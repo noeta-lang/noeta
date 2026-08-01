@@ -48,7 +48,9 @@
 #
 # Options:
 #   --quick / --full        pick a tier (default: the merge gate, in between)
-#   --only <substring>      run only steps whose group or name matches (e.g. --only clippy)
+#   --only <substring>      run only steps whose group or name matches (e.g. --only clippy).
+#                           Overrides the tier: naming a step is the selection, so `--only wasm`
+#                           runs the wasm steps without also needing --full.
 #   --list                  print the plan for the chosen tier and exit
 #   --install-hook [--force]  install an OPT-IN .git/hooks/pre-push running --quick (see below)
 #   -h | --help             this header
@@ -200,10 +202,19 @@ STEP_N=0
 FAILED=0
 
 # selected <tier> <group> <name> -> 0 when this step is in scope
+#
+# `--only` overrides the tier, deliberately: naming a step IS the selection, and asking for one that
+# lives above the current tier should run it rather than silently match nothing. `--only wasm`
+# without `--full` used to report zero steps — honest since the vacuous-pass fix, but the reason it
+# gave ("no step matched, in tier 2") named a tier the caller had not thought about, on a group whose
+# whole history is of not running. If you asked for it by name, you get it.
 selected() {
     local tier="$1" group="$2" name="$3"
+    if [[ -n "$ONLY" ]]; then
+        [[ "$group" == *"$ONLY"* || "$name" == *"$ONLY"* ]] && return 0
+        return 1
+    fi
     ((tier > TIER)) && return 1
-    if [[ -n "$ONLY" && "$group" != *"$ONLY"* && "$name" != *"$ONLY"* ]]; then return 1; fi
     return 0
 }
 
@@ -579,15 +590,18 @@ done
 echo "--------------------------------------------------------------------------------"
 printf ' %d passed, %d failed, %d skipped\n' "$n_pass" "$n_fail" "$n_skip"
 
-# A run that executed NOTHING is not a pass. `--only wasm` against the default tier matches no step
+# A run that executed NOTHING is not a pass. `--only wasm` against the default tier matched no step
 # (the wasm steps live in --full), and this printed `GATE PASSED`, exit 0 — a green light for a run
 # that gated nothing, which is the exact failure mode the rest of this script is built to avoid.
 # Found by using it: I typed that command to verify the wasm tier and was told everything was fine.
+#
+# `--only` now overrides the tier (see `selected`), so that particular command works. This stays,
+# because the class does not: a typo'd substring still matches nothing, and a run that gated nothing
+# must never read as a run that passed.
 if ((n_pass + n_fail + n_skip == 0)); then
     echo
     if [[ -n "$ONLY" ]]; then
-        printf ' \033[31mNO STEP MATCHED --only %s in tier %s.\033[0m\n' "$ONLY" \
-            "$([[ $TIER == 1 ]] && echo quick || { [[ $TIER == 3 ]] && echo full || echo merge; })"
+        printf ' \033[31mNO STEP MATCHED --only %s.\033[0m\n' "$ONLY"
         echo '  Nothing ran, so nothing is known. `--list` prints this tier'"'"'s steps; a step may'
         echo '  live in a wider tier (the wasm and miri steps are --full).'
     else
