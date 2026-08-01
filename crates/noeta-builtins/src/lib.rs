@@ -1,7 +1,23 @@
-//! The M0 prelude support: the small set of built-in capabilities programs rely on
-//! without importing anything — today just the prelude name metadata.
-//! (`IdGen`, the M0 id source, left with the id-entropy arc: `id.next_id()` is a registry
-//! function over the Host's `Ids` capability now, one counter shared by both backends.)
+//! **Per-name metadata about what the language itself provides**, in the one crate small enough for
+//! every consumer to depend on.
+//!
+//! Two censuses live here, and they are the same kind of fact — a name the language reserves,
+//! together with what a consumer needs to know about it:
+//!
+//! - [`PRELUDE`] — the M0 prelude names and the form each takes (`echo` is a keyword, `Ok` a value
+//!   binding). (`IdGen`, the M0 id source, left with the id-entropy arc: `id.next_id()` is a
+//!   registry function over the Host's `Ids` capability now, one counter shared by both backends.)
+//! - [`REFLECTION_INTRINSICS`](reflection::REFLECTION_INTRINSICS) — the thirteen reflection
+//!   primitives and their call signatures, which the editor's completion and signature help read.
+//!
+//! Both are checked against the lexer's own token table by this crate's tests, through a
+//! dev-dependency that keeps the lexer off anyone's build graph.
+
+pub mod reflection;
+
+pub use reflection::{
+    REFLECTION_INTRINSICS, ReflectForm, ReflectParam, ReflectionIntrinsic, reflection_intrinsic,
+};
 
 /// How a prelude name reaches a program — the distinction the two consumers of [`PRELUDE`] differ
 /// on, recorded here rather than as a second filtered list beside it.
