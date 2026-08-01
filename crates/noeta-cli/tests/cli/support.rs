@@ -116,6 +116,10 @@ pub fn temp_dir(name: &str, files: &[(&str, &str)]) -> PathBuf {
 /// "prerequisite missing" means the *detection* or the *install* broke, and that must not read as a
 /// pass. Several `--native` tests `return`ed silently on a missing `cc` for months, which is a large
 /// part of why `noeta build --native` reached a differential oracle only in this audit.
+///
+/// `jit`-gated like [`has_cc`], because its callers are: a lean (`--no-default-features`) build has
+/// no `--native` and would only warn that this is unused.
+#[cfg(feature = "jit")]
 pub fn skip_or_fail(what: &str, fix: &str) {
     let required = std::env::var_os("CI").is_some()
         || std::env::var("NOETA_GATE_REQUIRE_TOOLS").is_ok_and(|v| v == "1");
