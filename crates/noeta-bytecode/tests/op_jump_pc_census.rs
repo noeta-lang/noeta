@@ -322,3 +322,97 @@ fn the_shared_arms_are_exhaustive_without_a_wildcard() {
         "the shared arm list mentions non-variants: {unknown:?}"
     );
 }
+
+/// The structural census reads *names*; this reads *values*. Each branching op is built with a
+/// recognisable destination and must report exactly that one back, and the `_mut` form must
+/// rewrite the very field the interpreter later branches on — the wiring the arm list's shape
+/// cannot prove (an arm could bind the right field and hand `f` a different one).
+#[test]
+fn every_branching_op_reports_and_rewrites_its_own_destination() {
+    use noeta_bytecode::{NameId, Op};
+    use noeta_span::Span;
+
+    let span = Span::new(0, 0);
+    let name = NameId(0);
+    // One op per branching variant, each with a distinct destination.
+    let mut ops = vec![
+        Op::Jump { target: 1 },
+        Op::JumpIfTrue { reg: 0, target: 2 },
+        Op::JumpIfFalse { reg: 0, target: 3 },
+        Op::CondBranch {
+            reg: 0,
+            target: 4,
+            span,
+        },
+        Op::Coalesce {
+            dst: 0,
+            src: 0,
+            fallback: 5,
+            span,
+        },
+        Op::MatchInt {
+            src: 0,
+            value: 0,
+            fail: 6,
+        },
+        Op::MatchStr {
+            src: 0,
+            value: name,
+            fail: 7,
+        },
+        Op::MatchBool {
+            src: 0,
+            value: false,
+            fail: 8,
+        },
+        Op::MatchVariant {
+            src: 0,
+            type_name: None,
+            variant: name,
+            arity: 0,
+            fail: 9,
+        },
+        Op::MatchTuple {
+            src: 0,
+            arity: 0,
+            fail: 10,
+        },
+    ];
+    assert_eq!(
+        ops.len(),
+        10,
+        "one probe per branching variant; add one when the set grows"
+    );
+
+    for (i, op) in ops.iter().enumerate() {
+        let mut seen = Vec::new();
+        op.for_each_jump_pc(|t| seen.push(t));
+        assert_eq!(
+            seen,
+            vec![i as u32 + 1],
+            "op #{i} reported the wrong destination — its arm binds one field and hands `f` another"
+        );
+        assert!(op.has_jump_pc(), "op #{i} must report as branching");
+    }
+
+    // The `_mut` form must reach the same field: rewrite, then read back through the `&self` form.
+    for op in &mut ops {
+        op.for_each_jump_pc_mut(|t| *t += 100);
+    }
+    for (i, op) in ops.iter().enumerate() {
+        let mut seen = Vec::new();
+        op.for_each_jump_pc(|t| seen.push(t));
+        assert_eq!(
+            seen,
+            vec![i as u32 + 101],
+            "op #{i}'s `_mut` form missed it"
+        );
+    }
+
+    // A representative non-branching op reports nothing (and would be a compile error if the arms
+    // stopped covering it).
+    let inert = Op::Halt;
+    let mut seen = Vec::new();
+    inert.for_each_jump_pc(|t| seen.push(t));
+    assert!(seen.is_empty() && !inert.has_jump_pc());
+}
