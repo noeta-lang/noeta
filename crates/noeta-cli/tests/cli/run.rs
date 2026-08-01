@@ -840,16 +840,21 @@ fn a_repl_panic_prints_a_stack_trace_and_the_session_continues() {
 // --- `run --jit-stats` ------------------------------------------------------------
 
 /// `--jit-stats` (P-JIT S0): the report renders to stderr after the program's own output. The
-/// declined-loop section is deterministic — a map-dominated loop is declined OSR synchronously at
-/// its 50th back-edge (`worth_osr` says no), so a 200-iteration loop reliably lists the blocking
-/// ops with their source lines, regardless of off-thread compile timing. Program output is
-/// untouched (the report is stderr-only diagnostics).
+/// declined-loop section is deterministic — a loop carrying a non-native op is declined OSR
+/// synchronously at its 50th back-edge (`worth_osr` says no), so a 200-iteration loop reliably
+/// lists the blocking ops with their source lines, regardless of off-thread compile timing.
+/// Program output is untouched (the report is stderr-only diagnostics).
+///
+/// The blocking op here is a **list** method call. `Op::CallMethod` is native only for a *map*
+/// method name (the leaf helper serves the map receiver and bails on every other), so `xs.len()`
+/// is exactly the shape that still declines — and the fixture doubles as the lock on that static
+/// name gate. A map loop no longer belongs here: `m[k] = m.get_or(k, 0) + 1` sustains tier 1.
 #[test]
 #[cfg(feature = "jit")]
 fn run_jit_stats_reports_declined_loops_with_blocking_ops() {
     let file = temp_program(
         "jit_stats_declined",
-        "mut m: Map<string, int> = {}\nmut i = 0\nwhile i < 200 {\n  key = \"w${i % 5}\"\n  m[key] = m.get_or(key, 0) + 1\n  i = i + 1\n}\necho m[\"w0\"]\n",
+        "mut xs = [1, 2, 3]\nmut n = 0\nmut i = 0\nwhile i < 200 {\n  n = n + xs.len()\n  i = i + 1\n}\necho n\n",
     );
     let out = lang()
         .arg("run")
@@ -859,16 +864,16 @@ fn run_jit_stats_reports_declined_loops_with_blocking_ops() {
         .success();
     let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
     let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
-    assert_eq!(stdout, "40\n", "program output untouched by the report");
+    assert_eq!(stdout, "600\n", "program output untouched by the report");
     assert!(
         stderr.contains("── JIT report ──"),
         "report header on stderr:\n{stderr}"
     );
     assert!(
         stderr.contains("loops declined tier 1"),
-        "the map loop is declined:\n{stderr}"
+        "the list-method loop is declined:\n{stderr}"
     );
-    // The blocking ops are named with their source line (main.noe:5 is the get_or/set line).
+    // The blocking ops are named with their source line (main.noe:5 is the `xs.len()` line).
     assert!(
         stderr.contains("CallMethod") && stderr.contains("main.noe:5"),
         "blocking ops resolved to op + line:\n{stderr}"
