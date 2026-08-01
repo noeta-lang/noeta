@@ -74,17 +74,39 @@ pub trait Rng {
     fn rng_float(&mut self) -> f64;
 }
 
-/// **Logical monotonic clock** capability — `monotonic` reads-then-advances; `sleep` advances without
-/// blocking (deterministic, no wall-clock).
+/// **Monotonic clock** capability — `monotonic` reads-then-advances; `sleep` advances the logical
+/// clock; `delay` elapses real time.
 ///
 /// `clock_unix_ms` is the wall-time view (id-entropy U1): real `SystemTime` on the real host; on the
 /// sandbox a **derived read** of the logical clock against the fixed sandbox epoch. It deliberately
 /// does NOT advance the counter — a derived reading (a v7 UUID) must not perturb the user's
 /// observable `monotonic` stream — but it advances under `sleep` like everything else, so
 /// time-ordered ids still order deterministically.
+///
+/// # Why `sleep` and `delay` are two operations
+///
+/// They were one, and the one they were was `sleep` — *advance the counter, never block*. That is
+/// the right answer for `std.time.sleep`, which this repo documents as a logical clock and pins with
+/// a conformance fixture: a deterministic advance is what keeps a sleeping program reproducible and
+/// comparable backend-to-backend.
+///
+/// It is the wrong answer for the other caller. `HttpClient::perform` computed an exponential
+/// backoff, honoured a server's `Retry-After`, and then called `clock_sleep` — so on a *real* host
+/// it retried a rate-limited endpoint as fast as the socket allowed, discarding the delay it had
+/// just been careful to compute. One method, two callers whose requirements are opposites, and the
+/// real host could only satisfy one.
+///
+/// So `delay` is the one that means "do not return for `ms` of real time". A host with no real time
+/// to elapse — the sandbox, the browser — implements it as the same logical advance, which is not a
+/// shortcut but the truthful answer there, and is what keeps the retry loop in-oracle. Every
+/// implementor states which it is, because a default would have been the bug again.
 pub trait Clock {
     fn clock_monotonic(&mut self) -> u64;
+    /// Advance the logical clock by `ms` without blocking. `std.time.sleep`'s contract.
     fn clock_sleep(&mut self, ms: i64);
+    /// Elapse `ms` of **real** time where the host has any, and advance the logical clock either
+    /// way. What a retry backoff, a poll interval or a rate limiter needs.
+    fn clock_delay(&mut self, ms: i64);
     fn clock_unix_ms(&mut self) -> u64;
 }
 

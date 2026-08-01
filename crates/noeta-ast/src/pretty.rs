@@ -25,8 +25,8 @@
 
 use crate::{
     AttrArg, AttrValue, CallArg, ClassDecl, ClosureBody, EnumDecl, Expr, FieldDecl, FnDecl,
-    ForPattern, ImplDecl, Name, ObjectLit, Param, Pattern, Program, Stmt, StrPart, StructDecl,
-    TraitBound, TraitDecl, TypeOperand, TypeParam, TypeRef,
+    ForPattern, ImplDecl, Name, ObjectLit, Param, Pattern, Program, ReflectOperand, Stmt, StrPart,
+    StructDecl, TraitBound, TraitDecl, TypeOperand, TypeParam, TypeRef,
 };
 use noeta_span::Span;
 
@@ -1353,33 +1353,68 @@ impl Pretty for Expr {
                 expr.pretty(out, level + 1);
                 out.push(')');
             }
-            Expr::AttributesOf { ty, span: s } => {
-                out.push_str(&format!("(attributes_of {}\n", span(*s)));
-                ty.pretty(out, level + 1);
-                out.push(')');
-            }
-            Expr::TypeName { ty, span: s } => {
-                out.push_str(&format!("(type_name {} {})", type_ref_str(ty), span(*s)));
-            }
-            Expr::TypeOf { value, span: s } => {
-                out.push_str(&format!("(type_of {}\n", span(*s)));
-                value.pretty(out, level + 1);
-                out.push(')');
-            }
-            Expr::FieldsOf { value, span: s } => {
-                out.push_str(&format!("(fields_of {}\n", span(*s)));
-                value.pretty(out, level + 1);
-                out.push(')');
-            }
-            Expr::TraitsOf { value, span: s } => {
-                out.push_str(&format!("(traits_of {}\n", span(*s)));
-                value.pretty(out, level + 1);
-                out.push(')');
-            }
-            Expr::FromBytes { ty, blob, span: s } => {
-                out.push_str(&format!("(from_bytes {} {}\n", type_ref_str(ty), span(*s)));
-                blob.pretty(out, level + 1);
-                out.push(')');
+            // **One arm for all thirteen intrinsics.** The head is the keyword and the body is a
+            // function of the operand *shape*, so a fourteenth intrinsic reusing an existing shape
+            // prints correctly without an arm here — which is what it means for the surface to have
+            // stopped being thirteen special cases.
+            Expr::Reflect {
+                which,
+                operand,
+                span: s,
+            } => {
+                // The one head that is not the keyword: `invoke`'s free-function form prints as
+                // `invoke-free`, so a snapshot can never confuse the two dispatch namespaces by
+                // operand count alone.
+                let head = match operand {
+                    ReflectOperand::Dispatch { recv: None, .. } => "invoke-free",
+                    ReflectOperand::Nothing
+                    | ReflectOperand::Type(_)
+                    | ReflectOperand::Value(_)
+                    | ReflectOperand::StaticType(_)
+                    | ReflectOperand::TypeWith { .. }
+                    | ReflectOperand::StaticTypeWith { .. }
+                    | ReflectOperand::Dispatch { recv: Some(_), .. } => which.keyword(),
+                };
+                match operand {
+                    // A static type belongs on the head line — it is spelling, not a child node.
+                    ReflectOperand::StaticType(ty) => {
+                        out.push_str(&format!("({head} {} {})", type_ref_str(ty), span(*s)));
+                    }
+                    ReflectOperand::Nothing => out.push_str(&format!("({head} {})", span(*s))),
+                    ReflectOperand::StaticTypeWith { ty, arg } => {
+                        out.push_str(&format!("({head} {} {}\n", type_ref_str(ty), span(*s)));
+                        arg.pretty(out, level + 1);
+                        out.push(')');
+                    }
+                    ReflectOperand::Type(ty) => {
+                        out.push_str(&format!("({head} {}\n", span(*s)));
+                        ty.pretty(out, level + 1);
+                        out.push(')');
+                    }
+                    ReflectOperand::Value(value) => {
+                        out.push_str(&format!("({head} {}\n", span(*s)));
+                        value.pretty(out, level + 1);
+                        out.push(')');
+                    }
+                    ReflectOperand::TypeWith { ty, arg } => {
+                        out.push_str(&format!("({head} {}\n", span(*s)));
+                        ty.pretty(out, level + 1);
+                        out.push('\n');
+                        arg.pretty(out, level + 1);
+                        out.push(')');
+                    }
+                    ReflectOperand::Dispatch { recv, name, args } => {
+                        out.push_str(&format!("({head} {}\n", span(*s)));
+                        if let Some(recv) = recv {
+                            recv.pretty(out, level + 1);
+                            out.push('\n');
+                        }
+                        name.pretty(out, level + 1);
+                        out.push('\n');
+                        args.pretty(out, level + 1);
+                        out.push(')');
+                    }
+                }
             }
             Expr::Channel {
                 elem,
@@ -1388,45 +1423,6 @@ impl Pretty for Expr {
             } => {
                 out.push_str(&format!("(channel {} {}\n", type_ref_str(elem), span(*s)));
                 capacity.pretty(out, level + 1);
-                out.push(')');
-            }
-            Expr::RolesOf { ty, span: s } => match ty {
-                Some(ty) => {
-                    out.push_str(&format!("(roles_of {}\n", span(*s)));
-                    ty.pretty(out, level + 1);
-                    out.push(')');
-                }
-                None => out.push_str(&format!("(roles_of {})", span(*s))),
-            },
-            Expr::ParamsOf { target, span: s } => {
-                out.push_str(&format!("(params_of {}\n", span(*s)));
-                target.pretty(out, level + 1);
-                out.push(')');
-            }
-            Expr::ReturnsOf { target, span: s } => {
-                out.push_str(&format!("(returns_of {}\n", span(*s)));
-                target.pretty(out, level + 1);
-                out.push(')');
-            }
-            Expr::FieldSpecsOf { name, span: s } => {
-                out.push_str(&format!("(field_specs_of {}\n", span(*s)));
-                name.pretty(out, level + 1);
-                out.push(')');
-            }
-            Expr::VariantsOf { name, span: s } => {
-                out.push_str(&format!("(variants_of {}\n", span(*s)));
-                name.pretty(out, level + 1);
-                out.push(')');
-            }
-            Expr::Construct {
-                name,
-                fields,
-                span: s,
-            } => {
-                out.push_str(&format!("(construct {}\n", span(*s)));
-                name.pretty(out, level + 1);
-                out.push('\n');
-                fields.pretty(out, level + 1);
                 out.push(')');
             }
             Expr::TypedModuleCall {
@@ -1541,29 +1537,6 @@ impl Pretty for Expr {
                 span: s,
             } => {
                 out.push_str(&format!("(native-fn {module}.{func} {})", span(*s)));
-            }
-            Expr::Invoke {
-                recv,
-                name,
-                args,
-                span: s,
-            } => {
-                // The free-fn form prints as `invoke-free`, so a snapshot can never confuse the two
-                // dispatch namespaces by operand count alone.
-                let head = if recv.is_some() {
-                    "invoke"
-                } else {
-                    "invoke-free"
-                };
-                out.push_str(&format!("({head} {}\n", span(*s)));
-                if let Some(recv) = recv {
-                    recv.pretty(out, level + 1);
-                    out.push('\n');
-                }
-                name.pretty(out, level + 1);
-                out.push('\n');
-                args.pretty(out, level + 1);
-                out.push(')');
             }
         }
     }

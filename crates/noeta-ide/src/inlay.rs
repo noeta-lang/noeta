@@ -326,22 +326,15 @@ impl Walker<'_> {
                 self.expr(value);
                 self.expr(fallback);
             }
-            Expr::TypeOf { value, .. } => self.expr(value),
-            Expr::FieldsOf { value, .. } | Expr::TraitsOf { value, .. } => self.expr(value),
-            Expr::ParamsOf { target, .. } | Expr::ReturnsOf { target, .. } => self.expr(target),
-            // A turbofish operand is a type, not an expression; only a dynamic one is walked.
-            Expr::FieldSpecsOf { name, .. } | Expr::VariantsOf { name, .. } => {
-                if let Some(e) = name.dynamic() {
+            // One arm for the whole reflection surface. A turbofish operand is a type, not an
+            // expression; only a dynamic one is walked — which `for_each_expr` already knows.
+            Expr::Reflect { operand, .. } => {
+                let mut exprs = Vec::new();
+                operand.for_each_expr(&mut |e| exprs.push(e));
+                for e in exprs {
                     self.expr(e);
                 }
             }
-            Expr::Construct { name, fields, .. } => {
-                if let Some(e) = name.dynamic() {
-                    self.expr(e);
-                }
-                self.expr(fields);
-            }
-            Expr::FromBytes { blob, .. } => self.expr(blob),
             Expr::Channel { capacity, .. } => self.expr(capacity),
             Expr::TypedModuleCall { recv, args, .. } => {
                 self.expr(recv);
@@ -351,15 +344,6 @@ impl Walker<'_> {
             Expr::TypedMethodCall { recv, args, .. } => {
                 self.expr(recv);
                 self.arg_exprs(args);
-            }
-            Expr::Invoke {
-                recv, name, args, ..
-            } => {
-                if let Some(recv) = recv {
-                    self.expr(recv);
-                }
-                self.expr(name);
-                self.expr(args);
             }
             Expr::FieldSet {
                 receiver, value, ..
@@ -374,10 +358,7 @@ impl Walker<'_> {
             | Expr::F64 { .. }
             | Expr::IntN { .. }
             | Expr::Bool { .. }
-            | Expr::Ident { .. }
-            | Expr::AttributesOf { .. }
-            | Expr::TypeName { .. }
-            | Expr::RolesOf { .. } => {}
+            | Expr::Ident { .. } => {}
         }
     }
 

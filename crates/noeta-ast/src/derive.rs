@@ -29,7 +29,7 @@
 use crate::pretty::type_ref_str;
 use crate::{
     BinaryOp, CallArg, DeriveSpec, Expr, FieldDecl, FieldInit, FnDecl, Name, ObjectLit, Param,
-    Stmt, StrPart, TraitDecl, TypeOperand, TypeRef,
+    Stmt, StrPart, TraitDecl, TypeRef,
 };
 use noeta_span::Span;
 
@@ -751,15 +751,6 @@ fn visit_stmt_types(stmt: &mut Stmt, f: &mut impl FnMut(&mut TypeRef)) {
     }
 }
 
-/// Apply `f` to a reflection surface's type operand: the turbofish arm IS a [`TypeRef`], the
-/// dynamic arm an ordinary expression to recurse into.
-fn visit_type_operand_types(op: &mut TypeOperand, f: &mut impl FnMut(&mut TypeRef)) {
-    match op {
-        TypeOperand::Static(ty) => f(ty),
-        TypeOperand::Dynamic(e) => visit_expr_types(e, f),
-    }
-}
-
 /// Apply `f` to every [`TypeRef`] reachable from `expr`. Exhaustive over the expression grammar.
 fn visit_expr_types(expr: &mut Expr, f: &mut impl FnMut(&mut TypeRef)) {
     match expr {
@@ -767,16 +758,12 @@ fn visit_expr_types(expr: &mut Expr, f: &mut impl FnMut(&mut TypeRef)) {
             visit_expr_types(expr, f);
             f(ty);
         }
-        Expr::FromBytes { ty, blob, .. } => {
-            f(ty);
-            visit_expr_types(blob, f);
-        }
-        Expr::TypeName { ty, .. } => f(ty),
-        Expr::AttributesOf { ty, .. } => visit_type_operand_types(ty, f),
-        Expr::RolesOf { ty, .. } => {
-            if let Some(ty) = ty {
-                visit_type_operand_types(ty, f);
-            }
+        // One arm for the whole reflection surface: the operand knows which of its arms name a
+        // type and which hold an expression, so a fourteenth intrinsic reusing an existing shape
+        // needs nothing here at all.
+        Expr::Reflect { operand, .. } => {
+            operand.for_each_type_ref_mut(f);
+            operand.for_each_expr_mut(&mut |e| visit_expr_types(e, f));
         }
         Expr::Channel { elem, capacity, .. } => {
             f(elem);
@@ -822,15 +809,6 @@ fn visit_expr_types(expr: &mut Expr, f: &mut impl FnMut(&mut TypeRef)) {
             visit_expr_types(callee, f);
             args.iter_mut()
                 .for_each(|a| visit_expr_types(&mut a.value, f));
-        }
-        Expr::Invoke {
-            recv, name, args, ..
-        } => {
-            if let Some(recv) = recv {
-                visit_expr_types(recv, f);
-            }
-            visit_expr_types(name, f);
-            visit_expr_types(args, f);
         }
         Expr::TypedModuleCall { ty, args, .. } => {
             f(ty);
@@ -921,21 +899,6 @@ fn visit_expr_types(expr: &mut Expr, f: &mut impl FnMut(&mut TypeRef)) {
                     visit_expr_types(e, f);
                 }
             }
-        }
-        Expr::TypeOf { value, .. }
-        | Expr::FieldsOf { value, .. }
-        | Expr::TraitsOf { value, .. } => visit_expr_types(value, f),
-        Expr::ParamsOf { target, .. } | Expr::ReturnsOf { target, .. } => {
-            visit_expr_types(target, f)
-        }
-        // A turbofish operand IS a type reference (and the only one the derive rewrite can reach
-        // here); a dynamic one is an ordinary expression.
-        Expr::FieldSpecsOf { name, .. } | Expr::VariantsOf { name, .. } => {
-            visit_type_operand_types(name, f)
-        }
-        Expr::Construct { name, fields, .. } => {
-            visit_type_operand_types(name, f);
-            visit_expr_types(fields, f);
         }
         Expr::TierExpr { holes, .. } => holes.iter_mut().for_each(|h| visit_expr_types(h, f)),
         Expr::Ident { .. }

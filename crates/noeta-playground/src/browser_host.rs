@@ -254,6 +254,13 @@ impl Clock for BrowserHost {
         self.clock = self.clock.saturating_add(ms.max(0) as u64);
     }
 
+    /// A logical advance, like `sleep`. Blocking is not available to state here as a preference:
+    /// the playground runs on the browser's main thread, where a synchronous wait freezes the page
+    /// including the button that would stop the program.
+    fn clock_delay(&mut self, ms: i64) {
+        self.clock_sleep(ms);
+    }
+
     fn clock_unix_ms(&mut self) -> u64 {
         imports::now_ms()
     }

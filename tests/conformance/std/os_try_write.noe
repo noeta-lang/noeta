@@ -5,8 +5,14 @@
 //
 // The sandbox models both failing states so the `Err` arm is reachable in-oracle and comparable
 // backend-to-backend: the scripted `dead` command spawns a child whose stdin is broken from the
-// start (a server that crashed), and `close_stdin` genuinely closes the pipe (the real host reports
-// the same, its `ChildStdin` having been dropped).
+// start (a server that crashed), and `close_stdin` genuinely closes the pipe.
+//
+// `dead` is a scripted command, not a program, so this fixture reaches the first state only under
+// the sandbox — which is the only host the conformance oracle runs. What the REAL host does was for
+// a while just a sentence here claiming it matched. It is now checked:
+// `noeta-host-real`'s `the_recoverable_write_door_reports_what_the_sandbox_models` drives both
+// states from real processes and asserts the same kinds, and the `stdin_closed` detail is one
+// shared constant rather than a sentence typed into each host.
 // expect: stdout "wrote"
 // expect: stdout "broken_pipe"
 // expect: stdout "write: Broken pipe"

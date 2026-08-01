@@ -821,24 +821,15 @@ impl Resolver {
             | Expr::TypeTest { expr, .. }
             | Expr::As { expr, .. } => self.walk_expr(expr),
             Expr::Spawn { future, .. } => self.walk_expr(future),
-            Expr::TypeOf { value, .. } => self.walk_expr(value),
-            Expr::FieldsOf { value, .. } | Expr::TraitsOf { value, .. } => self.walk_expr(value),
-            Expr::ParamsOf { target, .. } | Expr::ReturnsOf { target, .. } => {
-                self.walk_expr(target)
-            }
-            // A turbofish operand is a type, not an expression; only a dynamic one is walked.
-            Expr::FieldSpecsOf { name, .. } | Expr::VariantsOf { name, .. } => {
-                if let Some(e) = name.dynamic() {
+            // One arm for the whole reflection surface. A turbofish operand is a type, not an
+            // expression; only a dynamic one is walked — which `for_each_expr` already knows.
+            Expr::Reflect { operand, .. } => {
+                let mut exprs = Vec::new();
+                operand.for_each_expr(&mut |e| exprs.push(e));
+                for e in exprs {
                     self.walk_expr(e);
                 }
             }
-            Expr::Construct { name, fields, .. } => {
-                if let Some(e) = name.dynamic() {
-                    self.walk_expr(e);
-                }
-                self.walk_expr(fields);
-            }
-            Expr::FromBytes { blob, .. } => self.walk_expr(blob),
             Expr::Channel { capacity, .. } => self.walk_expr(capacity),
             Expr::TypedModuleCall { recv, args, .. } => {
                 self.walk_expr(recv);
@@ -852,15 +843,6 @@ impl Resolver {
                 self.walk_expr(recv);
                 self.walk_args(args);
             }
-            Expr::Invoke {
-                recv, name, args, ..
-            } => {
-                if let Some(recv) = recv {
-                    self.walk_expr(recv);
-                }
-                self.walk_expr(name);
-                self.walk_expr(args);
-            }
             Expr::Coalesce {
                 value, fallback, ..
             } => {
@@ -873,17 +855,14 @@ impl Resolver {
                 self.walk_expr(receiver);
                 self.walk_expr(value);
             }
-            // Literals and operand-free reflection queries reference no value binding.
+            // Literals reference no value binding.
             Expr::Str { .. }
             | Expr::Int { .. }
             | Expr::Float { .. }
             | Expr::F32 { .. }
             | Expr::F64 { .. }
             | Expr::IntN { .. }
-            | Expr::Bool { .. }
-            | Expr::AttributesOf { .. }
-            | Expr::TypeName { .. }
-            | Expr::RolesOf { .. } => {}
+            | Expr::Bool { .. } => {}
         }
     }
 

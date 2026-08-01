@@ -152,6 +152,13 @@ impl Clock for DeterministicClock {
         self.ms = self.ms.saturating_add(ms.max(0) as u64);
     }
 
+    /// The sandbox has no real time to elapse, so a delay IS the logical advance. Not a shortcut:
+    /// blocking here would make a retrying program's wall-clock cost real while its observable
+    /// behaviour stayed identical, which is the opposite of what the deterministic host is for.
+    fn clock_delay(&mut self, ms: i64) {
+        self.clock_sleep(ms);
+    }
+
     fn clock_unix_ms(&mut self) -> u64 {
         self.unix_ms()
     }
@@ -914,11 +921,10 @@ impl Os for SandboxHost {
             .ok_or_else(|| OsError::unknown_process("write", handle))?;
         match proc.stdin {
             ScriptedStdin::Open => Ok(()),
-            ScriptedStdin::Closed => Err(OsError::new(
-                "write",
-                OsErrorKind::StdinClosed,
-                "the child's stdin is closed",
-            )),
+            ScriptedStdin::Closed => Err(OsError::stdin_closed()),
+            // The detail is the OS's own text on a real host, so the sandbox spells the Linux one
+            // and the cross-host tie asserts the KIND, which is the portable half. See
+            // `OsError::STDIN_CLOSED_DETAIL`.
             ScriptedStdin::Broken => Err(OsError::new(
                 "write",
                 OsErrorKind::BrokenPipe,

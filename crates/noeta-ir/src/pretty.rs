@@ -7,7 +7,8 @@
 use std::fmt::Write as _;
 
 use crate::{
-    Atom, Block, ClassDef, Const, Decl, Func, InterpPart, Program, Rvalue, Stmt, Thunk, TypeRef,
+    Atom, Block, ClassDef, Const, Decl, Func, InterpPart, Program, ReflectArgs, Rvalue, Stmt,
+    Thunk, TypeRef,
 };
 
 /// Render a lowered [`Program`] to a stable string.
@@ -430,9 +431,6 @@ impl Printer<'_> {
                 ..
             } => format!("type_name::<{param}>({}[{index}])", atom(operand)),
             Rvalue::TypeSlotName { slot, .. } => format!("type_name(${})", atom(slot)),
-            Rvalue::TypeOf { operand, .. } => format!("type_of({})", atom(operand)),
-            Rvalue::FieldsOf { operand, .. } => format!("fields_of({})", atom(operand)),
-            Rvalue::TraitsOf { operand, .. } => format!("traits_of({})", atom(operand)),
             Rvalue::MakeGen { step, .. } => format!("make_gen({})", atom(step)),
             Rvalue::MakeFuture { thunk, .. } => format!("make_future({})", atom(thunk)),
             Rvalue::RunFuture { future, .. } => format!("run_future({})", atom(future)),
@@ -447,37 +445,39 @@ impl Printer<'_> {
                 format!("isolate({}, [{args}])", atom(callee))
             }
             Rvalue::MakeChannel { capacity, .. } => format!("channel({})", atom(capacity)),
-            Rvalue::FromBytes { blob, layout, .. } => {
-                let ty = layout.as_ref().map(|l| l.type_name.as_str()).unwrap_or("?");
-                format!("from_bytes<{}>({})", ty, atom(blob))
-            }
-            Rvalue::AttributesOf { name, .. } => format!("attributes_of({})", atom(name)),
-            Rvalue::RolesOf { name, .. } => match name {
-                Some(name) => format!("roles_of({})", atom(name)),
-                None => "roles_of()".to_string(),
-            },
-            Rvalue::ParamsOf { target, .. } => format!("params_of({})", atom(target)),
-            Rvalue::ReturnsOf { target, .. } => format!("returns_of({})", atom(target)),
-            Rvalue::FieldSpecsOf { name, .. } => format!("field_specs_of({})", atom(name)),
-            Rvalue::VariantsOf { name, .. } => format!("variants_of({})", atom(name)),
-            Rvalue::Construct { name, fields, .. } => {
-                format!("construct({}, {})", atom(name), atom(fields))
+            // One arm for the whole reflection surface. The head is the keyword and the operand
+            // list is a function of the `ReflectArgs` shape, so a thirteenth query prints under its
+            // own name without an arm here — the printer is a *derived* view of the IR again,
+            // rather than a hand-maintained copy of its variant list.
+            Rvalue::Reflect { which, args, .. } => {
+                let kw = which.keyword();
+                match args {
+                    ReflectArgs::Nothing => format!("{kw}()"),
+                    ReflectArgs::One(a) => format!("{kw}({})", atom(a)),
+                    ReflectArgs::Two { name, arg } => {
+                        format!("{kw}({}, {})", atom(name), atom(arg))
+                    }
+                    ReflectArgs::Dispatch {
+                        recv: Some(recv),
+                        name,
+                        args,
+                    } => format!("{kw}({}, {}, {})", atom(recv), atom(name), atom(args)),
+                    ReflectArgs::Dispatch {
+                        recv: None,
+                        name,
+                        args,
+                    } => format!("{kw}({}, {})", atom(name), atom(args)),
+                    // The element type is what a reader needs here, and it comes from the layout —
+                    // `?` where the checker recorded none (`T` not packable, already an error).
+                    ReflectArgs::Bytes { blob, layout, .. } => {
+                        let ty = layout.as_ref().map(|l| l.type_name.as_str()).unwrap_or("?");
+                        format!("{kw}<{}>({})", ty, atom(blob))
+                    }
+                }
             }
             Rvalue::DecodeTyped { name, text, .. } => {
                 format!("decode_typed({}, {})", atom(name), atom(text))
             }
-            Rvalue::Invoke {
-                recv: Some(recv),
-                name,
-                args,
-                ..
-            } => format!("invoke({}, {}, {})", atom(recv), atom(name), atom(args)),
-            Rvalue::Invoke {
-                recv: None,
-                name,
-                args,
-                ..
-            } => format!("invoke({}, {})", atom(name), atom(args)),
             Rvalue::TypedModuleCall {
                 module, func, args, ..
             } => {

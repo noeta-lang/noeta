@@ -988,6 +988,195 @@ impl Interpreter {
         })
     }
 
+    /// **Evaluate a reflection query** — one dispatch over [`ReflectKind`], covering the twelve
+    /// kinds that reach a backend.
+    ///
+    /// The twin of the VM's dispatch arms and of `noeta_compiler::compile_reflect`. Being one
+    /// exhaustive match is what makes "the reference interpreter and the VM answer the same query"
+    /// a compile-time obligation rather than something the differential oracle discovers later.
+    fn eval_reflect(
+        &mut self,
+        which: noeta_ast::ReflectKind,
+        args: &noeta_ir::ReflectArgs,
+        span: Span,
+        frame: &mut Frame,
+    ) -> Eval<Value> {
+        use noeta_ast::ReflectKind as K;
+        use noeta_ir::ReflectArgs as A;
+
+        // A shape mismatch is a compiler bug — lowering builds these, and the census asserts the
+        // (kind × shape) grid — so it is reported as one rather than as a program error.
+        let mismatch = || -> ! {
+            panic!(
+                "`{}` reached the interpreter with the wrong operand shape",
+                which.keyword()
+            )
+        };
+        match which {
+            // Not a runtime query: `type_name::<T>()` IS the name-resolution step the others use as
+            // an operand, and lowering already turned it into a constant or a channel read.
+            K::TypeName => mismatch(),
+            K::TypeOf => {
+                let A::One(operand) = args else { mismatch() };
+                let v = self.eval_ir_atom(operand, frame)?;
+                match self.type_of_sites.get(&span) {
+                    Some(repr) => Ok(crate::build_type_value(repr)),
+                    None => Ok(crate::build_type_value(&crate::eval_type_repr(&v))),
+                }
+            }
+            K::FieldsOf => {
+                let A::One(operand) = args else { mismatch() };
+                let v = self.eval_ir_atom(operand, frame)?;
+                Ok(self.materialize_fields(&v))
+            }
+            K::TraitsOf => {
+                let A::One(operand) = args else { mismatch() };
+                let v = self.eval_ir_atom(operand, frame)?;
+                Ok(self.materialize_traits(&v))
+            }
+            // The five **name-keyed** queries. Each takes one runtime string — folded from a written
+            // turbofish, or read off a per-instantiation channel by the preceding
+            // `TypeArgName`/`TypeSlotName` — and each is total on an arbitrary name, answering the
+            // empty result for one it holds nothing for. That leniency is what let the turbofish and
+            // dynamic surfaces converge on a single node, and it is stated once here rather than
+            // five times.
+            K::AttributesOf => {
+                let name = self.reflect_name_operand(args, frame)?;
+                Ok(self.materialize_attributes(&name))
+            }
+            K::RolesOf => {
+                // The one query whose operand is optional: `None` is the unscoped index.
+                let role_enum = match args {
+                    A::Nothing => None,
+                    A::One(_) => Some(self.reflect_name_operand(args, frame)?),
+                    _ => mismatch(),
+                };
+                Ok(self.materialize_roles(role_enum.as_deref()))
+            }
+            K::ParamsOf => {
+                let target = self.reflect_name_operand(args, frame)?;
+                Ok(self.materialize_params(&target))
+            }
+            K::ReturnsOf => {
+                let target = self.reflect_name_operand(args, frame)?;
+                Ok(self.materialize_returns(&target))
+            }
+            K::FieldSpecsOf => {
+                let name = self.reflect_name_operand(args, frame)?;
+                Ok(self.materialize_field_specs(&name))
+            }
+            K::VariantsOf => {
+                let name = self.reflect_name_operand(args, frame)?;
+                Ok(self.materialize_variant_specs(&name))
+            }
+            K::Construct => {
+                let A::Two { name, arg } = args else {
+                    mismatch()
+                };
+                let name_val = self.eval_ir_atom(name, frame)?;
+                let fields_val = self.eval_ir_atom(arg, frame)?;
+                self.construct_dynamic(name_val, fields_val, span)
+            }
+            K::Invoke => {
+                let A::Dispatch { recv, name, args } = args else {
+                    mismatch()
+                };
+                let receiver = match recv {
+                    Some(recv) => Some(self.eval_ir_atom(recv, frame)?),
+                    None => None,
+                };
+                let name_val = self.eval_ir_atom(name, frame)?;
+                let args_val = self.eval_ir_atom(args, frame)?;
+                self.invoke_dynamic(receiver, name_val, args_val, span)
+            }
+            K::FromBytes => {
+                let A::Bytes {
+                    blob,
+                    layout,
+                    validate,
+                } = args
+                else {
+                    mismatch()
+                };
+
+                // Deserialize a `bytes` buffer into a flat `List<T>` (P-PACK 4.4): resolve T's schema,
+                // then wrap the raw bytes as a packed list — the inverse of `to_bytes`, an O(n) copy.
+                let blob_val = self.eval_ir_atom(blob, frame)?;
+                let Value::Bytes(bytes) = blob_val else {
+                    return Err(self.runtime_error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!(
+                            "`from_bytes` expects a `bytes` value, found {}",
+                            blob_val.type_name()
+                        ),
+                    ));
+                };
+                let schema = layout
+                    .as_ref()
+                    .and_then(|l| self.resolve_packed_schema(l))
+                    .ok_or_else(|| {
+                        self.runtime_error(
+                            DiagnosticCode::InvalidPackedType,
+                            span,
+                            "`from_bytes` requires a packable element type — a `@packed` struct or a sub-8-byte fixed-width numeric (`i32`/`u8`/`f32`, …)"
+                                .to_string(),
+                        )
+                    })?;
+                // The buffer must be a whole number of elements; a partial blob is corrupt input.
+                if schema.byte_size == 0 || bytes.len() % schema.byte_size != 0 {
+                    return Err(self.runtime_error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!(
+                            "`from_bytes` buffer of {} bytes is not a whole number of {}-byte elements",
+                            bytes.len(),
+                            schema.byte_size
+                        ),
+                    ));
+                }
+                let list = Value::packed_list_from(schema, (*bytes).clone());
+                // Validation arc: `from_bytes` is an abort door — run each decoded element's
+                // `validate()` (materialized boxed for the re-entry) and abort at `[i]` on the first
+                // rejection, consistent with a length/shape mismatch. Closes the hole a `@validated`
+                // packed type would otherwise have here.
+                if *validate && let Value::List(repr) = &list {
+                    for (i, elem) in repr.to_rc_vec().iter().enumerate() {
+                        if let Some(message) = self.validate_message(elem.clone(), span)? {
+                            return Err(self.runtime_error(
+                                DiagnosticCode::TypeMismatch,
+                                span,
+                                format!("from_bytes: [{i}]: {message}"),
+                            ));
+                        }
+                    }
+                }
+                Ok(list)
+            }
+        }
+    }
+
+    /// The **name operand** of a name-keyed query, as a runtime string.
+    ///
+    /// A non-string value answers the empty name, which the manifest and registry lookups all treat
+    /// as "nothing registered" — the same total-on-any-name contract that lets the turbofish and
+    /// runtime-string surfaces of one query converge on a single node. It was written out at each of
+    /// the five call sites; one of them differing would have been a silent wrong answer, not a
+    /// crash.
+    fn reflect_name_operand(
+        &mut self,
+        args: &noeta_ir::ReflectArgs,
+        frame: &mut Frame,
+    ) -> Eval<String> {
+        let noeta_ir::ReflectArgs::One(atom) = args else {
+            panic!("a name-keyed reflection query carries exactly one operand")
+        };
+        Ok(match self.eval_ir_atom(atom, frame)? {
+            Value::Str(s) => s,
+            _ => String::new(),
+        })
+    }
+
     /// Resolve an atom to a value: a constant, a frame temporary (moved out — see
     /// [`Frame::take`]), or a lexical lookup. The `Var` not-found path reproduces the AST
     /// walker's `Ident` diagnostic exactly.
@@ -1561,12 +1750,11 @@ impl Interpreter {
                     &self.reflection,
                 )))
             }
-            noeta_ir::Rvalue::TypeOf { operand, span } => {
-                let v = self.eval_ir_atom(operand, frame)?;
-                match self.type_of_sites.get(span) {
-                    Some(repr) => Ok(crate::build_type_value(repr)),
-                    None => Ok(crate::build_type_value(&crate::eval_type_repr(&v))),
-                }
+            // **The reflection surface, one arm.** All twelve queries that reach a backend
+            // dispatch through `eval_reflect`, which matches exhaustively on `ReflectKind` — so a
+            // thirteenth cannot be added here and forgotten in the VM, or the reverse.
+            noeta_ir::Rvalue::Reflect { which, args, span } => {
+                self.eval_reflect(*which, args, *span, frame)
             }
             // `type_name::<T>()` where `T` is a parameter of the enclosing generic type: read
             // argument `index` off the receiver's reflected type tag. A receiver with no such
@@ -1609,84 +1797,6 @@ impl Interpreter {
                         .map(|e| e.name.clone())
                         .unwrap_or_default(),
                 ))
-            }
-            noeta_ir::Rvalue::FieldsOf { operand, .. } => {
-                let v = self.eval_ir_atom(operand, frame)?;
-                Ok(self.materialize_fields(&v))
-            }
-            noeta_ir::Rvalue::TraitsOf { operand, .. } => {
-                let v = self.eval_ir_atom(operand, frame)?;
-                Ok(self.materialize_traits(&v))
-            }
-            noeta_ir::Rvalue::FromBytes {
-                blob,
-                layout,
-                validate,
-                span,
-            } => {
-                // Deserialize a `bytes` buffer into a flat `List<T>` (P-PACK 4.4): resolve T's schema,
-                // then wrap the raw bytes as a packed list — the inverse of `to_bytes`, an O(n) copy.
-                let blob_val = self.eval_ir_atom(blob, frame)?;
-                let Value::Bytes(bytes) = blob_val else {
-                    return Err(self.runtime_error(
-                        DiagnosticCode::TypeMismatch,
-                        *span,
-                        format!(
-                            "`from_bytes` expects a `bytes` value, found {}",
-                            blob_val.type_name()
-                        ),
-                    ));
-                };
-                let schema = layout
-                    .as_ref()
-                    .and_then(|l| self.resolve_packed_schema(l))
-                    .ok_or_else(|| {
-                        self.runtime_error(
-                            DiagnosticCode::InvalidPackedType,
-                            *span,
-                            "`from_bytes` requires a packable element type — a `@packed` struct or a sub-8-byte fixed-width numeric (`i32`/`u8`/`f32`, …)"
-                                .to_string(),
-                        )
-                    })?;
-                // The buffer must be a whole number of elements; a partial blob is corrupt input.
-                if schema.byte_size == 0 || bytes.len() % schema.byte_size != 0 {
-                    return Err(self.runtime_error(
-                        DiagnosticCode::TypeMismatch,
-                        *span,
-                        format!(
-                            "`from_bytes` buffer of {} bytes is not a whole number of {}-byte elements",
-                            bytes.len(),
-                            schema.byte_size
-                        ),
-                    ));
-                }
-                let list = Value::packed_list_from(schema, (*bytes).clone());
-                // Validation arc: `from_bytes` is an abort door — run each decoded element's
-                // `validate()` (materialized boxed for the re-entry) and abort at `[i]` on the first
-                // rejection, consistent with a length/shape mismatch. Closes the hole a `@validated`
-                // packed type would otherwise have here.
-                if *validate && let Value::List(repr) = &list {
-                    for (i, elem) in repr.to_rc_vec().iter().enumerate() {
-                        if let Some(message) = self.validate_message(elem.clone(), *span)? {
-                            return Err(self.runtime_error(
-                                DiagnosticCode::TypeMismatch,
-                                *span,
-                                format!("from_bytes: [{i}]: {message}"),
-                            ));
-                        }
-                    }
-                }
-                Ok(list)
-            }
-            noeta_ir::Rvalue::AttributesOf { name, .. } => {
-                // The manifest is name-keyed: the atom is the attribute type's name, folded from a
-                // written turbofish or read off a per-instantiation channel by the preceding
-                // `TypeArgName`/`TypeSlotName` — the same string either way, and the VM's twin.
-                let name = match self.eval_ir_atom(name, frame)? {
-                    Value::Str(s) => s,
-                    _ => String::new(),
-                };
-                Ok(self.materialize_attributes(&name))
             }
             noeta_ir::Rvalue::Object {
                 type_name,
@@ -1927,71 +2037,6 @@ impl Interpreter {
                     Value::Sender(ChannelId::from_index(id)),
                     Value::Receiver(ChannelId::from_index(id)),
                 ])))
-            }
-            noeta_ir::Rvalue::RolesOf { name, .. } => {
-                // The optional scope arrives as a name atom, exactly as `AttributesOf`'s does;
-                // `None` is the unscoped query over the whole index.
-                let role_enum = match name {
-                    Some(name) => Some(match self.eval_ir_atom(name, frame)? {
-                        Value::Str(s) => s,
-                        _ => String::new(),
-                    }),
-                    None => None,
-                };
-                Ok(self.materialize_roles(role_enum.as_deref()))
-            }
-            noeta_ir::Rvalue::ParamsOf { target, .. } => {
-                // The runtime target string names a fn or method; materialize its declared params.
-                let target = match self.eval_ir_atom(target, frame)? {
-                    Value::Str(s) => s,
-                    _ => String::new(),
-                };
-                Ok(self.materialize_params(&target))
-            }
-            noeta_ir::Rvalue::ReturnsOf { target, .. } => {
-                // The runtime target string names a fn or method; materialize its declared return.
-                let target = match self.eval_ir_atom(target, frame)? {
-                    Value::Str(s) => s,
-                    _ => String::new(),
-                };
-                Ok(self.materialize_returns(&target))
-            }
-            noeta_ir::Rvalue::FieldSpecsOf { name, .. } => {
-                // The runtime name string names a declared type; materialize its field schema.
-                let name = match self.eval_ir_atom(name, frame)? {
-                    Value::Str(s) => s,
-                    _ => String::new(),
-                };
-                Ok(self.materialize_field_specs(&name))
-            }
-            noeta_ir::Rvalue::VariantsOf { name, .. } => {
-                // The runtime name string names a declared type; materialize its variant schema.
-                let name = match self.eval_ir_atom(name, frame)? {
-                    Value::Str(s) => s,
-                    _ => String::new(),
-                };
-                Ok(self.materialize_variant_specs(&name))
-            }
-            noeta_ir::Rvalue::Construct {
-                name, fields, span, ..
-            } => {
-                let name_val = self.eval_ir_atom(name, frame)?;
-                let fields_val = self.eval_ir_atom(fields, frame)?;
-                self.construct_dynamic(name_val, fields_val, *span)
-            }
-            noeta_ir::Rvalue::Invoke {
-                recv,
-                name,
-                args,
-                span,
-            } => {
-                let receiver = match recv {
-                    Some(recv) => Some(self.eval_ir_atom(recv, frame)?),
-                    None => None,
-                };
-                let name_val = self.eval_ir_atom(name, frame)?;
-                let args_val = self.eval_ir_atom(args, frame)?;
-                self.invoke_dynamic(receiver, name_val, args_val, *span)
             }
             noeta_ir::Rvalue::TypedModuleCall {
                 module,

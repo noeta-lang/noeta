@@ -640,26 +640,16 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
             }
         }
         Rvalue::Try { operand, .. }
-        | Rvalue::TypeOf { operand, .. }
         | Rvalue::TypeArgName { operand, .. }
-        | Rvalue::FieldsOf { operand, .. }
-        | Rvalue::TraitsOf { operand, .. }
         | Rvalue::MaskWidth { operand, .. } => f(operand),
         // The forwarded `type_name::<T>()` reads the enclosing fn's hidden type-argument slot.
         Rvalue::TypeSlotName { slot, .. } => f(slot),
-        // `params_of(target)` / `returns_of(target)` read their runtime target-string operand.
-        Rvalue::ParamsOf { target, .. } | Rvalue::ReturnsOf { target, .. } => f(target),
-        // `field_specs_of(name)` / `variants_of(name)` read their runtime type-name operand.
-        Rvalue::FieldSpecsOf { name, .. }
-        | Rvalue::VariantsOf { name, .. }
-        | Rvalue::AttributesOf { name, .. } => f(name),
-        // `roles_of()`'s scope is optional; present, it is a name atom like every other.
-        Rvalue::RolesOf { name, .. } => name.iter().for_each(&mut *f),
-        // `construct(name, fields)` reads its type-name and field-list operands.
-        Rvalue::Construct { name, fields, .. } => {
-            f(name);
-            f(fields);
-        }
+        // **One arm for the whole reflection surface.** A value operand, a runtime target string, a
+        // type name and `invoke`'s three parts are all operand atoms by the time liveness runs, so
+        // the twelve queries read theirs through one walk — and a thirteenth cannot be added with
+        // its operands unaccounted for, which is what a missed atom here would mean: a register
+        // freed while still live.
+        Rvalue::Reflect { args, .. } => args.for_each_atom(f),
         // `decode_typed(name, text)` reads its runtime type-name and JSON-text operands.
         Rvalue::DecodeTyped { name, text, .. } => {
             f(name);
@@ -681,17 +671,6 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
         }
         // `channel::<T>(capacity)` reads its capacity operand (isolates I.1).
         Rvalue::MakeChannel { capacity, .. } => f(capacity),
-        // `from_bytes::<T>(blob)` reads its byte operand (P-PACK 4.4).
-        Rvalue::FromBytes { blob, .. } => f(blob),
-        Rvalue::Invoke {
-            recv, name, args, ..
-        } => {
-            if let Some(recv) = recv {
-                f(recv);
-            }
-            f(name);
-            f(args);
-        }
         // `module.func::<T>(args)` reads each argument atom (`json.parse::<T>(s)`) — and, for a
         // forwarded `T` (F2b), the hidden type-argument slot.
         Rvalue::TypedModuleCall { args, dynamic, .. } => {

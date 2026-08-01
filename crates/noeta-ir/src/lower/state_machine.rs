@@ -1204,34 +1204,13 @@ fn hoist_in_expr(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32, vp: &Varia
         Expr::Try { expr, .. }
         | Expr::Spawn { future: expr, .. }
         | Expr::As { expr, .. }
-        | Expr::TypeTest { expr, .. }
-        | Expr::TypeOf { value: expr, .. }
-        | Expr::FieldsOf { value: expr, .. }
-        | Expr::TraitsOf { value: expr, .. }
-        | Expr::ParamsOf { target: expr, .. }
-        | Expr::ReturnsOf { target: expr, .. }
-        | Expr::FromBytes { blob: expr, .. } => hoist_in_expr(expr, pre, ctr, vp),
+        | Expr::TypeTest { expr, .. } => hoist_in_expr(expr, pre, ctr, vp),
         Expr::Channel { capacity, .. } => hoist_in_expr(capacity, pre, ctr, vp),
-        // A turbofish operand is a type — no expression to hoist; a dynamic one is ordinary.
-        Expr::FieldSpecsOf { name, .. } | Expr::VariantsOf { name, .. } => {
-            if let Some(e) = name.dynamic_mut() {
-                hoist_in_expr(e, pre, ctr, vp);
-            }
-        }
-        Expr::Invoke {
-            recv, name, args, ..
-        } => {
-            if let Some(recv) = recv {
-                hoist_in_expr(recv, pre, ctr, vp);
-            }
-            hoist_in_expr(name, pre, ctr, vp);
-            hoist_in_expr(args, pre, ctr, vp);
-        }
-        Expr::Construct { name, fields, .. } => {
-            if let Some(e) = name.dynamic_mut() {
-                hoist_in_expr(e, pre, ctr, vp);
-            }
-            hoist_in_expr(fields, pre, ctr, vp);
+        // One arm for the whole reflection surface. A turbofish operand is a type — no expression to
+        // hoist — which `for_each_expr_mut` already knows; three of the thirteen used to sit in the
+        // leaf group below, where a dynamic operand's nested fn would never have been hoisted.
+        Expr::Reflect { operand, .. } => {
+            operand.for_each_expr_mut(&mut |e| hoist_in_expr(e, pre, ctr, vp));
         }
         Expr::TypedModuleCall { recv, args, .. } => {
             hoist_in_expr(recv, pre, ctr, vp);
@@ -1269,10 +1248,7 @@ fn hoist_in_expr(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32, vp: &Varia
         | Expr::F32 { .. }
         | Expr::F64 { .. }
         | Expr::Bool { .. }
-        | Expr::Ident { .. }
-        | Expr::AttributesOf { .. }
-        | Expr::TypeName { .. }
-        | Expr::RolesOf { .. } => {}
+        | Expr::Ident { .. } => {}
     }
 }
 

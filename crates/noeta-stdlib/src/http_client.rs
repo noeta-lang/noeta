@@ -236,9 +236,15 @@ impl HttpClient {
 
     /// Perform `request` through the host, applying this client's retry policy (http arc H9).
     ///
-    /// Sleeping between attempts goes through the **Clock** capability, not a thread sleep: under
-    /// the sandbox that advances the logical clock without blocking, so a retrying program stays
-    /// deterministic and in-oracle, and the differential covers this loop like any other code.
+    /// Waiting between attempts goes through the **Clock** capability's `delay`, not a thread sleep
+    /// written here: under the sandbox that advances the logical clock without blocking, so a
+    /// retrying program stays deterministic and in-oracle and the differential covers this loop like
+    /// any other code, while on a real host it elapses real time.
+    ///
+    /// It called `clock_sleep` — the *logical* advance — until the two intents were separated, which
+    /// meant a shipped binary computed an exponential backoff, honoured a server's `Retry-After`,
+    /// and then retried immediately anyway. Nothing failed; the policy was simply inert wherever it
+    /// mattered.
     ///
     /// The **last** outcome is what the caller sees. A retry budget that runs out returns the
     /// final failure (or the final retryable status as an ordinary `Ok` response) rather than
@@ -273,7 +279,7 @@ impl HttpClient {
                 }
                 _ => return outcome,
             };
-            host.clock_sleep(delay as i64);
+            host.clock_delay(delay as i64);
             retry += 1;
         }
     }
@@ -647,6 +653,86 @@ mod tests {
             .with_retry(RetryPolicy::new(3))
             .with_non_idempotent_retry();
         assert!(a.retry.as_ref().expect("policy").non_idempotent);
+    }
+
+    /// **A backoff has to reach the door that actually waits.**
+    ///
+    /// `perform` computed an exponential backoff, honoured a server's `Retry-After`, and then handed
+    /// the result to `clock_sleep` — the *logical* advance. Under the sandbox that is exactly right
+    /// and every existing test agreed; on a real host it meant a client configured to back off
+    /// retried a rate-limited endpoint as fast as the socket allowed. Nothing failed. The policy was
+    /// inert precisely where it mattered, and only there.
+    ///
+    /// So the assertion is about **which** capability call the loop makes, not about elapsed time:
+    /// elapsed time is what the sandbox deliberately does not have, and a timing test here would be
+    /// either slow or a coin flip. `clock_delay` is the host's real-time door — this pins that the
+    /// retry loop goes through it, and that it does not go through `clock_sleep`.
+    #[test]
+    fn a_retry_backoff_waits_through_the_real_time_door() {
+        /// The sandbox host with its clock observed. Everything else — including the scripted
+        /// network this test drives through `/status/503` — is the real sandbox, so the loop under
+        /// test is the one that ships.
+        struct RecordingHost {
+            base: crate::SandboxHost,
+            /// Every `clock_sleep`, in order. Must stay empty: this loop wants real time.
+            slept: Vec<i64>,
+            /// Every `clock_delay`, in order — the backoffs the policy computed.
+            delayed: Vec<i64>,
+        }
+
+        impl noeta_ext_abi::Clock for RecordingHost {
+            fn clock_monotonic(&mut self) -> u64 {
+                self.base.clock_monotonic()
+            }
+            fn clock_sleep(&mut self, ms: i64) {
+                self.slept.push(ms);
+                self.base.clock_sleep(ms);
+            }
+            fn clock_delay(&mut self, ms: i64) {
+                self.delayed.push(ms);
+                self.base.clock_delay(ms);
+            }
+            fn clock_unix_ms(&mut self) -> u64 {
+                self.base.clock_unix_ms()
+            }
+        }
+
+        noeta_ext_abi::delegate_host!(RecordingHost => base :
+            FileReader, FileSystem, Rng, Console, Os, Env, Entropy, Ids, Network, P2pProvider,
+            Tracing, Metrics, Logging);
+
+        let policy = RetryPolicy::new(2);
+        let expected: Vec<i64> = (0..policy.max_retries)
+            .map(|r| policy.backoff_ms(r) as i64)
+            .collect();
+
+        let mut host = RecordingHost {
+            base: crate::SandboxHost::new(),
+            slept: Vec::new(),
+            delayed: Vec::new(),
+        };
+        // The sandbox's scripted responder answers `/status/<n>` with that status — 503 is one of
+        // the four the default policy retries.
+        let client = HttpClient::new("").with_retry(policy);
+        let request = client.build("GET", "http://x/status/503", Vec::new(), Vec::new());
+        let response = client
+            .perform(request, &mut host)
+            .expect("a 503 is an ordinary response, not a transport error");
+
+        assert_eq!(
+            response.status, 503,
+            "the last outcome is what the caller sees"
+        );
+        assert_eq!(
+            host.delayed, expected,
+            "each retry must wait the backoff the policy computed, through the real-time door"
+        );
+        assert!(
+            host.slept.is_empty(),
+            "the retry loop reached `clock_sleep` — the logical advance — so a shipped binary would \
+             compute this backoff and then ignore it: {:?}",
+            host.slept
+        );
     }
 
     #[test]

@@ -243,6 +243,29 @@ impl OsError {
     }
 
     /// A failed write to a child's stdin pipe, classified from the `io::Error`.
+    /// **The `stdin_closed` detail**, shared by every host.
+    ///
+    /// It is a constant rather than a literal at each host because it *was* a literal at each host —
+    /// the same sentence typed out in `noeta-stdlib`'s sandbox and in `noeta-host-real`, with
+    /// nothing holding the two together. A program branching on `e.message()` would have seen them
+    /// agree for exactly as long as nobody edited one.
+    ///
+    /// Its sibling condition, `broken_pipe`, deliberately has **no** shared detail: there the real
+    /// host reports the operating system's own text (`"Broken pipe"` on Linux, something else
+    /// elsewhere), so pinning one string would be a portability claim this repo cannot keep. The
+    /// portable half is the *kind*, which is what `OsErrorKind::from_io` normalizes and what a
+    /// program should branch on.
+    pub const STDIN_CLOSED_DETAIL: &'static str = "the child's stdin is closed";
+
+    /// The recoverable write door's `stdin_closed` outcome: the caller closed the pipe itself.
+    pub fn stdin_closed() -> OsError {
+        OsError::new(
+            "write",
+            OsErrorKind::StdinClosed,
+            OsError::STDIN_CLOSED_DETAIL,
+        )
+    }
+
     pub fn write_failed(error: &std::io::Error) -> OsError {
         OsError {
             kind: OsErrorKind::from_io(error.kind()),

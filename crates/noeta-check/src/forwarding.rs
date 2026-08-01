@@ -48,9 +48,7 @@ use crate::subst::{
     apply_subst, bind_type_params, extend_param_scope, from_ref_q, mentions_param, param_ref,
     param_scope, scope_ids,
 };
-use noeta_ast::{
-    ClosureBody, Expr, FnDecl, ObjectLit, Program, Stmt, StrPart, TypeOperand, TypeRef,
-};
+use noeta_ast::{ClosureBody, Expr, FnDecl, ObjectLit, Program, Stmt, StrPart, TypeRef};
 use noeta_types::{ParamRef, Type};
 use std::collections::{HashMap, HashSet};
 
@@ -796,34 +794,30 @@ fn walk_expr(expr: &Expr, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
                 rec!(a);
             }
         }
-        // The name-keyed manifest consumers, on the same two-arm operand as `field_specs_of` below:
-        // bare parameters only (an attribute type, or a role enum, is a bare name by construction).
-        Expr::AttributesOf { ty, .. } => match ty {
-            TypeOperand::Static(ty) => {
-                if let Some(p) = cx.bare_param(ty) {
-                    mark(p, false);
-                }
+        // **The reflection surface, one arm.** Every name-keyed query is a NAME-ONLY consumer: it
+        // keys a registry, a manifest or a narrow on the instantiation's runtime name, which is the
+        // whole of what a slot's `TypeArgInfo.name` carries, so it forwards even for an
+        // instantiation that has no build recipe at all. Their turbofish arm is
+        // `field_specs_of(type_name::<T>())` with the composition done by the compiler rather than
+        // by the author.
+        //
+        // Bare parameters only, matching the head-keyed identity these queries actually key on
+        // ([`TypeRef::head_name`]): `field_specs_of::<List<T>>()` heads at `List`, a real type
+        // whatever `T` is, and stays the compile-time constant it always was.
+        //
+        // `from_bytes` is the one exception, and it is the *shape* that says so rather than a name
+        // listed here: it needs the element's packed layout, which no channel carries, so
+        // `ReflectShape::StaticTypeWith::resolves_type_by_name` is false and its `T` does not
+        // forward. That is a fact about the query, stated once, in front of the census.
+        Expr::Reflect { which, operand, .. } => {
+            if which.shape().resolves_type_by_name() {
+                operand.for_each_type_ref(&mut |ty| {
+                    if let Some(p) = cx.bare_param(ty) {
+                        mark(p, false);
+                    }
+                });
             }
-            TypeOperand::Dynamic(e) => rec!(e),
-        },
-        Expr::RolesOf { ty: Some(ty), .. } => match ty {
-            TypeOperand::Static(ty) => {
-                if let Some(p) = cx.bare_param(ty) {
-                    mark(p, false);
-                }
-            }
-            TypeOperand::Dynamic(e) => rec!(e),
-        },
-        // `type_name::<T>()` — the other **name-only** consumer, and the cheapest of them: it wants
-        // the slot's `TypeArgInfo.name` and nothing else, no build recipe, so it forwards wherever
-        // `attributes_of` does and additionally for instantiations that have no recipe at all.
-        // Bare parameters only, matching the surface's own head-keyed identity —
-        // `type_name::<List<T>>()` heads at `List`, a name no instantiation changes, and stays the
-        // compile-time constant it always was.
-        Expr::TypeName { ty, .. } => {
-            if let Some(p) = cx.bare_param(ty) {
-                mark(p, false);
-            }
+            operand.for_each_expr(&mut |e| walk_expr(e, cx, mark));
         }
         // The **narrow** consumers — `v.as<T>()` and `v is T`. Name-only, like `type_name` above
         // and for the same reason: a narrow is a head-constructor match on the instantiation's
@@ -922,12 +916,6 @@ fn walk_expr(expr: &Expr, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
         | Expr::Try { expr: e, .. }
         | Expr::Await { expr: e, .. }
         | Expr::Spawn { future: e, .. }
-        | Expr::TypeOf { value: e, .. }
-        | Expr::FieldsOf { value: e, .. }
-        | Expr::TraitsOf { value: e, .. }
-        | Expr::ParamsOf { target: e, .. }
-        | Expr::ReturnsOf { target: e, .. }
-        | Expr::FromBytes { blob: e, .. }
         | Expr::Channel { capacity: e, .. }
         | Expr::TupleIndex { receiver: e, .. }
         | Expr::Member { receiver: e, .. } => rec!(e),
@@ -1027,44 +1015,6 @@ fn walk_expr(expr: &Expr, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
                 rec!(&f.value);
             }
         }
-        Expr::Invoke {
-            recv, name, args, ..
-        } => {
-            if let Some(recv) = recv {
-                rec!(recv);
-            }
-            rec!(name);
-            rec!(args);
-        }
-        // The **name-keyed registry** consumers — `field_specs_of::<T>()`, `variants_of::<T>()`,
-        // `construct::<T>(…)`. Name-only, exactly like `type_name` and the narrows above: each
-        // keys a registry on the instantiation's runtime NAME, which is the whole of what the
-        // slot's `TypeArgInfo.name` carries, so they forward even for an instantiation that has no
-        // build recipe. Their turbofish arm is `field_specs_of(type_name::<T>())` with the
-        // composition done by the compiler rather than by the author.
-        //
-        // Bare parameters only, matching the head-keyed identity these queries actually key on
-        // ([`TypeRef::head_name`]): `field_specs_of::<List<T>>()` heads at `List`, a real type
-        // whatever `T` is, and stays the compile-time constant it always was.
-        Expr::FieldSpecsOf { name, .. } | Expr::VariantsOf { name, .. } => match name {
-            TypeOperand::Static(ty) => {
-                if let Some(p) = cx.bare_param(ty) {
-                    mark(p, false);
-                }
-            }
-            TypeOperand::Dynamic(e) => rec!(e),
-        },
-        Expr::Construct { name, fields, .. } => {
-            match name {
-                TypeOperand::Static(ty) => {
-                    if let Some(p) = cx.bare_param(ty) {
-                        mark(p, false);
-                    }
-                }
-                TypeOperand::Dynamic(e) => rec!(e),
-            }
-            rec!(fields);
-        }
         Expr::FieldSet {
             receiver, value, ..
         } => {
@@ -1085,8 +1035,6 @@ fn walk_expr(expr: &Expr, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
         | Expr::F64 { .. }
         | Expr::Bool { .. }
         | Expr::Ident { .. }
-        // The unscoped `roles_of()` — no operand at all.
-        | Expr::RolesOf { ty: None, .. }
         | Expr::NativeFnRef { .. } => {}
     }
 }

@@ -48,7 +48,7 @@ Determinism is a hard requirement across the whole stdlib: no wall-clock, no has
   - `math` — `sqrt`/`pow`/`abs`/`floor`/`ceil`/`round`/`min`/`max`/`pi`/`e`; pure scalar functions, so their semantics live here once in [`math::call`] and both backends are project/lift glue, bit-identical.
   - `random` — `seed`/`int`/`float`; a seeded SplitMix64 **pure stepper** in [`random`], so a given seed yields the identical stream in both runtimes (each backend holds the `u64` state and threads it through; it defaults to a fixed seed so even un-seeded use is reproducible).
   - `fs` — file IO over a sandboxed **in-memory** [`fs::Vfs`] each interpreter owns, fresh per run. In-memory rather than a real temp dir so isolation and cross-backend identity are *structural* (no disk flakiness, no cleanup); reading a missing path is `E0021`. (Real-disk and streaming IO now ship too — see the M2 additions below.)
-  - `time` — `monotonic`/`sleep`; a **logical** monotonic clock (a per-backend counter, not wall-clock) so output is reproducible and identical across backends.
+  - `time` — `monotonic`/`sleep`; a **logical** monotonic clock (a per-backend counter, not wall-clock) so output is reproducible and identical across backends. `time.sleep(ms)` therefore advances that counter and returns — it does not block, on any host, including a shipped binary. To actually wait, `await std.task.sleep(ms)`, which parks on the executor's real timer and is cancellable. The distinction is worth stating out loud because the names do not carry it: a synchronous `sleep` that returns immediately is exactly what a reader would not predict.
 
 ## Since M1.10 (host IO, concurrency, extensions)
 
