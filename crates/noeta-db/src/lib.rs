@@ -306,46 +306,61 @@ struct RenamedTextTiers(std::collections::HashMap<noeta_span::PackageOrigin, Vec
 
 backdating_update!(RenamedTextTiers);
 
+/// The installed extensions' tiers ([`noeta_loader::ExtTiers`]) as an [`ExtEnv`] field. A newtype
+/// for the same [`salsa::Update`]/orphan reason as [`WorkspaceUses`], and backdating so re-seeding
+/// an identical registry does not invalidate every lex.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExtTierEnv(pub noeta_loader::ExtTiers);
+
+backdating_update!(ExtTierEnv);
+
 /// The **extension environment** as an explicit salsa input (singleton): the installed
-/// extensions' verbatim-body tier names, which [`ast`] and [`workspace_text_tiers`] fold into
-/// lexing. Previously these were read straight off the process-global registry inside tracked
-/// queries — a hidden non-salsa input, sound only while the global never changes after first
-/// query, and a silent-staleness landmine for an embedder pairing a `LangDatabase` with a
-/// per-session registry. Constructors that know their registry seed this via [`seed_ext_env`];
-/// an unseeded db falls back to the global default (the documented single-registry stance for
-/// the CLI tools), and the fallback is *recorded on this input* so it stays one dependency.
+/// extensions' tiers, which [`ast`] and [`workspace_text_tiers`] fold into lexing. Previously these
+/// were read straight off the process-global registry inside tracked queries — a hidden non-salsa
+/// input, sound only while the global never changes after first query, and a silent-staleness
+/// landmine for an embedder pairing a `LangDatabase` with a per-session registry. Constructors that
+/// know their registry seed this via [`seed_ext_env`]; an unseeded db falls back to the global
+/// default (the documented single-registry stance for the CLI tools), and the fallback is *recorded
+/// on this input* so it stays one dependency.
+///
+/// It carries each tier's **provider root** and not only its name, because per-package resolution is
+/// scoped: `[tiers] notes = "speckit:json"` names *speckit's* `json`, and answering "is that a
+/// verbatim tier?" by bare name says yes for std's `@json` — capturing prose the compiler lexes as
+/// code. See [`noeta_loader::ExtTiers::is_verbatim_scoped`].
 #[salsa::input(singleton, debug)]
 pub struct ExtEnv {
     #[returns(ref)]
-    pub verbatim_tier_names: Vec<String>,
+    pub ext_tiers: ExtTierEnv,
 }
 
-/// Create (or overwrite) the db's [`ExtEnv`] from an explicit tier-name set. What an embedder
-/// with a per-session registry calls after assembling it.
-pub fn seed_ext_env(db: &mut dyn salsa::Database, verbatim_tier_names: Vec<String>) {
+/// Create (or overwrite) the db's [`ExtEnv`] from an explicit tier set. What an embedder with a
+/// per-session registry calls after assembling it (`ExtTiers::from_registry`).
+pub fn seed_ext_env(db: &mut dyn salsa::Database, tiers: noeta_loader::ExtTiers) {
     use salsa::Setter as _;
     match ExtEnv::try_get(db) {
         Some(env) => {
-            env.set_verbatim_tier_names(db).to(verbatim_tier_names);
+            env.set_ext_tiers(db).to(ExtTierEnv(tiers));
         }
         None => {
-            ExtEnv::new(db, verbatim_tier_names);
+            ExtEnv::new(db, ExtTierEnv(tiers));
         }
     }
 }
 
-/// The extension verbatim-tier names for `db`: the seeded [`ExtEnv`], or — first read of an
-/// unseeded db — the process-global default registry's, captured onto the input so later reads
-/// depend on salsa state, not the global.
-fn ext_verbatim_tier_names(db: &dyn salsa::Database) -> Vec<String> {
+/// The extension tiers for `db`: the seeded [`ExtEnv`], or — first read of an unseeded db — the
+/// process-global default registry's, captured onto the input so later reads depend on salsa state,
+/// not the global.
+fn ext_tiers(db: &dyn salsa::Database) -> noeta_loader::ExtTiers {
     match ExtEnv::try_get(db) {
-        Some(env) => env.verbatim_tier_names(db).clone(),
-        None => noeta_ext_abi::registry::single_registry_process()
-            .ext_verbatim_tier_names()
-            .into_iter()
-            .map(str::to_string)
-            .collect(),
+        Some(env) => env.ext_tiers(db).0.clone(),
+        None => noeta_loader::ExtTiers::from_process_registry(),
     }
+}
+
+/// The **verbatim-body** tier names the extensions installed for `db` declare — the program-wide
+/// (unscoped) half of the lexer's seed, for an ambient `@json` that no `[tiers]` binding renames.
+fn ext_verbatim_tier_names(db: &dyn salsa::Database) -> Vec<String> {
+    ext_tiers(db).verbatim_names()
 }
 
 /// Tokenize the source. Memoized; re-runs only when `SourceProgram::text` changes.
@@ -740,65 +755,43 @@ pub fn workspace_text_tiers(db: &dyn salsa::Database, ws: Workspace) -> Vec<Stri
 }
 
 /// The local `@name`s each package binds to a **text** (verbatim-body) tier, keyed by the binding
-/// package's [`PackageOrigin`] — the salsa twin of the loader's `renamed_text_tier_locals`
-/// (per-package tier-naming arc, sub-step 3g). A `[tiers]` binding `local = "provider[:exported]"`
-/// makes `local` a text tier for that package iff the provider tier it names captures verbatim,
-/// resolved the two ways the loader resolves it:
+/// package's [`PackageOrigin`] — the per-package input to [`tokens_in`]'s lex (per-package
+/// tier-naming arc, sub-step 3g).
 ///
-/// * an **extension** provider — the `exported` tier is one of the installed extensions' verbatim
-///   (text/expr) tiers. Read through the [`ExtEnv`] input (as [`workspace_text_tiers`] already reads
-///   ext tiers) so this stays a salsa dependency, matched by name: under the single-registry stance
-///   the editor runs on there is no same-name provider collision, and a false positive would only
-///   capture more prose; or
-/// * a **program-declared** provider — a dependency shipping `@tier(exported, …, text: "…")`, found
-///   by the dependency modules' own [`tokens`] text-tier scan, indexed by the dependency's link
-///   segment (its [`PackageOrigin::Dependency`] key), against which the binding's `provider_roots`
-///   match — exactly as the loader lines them up.
+/// **Not a twin of the loader's resolution — the same function.** This query supplies the two inputs
+/// the editor has and the batch loader does not phrase the same way, and
+/// [`noeta_loader::renamed_text_tier_locals`] does the resolving:
 ///
-/// Empty for a workspace with no `@name` bindings (a lone/sibling-only directory), which is the old
-/// behavior. Backdates on the dependency graph, not on member text (see [`RenamedTextTiers`]).
+/// * the **program-declared** text tiers of each dependency, from the dependency modules' own
+///   [`tokens`] scan, indexed by the dependency's link segment (its [`PackageOrigin::Dependency`]
+///   key) — the segment a binding's `provider_roots` carries for a `.noe` provider; and
+/// * the installed extensions' tiers, read through the [`ExtEnv`] input (as [`workspace_text_tiers`]
+///   already reads ext tiers) so this stays a salsa dependency rather than a process global.
+///
+/// Enumerating those two is genuinely per-surface: the loader walks a `Vec<Lexed>` beside a
+/// `PackageMap` it just built, the editor walks salsa's `dep_modules`. Deciding what they *mean* is
+/// not, and that half is where the divergence was: this query used to match an ext tier by bare
+/// name, so `[tiers] notes = "speckit:json"` — a dependency's **code** tier that happens to share a
+/// name with std's verbatim `@json` — captured its body as prose here while the loader lexed it as
+/// code. `noeta check` passed a file `noeta run` could not lex.
+///
+/// Empty for a workspace with no `@name` bindings (a lone/sibling-only directory). Backdates on the
+/// dependency graph, not on member text (see [`RenamedTextTiers`]).
 #[salsa::tracked(returns(ref))]
 fn workspace_renamed_text_tiers(db: &dyn salsa::Database, ws: Workspace) -> RenamedTextTiers {
     let uses = &ws.package_uses(db).0;
     if uses.is_empty() {
         return RenamedTextTiers::default();
     }
-    // Program-declared text tiers, indexed by the declaring dependency's link segment — the
-    // `PackageOrigin::Dependency` key a `@tier` runner is re-rooted to, which is exactly the segment
-    // a binding's `provider_roots` carries. Mirrors the loader's `declared_by_segment`.
-    let mut declared_by_segment: std::collections::HashMap<
-        String,
-        std::collections::HashSet<String>,
-    > = std::collections::HashMap::new();
-    for dm in ws.dep_modules(db).iter() {
+    let declared = ws.dep_modules(db).iter().filter_map(|dm| {
         let decls = &tokens(db, dm.src(db)).0.text_tier_decls;
-        if decls.is_empty() {
-            continue;
-        }
-        let entry = declared_by_segment
-            .entry(dm.import_key(db).to_string())
-            .or_default();
-        for name in decls {
-            entry.insert(name.clone());
-        }
-    }
-    let ext_names: std::collections::HashSet<String> =
-        ext_verbatim_tier_names(db).into_iter().collect();
-
-    let mut out: std::collections::HashMap<noeta_span::PackageOrigin, Vec<String>> =
-        std::collections::HashMap::new();
-    for (origin, local, use_) in uses.iter() {
-        let ext_text = ext_names.contains(&use_.exported);
-        let declared_text = use_.provider_roots.iter().any(|root| {
-            declared_by_segment
-                .get(root)
-                .is_some_and(|names| names.contains(&use_.exported))
-        });
-        if ext_text || declared_text {
-            out.entry(origin.clone()).or_default().push(local.clone());
-        }
-    }
-    RenamedTextTiers(out)
+        (!decls.is_empty()).then(|| (dm.import_key(db).to_string(), decls.clone()))
+    });
+    RenamedTextTiers(noeta_loader::renamed_text_tier_locals(
+        uses,
+        declared,
+        &ext_tiers(db),
+    ))
 }
 
 /// The verbatim-body text-tier set the workspace-aware lex applies to **one** source: the whole
@@ -1658,13 +1651,16 @@ mod tests {
             WorkspaceUses::default(),
             NativeRoots::default(),
         );
-        seed_ext_env(&mut db, vec!["blueprint".to_string()]);
+        seed_ext_env(
+            &mut db,
+            noeta_loader::ExtTiers::verbatim_under("std", ["blueprint".to_string()]),
+        );
         assert!(
             workspace_text_tiers(&db, ws).contains(&"blueprint".to_string()),
             "the seeded tier set flows into the workspace tier union"
         );
         // Re-seeding the input invalidates the memoized answer.
-        seed_ext_env(&mut db, Vec::new());
+        seed_ext_env(&mut db, noeta_loader::ExtTiers::default());
         assert!(
             !workspace_text_tiers(&db, ws).contains(&"blueprint".to_string()),
             "re-seeding the ExtEnv input must invalidate"
@@ -2251,7 +2247,10 @@ mod tests {
         // `workspace_captures_a_renamed_text_tier_bound_in_the_manifest`.
         let mut db = LangDatabase::default();
         // Seed std's `doc` as the known verbatim ext tier the `docs = "std:doc"` binding lands on.
-        seed_ext_env(&mut db, vec!["doc".to_string()]);
+        seed_ext_env(
+            &mut db,
+            noeta_loader::ExtTiers::verbatim_under("std", ["doc".to_string()]),
+        );
         // Load-bearing: the bare `"` (and `<angle>` bits) make this a hard lex error as code; only the
         // per-package text-tier resolution captures it verbatim as one `DocText`.
         let entry = Source::new(

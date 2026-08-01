@@ -1498,6 +1498,166 @@ impl ParsedDir {
     }
 }
 
+/// One installed extension tier, reduced to the three facts per-package text-tier resolution needs:
+/// the declaring unit's namespace **root**, the **name** it exported, and whether its body is
+/// **verbatim** (a text or expression tier — the predicate `Registry::ext_verbatim_tier_names` uses).
+///
+/// See [`ExtTiers`] for why this exists as a value rather than a registry lookup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtTierFacts {
+    /// The declaring extension unit's namespace root (`"std"` for the built-in four) — what a
+    /// `[tiers]` binding's `provider_roots` is matched against.
+    pub root: String,
+    /// The tier name the unit exported.
+    pub name: String,
+    /// Whether `@name { … }` bodies capture verbatim (the tier declares `text:` or `expr:`).
+    pub verbatim: bool,
+}
+
+/// **The installed extensions' tiers as a plain value**, in install order — the ext half of
+/// [`renamed_text_tier_locals`]'s input.
+///
+/// Text-tier resolution needs two answers from the extension registry: the global verbatim names to
+/// seed the lexer with ([`ExtTiers::verbatim_names`]), and whether a *specific* provider exports a
+/// given tier as verbatim ([`ExtTiers::is_verbatim_scoped`]). The loader can ask the process registry
+/// directly; the editor's salsa graph cannot — a tracked query that read the process global would be
+/// a hidden input. So the facts travel as a value, seeded once by whoever knows the registry, and the
+/// resolution itself is [one function](renamed_text_tier_locals) both paths call.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExtTiers(Vec<ExtTierFacts>);
+
+impl ExtTiers {
+    /// The facts for every tier `registry` has installed, in install order.
+    pub fn from_registry(registry: &noeta_ext_abi::registry::Registry) -> ExtTiers {
+        ExtTiers(
+            registry
+                .extensions()
+                .iter()
+                .flat_map(|unit| {
+                    let root = unit.root();
+                    unit.tiers().iter().map(move |tier| ExtTierFacts {
+                        root: root.to_string(),
+                        name: tier.name.to_string(),
+                        verbatim: tier.text.is_some() || tier.expr.is_some(),
+                    })
+                })
+                .collect(),
+        )
+    }
+
+    /// The facts for the process-wide default registry — what every non-embedding front end sees.
+    pub fn from_process_registry() -> ExtTiers {
+        ExtTiers::from_registry(noeta_ext_abi::registry::single_registry_process())
+    }
+
+    /// Build from explicit facts, in the order a lookup should consider them.
+    pub fn from_facts(facts: impl IntoIterator<Item = ExtTierFacts>) -> ExtTiers {
+        ExtTiers(facts.into_iter().collect())
+    }
+
+    /// The verbatim tiers of **one** provider — the shape a test, or an embedder whose registry has a
+    /// single root, already has. Anything more (two providers, a code tier that shares a name with a
+    /// verbatim one) needs [`ExtTiers::from_facts`], because the scoping is the point.
+    pub fn verbatim_under(root: &str, names: impl IntoIterator<Item = String>) -> ExtTiers {
+        ExtTiers(
+            names
+                .into_iter()
+                .map(|name| ExtTierFacts {
+                    root: root.to_string(),
+                    name,
+                    verbatim: true,
+                })
+                .collect(),
+        )
+    }
+
+    /// Every **verbatim-body** tier name, in install order — the program-wide set the lexer seeds
+    /// with, since a native tier's bodies must capture even though no `.noe` file declares them.
+    /// A bare-name list on purpose: an *ambient* `@json` (no `[tiers]` binding) has no provider to
+    /// scope by.
+    pub fn verbatim_names(&self) -> Vec<String> {
+        self.0
+            .iter()
+            .filter(|t| t.verbatim)
+            .map(|t| t.name.clone())
+            .collect()
+    }
+
+    /// Whether the tier `exported` — as resolved **under one of `provider_roots`** — captures its
+    /// body verbatim.
+    ///
+    /// Scoped, and first-match, because that is what `Registry::find_ext_tier_scoped` does: it lands
+    /// on the tier the binding *named*, so two providers exporting the same name (`std`'s verbatim
+    /// `json` and a third party's code tier of that name) never conflate. A bare-name test here is
+    /// the bug this function exists to prevent — it makes a binding onto *any* provider's `json`
+    /// capture prose, including a program package that ships a code tier by that name.
+    pub fn is_verbatim_scoped(&self, provider_roots: &[String], exported: &str) -> bool {
+        self.0
+            .iter()
+            .find(|t| t.name == exported && provider_roots.iter().any(|r| *r == t.root))
+            .is_some_and(|t| t.verbatim)
+    }
+}
+
+/// **The local `@name`s each package binds to a verbatim-body tier** — the one resolution behind both
+/// the batch loader's [`lex_program`] and the editor's `noeta_db::workspace_renamed_text_tiers`.
+///
+/// A `[tiers]` binding `local = "provider[:exported]"` makes `local` capture `@local { … }` bodies
+/// verbatim for the binding package *only* — two packages may bind the same spelling to different
+/// meanings — so the result is keyed by the binding [`PackageOrigin`]. The provider is resolved the
+/// two ways a tier can be provided, mirroring the checker's `TierRegistry::resolve_at`:
+///
+/// * an **extension** provider — `exported` is a text/expression tier declared by a unit whose root
+///   is one of the binding's `provider_roots` ([`ExtTiers::is_verbatim_scoped`]); or
+/// * a **program-declared** provider — a dependency shipping `@tier(exported, …, text: "…")`. At lex
+///   time there is no parsed AST, but each source's own text-tier declarations are already known from
+///   the lexer's token scan (`noeta_lexer::Lexed::text_tier_decls`); `declared_by_dependency` supplies
+///   them per dependency **link segment**, which is what a `[tiers]` binding's `provider_roots`
+///   carries for a `.noe` provider (a program `@tier` runner is re-rooted to the consumer's link
+///   segment), so the two line up.
+///
+/// Pure: it reads no filesystem and no process registry, which is what lets the salsa query call it.
+/// Values are sorted, so the result is a function of its inputs and not of any `HashMap` walk — an
+/// unsorted answer made the editor's memo compare unequal to itself and re-lex for nothing.
+pub fn renamed_text_tier_locals(
+    package_uses: &noeta_span::PackageUses,
+    declared_by_dependency: impl IntoIterator<Item = (String, Vec<String>)>,
+    ext: &ExtTiers,
+) -> std::collections::HashMap<PackageOrigin, Vec<String>> {
+    if package_uses.is_empty() {
+        return std::collections::HashMap::new();
+    }
+    // Program-declared text tiers, indexed by the declaring package's link segment.
+    let mut declared_by_segment: std::collections::HashMap<
+        String,
+        std::collections::HashSet<String>,
+    > = std::collections::HashMap::new();
+    for (segment, names) in declared_by_dependency {
+        declared_by_segment
+            .entry(segment)
+            .or_default()
+            .extend(names);
+    }
+
+    let mut out: std::collections::HashMap<PackageOrigin, Vec<String>> =
+        std::collections::HashMap::new();
+    for (origin, local, use_) in package_uses.iter() {
+        let ext_text = ext.is_verbatim_scoped(&use_.provider_roots, &use_.exported);
+        let declared_text = use_.provider_roots.iter().any(|root| {
+            declared_by_segment
+                .get(root)
+                .is_some_and(|names| names.contains(&use_.exported))
+        });
+        if ext_text || declared_text {
+            out.entry(origin.clone()).or_default().push(local.clone());
+        }
+    }
+    for locals in out.values_mut() {
+        locals.sort();
+    }
+    out
+}
+
 /// Lex every module of a program as one unit (text-tiers arc): each file lexes with the default
 /// text-tier set first; if any file declares a text tier (`@tier(x, …, text: "…")`), the union of
 /// all declarations is applied and every file re-lexes with it — so a tier declared in one file
@@ -1537,21 +1697,30 @@ fn lex_program(
     // (found by the lexer's per-file token scan) and the installed extensions' declarations (`doc`,
     // and any native `@json`/`@sql` — no `.noe` file declares these). These apply to EVERY file (a
     // tier declared in one file names the same tier everywhere), unchanged by the per-package layer.
+    let ext = ExtTiers::from_process_registry();
     let mut global_names: Vec<String> = lexeds
         .iter()
         .flat_map(|l| l.text_tier_decls.iter().cloned())
         .collect();
-    global_names.extend(
-        noeta_ext_abi::registry::single_registry_process()
-            .ext_verbatim_tier_names()
-            .into_iter()
-            .map(str::to_string),
-    );
+    global_names.extend(ext.verbatim_names());
     let global = noeta_lexer::TextTiers::with(global_names.clone());
-    // The per-package layer: each origin's local `@name`s that resolve to a text tier (see
-    // [`renamed_text_tier_locals`]). Keyed by origin so a rename in package A never forces verbatim
-    // capture of the same spelling in package B.
-    let renamed = renamed_text_tier_locals(package_uses, packages, &lexeds);
+    // The per-package layer: each origin's local `@name`s that resolve to a text tier — the shared
+    // [`renamed_text_tier_locals`], which the editor's salsa graph calls with its own inputs. Keyed
+    // by origin so a rename in package A never forces verbatim capture of the same spelling in
+    // package B. The program-declared half is fed from this pass's own token scan, indexed by each
+    // dependency's link segment (the `PackageOrigin::Dependency` key a `@tier` runner re-roots to).
+    let renamed = renamed_text_tier_locals(
+        package_uses,
+        lexeds.iter().enumerate().filter_map(|(index, lexed)| {
+            match packages.source_package(SourceId(index as u32)) {
+                Some(PackageOrigin::Dependency(key)) if !lexed.text_tier_decls.is_empty() => {
+                    Some((key.clone(), lexed.text_tier_decls.clone()))
+                }
+                _ => None,
+            }
+        }),
+        &ext,
+    );
 
     // The set the *parser* and *expansion* see is the union of every contribution — the parser
     // consults it only to re-lex `${…}` interpolation holes (a nested `@name { … }` inside a hole),
@@ -1592,70 +1761,6 @@ fn lex_program(
         })
         .collect();
     (relexed, union)
-}
-
-/// The local `@name`s each package binds to a **text** (verbatim-body) tier — the per-package input
-/// to [`lex_program`]'s re-lex, keyed by the binding package's [`PackageOrigin`]. A `[tiers]` binding
-/// `local = "provider[:exported]"` makes `local` a text tier for that package iff the provider tier it
-/// names is itself a text (or expression) tier — resolved two ways, mirroring the checker's
-/// `TierRegistry::resolve_at`:
-///
-/// * an **extension** provider — `find_ext_tier_scoped(provider_roots, exported)` lands on the tier
-///   the binding named (scoped so `std`'s `doc` and a third party's same-named tier never conflate),
-///   and it is a text tier when its `.text`/`.expr` is set (the same predicate `ext_verbatim_tier_names`
-///   uses); or
-/// * a **program-declared** provider — a dependency shipping `@tier(exported, …, text: "…")`. At lex
-///   time there is no parsed AST, but the first lex pass already scanned each source's own text-tier
-///   declarations ([`noeta_lexer::Lexed::text_tier_decls`]); indexed by the declaring source's package
-///   segment, that answers "does the provider this local names declare `exported` as text?" — matched
-///   against `provider_roots` (a `.noe` `@tier` runner is re-rooted to the consumer's link segment,
-///   which is exactly the dependency's [`PackageOrigin::Dependency`] key, so the two line up).
-fn renamed_text_tier_locals(
-    package_uses: &noeta_span::PackageUses,
-    packages: &noeta_span::PackageMap,
-    lexeds: &[noeta_lexer::Lexed],
-) -> std::collections::HashMap<PackageOrigin, Vec<String>> {
-    if package_uses.is_empty() {
-        return std::collections::HashMap::new();
-    }
-    // Program-declared text tiers, indexed by the declaring package's link segment. A dependency's
-    // modules carry `PackageOrigin::Dependency(key)`, and that `key` is the very segment a `@tier`
-    // runner is re-rooted to — so `provider_roots` (which carries that segment) matches here.
-    let mut declared_by_segment: std::collections::HashMap<&str, std::collections::HashSet<&str>> =
-        std::collections::HashMap::new();
-    for (index, lexed) in lexeds.iter().enumerate() {
-        if lexed.text_tier_decls.is_empty() {
-            continue;
-        }
-        if let Some(PackageOrigin::Dependency(key)) =
-            packages.source_package(SourceId(index as u32))
-        {
-            let entry = declared_by_segment.entry(key.as_str()).or_default();
-            for name in &lexed.text_tier_decls {
-                entry.insert(name.as_str());
-            }
-        }
-    }
-
-    let registry = noeta_ext_abi::registry::single_registry_process();
-    let mut out: std::collections::HashMap<PackageOrigin, Vec<String>> =
-        std::collections::HashMap::new();
-    for (origin, local, use_) in package_uses.iter() {
-        // An extension provider whose named tier captures verbatim (a text or expression tier).
-        let ext_text = registry
-            .find_ext_tier_scoped(&use_.provider_roots, &use_.exported)
-            .is_some_and(|tier| tier.text.is_some() || tier.expr.is_some());
-        // Or a dependency-declared `@tier(exported, …, text: "…")` under one of the provider roots.
-        let declared_text = use_.provider_roots.iter().any(|root| {
-            declared_by_segment
-                .get(root.as_str())
-                .is_some_and(|names| names.contains(use_.exported.as_str()))
-        });
-        if ext_text || declared_text {
-            out.entry(origin.clone()).or_default().push(local.clone());
-        }
-    }
-    out
 }
 
 /// Parse an already-lexed source, yielding its [`Program`] when both lex and parse are clean and a
@@ -5771,6 +5876,186 @@ mod tests {
         )
         .expect_err("without the binding, the markdown body is lexed as code and fails");
         assert!(!errs.is_empty());
+    }
+
+    /// One `[tiers]` binding, as [`renamed_text_tier_locals`] takes it.
+    fn binds(
+        origin: PackageOrigin,
+        local: &str,
+        roots: &[&str],
+        exported: &str,
+    ) -> noeta_span::PackageUses {
+        let mut uses = noeta_span::PackageUses::new();
+        uses.set(
+            origin,
+            local.to_string(),
+            noeta_span::PackageUse {
+                provider_roots: roots.iter().map(|r| r.to_string()).collect(),
+                exported: exported.to_string(),
+            },
+        );
+        uses
+    }
+
+    /// The registry shape the divergence needed: two providers exporting `json`, only one verbatim.
+    fn two_providers_named_json() -> ExtTiers {
+        ExtTiers::from_facts([
+            ExtTierFacts {
+                root: "std".to_string(),
+                name: "json".to_string(),
+                verbatim: true,
+            },
+            ExtTierFacts {
+                root: "criterion".to_string(),
+                name: "json".to_string(),
+                verbatim: false,
+            },
+        ])
+    }
+
+    #[test]
+    fn a_binding_onto_an_extension_text_tier_captures_for_its_own_package_only() {
+        let ext = ExtTiers::verbatim_under("std", ["doc".to_string()]);
+        let uses = binds(PackageOrigin::Root, "docs", &["std"], "doc");
+        let out = renamed_text_tier_locals(&uses, [], &ext);
+        assert_eq!(
+            out.get(&PackageOrigin::Root),
+            Some(&vec!["docs".to_string()])
+        );
+        assert_eq!(
+            out.get(&PackageOrigin::Dependency("other".to_string())),
+            None,
+            "a rename in one package must not widen another's lex"
+        );
+    }
+
+    #[test]
+    fn a_binding_onto_a_dependency_declared_text_tier_captures() {
+        // No extension declares `spec`; the provider is a `.noe` package whose own `@tier(spec,
+        // text: "xml")` the first lex pass already saw, indexed by its link segment.
+        let uses = binds(PackageOrigin::Root, "checks", &["speckit"], "spec");
+        let out = renamed_text_tier_locals(
+            &uses,
+            [("speckit".to_string(), vec!["spec".to_string()])],
+            &ExtTiers::default(),
+        );
+        assert_eq!(
+            out.get(&PackageOrigin::Root),
+            Some(&vec!["checks".to_string()])
+        );
+    }
+
+    #[test]
+    fn a_binding_onto_a_dependency_code_tier_does_not_capture_because_a_native_shares_its_name() {
+        // **The row-8 divergence, at the unit.** `notes = "criterion:json"` names criterion's `json`,
+        // which is a *code* tier; std also ships a verbatim `@json`. A bare-name test says verbatim
+        // — that is what the editor's copy of this resolution did, so `noeta check` swallowed a
+        // prose body the loader lexed as code. The lookup is scoped to the provider the binding
+        // named, so it says no.
+        let uses = binds(PackageOrigin::Root, "notes", &["criterion"], "json");
+        let out = renamed_text_tier_locals(&uses, [], &two_providers_named_json());
+        assert!(
+            out.is_empty(),
+            "a binding onto a provider's CODE tier must not make its body verbatim: {out:?}"
+        );
+        // The control: the same exported name under the provider that really does declare it
+        // verbatim still captures, so the scoping is not simply refusing everything.
+        let std_uses = binds(PackageOrigin::Root, "notes", &["std"], "json");
+        assert_eq!(
+            renamed_text_tier_locals(&std_uses, [], &two_providers_named_json())
+                .get(&PackageOrigin::Root),
+            Some(&vec!["notes".to_string()])
+        );
+    }
+
+    #[test]
+    fn a_dependencys_text_tier_declaration_does_not_reach_a_package_that_did_not_name_it() {
+        // `provider_roots` is the whole match: a declaration under `speckit` answers a binding that
+        // named `speckit`, and nothing else.
+        let uses = binds(PackageOrigin::Root, "checks", &["elsewhere"], "spec");
+        assert!(
+            renamed_text_tier_locals(
+                &uses,
+                [("speckit".to_string(), vec!["spec".to_string()])],
+                &ExtTiers::default(),
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn the_resolved_locals_are_sorted_so_the_answer_is_a_function_of_its_inputs() {
+        // The editor memoizes this value and compares it to decide whether to re-lex. A `HashMap`
+        // walk order is not stable across two constructions of the same map, so an unsorted answer
+        // could compare unequal to itself and invalidate every workspace-aware lex for nothing.
+        let ext = ExtTiers::verbatim_under("std", ["doc".to_string()]);
+        let mut uses = noeta_span::PackageUses::new();
+        for local in ["zeta", "alpha", "mid"] {
+            uses.set(
+                PackageOrigin::Root,
+                local.to_string(),
+                noeta_span::PackageUse {
+                    provider_roots: vec!["std".to_string()],
+                    exported: "doc".to_string(),
+                },
+            );
+        }
+        assert_eq!(
+            renamed_text_tier_locals(&uses, [], &ext).get(&PackageOrigin::Root),
+            Some(&vec![
+                "alpha".to_string(),
+                "mid".to_string(),
+                "zeta".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn the_installed_extensions_verbatim_names_are_exactly_the_text_and_expression_tiers() {
+        // `verbatim_names` seeds the lexer's program-wide set, and it must agree with the registry's
+        // own `ext_verbatim_tier_names` — the predicate is `text.is_some() || expr.is_some()`, and
+        // this is the one place it is restated as a value.
+        noeta_stdlib::registry::default_seeded();
+        let registry = noeta_ext_abi::registry::single_registry_process();
+        let mut from_value = ExtTiers::from_registry(registry).verbatim_names();
+        let mut from_registry: Vec<String> = registry
+            .ext_verbatim_tier_names()
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        from_value.sort();
+        from_registry.sort();
+        assert_eq!(from_value, from_registry);
+        assert!(
+            from_value.contains(&"doc".to_string()),
+            "std's `doc` is the built-in text tier: {from_value:?}"
+        );
+    }
+
+    #[test]
+    fn the_scoped_lookup_agrees_with_the_registrys_own_scoped_find() {
+        // The other half of the same equivalence: `is_verbatim_scoped` must answer what
+        // `find_ext_tier_scoped(...).is_some_and(verbatim)` answers, since that is the resolution it
+        // replaced so the salsa graph could run it without touching the process global.
+        noeta_stdlib::registry::default_seeded();
+        let registry = noeta_ext_abi::registry::single_registry_process();
+        let value = ExtTiers::from_registry(registry);
+        for roots in [
+            vec!["std".to_string()],
+            vec!["nobody".to_string()],
+            vec!["nobody".to_string(), "std".to_string()],
+            Vec::new(),
+        ] {
+            for exported in ["doc", "json", "test", "bench", "debug", "nonexistent"] {
+                assert_eq!(
+                    value.is_verbatim_scoped(&roots, exported),
+                    registry
+                        .find_ext_tier_scoped(&roots, exported)
+                        .is_some_and(|t| t.text.is_some() || t.expr.is_some()),
+                    "disagreement for {exported} under {roots:?}"
+                );
+            }
+        }
     }
 
     /// Whether the merged program declares a top-level value binding `name`.
