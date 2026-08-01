@@ -162,6 +162,13 @@ struct ObjHeader {
     /// live outside the refcount *and* the cycle collector (never registered, never buffered). `false`
     /// for every ordinary (local) object; single-isolate programs never set it.
     shared: bool,
+    /// **Whether this object has an entry in the live-object [`REGISTRY`]** — the *recorded* answer
+    /// to [`Payload::can_be_cyclic`], decided once in [`alloc_with`] and never rewritten. Every free
+    /// path consults this bit rather than re-deriving the predicate, so the insert and the matching
+    /// remove can never disagree: a payload mutated in place, or a collector mode flipped mid-run,
+    /// would otherwise desync the set and leave the trace collector sweeping a freed address.
+    /// Acyclic leaves are never registered — see [`Payload::can_be_cyclic`] for the invariant.
+    registered: bool,
 }
 
 /// The cycle collector's object colors (Bacon–Rajan synchronous trial deletion). `Black` =
@@ -519,6 +526,69 @@ pub(crate) enum Payload {
     // now, their contents in the extensions' retained arena.)
 }
 
+impl Payload {
+    /// **THE cycle-participation predicate**: can a value with this payload take part in a reference
+    /// cycle? Exactly the payloads that *own a child `Value`* — the GC **nodes**. Everything else is a
+    /// **leaf**: its bytes are primitives or owned Rust data, it references no other heap object, so
+    /// no chain of references can ever return to it.
+    ///
+    /// This is the single source of truth for two consumers, which is the whole point of stating it
+    /// once: the allocation path (whether to put the object in the live-object [`REGISTRY`] the backup
+    /// mark-sweep sweeps) and the release path (whether to buffer a surviving decrement as a
+    /// Bacon–Rajan candidate cycle root). Both questions are the same question.
+    ///
+    /// **Why excluding leaves preserves the collectors' invariants.** The registry exists so a
+    /// collection can find objects that are *allocated but unreachable* — refcounting alone cannot
+    /// reclaim those. An object is allocated-but-unreachable only if every owner of it is itself
+    /// unreachable; following owners upward that regress must terminate in a cycle, so every such
+    /// object is either a cycle member or is *reached from* one. A cycle member holds a reference to
+    /// the next member, hence is a node, hence is registered. A leaf held (only) by dead nodes is
+    /// reclaimed without the registry: the trace hands the dead nodes back and the reclaim releases
+    /// each dead node's edges to non-dead values, dropping the leaf's count to zero and freeing it
+    /// promptly; the trial-deletion collector reaches it through `gc_children` and its trial
+    /// decrement, never through the registry. So no leaf needs an entry, and the sole behavior a leaf
+    /// entry ever bought was mopping up a leaf leaked by a *refcount bug* — which the leak oracle
+    /// still catches as non-zero end-of-run residency ([`live_count`], which leaves do still bump).
+    ///
+    /// The arms mirror [`children`] and [`free`] one-for-one, and `children` `debug_assert`s the
+    /// coupling (anything that yields a child must answer `true` here), so a new node variant that
+    /// forgets this predicate fails a debug run rather than silently escaping the collector.
+    fn can_be_cyclic(&self) -> bool {
+        match self {
+            // Nodes: own one reference to each child value.
+            Payload::List(_)
+            | Payload::Tuple(_)
+            | Payload::Set(_)
+            | Payload::Map(_)
+            | Payload::Object { .. }
+            | Payload::Enum { .. }
+            | Payload::Closure { .. }
+            | Payload::Cell(_)
+            | Payload::Iter(_)
+            | Payload::Future(_)
+            | Payload::ChannelSend(..)
+            | Payload::BoundMethod { .. } => true,
+            // Leaves: primitives, owned Rust data, or plain ids — no child `Value`, ever.
+            Payload::Str(_)
+            | Payload::Bytes(_)
+            | Payload::Extern(_)
+            | Payload::Int(_)
+            | Payload::PackedList { .. }
+            | Payload::NativeModule(_)
+            | Payload::NativeFn(_)
+            | Payload::ModuleFn { .. }
+            | Payload::MethodHandle { .. }
+            | Payload::Timer(_)
+            | Payload::Handle(..)
+            | Payload::AsyncIo(_)
+            | Payload::Sender(_)
+            | Payload::Receiver(_)
+            | Payload::ChannelRecv(_)
+            | Payload::IsolateFuture(_) => false,
+        }
+    }
+}
+
 /// The state machine behind a [`Payload::Iter`] (Track I). The base case cursors a list; each adapter
 /// holds the source iterator(s) it pulls from. `noeta-eval` mirrors this enum over its own `Value`.
 pub(crate) enum IterState {
@@ -626,6 +696,10 @@ fn alloc_with(payload: Payload, shared: bool) -> Value {
         c.set(s.wrapping_add(1));
         s
     });
+    // The registry decision, taken **once**, here: only a GC node in `Trace` mode is swept, and a
+    // shared object is never GC-managed at all. Answering the cheap payload predicate first keeps a
+    // string/int allocation off both thread-locals entirely — the whole point of the exclusion.
+    let registered = payload.can_be_cyclic() && !shared && collector_mode() == CollectorMode::Trace;
     let raw = Box::into_raw(Box::new(Obj {
         header: ObjHeader {
             refcount: 1,
@@ -633,6 +707,7 @@ fn alloc_with(payload: Payload, shared: bool) -> Value {
             color: Color::Black,
             buffered: false,
             shared,
+            registered,
         },
         reflect: None,
         payload,
@@ -644,9 +719,8 @@ fn alloc_with(payload: Payload, shared: bool) -> Value {
     );
     let value = Value(Value::SIGN_BIT | Value::QNAN | (addr as u64 & Value::PTR_MASK));
     // The registry is the backup mark-sweep's sweep set; trial-deletion works from buffered candidates
-    // instead, so it pays no per-allocation registry cost (the Phase-6.4 trade-off). A shared object is
-    // never GC-managed, so it is never registered.
-    if !shared && MODE.with(|m| m.get()) == CollectorMode::Trace {
+    // instead, so it pays no per-allocation registry cost (the Phase-6.4 trade-off).
+    if registered {
         REGISTRY.with(|r| r.borrow_mut().insert(value.0));
     }
     value
@@ -664,10 +738,14 @@ fn alloc_shared(payload: Payload) -> Value {
 }
 
 /// Drop `value` from the live-object registry — called by every free path so the registry tracks
-/// exactly the live heap. Separate from the `live_dec` counter so both stay in lock-step. A no-op
-/// outside `Trace` mode (the registry is only maintained there).
-fn registry_remove(value: Value) {
-    if MODE.with(|m| m.get()) == CollectorMode::Trace {
+/// exactly the registered live heap. Separate from the `live_dec` counter so both stay in lock-step.
+///
+/// `was_registered` is the object's own [`ObjHeader::registered`] bit, read out of the box being
+/// freed: the *recorded* answer from [`alloc_with`], never a fresh derivation. That is what makes the
+/// insert and the remove symmetric by construction — an unregistered object (an acyclic leaf, a
+/// shared object, anything allocated in `TrialDeletion` mode) never touches the set on either end.
+fn registry_remove(value: Value, was_registered: bool) {
+    if was_registered {
         REGISTRY.with(|r| r.borrow_mut().remove(&value.0));
     }
 }
@@ -785,7 +863,7 @@ pub(crate) fn free(value: Value) {
     // SAFETY: `value` is a pointer this module allocated, its refcount is zero (so no other
     // owner exists), and it is freed exactly once.
     let boxed = unsafe { Box::from_raw(obj_ptr(value)) };
-    registry_remove(value);
+    registry_remove(value, boxed.header.registered);
     live_dec();
     match &boxed.payload {
         Payload::List(items)
@@ -886,9 +964,10 @@ pub(crate) fn release(value: Value) {
     }
 }
 
-/// Whether a value's type can participate in a cycle — i.e. it can hold references to other heap
-/// objects. Only these are buffered as candidate roots; a leaf (string, boxed int, native handle)
-/// can never close a cycle, so buffering it would be wasted work.
+/// Whether a *value* can participate in a cycle — the [`Payload::can_be_cyclic`] predicate applied
+/// through the NaN box (an immediate has no heap identity, so it never can). The release path buffers
+/// only these as Bacon–Rajan candidate roots; the allocation path registers only these with the
+/// backup mark-sweep. One predicate, both paths.
 fn can_be_cyclic(value: Value) -> bool {
     if !value.is_pointer() {
         return false;
@@ -896,17 +975,7 @@ fn can_be_cyclic(value: Value) -> bool {
     // SAFETY: pointer-tag checked above; a live pointer this module allocated (callers hold a
     // reference, so it is unfreed); single-threaded read.
     let obj = unsafe { &*obj_ptr(value) };
-    matches!(
-        obj.payload,
-        Payload::List(_)
-            | Payload::Tuple(_)
-            | Payload::Set(_)
-            | Payload::Map(_)
-            | Payload::Object { .. }
-            | Payload::Enum { .. }
-            | Payload::Closure { .. }
-            | Payload::Cell(_)
-    )
+    obj.payload.can_be_cyclic()
 }
 
 /// Buffer `value` as a Bacon–Rajan possible cycle root (`PossibleRoot`): paint it purple and, if it
@@ -1051,6 +1120,14 @@ pub(crate) fn children(value: Value) -> Vec<Value> {
         | Payload::IsolateFuture(_)
         | Payload::Extern(_) => {}
     }
+    // The drift guard for [`Payload::can_be_cyclic`]: anything that hands back a child value MUST
+    // answer `true` there, or it would be allocated outside the registry and so escape the backup
+    // mark-sweep. Checked on every traversal in debug/miri runs, which is where a newly-added node
+    // variant that forgot the predicate would first appear.
+    debug_assert!(
+        out.is_empty() || obj.payload.can_be_cyclic(),
+        "a payload with child values must answer `can_be_cyclic` — it is registered on that answer"
+    );
     out
 }
 
@@ -1071,7 +1148,7 @@ pub(crate) fn free_shallow(value: Value) {
     // SAFETY: the collector proved `value` is unreachable garbage and frees it exactly once;
     // children are freed by their own `free_shallow`, so they are not released here.
     let boxed = unsafe { Box::from_raw(obj_ptr(value)) };
-    registry_remove(value);
+    registry_remove(value, boxed.header.registered);
     live_dec();
     // Replace each child slot with an immediate so the `Vec`/`BTreeMap` drop does not touch
     // the (already independently freed) child objects — though dropping a `Value` is a no-op

@@ -728,6 +728,65 @@ mod tests {
         noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
     }
 
+    /// A two-slot object — a cycle partner in `next`, a payload in `data`.
+    fn pair() -> Value {
+        let shape = intern_shape(Shape::object(
+            ShapeKind::Class,
+            "Pair",
+            vec!["next".into(), "data".into()],
+        ));
+        Value::object(shape, vec![Value::unit(), Value::unit()])
+    }
+
+    /// The acyclic exclusion's load-bearing case, on **both** collectors: a dead cycle that owns a
+    /// *leaf* (a string). The leaf is no longer in the live-object registry, so the trace cannot
+    /// hand it back as garbage — and it must not need to: `release_external` drops the dead nodes'
+    /// edge to it, taking its count to zero. Trial deletion never consulted the registry to begin
+    /// with; it reaches the leaf through `gc_children`'s trial decrement. Either way residency
+    /// returns to its pre-cycle value, which is the whole claim the leak oracle makes.
+    #[test]
+    fn a_dead_cycle_still_reclaims_the_leaf_it_holds() {
+        for mode in [
+            noeta_value::CollectorMode::Trace,
+            noeta_value::CollectorMode::TrialDeletion,
+        ] {
+            noeta_value::set_collector_mode(mode);
+            let before = noeta_value::live_count();
+            let (a, b) = (pair(), pair());
+            a.set_slot(0, b); // b retained by a (rc 2)
+            b.set_slot(0, a); // a retained by b (rc 2)
+            let text = Value::string("dragged down by the cycle");
+            a.set_slot(1, text); // text retained by a (rc 2)
+            release(text); // …and `a` is now its only owner (rc 1)
+            release(a); // drop the external handles: the pair survives only on its own edges
+            release(b);
+            assert_eq!(
+                noeta_value::live_count(),
+                before + 3,
+                "the cycle keeps all three alive with no external reference ({mode:?})"
+            );
+            let garbage = match mode {
+                noeta_value::CollectorMode::Trace => {
+                    let garbage = collect_trace(&[]);
+                    assert!(
+                        garbage.fresh.iter().all(|v| v.bits() != text.bits()),
+                        "an unregistered leaf is never handed back by the sweep — refcounting \
+                         reclaims it when the dead nodes' edges are released"
+                    );
+                    garbage
+                }
+                noeta_value::CollectorMode::TrialDeletion => collect_trial_deletion(),
+            };
+            reclaim(garbage);
+            assert_eq!(
+                noeta_value::live_count(),
+                before,
+                "including the string the dead cycle held ({mode:?})"
+            );
+        }
+        noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
+    }
+
     #[test]
     fn cycle_collector_spares_an_externally_referenced_object() {
         // a -> b, and b is also held by an outside reference. The collector must NOT free b

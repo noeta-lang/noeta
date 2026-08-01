@@ -818,6 +818,44 @@ fn strings_round_trip_and_free() {
     v.free();
 }
 
+/// The acyclic exclusion, stated as a test: a **leaf** payload never enters the cycle collector's
+/// live-object registry (nothing can reach it through a chain of references that returns to it), a
+/// **node** payload always does, and both are counted by the leak oracle's `live_count` either way —
+/// so the exclusion buys allocation bookkeeping without blinding the residency check.
+#[test]
+fn acyclic_leaves_stay_out_of_the_registry_but_still_count_as_live() {
+    let registered = |v: Value| live_objects().iter().any(|r| r.bits() == v.bits());
+
+    let before = live_count();
+    // Leaves: a string, a bytes buffer, a boxed (out-of-immediate-range) int.
+    let leaves = [
+        Value::string("no cycle can ever reach me"),
+        Value::bytes(vec![1, 2, 3]),
+        Value::int(i64::MAX),
+    ];
+    for leaf in leaves {
+        assert!(leaf.is_pointer(), "the fixture must be heap-allocated");
+        assert!(!registered(leaf), "a leaf must not be registered");
+    }
+    // Nodes: anything that owns a child value, so anything that can close a cycle.
+    let nodes = [
+        Value::list(vec![Value::int(1)]),
+        Value::cell(Value::unit()),
+        Value::closure(0, Vec::new()),
+        Value::map(BTreeMap::from([("k".to_string(), Value::int(1))])),
+    ];
+    for node in nodes {
+        assert!(registered(node), "a node must be registered");
+    }
+    // Registered or not, every heap object is counted — residency is the oracle, not the registry.
+    assert_eq!(live_count(), before + leaves.len() + nodes.len());
+
+    for v in leaves.into_iter().chain(nodes) {
+        v.release();
+    }
+    assert_eq!(live_count(), before, "everything reclaimed");
+}
+
 #[test]
 fn closures_round_trip_and_free() {
     let v = Value::closure(7, Vec::new());
