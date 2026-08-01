@@ -47,7 +47,6 @@ noeta-host-real = { path = "../noeta-host-real", default-features = false }
 # (noeta-eval) keep noeta-stdlib default-on, so datetime is present everywhere else.
 noeta-stdlib = { path = "../noeta-stdlib", default-features = false }
 noeta-span = { workspace = true }
-noeta-diagnostics = { workspace = true }
 # The shared run epilogue (`RunTail`, audit row 1) — the one rendering of a finished run into
 # process output. It lives in `noeta-backend` because that is the common ancestor of every
 # execution surface: this staticlib reaches it without acquiring the compiler front-end that

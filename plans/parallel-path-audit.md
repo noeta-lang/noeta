@@ -1,6 +1,6 @@
 # The parallel-path audit — where the next four bugs live
 
-Status: **findings** — each row proposes a chokepoint and sizes it. No chokepoint has been built. Row 1's *live defect* in the wasm tail is fixed (see its Progress note) because the gate that was supposed to catch it had to be repaired first; the row's seven-copy problem is untouched.
+Status: **findings** — each row proposes a chokepoint and sizes it. **Row 1 is built and closed** (`noeta_backend::RunTail`; see its closing note); the rest are unbuilt.
 
 The compile/swap arc closed a bug class by deleting a copy. `compile_to_mc` and `SessionCompiler::extend_impl` were two implementations of one eleven-step sequence, four shipped bugs lived in the delta, and the fix was one `install` plus a `TABLE_POLICIES` census — one function, one list, no second place to forget. The module docs of `crates/noeta-compiler/tests/pipeline_tables.rs` and `crates/noeta-ir/tests/lowerer_field_census.rs` tell that story better than this file can.
 
@@ -14,7 +14,7 @@ Two sections follow the rows: what is **already tracked elsewhere** (so this fil
 
 ## 1. `RunResult.stderr` is written by two of seven run tails, and the wasm oracle forgot it the same way
 
-**Live. Silent. Reproducible today.**
+**CLOSED 2026-08-01** — one `RunTail`, seven (eight) callers, four live defects fixed. The findings below are kept as written; the closing note is at the end of the section.
 
 `std.io`'s `err`/`errln` are *observable program output*, buffered into `RunResult.stderr` (`crates/noeta-backend/src/lib.rs:18-24`, filled at `crates/noeta-vm/src/lifecycle.rs:463`) exactly as `stdout` is. Seven places turn a `(RunResult, trace)` into process output. Seven hand-written copies of one epilogue.
 
@@ -27,6 +27,9 @@ Two sections follow the rows: what is **already tracked elsewhere** (so this fil
 | `crates/noeta-wasm-runner/src/main.rs:111-126` (`build --wasm`) | ✅ | ✅ *(fixed)* | `render_mapped` | ✅ |
 | `crates/noeta-wasm-serve/src/lib.rs:161-183` (`wasi:http` edge) | ✗ on success | **✗** | — | — |
 | `crates/noeta-cli/src/cmd/serve.rs:559-567` / `:678-686` (workers) | ✅ | ✅ | **✗** | **✗** — prints `[worker] aborted` |
+
+(The table above is the state the audit found. **Row closed** — see the closing note at the end of
+this section; every cell is ✅ now, through one shared value rather than seven agreeing copies.)
 
 `run_compiled_module`'s own doc says it exists so "the CLI (`run`, bundle run) and the standalone runner … both present identical output". **It is the chokepoint, and five of the seven tails do not call it.**
 
@@ -47,6 +50,21 @@ Same file, same shape: `crates/noeta-aot-runtime/src/lib.rs:111` writes `result.
 That the oracle was blind here for weeks had a second cause worth recording with the first: it was **reporting SKIP** in `scripts/gate.sh`, because `wasmtime` lives in `~/.wasmtime/bin` (where its installer puts it, invisible to a non-interactive shell) and `wasm32-wasip1` was installed for `stable` while the gate pins `+1.97.0`. A parallel-path bug and a disarmed gate are the same failure at different altitudes: the copy drifts, and the thing that would have noticed was not running. The gate now probes the real install dirs, names which prerequisite is missing with the command that fixes it, lists every skipped step in the summary, and fails rather than skips under `NOETA_GATE_REQUIRE_TOOLS` (default-on in CI). The oracle also fails a whole-corpus run that executed zero programs.
 
 A note for whoever does the unification: `run_compiled_module` would **not** drop into the wasm runner as-is. The runner constructs its own `Host`/`Executor` pair (`SandboxHost` vs `WasiHost`) and runs `run_module_debug(…, None)`, whereas `run_compiled_module` owns host selection itself. The reusable piece is the *tail* — the `(RunResult, trace, SourceMap) → process output` half — which is why the row proposes a `RunTail` value beside the function rather than the function alone. Split that out and the wasm runner is a two-line caller; hand it the whole function and it is not a caller at all.
+
+**CLOSED (2026-08-01), `audit/run-tail`.** `noeta_backend::RunTail` is the epilogue, and all seven tails call it — plus an eighth the audit missed, `serve.rs`'s single-process `run_program_hot`.
+
+It went into `noeta-backend`, not "beside `run_compiled_module`" as the row proposed, and the reason is worth recording: `noeta-runner` links the L2 compile front-end, so the AOT runtime staticlib (whose `aot_runtime_does_not_link_the_compiler_frontend` guard exists to keep it out) and the two wasm crates (which have no `noeta-host-real`/tokio) cannot depend on it. `noeta-backend` already owns `RunResult` and `render_trace` and is the common ancestor of every execution surface. The type is `render` → components → `emit()` / `parts()`, so a surface that wants *structured* output — the `wasi:http` edge composes a 500 body, a serve worker labels an abort — reads the parts instead of hand-writing the epilogue again, which is how seven copies happened in the first place. `parts()` destructures `Self` exhaustively, so a **new output component** fails to compile until it is classified onto a stream and given a position in the order, and every structured consumer picks it up with no edit.
+
+Four live defects went with it: the dropped stderr on `run_declared_tier` / the AOT runtime / the `wasi:http` edge (which also dropped stdout on the success path); `result.exit_code as u8` on the AOT path (a `--native` binary exiting 256 exited 0); the AOT host's missing `with_live_output`; and the serve workers' `[worker] aborted`, five words replaced by the diagnostic and the stack.
+
+Two more the row did not name, both found by looking for the copies of a thing it did name:
+
+- **The serve workers had the AOT tail's live-output bug too.** `run_worker`, `run_worker_hot` and `run_program_hot` all built their real host without `with_live_output`, while the single-worker `serve` path — through `run_program` — had it. A server never exits on its own, so a `--parallel` worker buffered every byte it printed for its whole lifetime: `echo` from a request handler appeared *never*, not merely late. One defect, two surfaces, found once.
+- **The oracle is a caller now, not a ninth copy.** `crates/noeta-conformance/src/wasm.rs`'s `compare` composed its expected stderr by hand and forgot `native.stderr` — the same omission, in the gate that existed to catch it, so both sides dropped the stream and agreed. Adding `native.stderr` (the 07-31 fix) made it right; building a `RunTail` makes it *unable to drift*, and a future output component reaches the comparison by construction. `exit_code_byte` deleted with it — that was the tail's exit conversion, hand-copied a tenth time.
+
+The tests are per-surface and behavioural, not "did you call the function": stderr bytes, their order relative to the diagnostics and the traceback, and the exit-code conversion, in `crates/noeta-runner/tests/runner.rs`, `crates/noeta-wasm-runner/tests/runner.rs`, `crates/noeta-cli/tests/cli/run_tail.rs`, `crates/noeta-wasm-serve/src/lib.rs`, and `crates/noeta-cli/tests/parallel_serve.rs` (in `hot-e2e.sh`'s census, count bumped to 2). `build_native_matches_a_source_run_byte_for_byte` is the one that mattered most and was the weakest: it compared **stdout only** over a fixture that wrote no stderr and `return`ed silently without `cargo`/`cc` — the only gate on a surface with no oracle at all (row 9), reading green over three defects. It now compares both streams and the exit code, and its skips say what they did not prove. Mutation-verified: restoring the pre-unification AOT epilogue verbatim fails both native tests (`stderr diverged`, and `256 truncated to Some(0) — as u8 is back`).
+
+Row 9 is unchanged by this and is the remaining exposure: `--native` still has no differential oracle, so its correctness rests on those two hand-written programs.
 
 ---
 

@@ -28,7 +28,7 @@
 //! compile until it is classified onto a [`Stream`] and given a position in the canonical order.
 //! Every structured consumer iterates `parts()`, so the new component reaches all of them by
 //! construction rather than by seven people remembering. That property is the whole point of the
-//! type; `crates/noeta-backend/src/tail.rs`'s own tests pin it from the other side.
+//! type; the tests at the foot of this file pin it from the other side.
 
 use std::io::Write;
 use std::process::ExitCode;
@@ -227,11 +227,6 @@ impl RunTail {
     /// the one conversion in the tree.
     pub fn status(&self) -> u8 {
         u8::try_from(self.exit_code).unwrap_or(1)
-    }
-
-    /// [`status`](RunTail::status) as a [`std::process::ExitCode`], for a `main` that returns one.
-    pub fn process_exit_code(&self) -> ExitCode {
-        ExitCode::from(self.status())
     }
 
     /// Write the tail to two sinks in canonical order, flushing stdout before the first stderr byte
