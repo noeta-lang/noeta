@@ -122,11 +122,7 @@ fn fields_with_types(src: &str, head: &str) -> Vec<(String, String)> {
                 ty.trim().trim_end_matches(',').to_string(),
             )
         })
-        .filter(|(n, _)| {
-            !n.is_empty()
-                && n.chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-        })
+        .filter(|(n, _)| !n.is_empty() && n.chars().all(is_field_char))
         .collect()
 }
 
@@ -196,8 +192,14 @@ fn remapped_fields(src: &str) -> Vec<String> {
         .filter(|l| !l.is_empty() && !l.starts_with("//") && !l.starts_with("let Sites"))
         .filter(|l| !l.ends_with(": _,"))
         .map(|l| l.trim_end_matches(',').to_string())
-        .filter(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_lowercase() || c == '_'))
+        .filter(|n| !n.is_empty() && n.chars().all(is_field_char))
         .collect()
+}
+
+/// A character a `Sites` field name may contain. Digits included — `f32_literal_sites` is one —
+/// because a scanner that silently drops a field is a scanner that passes it.
+fn is_field_char(c: char) -> bool {
+    c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'
 }
 
 /// The `Sites` fields `SessionCompiler::absorb_type_args` overwrites wholesale (`owned.<f> = …`) —
@@ -212,7 +214,7 @@ fn replaced_fields(src: &str) -> Vec<String> {
         .filter_map(|l| l.strip_prefix("owned."))
         .filter_map(|l| l.split_once(" = "))
         .map(|(f, _)| f.to_string())
-        .filter(|n| n.chars().all(|c| c.is_ascii_lowercase() || c == '_'))
+        .filter(|n| !n.is_empty() && n.chars().all(is_field_char))
         .collect()
 }
 
