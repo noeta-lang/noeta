@@ -3125,20 +3125,16 @@ impl<'m> FnCompiler<'m> {
         site
     }
 
+    /// Fill in the destination of the branch emitted at `at`. Which ops carry a destination is
+    /// [`Op::for_each_jump_pc_mut`]'s answer, not a list repeated here; patching an op that
+    /// carries none (or more than one) is a bug in the caller and panics.
     fn patch_jump(&mut self, at: usize, target: u32) {
-        match &mut self.code[at] {
-            Op::Jump { target: t }
-            | Op::JumpIfFalse { target: t, .. }
-            | Op::JumpIfTrue { target: t, .. }
-            | Op::CondBranch { target: t, .. }
-            | Op::Coalesce { fallback: t, .. }
-            | Op::MatchInt { fail: t, .. }
-            | Op::MatchStr { fail: t, .. }
-            | Op::MatchBool { fail: t, .. }
-            | Op::MatchVariant { fail: t, .. }
-            | Op::MatchTuple { fail: t, .. } => *t = target,
-            _ => unreachable!("patching a jump we just emitted"),
-        }
+        let mut patched = 0usize;
+        self.code[at].for_each_jump_pc_mut(|t| {
+            *t = target;
+            patched += 1;
+        });
+        assert_eq!(patched, 1, "patching a jump we just emitted");
     }
 
     /// `mut x = v`, an immutable `x = v` declaration, or a reassignment — mirroring the
