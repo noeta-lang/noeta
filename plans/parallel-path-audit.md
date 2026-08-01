@@ -112,6 +112,21 @@ They agree today. `diff -r` of the two fixture directories is byte-identical acr
 
 **Live divergence in the publish limits.** `crates/noeta-pm/src/manifest.rs:1643` counts `trimmed.chars().count()`; `registry/src/index.ts:525` counts `.length` (UTF-16 code units). `manifest.rs:1645` uses `char::is_control` (which includes C1, U+0080–U+009F) where `index.ts:1083` uses an ASCII-only regex. A 180-character description with astral-plane characters passes `noeta check` and is 400'd at publish; U+0085 is client-rejected and server-accepted. Loud, but it is the tell that the "MUST match the server" comments are load-bearing and unassisted.
 
+*Verified 2026-08-01, both halves still exactly as described.* The two lines, for whoever fixes it:
+
+```rust
+// crates/noeta-pm/src/manifest.rs:1643-1644
+|| trimmed.chars().count() > MAX_DESCRIPTION      // Unicode scalar values
+|| trimmed.chars().any(|c| c.is_control())        // Cc: U+0000–U+001F and U+007F–U+009F
+```
+```ts
+// registry/src/index.ts:1083
+if (trimmed.length === 0 || trimmed.length > MAX_DESCRIPTION || /[\u0000-\u001f\u007f]/.test(trimmed))
+//     UTF-16 code units ────────┘                                     ASCII control + DEL only ┘
+```
+
+**Adopt the Rust side's semantics, because they are the ones a human means by "characters"** — an emoji is one character, not two — and because the client is where the message is actionable. The registry becomes `[...trimmed].length` (code points, not UTF-16 units) and `/[\u0000-\u001f\u007f-\u009f]/` (the full `Cc` category). Both halves then agree on Unicode rather than on an accident of each language's default string model. Pin it with a boundary-length `publish-request` fixture in the shared wire set — one description at exactly `MAX_DESCRIPTION` code points built from astral-plane characters, and one containing U+0085 — since a limit that only agrees on ASCII is not a limit that was checked.
+
 **Past drift.** Registry `fe9139d`: "reconcile PROTOCOL.md with the implemented wire schema … The spec had drifted from what both sides actually implement." Registry `6407107` documents a *deliberate* divergence window, because lockstep across two repos is painful. And registry `d815220` is the near-miss: the log public key is a raw 32-byte Ed25519 key, not the 44-byte SPKI DER openssl emits by default, and "**the mismatch fails as signatures that never verify rather than as a load error**" — caught only because the author checked production by hand.
 
 **Chokepoints, cheapest first.**
