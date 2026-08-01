@@ -1635,9 +1635,18 @@ pub const MAX_DESCRIPTION: usize = 200;
 
 /// Syntactic validation of a `package.description` value: a single line, trimmed, non-empty, at most
 /// [`MAX_DESCRIPTION`] characters, with no control characters (which rules out newlines and tabs).
-/// Mirrors the registry's `description` check, so a publish rejected server-side fails at
+/// Mirrors the registry's `validateDescription`, so a publish rejected server-side fails at
 /// `noeta check` time instead. Returns the trimmed value.
-fn validate_description(text: &str) -> Result<String, String> {
+///
+/// **"Characters" means Unicode scalar values, and "control" means the whole `Cc` category** — both
+/// halves of that sentence used to be a place the two implementations disagreed (audit row 4). The
+/// registry counted UTF-16 code units, so an emoji cost two here and one there, and rejected ASCII
+/// controls only, so U+0085 was rejected by this function and accepted by the server. The boundary
+/// is now pinned from both sides by `test_data/wire/publish-request-description-max.json` (exactly
+/// [`MAX_DESCRIPTION`] astral-plane code points — legal) and
+/// `publish-request-description-control.json` (a U+0085 — illegal). `pub` for exactly that reason:
+/// the fixture tests call it directly, on both sides of the wire.
+pub fn validate_description(text: &str) -> Result<String, String> {
     let trimmed = text.trim();
     if trimmed.is_empty()
         || trimmed.chars().count() > MAX_DESCRIPTION

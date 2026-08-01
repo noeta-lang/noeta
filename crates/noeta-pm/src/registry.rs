@@ -46,7 +46,7 @@ use crate::error::PmError;
 /// read-only assertion the gate runs. That script is the chokepoint — the four-step ritual in
 /// `test_data/wire/README.md` is now one command, and the step everyone could forget is inside it.
 pub const WIRE_MANIFEST_SHA256: &str =
-    "7b8b70d917b295839ccf548792e41339589375f519c3c3e434d25cf628ed69ae";
+    "c12ee1002795ca4edba7ba50c3ec021bd2bdf383155878f366efbd06ffa8ba9e";
 
 /// The git coordinates a registry release resolves to (package-manager P2.5). The **commit SHA** the
 /// tag resolved to at publish time is pinned here too (Phase 4, S2): the index — not just the

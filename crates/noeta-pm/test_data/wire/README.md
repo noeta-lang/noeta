@@ -12,9 +12,15 @@ with the fixture scope key (seed `0x42 × 32`, public key in `scope-key-response
 transparency-log / advisory signatures with the two fixed **test** keys from the Worker's
 `vitest.config.ts` — so both suites can verify real crypto against these exact bytes.
 
-One file breaks the naming convention because it pins something other than a shape, and belongs to
-the same set for the same reason — both repos must agree on it, byte for byte:
+Two files break the naming convention because they pin something other than a shape, and belong to
+the same set for the same reason — both repos must agree on them, byte for byte:
 
+- `publish-request-description-*.json` pin the **publish limits' boundary**, not a schema. One
+  description is exactly `MAX_DESCRIPTION` *code points* of astral-plane characters and must be
+  accepted by both sides; one contains U+0085 and must be rejected by both. They exist because the
+  two implementations disagreed about what "200 characters" counts (Unicode scalar values vs UTF-16
+  code units) and about which characters are control characters (`Cc` vs ASCII-only) — a limit that
+  agrees only on ASCII is not a limit that was checked.
 - `semver-vectors.json` is **generated** — `cargo run -p noeta-pm --example semver_vectors` — and
   holds every answer `semver::VersionReq::matches` gives over a case list. `noeta audit` calls that
   function; `noeta-registry/src/semver.ts` is a hand port of it. Both suites replay the file, so
