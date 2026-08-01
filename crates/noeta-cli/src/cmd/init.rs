@@ -9,8 +9,11 @@
 //! documents exactly the installed compiler instead of a hand-maintained copy that rots.
 //!
 //! Existing files are never overwritten — each is reported and skipped — so `init` is safe
-//! to run in a non-empty directory; only a pre-existing `noeta.toml` aborts (the directory
-//! is already a package).
+//! to run in a non-empty directory, *including* one that is already a package. Re-running it
+//! is additive: every missing scaffold file is created and every existing one (the manifest
+//! included) is left byte-identical, which is how a stale generated `SYNTAX.md` is refreshed
+//! after a toolchain upgrade — delete it and re-run. A run with nothing left to create says
+//! so and succeeds.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -50,12 +53,24 @@ const SYNTAX_PAGES: &[&str] = &[
 ];
 
 pub(crate) fn cmd_init(path: &Path, name: &Option<String>, no_git: bool) -> ExitCode {
+    // An existing manifest makes this a gap-filling run, not a fresh scaffold: it is the one
+    // file whose *content* encodes a decision the user already made, so it is never rewritten
+    // and it, not `--name`, names the package from here on.
+    let manifest_path = path.join("noeta.toml");
+    let adopting = manifest_path.exists();
+    if adopting && name.is_some() {
+        eprintln!(
+            "noeta: ignoring --name: {} already has a noeta.toml (edit it to rename the package)",
+            path.display()
+        );
+    }
+
     // Resolve the package name first: `--name` verbatim, else `local/<dir>` — so a bad
     // name (or an unusable directory name) fails before anything touches the filesystem.
     let dir_label = dir_stem(path);
     let raw_name = match name {
-        Some(n) => n.clone(),
-        None => format!("local/{}", sanitize_identifier(&dir_label)),
+        Some(n) if !adopting => n.clone(),
+        _ => format!("local/{}", sanitize_identifier(&dir_label)),
     };
     let package_name = match PackageName::parse(&raw_name) {
         Ok(n) => n,
@@ -64,16 +79,16 @@ pub(crate) fn cmd_init(path: &Path, name: &Option<String>, no_git: bool) -> Exit
             return ExitCode::FAILURE;
         }
     };
+    // …but when a manifest is already there, the label we report is *its* name, read back
+    // from disk, so the summary can never claim a package the directory doesn't hold.
+    let label = if adopting {
+        existing_package_label(&manifest_path).unwrap_or_else(|| path.display().to_string())
+    } else {
+        format!("`{}/{}`", package_name.company, package_name.package)
+    };
 
     if let Err(err) = std::fs::create_dir_all(path) {
         eprintln!("noeta: cannot create {}: {err}", path.display());
-        return ExitCode::FAILURE;
-    }
-    if path.join("noeta.toml").exists() {
-        eprintln!(
-            "noeta: {} is already a Noeta package (noeta.toml exists)",
-            path.display()
-        );
         return ExitCode::FAILURE;
     }
 
@@ -87,10 +102,18 @@ pub(crate) fn cmd_init(path: &Path, name: &Option<String>, no_git: bool) -> Exit
         ("AGENTS.md", AGENTS_MD.to_string()),
         ("SYNTAX.md", render_syntax_md()),
     ];
+    let mut created = 0usize;
+    let mut kept = 0usize;
     for (rel, contents) in files {
         match write_new(path, rel, contents) {
-            Ok(true) => println!("  created {rel}"),
-            Ok(false) => println!("  exists  {rel} (left unchanged)"),
+            Ok(true) => {
+                created += 1;
+                println!("  created {rel}");
+            }
+            Ok(false) => {
+                kept += 1;
+                println!("  exists  {rel} (left unchanged)");
+            }
             Err(err) => {
                 eprintln!("noeta: cannot write {rel}: {err}");
                 return ExitCode::FAILURE;
@@ -100,20 +123,39 @@ pub(crate) fn cmd_init(path: &Path, name: &Option<String>, no_git: bool) -> Exit
 
     if !no_git && !inside_git_worktree(path) {
         match git_init(path) {
-            Ok(()) => println!("  created git repository"),
+            Ok(()) => {
+                created += 1;
+                println!("  created git repository");
+            }
             // A missing/failing `git` shouldn't fail the scaffold — everything above is
             // already in place and useful without version control.
             Err(err) => eprintln!("noeta: skipped `git init`: {err}"),
         }
     }
 
-    println!(
-        "initialized Noeta package `{}/{}` in {}",
-        package_name.company,
-        package_name.package,
-        path.display()
-    );
+    if created == 0 {
+        println!(
+            "nothing to do: {} is already fully scaffolded ({kept} files left unchanged)",
+            path.display()
+        );
+    } else if adopting {
+        println!(
+            "updated Noeta package {label} in {}: {created} created, {kept} left unchanged",
+            path.display()
+        );
+    } else {
+        println!("initialized Noeta package {label} in {}", path.display());
+    }
     ExitCode::SUCCESS
+}
+
+/// `` `company/package` `` read back from an existing manifest, or `None` when it cannot be
+/// parsed — a manifest we can't read is still not one we may overwrite, so the caller falls
+/// back to naming the directory rather than failing a run that only creates missing files.
+fn existing_package_label(manifest_path: &Path) -> Option<String> {
+    let manifest = noeta_pm::manifest::load(manifest_path).ok()?;
+    let pkg = manifest.package()?;
+    Some(format!("`{}/{}`", pkg.name.company, pkg.name.package))
 }
 
 /// Write `rel` under `root` unless it already exists. `Ok(true)` = written,

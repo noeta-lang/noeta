@@ -145,7 +145,7 @@ The scaffold works before you edit a line:
 - **`src/main.noe`** — a small entry file that exercises all four tiers, so `run`, `test`, `bench`, and `doc` each have something to do immediately.
 - **`.vscode/`, `AGENTS.md`, `SYNTAX.md`** — run/debug profiles for the [editor extension](Editor-and-AI-Tooling), and the docs an AI agent needs to drive the project.
 
-`noeta init` never overwrites an existing file, so it is also safe to run in a directory that already has code. The full scaffold is documented at [The CLI](The-CLI#noeta-init); the manifest it writes on the [`noeta.toml` Manifest](Manifest) page.
+`noeta init` never overwrites an existing file, so it is also safe to run in a directory that already has code — and safe to re-run inside a project it already scaffolded, where it fills in whatever is missing (delete `SYNTAX.md` after a toolchain upgrade and re-run to regenerate it). The full scaffold is documented at [The CLI](The-CLI#noeta-init); the manifest it writes on the [`noeta.toml` Manifest](Manifest) page.
 
 > [!TIP]
 > Those `.vscode/` files assume the Noeta VS Code extension — install it to get syntax highlighting, live diagnostics, hover types, and one-click debugging out of the scaffold. Setup instructions: [Editor & AI Tooling](Editor-and-AI-Tooling).
