@@ -53,6 +53,13 @@ noeta-span = { workspace = true }
 # `noeta-runner` (where the CLI's copy of the tail lives) would drag in.
 noeta-backend = { workspace = true }
 
+# Only to restore the signal disposition Rust's own startup would have set. This crate exports a
+# C-ABI `main`, so `std::rt::lang_start` — and with it `sys::unix::init`, which sets `SIGPIPE` to
+# `SIG_IGN` — never runs in a `--native` artifact. Same crate and same version noeta-host-real
+# already uses for its `kill` wrapper, so this adds no new dependency to the graph.
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.29", features = ["signal"] }
+
 [features]
 # All rings on by default — the plain archive is fully capable. `noeta build --native`'s footprint
 # scan builds this crate with `--no-default-features --features entry,<used rings>` to shed the rest,

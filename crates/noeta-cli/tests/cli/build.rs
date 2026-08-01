@@ -236,6 +236,96 @@ fn build_native_matches_a_source_run_byte_for_byte() {
 }
 
 #[test]
+#[cfg(all(feature = "jit", unix))]
+fn build_native_survives_a_broken_pipe_like_every_other_surface() {
+    // A `--native` artifact exports a C-ABI `main`, so Rust's `lang_start` never runs — and with it
+    // `sys::unix::init`, which is where `std` sets `SIGPIPE` to `SIG_IGN`. Every other Noeta surface
+    // is an ordinary Rust binary and gets that for free; the one that SHIPS did not, so a write to a
+    // closed pipe killed the artifact on signal 13: no exit code, no stderr, no traceback.
+    //
+    // Two ordinary programs did it, and this test is both of them:
+    //
+    //  1. `Process.try_write` to a child that has exited. The recoverable write door exists so a
+    //     broken pipe is expressible as a VALUE, and it was — everywhere but `--native`. The AOT
+    //     differential caught this as `std/os_try_write.noe`'s "native side ABORTED (exit None)"
+    //     with an empty detail, on CI, where the spawned `echo` reliably won the race to exit.
+    //  2. `./app | head -3`. Nothing exotic: the shell pipeline. Modelled here by reading one line
+    //     and dropping the pipe, which is what `head` does when it has seen enough.
+    //
+    // Asserted against a `noeta run` of the same source, not against a hand-written expectation:
+    // "matches the surface everyone else runs on" is the property, and it is what was violated.
+    let src = "use std.{os}\n\
+               child = os.spawn(\"echo\", [\"hello\"])\n\
+               child.wait()\n\
+               echo match child.try_write(\"input\") {\n\
+                   Ok(_) => \"wrote\",\n\
+                   Err(e) => \"failed: ${e.message()}\",\n\
+               }\n\
+               echo \"survived\"\n";
+    let file = temp_program("build_native_sigpipe", src);
+    let app = file.parent().unwrap().join("app_native_sigpipe");
+
+    // The reference: the same program on the surface that always had the disposition right. It must
+    // reach the `Err` arm, or this fixture proves nothing.
+    let reference = lang().arg("run").arg(&file).output().expect("noeta runs");
+    let expected = String::from_utf8_lossy(&reference.stdout).into_owned();
+    assert!(
+        expected.contains("Broken pipe") && expected.contains("survived"),
+        "the fixture must reach the recoverable broken-pipe arm and keep running, got {expected:?}"
+    );
+
+    if build_native(&file, &app).is_none() {
+        return;
+    }
+
+    let native = Command::new(&app).output().expect("the native binary runs");
+    assert_eq!(
+        native.status.code(),
+        Some(0),
+        "the artifact was killed rather than returning: a broken pipe is a value, not a death \
+         (status {:?})",
+        native.status,
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&native.stdout),
+        expected,
+        "stdout diverged from the source run"
+    );
+
+    // The pipeline half: a consumer that stops reading must not kill the producer.
+    let counter = temp_program(
+        "build_native_sigpipe_out",
+        "mut i = 0\nwhile i < 20000 {\n    echo \"line ${i}\"\n    i = i + 1\n}\n",
+    );
+    let app_out = counter.parent().unwrap().join("app_native_sigpipe_out");
+    if build_native(&counter, &app_out).is_none() {
+        return;
+    }
+    let mut child = std::process::Command::new(&app_out)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("the native binary runs");
+    // Read one line, then close the pipe — `head -1`, without needing `head`.
+    {
+        use std::io::BufRead as _;
+        let out = child.stdout.take().expect("stdout was piped");
+        let mut first = String::new();
+        let _ = std::io::BufReader::new(out).read_line(&mut first);
+        assert_eq!(first.trim(), "line 0");
+    }
+    let status = child.wait().expect("the artifact is waitable");
+    assert_ne!(
+        status.code(),
+        None,
+        "the artifact was killed by a signal when its stdout consumer went away — \
+         `noeta run … | head -1` exits cleanly and so must this ({status:?})"
+    );
+
+    let _ = std::fs::remove_file(&app);
+    let _ = std::fs::remove_file(&app_out);
+}
+
+#[test]
 #[cfg(feature = "jit")]
 fn build_native_reports_an_out_of_range_exit_code_as_a_failure() {
     // A live wrong answer until the tails were unified: the AOT tail converted with

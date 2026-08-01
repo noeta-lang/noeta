@@ -2406,6 +2406,7 @@ version = "0.3.1"
 name = "noeta-aot-runtime"
 version = "0.3.1"
 dependencies = [
+ "nix",
  "noeta-backend",
  "noeta-bundle",
  "noeta-bytecode",
