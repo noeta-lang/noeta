@@ -5,5 +5,6 @@
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
+    noeta_runner::compile::phase_stop("main");
     noeta_cli::run_cli(&[], &[])
 }

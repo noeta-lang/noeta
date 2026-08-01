@@ -168,10 +168,17 @@ impl ReflectionInfo {
 
     /// The parameter list declared for `target`, or empty if the target names no known callable — the
     /// projection `params_of(target)` materializes for dependency injection.
+    ///
+    /// The program's own declarations answer first; a target none of them names falls through to the
+    /// **native** lookup ([`native_reflect::native_param_record`](crate::native_reflect::native_param_record)),
+    /// so a shipped stdlib callable is reported as the callable it is rather than as a typo. The
+    /// program-first order is not incidental: it is the prelude-shadowing rule, and it is what the
+    /// eager seeding's "only if absent" guard used to express.
     pub fn params_for(&self, target: &str) -> &[ParamSig] {
         self.params
             .iter()
             .find(|p| p.target == target)
+            .or_else(|| crate::native_reflect::native_param_record(target))
             .map(|p| p.params.as_slice())
             .unwrap_or(&[])
     }
@@ -187,10 +194,15 @@ impl ReflectionInfo {
     /// typo in a target string indistinguishable from a `void` method, which is exactly the
     /// vanishing-route failure a reflection-driven framework must be able to detect. So the
     /// missing case gets its own `none`, and the caller has to look at it.
+    ///
+    /// Falls through to the native lookup on a miss, on the same terms as
+    /// [`params_for`](Self::params_for) — one record answers both queries, so a callable present in
+    /// one index is present in the other.
     pub fn returns_for(&self, target: &str) -> Option<&TypeRepr> {
         self.params
             .iter()
             .find(|p| p.target == target)
+            .or_else(|| crate::native_reflect::native_param_record(target))
             .map(|p| &p.ret)
     }
 
@@ -230,8 +242,18 @@ impl ReflectionInfo {
     }
 
     /// The reflectable shape of a declared type by name.
+    ///
+    /// The program's own declarations answer first; a name none of them declares falls through to
+    /// the **prelude and native** lookup
+    /// ([`native_reflect::native_type_info`](crate::native_reflect::native_type_info)), so
+    /// `Ordering` and `std.http.Framing` are as knowable to reflection as they are to the rest of
+    /// the language. Program-first *is* the shadowing rule: a program that declares its own
+    /// `Ordering` reflects its own.
     pub fn type_named(&self, name: &str) -> Option<&TypeInfo> {
-        self.types.iter().find(|t| t.name == name)
+        self.types
+            .iter()
+            .find(|t| t.name == name)
+            .or_else(|| crate::native_reflect::native_type_info(name))
     }
 
     /// The **type-level field schema** of the declared struct/class `type_name` — one

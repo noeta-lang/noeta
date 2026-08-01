@@ -8,6 +8,12 @@ rust-version.workspace = true
 
 [dependencies]
 noeta-span = { workspace = true }
+# The extension registry, for `native_reflect`: reflection has to answer for a native declaration
+# exactly as it answers for a `.noe` one, and the registry is that declaration's only source. A leaf
+# crate with no `noeta-*` dependencies of its own, so this stays acyclic — and it is what lets the
+# ONE reflection lookup resolve natives lazily instead of every artifact carrying a pre-materialized
+# copy of the whole registry.
+noeta-ext-abi = { workspace = true }
 serde = { workspace = true }
 
 [dev-dependencies]

@@ -102,7 +102,7 @@ mod traits;
 pub use setup::{SetupDrop, SetupWarning, dropped_setup_warnings, is_tier_setup, setup_drop};
 pub use tiers::{
     Activated, DeclaredTier, DocTarget, ResolvedProvider, ResolvedTier, TextBlock, TierFn, TierId,
-    activate_tiers, code_tiers_in, dedent_doc, extend_reflection, resolve_docs, resolve_texts,
+    activate_tiers, code_tiers_in, dedent_doc, resolve_docs, resolve_texts,
 };
 
 use constructors::compute_fresh_constructors;
@@ -249,6 +249,14 @@ impl std::fmt::Debug for CheckOptions {
     }
 }
 
+/// TEMPORARY diagnostic probe (perf/startup-lazy) — see `noeta_runner::compile::phase_stop`.
+#[doc(hidden)]
+pub fn phase_stop(phase: &str) {
+    if std::env::var("NOETA_PHASE_STOP").as_deref() == Ok(phase) {
+        std::process::exit(0);
+    }
+}
+
 /// Type-check a program once against explicit [`CheckOptions`] — the single configurable entry every
 /// other `check_all*` is a thin preset of. Edition-, type-index-, and registry-aware in one call, so
 /// a tool that has (say) both a per-package [`EditionMap`] and the IDE type index asks for both
@@ -309,9 +317,12 @@ pub fn check_all_cancellable(program: &Program, opts: CheckOptions, cancel: &dyn
 
 fn check_all_impl(program: &Program, opts: CheckOptions, cancel: &dyn Fn()) -> Checked {
     let mut checker = Checker::new(Config::of(opts, false));
+    phase_stop("checker-new");
     checker.register_prelude();
+    phase_stop("prelude");
     checker.collect_imports(program);
     checker.collect(program);
+    phase_stop("collect");
     // The fresh-constructor pre-pass (generic constructor reflection) must precede body checking: a
     // `Repo.new(...)` call site stamps its instantiation onto the result whether it is written
     // before or after `Repo`'s declaration. It runs FIRST because the forwarding pre-pass below

@@ -36,6 +36,14 @@ pub use derive::{
 };
 pub use expand::ExpandedSource;
 
+/// TEMPORARY diagnostic probe (perf/startup-lazy) — see `noeta_runner::compile::phase_stop`.
+#[doc(hidden)]
+pub fn phase_stop(phase: &str) {
+    if std::env::var("NOETA_PHASE_STOP").as_deref() == Ok(phase) {
+        std::process::exit(0);
+    }
+}
+
 /// A loaded, linked program ready to type-check and run.
 #[derive(Debug)]
 pub struct Linked {
@@ -695,6 +703,7 @@ pub fn link(
     // The deps-free path has no manifest and so no `[tiers]`/`[directives]` bindings — an empty
     // `PackageUses` means [`lex_program`] contributes no per-package renamed text tiers (only a
     // file's own `@tier(…, text)` declarations, which its per-file scan discovers regardless).
+    crate::phase_stop("sibscan");
     let (lexeds, text_tiers) = lex_program(
         &sources,
         &editions,
@@ -702,6 +711,7 @@ pub fn link(
         &noeta_span::PackageUses::new(),
     );
 
+    crate::phase_stop("lexed");
     // Entry + siblings parse under the root package's edition (deps-free: no dependency packages,
     // so no other editions are in play). `link_with_deps` is the twin that also links dependencies,
     // each under its own edition.
@@ -762,6 +772,7 @@ pub fn link(
                 program,
             }),
     );
+    crate::phase_stop("parsed");
     let path_diagnostics = apply_derived_paths(units);
     if !path_diagnostics.is_empty() {
         return Err(path_diagnostics);
@@ -776,6 +787,7 @@ pub fn link(
         attribute_to_spans(&mut d, &sources);
         d
     })?;
+    crate::phase_stop("linkparsed");
     let reads = expand_into(
         &mut program,
         &source_maps,
@@ -784,6 +796,7 @@ pub fn link(
         root_edition,
         &text_tiers,
     )?;
+    crate::phase_stop("expanded");
     Ok(Linked {
         program,
         entry,
@@ -1085,6 +1098,7 @@ pub fn link_with_deps_appending(
         attribute_to_spans(&mut d, &sources);
         d
     })?;
+    crate::phase_stop("linkparsed");
     let reads = expand_into(
         &mut program,
         &source_maps,
@@ -1093,6 +1107,7 @@ pub fn link_with_deps_appending(
         root_edition,
         &text_tiers,
     )?;
+    crate::phase_stop("expanded");
     Ok(Linked {
         program,
         entry,

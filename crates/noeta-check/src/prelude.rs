@@ -23,10 +23,15 @@ impl Checker {
         self.register_prelude_enums();
         self.register_semantic_prelude();
         self.register_tier_prelude();
+        crate::phase_stop("prelude-builtin");
         self.register_extension_attributes();
+        crate::phase_stop("prelude-attrs");
         self.seed_native_builtin_traits();
+        crate::phase_stop("prelude-traits");
         self.seed_ext_enums();
+        crate::phase_stop("prelude-enums");
         self.seed_ext_fielded();
+        crate::phase_stop("prelude-fielded");
         self.seed_ext_directives();
     }
 

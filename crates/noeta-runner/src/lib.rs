@@ -73,11 +73,14 @@ pub fn run_module_real_host(
         (host, executor)
     });
     let (host, executor) = factory();
+    compile::phase_stop("host");
     // Real isolates run on OS threads (out-of-oracle); channel-shipping isolates fall back to
     // cooperative tasks (cross-thread channels are I.4c). The differential keeps the sandbox pair.
-    VmBackend::new().run_module_with_host_and_executor_parallel(
+    let out = VmBackend::new().run_module_with_host_and_executor_parallel(
         module, host, executor, factory, jit_report, cancel,
-    )
+    );
+    compile::phase_stop("vm");
+    out
 }
 
 /// Run a compiled module and render its stdout / diagnostics / abort trace / `--jit-stats` report to
