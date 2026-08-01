@@ -199,6 +199,9 @@ pub fn directive_signature(
 #[derive(Debug)]
 pub struct CallContext {
     pub callee: String,
+    /// The 0-based index of the argument the cursor is **in** — the top-level comma count. This is
+    /// the LSP `activeParameter`, the one to highlight, and it is deliberately *not* a count of
+    /// arguments: `f(` and `f(x` are both index 0.
     pub active: usize,
     pub receiver: Option<Span>,
     /// Whether the head was written `callee::<…>(` rather than `callee(`. Read by the reflection
@@ -206,6 +209,16 @@ pub struct CallContext {
     /// (`construct::<T>(fields)` vs `construct(name, fields)`) — the two cannot be told apart from
     /// the callee and the comma count alone.
     pub turbofish: bool,
+    /// How many arguments have been **written or begun** — `f(` is 0, `f(x` is 1, `f(x,` is 2.
+    ///
+    /// A second count rather than a richer [`Self::active`] because the two answer different
+    /// questions and only one of them is ambiguous. "Which parameter do I highlight?" is the comma
+    /// count and is right for an empty list as much as a full one. "Which *shape* is this call?"
+    /// needs to know whether the list is empty at all, and the comma count cannot say: `roles_of()`
+    /// and `roles_of(x` are both zero commas, and they are two different queries — the whole index
+    /// and one enum's. Folding the fact into `active` as an `Option` would have made every reader of
+    /// the highlight index handle a case that never mattered to it.
+    pub arity_so_far: usize,
 }
 
 /// One bracket frame on the scan stack. A call frame (a `(` opened right after a callee head) counts
@@ -216,6 +229,9 @@ struct Frame {
     receiver: Option<Span>,
     turbofish: bool,
     active: usize,
+    /// Whether any token at all has appeared inside this frame — the one bit that separates an empty
+    /// argument list from a first argument being typed.
+    started: bool,
 }
 
 /// Scan the tokens before `offset`, tracking bracket nesting, and return the innermost enclosing
@@ -229,6 +245,13 @@ pub fn enclosing_call(tokens: &[Token], text: &str, offset: u32) -> Option<CallC
         .enumerate()
         .take_while(|(_, t)| t.span.start < offset)
     {
+        // Any token inside the innermost open frame means its argument list is no longer empty.
+        // Marked *before* the match so an opening bracket counts for the frame it appears in
+        // (`f([` has begun an argument) rather than for the frame it is about to open, and so the
+        // `(` that opens a call marks the caller's frame, never the fresh one.
+        if let Some(frame) = stack.last_mut() {
+            frame.started = true;
+        }
         match token.kind {
             TokenKind::LParen => {
                 let head = call_head(tokens, i, text);
@@ -237,6 +260,7 @@ pub fn enclosing_call(tokens: &[Token], text: &str, offset: u32) -> Option<CallC
                     receiver: head.receiver,
                     turbofish: head.turbofish,
                     active: 0,
+                    started: false,
                 });
             }
             TokenKind::LBracket | TokenKind::LBrace => stack.push(Frame {
@@ -244,6 +268,7 @@ pub fn enclosing_call(tokens: &[Token], text: &str, offset: u32) -> Option<CallC
                 receiver: None,
                 turbofish: false,
                 active: 0,
+                started: false,
             }),
             TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
                 stack.pop();
@@ -266,6 +291,10 @@ pub fn enclosing_call(tokens: &[Token], text: &str, offset: u32) -> Option<CallC
             active: frame.active,
             receiver: frame.receiver,
             turbofish: frame.turbofish,
+            // Commas separate arguments, so `n` commas means `n + 1` arguments — but only once one
+            // exists at all. A comma is itself a token, so `started` is always true when `active`
+            // is non-zero, and the sum is exact rather than a clamp.
+            arity_so_far: frame.active + usize::from(frame.started),
         })
     })
 }
@@ -389,18 +418,19 @@ fn matching_lt(tokens: &[Token], gt: usize) -> Option<usize> {
 /// out in this crate.
 pub fn from_intrinsic(
     intrinsic: &noeta_builtins::ReflectionIntrinsic,
-    turbofish: bool,
-    active: usize,
+    call: &CallContext,
 ) -> SignatureData {
-    let form = intrinsic.form_for(turbofish, active);
+    // Which form: how many arguments have been written. Which parameter to highlight within it: the
+    // one the cursor is in. The two are different questions — see `CallContext::arity_so_far`.
+    let form = intrinsic.form_for(call.turbofish, call.arity_so_far);
     let parameters: Vec<String> = form
         .params
         .iter()
         .map(noeta_builtins::ReflectParam::render)
         .collect();
     SignatureData {
-        label: format!("{} — {}", intrinsic.render_form(form), intrinsic.summary),
-        active_param: active.min(parameters.len().saturating_sub(1)),
+        label: format!("{} — {}", form.render(intrinsic.name), intrinsic.summary),
+        active_param: call.active.min(parameters.len().saturating_sub(1)),
         parameters,
     }
 }
@@ -493,5 +523,31 @@ mod tests {
     fn a_plain_call_has_no_receiver() {
         let src = "v = f(";
         assert!(call_at(src, src.len() as u32).unwrap().receiver.is_none());
+    }
+
+    /// **The comma count and the argument count are different numbers**, and the scan reports both.
+    ///
+    /// `f(` and `f(x` are both "argument 0" — that is what `active` means and it is the right answer
+    /// for the highlight in each — but one call has no arguments and the other has one. Only
+    /// `arity_so_far` separates them, and a caller choosing between an intrinsic's zero-operand and
+    /// one-operand forms needs exactly that.
+    #[test]
+    fn the_argument_count_is_not_the_comma_count() {
+        let counts = |src: &str| {
+            let call = call_at(src, src.len() as u32).expect("inside a call");
+            (call.active, call.arity_so_far)
+        };
+        assert_eq!(counts("v = f("), (0, 0), "nothing written");
+        assert_eq!(counts("v = f(  "), (0, 0), "whitespace is not an argument");
+        assert_eq!(counts("v = f(x"), (0, 1), "one argument begun");
+        assert_eq!(counts("v = f(x,"), (1, 2), "a comma commits to a second");
+        assert_eq!(counts("v = f(x, y"), (1, 2));
+        assert_eq!(counts("v = f(x, y, z"), (2, 3));
+        // A nested argument has begun the outer call's first argument, and its own commas belong to
+        // the inner frame.
+        assert_eq!(counts("v = f([1, 2"), (0, 1));
+        // A turbofish head does not leak into the argument list.
+        assert_eq!(counts("v = f::<int>("), (0, 0));
+        assert_eq!(counts("v = f::<int>(x"), (0, 1));
     }
 }
