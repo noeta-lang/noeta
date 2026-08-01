@@ -2,7 +2,7 @@
 
 Status: **in progress on `audit/parallel-paths`** since 2026-08-01 — the rows are being built, not just proposed. Each closed row carries a note in its own section saying what was built and what the row got wrong; this header says only which are done. Everything below the header is the original reading pass, kept as written so the *predictions* can be scored against the outcomes.
 
-**Closed:** row 1 (one run tail), row 3 (provenance is one value), row 7 (one jump-target answer). **In flight:** rows 5, 6, 9, 11, 13. **Open:** rows 2, 4, 8, 10, 12, 14.
+**Closed:** row 1 (one run tail), row 3 (provenance is one value), row 7 (one jump-target answer), row 10 (one hot install). **In flight:** rows 5, 6, 9, 11, 13. **Open:** rows 2, 4, 8, 12, 14.
 
 Two corrections the work has already made to the reading pass, both worth carrying into the next audit: it **undercounts copies** (row 7 said four sites, there were five; row 1 said seven tails, there were eight — plus the oracle, a ninth; row 3 said four bad `CheckOptions` literals, there were six, two of them inside the crate the row was about), and it **under-sizes fixes that are structurally right** (row 3's "~40 lines in `noeta-check`, ~11 call sites" became a value object threaded through the loader, because constructors alone still let a caller pass two of three arguments). A reading pass sees the sites it greps for and prices the patch it can picture. Neither error is in the safe direction.
 
@@ -250,6 +250,8 @@ That is why the AOT tail's dropped stderr and truncated exit code went unnoticed
 
 ## 10. `noeta serve`'s three hot paths — confirmed, and it has already dropped a feature
 
+**CLOSED 2026-08-01**, `audit/hot-install`. The findings below are kept as written; the closing note is at the end of the section.
+
 **Known and unfixed. Confirmed, characterized, with a smoking gun.**
 
 Three functions in `crates/noeta-cli/src/cmd/serve.rs` assemble the same hot-reload install by hand: `run_program_hot` (`:695-771`) for the single worker, and `serve_parallel_hot` (`:576-633`) + `run_worker_hot` (`:638-687`) for the fleet.
@@ -263,6 +265,22 @@ There is a third copy of the front half, in another file. `crates/noeta-cli/src/
 Finally, `entry_tail` is called with an `EntryCall` the extension command declared (`serve.rs:315`) on one path and with one hand-written in the CLI (`:404-412`, `SERVE_ENTRY_MODULE` + `HANDLER`) on the other, under a comment asserting they are "built the same way". They are, *now*; a change to the serve entry's signature is two edits in two crates.
 
 **Chokepoint.** One `hot_install(program, sites, consumers, host_builder)` covering steps 3–8, one `run_tail` for step 9 (row 1's chokepoint), and one `load_entry_with_tail(file, tail)` for the front half shared with `watch.rs`. The `--parallel` `EntryCall` comes from the same `ExtCommand` declaration the single-worker path reads. **Size: ~120 lines moved; the three functions become three short callers.** Row 1 subsumes the tail half, so doing that first makes this smaller.
+
+### Closing note
+
+**The install split in two, not one, and the row's own sentence says why.** Steps 4–6 (mailbox, wake, watcher) happen once per *process*; steps 3 and 7–9 (session compile, host, executor, run, tail) happen once per *isolate*. `serve::HotRig` is both halves — `HotRig::arm(entry, tail, baseline, front, consumers)` and `rig.run_isolate(program, sites, sources, HotIsolate { … })` — and the parameter the row predicted is the only one there is: `consumers`. `run_program_hot` arms a rig of 1 and runs one isolate; `serve_parallel_hot` folded into `serve_parallel_impl`, arms a rig of N and runs the same `run_isolate` in each. `run_worker_hot` no longer exists.
+
+**The front half went further than the row asked.** `context::load_entry_with_tail(file, tail, Front)` is shared by all three sites, but the loader call itself moved *down* a layer into `noeta_runner::compile::load_linked_appending`, beside the `load_linked` that `run` and the tier verbs already used. The three serve loads were the only loads in the tree that called `noeta_loader` directly with a hand-assembled argument list, i.e. the only ones outside the `FrontFacts` firewall — which is a better statement of the defect than "three copies".
+
+**The `relink_entry_unit` re-resolve was a bug, and a worse one than a wasted resolve.** `graph::resolve_graph` refreshes `noeta.lock`, and under `[trust].require_transparency` it is by definition a live registry round trip — so a hot server re-solved its dependency graph on every keystroke-save, over the network, and a transient failure came back as `RelinkError::Unreadable`, which is "no verdict": printed, skipped, the developer's edit silently discarded. It bought no freshness at all, because a change to `noeta.toml`, `noeta.lock` or any file but the entry never reaches the re-link — the watcher exits with `HOT_RESTART_CODE` and the wrapper restarts the process, which resolves from scratch. Dependency freshness is the restart's job. The boot's `FrontFacts` are now handed to the watcher (`Front::Given`) exactly as the diff baseline already was.
+
+**The `EntryCall` was written three times, not two.** The row found `SERVE_COMMAND`'s and the CLI's hand-written twin; the third was the ABI's own default `CommandCtx::serve_parallel`, which rebuilt the call from `port`/`host` to forward it to `run_file`. The undercount is the audit's own recorded pattern. `serve_parallel(file, entry, host, port, workers)` now takes the declared call (ABI 13); `host`/`port` stay because they are the address the *driver* binds, not the call.
+
+**Two behaviour fixes fell out of unifying, neither of them the drift the row named.** The single worker armed its watcher *after* compiling and the fleet armed *before*, so a save made during a cold compile was lost only on the single-worker path — the fleet's order won. And every serving isolate's host now comes from one `serve_host`, which is where `with_live_output` had already been forgotten twice (row 1 found those).
+
+**Open, found here, not fixed: the fleet's wake reaches exactly two workers.** With the wake armed, an idle `--parallel N` fleet applies a deposited swap in two workers before the next request whatever N is — 0 stale responses at N=1 and N=2, 1 at N=3, 3 at N=5. With `set_wake` removed, *every* worker serves exactly one stale request (1 of 1, 3 of 3), so the wake works and simply does not reach a worker that is not awaiting it. Per-consumer `Notify`s were built and measured and changed nothing at N = 1, 2, 3 and 5, which rules out the `notify_one` single-permit race and points at where an idle worker holding a pre-bound listener actually blocks. That is a row of its own, in the host/VM, not in the install; the measurement lives in `watch::wake_all`'s doc and `parallel_hot` pins the bound (`stale < workers`) so a regression to "the wake reaches nobody" fails.
+
+**Gates.** `cmd::serve::tests::every_step_of_the_hot_install_is_performed_in_exactly_one_place` censuses the serve/watch pair for the single call performing each step, so a second install fails the build naming the step; `parallel_hot::a_fleet_and_a_single_worker_apply_an_idle_swap_identically` (`#[ignore]`d, `hot-e2e.sh`, count bumped 1 → 2) runs one edit against both shapes and pins the idle wake. Dropping `set_wake` fails both.
 
 ---
 
