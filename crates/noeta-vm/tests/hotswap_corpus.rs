@@ -721,6 +721,11 @@ impl Skip {
 struct Divergence {
     case: String,
     generator: Generator,
+    /// Whether this case ran through a non-identity type-argument merge ([`Case::renumbers`]).
+    /// Carried on the divergence too, not only on a pass: a mutation that breaks the remap turns
+    /// every renumbering case into a *divergence*, and a counter that only counted passes would
+    /// then report zero renumbering and blame the generator for the very failure it just caught.
+    renumbers: bool,
     v1: String,
     v2: String,
     probe: String,
@@ -813,6 +818,7 @@ fn oracle(name: &str, gtor: Generator, case: &Case) -> Verdict {
         Verdict::Diverged(Box::new(Divergence {
             case: name.to_string(),
             generator: gtor,
+            renumbers: case.renumbers,
             v1: case.v1.clone(),
             v2: case.v2.clone(),
             probe: case.probe.clone(),
@@ -914,7 +920,12 @@ impl Tally {
                 }
             }
             Verdict::Skipped(skip) => *self.skipped.entry((gtor, skip)).or_default() += 1,
-            Verdict::Diverged(d) => self.divergences.push(*d),
+            Verdict::Diverged(d) => {
+                if d.renumbers {
+                    *self.renumbered.entry(gtor).or_default() += 1;
+                }
+                self.divergences.push(*d);
+            }
         }
     }
 
@@ -1123,10 +1134,11 @@ fn report(tally: &Tally, programs: usize, multi: usize, elapsed: Duration) {
         // nothing is a generator that runs and proves nothing, and that has to be visible.
         if gtor == Generator::PermuteTypeArgs {
             println!(
-                "        {:>4}  of the compared cases renumber the type-argument table (a \
+                "        {:>4}  of the {} compared cases renumber the type-argument table (a \
                  NON-IDENTITY absorb_type_args merge — the property no append-only generator \
                  can produce)",
-                tally.renumbered.get(&gtor).copied().unwrap_or(0)
+                tally.renumbered.get(&gtor).copied().unwrap_or(0),
+                exercised + diverged
             );
         }
     }
@@ -1252,6 +1264,9 @@ fn the_whole_corpus_swaps_like_a_cold_start() {
         compared > 800,
         "the sweep compared only {compared} cases — the generators have stopped generating"
     );
+    // Divergences first: they are the finding, and a generator-health assertion firing ahead of
+    // them would bury it.
+    assert_against_the_known_defects(&tally, true);
     // The permutation's precondition, asserted rather than hoped for — the same guard row 6's
     // hand-written case carries, at corpus scale. Two halves: it must renumber in EVERY compared
     // case (the construction guarantees it, so a shortfall means the construction broke — the
@@ -1261,7 +1276,12 @@ fn the_whole_corpus_swaps_like_a_cold_start() {
         .exercised
         .get(&Generator::PermuteTypeArgs)
         .copied()
-        .unwrap_or(0);
+        .unwrap_or(0)
+        + tally
+            .divergences
+            .iter()
+            .filter(|d| d.generator == Generator::PermuteTypeArgs)
+            .count();
     let renumbering = tally
         .renumbered
         .get(&Generator::PermuteTypeArgs)
@@ -1281,5 +1301,4 @@ fn the_whole_corpus_swaps_like_a_cold_start() {
          the floor of {PERMUTE_RENUMBERING_FLOOR} — the permute generator has stopped exercising \
          the remap it exists for, and the corpus is back to measuring the identity case"
     );
-    assert_against_the_known_defects(&tally, true);
 }
