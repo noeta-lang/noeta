@@ -1,6 +1,10 @@
 # The parallel-path audit — where the next four bugs live
 
-Status: **findings** — each row proposes a chokepoint and sizes it. No chokepoint has been built. Row 1's *live defect* in the wasm tail is fixed (see its Progress note) because the gate that was supposed to catch it had to be repaired first; the row's seven-copy problem is untouched.
+Status: **in progress on `audit/parallel-paths`** since 2026-08-01 — the rows are being built, not just proposed. Each closed row carries a note in its own section saying what was built and what the row got wrong; this header says only which are done. Everything below the header is the original reading pass, kept as written so the *predictions* can be scored against the outcomes.
+
+**Closed:** row 3 (provenance is one value), row 7 (one jump-target answer). **In flight:** rows 1, 5, 6, 9, 11, 13. **Open:** rows 2, 4, 8, 10, 12.
+
+Two corrections the work has already made to the reading pass, both worth carrying into the next audit: it **undercounts copies** (row 7 said four sites, there were five; row 3 said eleven `CheckOptions` literals and four bad ones, there were six bad ones and two of them were inside the crate the row was about), and it **under-sizes fixes that are structurally right** (row 3's "~40 lines in `noeta-check`, ~11 call sites" became a value object threaded through the loader, because constructors alone still let a caller pass two of three arguments). A reading pass sees the sites it greps for and prices the patch it can picture. Neither error is in the safe direction.
 
 The compile/swap arc closed a bug class by deleting a copy. `compile_to_mc` and `SessionCompiler::extend_impl` were two implementations of one eleven-step sequence, four shipped bugs lived in the delta, and the fix was one `install` plus a `TABLE_POLICIES` census — one function, one list, no second place to forget. The module docs of `crates/noeta-compiler/tests/pipeline_tables.rs` and `crates/noeta-ir/tests/lowerer_field_census.rs` tell that story better than this file can.
 
