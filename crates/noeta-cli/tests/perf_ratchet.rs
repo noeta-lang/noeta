@@ -73,9 +73,9 @@ fn rows() -> Vec<Row> {
         );
         out.push(Row {
             id: f[0].to_string(),
-            tolerance: f[1]
-                .parse()
-                .unwrap_or_else(|_| panic!("row `{}` has a non-numeric tolerance `{}`", f[0], f[1])),
+            tolerance: f[1].parse().unwrap_or_else(|_| {
+                panic!("row `{}` has a non-numeric tolerance `{}`", f[0], f[1])
+            }),
             tier1: f[2].to_string(),
             argv: f[4].to_string(),
         });
@@ -121,7 +121,8 @@ fn every_row_is_measurable_and_every_fixture_is_measured() {
         }
     }
     assert_eq!(
-        present, declared,
+        present,
+        declared,
         "tests/perf/fixtures and the ROWS array in scripts/perf-ratchet.sh disagree.\n\
          Only in fixtures/ (measured by nothing): {:?}\n\
          Only in ROWS (nothing to measure): {:?}",
@@ -138,7 +139,9 @@ fn each_fixture_is_alone_in_its_directory() {
     // something else, which is how a first-pass startup analysis once came out 7x wrong.
     let root = fixtures_root();
     for entry in fs::read_dir(&root).expect("tests/perf/fixtures is missing") {
-        let dir = entry.expect("unreadable entry under tests/perf/fixtures").path();
+        let dir = entry
+            .expect("unreadable entry under tests/perf/fixtures")
+            .path();
         if !dir.is_dir() {
             continue;
         }

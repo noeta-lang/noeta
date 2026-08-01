@@ -19,8 +19,9 @@
 # EXIT CODES — the whole point is that "could not measure" is not "passed".
 #   0  every row is inside its tolerance band, and every tier-1 expectation held.
 #   1  a row moved outside its band, or a tier-1 expectation broke. Read the report.
-#   2  COULD NOT MEASURE: no perf, perf_event_paranoid forbids counting, no binary, no baseline,
-#      or the baseline was recorded on a different machine. Never conflated with 0. A predecessor
+#   2  COULD NOT MEASURE: no perf, perf_event_paranoid forbids counting, no PMU exposed, no
+#      binary, a debug binary, no baseline, a baseline missing a row, or a baseline recorded on a
+#      different cpu / libc / rustc. Never conflated with 0. A predecessor
 #      gate in this repo ("fix(bench): a regression gate that measured nothing must not report
 #      success", c619853bd) shipped exactly that conflation; this file inherits its rule.
 #
