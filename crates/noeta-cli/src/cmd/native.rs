@@ -197,7 +197,9 @@ pub(crate) fn emit_native(
 
     // 1. AOT object.
     let object = match noeta_vm::compile_module_aot(module) {
-        Ok(bytes) => bytes,
+        // The native-body count rides back for coverage-aware callers (the AOT differential); the
+        // build itself only needs the object.
+        Ok((bytes, _natives)) => bytes,
         Err(err) => {
             eprintln!("noeta: AOT compile failed: {err}");
             return ExitCode::from(1);

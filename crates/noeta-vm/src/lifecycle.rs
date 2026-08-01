@@ -767,6 +767,8 @@ impl<'m> Vm<'m> {
                 #[cfg(feature = "jit")]
                 force_jit: false,
                 #[cfg(feature = "jit")]
+                aot_bodies: false,
+                #[cfg(feature = "jit")]
                 jit_counters: Vec::new(),
                 #[cfg(feature = "jit")]
                 jit_declined: Vec::new(),
