@@ -542,9 +542,9 @@ impl<M: ClifModule> Jit<M> {
         // A fast body is entered only fresh at pc 0 (no seam resume, no OSR — the interpreter
         // re-enters a deopted fast frame through the normal body).
         let reachable = if fast {
-            reachable_pcs_from(chunk, vec![0])
+            reachable_pcs_from(chunk, vec![0], &module.names)
         } else {
-            reachable_pcs(chunk)
+            reachable_pcs(chunk, &module.names)
         };
 
         self.module.clear_context(&mut self.ctx);
@@ -658,7 +658,8 @@ impl<M: ClifModule> Jit<M> {
             // just as for the resume-native (post-call) entry a call-bearing prototype already forces.
             let heap_aware = has_osr_entry(chunk)
                 || chunk.code.iter().any(|op| {
-                    matches!(op, Op::Call { .. } | Op::CallGlobal { .. }) || is_leaf_heap_op(op)
+                    matches!(op, Op::Call { .. } | Op::CallGlobal { .. })
+                        || writes_heap_reg(op, &chunk.consts)
                 });
             // The per-store-site release map (P-JIT bare stores): in a `heap_aware` prototype, a store
             // releases the overwritten value only where that value may be a heap pointer; where it is
@@ -891,7 +892,7 @@ impl<M: ClifModule> Jit<M> {
                 if cg.cancel_addr != 0 && cg.loop_header[pc] {
                     emit_cancel_poll(&mut cg, pc);
                 }
-                emit_op(&mut cg, &chunk.consts, op, pc, &op_blocks);
+                emit_op(&mut cg, &chunk.consts, &module.names, op, pc, &op_blocks);
             }
 
             b.seal_all_blocks();
@@ -1020,7 +1021,7 @@ impl Jit<JITModule> {
         // The dev oracle knob makes the runtime JIT emit AOT-form (IC-off) bodies — identical
         // semantics, so the differential run under `NOETA_JIT_AOT=1` validates the AOT codegen.
         let aot = self.aot_bodies;
-        let f = if is_eligible(chunk) {
+        let f = if is_eligible(chunk, &module.names) {
             let main_id = self.emit_int_body(module, proto, false, aot)?;
             let f = self.finalize_ptr(main_id)?;
             self.native_count += 1;
@@ -1091,7 +1092,7 @@ impl Jit<ObjectModule> {
     /// returning its `FuncId`. Reuses the runtime JIT's `emit_*` routines verbatim — no finalize.
     pub fn compile_object(&mut self, module: &Module, proto: usize) -> Result<FuncId, String> {
         let chunk = &module.protos[proto];
-        if is_eligible(chunk) {
+        if is_eligible(chunk, &module.names) {
             self.emit_int_body(module, proto, false, true)
         } else {
             self.emit_bail_stub(proto)
@@ -1119,7 +1120,7 @@ impl Jit<ObjectModule> {
         let mut main_ids: Vec<Option<FuncId>> = vec![None; n];
         let mut fast_ids: Vec<Option<FuncId>> = vec![None; n];
         for (p, chunk) in module.protos.iter().enumerate() {
-            let entry = if is_eligible(chunk) {
+            let entry = if is_eligible(chunk, &module.names) {
                 main_ids[p] = Some(self.emit_int_body(module, p, false, true)?);
                 let fast = if fast_ok(chunk) {
                     fast_ids[p] = Some(self.emit_int_body(module, p, true, true)?);
@@ -1216,17 +1217,25 @@ fn fast_sig_for(
 /// doesn't (calls, heap ops, `Echo`, `Return`, `Halt`, …) are *bail points* — the body runs its
 /// compilable ops and hands back to the interpreter at the first one it can't (per-op bail). A
 /// prototype with no fast op at all gets a bail stub instead (nothing to gain).
-fn is_eligible(chunk: &noeta_bytecode::Chunk) -> bool {
-    chunk.code.iter().any(|op| is_fast_op(op, &chunk.consts))
+fn is_eligible(chunk: &noeta_bytecode::Chunk, names: &[String]) -> bool {
+    chunk.code.iter().any(|op| is_fast_op(op, names))
 }
 
 /// Whether [`emit_op`] compiles this op instance to native code (vs bailing to the interpreter at it).
-/// A `LoadConst` is fast only if its constant is an immediate (int in the 48-bit range, bool, unit, or
-/// a float — never a heap string/module or a big int that would box); a `Binary` only for the integer/
+/// Every `LoadConst` is fast: an immediate constant (int in the 48-bit range, bool, unit, a float)
+/// materializes inline, and a heap constant (a string, a native module/fn, a method handle, a big
+/// int) goes through the leaf-op helper's one shared `materialize` — a `Binary` only for the integer/
 /// float arithmetic-and-comparison set.
-fn is_fast_op(op: &Op, consts: &[Const]) -> bool {
+///
+/// `names` is the module's interned name table: `Op::CallMethod` is native only for a **map**
+/// method name (the leaf helper handles exactly the map receiver and bails on everything else), so
+/// classifying it needs to resolve its `NameId`. Restricting it statically matters — an
+/// always-native `CallMethod` would make an object-method loop *look* tier-1-sustainable to
+/// [`worth_osr`] and then bail out of native code on every iteration, which is slower than
+/// interpreting it.
+fn is_fast_op(op: &Op, names: &[String]) -> bool {
     match op {
-        Op::LoadConst { k, .. } => const_immediate_bits(&consts[*k as usize]).is_some(),
+        Op::LoadConst { .. } => true,
         Op::Move { .. } | Op::Drop { .. } => true,
         Op::Binary { op, .. } => supported_binary(*op),
         // S1 (Tier W): the sign-dependent fixed-width ops and the width wrap. Only the ops the
@@ -1248,6 +1257,12 @@ fn is_fast_op(op: &Op, consts: &[Const]) -> bool {
         | Op::JumpIfTrue { .. }
         | Op::JumpIfFalse { .. }
         | Op::CondBranch { .. } => true,
+        // The map fast path (`m[k]`/`m[k] = v`/`m.get_or(k, d)`): the helper serves a map receiver
+        // and bails on any other, so a same-named user method costs a bail — hence the static name
+        // filter, which keeps an object-method loop out of tier 1 entirely.
+        Op::CallMethod { method, .. } => names
+            .get(method.0 as usize)
+            .is_some_and(|n| noeta_ext_abi::MapMethod::from_name(n).is_some()),
         op if is_leaf_heap_op(op) => true,
         _ => false,
     }
@@ -1257,6 +1272,9 @@ fn is_fast_op(op: &Op, consts: &[Const]) -> bool {
 /// ops whose exact interpreter logic (refcounts included) the helper reproduces, bailing on the
 /// dispatch/error cases. A prototype containing one is `heap_aware` (they can put a heap value in a
 /// register).
+///
+/// `Op::CallMethod` is deliberately **not** here: it is a leaf op only for the map-method names
+/// [`is_fast_op`] admits, and `heap_aware` accounts for it separately ([`writes_heap_reg`]).
 fn is_leaf_heap_op(op: &Op) -> bool {
     matches!(
         op,
@@ -1269,7 +1287,27 @@ fn is_leaf_heap_op(op: &Op) -> bool {
             | Op::Index { .. }
             | Op::MakeTuple { .. }
             | Op::TupleIndex { .. }
+            // The string-building family (all three of `"a${x}b"`'s ops, plus the `s = s ~ x`
+            // accumulator): pure computation over registers and constants with no dispatch and no
+            // failure path, so the helper reproduces the interpreter arm exactly and never bails.
+            // `Stringify` is the one exception — an object/enum receiver may light up `Display`,
+            // whose `to_string` runs bytecode — and bails there.
+            | Op::Stringify { .. }
+            | Op::BuildString { .. }
+            | Op::ConcatInPlace { .. }
     )
+}
+
+/// Whether *native* execution of this op can leave a heap value in a register — the `heap_aware`
+/// question. Every leaf heap op qualifies, as does an admitted map `CallMethod` (its result, and
+/// the map it moves into the destination) and a `LoadConst` of a heap constant (which, unlike the
+/// immediate form, allocates).
+fn writes_heap_reg(op: &Op, consts: &[Const]) -> bool {
+    match op {
+        Op::LoadConst { k, .. } => const_immediate_bits(&consts[*k as usize]).is_none(),
+        Op::CallMethod { .. } => true,
+        op => is_leaf_heap_op(op),
+    }
 }
 
 /// The binary operators the JIT compiles natively: integer arithmetic, comparison, and the P-BITS
@@ -1386,14 +1424,11 @@ fn has_osr_entry(chunk: &noeta_bytecode::Chunk) -> bool {
 /// whose only loops bail is left in the interpreter. The loop body is over-approximated as the pc
 /// range `[header, back_edge]` — conservative (an occasional bail in a rarely-taken branch declines a
 /// loop that is mostly native-able), which errs toward not regressing a heap-op-dominated loop.
-pub fn worth_osr(chunk: &noeta_bytecode::Chunk) -> bool {
+pub fn worth_osr(chunk: &noeta_bytecode::Chunk, names: &[String]) -> bool {
     let code = &chunk.code;
     code.iter().enumerate().any(|(pc, op)| {
-        backward_target(op, pc).is_some_and(|header| {
-            code[header..=pc]
-                .iter()
-                .all(|o| is_fast_op(o, &chunk.consts))
-        })
+        backward_target(op, pc)
+            .is_some_and(|header| code[header..=pc].iter().all(|o| is_fast_op(o, names)))
     })
 }
 
@@ -1402,7 +1437,7 @@ pub fn worth_osr(chunk: &noeta_bytecode::Chunk) -> bool {
 /// `worth_osr` scans). These are the ops that keep a hot loop off tier 1 — the JIT bail report
 /// (`noeta run --jit-stats`) names them so "what should become JITable next" is a measurement, not a
 /// guess. Deduplicated and sorted; empty when every loop is native-sustainable (or there is no loop).
-pub fn loop_bail_pcs(chunk: &noeta_bytecode::Chunk) -> Vec<usize> {
+pub fn loop_bail_pcs(chunk: &noeta_bytecode::Chunk, names: &[String]) -> Vec<usize> {
     let code = &chunk.code;
     let mut pcs: Vec<usize> = code
         .iter()
@@ -1412,7 +1447,7 @@ pub fn loop_bail_pcs(chunk: &noeta_bytecode::Chunk) -> Vec<usize> {
             code[header..=back_edge]
                 .iter()
                 .enumerate()
-                .filter(|(_, o)| !is_fast_op(o, &chunk.consts))
+                .filter(|(_, o)| !is_fast_op(o, names))
                 .map(move |(i, _)| header + i)
                 .collect::<Vec<_>>()
         })
@@ -1427,8 +1462,8 @@ pub fn loop_bail_pcs(chunk: &noeta_bytecode::Chunk) -> Vec<usize> {
 /// body once per activation with no per-iteration bail bounce. A prototype *with* a loop is worth it
 /// only if some loop is native-sustainable ([`worth_osr`]); one whose every loop bails would bounce
 /// tier-0↔tier-1 every iteration, slower than just interpreting it.
-pub fn worth_compiling(chunk: &noeta_bytecode::Chunk) -> bool {
-    !has_osr_entry(chunk) || worth_osr(chunk)
+pub fn worth_compiling(chunk: &noeta_bytecode::Chunk, names: &[String]) -> bool {
+    !has_osr_entry(chunk) || worth_osr(chunk, names)
 }
 
 /// Forward reachability of each bytecode pc in the *native* control-flow graph, seeded from every
@@ -1437,12 +1472,16 @@ pub fn worth_compiling(chunk: &noeta_bytecode::Chunk) -> bool {
 /// follows edges only out of fast ops. Used so the codegen fills unreachable blocks (dead code, or the
 /// fall-through past a bail) with a trivial bail instead of code that would reference the entry-only
 /// frame/globals pointers from a non-dominated block.
-fn reachable_pcs(chunk: &noeta_bytecode::Chunk) -> Vec<bool> {
-    reachable_pcs_from(chunk, entry_pcs(chunk))
+fn reachable_pcs(chunk: &noeta_bytecode::Chunk, names: &[String]) -> Vec<bool> {
+    reachable_pcs_from(chunk, entry_pcs(chunk), names)
 }
 
 /// [`reachable_pcs`] seeded from an explicit entry set (the fast body's is just `{0}`).
-fn reachable_pcs_from(chunk: &noeta_bytecode::Chunk, entries: Vec<usize>) -> Vec<bool> {
+fn reachable_pcs_from(
+    chunk: &noeta_bytecode::Chunk,
+    entries: Vec<usize>,
+    names: &[String],
+) -> Vec<bool> {
     let n = chunk.code.len();
     let mut seen = vec![false; n];
     let mut stack = entries;
@@ -1452,7 +1491,7 @@ fn reachable_pcs_from(chunk: &noeta_bytecode::Chunk, entries: Vec<usize>) -> Vec
         }
         seen[pc] = true;
         let op = &chunk.code[pc];
-        if !is_fast_op(op, &chunk.consts) {
+        if !is_fast_op(op, names) {
             continue; // a bail point: no native successor
         }
         match op {
@@ -2099,9 +2138,16 @@ fn global_offset(g: u32) -> i32 {
 /// bytecode pc to its Cranelift block, for jumps/branches; a bail returns the pc. An op the JIT does
 /// not compile ([`is_fast_op`] is false) bails here — the interpreter runs it and the rest of the
 /// frame.
-fn emit_op(cg: &mut Codegen, consts: &[Const], op: &Op, pc: usize, op_blocks: &[Block]) {
+fn emit_op(
+    cg: &mut Codegen,
+    consts: &[Const],
+    names: &[String],
+    op: &Op,
+    pc: usize,
+    op_blocks: &[Block],
+) {
     cg.cur_pc = pc;
-    if !is_fast_op(op, consts) {
+    if !is_fast_op(op, names) {
         cg.sync_frame(pc);
         let here = cg.pc_const(pc);
         cg.ret_bail(here);
@@ -2111,7 +2157,11 @@ fn emit_op(cg: &mut Codegen, consts: &[Const], op: &Op, pc: usize, op_blocks: &[
     match op {
         Op::LoadConst { dst, k } => {
             let c = &consts[*k as usize];
-            let bits = const_immediate_bits(c).expect("eligibility checked");
+            // A heap constant allocates, so it has no inline bit pattern — route it through the
+            // leaf-op helper's shared `materialize` instead of materializing it here.
+            let Some(bits) = const_immediate_bits(c) else {
+                return emit_leaf_op(cg, pc, op_blocks);
+            };
             let v = cg.b.ins().iconst(types::I64, bits as i64);
             // T1: a typed constant also defines the raw form (the kind transfer gives the
             // destination this constant's kind).
@@ -2283,6 +2333,9 @@ fn emit_op(cg: &mut Codegen, consts: &[Const], op: &Op, pc: usize, op_blocks: &[
             dst, global, args, ..
         } => emit_call(cg, *dst, args, CalleeSrc::Global(global.0), pc, op_blocks),
         Op::Return { src } => emit_return(cg, *src, pc),
+        // Admitted by `is_fast_op` only for a map-method name — the helper serves the map receiver
+        // and bails on anything else (including a same-named user method).
+        Op::CallMethod { .. } => emit_leaf_op(cg, pc, op_blocks),
         op if is_leaf_heap_op(op) => emit_leaf_op(cg, pc, op_blocks),
         // A bail point (`is_fast_op` was checked at the top; unreachable in practice).
         _ => {
@@ -2743,40 +2796,54 @@ fn emit_load_global(cg: &mut Codegen, dst: Reg, g: u32, pc: usize, op_blocks: &[
 }
 
 /// `globals[g] = take(reg[src])` (P-JIT globals; `StoreGlobal` moves the source out, leaving `unit`).
-/// `src` is an immediate (invariant), so the global takes it with no retain. The old occupant decides
-/// the path: unbound → write it and call the helper to record the first binding in `global_order`; a
-/// heap value → bail (its `release` may run a destructor); an immediate → plain overwrite (its release
-/// is a no-op).
+/// The source's reference transfers into the global, so there is never a retain. The old occupant
+/// decides the tail: unbound → the helper records the first binding in `global_order`; otherwise the
+/// displaced value is released, destructor-aware, exactly as the interpreter's `release_value`.
+///
+/// A displaced **heap** value is native only in a `heap_aware` body — its release may run a
+/// `destruct` block, which is the same re-entrant call an IR-relevant `Op::Drop` already emits
+/// there. Elsewhere it bails (the immediate invariant makes the release a provable no-op, so the
+/// non-heap-aware body simply never needs the call).
 fn emit_store_global(cg: &mut Codegen, g: u32, src: Reg, pc: usize, op_blocks: &[Block]) {
-    // Decide the bail BEFORE mutating anything: a bail hands control back to the interpreter, which
-    // re-runs this op, so no register or slot may have changed yet. The only bail here is a bound heap
-    // old value (its `release` may run a destructor) — `is_pointer` is false for the unbound sentinel,
-    // so it excludes the first-bind case.
     let old = cg.load_global(g);
-    let heap = cg.is_pointer(old);
-    let cont = cg.b.create_block();
-    let bail = cg.b.create_block();
-    cg.b.ins().brif(heap, bail, &[], cont, &[]);
-    cg.b.switch_to_block(bail);
-    cg.sync_frame(pc);
-    let here = cg.pc_const(pc);
-    cg.ret_bail(here);
+    // Decide the bail BEFORE mutating anything: a bail hands control back to the interpreter, which
+    // re-runs this op, so no register or slot may have changed yet. `is_pointer` is false for the
+    // unbound sentinel, so this never catches the first-bind case.
+    if !cg.heap_aware {
+        let heap = cg.is_pointer(old);
+        let cont = cg.b.create_block();
+        let bail = cg.b.create_block();
+        cg.b.ins().brif(heap, bail, &[], cont, &[]);
+        cg.b.switch_to_block(bail);
+        cg.sync_frame(pc);
+        let here = cg.pc_const(pc);
+        cg.ret_bail(here);
+        cg.b.switch_to_block(cont);
+    }
 
-    // Not a heap old value: safe to mutate. Take the source out (moved into the global — no release,
-    // its reference transfers) and write the slot; a first bind also records it in `global_order`.
-    cg.b.switch_to_block(cont);
+    // Safe to mutate. Take the source out (moved into the global — no release, its reference
+    // transfers) and write the slot; a first bind records it in `global_order`, a rebind releases
+    // the value it displaced.
     let v = cg.read_reg(src);
     cg.store_reg_raw(src, cg.pool.unit);
     cg.store_global(g, v);
     let is_unb = cg.is_unbound(old);
     let bind_blk = cg.b.create_block();
+    let rebind_blk = cg.b.create_block();
     let after = cg.b.create_block();
-    cg.b.ins().brif(is_unb, bind_blk, &[], after, &[]);
+    cg.b.ins().brif(is_unb, bind_blk, &[], rebind_blk, &[]);
     cg.b.switch_to_block(bind_blk);
     let vm = cg.vm;
     let gid = cg.b.ins().iconst(types::I32, g as i64);
     let note = cg.note_bound_ref;
     cg.b.ins().call(note, &[vm, gid]);
+    cg.b.ins().jump(after, &[]);
+    cg.b.switch_to_block(rebind_blk);
+    if cg.heap_aware {
+        // The displaced value's destructor fires here if this was its last reference — the
+        // interpreter's `release_value`, through the same helper `Op::Drop` uses.
+        cg.release_dropped_if_heap(old, true);
+    }
     cg.b.ins().jump(after, &[]);
     cg.b.switch_to_block(after);
     cg.b.ins().jump(op_blocks[pc + 1], &[]);
@@ -2788,8 +2855,20 @@ fn emit_store_global(cg: &mut Codegen, g: u32, src: Reg, pc: usize, op_blocks: &
 fn emit_take_global(cg: &mut Codegen, dst: Reg, g: u32, pc: usize, op_blocks: &[Block]) {
     let old = cg.load_global(g);
     let unbound = cg.is_unbound(old);
-    let heap = cg.is_pointer(old);
-    let bail_cond = cg.b.ins().bor(unbound, heap);
+    // A heap value *moves* out of the slot into `dst` — the single owning reference transfers, so
+    // there is no retain to emit; the only refcount work is releasing whatever `dst` held, which is
+    // exactly what a `heap_aware` `store_reg` does (the interpreter's `mem::replace` + `set_reg`).
+    // Outside a `heap_aware` body the immediate invariant forbids a heap value in a register at
+    // all, so the move stays a bail there. This matters more than it looks: a top-level `mut`
+    // accumulator (a map, a string) lives in a global, so `m[k] = v` / `s = s ~ x` in a loop reads
+    // it through `TakeGlobal` every iteration — bailing here bailed the whole loop out of tier 1
+    // on its *first* body op, however native the rest of it was.
+    let bail_cond = if cg.heap_aware {
+        unbound
+    } else {
+        let heap = cg.is_pointer(old);
+        cg.b.ins().bor(unbound, heap)
+    };
     let cont = cg.b.create_block();
     let bail = cg.b.create_block();
     cg.b.ins().brif(bail_cond, bail, &[], cont, &[]);

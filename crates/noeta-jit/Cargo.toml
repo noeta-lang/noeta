@@ -9,6 +9,10 @@ rust-version.workspace = true
 [dependencies]
 noeta-ast = { workspace = true }
 noeta-bytecode = { workspace = true }
+# The Ring-1 method vocabulary (`MapMethod`): `is_fast_op` classifies an `Op::CallMethod` by whether
+# its interned name is a map method, so the op-name set stays the shared enum rather than a string
+# list this crate would have to keep in sync with the VM.
+noeta-ext-abi = { workspace = true }
 noeta-value = { workspace = true }
 # The cranelift-free ABI surface (frame layout, CompiledFn, helper names, dispatch symbol) lives here
 # so an AOT binary can link the runtime support without Cranelift; re-exported below so every

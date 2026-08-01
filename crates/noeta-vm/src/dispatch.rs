@@ -550,59 +550,7 @@ impl<'m> Vm<'m> {
                         // and the single owner is transferred into the result. This also makes a
                         // `dst == lhs` store safe (the old occupant is now `unit`, not the live list).
                         regs[fbase + *lhs as usize] = Value::unit();
-                        let result = if l.is_list() && r.is_list() {
-                            if l.is_packed_list()
-                                && r.is_packed_list()
-                                && l.is_uniquely_owned()
-                                && l.packed_extend_in_place(r)
-                            {
-                                // Sole owner, both flat, same layout: append `rhs`'s words to `lhs`'s
-                                // buffer in place (P-PACK 2.6). The single reference moves into the result.
-                                l
-                            } else if !l.is_packed_list()
-                                && !r.is_packed_list()
-                                && l.is_uniquely_owned()
-                            {
-                                // Sole owner, both boxed: extend the backing buffer in place (O(1)
-                                // amortized). The single reference moves from `lhs` into the result.
-                                l.list_extend(r);
-                                l
-                            } else if let Some(flat) = l.packed_concat(r) {
-                                // Aliased but both flat (same layout): copy the word buffers, then drop the
-                                // consumed accumulator reference — stays flat without mutating the alias.
-                                release(l);
-                                flat
-                            } else {
-                                // A mixed packed/boxed pairing (or differing layouts): copy, preserving
-                                // immutable semantics. Demote each operand to an owned boxed list, retain
-                                // each element into the new list, release the demotions, then drop the
-                                // accumulator's consumed reference.
-                                let lb = l.realize_list();
-                                let rb = r.realize_list();
-                                let mut items = lb.list_items().unwrap();
-                                items.extend(rb.list_items().unwrap());
-                                for &item in &items {
-                                    item.inc_ref();
-                                }
-                                lb.release();
-                                rb.release();
-                                release(l);
-                                Value::list(items)
-                            }
-                        } else if l.is_string() && l.is_uniquely_owned() {
-                            // Sole owner of a string accumulator: append `rhs`'s display form to its
-                            // buffer in place (amortized O(1)), mirroring the list path — the single
-                            // reference moves into the result. This is what makes `s = s ~ x` in a loop
-                            // O(n) instead of O(n²) (the `format!` below copies all of `l` each time).
-                            l.str_push_in_place(&r.display());
-                            l
-                        } else {
-                            // Aliased accumulator or non-string lhs: display concatenation into a fresh
-                            // string (preserves immutable semantics), identical to `Op::Binary`'s `~`.
-                            let s = Value::string(&format!("{}{}", l.display(), r.display()));
-                            release(l);
-                            s
-                        };
+                        let result = concat_in_place(l, r);
                         set_reg(regs, fbase, *dst, result);
                         pc += 1;
                     }
@@ -3705,44 +3653,13 @@ impl<'m> Vm<'m> {
                         }
                         // Identity for every other value: the consuming `Echo`/`Concat` stringifies
                         // it via `display`.
-                        retain(v);
-                        set_reg(regs, fbase, *dst, v);
+                        let passed = stringify_passthrough(v);
+                        set_reg(regs, fbase, *dst, passed);
                         pc += 1;
                     }
                     Op::BuildString { dst, parts } => {
-                        // One pass, one output allocation (P-VMT-STR). Size the buffer from the
-                        // literal segments (known up front); holes grow it as they render. Each hole
-                        // register holds an already-`Stringify`-ed value (a `Display` object was
-                        // dispatched to `to_string` by the preceding `Stringify`), so `display` here
-                        // never pushes a frame — the whole build stays within this one op. Holes are
-                        // read by value (`Value` is `Copy`); their registers keep ownership and are
-                        // released at frame teardown, exactly as the old fold's temporaries were.
-                        let cap: usize = parts
-                            .iter()
-                            .map(|p| match p {
-                                StrPart::Literal(k) => match &chunk.consts[*k as usize] {
-                                    Const::Str(s) => s.len(),
-                                    _ => 0,
-                                },
-                                StrPart::Hole(_) => 0,
-                            })
-                            .sum();
-                        let mut out = noeta_value::CompactString::with_capacity(cap);
-                        for part in parts.iter() {
-                            match part {
-                                StrPart::Literal(k) => {
-                                    if let Const::Str(s) = &chunk.consts[*k as usize] {
-                                        out.push_str(s);
-                                    }
-                                }
-                                StrPart::Hole(r) => {
-                                    // Render directly into the buffer — no per-hole `display()` clone.
-                                    regs[fbase + *r as usize].display_into(&mut out);
-                                }
-                            }
-                        }
-                        // Move the finished buffer into the heap string — no second copy.
-                        set_reg(regs, fbase, *dst, Value::from_string(out));
+                        let built = build_string(parts, &chunk.consts, regs, fbase);
+                        set_reg(regs, fbase, *dst, built);
                         pc += 1;
                     }
                     Op::Raise { idx } => {
@@ -3957,18 +3874,18 @@ impl<'m> Vm<'m> {
 /// operation itself, dominates. Arities are tiny (the stdlib tops out at three), so up to
 /// [`ArgBuf::INLINE`] arguments live on the dispatch stack frame; a wider call (none exists in
 /// the stdlib today) falls back to the heap rather than imposing a hidden arity cap.
-enum ArgBuf {
+pub(crate) enum ArgBuf {
     Inline([Value; ArgBuf::INLINE], usize),
     Heap(Vec<Value>),
 }
 
 impl ArgBuf {
-    const INLINE: usize = 8;
+    pub(crate) const INLINE: usize = 8;
 
     /// Copy the argument registers out of the frame window. The registers keep ownership
     /// (arguments are borrowed by every consumer), exactly as the `Vec` collect did.
     #[inline]
-    fn collect(args: &[Reg], regs: &[Value], base: usize) -> Self {
+    pub(crate) fn collect(args: &[Reg], regs: &[Value], base: usize) -> Self {
         if args.len() <= Self::INLINE {
             let mut buf = [Value::unit(); Self::INLINE];
             for (slot, r) in buf.iter_mut().zip(args) {
@@ -3981,7 +3898,7 @@ impl ArgBuf {
     }
 
     #[inline]
-    fn as_slice(&self) -> &[Value] {
+    pub(crate) fn as_slice(&self) -> &[Value] {
         match self {
             ArgBuf::Inline(buf, n) => &buf[..*n],
             ArgBuf::Heap(v) => v,
@@ -4074,6 +3991,120 @@ pub(crate) fn reserve_window(regs: &mut Vec<Value>, n: usize) -> usize {
 // any register write. The residual duplication in `jit_run_leaf_op` — the map/string `Op::Index`
 // cases and `Op::LoadField` (interpreter-side inline cache, measured not-profitable for tier 1 in
 // J6) — stays at its call sites with the divergence documented there.
+//
+// Not every shared leaf path is a free function here: where the op's happy path already needs the
+// VM (`Op::CallMethod`'s map routes need `release_value` for a displaced value, and the diagnostic
+// builders for their error cases), the ONE implementation is the existing `impl Vm` method — the
+// interpreter arm and the leaf-op helper both call `Vm::map_update_in_place` /
+// `Vm::call_builtin_method` unchanged. Same rule, wider seam: one behavior, one implementation,
+// two callers.
+
+/// `Op::Stringify`'s happy path: nothing dispatches, so the value passes through unchanged —
+/// retained for its destination, because the consuming `Echo`/`BuildString` renders it with
+/// `display`. The `Display` dispatch (a user object/enum with a `to_string` method) is the
+/// caller's precondition: the interpreter tries it first, the JIT bails on **any** object/enum
+/// receiver (a conservative superset — an object without `to_string` merely re-runs in tier 0).
+#[inline(always)]
+pub(crate) fn stringify_passthrough(v: Value) -> Value {
+    retain(v);
+    v
+}
+
+/// `Op::BuildString`'s whole computation — one pass, one output allocation (P-VMT-STR), no
+/// failure path. The buffer is sized from the literal segments (known up front); holes grow it as
+/// they render *into* it (no per-hole `display()` clone). Each hole register holds an
+/// already-`Stringify`-ed value, so `display_into` never needs to dispatch — the whole build stays
+/// within this one op. Holes are read by value (`Value` is `Copy`); their registers keep ownership.
+#[inline(always)]
+pub(crate) fn build_string(
+    parts: &[StrPart],
+    consts: &[Const],
+    regs: &[Value],
+    base: usize,
+) -> Value {
+    let cap: usize = parts
+        .iter()
+        .map(|p| match p {
+            StrPart::Literal(k) => match &consts[*k as usize] {
+                Const::Str(s) => s.len(),
+                _ => 0,
+            },
+            StrPart::Hole(_) => 0,
+        })
+        .sum();
+    let mut out = noeta_value::CompactString::with_capacity(cap);
+    for part in parts.iter() {
+        match part {
+            StrPart::Literal(k) => {
+                if let Const::Str(s) = &consts[*k as usize] {
+                    out.push_str(s);
+                }
+            }
+            StrPart::Hole(r) => regs[base + *r as usize].display_into(&mut out),
+        }
+    }
+    // Move the finished buffer into the heap string — no second copy.
+    Value::from_string(out)
+}
+
+/// `Op::ConcatInPlace`'s whole computation — no failure path. `l` is the **consumed** left operand:
+/// the caller has already cleared its register *without* releasing (a direct overwrite, not
+/// `set_reg`), so the refcount tests below still count the accumulator's reference and the single
+/// owner transfers into the result — which also makes a `dst == lhs` store safe.
+///
+/// Sole-owner accumulators mutate in place (a flat packed list extends its word buffer, a boxed
+/// list its backing buffer, a string its byte buffer), which is what makes `s = s ~ x` / `xs = xs ~
+/// ys` in a loop O(n) instead of O(n²). Every aliased case copies, preserving immutable semantics.
+#[inline(always)]
+pub(crate) fn concat_in_place(l: Value, r: Value) -> Value {
+    if l.is_list() && r.is_list() {
+        if l.is_packed_list()
+            && r.is_packed_list()
+            && l.is_uniquely_owned()
+            && l.packed_extend_in_place(r)
+        {
+            // Sole owner, both flat, same layout: append `rhs`'s words to `lhs`'s buffer in place
+            // (P-PACK 2.6). The single reference moves into the result.
+            l
+        } else if !l.is_packed_list() && !r.is_packed_list() && l.is_uniquely_owned() {
+            // Sole owner, both boxed: extend the backing buffer in place (O(1) amortized). The
+            // single reference moves from `lhs` into the result.
+            l.list_extend(r);
+            l
+        } else if let Some(flat) = l.packed_concat(r) {
+            // Aliased but both flat (same layout): copy the word buffers, then drop the consumed
+            // accumulator reference — stays flat without mutating the alias.
+            release(l);
+            flat
+        } else {
+            // A mixed packed/boxed pairing (or differing layouts): copy, preserving immutable
+            // semantics. Demote each operand to an owned boxed list, retain each element into the
+            // new list, release the demotions, then drop the accumulator's consumed reference.
+            let lb = l.realize_list();
+            let rb = r.realize_list();
+            let mut items = lb.list_items().unwrap();
+            items.extend(rb.list_items().unwrap());
+            for &item in &items {
+                item.inc_ref();
+            }
+            lb.release();
+            rb.release();
+            release(l);
+            Value::list(items)
+        }
+    } else if l.is_string() && l.is_uniquely_owned() {
+        // Sole owner of a string accumulator: append `rhs`'s display form to its buffer in place
+        // (amortized O(1)), mirroring the list path — the single reference moves into the result.
+        l.str_push_in_place(&r.display());
+        l
+    } else {
+        // Aliased accumulator or non-string lhs: display concatenation into a fresh string
+        // (preserves immutable semantics), identical to `Op::Binary`'s `~`.
+        let s = Value::string(&format!("{}{}", l.display(), r.display()));
+        release(l);
+        s
+    }
+}
 
 /// `Op::MakeRange`'s happy path: int bounds → the materialized element list (refcount 1).
 /// `None` = non-int bounds (the interpreter raises TypeMismatch; the JIT bails). `..=` shifts
