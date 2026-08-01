@@ -190,6 +190,30 @@ pub const MAGIC: &[u8; 4] = b"NOEB";
 /// tail desynchronises rather than failing cleanly.
 pub const FORMAT_VERSION: u8 = 17;
 
+/// The SHA-256 of one canonical [`Module`]'s postcard encoding — the *other* half of
+/// [`FORMAT_VERSION`], and the thing that makes the changelog above enforceable.
+///
+/// Every paragraph up there was written after the fact by someone who noticed. One of them says so
+/// out loud: `28e5d724b fix(bundle): bump the container format — the mask changed the Module
+/// layout` is a `fix(` commit, because the bump was forgotten in the change that needed it. Nothing
+/// connected the two halves, and the round-trip tests structurally cannot: they encode and decode
+/// with the same build, so a layout change is invisible to them.
+///
+/// `crates/noeta-bundle/tests/module_layout_digest.rs` builds a `Module` from struct literals with
+/// **every field named** and no `..Default::default()` anywhere in the reachable graph, encodes it,
+/// and compares the hash to this constant. That gives two guards for one artifact: adding a field
+/// anywhere reachable from `Module` — `Chunk`, `Shape`, `reflect::TypeInfo`, `TypeRecipe`, any of
+/// them — stops *compiling* at that one site, and reordering two same-typed fields or changing a
+/// field's type moves the bytes and so this digest. The second is the one a golden `.noeb` compared
+/// by re-encoding would miss: postcard is positional, so swapping two `u32`s round-trips clean.
+///
+/// **Both must move together.** A digest updated without a `FORMAT_VERSION` bump re-greens the test
+/// and leaves every previously-written artifact silently mis-decodable, which is the failure this
+/// pair exists to prevent. The test's message says so; this doc says so; the changelog paragraph
+/// you are about to write is the third place.
+pub const MODULE_LAYOUT_DIGEST: &str =
+    "207cec749b62207a6ea89947d1143e4e3030ad6ee484ac9a96df36ef9b4cdefd";
+
 /// The runtime version stamped into and checked against artifacts — the building crate's
 /// package version. Any release that changes the serialized [`Module`] layout bumps this, so a
 /// mismatch is the signal to rebuild the bundle.

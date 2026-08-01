@@ -84,6 +84,12 @@ mod store;
 #[cfg(test)]
 mod test_temp;
 
+/// The `noeta.lock` field census (audit row 12b): every field that reaches the lockfile classified
+/// `RoundTrip` / `WriteOnly` / `Unwritten`, checked against both the declarations and a real
+/// write→read. Test-only.
+#[cfg(test)]
+mod lock_census;
+
 /// The git **authorship** helpers backing the committer signal (`noeta update`/`add`) — re-exported so
 /// front-ends reach them without the rest of the git-fetch internals (which keep `Store` private).
 pub use git::{Authorship, authorship, commit_web_url, repo_web_url};
