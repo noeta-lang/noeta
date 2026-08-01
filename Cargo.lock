@@ -2438,6 +2438,7 @@ name = "noeta-builtins"
 version = "0.2.3"
 dependencies = [
  "noeta-ast",
+ "noeta-lexer",
  "noeta-span",
 ]
 
@@ -2478,6 +2479,7 @@ dependencies = [
  "criterion",
  "insta",
  "noeta-ast",
+ "noeta-builtins",
  "noeta-diagnostics",
  "noeta-edition",
  "noeta-ext-abi",
@@ -2739,6 +2741,7 @@ version = "0.2.3"
 dependencies = [
  "include_dir",
  "noeta-ast",
+ "noeta-builtins",
  "noeta-check",
  "noeta-compiler",
  "noeta-db",
@@ -2754,6 +2757,7 @@ dependencies = [
  "noeta-test-temp",
  "noeta-types",
  "salsa",
+ "serde_json",
 ]
 
 [[package]]

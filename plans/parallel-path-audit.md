@@ -285,6 +285,18 @@ Finally, `entry_tail` is called with an `EntryCall` the extension command declar
 
 **Chokepoint.** A Rust test that reads `TokenKind`, `BuiltinTy` and `PRELUDE_NAMES` and greps the two grammar files plus the two IDE lists, asserting coverage in both directions with an explicit allow-list for deliberate omissions. The grammars are plain JSON and JS; `noeta-diagnostics` already greps its own source for the `ALL` gate, so the technique is in-house. **Size: ~120 lines, plus the four one-line vocabulary fixes.**
 
+**CLOSED (2026-08-01).** Seven lists became one census and two generated files.
+
+The lexer now *enumerates* its own vocabulary: `TokenKind::RESERVED_WORD_KINDS` lists the words as token **variants** (a renamed variant is a compile error, which a `&str` list can never be), `ReservedWord::all()` derives spelling and role from the token itself, and the lexer's own suite scrapes this file's `#[token("…")]` attributes and asserts the list is exactly them, both ways. The three Rust restatements stopped being lists: `highlight::is_keyword` is `kind.reserved_word().is_some()`, `completion::KEYWORDS` is the census filtered by role, and the test-only `RESERVED_WORDS` census is gone — what is left is the two *closed* role families (`true`/`false`, the thirteen intrinsics) pinned by name, because `reserved_role`'s wildcard default would otherwise file a mis-roled word as a keyword in silence.
+
+The prelude was the same shape one crate over: `noeta-check` kept its own copy of the six value names because it deliberately does not link the lexer and so cannot ask which prelude names are keywords. `PRELUDE` is now `(name, PreludeForm)` and the checker filters it; `noeta-builtins` takes the lexer as a **dev**-dependency to check the form against the token table without putting it on anyone's build graph.
+
+The two grammars are **generated**, not censused — `crates/noeta-ide/tests/editor_vocabulary.rs` renders each managed region from the three censuses, checks it by default, and rewrites it under `NOETA_UPDATE_EDITOR_VOCABULARY=1`. The colour family a keyword belongs to is the one thing no census knows, so it is decided once there, for both grammars, and a new keyword fails **by name** until somebody decides. Where generation genuinely cannot reach it censuses instead, which is the audit's original sizing applied only where it is the right tool: a keyword in `grammar.js` lives inside the production rule that uses it, so its word tokens are checked for coverage both ways with a reason per deliberate omission.
+
+Six drifts fixed, all of them now named by a failing gate: `Any` missing from both grammars; `Enum`/`Struct`/`Class` missing from TextMate's; TextMate's prelude rule matching `signal|computed|effect|len` and never matching `Ok`/`Err`/`some`/`none`; the thirteen intrinsics with no tree-sitter rule at all. Plus two this row had not found — **`type` was not a token of the tree-sitter grammar in any form**, so an `impl` carrying an associated binding failed to parse outright (fixed with an `associated_type` rule and two corpus cases), and the two grammars disagreed about `await`.
+
+And one more disarmed gate, the same shape as row 1's: `npm test` in `editors/tree-sitter-noeta` **passed on its first run and failed on its second**. The per-project overlay harness builds a grammar also called `noeta`, and the tree-sitter CLI caches compiled parsers as `$TREE_SITTER_LIBDIR/<name>.so` keyed by name alone — so the overlaid parser replaced the static one and the *static* corpus then ran against the *overlaid* build. The harness now uses a private `TREE_SITTER_LIBDIR`. Confirmed live afterwards: `tree-sitter test` runs 28 corpus cases and then validates `queries/*.scm` against the compiled grammar (a bogus node type or a bogus token both fail it), and `test:project` runs 6 more.
+
 ---
 
 ## 12. On-disk artifacts whose two halves are hand-maintained
@@ -383,7 +395,7 @@ Recording these so the next audit does not re-walk them.
 
 1. `pm.rs:1239` (row 4a) and the `noeta-pm` CI features (row 4b) — ~15 lines, and the only place where the current behaviour is *silence about a security check*.
 2. `native.stderr` in the wasm oracle (row 1) — one line, and it makes the rest of row 1 fail loudly instead of needing to be argued.
-3. The three live one-liners: the cache-key gaps (row 2), `package_uses` at `impact.rs:517` and `execute.rs:399` (row 3), the four stale vocabulary entries (row 11).
+3. The three live one-liners: the cache-key gaps (row 2), `package_uses` at `impact.rs:517` and `execute.rs:399` (row 3), ~~the four stale vocabulary entries (row 11)~~ — row 11 is closed.
 4. Rows 1, 10 as one pass, then row 3's constructor and row 5 as the next — they are four views of "the tail, the install and the options are copied", and the chokepoints overlap.
 5. Rows 6, 7, 8, 9, 12 as separate small arcs.
 
@@ -417,10 +429,10 @@ lexer's own tokens).
    agent that fixed all four of its bugs: `..Default::default()` converts "I did
    not consider this field" into "I chose the default", and the compiler cannot
    tell them apart. The census merged here is a stopgap and says so.
-4. **A grammar census** (~120 lines, Rust, reading the JSON/JS as text) for the
-   TextMate and tree-sitter keyword/intrinsic lists. Four drifts are known and
-   were deliberately NOT hand-edited: hand-editing the files whose problem is
-   silent hand-editing is the wrong trade.
+4. ~~A grammar census for the TextMate and tree-sitter keyword/intrinsic
+   lists.~~ **Closed 2026-08-01** — and closed by *generation* rather than a
+   census, which is why the four known drifts could be fixed without
+   hand-editing the files whose problem is silent hand-editing. See row 11.
 5. Rows 5–12 as originally written, plus: `MANIFEST.sha256` is still
    self-referential (the new CI step catches a local edit, not an un-propagated
    copy), and `list_advisories` classifies a malformed feed body as `Network`, so

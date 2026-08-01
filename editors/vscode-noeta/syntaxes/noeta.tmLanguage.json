@@ -308,11 +308,11 @@
       "patterns": [
         {
           "name": "keyword.control.flow.noeta",
-          "match": "\\b(if|then|else|for|while|break|continue|in|match|return|yield|await)\\b"
+          "match": "\\b(return|yield|if|then|else|for|while|break|continue|in|match)\\b"
         },
         {
           "name": "keyword.control.concurrency.noeta",
-          "match": "\\b(async|concurrent|spawn|isolate)\\b"
+          "match": "\\b(async|await|concurrent|spawn|isolate)\\b"
         },
         {
           "name": "keyword.other.echo.noeta",
@@ -320,7 +320,7 @@
         },
         {
           "name": "keyword.control.import.noeta",
-          "match": "\\b(use|namespace|pub)\\b"
+          "match": "\\b(namespace|use|pub)\\b"
         },
         {
           "name": "keyword.operator.word.noeta",
@@ -328,7 +328,7 @@
         },
         {
           "name": "keyword.other.reflection.noeta",
-          "match": "\\b(type_of|type_name|attributes_of|roles_of|fields_of|traits_of|params_of|returns_of|field_specs_of|variants_of|construct|from_bytes|invoke)\\b"
+          "match": "\\b(attributes_of|type_of|type_name|fields_of|traits_of|from_bytes|roles_of|params_of|returns_of|invoke|field_specs_of|variants_of|construct)\\b"
         }
       ]
     },
@@ -353,7 +353,7 @@
         },
         {
           "name": "storage.type.noeta",
-          "match": "\\b(fn|mut|struct|class|enum|type|impl|trait|destruct)\\b"
+          "match": "\\b(mut|fn|enum|struct|type|class|destruct|impl|trait)\\b"
         }
       ]
     },
@@ -363,18 +363,18 @@
       "patterns": [
         {
           "name": "support.type.primitive.noeta",
-          "match": "\\b(int|float|f32|f64|number|bool|string|bytes|void|unit|dyn|never|i8|i16|i32|i64|u8|u16|u32|u64)\\b"
+          "match": "\\b(int|float|f32|f64|bool|string|bytes|void|unit|dyn|Any|never|number|i8|i16|i32|i64|u8|u16|u32|u64)\\b"
         },
         {
           "name": "support.type.builtin.noeta",
-          "match": "\\b(List|Map|Set|Option|Result)\\b"
+          "match": "\\b(List|Set|Map|Option|Result|Enum|Struct|Class)\\b"
         }
       ]
     },
 
     "builtin-functions": {
       "name": "support.function.builtin.noeta",
-      "match": "\\b(signal|computed|effect|assert|panic|len)\\s*(?=\\()"
+      "match": "\\b(Ok|Err|some|none|panic|assert)\\s*(?=\\()"
     },
 
     "types": {

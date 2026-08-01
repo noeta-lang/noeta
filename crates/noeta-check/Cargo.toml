@@ -21,6 +21,11 @@ noeta-ext-abi = { workspace = true }
 # arguments it may take. The checker and the loader both need those answers, so they live in the
 # crate both already depend on rather than being written twice here and there.
 noeta-parser = { workspace = true }
+# The prelude census (`PRELUDE`): the always-resolvable names the unknown-name gate must never
+# flag. Derived from the one list rather than restated here — this crate used to keep its own copy
+# of the value half. A leaf crate (span + ast, both already linked); notably NOT the lexer, which
+# this crate still does not link.
+noeta-builtins = { workspace = true }
 
 [dev-dependencies]
 # Tests and the corpus bench are their own assembling driver: they seed the process-default
