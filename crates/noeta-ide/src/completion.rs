@@ -1473,7 +1473,10 @@ mod tests {
             .iter()
             .filter(|w| w.role == ReservedRole::Reflection)
             .count();
-        assert!(reflection_census > 0, "the reflection family has emptied out");
+        assert!(
+            reflection_census > 0,
+            "the reflection family has emptied out"
+        );
 
         // The two offers partition the census: no word is in both, none is in neither.
         assert_eq!(
@@ -1536,7 +1539,10 @@ mod tests {
                 .iter()
                 .find(|c| c.label == intrinsic.name)
                 .expect("just found above");
-            assert_eq!(candidate.detail.as_deref(), Some(intrinsic.signature().as_str()));
+            assert_eq!(
+                candidate.detail.as_deref(),
+                Some(intrinsic.signature().as_str())
+            );
         }
         // Not offered as keywords — the kind is what a client sorts and icons by.
         let kws = labels_of(&cands, CandidateKind::Keyword);

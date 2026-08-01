@@ -399,11 +399,7 @@ pub fn from_intrinsic(
         .map(noeta_builtins::ReflectParam::render)
         .collect();
     SignatureData {
-        label: format!(
-            "{} — {}",
-            intrinsic.render_form(form),
-            intrinsic.summary
-        ),
+        label: format!("{} — {}", intrinsic.render_form(form), intrinsic.summary),
         active_param: active.min(parameters.len().saturating_sub(1)),
         parameters,
     }

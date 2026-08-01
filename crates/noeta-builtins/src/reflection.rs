@@ -431,7 +431,10 @@ mod tests {
         for intrinsic in REFLECTION_INTRINSICS {
             let role = ReservedWord::from_spelling(intrinsic.name)
                 .unwrap_or_else(|| {
-                    panic!("`{}` has an entry but the lexer does not reserve it", intrinsic.name)
+                    panic!(
+                        "`{}` has an entry but the lexer does not reserve it",
+                        intrinsic.name
+                    )
                 })
                 .role;
             assert_eq!(
@@ -457,9 +460,21 @@ mod tests {
     #[test]
     fn every_entry_renders() {
         for intrinsic in REFLECTION_INTRINSICS {
-            assert!(!intrinsic.forms.is_empty(), "{} has no form", intrinsic.name);
-            assert!(!intrinsic.result.is_empty(), "{} has no result", intrinsic.name);
-            assert!(!intrinsic.summary.is_empty(), "{} has no summary", intrinsic.name);
+            assert!(
+                !intrinsic.forms.is_empty(),
+                "{} has no form",
+                intrinsic.name
+            );
+            assert!(
+                !intrinsic.result.is_empty(),
+                "{} has no result",
+                intrinsic.name
+            );
+            assert!(
+                !intrinsic.summary.is_empty(),
+                "{} has no summary",
+                intrinsic.name
+            );
             let rendered = intrinsic.signature();
             assert!(rendered.starts_with(intrinsic.name), "{rendered}");
             assert!(rendered.ends_with(intrinsic.result), "{rendered}");

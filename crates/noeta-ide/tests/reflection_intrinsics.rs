@@ -112,12 +112,11 @@ fn expected_result(intrinsic: &ReflectionIntrinsic, form: &ReflectForm) -> Strin
             .result
             .split_inclusive(|c: char| !c.is_ascii_alphanumeric() && c != '_')
             .map(|chunk| {
-                let (word, tail) = match chunk
-                    .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-                {
-                    Some(i) => chunk.split_at(i),
-                    None => (chunk, ""),
-                };
+                let (word, tail) =
+                    match chunk.find(|c: char| !c.is_ascii_alphanumeric() && c != '_') {
+                        Some(i) => chunk.split_at(i),
+                        None => (chunk, ""),
+                    };
                 if word == param {
                     format!("{}{tail}", type_argument(intrinsic.name))
                 } else {
@@ -141,7 +140,9 @@ fn probe_source(expr: &str) -> String {
 /// The `(line, character)` of `needle`'s first occurrence in `text` — the buffers are ASCII, so the
 /// character index is the byte index within the line.
 fn position_of(text: &str, needle: &str) -> Position {
-    let offset = text.find(needle).unwrap_or_else(|| panic!("`{needle}` not in the buffer"));
+    let offset = text
+        .find(needle)
+        .unwrap_or_else(|| panic!("`{needle}` not in the buffer"));
     let line = text[..offset].matches('\n').count();
     let line_start = text[..offset].rfind('\n').map_or(0, |i| i + 1);
     Position {
@@ -203,9 +204,10 @@ fn the_call_surfaces_are_the_parsers_own() {
     for intrinsic in REFLECTION_INTRINSICS {
         for turbofish in [false, true] {
             for arity in 0..=4usize {
-                let claimed = intrinsic.forms.iter().any(|f| {
-                    f.turbofish.is_some() == turbofish && f.params.len() == arity
-                });
+                let claimed = intrinsic
+                    .forms
+                    .iter()
+                    .any(|f| f.turbofish.is_some() == turbofish && f.params.len() == arity);
                 let head = match turbofish {
                     true => format!("{}::<{}>", intrinsic.name, type_argument(intrinsic.name)),
                     false => intrinsic.name.to_string(),
@@ -214,7 +216,8 @@ fn the_call_surfaces_are_the_parsers_own() {
                 let expr = format!("{head}({args})");
                 let parses = parses_as_written(&expr);
                 assert_eq!(
-                    parses, claimed,
+                    parses,
+                    claimed,
                     "`{expr}`: the grammar {} it, and REFLECTION_INTRINSICS {} a form of that \
                      shape — add or remove the entry's form to match",
                     if parses { "accepts" } else { "rejects" },
