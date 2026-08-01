@@ -12,22 +12,42 @@ with the fixture scope key (seed `0x42 × 32`, public key in `scope-key-response
 transparency-log / advisory signatures with the two fixed **test** keys from the Worker's
 `vitest.config.ts` — so both suites can verify real crypto against these exact bytes.
 
+One file breaks the naming convention because it pins something other than a shape, and belongs to
+the same set for the same reason — both repos must agree on it, byte for byte:
+
+- `semver-vectors.json` is **generated** — `cargo run -p noeta-pm --example semver_vectors` — and
+  holds every answer `semver::VersionReq::matches` gives over a case list. `noeta audit` calls that
+  function; `noeta-registry/src/semver.ts` is a hand port of it. Both suites replay the file, so
+  "the port agrees with the crate" is a test rather than a claim in a comment. Never edit it by
+  hand; add cases to the example.
+
 ## The sync rule (read this before editing)
 
 **This directory is the canonical copy.** The registry repo carries a **verbatim copy** at
-`noeta-registry/test/fixtures/wire/`. Two repos cannot share a file, so the copy is pinned by
-`MANIFEST.sha256` (the same manifest lives in both copies) and each repo's test suite recomputes
-the hashes — a stale or diverged copy fails that repo's tests.
+`noeta-registry/test/fixtures/wire/`. Two repos cannot share a file, so the copy is pinned twice:
+
+1. `MANIFEST.sha256` hashes every fixture, and each repo's suite recomputes it — that catches a
+   local hand-edit.
+2. The manifest's own SHA-256 is a **source constant on each side**, outside the copied directory:
+   `noeta_pm::registry::WIRE_MANIFEST_SHA256` here, `WIRE_MANIFEST_SHA256` in the registry's
+   `src/wire-manifest.ts`. This is the one that catches a *stale copy*. Without it the pin is
+   self-referential — the manifest is copied along with the fixtures, so each repo hashes its own
+   fixtures against its own manifest and "regenerated here, never copied there" is green on both
+   sides while the protocol diverges.
 
 To change the protocol:
 
 1. Edit the fixtures **here**, and update both implementations + `PROTOCOL.md`.
-2. Regenerate the manifest: `cd crates/noeta-pm/test_data/wire && sha256sum *.json > MANIFEST.sha256`.
-3. Copy everything verbatim to the registry repo:
-   `cp crates/noeta-pm/test_data/wire/* …/noeta-registry/test/fixtures/wire/`.
-4. Run both suites: `cargo test -p noeta-pm --all-features` and (registry repo) `pnpm test`.
+2. Run **`scripts/sync-wire-fixtures.sh`**. It regenerates the manifest, rewrites both stamps, and
+   mirrors the directory into the registry checkout (`$NOETA_REGISTRY_DIR`, else the sibling clone).
+   That one command replaces the three hand steps this list used to spell out — including the one
+   nothing could catch.
+3. Run both suites: `cargo test -p noeta-pm --all-features` and (registry repo) `pnpm test`.
+4. Commit in **both** repos. The registry's changes do not appear in this repo's `git status`.
 
-`MANIFEST.sha256` is `sha256sum` output — `sha256sum -c MANIFEST.sha256` also works from a shell.
+`scripts/sync-wire-fixtures.sh --check` is the read-only assertion (CI and `scripts/gate.sh` run
+it). `MANIFEST.sha256` is plain `sha256sum` output, so `sha256sum -c MANIFEST.sha256` still works
+from a shell.
 
 ## Conventions the fixtures pin
 
