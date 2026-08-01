@@ -41,6 +41,7 @@ pub mod highlight;
 pub mod impact;
 pub mod inlay;
 pub mod offsets;
+pub mod project;
 pub mod resolve;
 pub mod sample;
 pub mod semtokens;
@@ -63,6 +64,9 @@ use crate::workspace::{
 };
 
 pub use offsets::{Encoding, LineIndex, Position, Range};
+pub use project::{
+    ProjectCheck, ProjectCheckOptions, ProjectDiagnostic, check_sources, project_check,
+};
 pub use semtokens::SemanticToken;
 pub use symbols::{DocumentSymbol, SymbolKind};
 
@@ -473,11 +477,13 @@ impl DocumentStore {
     /// **Every shape of the file, not just the one that ships.** A `@test { … }` block is stripped
     /// before the checker sees it, so the shipping-shape query alone showed the file as clean while
     /// `noeta check` failed on it — the compiler/editor disagreement this whole surface exists to
-    /// end. So the document is also reported against each code tier its own blocks name
-    /// ([`tier_diagnostics_from`](noeta_db::tier_diagnostics_from)), one tier per pass, deduplicated
-    /// against the shipping shape so a fault outside a tier block still underlines once.
+    /// end. The shapes come from [`noeta_db::entry_diagnostics`], the *same* function
+    /// [`project_check`](crate::project_check) calls for every entry of a project and the MCP
+    /// `check` tool calls for the file it was handed. This surface differs from those in **which
+    /// entries** it sweeps — one open document, not a project — and in nothing else, which is what
+    /// keeps "is this file clean" one answer with three callers.
     ///
-    /// That sweep is deliberately *not* folded into `linked_checked_ide_from`: hover, inlay hints
+    /// The sweep is deliberately *not* folded into `linked_checked_ide_from`: hover, inlay hints
     /// and completion read that query on the same keystroke and must pay nothing for it. A file with
     /// no code-tier block — nearly every file — adds one AST walk and no check at all; see the
     /// query-family note in `noeta-db` for the rest of the narrowing.
@@ -500,25 +506,15 @@ impl DocumentStore {
                 doc.text(db).clone(),
             ));
         }
+        // EVERY shape of the document, through the one function `noeta check` and the MCP tool
+        // call: the shipping shape (IDE-flavored, so it rides the memo hover and inlay hints
+        // already paid for) and then one pass per code tier this file's own blocks name, folded on
+        // the shared dedup key so one fault stays one squiggle however many shapes reported it.
         let mut diags: Vec<noeta_diagnostics::Diagnostic> =
-            noeta_db::linked_checked_ide_from(db, cache.workspace, doc)
-                .diagnostics
-                .iter()
+            noeta_db::entry_diagnostics(db, cache.workspace, doc, &[], noeta_db::CheckFlavor::Ide)
+                .into_iter()
                 .filter(|d| d.span.source == source)
-                .cloned()
                 .collect();
-        // The non-shipping shapes — what `noeta test`/`noeta bench` will compile. Deduplicated on
-        // the same key the CLI and the MCP tool fold their per-tier passes into, so one fault stays
-        // one squiggle no matter how many shapes reported it.
-        let mut seen: std::collections::HashSet<_> =
-            diags.iter().map(noeta_db::diagnostic_key).collect();
-        for diagnostic in noeta_db::tier_diagnostics_from(db, cache.workspace, doc) {
-            if diagnostic.span.source == source
-                && seen.insert(noeta_db::diagnostic_key(&diagnostic))
-            {
-                diags.push(diagnostic);
-            }
-        }
         // A hard dependency-resolution failure (audit-5 #7): surface the real cause — a trust
         // refusal, a version conflict, a broken manifest — at the top of the file instead of
         // leaving only the spurious unknown-import errors it causes downstream. Reported under
@@ -2578,6 +2574,13 @@ impl DocumentStore {
     /// explorer lists and its gutter run-arrows anchor to. Discovery is the runner's own
     /// [`activate_tiers`](noeta_check::activate_tiers) walk over the merged program, filtered to
     /// this file, so the explorer and `noeta test` can never disagree about what a test is.
+    ///
+    /// Which tiers to activate comes from the entry's **own declared blocks**
+    /// ([`entry_code_tiers`](noeta_db::entry_code_tiers)), not from the literal name `test`: a
+    /// package is free to bind the test runner to a name of its own (`[tiers] spec = "std:test"`),
+    /// and a hardcoded `"test"` activated nothing at all in such a package — an empty test explorer
+    /// for a file full of tests. Activation still runs one tier per pass, as everywhere else; a
+    /// block whose tier is *not* the test runner's simply contributes no `tests`.
     pub fn tests(&self, uri: &str, encoding: Encoding) -> Option<Vec<TestItem>> {
         let (cache, entry, source) = self.workspace_of(uri)?;
         let db = &self.db;
@@ -2587,15 +2590,18 @@ impl DocumentStore {
             Ok(program) => program,
             Err(_) => &entry_ast.0.program,
         };
-        let activated = noeta_check::activate_tiers(
-            program,
-            &["test"],
-            &noeta_db::workspace_provenance(db, cache.workspace),
-        );
+        let provenance = noeta_db::workspace_provenance(db, cache.workspace);
+        let mut tests: Vec<noeta_check::TierFn> = Vec::new();
+        let mut seen: std::collections::HashSet<noeta_span::Span> =
+            std::collections::HashSet::new();
+        for tier in noeta_db::entry_code_tiers(db, cache.workspace, entry) {
+            let activated = noeta_check::activate_tiers(program, &[tier.as_str()], &provenance);
+            tests.extend(activated.tests.into_iter().filter(|t| seen.insert(t.span)));
+        }
+        tests.sort_by_key(|t| (t.span.source, t.span.start));
         let index = LineIndex::new(self.source_text(cache, source)?);
         Some(
-            activated
-                .tests
+            tests
                 .iter()
                 .filter(|t| t.span.source == source)
                 .map(|t| TestItem {

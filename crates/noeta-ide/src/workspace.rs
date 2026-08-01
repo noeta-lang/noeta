@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use noeta_db::{DepModule, LangDatabase, SourceProgram, Workspace, WorkspaceUses};
+use noeta_db::{DepModule, LangDatabase, NativeRoots, SourceProgram, Workspace, WorkspaceUses};
 use noeta_span::SourceId;
 use salsa::Setter as _;
 
@@ -158,6 +158,13 @@ pub(crate) struct WorkspaceCache {
     /// succeeded or failed for a routine reason (no manifest, network/IO), where the quiet
     /// degrade is the right behavior.
     pub(crate) dep_error: Option<noeta_pm::PmError>,
+    /// The **routine** failure that was quietly degraded past — a network or filesystem hiccup that
+    /// left the workspace with no dependencies. The editor deliberately ignores it (a flaky network
+    /// must not nag while you type, and the unresolved imports it causes are already underlined),
+    /// but a **batch** project check must not answer "no dependencies" as though it had resolved
+    /// them, so [`crate::project_check`] reports it. `None` when the resolve succeeded or when there
+    /// was no manifest to resolve (a lone file has no dependencies to lose).
+    pub(crate) dep_degraded: Option<noeta_pm::PmError>,
     /// The native packages this directory's program needs whose extensions **this editor process
     /// does not carry** ([`noeta_pm::composed::uncomposed`]). Non-empty means the workspace cannot
     /// be linked at all — the namespaces those packages register are absent — so every file in it
@@ -300,6 +307,12 @@ pub(crate) struct ResolvedDeps {
     pub(crate) package_uses: noeta_span::PackageUses,
     /// A hard resolution failure worth the user's attention (see [`WorkspaceCache::dep_error`]).
     pub(crate) error: Option<noeta_pm::PmError>,
+    /// A routine failure that was degraded past (see [`WorkspaceCache::dep_degraded`]).
+    pub(crate) degraded: Option<noeta_pm::PmError>,
+    /// The declared native-package roots of a **successfully resolved** graph — what makes the link
+    /// strict about foreign import roots (see [`Workspace::native_roots`]). `None` whenever the
+    /// resolve did not happen or did not succeed, which is what keeps a scratch buffer lenient.
+    pub(crate) native_roots: NativeRoots,
     /// The native packages this process cannot link (see [`WorkspaceCache::uncomposed`]) — read off
     /// the same resolve that produced the modules, so it costs a vector scan.
     pub(crate) uncomposed: Vec<String>,
@@ -409,12 +422,17 @@ pub(crate) fn sync(
                 .workspace
                 .set_package_uses(db)
                 .to(WorkspaceUses(deps.package_uses.clone()));
+            cache
+                .workspace
+                .set_native_roots(db)
+                .to(deps.native_roots.clone());
             cache.source_uris = uris;
             cache.programs = programs;
             cache.dep_uris = deps.uris;
             cache.dep_programs = deps.programs;
             cache.dep_modules = deps.modules;
             cache.dep_error = deps.error;
+            cache.dep_degraded = deps.degraded;
             cache.uncomposed = deps.uncomposed;
             cache.tombstones = pool;
             cache
@@ -425,6 +443,7 @@ pub(crate) fn sync(
                 programs.clone(),
                 deps.modules.clone(),
                 WorkspaceUses(deps.package_uses.clone()),
+                deps.native_roots.clone(),
             ),
             source_uris: uris,
             programs,
@@ -432,6 +451,7 @@ pub(crate) fn sync(
             dep_programs: deps.programs,
             dep_modules: deps.modules,
             dep_error: deps.error,
+            dep_degraded: deps.degraded,
             uncomposed: deps.uncomposed,
             tombstones: pool,
         },
@@ -478,13 +498,16 @@ fn resolve_dep_modules(
         Ok(graph) => graph,
         // Not a project / environmental: the quiet degrade IS the right behavior (formatting and
         // single-file analysis must not nag about a flaky network).
-        Err(
-            noeta_pm::PmError::NoManifest(_)
-            | noeta_pm::PmError::Network(_)
-            | noeta_pm::PmError::Io(_),
-        ) => {
+        Err(err @ (noeta_pm::PmError::Network(_) | noeta_pm::PmError::Io(_))) => {
             // Degraded to no dependencies: any previously-resolved dep sources are now orphaned —
-            // hand them back for reclamation (finding a).
+            // hand them back for reclamation (finding a). The cause is recorded but not raised:
+            // only a batch check reads it (see `ResolvedDeps::degraded`).
+            deps.degraded = Some(err);
+            deps.deleted = previous.map(|c| c.dep_programs.clone()).unwrap_or_default();
+            return deps;
+        }
+        // Not a project at all: nothing was lost, so there is nothing to report to anyone.
+        Err(noeta_pm::PmError::NoManifest(_)) => {
             deps.deleted = previous.map(|c| c.dep_programs.clone()).unwrap_or_default();
             return deps;
         }
@@ -500,6 +523,9 @@ fn resolve_dep_modules(
     // directory into a program, so no editor feature can bypass it.
     deps.uncomposed = noeta_pm::composed::uncomposed(&graph.native_crates);
     let packages = graph.packages;
+    // The graph resolved, so every legitimate import root is known: this workspace links strictly,
+    // exactly as `noeta check` does.
+    deps.native_roots = NativeRoots(Some(noeta_loader::native_dep_roots(&packages)));
     // The per-package `@name` tables travel onto the workspace even when the package has no linkable
     // modules (the root's own `[tiers]` bindings live here), so carry them before the module walk.
     deps.package_uses = graph.package_uses;
@@ -733,6 +759,7 @@ mod tests {
                 programs.clone(),
                 dep_modules.clone(),
                 WorkspaceUses::default(),
+                NativeRoots::default(),
             ),
             source_uris: members.iter().map(|u| (*u).to_string()).collect(),
             programs,
@@ -741,6 +768,7 @@ mod tests {
             dep_modules,
             tombstones: Vec::new(),
             dep_error: None,
+            dep_degraded: None,
             uncomposed: Vec::new(),
         }
     }

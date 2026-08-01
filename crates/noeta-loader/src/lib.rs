@@ -1177,7 +1177,11 @@ fn dep_module_path(deps: &[DepPackage], flat: usize) -> &ModulePath {
 
 /// A resolved dependency graph is complete knowledge: the always-legitimate non-std roots are the
 /// declared native-package keys (their members live in the composed toolchain, not the link pool).
-fn native_dep_roots(deps: &[DepPackage]) -> Vec<String> {
+///
+/// Public because a *resolved* graph is what makes a link strict, and the salsa workspace resolves
+/// one too (`noeta_db::Workspace::native_roots`): the editor and `noeta check` must adjudicate a
+/// foreign import root the same way or the editor shows a file clean that the CLI rejects.
+pub fn native_dep_roots(deps: &[DepPackage]) -> Vec<String> {
     deps.iter()
         .filter(|d| d.native)
         .map(|d| d.key().to_string())
@@ -1706,6 +1710,22 @@ fn retarget(mut diagnostic: Diagnostic, id: SourceId) -> Diagnostic {
         label.span.source = id;
     }
     diagnostic
+}
+
+/// [`retarget`] over a whole batch, in place — **public because the salsa lexer needs it too**.
+///
+/// `noeta-db`'s `tokens_in` handed the lexer's diagnostics straight on, so every lex error in a
+/// workspace carried `SourceId::FIRST` whatever file it came from: in the editor a per-document
+/// view filtering on `span.source` dropped it entirely, and a whole-project render put it on
+/// whichever file happened to be id 0. The batch loader has always done this on the line above; the
+/// query path simply never did.
+pub fn retarget_diagnostics(diagnostics: &mut [Diagnostic], id: SourceId) {
+    for diagnostic in diagnostics.iter_mut() {
+        diagnostic.span.source = id;
+        for label in &mut diagnostic.labels {
+            label.span.source = id;
+        }
+    }
 }
 
 /// One parsed file and the module path its **location** derives — the input to
