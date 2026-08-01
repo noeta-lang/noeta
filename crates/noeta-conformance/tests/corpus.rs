@@ -230,8 +230,13 @@ fn jit_differential_tiers_agree() {
 /// **When this fails high** ("the corpus now compiles more"), raise it — that is the ratchet
 /// tightening. **When it fails low**, do not lower it: find out which prototypes stopped compiling.
 /// `cargo run -p noeta-conformance --features jit -- --jit-differential` prints the live number.
+///
+/// `jit`-gated with the three oracles that assert it: without Cranelift nothing compiles a prototype
+/// to native code, so the number does not exist to ratchet.
+#[cfg(feature = "jit")]
 const NATIVE_PROTO_FLOOR: usize = 2550; // measured 2633 on 2026-08-01
 
+#[cfg(feature = "jit")]
 fn assert_native_proto_ratchet(native_protos: usize, human: &str) {
     assert!(
         native_protos >= NATIVE_PROTO_FLOOR,
