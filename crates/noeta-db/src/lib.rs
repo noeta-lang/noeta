@@ -352,11 +352,14 @@ fn ext_verbatim_tier_names(db: &dyn salsa::Database) -> Vec<String> {
 #[salsa::tracked(returns(ref))]
 pub fn tokens(db: &dyn salsa::Database, src: SourceProgram) -> Tokens {
     let source = source_of(db, src);
-    Tokens(noeta_lexer::lex_in(
+    let mut lexed = noeta_lexer::lex_in(
         &source,
         edition_of(db, src),
         &noeta_lexer::TextTiers::default(),
-    ))
+    );
+    // Stamped for the same reason as in [`tokens_in`]: a lex error must name the file it is in.
+    noeta_loader::retarget_diagnostics(&mut lexed.diagnostics, source.id());
+    Tokens(lexed)
 }
 
 /// Parse the token stream into an AST. Depends on [`tokens`].
@@ -369,12 +372,11 @@ pub fn ast(db: &dyn salsa::Database, src: SourceProgram) -> Ast {
     let mut names = toks.0.text_tier_decls.clone();
     names.extend(ext_verbatim_tier_names(db));
     let set = noeta_lexer::TextTiers::with(names);
-    Ast(noeta_parser::parse_in(
-        &source,
-        &toks.0.tokens,
-        edition_of(db, src),
-        &set,
-    ))
+    let mut parsed = noeta_parser::parse_in(&source, &toks.0.tokens, edition_of(db, src), &set);
+    // Stamped for the same reason as the lex diagnostics: a few parser spans carry the default
+    // entry id (see [`tokens`]).
+    noeta_loader::retarget_diagnostics(&mut parsed.diagnostics, source.id());
+    Ast(parsed)
 }
 
 /// Type-check the AST and return the checker's diagnostics. Depends on [`ast`]. The pipeline's
@@ -493,7 +495,29 @@ pub struct Workspace {
     /// exactly as the loader does under `noeta run`/`noeta check`.
     #[returns(ref)]
     pub package_uses: WorkspaceUses,
+    /// **Whether the caller resolved a complete dependency graph**, and if so the declared
+    /// native-package roots it found (`noeta_loader::native_dep_roots`).
+    ///
+    /// This is what makes a link *strict*. `Some(roots)` means every legitimate import root is
+    /// known — the std extensions plus these — so a `use` resolving to nothing is `E0019`. `None`
+    /// means the caller has no graph (a scratch buffer, a synthetic program) and the link stays
+    /// lenient about foreign roots, flagging only a missing intra-project module.
+    ///
+    /// It is a workspace field rather than a per-call flag because it is a fact about *this
+    /// program's* resolution, not about who is asking. `noeta check` was strict and the editor was
+    /// lenient, so a file whose `use` named nothing at all showed clean in the editor and failed on
+    /// the command line — the same class of disagreement as an unswept tier body, one layer down.
+    #[returns(ref)]
+    pub native_roots: NativeRoots,
 }
+
+/// [`Workspace::native_roots`] as a salsa input field: `None` = no resolved graph (lenient),
+/// `Some(roots)` = a complete one. Newtype for the same [`salsa::Update`]/orphan reason as
+/// [`WorkspaceUses`]; backdating, because it changes only when the dependency graph does.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NativeRoots(pub Option<Vec<String>>);
+
+backdating_update!(NativeRoots);
 
 /// The workspace's conventional entry: its **first member**. What the classic single-entry query
 /// surface ([`linked`], [`linked_checked`], …) links from — every [`workspace`]/
@@ -570,7 +594,13 @@ pub fn workspace(
         .collect();
     // No manifest on this deps-free path → no `[tiers]`/`[directives]` bindings, so no renamed text
     // tiers (a member's own `@tier(…, text)` is discovered by the per-file token scan regardless).
-    Workspace::new(db, members, Vec::new(), WorkspaceUses::default())
+    Workspace::new(
+        db,
+        members,
+        Vec::new(),
+        WorkspaceUses::default(),
+        NativeRoots::default(),
+    )
 }
 
 /// Build a [`Workspace`] that also links **dependency packages** (package-manager P2.1c): the entry
@@ -613,7 +643,13 @@ pub fn workspace_with_deps(
             ));
         }
     }
-    Workspace::new(db, members, dep_inputs, WorkspaceUses(package_uses.clone()))
+    Workspace::new(
+        db,
+        members,
+        dep_inputs,
+        WorkspaceUses(package_uses.clone()),
+        NativeRoots::default(),
+    )
 }
 
 /// Reclaim the resident content of a [`SourceProgram`] whose file was **deleted** from a workspace
@@ -640,10 +676,13 @@ pub fn workspace_with_deps(
 pub fn release_source(db: &mut LangDatabase, ws: Workspace, src: SourceProgram) {
     use salsa::Setter as _;
     // 0. The tier shapes this source had *before* it was emptied. Their memos
-    //    (`tier_activated_from`/`tier_checked_from`) are keyed on the tier name, so once the text is
+    //    (`shape_activated_from`/`shape_checked_from`) are keyed on the shape, so once the text is
     //    gone `entry_code_tiers` comes back empty and nothing would name them again — they would stay
     //    resident at full size (a whole activated `Program`) forever. Captured here, recomputed in
     //    step 2 over the emptied source. Empty for nearly every file, which costs nothing.
+    //    (Only the swept single-tier shapes: an editor session asks for no other, and a caller that
+    //    supplies an explicit multi-tier selection — `noeta check --tier a --tier b` — runs on a
+    //    throwaway database it drops whole.)
     let tiers: Vec<String> = entry_code_tiers(db, ws, src).clone();
     // 1. Free the source text and name (the unbounded per-file allocations the input holds).
     src.set_name(db).to(String::new());
@@ -657,9 +696,9 @@ pub fn release_source(db: &mut LangDatabase, ws: Workspace, src: SourceProgram) 
     let _ = linked_bytecode_from(db, ws, src); // recomputes linked_checked_from + linked_from + Module
     let _ = entry_code_tiers(db, ws, src); // now empty
     for tier in tiers {
-        // Recomputes tier_activated_from + tier_checked_from over the emptied source, overwriting
+        // Recomputes shape_activated_from + shape_checked_from over the emptied source, overwriting
         // each fat memo (an activated `Program` and its `Checked`) with an empty-program equivalent.
-        let _ = tier_checked_from(db, ws, src, tier);
+        let _ = shape_checked_from(db, ws, src, vec![tier]);
     }
 }
 
@@ -809,7 +848,11 @@ fn workspace_text_tiers_union(db: &dyn salsa::Database, ws: Workspace) -> noeta_
 pub fn tokens_in(db: &dyn salsa::Database, ws: Workspace, src: SourceProgram) -> Tokens {
     let set = source_text_tiers(db, ws, src);
     let source = source_of(db, src);
-    Tokens(noeta_lexer::lex_in(&source, edition_of(db, src), &set))
+    let mut lexed = noeta_lexer::lex_in(&source, edition_of(db, src), &set);
+    // A handful of lexer spans are built with the default entry id, so a lex error in any member
+    // but the first pointed at the wrong file (see `noeta_loader::retarget_diagnostics`).
+    noeta_loader::retarget_diagnostics(&mut lexed.diagnostics, source.id());
+    Tokens(lexed)
 }
 
 /// Workspace-aware parse over [`tokens_in`] — the [`linked`] pipeline's counterpart of [`ast`].
@@ -821,12 +864,10 @@ pub fn ast_in(db: &dyn salsa::Database, ws: Workspace, src: SourceProgram) -> As
     // source with — so a nested tier body inside a `${…}` hole re-lexes correctly (an inline
     // `@html { … }` loop), matching the loader's parser set.
     let set = workspace_text_tiers_union(db, ws);
-    Ast(noeta_parser::parse_in(
-        &source,
-        &toks.0.tokens,
-        edition_of(db, src),
-        &set,
-    ))
+    let mut parsed = noeta_parser::parse_in(&source, &toks.0.tokens, edition_of(db, src), &set);
+    // Stamped for the same reason as in [`tokens_in`]: a parse error must name the file it is in.
+    noeta_loader::retarget_diagnostics(&mut parsed.diagnostics, source.id());
+    Ast(parsed)
 }
 
 /// Resolve and merge the workspace **from `entry`** (any member): the entry's imports against the
@@ -999,22 +1040,20 @@ pub fn linked_from(db: &dyn salsa::Database, ws: Workspace, entry: SourceProgram
     }
     let entry_program: &Program = entry_owned.as_ref().unwrap_or(&entry_ast.0.program);
 
-    let result = if dep_programs.is_empty() {
-        noeta_loader::link_parsed(&entry_source, entry_program, &module_programs, &broken_refs)
-    } else {
-        let dep_refs: Vec<&Program> = dep_programs.iter().collect();
-        // The IDE query links from re-rooted dep *sources* but does not carry the resolved native
-        // package set, so it stays lenient on foreign roots (`None`) — it flags a missing
-        // intra-project module, never an import it cannot fully see (module-namespaces).
-        noeta_loader::link_parsed_with_deps(
-            &entry_source,
-            entry_program,
-            &module_programs,
-            &dep_refs,
-            &broken_refs,
-            None,
-        )
-    };
+    let dep_refs: Vec<&Program> = dep_programs.iter().collect();
+    // Strictness comes from the workspace, not from who is asking: a workspace built by a caller
+    // that resolved the dependency graph carries the native roots and adjudicates a foreign import
+    // root exactly as `noeta check` does; one built without a graph (a scratch buffer, a synthetic
+    // program) stays lenient and flags only a missing intra-project module. See
+    // [`Workspace::native_roots`] for why that used to differ per surface.
+    let result = noeta_loader::link_parsed_with_deps(
+        &entry_source,
+        entry_program,
+        &module_programs,
+        &dep_refs,
+        &broken_refs,
+        ws.native_roots(db).0.as_deref(),
+    );
     let noeta_loader::Linkage {
         mut program,
         source_maps,
@@ -1186,12 +1225,28 @@ pub fn linked(db: &dyn salsa::Database, ws: Workspace) -> &LinkedProgram {
 /// "unknown", it reads as *no package binds any `@name`*, and every `@directive` in the project then
 /// reports a spurious `E0036`. One query, so there is nothing to half-ask for.
 pub fn workspace_provenance(db: &dyn salsa::Database, ws: Workspace) -> noeta_check::Provenance {
-    noeta_check::Provenance::of(
+    workspace_provenance_memo(db, ws).0.clone()
+}
+
+/// [`workspace_provenance`] as a **memo**. It is a fold over every member and dependency module —
+/// two maps built by hand plus a clone of the `@name` tables — and it is read by every query that
+/// checks or activates anything, so recomputing it per query execution made a project sweep rebuild
+/// it once per entry per shape. Backdating: adding a file changes it, editing one does not.
+#[salsa::tracked(returns(ref))]
+fn workspace_provenance_memo(db: &dyn salsa::Database, ws: Workspace) -> WorkspaceProvenance {
+    WorkspaceProvenance(noeta_check::Provenance::of(
         workspace_editions(db, ws),
         workspace_packages(db, ws),
         ws.package_uses(db).0.clone(),
-    )
+    ))
 }
+
+/// [`noeta_check::Provenance`] as a memoized query output. A newtype for the same
+/// [`salsa::Update`]/orphan reason as [`WorkspaceUses`].
+#[derive(Debug, Clone, PartialEq)]
+struct WorkspaceProvenance(noeta_check::Provenance);
+
+backdating_update!(WorkspaceProvenance);
 
 /// The per-source [`EditionMap`](noeta_lexer::EditionMap) for a whole workspace — every member
 /// source (and dependency module) under its own package's edition, keyed by `SourceId`. The salsa
@@ -1299,18 +1354,22 @@ pub fn linked_checked_ide_from(
 // `linked_checked_from` checks exactly ONE shape of a file: the stripped, shipping one. A
 // `@test { … }` block is dropped before the checker sees it, so its body's type error is
 // invisible to every consumer of that query — which is why a green `noeta check` could be
-// followed by a `noeta test` that does not compile. The CLI closed that for `noeta check` by
-// checking each entry once as it ships and then once per code tier its own blocks name; these
-// queries are the same sweep as a salsa graph, so the MCP `check` tool and the editor agree with
-// the CLI instead of each re-deriving it.
+// followed by a `noeta test` that does not compile.
+//
+// `entry_diagnostics` is the whole answer to **"which shapes of one entry"**, and every surface
+// reads it: `noeta check`'s project walk, the editor's per-document publish, the MCP `check` tool.
+// The three differ in *which entries* they sweep and in nothing else — a surface that grew its own
+// shape list is precisely the drift this family exists to make impossible.
 //
 // ```text
-//   linked_from(ws, entry) ─┬─► linked_checked_from / linked_checked_ide_from   (shipping shape)
-//                           │
-//                           ├─► entry_code_tiers(ws, entry) -> Vec<String>      (backdates)
-//                           │
-//                           └─► tier_activated_from(ws, entry, tier)  (backdates)
-//                                        └─► tier_checked_from(ws, entry, tier)
+//   entry_diagnostics(ws, entry, selection, flavor)
+//        └─ entry_shapes(ws, entry, selection)
+//             ├─► []      ─► linked_checked_from / linked_checked_ide_from   (shipping shape)
+//             │              (which one is `flavor` — see `CheckFlavor`)
+//             └─► [tier]  ─► shape_activated_from(ws, entry, shape)  (backdates)
+//                                └─► shape_checked_from(ws, entry, shape)
+//
+//   entry_code_tiers(ws, entry) -> Vec<String>   (backdates; what `entry_shapes` sweeps)
 // ```
 //
 // Four properties make this affordable on the editor's per-keystroke path:
@@ -1321,14 +1380,16 @@ pub fn linked_checked_ide_from(
 //    already-linked program and comes back empty for nearly every file, and no check runs.
 // 3. **A tier pass records no `expr_types`.** It exists to produce diagnostics, so it runs the
 //    cheaper compile-flavored options, not the IDE-flavored ones.
-// 4. **`tier_activated_from` backdates.** Activation for tier T *drops* every other tier's block,
+// 4. **`shape_activated_from` backdates.** Activation for tier T *drops* every other tier's block,
 //    so an edit inside a `@bench` body leaves the `@test`-activated program byte-identical and
 //    salsa skips the `@test` check entirely; so does an edit that does not change the AST at all.
 //    Activation re-runs (its input, `linked_from`, never backdates) but that is one AST walk, and
 //    the expensive half — the type check — is what gets skipped.
 //
-// One tier per pass, never a joint one: no build compiles `@test` and `@bench` together, and a
-// joint pass would invent collisions between two blocks' same-named helpers.
+// One tier per *swept* pass, never a joint one: no build compiles `@test` and `@bench` together,
+// and a joint pass would invent collisions between two blocks' same-named helpers. A multi-name
+// shape reaches `shape_activated_from` only from a caller that explicitly asked for the union
+// (`noeta check --tier a --tier b`, `--target`), which is a build that really does exist.
 
 /// One dev tier's **activated** shape of an entry: the program that tier's blocks build, with every
 /// other tier's block dropped — plus activation's own diagnostics (`E0036` for an unknown tier).
@@ -1367,22 +1428,25 @@ pub fn entry_code_tiers(
     }
 }
 
-/// The entry's program with **exactly `tier`** live — the shape `noeta test`/`noeta bench`/
-/// `noeta <tier>` compiles. See the module-level note on why this is its own (backdating) query.
+/// The entry's program with **exactly the tiers in `shape`** live — the shape `noeta test`/
+/// `noeta bench`/`noeta <tier>` (one name) or an explicit `--tier a --tier b`/`--target` selection
+/// (several) compiles. See the module-level note on why this is its own (backdating) query.
+///
+/// The sweep only ever asks for one name at a time; a multi-name shape comes from a caller that
+/// *chose* the union, which is the one case where blocks of two tiers legitimately compile
+/// together.
 #[salsa::tracked(returns(ref))]
-pub fn tier_activated_from(
+pub fn shape_activated_from(
     db: &dyn salsa::Database,
     ws: Workspace,
     entry: SourceProgram,
-    tier: String,
+    shape: Vec<String>,
 ) -> TierActivated {
     match &linked_from(db, ws, entry).program {
         Ok(program) => {
-            let activated = noeta_check::activate_tiers(
-                program,
-                &[tier.as_str()],
-                &workspace_provenance(db, ws),
-            );
+            let names: Vec<&str> = shape.iter().map(String::as_str).collect();
+            let activated =
+                noeta_check::activate_tiers(program, &names, &workspace_provenance(db, ws));
             TierActivated {
                 program: Some(activated.program),
                 diagnostics: activated.diagnostics,
@@ -1395,21 +1459,21 @@ pub fn tier_activated_from(
     }
 }
 
-/// Type-check the entry as `tier` builds it — the tier-aware analogue of [`linked_checked_from`],
-/// memoized per `(ws, entry, tier)`.
+/// Type-check the entry as `shape` builds it — the tier-aware analogue of [`linked_checked_from`],
+/// memoized per `(ws, entry, shape)`.
 ///
 /// The `SourceId`s survive activation, so the workspace's edition and package maps stay valid over
 /// the derived program (that is why [`workspace_editions`]/[`workspace_packages`] are public).
 /// Deliberately *not* the IDE flavor: this feeds diagnostics only, and an `expr_types` index over a
 /// shape the user is not editing would be paid for on every keystroke and read by nothing.
 #[salsa::tracked(returns(ref))]
-pub fn tier_checked_from(
+pub fn shape_checked_from(
     db: &dyn salsa::Database,
     ws: Workspace,
     entry: SourceProgram,
-    tier: String,
+    shape: Vec<String>,
 ) -> Checked {
-    let activated = tier_activated_from(db, ws, entry, tier);
+    let activated = shape_activated_from(db, ws, entry, shape);
     let Some(program) = &activated.program else {
         return Checked {
             diagnostics: Vec::new(),
@@ -1431,25 +1495,79 @@ pub fn tier_checked_from(
     checked
 }
 
-/// The diagnostics of every **non-shipping** shape of `entry`: one pass per code tier its own
-/// blocks name, deduplicated across tiers by `(source, span, code)` so a fault outside any tier
-/// block — which every pass reports — appears once.
+/// Which flavor of the **shipping** check a caller needs — the one axis on which the surfaces may
+/// legitimately differ, because it changes what is *recorded*, never what is *reported*.
 ///
-/// A plain function, not a tracked query: it is a loop over already-memoized per-tier results, and
-/// a memo of its own would only add a second copy of the diagnostics that can never backdate.
-/// Empty (and free) for an entry that declares no code-tier block.
+/// [`Ide`](CheckFlavor::Ide) additionally builds the span→type index hover, inlay hints and
+/// completion read, so the editor's diagnostics ride the memo those features already paid for
+/// instead of running a second check on the same keystroke. The diagnostics are identical either
+/// way (`with_expr_types` only adds recording), which is what makes this a flavor rather than a
+/// second answer to the question.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckFlavor {
+    /// The compile-path check: diagnostics only, no `expr_types` index.
+    Compile,
+    /// The editor's check: additionally records `expr_types`.
+    Ide,
+}
+
+/// **Every shape of `entry` that a "is this clean?" answer must cover**, in check order — the one
+/// place that question is answered, for `noeta check`, the LSP and the MCP `check` tool alike.
 ///
-/// The caller merges these with the shipping shape's own diagnostics, deduplicating on
-/// [`diagnostic_key`] — the shipping pass reports the same faults outside the tier blocks.
-pub fn tier_diagnostics_from(
+/// The first shape is the caller's explicit selection (`--tier`/`--target`; empty for the stripped
+/// shape that ships, which is what the editor and the agent ask for). After it, one shape per code
+/// tier the entry's *own* blocks name that the selection did not already make live — the exact
+/// shape `noeta test`/`noeta bench`/`noeta <tier>` compiles.
+///
+/// One tier per swept shape, never a joint one: no build compiles `@test` and `@bench` together,
+/// and a joint pass would invent collisions between two blocks' same-named helpers.
+pub fn entry_shapes(
     db: &dyn salsa::Database,
     ws: Workspace,
     entry: SourceProgram,
+    selection: &[String],
+) -> Vec<Vec<String>> {
+    let mut shapes = vec![selection.to_vec()];
+    for tier in entry_code_tiers(db, ws, entry) {
+        if !selection.iter().any(|s| s == tier) {
+            shapes.push(vec![tier.clone()]);
+        }
+    }
+    shapes
+}
+
+/// **The diagnostics of every shape of `entry`** ([`entry_shapes`]), deduplicated on
+/// [`diagnostic_key`] so a fault outside any tier block — which every shape reports — appears once.
+///
+/// This is the whole of "which shapes of one entry", and it is deliberately the *only* answer:
+/// `noeta check`, the editor and the MCP tool differ in **which entries** they sweep (a project
+/// walk, the open document, the requested file) and in nothing else. A surface that grew its own
+/// shape list is exactly the drift this function exists to make impossible.
+///
+/// A plain function, not a tracked query: it is a loop over already-memoized per-shape results, and
+/// a memo of its own would only add a second copy of the diagnostics that can never backdate. An
+/// entry with no code-tier block — nearly every file — pays for one AST walk and no extra check.
+pub fn entry_diagnostics(
+    db: &dyn salsa::Database,
+    ws: Workspace,
+    entry: SourceProgram,
+    selection: &[String],
+    flavor: CheckFlavor,
 ) -> Vec<Diagnostic> {
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
-    for tier in entry_code_tiers(db, ws, entry) {
-        for diagnostic in &tier_checked_from(db, ws, entry, tier.clone()).diagnostics {
+    for shape in entry_shapes(db, ws, entry, selection) {
+        // An empty shape is the shipping program itself — no activation to run, and the flavored
+        // query the caller's other features already read.
+        let diagnostics = if shape.is_empty() {
+            match flavor {
+                CheckFlavor::Compile => &linked_checked_from(db, ws, entry).diagnostics,
+                CheckFlavor::Ide => &linked_checked_ide_from(db, ws, entry).diagnostics,
+            }
+        } else {
+            &shape_checked_from(db, ws, entry, shape).diagnostics
+        };
+        for diagnostic in diagnostics {
             if seen.insert(diagnostic_key(diagnostic)) {
                 out.push(diagnostic.clone());
             }
@@ -1464,16 +1582,6 @@ pub fn tier_diagnostics_from(
 /// times one fault is reported.
 pub fn diagnostic_key(d: &Diagnostic) -> (SourceId, u32, u32, &'static str) {
     (d.span.source, d.span.start, d.span.end, d.code.code())
-}
-
-/// Classic single-entry tier sweep: [`tier_diagnostics_from`] the workspace's first member.
-pub fn tier_diagnostics(db: &dyn salsa::Database, ws: Workspace) -> Vec<Diagnostic> {
-    tier_diagnostics_from(db, ws, workspace_entry(db, ws))
-}
-
-/// Classic single-entry code tiers: [`entry_code_tiers`] of the workspace's first member.
-pub fn workspace_code_tiers(db: &dyn salsa::Database, ws: Workspace) -> &Vec<String> {
-    entry_code_tiers(db, ws, workspace_entry(db, ws))
 }
 
 /// Classic single-entry ide check: [`linked_checked_ide_from`] the workspace's first member.
@@ -1543,7 +1651,13 @@ mod tests {
         let mut db = LangDatabase::default();
         let source = Source::new(SourceId::FIRST, "test.noe", "echo 1;\n");
         let src = source_program(&db, &source, noeta_lexer::Edition::DEFAULT);
-        let ws = Workspace::new(&db, vec![src], Vec::new(), WorkspaceUses::default());
+        let ws = Workspace::new(
+            &db,
+            vec![src],
+            Vec::new(),
+            WorkspaceUses::default(),
+            NativeRoots::default(),
+        );
         seed_ext_env(&mut db, vec!["blueprint".to_string()]);
         assert!(
             workspace_text_tiers(&db, ws).contains(&"blueprint".to_string()),
@@ -1641,7 +1755,7 @@ mod tests {
     /// one must not re-check the other.
     ///
     /// This is the property that makes the tier sweep affordable on the editor's per-keystroke path.
-    /// `tier_activated_from` *drops* every tier but its own, so an edit inside `@bench` leaves the
+    /// `shape_activated_from` *drops* every tier but its own, so an edit inside `@bench` leaves the
     /// `@test`-activated program identical, its backdating `Update` reports "unchanged", and salsa
     /// skips the `@test` type check — the expensive half. Activation itself re-runs (its input,
     /// `linked_from`, never backdates), which is one AST walk.
@@ -1659,12 +1773,18 @@ mod tests {
         };
         let source = Source::new(SourceId::FIRST, "tiered.noe", program("add(1, 2)"));
         let src = source_program(&db, &source, noeta_lexer::Edition::DEFAULT);
-        let ws = Workspace::new(&db, vec![src], Vec::new(), WorkspaceUses::default());
+        let ws = Workspace::new(
+            &db,
+            vec![src],
+            Vec::new(),
+            WorkspaceUses::default(),
+            NativeRoots::default(),
+        );
 
         assert_eq!(entry_code_tiers(&db, ws, src), &["test", "bench"]);
-        assert!(tier_diagnostics_from(&db, ws, src).is_empty());
-        // Both shapes were checked the first time round.
-        assert_eq!(executions(&log, "tier_checked_from"), 2);
+        assert!(entry_diagnostics(&db, ws, src, &[], CheckFlavor::Compile).is_empty());
+        // Both tier shapes were checked the first time round (the shipping shape is its own query).
+        assert_eq!(executions(&log, "shape_checked_from"), 2);
 
         // An edit *inside the `@bench` block only*.
         log.lock().unwrap().clear();
@@ -1672,14 +1792,14 @@ mod tests {
             use salsa::Setter as _;
             src.set_text(&mut db).to(program("add(2, 3)"));
         }
-        assert!(tier_diagnostics_from(&db, ws, src).is_empty());
+        assert!(entry_diagnostics(&db, ws, src, &[], CheckFlavor::Compile).is_empty());
         assert_eq!(
-            executions(&log, "tier_activated_from"),
+            executions(&log, "shape_activated_from"),
             2,
             "activation re-runs for both shapes — it is one AST walk"
         );
         assert_eq!(
-            executions(&log, "tier_checked_from"),
+            executions(&log, "shape_checked_from"),
             1,
             "only the `@bench` shape changed, so only it may be re-checked"
         );
@@ -1694,18 +1814,24 @@ mod tests {
         let mut db = logging_db(std::sync::Arc::clone(&log));
         let source = Source::new(SourceId::FIRST, "plain.noe", "echo 1 + 2\n");
         let src = source_program(&db, &source, noeta_lexer::Edition::DEFAULT);
-        let ws = Workspace::new(&db, vec![src], Vec::new(), WorkspaceUses::default());
+        let ws = Workspace::new(
+            &db,
+            vec![src],
+            Vec::new(),
+            WorkspaceUses::default(),
+            NativeRoots::default(),
+        );
 
-        assert!(tier_diagnostics_from(&db, ws, src).is_empty());
-        assert_eq!(executions(&log, "tier_checked_from"), 0);
+        assert!(entry_diagnostics(&db, ws, src, &[], CheckFlavor::Compile).is_empty());
+        assert_eq!(executions(&log, "shape_checked_from"), 0);
         log.lock().unwrap().clear();
         {
             use salsa::Setter as _;
             src.set_text(&mut db).to("echo 2 + 3\n".to_string());
         }
-        assert!(tier_diagnostics_from(&db, ws, src).is_empty());
+        assert!(entry_diagnostics(&db, ws, src, &[], CheckFlavor::Compile).is_empty());
         assert_eq!(
-            executions(&log, "tier_checked_from"),
+            executions(&log, "shape_checked_from"),
             0,
             "no code-tier block, no tier check"
         );
@@ -1723,13 +1849,19 @@ mod tests {
             "fn add(a: int, b: int): int { return a + b }\n\n@test {\n    fn adds(): void { n: int = \"lots\" }\n}\n",
         );
         let src = source_program(&db, &source, noeta_lexer::Edition::DEFAULT);
-        let ws = Workspace::new(&db, vec![src], Vec::new(), WorkspaceUses::default());
+        let ws = Workspace::new(
+            &db,
+            vec![src],
+            Vec::new(),
+            WorkspaceUses::default(),
+            NativeRoots::default(),
+        );
 
         assert!(
             linked_checked(&db, ws).diagnostics.is_empty(),
             "the shipping shape strips the block — that is the whole point"
         );
-        let swept = tier_diagnostics(&db, ws);
+        let swept = entry_diagnostics(&db, ws, src, &[], CheckFlavor::Compile);
         assert!(
             swept.iter().any(|d| d.code.code() == "E0007"),
             "the tier sweep must see it; got {swept:?}"
@@ -1920,6 +2052,7 @@ mod tests {
             vec![entry_src, a_src, b_src],
             Vec::new(),
             WorkspaceUses::default(),
+            NativeRoots::default(),
         );
 
         assert!(linked(&db, ws).program.is_ok());
@@ -1965,6 +2098,7 @@ mod tests {
             vec![main_src, a_src],
             Vec::new(),
             WorkspaceUses::default(),
+            NativeRoots::default(),
         );
 
         // Link from `main` (imports the sibling), then from `a` (a library module, no imports).

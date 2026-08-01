@@ -16,12 +16,29 @@
 //! superseded result is never delivered (audit-4 finding 9).
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use noeta_ide::{DocumentStore, Encoding, LineIndex, TOP_LEVEL, completion, inlay, semtokens};
 use tower_lsp_server::jsonrpc::{Error, ErrorCode, Result};
 use tower_lsp_server::ls_types::*;
 use tower_lsp_server::{Client, LanguageServer, LspService, Server};
+
+/// The **project roots** a client opened: its workspace folders, or (for a pre-folder client) its
+/// single root URI. `workspace/diagnostic` checks each of them; a client that opened one loose file
+/// and no folder reports none, and the pull comes back empty rather than sweeping the whole disk.
+fn workspace_roots(params: &InitializeParams) -> Vec<PathBuf> {
+    let folders = params.workspace_folders.iter().flatten().map(|f| &f.uri);
+    // `root_uri` is deprecated in favor of `workspace_folders`, and honored anyway: a client that
+    // sends only the old field still has a project, and refusing to look at it would leave that
+    // editor with no workspace diagnostics at all.
+    #[allow(deprecated)]
+    let legacy = params.root_uri.iter();
+    folders
+        .chain(legacy)
+        .filter_map(|uri| noeta_ide::uri_path(uri.as_str()))
+        .collect()
+}
 
 /// An engine position to its LSP wire form (same fields; distinct types keep the engine
 /// wire-protocol-free).
@@ -681,6 +698,9 @@ struct Backend {
     /// buffer is momentarily unparseable mid-edit so the inline types hold steady instead of
     /// flickering off and on with each keystroke (see [`Backend::inlay_hint`]).
     inlay_cache: Mutex<HashMap<String, Vec<InlayHint>>>,
+    /// The client's workspace folders, from `initialize` — what `workspace/diagnostic` checks. Empty
+    /// for a client that opened a single file with no folder, where there is no project to sweep.
+    roots: Mutex<Vec<PathBuf>>,
 }
 
 impl Backend {
@@ -691,6 +711,7 @@ impl Backend {
             // Overwritten during `initialize`; UTF-16 is the protocol default until then.
             encoding: Mutex::new(Encoding::Utf16),
             inlay_cache: Mutex::new(HashMap::new()),
+            roots: Mutex::new(Vec::new()),
         }
     }
 
@@ -957,6 +978,28 @@ impl Backend {
         true
     }
 
+    /// `textDocument/diagnostic` — the **pull** form of [`Self::publish`], for a client that asks
+    /// instead of being told. Same answer, same engine: one open document, every shape of it.
+    async fn document_report(&self, uri: Uri) -> Option<Vec<Diagnostic>> {
+        let uri_string = uri.as_str().to_string();
+        let (diags, text) = self
+            .read_latest(move |store| store.diagnostics(&uri_string))
+            .await??;
+        let encoding = self.encoding();
+        let index = LineIndex::new(&text);
+        Some(
+            diags
+                .iter()
+                .map(|diag| to_lsp_diagnostic(&index, &uri, diag, encoding))
+                .collect(),
+        )
+    }
+
+    /// The workspace folders `workspace/diagnostic` sweeps.
+    fn roots(&self) -> Vec<PathBuf> {
+        self.roots.lock().expect("roots lock poisoned").clone()
+    }
+
     /// Republish diagnostics for every open document. Editing one file can change what a sibling
     /// that imports it sees, so a change re-publishes the whole open set (bounded by the number of
     /// open documents). A sweep superseded mid-way stops: the newer mutation runs its own full
@@ -980,6 +1023,7 @@ impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
         let encoding = negotiate_encoding(&params);
         *self.encoding.lock().expect("encoding lock poisoned") = encoding;
+        *self.roots.lock().expect("roots lock poisoned") = workspace_roots(&params);
         let position_encoding = Some(match encoding {
             Encoding::Utf8 => PositionEncodingKind::UTF8,
             Encoding::Utf16 => PositionEncodingKind::UTF16,
@@ -998,6 +1042,22 @@ impl LanguageServer for Backend {
                     TextDocumentSyncKind::FULL,
                 )),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
+                // Pull diagnostics (LSP 3.17), *both* halves. `textDocument/diagnostic` answers for
+                // one open document off the incremental graph; `workspace/diagnostic` answers for
+                // the whole project through `noeta_ide::project_check` — the same function `noeta
+                // check` prints, so a file the editor has never opened is reported exactly as the
+                // command line reports it. `inter_file_dependencies` is true because editing one
+                // module changes what its importers see, which is what tells the client to re-pull
+                // the workspace rather than only the edited file. Push diagnostics stay on for
+                // clients that do not pull.
+                diagnostic_provider: Some(DiagnosticServerCapabilities::Options(
+                    DiagnosticOptions {
+                        identifier: Some("noeta".to_string()),
+                        inter_file_dependencies: true,
+                        workspace_diagnostics: true,
+                        work_done_progress_options: WorkDoneProgressOptions::default(),
+                    },
+                )),
                 // Inlay type hints (rust-analyzer style): inferred types after un-annotated
                 // binding names. Labels are complete at production — no resolve round-trip.
                 inlay_hint_provider: Some(OneOf::Left(true)),
@@ -1415,6 +1475,109 @@ impl LanguageServer for Backend {
         }))
     }
 
+    /// `textDocument/diagnostic`: the pull form of the per-document publish (LSP 3.17).
+    async fn diagnostic(
+        &self,
+        params: DocumentDiagnosticParams,
+    ) -> Result<DocumentDiagnosticReportResult> {
+        let items = self
+            .document_report(params.text_document.uri)
+            .await
+            .unwrap_or_default();
+        Ok(DocumentDiagnosticReportResult::Report(
+            DocumentDiagnosticReport::Full(RelatedFullDocumentDiagnosticReport {
+                related_documents: None,
+                full_document_diagnostic_report: FullDocumentDiagnosticReport {
+                    result_id: None,
+                    items,
+                },
+            }),
+        ))
+    }
+
+    /// `workspace/diagnostic`: **the whole project**, through the one function `noeta check` prints
+    /// and the MCP `check` tool serves.
+    ///
+    /// This is the entry set the editor was missing. Push diagnostics cover the open documents, so
+    /// a `@test` body's type error in a file nobody has opened — or a library module no entry
+    /// imports — was reported by the command line and by nothing the user could see. Every `.noe`
+    /// file under each workspace folder is now checked as its own entry, in every shape it can be
+    /// built in, with the unsaved buffers overlaid on the disk scan.
+    ///
+    /// Deliberately the *pull* form: a project sweep is a batch scan, and the client asks for it
+    /// when it wants it (on idle, on save) rather than on every keystroke. The per-keystroke path is
+    /// unchanged and still narrows to the edited document — the split is over which entries, never
+    /// over which shapes of one entry.
+    ///
+    /// A file with no diagnostics still reports an empty item, so a fault the user has just fixed
+    /// disappears from the problems panel instead of lingering.
+    async fn workspace_diagnostic(
+        &self,
+        _params: WorkspaceDiagnosticParams,
+    ) -> Result<WorkspaceDiagnosticReportResult> {
+        let roots = self.roots();
+        let encoding = self.encoding();
+        let Some(items) = self
+            .read_latest(move |store| {
+                let mut by_file: HashMap<String, Vec<Diagnostic>> = HashMap::new();
+                for root in &roots {
+                    let checked = store.project_check(root);
+                    for entry in &checked.diagnostics {
+                        let source = entry.sources.source(entry.diagnostic.span.source);
+                        // Compile-time-generated code has a display name, not a file — there is
+                        // nothing for the client to open, so it is left to the per-document view,
+                        // which re-blames it on the directive that produced it.
+                        if !Path::new(source.name()).is_absolute() {
+                            continue;
+                        }
+                        let index = LineIndex::new(source.text());
+                        let uri = format!("file://{}", source.name());
+                        let Ok(parsed) = uri.parse::<Uri>() else {
+                            continue;
+                        };
+                        by_file.entry(uri).or_default().push(to_lsp_diagnostic(
+                            &index,
+                            &parsed,
+                            &entry.diagnostic,
+                            encoding,
+                        ));
+                    }
+                    // A clean file must report an *empty* set, or the client keeps showing the
+                    // diagnostics it was last told about.
+                    for path in noeta_ide::project::noe_files(root) {
+                        by_file
+                            .entry(format!("file://{}", path.display()))
+                            .or_default();
+                    }
+                }
+                by_file
+            })
+            .await
+        else {
+            return Ok(WorkspaceDiagnosticReportResult::Report(
+                WorkspaceDiagnosticReport { items: Vec::new() },
+            ));
+        };
+        let items = items
+            .into_iter()
+            .filter_map(|(uri, items)| {
+                Some(WorkspaceDocumentDiagnosticReport::Full(
+                    WorkspaceFullDocumentDiagnosticReport {
+                        uri: uri.parse::<Uri>().ok()?,
+                        version: None,
+                        full_document_diagnostic_report: FullDocumentDiagnosticReport {
+                            result_id: None,
+                            items,
+                        },
+                    },
+                ))
+            })
+            .collect();
+        Ok(WorkspaceDiagnosticReportResult::Report(
+            WorkspaceDiagnosticReport { items },
+        ))
+    }
+
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let doc = params.text_document;
         {
@@ -1601,6 +1764,40 @@ mod tests {
     fn store() -> DocumentStore {
         noeta_stdlib::registry::default_seeded();
         DocumentStore::default()
+    }
+
+    /// The project pull sweeps the folders the client opened — including the one a pre-3.6 client
+    /// sends as the deprecated `root_uri`, which is the only project such an editor has.
+    #[test]
+    fn workspace_roots_come_from_the_folders_the_client_opened() {
+        let folders = InitializeParams {
+            workspace_folders: Some(vec![WorkspaceFolder {
+                uri: "file:///proj/app".parse().unwrap(),
+                name: "app".to_string(),
+            }]),
+            ..InitializeParams::default()
+        };
+        assert_eq!(
+            workspace_roots(&folders),
+            vec![PathBuf::from("/proj/app")],
+            "a folder is a project to sweep"
+        );
+
+        #[allow(deprecated)]
+        let legacy = InitializeParams {
+            root_uri: Some("file:///proj/legacy".parse().unwrap()),
+            ..InitializeParams::default()
+        };
+        assert_eq!(
+            workspace_roots(&legacy),
+            vec![PathBuf::from("/proj/legacy")],
+            "a client that only sends `root_uri` still has a project"
+        );
+
+        assert!(
+            workspace_roots(&InitializeParams::default()).is_empty(),
+            "one loose file and no folder is no project: the pull must not sweep the disk"
+        );
     }
 
     #[test]

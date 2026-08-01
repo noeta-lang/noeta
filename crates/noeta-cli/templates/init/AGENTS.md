@@ -42,7 +42,7 @@ The toolchain ships an MCP server — the same compiler queries the IDE uses, ex
 - `explain_diagnostic` — what an `E0xxx` code means, with programs that trigger it.
 
 **Understand this codebase**
-- `check` — type-check and get diagnostics (the compile feedback loop). Reads inside tier blocks like `noeta check` does; `tiers_checked` names which it covered.
+- `check` — type-check and get diagnostics (the compile feedback loop). Point it at a file or at the **project directory** and it answers exactly as `noeta check` does, reading inside tier blocks; `tiers_checked` names which it covered.
 - `type_at` — the inferred type at a position: the compiler's answer, not a guess.
 - `definition` / `references` / `symbols` / `completions` / `signature` — navigation.
 - `module_graph` — the module/`use` import graph.

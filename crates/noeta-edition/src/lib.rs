@@ -123,7 +123,7 @@ impl fmt::Display for Edition {
 /// Making the triple one value removes the choice. There is no `Default`, for the same reason
 /// `LowerOptions` has none: an unattributed program is a *decision* ([`Provenance::unattributed`]),
 /// not a fallback.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct Provenance {
     /// Which language [`Edition`] governs each source, keyed by `SourceId` (editions arc). Empty

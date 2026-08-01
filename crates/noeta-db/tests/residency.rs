@@ -45,6 +45,7 @@ fn cycle(db: &mut LangDatabase, base_src: noeta_db::SourceProgram, text: &str, r
         vec![base_src, src],
         Vec::new(),
         WorkspaceUses::default(),
+        noeta_db::NativeRoots::default(),
     );
     // Populate the fat memos: the merged program, its type index, and its compiled module.
     let _ = linked_checked_ide_from(db, ws, src);
@@ -115,6 +116,7 @@ fn released_source_reads_back_empty_and_recomputes_cleanly() {
         vec![base_src, src],
         Vec::new(),
         WorkspaceUses::default(),
+        noeta_db::NativeRoots::default(),
     );
 
     // Before release: the scratch module compiles cleanly to a non-trivial module.
