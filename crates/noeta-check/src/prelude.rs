@@ -26,8 +26,6 @@ impl Checker {
         crate::phase_stop("prelude-builtin");
         self.register_extension_attributes();
         crate::phase_stop("prelude-attrs");
-        self.seed_native_builtin_traits();
-        crate::phase_stop("prelude-traits");
         self.seed_ext_enums();
         crate::phase_stop("prelude-enums");
         self.seed_ext_fielded();
@@ -356,14 +354,15 @@ impl Checker {
     ///   constructed type's *resolved* name, which is qualified for a native type (so this matches
     ///   what the gate sees, unlike collect.rs's short user key). This installs only the static
     ///   construction ban; validation *runs* iff the type also advertises `traits:["Validate"]`
-    ///   (seeded by [`Checker::seed_native_builtin_traits`], so `satisfies(Validate)` is true) and
+    ///   (answered by [`Checker::has_builtin_trait`], so `satisfies(Validate)` is true) and
     ///   carries a reachable `validate` method — both on the type's existing channels.
     /// - [`ExtTypeDirective::Semantic`] (enum) → `semantic_enums`, keyed by qualified identity, so a
     ///   native enum is a legal role vocabulary for `@role(Enum.Variant)` exactly like a `.noe`
     ///   `@semantic` enum.
     ///
-    /// Runs at prelude time after the fielded/enum seeders (whose records this keys against) and after
-    /// [`Checker::seed_native_builtin_traits`] (so a `@validated` type is already `satisfies(Validate)`).
+    /// Runs at prelude time after the fielded/enum seeders (whose records this keys against); a
+    /// `@validated` type is `satisfies(Validate)` through [`Checker::has_builtin_trait`], which reads
+    /// the registry directly and so needs no ordering against this pass.
     pub(crate) fn seed_ext_directives(&mut self) {
         // Snapshot the qualified declarations + their directives under the immutable registry borrow,
         // then release it before the `&mut self` symbol-table writes (every native seeder's shape).
@@ -427,41 +426,59 @@ impl Checker {
         }
     }
 
-    /// Seed the built-in traits that **native declarations** advertise through the extension registry
-    /// (p2p P2; unified across kinds in native-extensibility Slice C) into the trait-impl table — the
-    /// native analogue of processing a user type's `@derive`/`impl`. This is what makes
-    /// `satisfies(Uuid, Comparable)` true, so a `T: Comparable` bound accepts a native type. Iterates
-    /// **every** native kind — extern types, fielded (class/struct), and enums — so a native class,
-    /// struct, or enum declaring a built-in trait (`traits: ["Comparable"]`) actually satisfies it,
-    /// not only an [`ExtType`] (the pre-Slice-C latent gap). Runs at prelude time, once, from every
-    /// construction path; only registry-declared (intrinsic) traits appear here, so it cannot let a
-    /// user type masquerade as one. [`Checker::record_trait_impls`] filters its input to the closed
-    /// `BuiltinTrait` set, so feeding it a mixed `traits` list is safe — a non-built-in name (a
-    /// native [`ExtTrait`]) is dropped here and recorded by [`Checker::seed_ext_traits`] instead.
-    pub(crate) fn seed_native_builtin_traits(&mut self) {
-        // Snapshot (qualified identity, declared traits) over every native kind while the immutable
-        // registry borrow is live, then release it before the `&mut self` `record_trait_impls`
-        // writes. Keyed by the **qualified identity** (e.g. `para.crdt.GCounter` when a program
-        // installs the out-of-tree para-p2p package) the checker stores in `Type::Named`, so a
-        // built-in-trait bound resolves against the same string.
-        let decls: Vec<(String, &'static [&'static str])> = {
-            let reg = self.reg();
-            let types = reg
-                .extensions()
+    /// Whether a **native declaration** advertises the built-in trait `t` through the extension
+    /// registry (p2p P2; unified across kinds in native-extensibility Slice C) — the native
+    /// analogue of a user type's `@derive`/`impl`, and what makes `satisfies(Uuid, Comparable)`
+    /// true so a `T: Comparable` bound accepts a native type.
+    ///
+    /// Resolved **on the lookup**, against the `&'static` registry, rather than pre-written into
+    /// `symbols.trait_impls` at prelude time: the answer is a pure function of the registry, so
+    /// seeding it merely paid for every native declaration in the process before the program was
+    /// looked at. It is asked in exactly two places ([`Checker::satisfies`] and the `to_json`
+    /// member rule), both through [`Checker::has_builtin_trait`], so there is one place that
+    /// decides and no eager copy for it to drift from.
+    ///
+    /// `name` is the **qualified identity** (`para.crdt.GCounter`) the checker stores in
+    /// `Type::Named`, matching the identity every native kind is keyed on elsewhere. Every native
+    /// kind is consulted — extern types, fielded (class/struct), and enums — so a native class,
+    /// struct, or enum declaring a built-in trait actually satisfies it, not only an `ExtType` (the
+    /// pre-Slice-C latent gap). Only registry-declared (intrinsic) traits answer here, so it cannot
+    /// let a user type masquerade as one; a name that is not a `BuiltinTrait` (a native
+    /// [`ExtTrait`]) is dead data for this question and is recorded by
+    /// [`Checker::seed_ext_traits`] instead.
+    fn native_declares_builtin_trait(&self, name: &str, t: BuiltinTrait) -> bool {
+        use noeta_ext_abi::NominalType;
+        let advertises = |traits: &'static [&'static str]| {
+            traits
                 .iter()
-                .flat_map(|ext| ext.types())
-                .map(|ty| (ty.qualified(), ty.traits));
-            let fielded = reg.fielded().map(|f| (f.qualified(), f.traits));
-            let enums = reg.enums().map(|en| (en.qualified(), en.traits));
-            types
-                .chain(fielded)
-                .chain(enums)
-                .filter(|(_, traits)| !traits.is_empty())
-                .collect()
+                .filter_map(|n| BuiltinTrait::from_name(n))
+                .any(|declared| declared == t)
         };
-        for (qualified, traits) in decls {
-            self.record_trait_impls(&qualified, traits.iter().copied());
-        }
+        let reg = self.reg();
+        reg.extensions()
+            .iter()
+            .flat_map(|ext| ext.types())
+            .any(|ty| ty.is_qualified(name) && advertises(ty.traits))
+            || reg
+                .fielded()
+                .any(|f| f.is_qualified(name) && advertises(f.traits))
+            || reg
+                .enums()
+                .any(|en| en.is_qualified(name) && advertises(en.traits))
+    }
+
+    /// Whether the nominal type `name` implements the built-in trait `t` — the **one** membership
+    /// question, over the program's own `@derive`/`impl` declarations *and* the registry's.
+    ///
+    /// The two are a union, not a precedence: a program declaring its own type under a native
+    /// type's qualified identity used to merge into the same `symbols.trait_impls` entry the
+    /// prelude seeding had already written, so both contributions counted. They still do.
+    pub(crate) fn has_builtin_trait(&self, name: &str, t: BuiltinTrait) -> bool {
+        self.symbols
+            .trait_impls
+            .get(name)
+            .is_some_and(|ts| ts.contains(&t))
+            || self.native_declares_builtin_trait(name, t)
     }
 
     /// Register every installed extension's declared **prelude attributes** (tier-extensions

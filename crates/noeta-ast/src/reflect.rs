@@ -3089,7 +3089,7 @@ pub fn prelude_type_infos() -> Vec<TypeInfo> {
             })
             .collect(),
     });
-    let structs = prelude_structs().into_iter().map(|decl| TypeInfo {
+    let structs = prelude_struct_table().iter().cloned().map(|decl| TypeInfo {
         name: decl.name.to_string(),
         kind: TypeKind::Struct,
         field_types: decl.field_types.iter().map(|t| t.repr()).collect(),
@@ -3243,6 +3243,20 @@ pub struct PreludeStruct {
 ///   itself as a first-class value the runner calls.
 /// * `TierText { target: string, text: string }` — its verbatim-body twin.
 pub fn prelude_structs() -> Vec<PreludeStruct> {
+    prelude_struct_table().to_vec()
+}
+
+/// The prelude-struct table itself, built once. The declarations are a fixed list with no input, so
+/// the table is a constant in everything but spelling — and a `Vec<PreludeStruct>` of it costs ~25
+/// `String` allocations to build. `Checker::register_prelude` asks for eight of them by name on the
+/// way to checking *any* program, so rebuilding the whole table per lookup was ~200 allocations
+/// before a one-line file was looked at.
+fn prelude_struct_table() -> &'static [PreludeStruct] {
+    static TABLE: std::sync::OnceLock<Vec<PreludeStruct>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(build_prelude_structs)
+}
+
+fn build_prelude_structs() -> Vec<PreludeStruct> {
     use PreludeStructFieldTy as F;
     let s = |name: &'static str, fields: &[(&str, PreludeStructFieldTy)]| PreludeStruct {
         name,
@@ -3286,7 +3300,7 @@ pub fn prelude_structs() -> Vec<PreludeStruct> {
 
 /// The prelude struct of this name, or `None` when the name is not one.
 pub fn prelude_struct(name: &str) -> Option<PreludeStruct> {
-    prelude_structs().into_iter().find(|s| s.name == name)
+    prelude_struct_table().iter().find(|s| s.name == name).cloned()
 }
 
 /// The fields of the prelude struct `name`, in slot order — the lookup every materialization site

@@ -425,11 +425,7 @@ impl Checker {
         // the closed-user-type guard reads a `Unknown` return as proof the member does not exist.
         if let Type::Named(n, _) = recv
             && name == "to_json"
-            && self
-                .symbols
-                .trait_impls
-                .get(n.as_str())
-                .is_some_and(|ts| ts.contains(&noeta_types::BuiltinTrait::Serialize))
+            && self.has_builtin_trait(n.as_str(), noeta_types::BuiltinTrait::Serialize)
         {
             return Type::String;
         }
