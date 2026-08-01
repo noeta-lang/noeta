@@ -113,6 +113,55 @@ fn renders_an_abort_with_its_traceback() {
 }
 
 #[test]
+fn writes_the_programs_own_stderr_stream() {
+    // `std.io`'s `err`/`errln` are observable program output, buffered into `RunResult.stderr`
+    // exactly as `echo` is buffered into `stdout`. This is the tail that IS the chokepoint
+    // (`run_compiled_module` → `RunTail`), so the property is pinned here at its source: a tail
+    // that stopped calling it and hand-wrote the epilogue again would have to remember the stream,
+    // which four of seven copies did not (plans/parallel-path-audit.md row 1).
+    let text = "use std.io\necho \"to stdout\"\nio.errln(\"to stderr\")\n";
+    let path = temp_bundle("streams.noeb", &build_bundle(text));
+    let out = runner().arg(path.path()).output().expect("runner runs");
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "to stdout\n");
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "to stderr\n");
+}
+
+#[test]
+fn program_stderr_precedes_the_diagnostics_and_the_traceback() {
+    // The canonical order: the program's own stderr, then the run's diagnostics, then the abort
+    // traceback. A program that reports progress on stderr and then aborts must not have its
+    // report appear *after* the failure that followed it.
+    let text = "use std.io\nfn boom(): int {\n  panic(\"kaboom\");\n}\nio.errln(\"step one\")\necho boom();";
+    let path = temp_bundle("order.noeb", &build_bundle(text));
+    let out = runner().arg(path.path()).output().expect("runner runs");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_ne!(out.status.code(), Some(0));
+    let program = stderr.find("step one").expect("program stderr is written");
+    let diagnostic = stderr.find("kaboom").expect("the diagnostic is rendered");
+    let traceback = stderr
+        .find("stack trace")
+        .expect("the traceback is rendered");
+    assert!(program < diagnostic, "stderr out of order: {stderr:?}");
+    assert!(diagnostic < traceback, "stderr out of order: {stderr:?}");
+}
+
+#[test]
+fn an_exit_code_above_255_is_reported_as_a_failure_not_truncated() {
+    // A process status is a `u8`, so an out-of-range code has to be *converted*. `as u8` truncates:
+    // 256 becomes 0 — a failure reported as a success. `RunTail::status` clamps to 1 instead, and
+    // this is the one conversion in the tree.
+    let path = temp_bundle("big_exit.noeb", &build_bundle("use std.os\nos.exit(256)\n"));
+    let out = runner().arg(path.path()).output().expect("runner runs");
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "256 must not truncate to 0: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
 fn refuses_a_missing_file() {
     let out = runner()
         .arg("/nonexistent/app.noeb")
