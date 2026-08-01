@@ -53,17 +53,69 @@ unsafe extern "C" {
 pub fn run_embedded_with_extensions(
     units: &'static [&'static (dyn noeta_stdlib::Extension + Sync)],
 ) -> core::ffi::c_int {
+    // The startup work a C-ABI entry skips (see `restore_rust_signal_defaults`). First, because a
+    // program that writes before it is done is a program that can already have died.
+    restore_rust_signal_defaults();
     // Seed the default registry with std + the app's native units before any lookup (the VM's first
     // module/type/tier resolution reads it). An empty slice is exactly the lazy std-only default.
     noeta_stdlib::registry::install_with_extras(units);
     core::ffi::c_int::from(run())
 }
 
+/// Ignore `SIGPIPE`, which is what Rust's own startup does and what this entry point skips.
+///
+/// Every *other* Noeta execution surface is an ordinary Rust binary, so `crt0` calls Rust's
+/// `lang_start`, which calls `sys::unix::init`, which sets `SIGPIPE` to `SIG_IGN` before `main`
+/// runs. That is why `std::io` can report a write to a closed pipe as an ordinary
+/// `ErrorKind::BrokenPipe` value: the signal that would otherwise have killed the process first is
+/// disarmed.
+///
+/// A `--native` artifact exports its own C-ABI [`main`], so `crt0` calls *it* and `lang_start` never
+/// runs. `SIGPIPE` therefore kept its default disposition — terminate — and the artifact died on
+/// signal 13 with no exit code, no stderr and no traceback wherever `noeta run` returned an `Err`.
+/// Two ordinary things did it:
+///
+/// * `./app | head -3` — the everyday shell pipeline. `noeta run … | head -3` exits 0; the same
+///   program built `--native` was killed by `SIGPIPE` as soon as `head` closed the pipe.
+/// * `Process.try_write` to a child that has exited (`std/os_try_write.noe`). The whole point of the
+///   recoverable write door is that a broken pipe is expressible as a value — and it is, on every
+///   surface except the one that ships. This is how the bug surfaced: the AOT differential's native
+///   side aborted with `exit None` on CI, where the spawned `echo` reliably won the race to exit,
+///   and passed on an idle machine, where the write reached the pipe buffer first.
+///
+/// Children are unaffected: `std::process::Command` resets `SIGPIPE` to `SIG_DFL` in the child
+/// between `fork` and `exec`, exactly as it does under `noeta run`.
+#[cfg(unix)]
+fn restore_rust_signal_defaults() {
+    // SAFETY: `signal(2)` with `SIG_IGN` installs no handler, so there is no async-signal-safety
+    // obligation to discharge; this runs on the entry thread before any other thread exists. It is
+    // the same call, with the same argument, that `std`'s startup makes on this platform — the
+    // point is to restore that state, not to choose a new one. A failure is not actionable (the
+    // disposition simply stays as inherited), so the result is dropped rather than aborting a run.
+    #[allow(unsafe_code)]
+    unsafe {
+        let _ = nix::sys::signal::signal(
+            nix::sys::signal::Signal::SIGPIPE,
+            nix::sys::signal::SigHandler::SigIgn,
+        );
+    }
+}
+
+/// No-op off Unix: `SIGPIPE` is a POSIX concept, and Windows' `crt0` hands control to `main` with no
+/// equivalent disposition to restore.
+#[cfg(not(unix))]
+fn restore_rust_signal_defaults() {}
+
 /// C-runtime entry point of a native AOT binary. `crt0` calls this after process setup; it returns
 /// the program's exit code. Declared `extern "C"` and exported as `main` so the system linker
 /// resolves `crt0`'s reference to it. Arguments (`argc`/`argv`) are read through `std::env` — on the
 /// platforms this interim runtime targets, std's startup captures them independently of this entry —
 /// so the signature takes none.
+///
+/// Argv is not the only thing Rust's `lang_start` would have done on the way here, and it is the one
+/// piece that survives being skipped. The rest does not: see `restore_rust_signal_defaults`, which
+/// puts back the `SIGPIPE` disposition whose absence killed artifacts on signal 13. Anything else
+/// this entry point is later found to owe `lang_start` belongs there, beside it, for the same reason.
 ///
 /// Gated behind the default **`entry`** feature so a *composed* AOT runtime (a native-dependency app's
 /// `--native` base) can depend on this crate with `default-features = false` and provide its **own**
