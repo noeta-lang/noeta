@@ -676,6 +676,68 @@ pub fn read_dir_modules(dir: &Path) -> Vec<RawModule> {
         .collect()
 }
 
+/// Whether a sibling module is **inert** — provably incapable of contributing anything to a
+/// successful link — so its parse can be deferred.
+///
+/// Parsing costs ~200k instructions *per file* before a single byte of it is read: `parse_in` builds
+/// the whole combinator grammar afresh on every call (measured — an entirely EMPTY sibling costs
+/// 197k, a 42-byte one 295k). That is what made a lone script pay `O(directory)`: seven files in a
+/// directory cost `noeta run empty.noe` 5.86M instructions against 3.56M for the same file alone,
+/// and every instruction of the difference went into parsing modules the entry cannot even name.
+///
+/// A sibling with **no derived module path** ([`ModulePath::Declared`] — the flat, no-package scan a
+/// lone script gets) has exactly one way to acquire an identity: its own `namespace` declaration.
+/// `apply_derived_paths` leaves such a file alone, and [`link_core`] admits a module into the
+/// resolution pool only if [`module_namespace`] answers — so a flat-scan sibling that declares no
+/// `namespace` is in no pool, no `import_targets` list, no `project_roots` set, and no module map.
+/// It cannot be resolved, cannot be merged, and cannot be suggested. Parsing it decides nothing.
+///
+/// The one thing its parse *could* still produce is a [`BrokenModule`], which names the file as a
+/// hint on someone else's unresolved `use`. That is an error-path fact, so it is recovered on the
+/// error path: [`link_with_deps_appending`] parses every deferred sibling and re-links before it
+/// reports, so a failing link sees exactly the module set an eager parse would have given it.
+///
+/// The token scan is over an **already-lexed** file (lexing every sibling is kept — it is ~12k a file
+/// and a text tier declared in any one of them changes how all the others lex), and a lex diagnostic
+/// makes the file un-deferrable outright: it is broken already.
+fn sibling_is_inert(path: &ModulePath, lexed: &noeta_lexer::Lexed) -> bool {
+    matches!(path, ModulePath::Declared)
+        && lexed.diagnostics.is_empty()
+        && !lexed
+            .tokens
+            .iter()
+            .any(|t| t.kind == noeta_lexer::TokenKind::NamespaceKw)
+}
+
+/// Parse the entry's sibling modules, optionally **deferring** the ones [`sibling_is_inert`] proves
+/// cannot matter. Returns the cleanly-parsed programs (indexed by their `SourceId` position), the
+/// broken ones, and whether anything was deferred — the last so a failing link knows to come back
+/// for them.
+fn parse_siblings(
+    sources: &[Source],
+    lexeds: &[noeta_lexer::Lexed],
+    siblings: &[RawModule],
+    root_edition: noeta_lexer::Edition,
+    text_tiers: &noeta_lexer::TextTiers,
+    defer_inert: bool,
+) -> (Vec<(usize, Program)>, Vec<BrokenModule>, bool) {
+    let mut programs: Vec<(usize, Program)> = Vec::new();
+    let mut broken: Vec<BrokenModule> = Vec::new();
+    let mut deferred = false;
+    for (index, (source, lexed)) in sources.iter().zip(lexeds).enumerate() {
+        let path = &siblings[index].path;
+        if defer_inert && sibling_is_inert(path, lexed) {
+            deferred = true;
+            continue;
+        }
+        match parse_module(source, lexed, root_edition, text_tiers, path) {
+            Ok(program) => programs.push((index + 1, program)),
+            Err(module) => broken.push(*module),
+        }
+    }
+    (programs, broken, deferred)
+}
+
 /// The pure core of [`load`], split out so it is testable from in-memory sources: link the entry
 /// (`entry_name`/`entry_text`) against the given sibling modules.
 pub fn link(
@@ -986,7 +1048,9 @@ pub fn link_with_deps_appending(
             next_id += 1;
         }
     }
+    crate::phase_stop("d-sources");
     let (lexeds, text_tiers) = lex_program(&sources, &editions, &packages, package_uses);
+    crate::phase_stop("d-lexed");
 
     // The entry parses under the root package's edition.
     let mut entry_parsed =
@@ -1012,27 +1076,20 @@ pub fn link_with_deps_appending(
             .collect());
     }
 
-    // Parse the siblings (pure decl-sources) under the root edition. A broken sibling is kept for
+    // Parse the siblings (pure decl-sources) under the root edition, **deferring** the ones that
+    // provably cannot matter ([`sibling_is_inert`]) — a lone script must not pay ~200k instructions
+    // of grammar construction per unrelated file sharing its directory. A broken sibling is kept for
     // attribution rather than dropped (see [`BrokenModule`]).
-    let mut sibling_programs: Vec<(usize, Program)> = Vec::new();
-    let mut broken: Vec<BrokenModule> = Vec::new();
-    for (index, (source, lexed)) in sources[1..sibling_end]
-        .iter()
-        .zip(&lexeds[1..sibling_end])
-        .enumerate()
-    {
-        match parse_module(
-            source,
-            lexed,
-            root_edition,
-            &text_tiers,
-            &siblings[index].path,
-        ) {
-            Ok(program) => sibling_programs.push((index + 1, program)),
-            Err(module) => broken.push(*module),
-        }
-    }
+    let (mut sibling_programs, mut broken, deferred_siblings) = parse_siblings(
+        &sources[1..sibling_end],
+        &lexeds[1..sibling_end],
+        siblings,
+        root_edition,
+        &text_tiers,
+        true,
+    );
 
+    crate::phase_stop("d-sibparsed");
     // Parse + re-root each dependency package's modules under *that package's* edition (the sources
     // continue past the siblings in the same package order they were assembled above).
     let (mut dep_programs, broken_deps) =
@@ -1078,23 +1135,52 @@ pub fn link_with_deps_appending(
     if !path_diagnostics.is_empty() {
         return Err(path_diagnostics);
     }
+    crate::phase_stop("d-derived");
 
-    let sibling_refs: Vec<&Program> = sibling_programs.iter().map(|(_, p)| p).collect();
     let dep_refs: Vec<&Program> = dep_programs.iter().map(|(_, p)| p).collect();
-    let broken_refs: Vec<&BrokenModule> = broken.iter().collect();
     let native_roots = native_dep_roots(deps);
+    let link = |sibling_programs: &[(usize, Program)], broken: &[BrokenModule]| {
+        let sibling_refs: Vec<&Program> = sibling_programs.iter().map(|(_, p)| p).collect();
+        let broken_refs: Vec<&BrokenModule> = broken.iter().collect();
+        link_parsed_with_deps(
+            &entry,
+            &entry_parsed.program,
+            &sibling_refs,
+            &dep_refs,
+            &broken_refs,
+            Some(&native_roots),
+        )
+    };
+    let mut linked = link(&sibling_programs, &broken);
+    // The deferral is invisible to a link that succeeds — an inert sibling resolves nothing and
+    // suggests nothing — but a link that FAILS can name a broken file as a hint, and a deferred file
+    // was never given the chance to be broken. So the error path buys the fidelity back: parse
+    // everything and link again, and report *that*. Only a program that is already failing pays for
+    // it, and it sees exactly the module set an eager parse would have handed it.
+    if linked.is_err() && deferred_siblings {
+        let (all_programs, all_broken, _) = parse_siblings(
+            &sources[1..sibling_end],
+            &lexeds[1..sibling_end],
+            siblings,
+            root_edition,
+            &text_tiers,
+            false,
+        );
+        sibling_programs = all_programs;
+        broken = all_broken;
+        for (index, program) in &mut sibling_programs {
+            apply_derived_paths(vec![DerivedUnit {
+                source: &sources[*index],
+                path: &siblings[*index - 1].path,
+                program,
+            }]);
+        }
+        linked = link(&sibling_programs, &broken);
+    }
     let Linkage {
         mut program,
         source_maps,
-    } = link_parsed_with_deps(
-        &entry,
-        &entry_parsed.program,
-        &sibling_refs,
-        &dep_refs,
-        &broken_refs,
-        Some(&native_roots),
-    )
-    .map_err(|mut d| {
+    } = linked.map_err(|mut d| {
         attribute_to_spans(&mut d, &sources);
         d
     })?;
@@ -4357,6 +4443,63 @@ mod tests {
                 .as_deref()
                 .is_some_and(|h| h.contains("models.noe")),
             "the E0019 should name the file that failed to parse, got {:?}",
+            err.diagnostic.help
+        );
+    }
+
+    /// **Sibling-parse deferral, the invisible half.** A flat-scan sibling that declares no
+    /// `namespace` can never be resolved — derivation gives it no path, so [`link_core`] never sees
+    /// it as a module — and its parse is therefore deferred. A link that succeeds must be
+    /// byte-identical to one that parsed it, which is what makes the deferral a pure saving.
+    #[test]
+    fn an_inert_sibling_changes_nothing_about_a_successful_link() {
+        let entry = "namespace App;\npub fn main(): int { return 1; }\n";
+        let inert = module("side.noe", "fn helper(x: int): int { return x + 1; }\n");
+        let with_sibling = link_with_deps(
+            "main.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            std::slice::from_ref(&inert),
+            &[],
+        )
+        .expect("links");
+        let alone = link_with_deps("main.noe", entry, noeta_lexer::Edition::DEFAULT, &[], &[])
+            .expect("links");
+        assert_eq!(
+            with_sibling.program.stmts.len(),
+            alone.program.stmts.len(),
+            "an unresolvable sibling contributes no statements either way"
+        );
+    }
+
+    /// **Sibling-parse deferral, the error-path half.** The one thing a deferred sibling's parse
+    /// could still have produced is a [`BrokenModule`], which names the file as a hint on someone
+    /// else's unresolved `use`. A failing link parses every deferred sibling and re-links before it
+    /// reports, so the hint survives the deferral — this pins that, because a saving that quietly
+    /// drops a diagnostic is not a saving.
+    #[test]
+    fn a_deferred_sibling_that_does_not_parse_is_still_named_on_an_unresolved_import() {
+        let entry = "namespace App.Orders;\nuse App.Models.User;\npub fn make(): ?User { return none; }\n";
+        // No `namespace` line and no derived path: inert by the deferral's test, and broken.
+        let sibling = module("models.noe", "pub struct User { let ] = ; }\n");
+        let errors = link_with_deps(
+            "main.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            std::slice::from_ref(&sibling),
+            &[],
+        )
+        .unwrap_err();
+        let err = errors
+            .iter()
+            .find(|e| e.diagnostic.code == DiagnosticCode::UnresolvedImport)
+            .unwrap_or_else(|| panic!("expected E0019 for `App.Models`, got {errors:?}"));
+        assert!(
+            err.diagnostic
+                .help
+                .as_deref()
+                .is_some_and(|h| h.contains("models.noe")),
+            "the deferred-but-broken file must still be named, got {:?}",
             err.diagnostic.help
         );
     }
