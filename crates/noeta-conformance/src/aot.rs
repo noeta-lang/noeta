@@ -129,23 +129,26 @@ pub struct AotDiffFailure {
 /// **Known divergences**: defects this oracle found or confirmed, which are not its to fix, listed
 /// so it can land green while still failing on anything new.
 ///
-/// `crates/noeta-aot-runtime/src/lib.rs` writes `result.stdout`, the diagnostics and the traceback,
-/// and nothing else: the program's own `std.io` `err`/`errln` stream (`RunResult.stderr`) is dropped,
-/// which is parallel-path audit row 1's finding — four of seven run tails drop it.
+/// **Three rows have already left this list, and the ratchet is why.**
 ///
-/// `std/os_exit.noe` was here too, and is not any more: `os.exit(3)` exited **1**, because the tail's
-/// `as u8` truncation was only half of it and the `ExitCode` → `c_int` collapse in
-/// `run_embedded_with_extensions` was the binding constraint — `RunTail::status()` had the right byte
-/// and `emit()` threw it away one call later. This oracle is what turned that from a plausible
-/// reading of the code into a failing case with a number attached.
+/// `io/streams.noe` and `io/to_string_parity.noe` were here because the AOT tail dropped the
+/// program's own `std.io` `err`/`errln` stream. `std/os_exit.noe` was here because `os.exit(3)`
+/// exited **1** — the tail's `as u8` truncation was only half of it, and the `ExitCode` → `c_int`
+/// collapse in `run_embedded_with_extensions` was the binding constraint, with `RunTail::status()`
+/// holding the right byte and `emit()` throwing it away one call later.
+///
+/// The first two are instructive about *this list* rather than about the AOT path: the tail fix
+/// (audit row 1) and this oracle (row 9) were built on separate branches, so each was correct about
+/// the tree it could see and the rows were honest when written. The moment both merged, the defect
+/// was gone and the rows were not — and the gate failed, naming them, and told whoever read it to
+/// delete them. That is the whole design. A suppression list would have gone quiet instead, and the
+/// next person would have inherited two entries describing a bug that no longer existed.
 ///
 /// The list is an **expect-fail ratchet**, not a suppression: the oracle asserts the failure set is
 /// *exactly* this list, so a new divergence fails **and a fixed one fails too**, with instructions to
 /// delete the row. A stale entry cannot outlive the bug it describes. Read the rows: one of them is a
 /// crash, and it should be the shortest-lived entry here.
 pub const KNOWN_DIVERGENCES: &[(&str, &str)] = &[
-    ("io/streams.noe", "stderr"),
-    ("io/to_string_parity.noe", "stderr"),
     // NOT a tail gap — a live `--native` crash this oracle found on its first full-corpus run, and
     // the reason row 9 exists. The linked artifact aborts every time with a Rust panic at
     // `noeta-vm/src/dispatch.rs`'s `&chunk.code[pc]`, where `pc` is a pointer-shaped value: after
