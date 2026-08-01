@@ -17,7 +17,8 @@
 # hide the state of the rest; everything runs, then the script exits non-zero.
 #
 #   scripts/gate.sh --quick     the inner loop  — fmt + both clippy splits           1m20s / 2m10s
-#   scripts/gate.sh             the merge gate  — + tests, doc samples, JIT oracles    ~15m / 35m
+#   scripts/gate.sh             the merge gate  — + tests, doc samples, JIT oracles,
+#                                                 the perf ratchet                     ~20m / 42m
 #   scripts/gate.sh --full      full CI parity  — + wasm, AOT, miri, editor tooling    +2m and up
 #
 # The merge tier also runs the `#[ignore]`d real-socket suites (`scripts/hot-e2e.sh` — hot reload,
@@ -29,7 +30,9 @@
 # Those are MEASURED wall times on a 20-core box, `warm target dir / cold target dir`, with
 # CARGO_BUILD_JOBS=8. The two long poles in the merge gate are `cargo test --workspace` (4m50s warm,
 # 9m53s cold) and the lean-CLI build (8m warm, 9m cold — it is a second, Cranelift-free link of the
-# whole CLI); the JIT group adds 13m cold and a few minutes warm. `--full` adds miri (1m12s, 63
+# whole CLI); the JIT group adds 13m cold and a few minutes warm. The perf group adds a THIRD link
+# of the CLI — a `--release` one, codegen-units=1 + thin LTO, ~6m cold on this box under load —
+# and the ratchet it feeds then runs in seconds. `--full` adds miri (1m12s, 63
 # tests) and the editor tooling (4s) — cheap. Its wasm legs were NOT measured here: they need
 # wasmtime and the wasm targets installed *for the gating toolchain*, and the runner / playground /
 # component builds behind them are the expensive part when they do run.
@@ -368,6 +371,12 @@ has_target() {
 #                                     doc samples, the JIT's own differential, and the `#[ignore]`d
 #                                     real-socket end-to-end suites (hot reload, LiveView, drain).
 #                                     This is the set a merge to `main` must clear.
+#   perf          (tier 2, default)  — the instructions-retired ratchet: startup, the interpreter
+#                                     dispatch loop, a map workload, and whether tier 1 still
+#                                     compiles what it used to. Tier 2 rather than tier 3 because
+#                                     the regression it exists to catch (2x startup, 7-11%
+#                                     interpreter, ~1,800 commits, nothing noticed) would have
+#                                     survived a gate that only ran before a release tag.
 #   wasm/aot/miri/editors (tier 3)   — portability, the linked `--native` differential, `unsafe`
 #                                     soundness, and the editor grammars. Real gates, but they need
 #                                     wasmtime/a C toolchain/nightly+miri/npm and they dominate the
@@ -449,6 +458,48 @@ step 2 jit "JIT-enabled CLI (integration + doc samples)" -- \
 # server that is actually serving. See scripts/hot-e2e.sh for what it covers and what it asserts.
 step 2 jit "hot-reload e2e (#[ignore]d real-socket suites)" -- \
     env "NOETA_GATE_TOOLCHAIN=$TC" bash "$ROOT/scripts/hot-e2e.sh"
+
+# --- perf: the instructions-retired ratchet ----------------------------------------------------
+#
+# The gap this closes: ~1,800 commits landed a 2x startup regression and a 7-11% interpreter
+# regression, and NOTHING in this tree noticed — because everything that could have noticed was
+# wall-clock, and wall-clock cannot gate on a box that routinely carries several concurrent agent
+# builds (load 6-13 is normal; a whole field run of wall-clock benchmarks inflates ~2x together).
+# Instructions retired is a different instrument: the deterministic rows repeat to 0.001-0.08%
+# under exactly the load that moves wall-clock by 2x. See scripts/perf-ratchet.sh for the measured
+# variance behind every tolerance, for the tier-1 decline check, and for how to re-baseline.
+#
+# Tier 2, because a gate that only runs before a release tag would not have caught this one either.
+# Its cost is the release build below, which is a SECOND full link of the CLI (codegen-units=1 +
+# thin LTO) — named as its own step so the minutes land on the line that spends them rather than
+# on the ratchet, which itself takes seconds.
+#
+# The SKIP path is not decorative. `perf` is not everywhere, `perf_event_paranoid` can forbid
+# counting, a VM may expose no PMU, and instruction counts are not comparable across machines — so
+# `--preflight` answers "can this box produce a number that means anything" and a no becomes a
+# loud SKIP naming the reason and its fix. A SKIP is never a PASS here (and under
+# NOETA_GATE_REQUIRE_TOOLS it is a FAIL), which is the rule this repo already had to learn twice:
+# once from a wasm oracle that sat red while reporting SKIP, and once from `noeta bench`'s own
+# regression gate reporting success on a run that measured nothing (c619853bd).
+#
+# NOETA_PERF_TOOLCHAIN is not optional here: the ratchet folds `rustc -V` into the baseline's
+# machine fingerprint (two rustc patch releases inline differently, which on this codebase is
+# worth percent, not noise), and it has to be told which toolchain built the binary it is handed.
+# Passing $TC keeps the measured build and the recorded baseline describing the same compiler.
+PERF_PREFLIGHT_LOG="$LOGDIR/00-perf-preflight.log"
+if env "NOETA_PERF_TOOLCHAIN=$TC" bash "$ROOT/scripts/perf-ratchet.sh" --preflight \
+    > "$PERF_PREFLIGHT_LOG" 2>&1; then
+    step 2 perf "build the noeta CLI, release (the ratchet's subject)" -- \
+        "${CARGO[@]}" build --release -p noeta-cli --locked
+    step 2 perf "instructions-retired ratchet (startup, interpreter, tier-1 decline)" -- \
+        env "NOETA_PERF_TOOLCHAIN=$TC" bash "$ROOT/scripts/perf-ratchet.sh"
+else
+    PERF_REASON="$(sed -n 's/^perf-ratchet: CANNOT MEASURE — //p' "$PERF_PREFLIGHT_LOG" | head -1)"
+    PERF_FIX="$(sed -n 's/^perf-ratchet: fix: //p' "$PERF_PREFLIGHT_LOG" | head -1)"
+    skip 2 perf "instructions-retired ratchet (startup, interpreter, tier-1 decline)" \
+        "${PERF_REASON:-perf-ratchet.sh --preflight failed; see $PERF_PREFLIGHT_LOG}" \
+        "${PERF_FIX:-bash scripts/perf-ratchet.sh --preflight   # for the full reason}"
+fi
 
 # --- aot: the LINKED `--native` differential ---------------------------------------------------
 #

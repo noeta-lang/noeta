@@ -1,0 +1,7 @@
+// Process init + the whole front end, and as little else as the language allows.
+//
+// Kept ALONE in this directory on purpose: an entry's siblings are linked as its project, so a
+// second .noe file here would silently add its compile to every measurement of "startup". That
+// trap once inflated a startup figure by 7x. scripts/perf-ratchet.sh stages this file into a
+// private directory before measuring for the same reason.
+echo 0

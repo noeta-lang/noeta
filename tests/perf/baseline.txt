@@ -1,0 +1,20 @@
+# Baseline for scripts/perf-ratchet.sh — INSTRUCTIONS RETIRED, min of 5.
+#
+# Recorded 2026-08-01T22:27:32Z from /home/niklas/.cache/agent-gate-target/release/noeta
+# Re-record with:  scripts/perf-ratchet.sh --record
+#
+# Read the diff, do not just accept it: numbers DOWN is an improvement worth keeping
+# (the ratchet then holds the new floor); numbers UP needs a sentence in the commit
+# message saying which change bought it and what for.
+#
+# `machine` is not decoration: instruction counts are not portable across
+# microarchitectures or libc versions, so a mismatch makes the gate report CANNOT
+# MEASURE (exit 2) rather than inventing a regression.
+
+machine AMD Ryzen AI 9 365 w/ Radeon 880M | ldd (GNU libc) 2.43 | rustc 1.97.0 (2d8144b78 2026-07-07)
+
+row version             2515764
+row startup             5551274
+row arith             611410827
+row map               165138912
+row loop_jit         1164742631
