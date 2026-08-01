@@ -646,13 +646,15 @@ impl Checker {
     /// on. `field_specs_of::<List<T>>()` heads at `List`, a real type with no field schema, and keeps
     /// its honest empty answer.
     ///
-    /// The turbofish arm stays a **compile-time** key: it resolves like an annotation, follows a
-    /// `namespace`/`use … as`/rename, and folds to a constant. What changed is that inside a
-    /// top-level generic fn the erased parameter now *has* a runtime name — `type_name::<T>()`
-    /// reads it off the same hidden slot that carries a forwarded decode recipe — so these
-    /// queries' own **runtime-string** arm reaches it: `field_specs_of(type_name::<T>())`. The help
-    /// says so where that route is actually open ([`Checker::forwardable_params`]), rather than
-    /// sending the author to restructure a signature that no longer needs it.
+    /// The turbofish arm stays a **compile-time** key for every type that HAS one: it resolves like
+    /// an annotation, follows a `namespace`/`use … as`/rename, and folds to a constant. A bare type
+    /// parameter has no such key — but where one of the two per-instantiation channels carries the
+    /// instantiation's name into the body, the surface resolves it at run time instead
+    /// ([`Self::check_type_operand`], [`Self::record_type_param`]), and never reaches here. So this
+    /// function now reports exactly the residue: a parameter **no channel** delivers. There is no
+    /// "compose it yourself out of `type_name`" advice left to give, because `type_name::<T>()`
+    /// would fail in the very same places for the very same reason — the fix is always to get the
+    /// instantiation to this body, which is what each branch below says how to do.
     fn reject_erased_type_param(&mut self, ty: &TypeRef, surface: &str) -> bool {
         let TypeRef::Named { args, span, .. } = ty else {
             return false;
@@ -679,10 +681,12 @@ impl Checker {
         // on the type, but not reachable here" splits cleanly on it.
         //
         // A self-less member whose class parameter DOES reach it — through the hidden type-argument
-        // slot, which is that member's only channel — is excluded here and falls through to the
-        // blanket branch, whose help points at the route that is actually open
-        // (`field_specs_of(type_name::<T>())`). Saying "this member has no receiver" there would be
-        // true and useless: the parameter is reachable, just not as a compile-time key.
+        // slot, which is that member's only channel — is excluded here: the callers resolve it
+        // through [`Self::record_type_param`] before ever asking this function, so it does not
+        // reach the diagnostic at all. The guard stays because the two are different questions —
+        // `forwardable_params` is the *capability*, `current_forwarding` the realized layout — and
+        // where they disagree the blanket branch's advice is the honest one, while "this member has
+        // no receiver" would be true and useless.
         if let Some(owner) = self.coloring.current_type.clone()
             && !self.coloring.forwardable_params.contains(&param)
             && self
@@ -720,24 +724,16 @@ impl Checker {
                 .help(help);
             return true;
         }
-        // Inside a top-level generic fn the parameter DOES have a runtime name — the hidden
-        // type-argument slot carries it — so the fix is the surface's own runtime-string arm, not
-        // a signature change. Point at it; the turbofish arm stays the compile-time key.
-        // `type_name` itself is excluded: it IS the route, so pointing it at itself says nothing.
-        // (Reaching here from that surface means the slot did not resolve — a session-incremental
-        // entry whose forwarding table is still growing — where the general advice still applies.)
-        let help = if surface != "type_name" && self.coloring.forwardable_params.contains(&param) {
-            format!(
-                "pass the name instead of the type: `{surface}(type_name::<{name}>())` — \
-                 `type_name` resolves a forwarded parameter per instantiation, which the \
-                 compile-time `{surface}::<...>` key cannot"
-            )
-        } else {
-            format!(
-                "reflect where the type is concrete and pass the result in — give this function a \
-                 parameter for it and let the caller supply `{surface}::<TheRealType>`"
-            )
-        };
+        // Neither channel reaches this body — not the receiver's reflected tag, not the hidden
+        // type-argument slot — so there is no runtime name to route to and no composition out of
+        // `type_name` that would do better: `type_name::<T>()` here is this same error. The only
+        // fix is to reflect where the instantiation IS known and hand the answer in. (This used to
+        // point at `{surface}(type_name::<T>())` where the slot was open; the turbofish arm now
+        // takes that route itself, so reaching here means the route is shut.)
+        let help = format!(
+            "reflect where the type is concrete and pass the result in — give this function a \
+             parameter for it and let the caller supply `{surface}::<TheRealType>`"
+        );
         self.error(
             DiagnosticCode::InvalidTypeArguments,
             *span,
@@ -969,6 +965,16 @@ impl Checker {
     ///
     /// The **dynamic** arm is an ordinary expression that must be a `string`. Nothing is resolved
     /// there — its value is only known at runtime, which is the whole point of the surface.
+    ///
+    /// A turbofish naming a **bare type parameter of an enclosing generic** is neither: the type is
+    /// erased, so there is no compile-time key, but the instantiation's NAME does reach the body
+    /// through one of the two per-instantiation channels ([`Self::record_type_param`]) — which is
+    /// all these registries key on. Recording the site routes the surface through its own dynamic
+    /// arm at run time, making `field_specs_of::<T>()` mean exactly
+    /// `field_specs_of(type_name::<T>())` without the author writing the composition. Only a *bare*
+    /// parameter, matching [`TypeRef::head_name`]: `field_specs_of::<List<T>>()` heads at `List`
+    /// and stays the folded constant it always was. A parameter no channel reaches is still
+    /// [`Self::reject_erased_type_param`]'s E0058, with its tailored message.
     fn check_type_operand(
         &mut self,
         operand: &TypeOperand,
@@ -979,6 +985,15 @@ impl Checker {
     ) {
         let e = match operand {
             TypeOperand::Static(ty) => {
+                // The same two channels, consulted in the same order, as `type_name::<T>()` — one
+                // helper, so every name-keyed surface answers with the same `T`.
+                if let TypeRef::Named { args, .. } = ty
+                    && args.is_empty()
+                    && let Type::Param(p) = self.annot(ty)
+                    && self.record_type_param(&p, span)
+                {
+                    return;
+                }
                 if !self.reject_erased_type_param(ty, surface) {
                     self.check_type_ref(ty);
                 }

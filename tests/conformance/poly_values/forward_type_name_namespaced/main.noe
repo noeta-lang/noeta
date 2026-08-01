@@ -17,6 +17,7 @@
 // expect: stdout "demo.main.Todo"
 // expect: stdout "true"
 // expect: stdout "1"
+// expect: stdout "1"
 // expect: exit 0
 
 struct Todo {
@@ -27,13 +28,22 @@ fn named<T>(): string {
     return type_name::<T>()
 }
 
-// The composed route the name-keyed queries' diagnostic now points at — it must find the real
-// schema, which only happens if the forwarded name carries the namespace.
+// The composed route, spelled by hand — it must find the real schema, which only happens if the
+// forwarded name carries the namespace.
 fn field_count<T>(): int {
     return field_specs_of(type_name::<T>()).len()
+}
+
+// The same query with the composition left to the compiler. It reads the very same slot entry, so
+// it inherits the qualification — and pinning it here is what keeps that inheritance honest: a
+// turbofish arm that ever went back to folding a name would answer the SHORT `Todo`, find nothing
+// registered, and report `0` with no diagnostic at all.
+fn field_count_tf<T>(): int {
+    return field_specs_of::<T>().len()
 }
 
 echo type_name::<Todo>()
 echo named::<Todo>()
 echo named::<Todo>() == type_name::<Todo>()
 echo field_count::<Todo>()
+echo field_count_tf::<Todo>()

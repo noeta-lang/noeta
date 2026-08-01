@@ -1,0 +1,47 @@
+// The residue: a type parameter **no channel** delivers is still E0058, with the tailored message
+// that says which channel is missing and how to get one.
+//
+// Forwarding the turbofish arm did not make the diagnostic go away, it narrowed it to the cases
+// where it is still true. Both survivors are bodies a per-call channel cannot reach:
+//
+//   * a nested `fn` inside an INSTANCE method of a generic type — the class's `T` rides the
+//     receiver's tag, and a nested `fn` has no receiver (it carries no hidden slots of its own
+//     either, D2b);
+//   * a nested `fn`'s OWN `<U>` — it is not a declared top-level generic, so no call site fills a
+//     slot for it and nothing names its instantiation.
+//
+// `type_name::<T>()` fails in exactly these places for exactly this reason, which is why the help no
+// longer says "pass the name instead of the type": the composed route is shut here too. Pinned so a
+// future help-text edit cannot reintroduce advice that does not work.
+//
+// The third line is the STATIC arm's other guarantee, unchanged: a turbofish naming a type that
+// resolves to nothing stays E0013. Forwarding a parameter must never turn a typo into a silent
+// empty list — that leniency belongs to the dynamic arm alone.
+// expect: error E0058 at 35:51
+// expect: error E0058 at 43:47
+// expect: error E0013 at 47:43
+// expect: exit 1
+struct Todo {
+    id: int
+    title: string
+}
+
+class Repo<T> {
+    pub tbl: string
+
+    fn new(tbl: string): Repo<T> { return Repo { tbl: tbl }; }
+
+    fn nested(): int {
+        fn inner(): int { return field_specs_of::<T>().len() }
+        if self.tbl == "" { return 0 }
+        return inner();
+    }
+}
+
+fn outer<T>(): int {
+    // The enclosing `T` forwards; this nested declaration's own `U` has no call site to fill it.
+    fn inner<U>(): int { return variants_of::<U>().len() }
+    return inner() + field_specs_of::<T>().len();
+}
+
+fn bogus(): int { return field_specs_of::<NoSuchType>().len() }

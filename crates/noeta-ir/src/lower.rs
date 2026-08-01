@@ -1974,13 +1974,25 @@ impl Lowerer<'_> {
     /// registered under and answered the empty list, right after the program imported the type, and
     /// `type_name::<Uuid>()` handed out that unregistered name as a key.
     /// [`Self::native_type_imports`] carries the one rewrite that closes it.
+    ///
+    /// The one static operand that is NOT a constant is a bare type parameter of an enclosing
+    /// generic, which the checker resolved to a per-instantiation channel at `span`: one compiled
+    /// body serves every instantiation, so the name arrives per call from
+    /// [`Self::type_param_name_atom`] — the same helper `type_name::<T>()` and the narrows read, so
+    /// `field_specs_of::<T>()` and `field_specs_of(type_name::<T>())` are the same two instructions
+    /// in the same order. Everything downstream is untouched: the rvalue already takes an `Atom`,
+    /// so this is the surface's own dynamic arm, reached without the author writing it.
     fn lower_type_operand(
         &mut self,
         operand: &TypeOperand,
+        span: &Span,
         out: &mut Vec<Stmt>,
     ) -> Result<Atom, Unsupported> {
         match operand {
-            TypeOperand::Static(ty) => Ok(Atom::Const(Const::Str(self.reflection_head_name(ty)))),
+            TypeOperand::Static(ty) => Ok(match self.type_param_name_atom(ty, span, out) {
+                Some(atom) => atom,
+                None => Atom::Const(Const::Str(self.reflection_head_name(ty))),
+            }),
             TypeOperand::Dynamic(e) => self.lower_expr(e, out),
         }
     }
@@ -3226,15 +3238,15 @@ impl Lowerer<'_> {
                 ))
             }
             Expr::FieldSpecsOf { name, span } => {
-                let name = self.lower_type_operand(name, out)?;
+                let name = self.lower_type_operand(name, span, out)?;
                 Ok(self.emit(out, Rvalue::FieldSpecsOf { name, span: *span }, *span))
             }
             Expr::VariantsOf { name, span } => {
-                let name = self.lower_type_operand(name, out)?;
+                let name = self.lower_type_operand(name, span, out)?;
                 Ok(self.emit(out, Rvalue::VariantsOf { name, span: *span }, *span))
             }
             Expr::Construct { name, fields, span } => {
-                let name = self.lower_type_operand(name, out)?;
+                let name = self.lower_type_operand(name, span, out)?;
                 let fields = self.lower_expr(fields, out)?;
                 Ok(self.emit(
                     out,

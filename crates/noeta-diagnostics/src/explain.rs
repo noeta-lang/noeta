@@ -267,8 +267,8 @@ impl DiagnosticCode {
                 title: "invalid type arguments",
                 group: "Functions and calls",
                 severity: Severity::Error,
-                summary: "Wrong type arguments in a generic application — a turbofish that cannot apply, a built-in constructor at the wrong arity, or a name-keyed reflection query given a type *parameter*.",
-                detail: "Type arguments bind to the declared parameters in order, one each. The reflection queries (`field_specs_of::<T>()`, `variants_of::<T>()`, `construct::<T>(…)`) additionally refuse a type **parameter**: their turbofish is a compile-time key, and one compiled body serves every instantiation. Hand them a name instead — `field_specs_of(type_name::<T>())` forwards through the instantiation and answers the real per-instantiation schema.",
+                summary: "Wrong type arguments in a generic application — a turbofish that cannot apply, a built-in constructor at the wrong arity, or a reflection query over a type parameter no instantiation reaches.",
+                detail: "Type arguments bind to the declared parameters in order, one each. The name-keyed reflection queries (`type_name::<T>()`, `field_specs_of::<T>()`, `variants_of::<T>()`, `construct::<T>(…)`) accept a type **parameter** wherever the instantiation reaches the body: a generic type's parameter rides the receiver in an instance method, and a generic `fn`'s or method's own parameter rides the call site. They refuse it where neither does — a nested `fn`'s own parameter, or a class's parameter inside a nested `fn` that has no receiver — because no per-call channel names it there. Reflect where the type is concrete and pass the result in.",
                 docs: "Generics-and-Traits",
             },
             DiagnosticCode::InvalidArgument => Explanation {

@@ -1,28 +1,64 @@
-// Reflecting over an **erased type parameter** is an error, not a silent empty answer.
+// Reflecting over a **forwarded type parameter** answers with the instantiation, not with an error.
 //
-// `field_specs_of` / `construct` are keyed on a type NAME, and a type parameter has no name at run
-// time: generics are erased, so one compiled body serves every instantiation and `T` is only ever
-// the three literal characters `T`. Nothing is registered under that key, so
-// `field_specs_of::<T>()` inside `fn count_of<T>()` returned the EMPTY schema — indistinguishable
-// from a real type that happens to have no fields — while the very same
-// `field_specs_of::<Todo>()` written at the call site answered 2. A silent wrong answer, so:
-// E0058, the code for a turbofish instantiation that cannot apply.
+// These queries are keyed on a type NAME, and a type parameter has no name in the *body*: generics
+// are erased, so one compiled body serves every instantiation. What the body does have is a
+// per-instantiation channel — for a top-level generic `fn`, the hidden type-argument slot that
+// already carries `json.try_parse::<T>`'s decode recipe (poly-values F2b), of which these surfaces
+// read only the NAME. `type_name::<T>()` has read it since 0.3; these three had not, and rejected
+// the spelling with E0058 while pointing the author at `field_specs_of(type_name::<T>())` — a
+// composition that already worked, which is what proved the capability was there all along. The
+// turbofish arm now takes that route itself: `field_specs_of::<T>()` IS
+// `field_specs_of(type_name::<T>())`, lowered through the surface's own dynamic arm, no new opcode.
 //
-// `construct::<T>(…)` and `variants_of::<T>()` are the same query under the same erasure, and are
-// pinned alongside so the surfaces cannot drift apart.
-// expect: error E0058 at 17:49
-// expect: error E0058 at 19:83
-// expect: error E0058 at 21:46
-// expect: exit 1
-fn count_of<T>(): int { return field_specs_of::<T>().len() }
-
-fn build_a<T>(fields: Map<string, dyn>): Result<dyn, string> { return construct::<T>(fields) }
-
-fn cases_of<T>(): int { return variants_of::<T>().len() }
-
+// All three are pinned together so they cannot drift apart, and each is called at two different
+// instantiations from ONE body — answering differently per call is the whole point of the channel.
+// expect: stdout "fields Todo: 2"
+// expect: stdout "fields User: 1"
+// expect: stdout "variants Color: 2"
+// expect: stdout "variants Status: 3"
+// expect: stdout "built: Todo {id: 7, title: \"write it\"}"
+// expect: stdout "built: User {name: \"ada\"}"
+// expect: stdout "agrees: true"
+// expect: exit 0
 struct Todo {
     id: int
     title: string
 }
+struct User {
+    name: string
+}
+enum Color {
+    Red
+    Blue
+}
+enum Status {
+    Draft
+    Live
+    Gone
+}
 
-echo count_of::<Todo>()
+fn count_of<T>(): int { return field_specs_of::<T>().len() }
+
+fn cases_of<T>(): int { return variants_of::<T>().len() }
+
+fn build_a<T>(fields: List<dyn>): Result<dyn, string> { return construct::<T>(fields) }
+
+// The composition the old E0058 help prescribed. It still works, and it must answer *identically* —
+// the turbofish arm lowers to exactly this, so a divergence here means the two arms have drifted.
+fn count_by_name<T>(): int { return field_specs_of(type_name::<T>()).len() }
+
+echo "fields Todo: ${count_of::<Todo>()}"
+echo "fields User: ${count_of::<User>()}"
+echo "variants Color: ${cases_of::<Color>()}"
+echo "variants Status: ${cases_of::<Status>()}"
+
+match build_a::<Todo>([7, "write it"]) {
+    Ok(v) => { echo "built: ${v}" },
+    Err(e) => { echo "err: ${e}" },
+}
+match build_a::<User>(["ada"]) {
+    Ok(v) => { echo "built: ${v}" },
+    Err(e) => { echo "err: ${e}" },
+}
+
+echo "agrees: ${count_of::<Todo>() == count_by_name::<Todo>()}"

@@ -48,7 +48,9 @@ use crate::subst::{
     apply_subst, bind_type_params, extend_param_scope, from_ref_q, mentions_param, param_ref,
     param_scope, scope_ids,
 };
-use noeta_ast::{ClosureBody, Expr, FnDecl, ObjectLit, Program, Stmt, StrPart, TypeRef};
+use noeta_ast::{
+    ClosureBody, Expr, FnDecl, ObjectLit, Program, Stmt, StrPart, TypeOperand, TypeRef,
+};
 use noeta_types::{ParamRef, Type};
 use std::collections::{HashMap, HashSet};
 
@@ -1023,16 +1025,32 @@ fn walk_expr(expr: &Expr, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
             rec!(name);
             rec!(args);
         }
-        // A turbofish operand names a *declared* type, never an enclosing type parameter's slot (a
-        // `T` there is erased and reflects as nothing), so it forwards no recipe.
-        Expr::FieldSpecsOf { name, .. } | Expr::VariantsOf { name, .. } => {
-            if let Some(e) = name.dynamic() {
-                rec!(e);
+        // The **name-keyed registry** consumers — `field_specs_of::<T>()`, `variants_of::<T>()`,
+        // `construct::<T>(…)`. Name-only, exactly like `type_name` and the narrows above: each
+        // keys a registry on the instantiation's runtime NAME, which is the whole of what the
+        // slot's `TypeArgInfo.name` carries, so they forward even for an instantiation that has no
+        // build recipe. Their turbofish arm is `field_specs_of(type_name::<T>())` with the
+        // composition done by the compiler rather than by the author.
+        //
+        // Bare parameters only, matching the head-keyed identity these queries actually key on
+        // ([`TypeRef::head_name`]): `field_specs_of::<List<T>>()` heads at `List`, a real type
+        // whatever `T` is, and stays the compile-time constant it always was.
+        Expr::FieldSpecsOf { name, .. } | Expr::VariantsOf { name, .. } => match name {
+            TypeOperand::Static(ty) => {
+                if let Some(p) = cx.bare_param(ty) {
+                    mark(p, false);
+                }
             }
-        }
+            TypeOperand::Dynamic(e) => rec!(e),
+        },
         Expr::Construct { name, fields, .. } => {
-            if let Some(e) = name.dynamic() {
-                rec!(e);
+            match name {
+                TypeOperand::Static(ty) => {
+                    if let Some(p) = cx.bare_param(ty) {
+                        mark(p, false);
+                    }
+                }
+                TypeOperand::Dynamic(e) => rec!(e),
             }
             rec!(fields);
         }
