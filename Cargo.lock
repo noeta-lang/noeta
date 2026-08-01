@@ -2453,6 +2453,8 @@ dependencies = [
  "noeta-ext-abi",
  "noeta-object",
  "noeta-span",
+ "postcard",
+ "serde",
  "sha2",
  "walrus",
 ]

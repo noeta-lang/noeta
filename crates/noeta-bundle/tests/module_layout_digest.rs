@@ -1162,3 +1162,47 @@ fn the_format_changelog_reaches_the_current_version() {
         current + 1
     );
 }
+
+/// `#[serde(default)]` does **not** make an added field backward-compatible under postcard — and
+/// `noeta_object::Shape::key_capable`, which is in the payload, carries a comment saying it does.
+///
+/// postcard is not self-describing: a struct is its fields back to back, and the deserializer reads
+/// exactly as many as the *current* declaration has. `#[serde(default)]` only fires when the format
+/// signals the sequence ended early, which a byte-oriented format never does. So an artifact written
+/// before the field is not defaulted — it is misread from that field on, and if enough bytes follow
+/// it does not even error. This is the rule every `Bumped to N` paragraph reasons from, checked
+/// rather than restated.
+#[test]
+fn serde_default_does_not_make_an_added_field_readable_by_postcard() {
+    #[derive(serde::Serialize)]
+    struct Before {
+        a: u32,
+        b: u32,
+    }
+    #[derive(serde::Deserialize, Debug)]
+    struct After {
+        a: u32,
+        b: u32,
+        #[serde(default)]
+        added: u32,
+        tail: u32,
+    }
+
+    let old = postcard::to_allocvec(&Before { a: 1, b: 2 }).unwrap();
+    assert!(
+        postcard::from_bytes::<After>(&old).is_err(),
+        "postcard defaulted a missing field — the format's self-describing story changed, and every \
+         `Bumped to N` paragraph reasoning from 'postcard is not self-describing' needs rereading"
+    );
+
+    // With more of the artifact behind it — the next table's bytes — the decode *succeeds* and is
+    // wrong, which is the failure mode the version gate exists to turn into an error.
+    let stream = postcard::to_allocvec(&(Before { a: 1, b: 2 }, 9u32, 7u32)).unwrap();
+    let read: After = postcard::from_bytes(&stream).expect("enough bytes, wrong meaning");
+    assert_eq!(
+        (read.a, read.b, read.added, read.tail),
+        (1, 2, 9, 7),
+        "the added field ate the value after it and every field behind it shifted — no error, a \
+         plausible wrong answer"
+    );
+}

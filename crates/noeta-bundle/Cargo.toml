@@ -24,6 +24,10 @@ noeta-ext-abi = { workspace = true }
 noeta-object = { workspace = true }
 noeta-span = { workspace = true }
 sha2 = { workspace = true }
+# The `serde(default)` probe: the changelog's whole argument is "postcard is not self-describing",
+# and the probe checks that rather than restating it.
+serde = { workspace = true }
+postcard = { workspace = true }
 
 [lints]
 workspace = true
