@@ -123,7 +123,7 @@ Every surface takes a **value**, a **type** (turbofish), or a runtime **string**
 
 That last row is the axis worth internalizing. `params_of`, `returns_of` and `invoke` have no static arm at all, because nothing about them is static: the target is a `#[Tool]` manifest entry's `.target`, a router action, an argv subcommand. **The other surfaces produce names; these three consume them.** Adding a turbofish to `invoke` would be adding a slower way to write a call you could already write directly.
 
-The middle row is the whole name-keyed surface, and it is one contract rather than five agreements. Every query in it keys on a type *name*, so both arms end at the same runtime node — which is also what lets the turbofish arm answer for a **type parameter**: generics are erased, but the instantiation's name reaches the body on a per-call channel, and the compiler routes the surface through its own string arm there. See [Reflecting over a type parameter](#reflecting-over-a-type-parameter).
+The middle row is the whole name-keyed surface, and it is one contract rather than five agreements. Every query in it keys on a type *name*, so both arms end at the same runtime node — which is also what lets the turbofish arm answer for a **type parameter**: generics are erased, but the instantiation's name reaches the body on a per-call channel, and the compiler routes the surface through its own string arm there. See [Reflection over a type parameter](#reflection-over-a-type-parameter).
 
 Reaching for the wrong axis is a **parse** error, `E0003` — `params_of::<Foo>()` fails at the operand, before typing ever runs. That is deliberate: a surface's operand shape is part of what it *is*, so getting it wrong is not a type mismatch to be coerced away.
 
