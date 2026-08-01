@@ -48,9 +48,18 @@
 //!   the sandbox executor the whole corpus is instant, which is why the other oracles never met
 //!   this.)
 //!
-//! A **host-level abort** is checked before any of that: a Rust panic prints an ASLR-varying address,
-//! so a crashing artifact looks exactly like a program that does not reproduce itself, and the first
-//! version of this oracle nearly excluded a live crash as "nondeterministic".
+//! A **host-level abort** is checked before any of that, and asked a different question. A Rust panic
+//! prints an ASLR-varying address, so a crashing artifact looks exactly like a program that does not
+//! reproduce itself, and the first version of this oracle nearly excluded a live crash as
+//! "nondeterministic" — which is why the abort check comes first.
+//!
+//! It is still *checked for reproducibility*, just not by comparing bytes. The aborting side is
+//! re-run [`ABORT_REPEATS`] times and asked whether it aborts **again**; any repeat that aborts makes
+//! the case a divergence, and only [`ABORT_REPEATS`] consecutive clean runs earn an exclusion (named
+//! and counted, as `aborted_once`). Coming first used to mean "off one sample", so an abort was the
+//! one outcome the oracle judged with *less* evidence than an ordinary output disagreement — and it
+//! is the arm anything load-induced lands in, which made a release gate that could go red because a
+//! build was running beside it. A gate that goes red under load gets re-run instead of read.
 //!
 //! A case cannot slip out of coverage silently — it has to fail to reproduce itself, hang, or be a
 //! pure reordering, first, and every one of those is printed with the case's name.
@@ -93,6 +102,11 @@ pub struct AotDiffReport {
     /// Cases excluded because the truth run does not reproduce its own output (clock/RNG/env) —
     /// named, not silently dropped.
     pub nondeterministic: Vec<String>,
+    /// Cases where a side fell over at the host level **once** and then ran clean [`ABORT_REPEATS`]
+    /// times — named, with the signal or status the one abort ended on. Not a failure (an abort that
+    /// will not reproduce in six runs is not evidence about the codegen), but the loudest exclusion
+    /// this report has: a case that keeps landing here is a case to go and read.
+    pub aborted_once: Vec<String>,
     /// Cases excluded because a side outlived [`RUN_TIMEOUT`] (a real socket, a real sleep) — named,
     /// with which side hung.
     pub timed_out: Vec<String>,
@@ -130,6 +144,7 @@ impl Default for AotDiffReport {
             matched: 0,
             not_run: crate::NotRun::default(),
             nondeterministic: Vec::new(),
+            aborted_once: Vec::new(),
             timed_out: Vec::new(),
             reordered: Vec::new(),
             failures: Vec::new(),
@@ -229,11 +244,12 @@ impl AotDiffReport {
         let _ = writeln!(
             out,
             "AOT differential: {} ran and agreed, {} not run ({}), {} nondeterministic, \
-             {} timed out; {} prototypes compiled to native bodies",
+             {} aborted once, {} timed out; {} prototypes compiled to native bodies",
             self.matched,
             self.not_run.total(),
             self.not_run.to_human(),
             self.nondeterministic.len(),
+            self.aborted_once.len(),
             self.timed_out.len(),
             self.native_protos,
         );
@@ -250,6 +266,19 @@ impl AotDiffReport {
                 self.nondeterministic.len()
             );
             for name in &self.nondeterministic {
+                let _ = writeln!(out, "  {name}");
+            }
+        }
+        if !self.aborted_once.is_empty() {
+            let _ = writeln!(
+                out,
+                "{} case(s) EXCLUDED as a ONE-OFF ABORT — a side fell over at the host level and \
+                 then ran clean {ABORT_REPEATS} times, so the abort is not evidence about the \
+                 codegen. Read these anyway: an abort that reproduces is a DIVERGENCE, and this \
+                 list is where a rare one would hide:",
+                self.aborted_once.len(),
+            );
+            for name in &self.aborted_once {
                 let _ = writeln!(out, "  {name}");
             }
         }
@@ -511,11 +540,19 @@ struct Job {
 }
 
 /// What one side of the comparison produced.
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, Clone, Debug, Default)]
 struct Output {
     stdout: String,
     stderr: String,
     exit: Option<i32>,
+    /// The signal that killed the process, when one did — the other half of what `exit: None` means.
+    ///
+    /// Without this the report could only say `ABORTED (exit None)`, which names the *absence* of
+    /// the answer rather than the answer: on Unix `exit` is `None` precisely because a signal ended
+    /// the process, and which signal is the whole diagnosis. A `--native` artifact dying on `SIGPIPE`
+    /// (a broken pipe the runtime failed to disarm) and one dying on `SIGSEGV` (a miscompile) are
+    /// the same `exit: None` and nothing alike. Always `None` off Unix, where `code()` is total.
+    signal: Option<i32>,
 }
 
 /// How one side's run ended.
@@ -719,6 +756,9 @@ enum Outcome {
     Diverged(&'static str, String),
     /// Which side failed to reproduce itself.
     Nondeterministic(&'static str),
+    /// A side fell over at the host level **once** and then ran clean [`ABORT_REPEATS`] times: which
+    /// side, and what the one abort was. Excluded, but named and counted — see [`reproduce_abort`].
+    AbortedOnce(&'static str, String),
     TimedOut(&'static str),
 }
 
@@ -754,6 +794,9 @@ fn drain(chunk: &mut Vec<Job>, tools: &AotTools, report: &mut AotDiffReport) {
             Outcome::Nondeterministic(side) => {
                 report.nondeterministic.push(format!("{} ({side})", v.name))
             }
+            Outcome::AbortedOnce(side, detail) => report
+                .aborted_once
+                .push(format!("{} ({side} side) — {detail}", v.name)),
             Outcome::TimedOut(side) => report.timed_out.push(format!("{} ({side} side)", v.name)),
         }
     }
@@ -799,26 +842,48 @@ fn judge(slot: usize, job: &Job, tools: &AotTools) -> Verdict {
             if native == truth {
                 Outcome::Agreed
             } else if let Some(side) = crashed(&native, &truth) {
-                // A host-level abort is never "nondeterministic": it is the artifact falling over.
-                // It has to be checked BEFORE the reproducibility dance, because a Rust panic prints
-                // an ASLR-varying address and would otherwise look like a program that does not
-                // reproduce itself — which is exactly how a crash could hide inside an exclusion.
-                Outcome::Diverged(
-                    "crash",
-                    format!(
-                        "the {side} side ABORTED (exit {:?}): {}",
-                        if side == "native" {
-                            native.exit
-                        } else {
-                            truth.exit
-                        },
-                        first_lines(if side == "native" {
-                            &native.stderr
-                        } else {
-                            &truth.stderr
-                        }),
+                // A host-level abort still cannot go through the ORDINARY reproducibility dance: a
+                // Rust panic prints an ASLR-varying address, so a crashing artifact looks exactly
+                // like a program that does not reproduce itself, and asking "did it print the same
+                // bytes twice" would file a live crash as an exclusion. That is why this arm exists
+                // and why it is checked first.
+                //
+                // But "not that question" was read as "no question", and an abort was called a
+                // divergence off a single sample while a mere output disagreement got four. That is
+                // the wrong way round, and it made the gate load-sensitive: this is the arm a
+                // load-induced abort lands in, so a machine under a parallel build could turn the
+                // release gate red with nothing wrong. A gate that goes red under load is a gate
+                // people re-run instead of read, which is the failure mode the whole discipline
+                // exists to prevent.
+                //
+                // So the abort is held to the same reproducibility discipline, asking the question
+                // an abort can actually answer — "does it abort AGAIN", not "does it print the same
+                // bytes" — and it is asked more times, not fewer. A reproducible abort is a
+                // divergence exactly as loudly as before.
+                let fell_over = if side == "native" { &native } else { &truth };
+                let verdict = if side == "native" {
+                    reproduce_abort(native_probe(&dir, &app))
+                } else {
+                    reproduce_abort(truth_ms_probe(&dir, tools, &job.bundle))
+                };
+                match verdict {
+                    Abort::Reproduced => Outcome::Diverged(
+                        "crash",
+                        format!(
+                            "the {side} side ABORTED and did it again on re-run — {}",
+                            abort_detail(fell_over)
+                        ),
                     ),
-                )
+                    Abort::NotReproduced => Outcome::AbortedOnce(
+                        side,
+                        format!(
+                            "{} — clean on all {ABORT_REPEATS} re-runs",
+                            abort_detail(fell_over)
+                        ),
+                    ),
+                    Abort::TimedOut(side) => Outcome::TimedOut(side),
+                    Abort::Broke(detail) => Outcome::Diverged("build", detail),
+                }
             } else {
                 // Only a disagreeing case pays for the reproducibility check, and it asks the
                 // question of BOTH sides: a real host has a real clock, a real RNG and a real
@@ -1009,18 +1074,112 @@ fn run_truth(dir: &Path, tools: &AotTools, bundle: &[u8]) -> Ran {
     out
 }
 
-/// Which side, if either, fell over at the *host* level: killed by a signal (no exit code), an
+/// Whether one side fell over at the *host* level: killed by a signal (no exit code), an
 /// abort-shaped status, or a Rust panic in its stderr. A Noeta `panic(...)` is none of these — it is
 /// a rendered `panic: …` diagnostic and an ordinary exit code — so this catches only the artifact
 /// itself failing, which is never a legitimate outcome.
+fn aborted(o: &Output) -> bool {
+    o.exit.is_none_or(|c| c >= 128) || o.stderr.contains("panicked at")
+}
+
+/// Which side, if either, aborted — the native side first, since it is the one under test.
 fn crashed(native: &Output, truth: &Output) -> Option<&'static str> {
-    let bad = |o: &Output| o.exit.is_none_or(|c| c >= 128) || o.stderr.contains("panicked at");
-    if bad(native) {
+    if aborted(native) {
         Some("native")
-    } else if bad(truth) {
+    } else if aborted(truth) {
         Some("truth")
     } else {
         None
+    }
+}
+
+/// How many times an aborting side is re-run before its abort is called a one-off.
+///
+/// Deliberately more than the [`STABILITY_REPEATS`] an output disagreement pays for. A disagreement
+/// only has to show that two engines differ; an abort has to answer a question with a much worse
+/// wrong answer available in each direction — call a real miscompile a fluke, or call the gate red
+/// when nothing is wrong — so it buys more samples.
+const ABORT_REPEATS: usize = 5;
+
+/// What re-running an aborting side concluded.
+#[derive(Debug, PartialEq, Eq)]
+enum Abort {
+    /// It aborted again. The artifact really does fall over: a divergence, loudly.
+    Reproduced,
+    /// Every re-run finished without aborting.
+    NotReproduced,
+    TimedOut(&'static str),
+    Broke(String),
+}
+
+/// Re-run an aborting side and say whether the abort reproduces.
+///
+/// **Any** abort across the re-runs counts as reproduced — not "most", not "all". The asymmetry is
+/// the whole point and it is the direction that cannot lose a bug: an abort that happens one run in
+/// six is still a `--native` artifact falling over, and the only thing an intermittent miscompile
+/// looks like is exactly this. What the re-runs can rule out is the *opposite* error — a single
+/// abort caused by something that is not the codegen at all — and ruling that out is what this is
+/// for. It takes [`ABORT_REPEATS`] consecutive clean runs to earn an exclusion, and the exclusion is
+/// still named and counted in the report.
+///
+/// The stated limit, rather than a hidden one: an abort rarer than one in six runs can be excluded
+/// here. Nothing has ever looked like that — the one real abort this oracle has caught (a misaligned
+/// AOT dispatch table indexing out of bounds, `modules/derived_package_path`) was deterministic, and
+/// so is every miscompile shape anyone has proposed for it. The exclusion is loud precisely so that
+/// a case which keeps appearing in it gets read rather than accumulated.
+fn reproduce_abort(mut probe: impl FnMut() -> Ran) -> Abort {
+    for _ in 0..ABORT_REPEATS {
+        match probe() {
+            Ran::Done(again) if aborted(&again) => return Abort::Reproduced,
+            Ran::Done(_) => {}
+            Ran::TimedOut(side) => return Abort::TimedOut(side),
+            Ran::Broke(detail) => return Abort::Broke(detail),
+        }
+    }
+    Abort::NotReproduced
+}
+
+/// Say what actually happened to a side that fell over.
+///
+/// `exit: None` and an empty detail — which is all this used to print — names the absence of the
+/// answer, not the answer. It cost a reader a whole investigation to work out that `exit None` meant
+/// "killed by a signal" and then which signal it was, and the signal *was* the diagnosis. So: the
+/// signal by number and name where there is one, the status where there is not, and an explicit "no
+/// output captured" rather than a colon with nothing after it.
+fn abort_detail(o: &Output) -> String {
+    let how = match (o.signal, o.exit) {
+        (Some(sig), _) => format!("killed by signal {sig} ({})", signal_name(sig)),
+        (None, Some(code)) if code >= 128 => {
+            format!("exit {code} (an abort-shaped status: {} + 128)", code - 128)
+        }
+        (None, Some(code)) => format!("exit {code}"),
+        (None, None) => "no exit code and no signal".to_string(),
+    };
+    let said = first_lines(&o.stderr);
+    if said.is_empty() {
+        format!("{how}, no output captured on stderr")
+    } else {
+        format!("{how}: {said}")
+    }
+}
+
+/// The POSIX name of a signal number — the ones a native artifact can plausibly die on, so a report
+/// reads as a diagnosis rather than a number to go and look up.
+fn signal_name(sig: i32) -> &'static str {
+    match sig {
+        1 => "SIGHUP",
+        2 => "SIGINT",
+        3 => "SIGQUIT",
+        4 => "SIGILL",
+        6 => "SIGABRT",
+        8 => "SIGFPE",
+        9 => "SIGKILL",
+        11 => "SIGSEGV",
+        13 => "SIGPIPE",
+        15 => "SIGTERM",
+        24 => "SIGXCPU",
+        25 => "SIGXFSZ",
+        _ => "unknown",
     }
 }
 
@@ -1142,10 +1301,18 @@ fn run_capped(cmd: &mut Command, side: &'static str) -> Ran {
         };
         let stdout = String::from_utf8_lossy(&out.join().unwrap_or_default()).into_owned();
         let stderr = String::from_utf8_lossy(&err.join().unwrap_or_default()).into_owned();
+        #[cfg(unix)]
+        let signal = {
+            use std::os::unix::process::ExitStatusExt as _;
+            status.signal()
+        };
+        #[cfg(not(unix))]
+        let signal = None;
         Ran::Done(Output {
             stdout,
             stderr,
             exit: status.code(),
+            signal,
         })
     })
 }
@@ -1262,8 +1429,8 @@ mod tests {
     fn reordering_is_recognised_and_a_real_difference_is_not() {
         let out = |stdout: &str| Output {
             stdout: stdout.to_string(),
-            stderr: String::new(),
             exit: Some(0),
+            ..Output::default()
         };
         assert!(reordered(&out("a\nb\nc\n"), &out("a\nc\nb\n")));
         assert!(!reordered(&out("a\nb\nc\n"), &out("a\nb\nd\n")));
@@ -1279,30 +1446,120 @@ mod tests {
     /// Rust panic on stderr with an otherwise ordinary exit code.
     #[test]
     fn a_rust_panic_or_a_signal_is_a_crash() {
-        let clean = Output {
-            stdout: String::new(),
-            stderr: String::new(),
-            exit: Some(1),
-        };
-        let panicked = Output {
-            stdout: String::new(),
-            stderr: "thread '<unnamed>' panicked at src/dispatch.rs:439:37".to_string(),
-            exit: Some(101),
-        };
-        let signalled = Output {
-            stdout: String::new(),
-            stderr: String::new(),
-            exit: None,
-        };
-        assert_eq!(crashed(&panicked, &clean), Some("native"));
-        assert_eq!(crashed(&clean, &signalled), Some("truth"));
-        assert_eq!(crashed(&clean, &clean), None);
+        assert_eq!(crashed(&panicked(), &clean()), Some("native"));
+        assert_eq!(crashed(&clean(), &signalled(13)), Some("truth"));
+        assert_eq!(crashed(&clean(), &clean()), None);
         // A Noeta `panic(...)` is a rendered diagnostic and an ordinary exit — not a crash.
         let noeta_panic = Output {
             stdout: "before\n".to_string(),
             stderr: "panic: boom\n".to_string(),
             exit: Some(1),
+            signal: None,
         };
-        assert_eq!(crashed(&noeta_panic, &clean), None);
+        assert_eq!(crashed(&noeta_panic, &clean()), None);
+    }
+
+    /// A side that finished normally.
+    fn clean() -> Output {
+        Output {
+            exit: Some(1),
+            ..Output::default()
+        }
+    }
+
+    /// A side killed by `sig`, which is what `exit: None` means on Unix.
+    fn signalled(sig: i32) -> Output {
+        Output {
+            exit: None,
+            signal: Some(sig),
+            ..Output::default()
+        }
+    }
+
+    /// A side that died with a Rust panic on stderr.
+    fn panicked() -> Output {
+        Output {
+            stderr: "thread '<unnamed>' panicked at src/dispatch.rs:439:37".to_string(),
+            exit: Some(101),
+            ..Output::default()
+        }
+    }
+
+    /// `n` completed runs that all produced `what()`.
+    fn repeated(n: usize, what: fn() -> Output) -> Vec<Ran> {
+        (0..n).map(|_| Ran::Done(what())).collect()
+    }
+
+    /// A probe that replays a scripted sequence of runs, so the abort re-run policy can be posed
+    /// exact histories instead of a real process.
+    fn scripted(runs: Vec<Ran>) -> impl FnMut() -> Ran {
+        let mut runs = runs.into_iter();
+        move || {
+            runs.next()
+                .expect("the policy asked for more runs than were scripted")
+        }
+    }
+
+    /// The rule the `derived_package_path` miscompile was caught by, and the one that must survive
+    /// every leniency added here: an abort that happens again is a divergence.
+    #[test]
+    fn an_abort_that_reproduces_is_still_a_divergence() {
+        // Every re-run aborts — the deterministic miscompile shape.
+        assert_eq!(
+            reproduce_abort(scripted(repeated(ABORT_REPEATS, panicked))),
+            Abort::Reproduced
+        );
+        // And so is one that aborts only on the LAST re-run: any repeat, not most of them. An
+        // intermittent miscompile is still a miscompile, and this is the direction that cannot
+        // lose one.
+        let mut runs = repeated(ABORT_REPEATS - 1, clean);
+        runs.push(Ran::Done(signalled(11)));
+        assert_eq!(reproduce_abort(scripted(runs)), Abort::Reproduced);
+    }
+
+    /// The load-flake this arm used to report as a release-blocking divergence off ONE sample.
+    #[test]
+    fn an_abort_that_never_reproduces_is_excluded_not_failed() {
+        assert_eq!(
+            reproduce_abort(scripted(repeated(ABORT_REPEATS, clean))),
+            Abort::NotReproduced
+        );
+    }
+
+    /// It takes the full run of clean re-runs to earn the exclusion — not a first clean one.
+    #[test]
+    fn one_clean_re_run_does_not_clear_an_abort() {
+        assert!(ABORT_REPEATS > 1, "a single re-run cannot clear an abort");
+        let mut runs = repeated(1, clean);
+        runs.push(Ran::Done(panicked()));
+        assert_eq!(reproduce_abort(scripted(runs)), Abort::Reproduced);
+    }
+
+    /// An abort is judged with MORE evidence than an output disagreement, not less — the inversion
+    /// that made this the load-sensitive arm of the gate.
+    #[test]
+    fn an_abort_buys_more_samples_than_a_disagreement() {
+        assert!(ABORT_REPEATS >= STABILITY_REPEATS);
+    }
+
+    /// `exit None` and an empty detail names the absence of the answer. The report says which
+    /// signal, and says so when there was no output rather than trailing off after a colon.
+    #[test]
+    fn an_abort_reports_the_signal_and_admits_to_saying_nothing() {
+        let detail = abort_detail(&signalled(13));
+        assert!(detail.contains("signal 13"), "{detail}");
+        assert!(detail.contains("SIGPIPE"), "{detail}");
+        assert!(detail.contains("no output captured"), "{detail}");
+        assert!(abort_detail(&signalled(11)).contains("SIGSEGV"));
+        // A panic keeps its message, which is how the one real abort found so far identified itself.
+        let said = abort_detail(&panicked());
+        assert!(said.contains("panicked at"), "{said}");
+        assert!(!said.contains("no output captured"), "{said}");
+        // An abort-shaped status with no signal still says what the status was.
+        let shaped = Output {
+            exit: Some(134),
+            ..Output::default()
+        };
+        assert!(abort_detail(&shaped).contains("134"));
     }
 }
