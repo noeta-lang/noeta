@@ -83,6 +83,17 @@ const POSITIONS: &[(&str, &str)] = &[
         "Expr::Construct dynamic name and fields",
         "x = construct(@json { {} }, [@json { {} }])\n",
     ),
+    // The two that gained a dynamic arm with the reflection-operand unification. They were leaves
+    // here for a real reason — they had no expression operand at all — and stopped being one the
+    // moment they took a `TypeOperand`, which is exactly the drift this file exists to catch.
+    (
+        "Expr::AttributesOf dynamic name",
+        "x = attributes_of(@json { {} })\n",
+    ),
+    (
+        "Expr::RolesOf dynamic scope",
+        "x = roles_of(@json { {} })\n",
+    ),
     (
         "Expr::FromBytes blob",
         "@packed\nstruct V2 { x: f32 y: f32 }\nx = from_bytes::<V2>(@json { {} })\n",

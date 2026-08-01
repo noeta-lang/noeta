@@ -3498,9 +3498,16 @@ fn tier_name_at(
             }),
             // The name-keyed reflection queries: a turbofish operand is a *type*, so only the
             // dynamic (expression) arm can hold a tier block.
-            Expr::FieldSpecsOf { name, .. } | Expr::VariantsOf { name, .. } => {
+            Expr::FieldSpecsOf { name, .. }
+            | Expr::VariantsOf { name, .. }
+            | Expr::AttributesOf { ty: name, .. } => {
                 name.dynamic().and_then(|e| in_expr(e, offset, source))
             }
+            // `roles_of()` is the same operand, optional — bare `roles_of()` has none at all.
+            Expr::RolesOf { ty: name, .. } => name
+                .as_ref()
+                .and_then(|n| n.dynamic())
+                .and_then(|e| in_expr(e, offset, source)),
             Expr::Construct { name, fields, .. } => name
                 .dynamic()
                 .and_then(|e| in_expr(e, offset, source))
@@ -3525,10 +3532,10 @@ fn tier_name_at(
             Expr::FieldSet {
                 receiver, value, ..
             } => in_expr(receiver, offset, source).or_else(|| in_expr(value, offset, source)),
-            // Leaves: a literal has no sub-expression, an identifier names one thing, and the
-            // three operand-free reflection queries take a *type* (or nothing) rather than a
-            // value — none of them can contain a `@<tier> { … }`. `NativeFnRef` is synthesized by
-            // the compiler and never appears in parsed source.
+            // Leaves: a literal has no sub-expression, an identifier names one thing, and
+            // `type_name::<T>()` takes a *type* rather than a value — none of them can contain a
+            // `@<tier> { … }`. `NativeFnRef` is synthesized by the compiler and never appears in
+            // parsed source.
             Expr::Str { .. }
             | Expr::Int { .. }
             | Expr::Float { .. }
@@ -3538,9 +3545,7 @@ fn tier_name_at(
             | Expr::Bool { .. }
             | Expr::Ident { .. }
             | Expr::NativeFnRef { .. }
-            | Expr::AttributesOf { .. }
-            | Expr::TypeName { .. }
-            | Expr::RolesOf { .. } => None,
+            | Expr::TypeName { .. } => None,
         }
     }
     in_stmts(&program.stmts, offset, source)

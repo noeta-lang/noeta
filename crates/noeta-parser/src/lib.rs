@@ -3215,9 +3215,10 @@ where
         // runtime string. Bare `roles_of()` (no scope at all) spans all role-tagged attributes.
         // Yields `List<RoleBinding>`.
         //
-        // The three arms commit on the token after the keyword, so `()` cannot be mistaken for the
-        // dynamic arm: the empty-parens arm is tried last, after an expression between the parens
-        // has failed to parse.
+        // The turbofish arm commits on the `::`; the other two both open on `(`, so the ORDER is
+        // what tells them apart — the empty-parens arm is tried last, reached only once parsing an
+        // expression between the parens has failed. A `roles_of()` therefore stays the unscoped
+        // query and never becomes a dynamic arm with a missing operand.
         let roles_of = just(T::RolesOfKw)
             .ignore_then(choice((
                 just(T::ColonColon)
