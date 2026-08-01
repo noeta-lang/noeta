@@ -824,36 +824,41 @@ fn jit_mixed_numeric_and_float_rem_native_with_identical_semantics() {
 }
 
 /// The `--jit-stats` bail histogram (S0): a function whose body holds a non-native op
-/// (`Stringify`, string interpolation) bails there on **every call**, and the seam counts each
-/// one against that exact `(proto, pc)`. Under `force_jit` everything compiles up front, so the
-/// counts are deterministic: 10 calls → count 10 at `tag`'s `Stringify`, sorted first (the
-/// histogram is most-frequent-first). Also locks that the recording seam is `None`-gated — the
-/// plain stats entry point records nothing.
+/// (`MakeList`, a list literal) bails there on **every call**, and the seam counts each one
+/// against that exact `(proto, pc)`. Under `force_jit` everything compiles up front, so the counts
+/// are deterministic: 10 calls → count 10 at `tag`'s `MakeList`, sorted first (the histogram is
+/// most-frequent-first). Also locks that the recording seam is `None`-gated — the plain stats
+/// entry point records nothing.
+///
+/// The blocking op used to be `Stringify` (string interpolation), which is native now — it runs
+/// through the leaf-op helper. `MakeList` replaces it, preceded by an arithmetic op so the bail
+/// site is at pc > 0 and cannot be confused with the entry parameter guard's pc-0 bail.
 #[cfg(feature = "jit")]
 #[test]
 fn jit_bail_histogram_counts_per_call_bails_at_the_exact_site() {
-    let src = "fn tag(n: int): string {\n  return \"v${n}\";\n}\nmut acc = 0;\nmut i = 0;\nwhile i < 10 {\n  s = tag(i);\n  acc = acc + 1;\n  i = i + 1;\n}\necho acc;\n";
+    let src = "fn tag(n: int): List<int> {\n  m = n + 1;\n  return [m];\n}\nmut acc = 0;\nmut i = 0;\nwhile i < 10 {\n  s = tag(i);\n  acc = acc + 1;\n  i = i + 1;\n}\necho acc;\n";
     let module = compile_module(src);
     let (result, bails) = VmBackend::new().run_module_jit_bails(&module);
     assert_eq!(result.stdout, "10\n");
 
-    // Locate `tag`'s prototype and its Stringify pc straight from the bytecode.
+    // Locate `tag`'s prototype and its MakeList pc straight from the bytecode.
     let (tag_proto, tag_chunk) = module
         .protos
         .iter()
         .enumerate()
         .find(|(_, c)| c.name.as_deref() == Some("tag"))
         .expect("tag should have a prototype");
-    let stringify_pc = tag_chunk
+    let make_list_pc = tag_chunk
         .code
         .iter()
-        .position(|op| matches!(op, Op::Stringify { .. }))
-        .expect("tag should contain a Stringify") as u32;
+        .position(|op| matches!(op, Op::MakeList { .. }))
+        .expect("tag should contain a MakeList") as u32;
+    assert!(make_list_pc > 0, "the bail site must not be the pc-0 guard");
 
     let site = bails
         .iter()
-        .find(|b| b.proto == tag_proto as u32 && b.pc == stringify_pc)
-        .expect("the Stringify site should be in the histogram");
+        .find(|b| b.proto == tag_proto as u32 && b.pc == make_list_pc)
+        .expect("the MakeList site should be in the histogram");
     assert_eq!(site.count, 10, "one bail per call, exactly: {bails:?}");
     // Most-frequent-first: no site outranks the per-call one.
     assert_eq!(bails[0].count, site.count, "sorted descending: {bails:?}");
@@ -865,21 +870,34 @@ fn jit_bail_histogram_counts_per_call_bails_at_the_exact_site() {
 
 /// P-JIT foundation: a prototype with no compilable op runs its bail stub — reaching the
 /// `noeta_jit_observe` helper — and control falls cleanly back to tier 0 with a byte-identical
-/// result. `echo "hi"` is exactly such a program (its only prototype is `LoadConst`(str) /
-/// `Stringify` / `Echo` / `Halt`, none of them fast). Proves the seam (Cranelift build + finalize,
-/// tier-0/1 dispatch, the helper ABI, the deopt handoff) end to end.
+/// result. Proves the seam (Cranelift build + finalize, tier-0/1 dispatch, the helper ABI, the
+/// deopt handoff) end to end.
+///
+/// `echo "hi"` used to be exactly such a program, but every `LoadConst` is compilable now (a heap
+/// constant materializes through the leaf-op helper), so its prototype is eligible. A body that is
+/// *only* `Halt` — what an empty program compiles to — is what is left with nothing to compile, and
+/// it drives the same seam. The byte-identity claim keeps a program that actually prints beside it.
 #[cfg(feature = "jit")]
 #[test]
 fn jit_foundation_bails_to_identical_result_and_runs_native_stubs() {
-    let module = compile_module("echo \"hi\";\n");
+    let module = compile_module("// nothing to compile\n");
     let interp = VmBackend::new().run_module(&module);
     let before = jit_observe_count();
     let jit = VmBackend::new().run_module_jit(&module);
     let entered = jit_observe_count() - before;
 
     assert_eq!(interp, jit, "tier-1 result must match the interpreter");
-    assert_eq!(jit.stdout, "hi\n");
     assert!(entered >= 1, "expected the bail stub to run, got {entered}");
+
+    // …and a printing program still round-trips byte-identically through tier 1.
+    let printing = compile_module("echo \"hi\";\n");
+    let printed = VmBackend::new().run_module_jit(&printing);
+    assert_eq!(
+        VmBackend::new().run_module(&printing),
+        printed,
+        "tier-1 result must match the interpreter"
+    );
+    assert_eq!(printed.stdout, "hi\n");
 }
 
 /// J1 (integer fast path): a pure-integer `while`-loop function compiles to native code and, run

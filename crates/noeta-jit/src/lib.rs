@@ -1472,6 +1472,17 @@ pub fn worth_compiling(chunk: &noeta_bytecode::Chunk, names: &[String]) -> bool 
 /// follows edges only out of fast ops. Used so the codegen fills unreachable blocks (dead code, or the
 /// fall-through past a bail) with a trivial bail instead of code that would reference the entry-only
 /// frame/globals pointers from a non-dominated block.
+///
+/// **A prototype's native region is not free to grow (measured).** Nativizing one more op widens
+/// this set, and a *whole-function* Cranelift compile then allocates registers across the larger
+/// body — which can cost an unrelated hot loop in the *same* prototype. Concretely: making the
+/// trailing `Stringify` of `echo sum` compilable pushed the `Echo`/`Halt` tail into the reachable
+/// set of a top-level script whose hot loop is `while i < 2000 { sum = sum + xs[i] }`, and the loop
+/// slowed ~5% (a register that had lived in `%r14` started spilling to the stack every iteration).
+/// The same program with the loop moved into its own `fn` is unaffected — the small prototype's
+/// allocation does not change. So the cost is confined to one-big-prototype top-level scripts, and
+/// the structural fix is region-scoped (OSR-window) compilation rather than whole-prototype
+/// compilation; nativizing more ops without that will keep trading against it.
 fn reachable_pcs(chunk: &noeta_bytecode::Chunk, names: &[String]) -> Vec<bool> {
     reachable_pcs_from(chunk, entry_pcs(chunk), names)
 }
