@@ -3023,14 +3023,26 @@ where
                 desugar_if_then_else(cond, then_expr, else_expr, ctx.to_span(e.span()))
             });
 
-        // `attributes_of::<T>()` — the reflection manifest query. A keyword (so the type-argument
-        // turbofish parses unambiguously), `::<T>` carrying the attribute type, and a trailing `()`
-        // mirroring a call surface. Compile-time resolved; returns `List<Attributed<T>>`.
+        // `attributes_of::<T>()` / `attributes_of(name)` — the reflection manifest query. Two
+        // disjoint surfaces under one keyword, told apart by the token after it, exactly as
+        // `field_specs_of` spells them: `::` opens the turbofish (a static attribute type), `(`
+        // opens the dynamic string operand. They stay disjoint in the AST as the two arms of
+        // `TypeOperand` and converge at lowering on one name-keyed runtime node — the manifest is
+        // keyed on the type NAME, so the two arms ask the same question.
+        //
+        // The turbofish `T` stays a real `TypeRef` here for the same reason every other one does:
+        // namespace qualification runs later, in the linker, and rewrites `TypeRef`s.
         let attributes_of = just(T::AttributesOfKw)
-            .ignore_then(just(T::ColonColon))
-            .ignore_then(type_parser(ctx).delimited_by(just(T::Lt), just(T::Gt)))
-            .then_ignore(just(T::LParen))
-            .then_ignore(just(T::RParen))
+            .ignore_then(choice((
+                just(T::ColonColon)
+                    .ignore_then(type_parser(ctx).delimited_by(just(T::Lt), just(T::Gt)))
+                    .then_ignore(just(T::LParen))
+                    .then_ignore(just(T::RParen))
+                    .map(TypeOperand::Static),
+                sub.clone()
+                    .delimited_by(just(T::LParen), just(T::RParen))
+                    .map(|e| TypeOperand::Dynamic(Box::new(e))),
+            )))
             .map_with(move |ty, e| Expr::AttributesOf {
                 ty,
                 span: ctx.to_span(e.span()),
@@ -3197,18 +3209,27 @@ where
                 },
             );
 
-        // `roles_of()` / `roles_of::<RoleEnum>()` — the semantic-role index query (P2.7). A keyword,
-        // an *optional* `::<E>` turbofish scoping the query to one role enum (mirroring
-        // `attributes_of`), and a trailing `()`. Bare `roles_of()` spans all role-tagged attributes;
-        // `roles_of::<Semantic>()` returns only `Semantic` bindings. Yields `List<RoleBinding>`.
+        // `roles_of()` / `roles_of::<RoleEnum>()` / `roles_of(name)` — the semantic-role index query
+        // (P2.7). A keyword and an *optional* scope, which is the same two `TypeOperand` arms
+        // `attributes_of` takes: `::<E>` names the role enum statically, `(name)` scopes by a
+        // runtime string. Bare `roles_of()` (no scope at all) spans all role-tagged attributes.
+        // Yields `List<RoleBinding>`.
+        //
+        // The three arms commit on the token after the keyword, so `()` cannot be mistaken for the
+        // dynamic arm: the empty-parens arm is tried last, after an expression between the parens
+        // has failed to parse.
         let roles_of = just(T::RolesOfKw)
-            .ignore_then(
+            .ignore_then(choice((
                 just(T::ColonColon)
                     .ignore_then(type_parser(ctx).delimited_by(just(T::Lt), just(T::Gt)))
-                    .or_not(),
-            )
-            .then_ignore(just(T::LParen))
-            .then_ignore(just(T::RParen))
+                    .then_ignore(just(T::LParen))
+                    .then_ignore(just(T::RParen))
+                    .map(|ty| Some(TypeOperand::Static(ty))),
+                sub.clone()
+                    .delimited_by(just(T::LParen), just(T::RParen))
+                    .map(|e| Some(TypeOperand::Dynamic(Box::new(e)))),
+                just(T::LParen).ignore_then(just(T::RParen)).map(|_| None),
+            )))
             .map_with(move |ty, e| Expr::RolesOf {
                 ty,
                 span: ctx.to_span(e.span()),
@@ -6586,8 +6607,17 @@ mod tests {
     #[test]
     fn attributes_of_parses() {
         // `attributes_of::<T>()` — a keyword + turbofish type argument + `()` — parses to a
-        // dedicated reflection node carrying the attribute type.
+        // dedicated reflection node whose operand is the STATIC arm of `TypeOperand`, keeping `T` a
+        // real TYPE so the linker's namespace rewrite reaches it.
         insta::assert_snapshot!(pretty("x = attributes_of::<Route>();"));
+    }
+
+    #[test]
+    fn attributes_of_dynamic_parses() {
+        // The other arm of the same operand: `attributes_of(name)` takes a runtime string, exactly
+        // as `field_specs_of(name)` does. The two arms stay distinguishable in the AST — a string
+        // that happens to spell a local type name means that string and must not be qualified.
+        insta::assert_snapshot!(pretty("x = attributes_of(n);"));
     }
 
     #[test]
@@ -6625,6 +6655,14 @@ mod tests {
         // `roles_of()` — a keyword + empty `()` — parses to a dedicated reflection node (the
         // semantic-role index query), taking no operand.
         insta::assert_snapshot!(pretty("x = roles_of();"));
+    }
+
+    #[test]
+    fn roles_of_scoped_parses() {
+        // The two SCOPED arms, pinned together because the empty-parens arm has to stay
+        // distinguishable from the dynamic one: `roles_of::<E>()` is a static type operand,
+        // `roles_of(name)` a runtime string, and bare `roles_of()` neither.
+        insta::assert_snapshot!(pretty("x = roles_of::<Semantic>(); y = roles_of(e);"));
     }
 
     #[test]

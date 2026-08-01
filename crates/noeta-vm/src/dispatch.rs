@@ -2916,31 +2916,20 @@ impl<'m> Vm<'m> {
                         set_reg(regs, fbase, *dst, tuple);
                         pc += 1;
                     }
-                    Op::AttributesOf {
-                        dst,
-                        type_name,
-                        dynamic,
-                    } => {
-                        // A forwarded type parameter (F2b) resolves the concrete NAME through the
-                        // hidden slot's table entry; a static turbofish keeps the interned name.
-                        let result = match dynamic {
-                            Some(slot) => {
-                                let idx = regs[fbase + *slot as usize].as_int().unwrap_or(-1);
-                                let name = module
-                                    .type_args
-                                    .get(idx.max(0) as usize)
-                                    .map(|e| e.name.as_str())
-                                    .unwrap_or("");
-                                self.materialize_attributes(name)
-                            }
-                            None => self.materialize_attributes(module.name(*type_name)),
-                        };
+                    Op::AttributesOf { dst, src } => {
+                        // The manifest is name-keyed: the register holds the attribute type's name,
+                        // folded from a written turbofish or read off a per-instantiation channel by
+                        // the preceding `TypeArgName`/`TypeSlotName` — the same string either way.
+                        let name = regs[fbase + *src as usize].as_string().unwrap_or_default();
+                        let result = self.materialize_attributes(&name);
                         set_reg(regs, fbase, *dst, result);
                         pc += 1;
                     }
-                    Op::RolesOf { dst, role_enum } => {
-                        let filter = role_enum.map(|e| module.name(e));
-                        let result = self.materialize_roles(filter);
+                    Op::RolesOf { dst, src } => {
+                        // The optional scope arrives the same way; `None` is the unscoped query.
+                        let filter =
+                            src.map(|src| regs[fbase + src as usize].as_string().unwrap_or_default());
+                        let result = self.materialize_roles(filter.as_deref());
                         set_reg(regs, fbase, *dst, result);
                         pc += 1;
                     }

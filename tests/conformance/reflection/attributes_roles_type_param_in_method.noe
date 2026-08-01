@@ -1,0 +1,96 @@
+// `attributes_of` and `roles_of` over a type parameter reached through the **receiver's reflected
+// tag** — the other channel, and the one `attributes_of` structurally could not read.
+//
+// A body is handed its instantiation by exactly one of two channels, and both deliver a NAME. An
+// instance method of a generic type reads the class's parameter off the receiver's tag, stamped at
+// the construction site; a self-less member has no receiver, so its class's parameter rides the
+// hidden slot the call site fills; a method's own `<U>` rides that same slot. The receiver is
+// consulted first, through the one helper every name-keyed surface shares — which is what makes
+// `attributes_of::<T>()` and `field_specs_of::<T>()` agree about `T` by construction.
+//
+// Before the operand unification this file's first two lines were `E0035` ("cannot forward `T`
+// here"), because `Op::AttributesOf`'s operand was a slot INDEX and the receiver tag produces a
+// string.
+// expect: stdout "routes attrs: 2"
+// expect: stdout "persists attrs: 1"
+// expect: stdout "self-less attrs: 2"
+// expect: stdout "own param roles: 3"
+// expect: stdout "own param roles: 1"
+// expect: exit 0
+@semantic
+enum WebRole {
+    Controller
+    Middleware
+}
+
+@attribute(Function)
+@role(Semantic.EntryPoint)
+struct Route {
+    path: string
+}
+
+@attribute(Function)
+@role(Semantic.Sink)
+struct Persist {
+    table: string
+}
+
+@attribute(Function)
+@role(WebRole.Controller)
+struct Page {
+    path: string
+}
+
+#[Route("/users")]
+fn handleUsers(): int { return 1; }
+
+#[Route("/orders")]
+fn handleOrders(): int { return 2; }
+
+#[Persist("users")]
+fn writeUser(): int { return 3; }
+
+#[Page("/")]
+fn renderHome(): int { return 4; }
+
+class Scanner<T> {
+    pub label: string
+
+    fn new(label: string): Scanner<T> {
+        return Scanner { label: label };
+    }
+
+    // Reads `self`, so an INSTANCE method: `T` comes off the receiver's reflected tag.
+    fn count(): string {
+        return "${self.label} attrs: ${attributes_of::<T>().len()}";
+    }
+
+    // Self-less: no receiver exists, so `T` arrives on the hidden slot the call site fills.
+    fn describe(): string {
+        return "self-less attrs: ${attributes_of::<T>().len()}";
+    }
+}
+
+// A generic method's OWN type parameter on a non-generic type: the slot channel again, filled from
+// the call's own turbofish rather than from an enclosing declaration.
+class Auditor {
+    pub extra: int
+
+    fn new(): Auditor {
+        return Auditor { extra: 0 };
+    }
+
+    fn roles<E>(): string {
+        return "own param roles: ${roles_of::<E>().len() + self.extra}";
+    }
+}
+
+sr: Scanner<Route> = Scanner.new("routes");
+sp: Scanner<Persist> = Scanner.new("persists");
+echo sr.count();
+echo sp.count();
+echo Scanner::<Route>.describe();
+
+a = Auditor.new();
+echo a.roles::<Semantic>();
+echo a.roles::<WebRole>();

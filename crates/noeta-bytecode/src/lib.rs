@@ -1083,25 +1083,34 @@ pub enum Op {
         capacity: Reg,
         span: Span,
     },
-    /// `attributes_of::<T>()`: `dst = List<Attributed<T>>` — the `#[T(...)]` attributes from the
-    /// module manifest, each materialized into a `T` struct and paired with its target. `type_name`
-    /// is the attribute type, resolved at compile time (closed-world). Reads `Module::reflection`.
+    /// `attributes_of::<T>()` / `attributes_of(name)`: `dst = List<Attributed<T>>` — the `#[T(...)]`
+    /// attributes from the module manifest, each materialized into a `T` struct and paired with its
+    /// target. `src` holds the attribute type's **name as a runtime string**; the manifest is
+    /// name-keyed, so an unknown name yields the empty list. Reads `Module::reflection`.
+    ///
+    /// A name-string register rather than the compile-time `NameId` it used to be, and rather than
+    /// the `Option<Reg>` slot *index* that rode beside it. The index form could only ever be filled
+    /// from the hidden type-argument slot, which made this the one name-keyed surface that could not
+    /// consume what [`Op::TypeArgName`]/[`Op::TypeSlotName`] produce — a string — so a type parameter
+    /// reaching a body on the *receiver's* reflected tag was rejected here while
+    /// `field_specs_of::<T>()` answered. One string operand is what the other name-keyed surfaces
+    /// take ([`Op::FieldSpecsOf`], [`Op::VariantsOf`], [`Op::Construct`]), and the two channels fill
+    /// it identically.
     AttributesOf {
         dst: Reg,
-        type_name: NameId,
-        /// A forwarded type parameter (poly-values F2b): the register holding the hidden slot's
-        /// index into [`Module::type_args`]; the concrete type NAME is resolved through the table
-        /// at runtime instead of `type_name` (which is unused then).
-        dynamic: Option<Reg>,
+        src: Reg,
     },
-    /// `roles_of()` / `roles_of::<RoleEnum>()`: `dst = List<RoleBinding>` — the `(declaration, Role)`
-    /// semantic-role index from the module's reflection info, each entry materialized into a
-    /// `RoleBinding { target, role }`. Compile-time resolved (closed-world); reads
-    /// `Module::reflection`. (P2.7.) `role_enum` is `Some(name)` for the turbofish form, keeping only
-    /// bindings whose role enum matches (mirroring `AttributesOf`); `None` yields the whole index.
+    /// `roles_of()` / `roles_of::<RoleEnum>()` / `roles_of(name)`: `dst = List<RoleBinding>` — the
+    /// `(declaration, Role)` semantic-role index from the module's reflection info, each entry
+    /// materialized into a `RoleBinding { target, role }`. Reads `Module::reflection`. (P2.7.)
+    ///
+    /// `src` is `Some(reg)` for the scoped forms — the register holding the role enum's name as a
+    /// runtime string, keeping only bindings whose role enum matches (mirroring [`Op::AttributesOf`],
+    /// and filled by the same two channels) — and `None` for the unscoped `roles_of()`, which yields
+    /// the whole index.
     RolesOf {
         dst: Reg,
-        role_enum: Option<NameId>,
+        src: Option<Reg>,
     },
     /// `params_of(target)`: `dst = List<ParamInfo>` — the declared parameter list of the fn/method
     /// named by the runtime `string` in `src`, each materialized into a `ParamInfo { name, type, optional }`
@@ -2415,16 +2424,11 @@ fn op_repr(
             Some(r) => format!("Narrow      r{dst} <- r{src}.as<name r{r}>()"),
             None => format!("Narrow      r{dst} <- r{src}.as<{target:?}>()"),
         },
-        Op::AttributesOf {
-            dst,
-            type_name,
-            dynamic,
-        } => match dynamic {
-            Some(slot) => format!("AttributesOf r{dst} <- attributes_of::<$ty r{slot}>()"),
-            None => format!("AttributesOf r{dst} <- attributes_of::<{}>()", n(type_name)),
-        },
-        Op::RolesOf { dst, role_enum } => match role_enum {
-            Some(e) => format!("RolesOf     r{dst} <- roles_of::<{}>()", n(e)),
+        Op::AttributesOf { dst, src } => {
+            format!("AttributesOf r{dst} <- attributes_of(r{src})")
+        }
+        Op::RolesOf { dst, src } => match src {
+            Some(src) => format!("RolesOf     r{dst} <- roles_of(r{src})"),
             None => format!("RolesOf     r{dst} <- roles_of()"),
         },
         Op::ParamsOf { dst, src } => format!("ParamsOf    r{dst} <- params_of(r{src})"),

@@ -4,4 +4,5 @@ expression: "pretty(\"x = attributes_of::<Route>();\")"
 ---
 (program @0..29
   (binding x @0..29
-    (attributes_of Route @4..28)))
+    (attributes_of @4..28
+      (type-arg Route @20..25))))

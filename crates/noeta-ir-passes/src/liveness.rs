@@ -650,7 +650,11 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
         // `params_of(target)` / `returns_of(target)` read their runtime target-string operand.
         Rvalue::ParamsOf { target, .. } | Rvalue::ReturnsOf { target, .. } => f(target),
         // `field_specs_of(name)` / `variants_of(name)` read their runtime type-name operand.
-        Rvalue::FieldSpecsOf { name, .. } | Rvalue::VariantsOf { name, .. } => f(name),
+        Rvalue::FieldSpecsOf { name, .. }
+        | Rvalue::VariantsOf { name, .. }
+        | Rvalue::AttributesOf { name, .. } => f(name),
+        // `roles_of()`'s scope is optional; present, it is a name atom like every other.
+        Rvalue::RolesOf { name, .. } => name.iter().for_each(&mut *f),
         // `construct(name, fields)` reads its type-name and field-list operands.
         Rvalue::Construct { name, fields, .. } => {
             f(name);
@@ -701,9 +705,7 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
             args.iter().for_each(&mut *f);
             dynamic.iter().for_each(&mut *f);
         }
-        Rvalue::AttributesOf { dynamic, .. } => dynamic.iter().for_each(&mut *f),
         Rvalue::Closure { .. }
-        | Rvalue::RolesOf { .. }
         // A native module-fn reference / module value has no operand atoms (identity is static).
         | Rvalue::ModuleFn { .. }
         | Rvalue::NativeModule { .. } => {}

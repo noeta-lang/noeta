@@ -7,6 +7,27 @@
 use crate::*;
 use noeta_ast::{CallArg, ObjectLit, TypeOperand};
 
+/// **How a name-keyed reflection surface's operand resolved** — the one classification every such
+/// surface makes, returned by [`Checker::check_type_operand`] so each can apply its own capability
+/// gate to the one arm that has a compile-time type, and *only* to that arm.
+///
+/// This is what keeps `attributes_of`'s `@attribute` gate and `roles_of`'s `@semantic` gate from
+/// firing on an operand that has no compile-time type to gate: a forwarded type parameter is not
+/// "not an attribute", it is a name that arrives per call, and whether that name is an attribute is
+/// a per-instantiation manifest fact — the same fact the dynamic string arm defers.
+pub(crate) enum OperandKind {
+    /// An ordinary type reference, resolved. Carries its annotated type, so the caller can gate it.
+    Static(Type),
+    /// A bare type parameter of an enclosing generic, carried into this body by one of the two
+    /// per-instantiation channels — the name is resolved at run time, so there is nothing to gate.
+    /// Carries the parameter type, for the surface's own result type.
+    Channel(Type),
+    /// A type parameter **no** channel carries: already reported as E0058.
+    Erased,
+    /// The runtime-string arm. The name is a value; nothing about it is known statically.
+    Dynamic,
+}
+
 impl Checker {
     // ----- bidirectional judgments -----
 
@@ -982,23 +1003,9 @@ impl Checker {
         span: noeta_span::Span,
         surface: &str,
         help: &str,
-    ) {
+    ) -> OperandKind {
         let e = match operand {
-            TypeOperand::Static(ty) => {
-                // The same two channels, consulted in the same order, as `type_name::<T>()` — one
-                // helper, so every name-keyed surface answers with the same `T`.
-                if let TypeRef::Named { args, .. } = ty
-                    && args.is_empty()
-                    && let Type::Param(p) = self.annot(ty)
-                    && self.record_type_param(&p, span)
-                {
-                    return;
-                }
-                if !self.reject_erased_type_param(ty, surface) {
-                    self.check_type_ref(ty);
-                }
-                return;
-            }
+            TypeOperand::Static(ty) => return self.check_static_type_operand(ty, span, surface),
             TypeOperand::Dynamic(e) => e,
         };
         let name_ty = self.synth(e, env);
@@ -1010,6 +1017,38 @@ impl Checker {
             )
             .help(help.to_string());
         }
+        OperandKind::Dynamic
+    }
+
+    /// The **turbofish arm** of [`Self::check_type_operand`], on its own so `type_name::<T>()` —
+    /// which has no dynamic arm at all, its runtime-string form being the identity function — makes
+    /// the same judgment through the same code rather than through a copy of it.
+    ///
+    /// Three outcomes, and every name-keyed surface distinguishes exactly these: a type parameter a
+    /// per-instantiation channel carries (recorded, resolved at run time), a type parameter no
+    /// channel carries (E0058, [`Self::reject_erased_type_param`]), or an ordinary type reference
+    /// (resolved like an annotation, so an unknown name is E0013 and the caller can apply whatever
+    /// capability gate its surface has — `@attribute`, `@semantic`).
+    pub(crate) fn check_static_type_operand(
+        &mut self,
+        ty: &TypeRef,
+        span: noeta_span::Span,
+        surface: &str,
+    ) -> OperandKind {
+        // The same two channels, consulted in the same order, as `type_name::<T>()` — one
+        // helper, so every name-keyed surface answers with the same `T`.
+        if let TypeRef::Named { args, .. } = ty
+            && args.is_empty()
+            && let Type::Param(p) = self.annot(ty)
+            && self.record_type_param(&p, span)
+        {
+            return OperandKind::Channel(Type::Param(p));
+        }
+        if self.reject_erased_type_param(ty, surface) {
+            return OperandKind::Erased;
+        }
+        self.check_type_ref(ty);
+        OperandKind::Static(self.annot(ty))
     }
 
     pub(crate) fn synth_inner(&mut self, expr: &Expr, env: &mut Env) -> Type {
@@ -1767,78 +1806,54 @@ impl Checker {
                 // and `type_name::<List<T>>()` heads at `List` whatever `T` is, so it stays the
                 // folded constant. The narrow surfaces (`.as<T>()`, `x is T`) read the same two
                 // channels through the same helper, which is what makes them agree about `T`.
-                if let TypeRef::Named { args, .. } = ty
-                    && args.is_empty()
-                    && let Type::Param(p) = self.annot(ty)
-                    && self.record_type_param(&p, *span)
-                {
-                    return Type::String;
-                }
-                if !self.reject_erased_type_param(ty, "type_name") {
-                    self.check_type_ref(ty);
-                }
+                //
+                // `type_name` has no dynamic arm (`type_name(s)` would be the identity function on
+                // `s`), so it takes the turbofish half of the operand contract directly — the same
+                // code the two-arm surfaces reach through `check_type_operand`, not a copy of it.
+                // The result is a `string` whichever way the operand resolved: that is the surface.
+                self.check_static_type_operand(ty, *span, "type_name");
                 Type::String
             }
             Expr::AttributesOf { ty, span } => {
-                self.check_type_ref(ty);
-                let target = self.annot(ty);
-                // The type argument must itself be an attribute — a struct marked `@attribute` (the
-                // same capability gate as a `#[T(...)]` use). Otherwise the manifest holds no `T` to
-                // materialize.
-                // A FORWARDED type parameter (poly-values F2b): the attribute type arrives
-                // per-instantiation through the enclosing fn's hidden slot; the manifest query
-                // resolves the concrete NAME at runtime. Whether that instantiation is an
-                // attribute is a per-name manifest fact (an entry-less name yields the empty
-                // list, exactly like the runtime path).
-                if let Type::Param(_) = &target {
-                    match self
-                        .coloring
-                        .current_forwarding
-                        .iter()
-                        .position(|t| t == &target)
-                    {
-                        Some(idx) => {
-                            self.sites.forwarded_slot_sites.insert(*span, idx as u32);
-                        }
-                        None => {
+                // The manifest query is name-keyed, so the operand is the ordinary two-arm
+                // `TypeOperand` every name-keyed surface takes — and a bare type parameter resolves
+                // through whichever per-instantiation channel reaches this body (the receiver's
+                // reflected tag, or the hidden type-argument slot), through the shared helper.
+                //
+                // Only the STATIC arm carries a compile-time type, so only it is gated: the type
+                // argument must itself be a struct marked `@attribute` (the same capability gate as
+                // a `#[T(...)]` use), or the manifest holds no `T` to materialize. A channel-carried
+                // or runtime-string name defers that to the manifest, which answers the empty list
+                // for a name it holds nothing for — the leniency the dynamic arm has always had.
+                let elem = match self.check_type_operand(
+                    ty,
+                    env,
+                    *span,
+                    "attributes_of",
+                    "pass an `@attribute` type name, or use the turbofish `attributes_of::<T>()`",
+                ) {
+                    OperandKind::Static(target) => {
+                        let is_attribute = matches!(&target, Type::Named(n, _)
+                            if self.symbols.attributes.contains(n));
+                        if !is_attribute {
                             self.error(
-                                DiagnosticCode::InvalidTypeArguments,
+                                DiagnosticCode::NotAnAttribute,
                                 *span,
                                 format!(
-                                    "cannot forward `{target}` here: call-site-typed forwarding \
-                                     carries a generic `fn`'s or method's OWN type parameters, \
-                                     and `{target}` is not one of this body's"
+                                    "`attributes_of` requires an attribute type, but `{target}` is not one"
                                 ),
                             )
-                            .help(
-                                "an enclosing generic TYPE's parameter reaches a method through \
-                                 the receiver, which records the instantiation's name but no \
-                                 build recipe — take the type as the method's own parameter \
-                                 instead",
-                            );
+                            .help("name a record marked `@attribute`");
+                            return Type::List(Box::new(Type::Dyn));
                         }
+                        target
                     }
-                    return Type::List(Box::new(Type::Named(
-                        "Attributed".to_string(),
-                        vec![target],
-                    )));
-                }
-                let is_attribute = matches!(&target, Type::Named(n, _)
-                    if self.symbols.attributes.contains(n));
-                if !is_attribute {
-                    self.error(
-                        DiagnosticCode::NotAnAttribute,
-                        *span,
-                        format!(
-                            "`attributes_of` requires an attribute type, but `{target}` is not one"
-                        ),
-                    )
-                    .help("name a record marked `@attribute`");
-                    return Type::List(Box::new(Type::Dyn));
-                }
+                    OperandKind::Channel(param) => param,
+                    OperandKind::Erased | OperandKind::Dynamic => Type::Dyn,
+                };
                 Type::List(Box::new(Type::Named(
-                    "Attributed".to_string(),
-                    vec![target],
+                    noeta_ast::reflect::ATTRIBUTED.to_string(),
+                    vec![elem],
                 )))
             }
             Expr::TypeOf { value, span } => {
@@ -1871,11 +1886,23 @@ impl Checker {
             }
             Expr::RolesOf { ty, span } => {
                 // The compiler-built role index, surfaced as `List<RoleBinding>`. The optional
-                // turbofish scopes the query to one role enum, which — like `attributes_of`'s
-                // `@attribute` gate — must be a `@semantic` enum (only those contribute roles).
-                if let Some(ty) = ty {
-                    self.check_type_ref(ty);
-                    let target = self.annot(ty);
+                // scope is the same two-arm `TypeOperand` `attributes_of` takes, checked through the
+                // same helper, so a bare type parameter resolves per instantiation on whichever
+                // channel reaches this body instead of being misreported as "not `@semantic`".
+                //
+                // The `@semantic` gate — like `attributes_of`'s `@attribute` gate — applies to the
+                // STATIC arm alone: it is the only one with a compile-time type to gate. The index
+                // is filtered by enum NAME at run time (`materialize_roles`), which is total on an
+                // arbitrary name and answers the empty list for one it holds nothing for.
+                if let Some(ty) = ty
+                    && let OperandKind::Static(target) = self.check_type_operand(
+                        ty,
+                        env,
+                        *span,
+                        "roles_of",
+                        "pass a `@semantic` enum name, or use the turbofish `roles_of::<E>()`",
+                    )
+                {
                     let is_semantic = matches!(&target, Type::Named(n, _)
                         if self.symbols.semantic_enums.contains(n));
                     if !is_semantic {
@@ -2013,6 +2040,35 @@ impl Checker {
                         if self.satisfies(&elem, noeta_types::BuiltinTrait::Validate) {
                             self.sites.from_bytes_validated.insert(*span);
                         }
+                    }
+                    // A type PARAMETER is not "not packable" — it may well be a `@packed` struct at
+                    // every call site. It is unanswerable here for a different reason, and saying
+                    // the packable one sends the author to mark a type that is already marked.
+                    //
+                    // `from_bytes` is the one reflection surface a *name* cannot serve. The other
+                    // name-keyed surfaces resolve a type parameter through the two per-instantiation
+                    // channels, which deliver the instantiation's NAME — enough for a name-keyed
+                    // registry lookup. Decoding an opaque byte buffer needs the element's packed
+                    // LAYOUT (field kinds and bit widths), and neither channel carries one: the
+                    // hidden type-argument slot carries a name and an optional JSON decode recipe,
+                    // and the receiver's reflected tag carries a name. So this is E0058 — a
+                    // well-formed turbofish that cannot apply here — with its own message.
+                    None if matches!(&elem, Type::Param(_)) => {
+                        self.error(
+                            DiagnosticCode::InvalidTypeArguments,
+                            *span,
+                            format!(
+                                "`from_bytes` cannot decode into the type parameter `{elem}`: the \
+                                 buffer is opaque, so decoding needs `{elem}`'s packed layout — its \
+                                 field kinds and bit widths — and the per-instantiation channels \
+                                 carry only the instantiation's name"
+                            ),
+                        )
+                        .help(format!(
+                            "decode where the element type is concrete and pass the list in — give \
+                             this function a `List<{elem}>` parameter and let the caller supply \
+                             `from_bytes::<TheRealType>(blob)`"
+                        ));
                     }
                     None => {
                         self.error(

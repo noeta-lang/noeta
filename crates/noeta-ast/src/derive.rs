@@ -771,10 +771,11 @@ fn visit_expr_types(expr: &mut Expr, f: &mut impl FnMut(&mut TypeRef)) {
             f(ty);
             visit_expr_types(blob, f);
         }
-        Expr::AttributesOf { ty, .. } | Expr::TypeName { ty, .. } => f(ty),
+        Expr::TypeName { ty, .. } => f(ty),
+        Expr::AttributesOf { ty, .. } => visit_type_operand_types(ty, f),
         Expr::RolesOf { ty, .. } => {
             if let Some(ty) = ty {
-                f(ty);
+                visit_type_operand_types(ty, f);
             }
         }
         Expr::Channel { elem, capacity, .. } => {

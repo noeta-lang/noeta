@@ -621,7 +621,11 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
         | Rvalue::TraitsOf { operand, .. } => f(operand),
         Rvalue::TypeSlotName { slot, .. } => f(slot),
         Rvalue::ParamsOf { target, .. } | Rvalue::ReturnsOf { target, .. } => f(target),
-        Rvalue::FieldSpecsOf { name, .. } | Rvalue::VariantsOf { name, .. } => f(name),
+        Rvalue::FieldSpecsOf { name, .. }
+        | Rvalue::VariantsOf { name, .. }
+        | Rvalue::AttributesOf { name, .. } => f(name),
+        // `roles_of()`'s scope is optional; the atom is a name like every other when present.
+        Rvalue::RolesOf { name, .. } => name.iter().for_each(&mut *f),
         Rvalue::Construct { name, fields, .. } => {
             f(name);
             f(fields);
@@ -669,11 +673,7 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
             args.iter().for_each(&mut *f);
             dynamic.iter().for_each(&mut *f);
         }
-        Rvalue::AttributesOf { dynamic, .. } => dynamic.iter().for_each(&mut *f),
         // No operands (or handled elsewhere).
-        Rvalue::Closure { .. }
-        | Rvalue::RolesOf { .. }
-        | Rvalue::ModuleFn { .. }
-        | Rvalue::NativeModule { .. } => {}
+        Rvalue::Closure { .. } | Rvalue::ModuleFn { .. } | Rvalue::NativeModule { .. } => {}
     }
 }

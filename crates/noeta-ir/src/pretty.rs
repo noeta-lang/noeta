@@ -451,9 +451,9 @@ impl Printer<'_> {
                 let ty = layout.as_ref().map(|l| l.type_name.as_str()).unwrap_or("?");
                 format!("from_bytes<{}>({})", ty, atom(blob))
             }
-            Rvalue::AttributesOf { ty, .. } => format!("attributes_of<{}>", type_ref(ty)),
-            Rvalue::RolesOf { ty, .. } => match ty {
-                Some(ty) => format!("roles_of<{}>", type_ref(ty)),
+            Rvalue::AttributesOf { name, .. } => format!("attributes_of({})", atom(name)),
+            Rvalue::RolesOf { name, .. } => match name {
+                Some(name) => format!("roles_of({})", atom(name)),
                 None => "roles_of()".to_string(),
             },
             Rvalue::ParamsOf { target, .. } => format!("params_of({})", atom(target)),

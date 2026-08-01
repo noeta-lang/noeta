@@ -939,7 +939,13 @@ fn expr_variants() -> Vec<Expr> {
             span: SP,
         },
         Expr::AttributesOf {
-            ty: tref(&n("AttributesOf"), "ty"),
+            ty: TypeOperand::Static(tref(&n("AttributesOf"), "ty")),
+            span: SP,
+        },
+        // The dynamic arm of the same operand — a runtime string, which must be recursed into and
+        // must NOT be rewritten as a type name.
+        Expr::AttributesOf {
+            ty: TypeOperand::Dynamic(bx("TypeOperand::Dynamic", "0")),
             span: SP,
         },
         Expr::TypeName {
@@ -997,7 +1003,11 @@ fn expr_variants() -> Vec<Expr> {
             span: SP,
         },
         Expr::RolesOf {
-            ty: Some(tref(&n("RolesOf"), "ty")),
+            ty: Some(TypeOperand::Static(tref(&n("RolesOf"), "ty"))),
+            span: SP,
+        },
+        Expr::RolesOf {
+            ty: Some(TypeOperand::Dynamic(bx("TypeOperand::Dynamic", "0"))),
             span: SP,
         },
         Expr::ParamsOf {

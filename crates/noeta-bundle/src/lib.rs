@@ -188,7 +188,23 @@ pub const MAGIC: &[u8; 4] = b"NOEB";
 /// had nothing to put back. Same non-self-describing-encoding rule as every bump above — postcard
 /// writes the new sequence's length prefix where a version-16 reader expects `params`, so the whole
 /// tail desynchronises rather than failing cleanly.
-pub const FORMAT_VERSION: u8 = 17;
+///
+/// Bumped to 18 by the reflection-operand unification: `Op::AttributesOf` (in `Module::code`)
+/// changed from `{ dst, type_name: NameId, dynamic: Option<Reg> }` to `{ dst, src: Reg }`, and
+/// `Op::RolesOf` from `{ dst, role_enum: Option<NameId> }` to `{ dst, src: Option<Reg> }`. Both are
+/// wire breaks by the same non-self-describing-encoding rule as every bump above — postcard writes a
+/// `NameId` as a varint and a `Reg` as a byte, and the dropped `Option` discriminant shifts every
+/// byte after it, so a version-17 reader decoding these ops walks off into the following
+/// instruction.
+///
+/// The reason is that the two ops could not consume what the rest of the surface produces.
+/// `Op::AttributesOf::dynamic` held an *index* into `Module::type_args` and resolved the name itself,
+/// while `Op::TypeArgName`/`Op::TypeSlotName` — the two per-instantiation channels every other
+/// name-keyed query reads — produce a **string**. So a type parameter arriving on the receiver's
+/// reflected tag was rejected at `attributes_of::<T>()` and answered at `field_specs_of::<T>()`, and
+/// `roles_of::<E>()` had no register at all. One name-string operand is what `Op::FieldSpecsOf`,
+/// `Op::VariantsOf` and `Op::Construct` already take; the two channels fill it identically.
+pub const FORMAT_VERSION: u8 = 18;
 
 /// The SHA-256 of one canonical [`Module`]'s postcard encoding — the *other* half of
 /// [`FORMAT_VERSION`], and the thing that makes the changelog above enforceable.
@@ -212,7 +228,7 @@ pub const FORMAT_VERSION: u8 = 17;
 /// pair exists to prevent. The test's message says so; this doc says so; the changelog paragraph
 /// you are about to write is the third place.
 pub const MODULE_LAYOUT_DIGEST: &str =
-    "207cec749b62207a6ea89947d1143e4e3030ad6ee484ac9a96df36ef9b4cdefd";
+    "992b2f919e64dedac239b39f33c8ff6f960de252abe5dc42deda12514fdb1a10";
 
 /// The runtime version stamped into and checked against artifacts — the building crate's
 /// package version. Any release that changes the serialized [`Module`] layout bumps this, so a

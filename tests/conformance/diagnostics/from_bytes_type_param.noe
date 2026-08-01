@@ -1,0 +1,28 @@
+// `from_bytes::<T>` over a **type parameter** is E0058, not E0038 — and the distinction is the
+// whole point of this case.
+//
+// Every other reflection surface that names a type keys on a NAME, which is exactly what the two
+// per-instantiation channels deliver, so `field_specs_of::<T>()` and friends resolve a forwarded
+// parameter at run time. Decoding an opaque byte buffer needs `T`'s packed LAYOUT — field kinds and
+// bit widths — and no channel carries one: the hidden type-argument slot carries a name and an
+// optional JSON decode recipe, the receiver's reflected tag carries a name.
+//
+// So the old answer, E0038 "requires a packable element type", was a **misdiagnosis**: `T` may well
+// be a `@packed` struct at every call site, and the author was sent to mark a type that is already
+// marked. It is now the code for a turbofish that cannot apply here, with a message that says which
+// thing is missing and where to decode instead.
+// expect: error E0058 at 19:45
+// expect: error E0058 at 25:44
+// expect: exit 1
+@packed struct V3 { x: f32; y: f32; z: f32 }
+
+fn decode<T>(blob: bytes): List<T> { return from_bytes::<T>(blob) }
+
+class Reader<T> {
+    pub name: string
+    fn new(name: string): Reader<T> { return Reader { name: name }; }
+    // The receiver channel reaches this body and still cannot help: it carries a name, not a layout.
+    fn read(blob: bytes): List<T> { return from_bytes::<T>(blob) }
+}
+
+echo decode::<V3>([V3 { x: 1.0f32, y: 2.0f32, z: 3.0f32 }].to_bytes()).len()
