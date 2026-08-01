@@ -180,10 +180,11 @@ fn diff_file(
             // the *type* whose method changed, and seeding `Counter` for an edit to `Counter.bump`
             // would rerun every test that so much as mentions the type. False positives rerun
             // harmlessly, but this engine's whole value is not producing them.
-            let reordered = plan
-                .declarations_reordered
-                .then(|| plan.fragment_declarations())
-                .unwrap_or_default();
+            let reordered = if plan.declarations_reordered {
+                plan.fragment_declarations()
+            } else {
+                Vec::new()
+            };
             FileDiff::Names {
                 names: plan
                     .changed
