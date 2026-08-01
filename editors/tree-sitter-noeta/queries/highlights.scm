@@ -72,22 +72,45 @@
 (expr_tier_block (text_segment) @string)
 
 ; --------------------------------------------------------------------- keywords
+; The keyword captures below are GENERATED from the lexer's own `#[token("…")]` declarations —
+; every word the language reserves, filed under the colour family it was assigned once, for this
+; grammar and the VS Code TextMate grammar together. Do not hand-edit between the markers; the
+; generator is `crates/noeta-ide/tests/editor_vocabulary.rs`, which also checks this region on
+; every `cargo test -p noeta-ide`.
+;
+; The boolean literals are deliberately absent: `(boolean_literal) @boolean` above captures the
+; whole literal node, which is more precise than matching its two spellings.
+; --- BEGIN GENERATED VOCABULARY ---
+; Generated from the lexer's reserved words by crates/noeta-ide/tests/editor_vocabulary.rs.
+; Regenerate: NOETA_UPDATE_EDITOR_VOCABULARY=1 cargo test -p noeta-ide --test editor_vocabulary
 [
-  "fn" "mut" "struct" "class" "enum" "impl" "trait" "destruct"
-  "namespace" "use" "pub"
+  "mut" "fn" "enum" "struct" "type" "class" "destruct" "impl"
+  "trait" "namespace" "use" "pub" "echo"
 ] @keyword
 
 [
-  "if" "then" "else" "for" "while" "break" "continue" "in" "match" "return" "yield"
+  "return" "yield" "if" "then" "else" "for" "while" "break"
+  "continue" "in" "match"
 ] @keyword.control
 
 [
-  "async" "await" "spawn" "isolate" "concurrent"
+  "async" "await" "concurrent" "spawn" "isolate"
 ] @keyword.coroutine
 
-"echo" @keyword
+[
+  "as" "is"
+] @keyword.operator
 
-["as" "is"] @keyword.operator
+; The reflection primitives are identifiers to the grammar (`turbofish_call` takes an
+; `identifier`), so they are captured by spelling rather than as anonymous keyword nodes.
+((identifier) @function.builtin
+  (#any-of? @function.builtin
+    "attributes_of" "type_of" "type_name" "fields_of"
+    "traits_of" "from_bytes" "roles_of" "params_of"
+    "returns_of" "invoke" "field_specs_of" "variants_of"
+    "construct"
+  ))
+; --- END GENERATED VOCABULARY ---
 
 ; --------------------------------------------------------------------- operators
 [
