@@ -297,8 +297,8 @@ pub struct DerivedPath(pub noeta_loader::ModulePath);
 backdating_update!(DerivedPath);
 
 /// The local `@name`s each package binds to a **text** (verbatim-body) tier, keyed by the binding
-/// package's [`PackageOrigin`] — the per-package input to [`tokens_in`]'s lex, the salsa twin of the
-/// loader's `renamed_text_tier_locals`. Newtype for the same [`salsa::Update`]/orphan reason as
+/// package's [`PackageOrigin`] — the per-package input to [`tokens_in`]'s lex, memoizing what
+/// [`noeta_loader::renamed_text_tier_locals`] returned. Newtype for the same [`salsa::Update`]/orphan reason as
 /// [`WorkspaceUses`]; backdating so it invalidates the workspace-aware lexes only when a `[tiers]`
 /// binding or a dependency's `@tier(…, text)` declaration actually changes.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -794,42 +794,36 @@ fn workspace_renamed_text_tiers(db: &dyn salsa::Database, ws: Workspace) -> Rena
     ))
 }
 
+/// The workspace's program-wide verbatim-body set as a [`noeta_lexer::TextTiers`] — what both
+/// widenings below start from.
+fn global_text_tiers(db: &dyn salsa::Database, ws: Workspace) -> noeta_lexer::TextTiers {
+    noeta_lexer::TextTiers::with(workspace_text_tiers(db, ws).iter().cloned())
+}
+
 /// The verbatim-body text-tier set the workspace-aware lex applies to **one** source: the whole
-/// workspace's global set ([`workspace_text_tiers`]) plus the local `@name`s the source's own package
-/// renamed onto a text tier ([`workspace_renamed_text_tiers`]). The salsa twin of the loader's
-/// per-package re-lex — a source whose package renamed nothing lexes with exactly the global set,
-/// behavior-identical to before the per-package layer.
+/// workspace's global set ([`workspace_text_tiers`]) widened by the local `@name`s the source's own
+/// package renamed onto a text tier ([`workspace_renamed_text_tiers`]). A source whose package
+/// renamed nothing lexes with exactly the global set.
 fn source_text_tiers(
     db: &dyn salsa::Database,
     ws: Workspace,
     src: SourceProgram,
 ) -> noeta_lexer::TextTiers {
-    let mut set = noeta_lexer::TextTiers::with(workspace_text_tiers(db, ws).iter().cloned());
     let renamed = workspace_renamed_text_tiers(db, ws);
-    if !renamed.0.is_empty()
-        && let Some(origin) = workspace_packages(db, ws).source_package(SourceId(src.id(db)))
-        && let Some(locals) = renamed.0.get(origin)
-    {
-        for name in locals {
-            set.insert(name.clone());
-        }
-    }
-    set
+    let locals = workspace_packages(db, ws)
+        .source_package(SourceId(src.id(db)))
+        .and_then(|origin| renamed.0.get(origin));
+    noeta_loader::widened_text_tiers(&global_text_tiers(db, ws), locals.into_iter().flatten())
 }
 
 /// The union of every package's verbatim-body text tiers — the workspace-wide set the parser and
-/// directive expansion consult. They use it only to re-lex a nested tier body inside a `${…}`
-/// interpolation hole; a top-level block's text-vs-code is already baked into [`tokens_in`]'s
-/// per-package tokens. Broader than any one package's set, which is safe there (it merely captures
-/// more prose). Matches the loader's `union` in `lex_program`.
+/// directive expansion consult, for the `${…}`-hole reason [`noeta_loader::widened_text_tiers`]
+/// gives.
 fn workspace_text_tiers_union(db: &dyn salsa::Database, ws: Workspace) -> noeta_lexer::TextTiers {
-    let mut set = noeta_lexer::TextTiers::with(workspace_text_tiers(db, ws).iter().cloned());
-    for locals in workspace_renamed_text_tiers(db, ws).0.values() {
-        for name in locals {
-            set.insert(name.clone());
-        }
-    }
-    set
+    noeta_loader::widened_text_tiers(
+        &global_text_tiers(db, ws),
+        workspace_renamed_text_tiers(db, ws).0.values().flatten(),
+    )
 }
 
 /// Workspace-aware tokenization: like [`tokens`], but lexing with the source's package text-tier

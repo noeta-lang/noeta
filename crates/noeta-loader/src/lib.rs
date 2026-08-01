@@ -1658,6 +1658,26 @@ pub fn renamed_text_tier_locals(
     out
 }
 
+/// **A verbatim-body tier set widened by some package's renamed locals** — the one assembly behind
+/// every place a `TextTiers` is handed to the lexer or the parser, on both the batch and the editor
+/// path.
+///
+/// Two shapes use it and they are the same shape. Lexing **one source** widens the program-wide set
+/// by that source's own package's locals, so a rename in package A never captures the same spelling
+/// in package B. Parsing widens it by **every** package's locals, because the parser consults the
+/// set only to re-lex a nested `@name { … }` inside a `${…}` interpolation hole — generated code has
+/// no single owning package, and over-capturing there merely takes more prose.
+pub fn widened_text_tiers<'a>(
+    global: &noeta_lexer::TextTiers,
+    locals: impl IntoIterator<Item = &'a String>,
+) -> noeta_lexer::TextTiers {
+    let mut set = global.clone();
+    for name in locals {
+        set.insert(name.clone());
+    }
+    set
+}
+
 /// Lex every module of a program as one unit (text-tiers arc): each file lexes with the default
 /// text-tier set first; if any file declares a text tier (`@tier(x, …, text: "…")`), the union of
 /// all declarations is applied and every file re-lexes with it — so a tier declared in one file
@@ -1722,18 +1742,9 @@ fn lex_program(
         &ext,
     );
 
-    // The set the *parser* and *expansion* see is the union of every contribution — the parser
-    // consults it only to re-lex `${…}` interpolation holes (a nested `@name { … }` inside a hole),
-    // never to decide a top-level block's text-vs-code (that is already baked into the lexer's tokens
-    // by the per-package pass below); generated code has no single owning package, so the union is
-    // the only meaningful set there too. The union is broader than any one package's set, which only
-    // matters for the exotic nested-tier-in-a-hole case — safe, since it merely captures more prose.
-    let mut union = global.clone();
-    for locals in renamed.values() {
-        for name in locals {
-            union.insert(name.clone());
-        }
-    }
+    // The set the *parser* and *expansion* see is the union of every contribution — see
+    // [`widened_text_tiers`] for why over-capturing is right there and wrong per source.
+    let union = widened_text_tiers(&global, renamed.values().flatten());
 
     // Fast path: the default `{doc}` covers every program-wide name and no package renamed a text
     // tier — the first pass already lexed correctly, so nothing re-lexes (the common case: no text
@@ -1743,20 +1754,16 @@ fn lex_program(
         return (lexeds, global);
     }
 
-    // Re-lex each source with ITS OWN package's set: the program-wide `global` plus the local names
-    // that package bound to a text tier. A source whose package renamed nothing re-lexes with exactly
-    // `global` (unchanged from the old behavior); only a package with a text-tier binding widens.
+    // Re-lex each source with ITS OWN package's set ([`widened_text_tiers`]). A source whose package
+    // renamed nothing re-lexes with exactly `global` (unchanged from the old behavior); only a
+    // package with a text-tier binding widens.
     let relexed = sources
         .iter()
         .map(|source| {
-            let mut set = global.clone();
-            if let Some(origin) = packages.source_package(source.id())
-                && let Some(locals) = renamed.get(origin)
-            {
-                for name in locals {
-                    set.insert(name.clone());
-                }
-            }
+            let locals = packages
+                .source_package(source.id())
+                .and_then(|origin| renamed.get(origin));
+            let set = widened_text_tiers(&global, locals.into_iter().flatten());
             noeta_lexer::lex_in(source, edition_of(source), &set)
         })
         .collect();
