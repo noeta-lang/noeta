@@ -194,7 +194,9 @@ fn fmt_dir_tiers(
 ) -> (noeta_lexer::TextTiers, noeta_fmt::TierBodyFormatters) {
     let mut names: Vec<String> = Vec::new();
     let mut map = noeta_fmt::TierBodyFormatters::new();
-    let mut scan = |name: &str, text: &str| {
+    // Returns the file's own `@tier(…, text:/expr:)` declarations as well as folding them in, so the
+    // per-dependency index the renamed-tier resolution needs comes out of this one lex too.
+    let mut scan = |name: &str, text: &str| -> Vec<String> {
         let source = Source::new(SourceId(0), name, text);
         let lexed = noeta_lexer::lex(&source);
         for (tier, lang) in noeta_lexer::declared_tier_languages_in(&source, &lexed.tokens) {
@@ -202,7 +204,8 @@ fn fmt_dir_tiers(
                 map.insert(tier, f);
             }
         }
-        names.extend(lexed.text_tier_decls);
+        names.extend(lexed.text_tier_decls.iter().cloned());
+        lexed.text_tier_decls
     };
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
@@ -210,17 +213,38 @@ fn fmt_dir_tiers(
             if path.extension().is_some_and(|e| e == "noe")
                 && let Ok(text) = std::fs::read_to_string(&path)
             {
-                scan(&path.to_string_lossy(), &text);
+                let _ = scan(&path.to_string_lossy(), &text);
             }
         }
     }
     // A query resolve: `noeta fmt` scanning dependency modules for text tiers must not refresh
     // `noeta.lock` as a side effect of formatting.
     if let Ok(graph) = graph::resolve_graph_query(entry) {
+        // Each dependency's own text-tier declarations, indexed by its link key — the input the
+        // renamed-tier resolution below needs for a `.noe` provider, collected from the same lex.
+        let mut declared: Vec<(String, Vec<String>)> = Vec::new();
         for dep in &graph.packages {
+            let mut decls: Vec<String> = Vec::new();
             for module in &dep.modules {
-                scan(&module.name, &module.text);
+                decls.extend(scan(&module.name, &module.text));
             }
+            if !decls.is_empty() {
+                declared.push((dep.key().to_string(), decls));
+            }
+        }
+        // The **root package's** `[tiers]` renames (per-package naming arc 3g): a manifest binding
+        // `docs = "std:doc"` makes `@docs { … }` a verbatim body for this package, and the formatter
+        // must know it or it tokenizes markdown as code and declares the file unparseable — on a
+        // file `noeta run` and `noeta check` both accept. The same resolution the loader and the
+        // editor use, over the graph this function already had in hand. Root only: fmt's set is one
+        // flat project set, and a *dependency's* local spelling must not capture in these files.
+        let renamed = noeta_loader::renamed_text_tier_locals(
+            &graph.package_uses,
+            declared,
+            &noeta_loader::ExtTiers::from_process_registry(),
+        );
+        if let Some(locals) = renamed.get(&noeta_span::PackageOrigin::Root) {
+            names.extend(locals.iter().cloned());
         }
     }
     // Plus the installed extensions' verbatim-body tiers (no `.noe` file declares a native one),
