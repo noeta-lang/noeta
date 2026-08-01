@@ -274,8 +274,17 @@ machine_preflight() {
     probe="$(LC_ALL=C perf stat -x, -e instructions:u true 2>&1 >/dev/null \
         | awk -F, '$3 ~ /^instructions/ {print $1; exit}')"
     if [[ ! "$probe" =~ ^[0-9]+$ ]]; then
-        cannot "perf cannot count user instructions here (got '${probe:-<no counter line>}'; /proc/sys/kernel/perf_event_paranoid = $(cat /proc/sys/kernel/perf_event_paranoid 2> /dev/null || echo '?'))" \
-            "sudo sysctl kernel.perf_event_paranoid=2   # 2 is enough: this only counts :u (userspace)"
+        local paranoid fix
+        paranoid="$(cat /proc/sys/kernel/perf_event_paranoid 2> /dev/null || echo '?')"
+        # Name the fix that matches the cause. Telling someone to lower `paranoid` when it is
+        # already low sends them to change a setting that was never the problem — the remaining
+        # explanations are a VM or container with no PMU exposed, or a missing CAP_PERFMON.
+        if [[ "$paranoid" == "?" || "$paranoid" -gt 2 ]]; then
+            fix="sudo sysctl kernel.perf_event_paranoid=2   # 2 is enough: this only counts :u (userspace)"
+        else
+            fix="perf_event_paranoid is already $paranoid, so this is not a permissions setting: the PMU is likely not exposed (a VM or container without one, or no CAP_PERFMON). There is no fallback — this ratchet gates on hardware counters or it does not gate."
+        fi
+        cannot "perf cannot count user instructions here (got '${probe:-<no counter line>}'; /proc/sys/kernel/perf_event_paranoid = $paranoid)" "$fix"
     fi
 
     # A baseline from another box is not something to compare against, in either direction — so it
