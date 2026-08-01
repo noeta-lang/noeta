@@ -242,6 +242,15 @@ const TABLE: &[Row] = &[
               dotted prefix as one candidate",
         ),
     ),
+    Row(
+        "Expr::Reflect",
+        "which",
+        Inert(
+            "which reflection query this is — a fieldless enum, so there is no name or type inside \
+             it to rewrite. What the query is asked ABOUT lives in `operand`, and that is the field \
+             qualification has an opinion about",
+        ),
+    ),
     Row("Expr::Range", "inclusive", Inert("a flag")),
     Row("Expr::Spawn", "isolate", Inert("a flag")),
     Row(
@@ -970,6 +979,15 @@ fn expr_variants() -> Vec<Expr> {
         Expr::Reflect {
             which: ReflectKind::TypeOf,
             operand: ReflectOperand::Value(bx("ReflectOperand::Value", "0")),
+            span: SP,
+        },
+        // The carrier itself. Every arm probe above names a position INSIDE a `ReflectOperand`,
+        // which proves the qualifier reaches that arm's payload but says nothing about whether it
+        // descends into `operand` at all — and "the walk never descends into this field" is exactly
+        // the shape of the three bugs this gate was built for.
+        Expr::Reflect {
+            which: ReflectKind::TypeOf,
+            operand: ReflectOperand::Value(bx(&n("Reflect"), "operand")),
             span: SP,
         },
         Expr::Reflect {
