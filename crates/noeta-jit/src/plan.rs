@@ -18,14 +18,16 @@
 //! write the frame's slots). Residency fails closed **per prototype**: any op the register-effect
 //! model can't cover makes the whole prototype unmodeled (nothing promotes).
 //!
-//! **Successor soundness.** Unlike [`crate::analysis_succ`] (which only ever sees the
-//! arithmetic-loop whitelist), liveness runs over *every* op, so [`succ_all`] must know every
-//! jump-target-carrying op — the same set the compiler's `patch_jump`/`for_each_target_mut`
-//! handle (`Jump`/`JumpIf*`/`CondBranch`, `Coalesce.fallback`, the five `Match*.fail`s). A missed
-//! edge would under-approximate liveness (an unsound spill omission); an op that never falls
-//! through but is treated as if it did (`MatchFail`, which raises) only over-approximates — safe.
+//! **Successor soundness.** Liveness runs over *every* op, so its successor function must know
+//! every jump-target-carrying op. It no longer keeps a list: [`crate::tier0_succ`] asks
+//! [`Op::for_each_jump_pc`], the single exhaustive answer in `noeta-bytecode`, which the
+//! compiler's `patch_jump`, `op_facts` and LICM target fix-up ask too. A missed edge would
+//! under-approximate liveness (an unsound spill omission); an op that never falls through but is
+//! treated as if it did (`MatchFail`, which raises) only over-approximates — safe.
 
 use noeta_bytecode::{Chunk, Op, Reg};
+
+use crate::analysis::tier0_succ;
 
 /// The S0/S5 register plan for a prototype. See the module docs for the maps' contracts.
 pub(crate) struct RegPlan {
@@ -274,7 +276,7 @@ pub(crate) fn const_reg_bits(chunk: &Chunk) -> Vec<Option<u64>> {
 }
 
 /// Is any of `read_pcs` reachable from pc 0 along a path that never executes `def_pc`? (BFS over
-/// [`succ_all`], refusing to expand `def_pc`.) If not, every executed read observes the def.
+/// [`crate::tier0_succ`], refusing to expand `def_pc`.) If not, every executed read observes the def.
 fn any_read_bypasses_def(chunk: &Chunk, n: usize, def_pc: usize, read_pcs: &[usize]) -> bool {
     let mut seen = vec![false; n];
     let mut stack = vec![0usize];
@@ -290,38 +292,10 @@ fn any_read_bypasses_def(chunk: &Chunk, n: usize, def_pc: usize, read_pcs: &[usi
         if pc == def_pc {
             continue; // paths through the def are fine — don't expand it
         }
-        succ_all(&chunk.code[pc], pc, n, &mut succ);
+        tier0_succ(&chunk.code[pc], pc, n, &mut succ);
         stack.extend_from_slice(&succ);
     }
     false
-}
-
-/// The tier-0 successors of `pc` for **every** op (cf. the module docs on soundness): each
-/// jump-target field plus fallthrough, no fallthrough after `Jump`/`Return`/`Halt`. `MatchFail`
-/// raises (no real successor) but keeps its conservative fallthrough — over-approximation only.
-fn succ_all(op: &Op, pc: usize, n: usize, out: &mut Vec<usize>) {
-    out.clear();
-    let mut fallthrough = true;
-    match op {
-        Op::Jump { target } => {
-            out.push(*target as usize);
-            fallthrough = false;
-        }
-        Op::JumpIfTrue { target, .. }
-        | Op::JumpIfFalse { target, .. }
-        | Op::CondBranch { target, .. } => out.push(*target as usize),
-        Op::Coalesce { fallback, .. } => out.push(*fallback as usize),
-        Op::MatchInt { fail, .. }
-        | Op::MatchStr { fail, .. }
-        | Op::MatchBool { fail, .. }
-        | Op::MatchVariant { fail, .. }
-        | Op::MatchTuple { fail, .. } => out.push(*fail as usize),
-        Op::Return { .. } | Op::Halt => fallthrough = false,
-        _ => {}
-    }
-    if fallthrough && pc + 1 < n {
-        out.push(pc + 1);
-    }
 }
 
 /// The backward may-be-read fixpoint: `map[pc * nreg + r]` = may `r`'s value be read before being
@@ -339,7 +313,7 @@ fn live_in_map(chunk: &Chunk) -> Vec<bool> {
         for pc in (0..n).rev() {
             // live_out = union of successors' live_in.
             let mut out = vec![false; nreg];
-            succ_all(&chunk.code[pc], pc, n, &mut succ);
+            tier0_succ(&chunk.code[pc], pc, n, &mut succ);
             for &s in &succ {
                 for (r, o) in out.iter_mut().enumerate() {
                     *o |= live[s * nreg + r];
@@ -442,7 +416,7 @@ mod tests {
     }
 
     /// The `Match*.fail` edge is a real successor: a register read only on the fail path stays
-    /// live across the match (the `analysis_succ`-whitelist hazard [`succ_all`] exists to avoid).
+    /// live across the match (the whitelist hazard [`crate::tier0_succ`] exists to avoid).
     #[test]
     fn match_fail_edge_keeps_fail_path_read_live() {
         // 0: match-bool r0 else -> 2   1: halt   2: echo r1   3: halt
