@@ -117,13 +117,15 @@ Every surface takes a **value**, a **type** (turbofish), or a runtime **string**
 | Operand | Surfaces | Why that shape |
 |---|---|---|
 | a **value** | `type_of`, `fields_of`, `traits_of` | You have the thing; the answer is about what it *is*. |
-| a **type**, turbofish only | `type_name::<T>()`, `attributes_of::<T>()`, `roles_of::<E>()`, `from_bytes::<T>(b)` | The compiler must resolve `T`. A string operand would be the identity function (`type_name`) or an open-world query the closed-world index cannot answer. |
-| **either** | `field_specs_of`, `variants_of`, `construct` | One name-keyed query, two ways to spell the key: a compile-time constant, or a name you are holding. |
+| a **type**, turbofish only | `type_name::<T>()`, `from_bytes::<T>(b)` | `type_name` has no string arm because it would be the identity function on its argument. `from_bytes` has none because it needs `T`'s packed *layout*, and a name does not carry one. |
+| **either** | `field_specs_of`, `variants_of`, `construct`, `attributes_of`, `roles_of` | One name-keyed query, two ways to spell the key: a compile-time constant, or a name you are holding. |
 | a runtime **string** only | `params_of`, `returns_of`, `invoke` | No turbofish arm exists, deliberately — the target's name *arrives as data*. |
 
 That last row is the axis worth internalizing. `params_of`, `returns_of` and `invoke` have no static arm at all, because nothing about them is static: the target is a `#[Tool]` manifest entry's `.target`, a router action, an argv subcommand. **The other surfaces produce names; these three consume them.** Adding a turbofish to `invoke` would be adding a slower way to write a call you could already write directly.
 
-Reaching for the wrong axis is a **parse** error, `E0003` — `params_of::<Foo>()` and `attributes_of("Foo")` both fail at the operand, before typing ever runs. That is deliberate: a surface's operand shape is part of what it *is*, so getting it wrong is not a type mismatch to be coerced away.
+The middle row is the whole name-keyed surface, and it is one contract rather than five agreements. Every query in it keys on a type *name*, so both arms end at the same runtime node — which is also what lets the turbofish arm answer for a **type parameter**: generics are erased, but the instantiation's name reaches the body on a per-call channel, and the compiler routes the surface through its own string arm there. See [Reflecting over a type parameter](#reflecting-over-a-type-parameter).
+
+Reaching for the wrong axis is a **parse** error, `E0003` — `params_of::<Foo>()` fails at the operand, before typing ever runs. That is deliberate: a surface's operand shape is part of what it *is*, so getting it wrong is not a type mismatch to be coerced away.
 
 ### When the `Type` ADT earns its keep
 
@@ -308,7 +310,24 @@ class Repo<T> {
 
 The **static** arm's other guarantee is unchanged: a turbofish naming a type that resolves to nothing is `E0013`, not a silent empty list. Leniency about an unrecognized *name* belongs to the runtime-string arm alone, where the name is data.
 
-`attributes_of::<T>()` takes a forwarded parameter as well, on the slot channel only — a generic type's parameter inside an instance method is still `E0058` there.
+This holds for **every** name-keyed query, `attributes_of::<T>()` and `roles_of::<E>()` included, on **both** channels — they are one operand contract, resolved by one helper, so a capability a channel gains is a capability all of them gain:
+
+```noeta
+@attribute(Function)
+@role(Semantic.EntryPoint)
+struct Route { path: string }
+
+#[Route("/users")]
+fn handleUsers(): int { return 1 }
+
+fn attrs_of<T>(): int { return attributes_of::<T>().len() }
+fn roles_in<E>(): int { return roles_of::<E>().len() }
+
+echo attrs_of::<Route>()        // 1
+echo roles_in::<Semantic>()     // 1
+```
+
+The one surface that stays turbofish-only is **`from_bytes::<T>(blob)`**, and the reason is the operand rather than the machinery. The others key on a *name*, which is exactly what the two channels deliver; decoding an opaque byte buffer needs `T`'s packed **layout** — its field kinds and bit widths — and neither channel carries one. So a type parameter there is `E0058` with a message saying so, rather than the "requires a packable element type" it used to report about a `T` that really was `@packed`.
 
 ### The prelude enums are ordinary enums
 
@@ -784,7 +803,7 @@ A **bare enum name** is a rejection rather than a second spelling. The alternati
 
 To go the other way — a single **wire value** to a case, rather than a payload to a variant — use [`Enum.try_from`](Structs-Classes-and-Enums#enums), which matches a backed enum's backing.
 
-### `attributes_of::<T>(): List<Attributed<T>>`
+### `attributes_of::<T>(): List<Attributed<T>>` / `attributes_of(name): List<Attributed<dyn>>`
 
 Materializes every `#[T(...)]` attribute in the program — each entry's `.value` is a real `T`, and `.target` is the annotated declaration's name:
 
@@ -817,9 +836,11 @@ for b in attributes_of::<Builds>() {
 }
 ```
 
-### `roles_of(): List<RoleBinding>` / `roles_of::<RoleEnum>(): List<RoleBinding>`
+The **string arm** asks the same question with a key you are holding rather than one you can write: `attributes_of(name)` takes a runtime `string` and answers `List<Attributed<dyn>>`. The manifest is name-keyed either way, so the turbofish arm *is* the string arm with the name folded in. Only the turbofish arm is gated on `@attribute` — that gate needs a compile-time type to gate — and only it can be `E0013` for a name that resolves to nothing; the string arm is lenient like `field_specs_of(name)`, answering the empty list for a name the manifest holds nothing for.
 
-The compile-time `(declaration, role)` index built from `@role(...)` tags — each binding has a `.target` and a `.role`. The optional turbofish scopes the query to a single `@semantic` enum (the mirror of `attributes_of::<T>()`): `roles_of::<Semantic>()` returns only the bindings whose role is a `Semantic` variant, while bare `roles_of()` returns the whole index. The enum is resolved at compile time (closed-world); naming a non-`@semantic` type is an error (E0031).
+### `roles_of(): List<RoleBinding>` / `roles_of::<RoleEnum>(): List<RoleBinding>` / `roles_of(name): List<RoleBinding>`
+
+The compile-time `(declaration, role)` index built from `@role(...)` tags — each binding has a `.target` and a `.role`. The optional scope narrows the query to a single `@semantic` enum (the mirror of `attributes_of::<T>()`, and the same two operand arms): `roles_of::<Semantic>()` returns only the bindings whose role is a `Semantic` variant, `roles_of(name)` scopes by a name you are holding, and bare `roles_of()` returns the whole index. The turbofish arm is resolved at compile time (closed-world); naming a non-`@semantic` type there is an error (E0031), while the string arm is lenient and answers the empty list for an enum it knows nothing about.
 
 It reads the same manifest `attributes_of` does, so it has the same reach: every annotated declaration in the program, including ones no `use` names, and including a role conferred by a *dependency package's* `@role`-bearing attribute. `.role` is a real enum value, so it compares directly — `if b.role == Semantic.TrustBoundary { … }`.
 

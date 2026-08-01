@@ -139,7 +139,7 @@ The two remain separate concepts checked against separate parameter lists: the t
 
 ## Forwarding `T`
 
-Inside a generic function's body, `T` is legal wherever a type goes — including as a turbofish argument to another generic, to a call-site-typed native function (`json.try_parse::<T>`), to `attributes_of::<T>()`, to `type_name::<T>()`, and to `channel::<T>(cap)`:
+Inside a generic function's body, `T` is legal wherever a type goes — including as a turbofish argument to another generic, to a call-site-typed native function (`json.try_parse::<T>`), to the name-keyed reflection queries (`type_name::<T>()`, `field_specs_of::<T>()`, `variants_of::<T>()`, `construct::<T>(…)`, `attributes_of::<T>()`, `roles_of::<E>()`), and to `channel::<T>(cap)`:
 
 ```noeta check
 use std.{json}
@@ -158,7 +158,9 @@ user  = load::<User>("{\"name\": \"Ada\"}")   // same body, per-instantiation de
 
 Forwarding works from a **top-level generic function**, from a **nested `fn`** inside one, and from a **generic method** — its own `<T>`, not the class's. A **composite** parameter forwards too (`List<T>`, `Box<T>` in a `::<...>` position), not just the bare `T`.
 
-The boundaries. An instantiation the call site cannot pin must be spelled with a turbofish (E0023), and a function that forwards `T` this way is not usable as a bare value (E0058) — call it, or wrap it in a closure. A generic **type**'s parameter does not forward from a method body (E0058): it reaches the body through the receiver's type tag, which records the instantiation's *name* but no build recipe, so take the type as the method's own parameter instead.
+The boundaries. An instantiation the call site cannot pin must be spelled with a turbofish (E0023), and a function that forwards `T` this way is not usable as a bare value (E0058) — call it, or wrap it in a closure.
+
+The remaining boundary is about **what the consumer needs**, not about which parameter it is. The two per-instantiation channels — the receiver's type tag, and the hidden slot the call site fills — both deliver the instantiation's *name*; only the slot additionally delivers a *build recipe*. So a **name** consumer (every reflection query listed above) forwards on either channel, including a generic type's parameter read off `self` in an instance method. A **recipe** consumer (`json.try_parse::<T>`) forwards on the slot alone, and a generic type's parameter in a method body is E0058 there — take the type as the method's own parameter instead. `from_bytes::<T>(blob)` forwards on neither: it needs the element's packed *layout*, which no channel carries.
 
 One more, and it is about **spelling** rather than about what a parameter is. The slots a body forwards through are computed by a pass that runs before checking and reads the source as written, so it registers a forward from a call spelled on a **bare name** — `json.try_parse::<T>(s)`, `f::<T>(x)`, `self.load::<T>(s)`, `store.load::<T>(s)`, `Store.load::<T>(s)`. A receiver that is itself an expression (`self.inner.load::<T>(s)`) names its callee only once checking has typed it, which is too late, and is E0058. Bind the receiver first and the call is spelled on a name again:
 

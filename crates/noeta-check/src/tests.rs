@@ -3982,17 +3982,22 @@ echo r.rebuild();
 
 /// **The name-keyed reflection surfaces agree with `type_name` about which `T` they can see.**
 ///
-/// All four key on a type NAME, and the two per-instantiation channels that carry one — the
+/// All six key on a type NAME, and the two per-instantiation channels that carry one — the
 /// receiver's reflected type tag, and the hidden type-argument slot — are decided in a single
-/// place (`Checker::record_type_param`). `type_name::<T>()` read them from 0.3; the other three
-/// rejected the very same spelling with E0058 while their help prescribed
-/// `field_specs_of(type_name::<T>())`, a composition that worked — so the capability was already
-/// there and only the turbofish arm refused to reach it.
+/// place (`Checker::record_type_param`). `type_name::<T>()` read them from 0.3; the others
+/// rejected the very same spelling, each with its own wrong reason: `field_specs_of` and its two
+/// siblings with an E0058 whose help prescribed `field_specs_of(type_name::<T>())`, a composition
+/// that worked — so the capability was already there and only the turbofish arm refused to reach
+/// it — and `attributes_of`/`roles_of` with a *capability gate* firing on an operand that had no
+/// compile-time type to gate.
 ///
-/// The corpus (`reflection/reflect_over_type_param.noe`,
-/// `reflection/reflect_type_param_in_method.noe`) pins the ANSWERS. This pins the checker's
-/// judgment directly, over every combination of surface and channel, so a routing change that
-/// re-narrows one surface fails here with the surface named rather than as one line of stdout.
+/// This is the surface × channel census, and it is the gate the class needs: a routing change that
+/// re-narrows one surface, or a seventh surface that resolves its operand its own way, fails here
+/// with the surface named rather than as one line of some corpus case's stdout. The corpus
+/// (`reflection/reflect_over_type_param.noe`, `reflection/reflect_type_param_in_method.noe`,
+/// `reflection/attributes_roles_over_type_param.noe`,
+/// `reflection/attributes_roles_type_param_in_method.noe`) pins the ANSWERS; this pins the
+/// judgment.
 #[test]
 fn every_name_keyed_reflection_surface_forwards_a_type_parameter_like_type_name() {
     // Each channel, spelled once, with `type_name` alongside as the control.
@@ -4012,6 +4017,12 @@ fn every_name_keyed_reflection_surface_forwards_a_type_parameter_like_type_name(
         ("field_specs_of", "field_specs_of::<T>()"),
         ("variants_of", "variants_of::<T>()"),
         ("construct", "construct::<T>([])"),
+        // The two that held a bare `TypeRef` until the operand unification. Their capability gates
+        // (`@attribute`, `@semantic`) must not fire on a channel-carried parameter: whether the
+        // instantiation is an attribute or a semantic enum is a per-name manifest fact, which is
+        // exactly what the dynamic arm has always deferred.
+        ("attributes_of", "attributes_of::<T>()"),
+        ("roles_of", "roles_of::<T>()"),
     ];
     for body in bodies {
         for (name, call) in surfaces {
