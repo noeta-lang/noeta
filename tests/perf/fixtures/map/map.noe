@@ -1,0 +1,21 @@
+// Map insert + lookup, interpreted. Insert and read are separate loops so a regression in either
+// half moves the number.
+//
+// Tier 1 declines this loop too, and here it does so without any help: interpolating `"key${i}"`
+// emits `Stringify`/`BuildString`, and `m[k] = v` emits `CallMethod`. That equality between the
+// JIT and interpreter columns for map benchmarks is exactly what three benchmark reports read as
+// "the JIT is not helping here" instead of "the JIT never ran"; scripts/perf-ratchet.sh pins the
+// state (`tier1=declined`) so the day it changes is a reported event.
+mut m: Map<string, int> = {}
+mut i = 0
+while i < 30000 {
+    m["key${i}"] = i
+    i = i + 1
+}
+mut sum = 0
+mut j = 0
+while j < 30000 {
+    sum = sum + m["key${j}"]
+    j = j + 1
+}
+echo sum

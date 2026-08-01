@@ -1,0 +1,16 @@
+// The same arithmetic as arith.noe, with nothing in the loop to stop tier 1 compiling it — so
+// this row runs on NATIVE code and `arith.noe` runs on the interpreter, and the pair covers both
+// engines from a single binary.
+//
+// Its instruction count carries a deliberately coarse tolerance (see scripts/perf-ratchet.sh):
+// tier 1 compiles on a background thread, so how many iterations run interpreted before native
+// code is installed depends on machine load — measured, the FLOOR itself moves ~1.2% between an
+// idle box and a loaded one. The precise guard on this row is not the number but the assertion
+// that it is native at all (`tier1=native`).
+mut total = 0
+mut i = 0
+while i < 10000000 {
+    total = total + (i % 7)
+    i = i + 1
+}
+echo total

@@ -1,0 +1,16 @@
+// The INTERPRETER's arithmetic loop — the tier-0 dispatch path that regressed 7-11% unnoticed.
+//
+// `xs.len()` is not decoration. Tier 1 declines any loop containing a non-native op, and
+// `CallMethod` is one, so this loop is guaranteed to run interpreted no matter how hot it gets.
+// That is what makes this row a measurement of the interpreter rather than of whichever engine
+// happened to win the race that day — and scripts/perf-ratchet.sh asserts the decline
+// (`tier1=declined`), so if a future slice teaches tier 1 to compile `len`, the gate says so
+// instead of silently starting to measure native code against an interpreter's baseline.
+mut xs = [1]
+mut total = 0
+mut i = 0
+while i < 300000 {
+    total = total + (i % 7) + xs.len()
+    i = i + 1
+}
+echo total
