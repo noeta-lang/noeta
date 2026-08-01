@@ -88,6 +88,8 @@ Same shape one level down: `DepPackage` has seven public fields (`crates/noeta-l
 
 **Chokepoint.** A `FrontFacts` / `DepPackage` field census in the style of `lowerer_field_census.rs`: every field is either key material or explicitly declared irrelevant *with a reason*, and a new field fails the test until classified. **Size: ~120 lines of test, plus two or three lines for the live gaps.** `PackageUses` is `HashMap`-backed — folding it in must sort first, or it reintroduces the bug the cross-process determinism gate exists for.
 
+**Closed 2026-08-01.** The first pass had already made `open_startup_cache` and `key_deps` **destructure** their inputs with no rest-pattern, so a new field on either struct is a compile error — the strong half, needing no test. What was left is the half a destructure cannot carry: `let FrontFacts { thing: _, .. }` compiles as happily as folding it and reads as a decision nobody made. `crates/noeta-runner/tests/cache_key_census.rs` now requires every destructured field to be *used*, or listed with a reason. Exactly one is listed — `DepPackage::prefix`, which is folded into every one of that dependency's key names rather than keyed as a value of its own — and the excuse list is itself checked against the source, so it cannot outlive what it excuses. Mutation-verified both ways: underscore `package_uses` and it names it; put the rest-pattern back and it says so.
+
 ---
 
 ## 3. `CheckOptions` is assembled by hand in eleven places behind `..default()`, and two of them are wrong
