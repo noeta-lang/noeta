@@ -1599,10 +1599,10 @@ pub enum ReflectKind {
     /// `attributes_of::<T>()` / `attributes_of(name)` — the build manifest's materialized
     /// `#[T(...)]` attributes, each paired with its annotated target.
     AttributesOf,
-    /// `type_name::<T>()` — a type's qualified runtime identity as a `string`.
-    TypeName,
     /// `type_of(value)` — a value's runtime `Type` descriptor.
     TypeOf,
+    /// `type_name::<T>()` — a type's qualified runtime identity as a `string`.
+    TypeName,
     /// `fields_of(value)` — a struct/class instance's fields as `List<FieldEntry>`.
     FieldsOf,
     /// `traits_of(value)` — the qualified trait names a value's nominal type has an `impl` for.
@@ -1630,8 +1630,8 @@ impl ReflectKind {
     /// needs to enumerate the surface (completion, the parser grid, the operand-contract gate).
     pub const ALL: [ReflectKind; 13] = [
         ReflectKind::AttributesOf,
-        ReflectKind::TypeName,
         ReflectKind::TypeOf,
+        ReflectKind::TypeName,
         ReflectKind::FieldsOf,
         ReflectKind::TraitsOf,
         ReflectKind::FromBytes,
