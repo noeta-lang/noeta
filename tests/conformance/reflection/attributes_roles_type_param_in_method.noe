@@ -8,9 +8,10 @@
 // consulted first, through the one helper every name-keyed surface shares — which is what makes
 // `attributes_of::<T>()` and `field_specs_of::<T>()` agree about `T` by construction.
 //
-// Before the operand unification this file's first two lines were `E0035` ("cannot forward `T`
-// here"), because `Op::AttributesOf`'s operand was a slot INDEX and the receiver tag produces a
-// string.
+// Measured before the operand unification: the first two lines were E0058 "cannot forward `T`
+// here: call-site-typed forwarding carries a generic `fn`'s or method's OWN type parameters" —
+// true of the SLOT channel `Op::AttributesOf`'s index operand could read, and irrelevant to the
+// receiver tag, which produces a string. `roles_of::<E>()` was E0031 on *both* channels.
 // expect: stdout "routes attrs: 2"
 // expect: stdout "persists attrs: 1"
 // expect: stdout "self-less attrs: 2"
