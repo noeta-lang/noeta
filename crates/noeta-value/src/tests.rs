@@ -818,6 +818,65 @@ fn strings_round_trip_and_free() {
     v.free();
 }
 
+/// The three properties the map store's hasher must have, none of which the type system states.
+///
+/// 1. **Probe equivalence.** A bare `&str` must hash exactly as the `MapKey::Str` holding it, or
+///    the zero-allocation heterogeneous lookup silently misses every key.
+/// 2. **Length disambiguation.** The word-at-a-time `write` zero-pads its tail, so a string and
+///    that string followed by NULs must still differ.
+/// 3. **Bucket-index spread.** hashbrown indexes on the LOW bits; a multiply's low bits are the
+///    weak end, which is what `finish`'s fold exists to fix. Realistic key families must not pile
+///    into a few buckets.
+#[test]
+fn map_hasher_matches_the_str_probe_disambiguates_length_and_spreads() {
+    use std::hash::BuildHasher as _;
+    let build = std::hash::BuildHasherDefault::<crate::heap::FxHasher>::default();
+    let hash_of = |s: &str| build.hash_one(s);
+
+    for s in [
+        "",
+        "a",
+        "key",
+        "key12345",
+        "key123456",
+        "a much longer key than one machine word",
+        "\0",
+        "with\0embedded\0nuls",
+    ] {
+        assert_eq!(
+            hash_of(s),
+            build.hash_one(noeta_ext_abi::MapKey::from(s)),
+            "the &str probe must hash as the stored MapKey for {s:?}"
+        );
+    }
+
+    assert_ne!(
+        hash_of("ab"),
+        hash_of("ab\0"),
+        "zero padding must not alias"
+    );
+    assert_ne!(hash_of("ab\0"), hash_of("ab\0\0\0\0\0\0\0"));
+
+    // Spread: the `assoc`/`wordcount` key families, bucketed as hashbrown would bucket them.
+    for keys in [
+        (0..4096).map(|i| format!("key{i}")).collect::<Vec<_>>(),
+        (0..4096).map(|i| format!("word{i}")).collect::<Vec<_>>(),
+        (0..4096).map(|i| format!("{i}")).collect::<Vec<_>>(),
+    ] {
+        let mut buckets = [0u32; 512];
+        for k in &keys {
+            buckets[(hash_of(k) & 511) as usize] += 1;
+        }
+        let worst = buckets.iter().copied().max().unwrap_or(0);
+        // 4096 keys over 512 buckets averages 8; a well-spread hash stays well under 4x that.
+        assert!(
+            worst < 32,
+            "hash piles up: worst bucket held {worst} of 4096 keys ({:?}…)",
+            keys[0]
+        );
+    }
+}
+
 /// The acyclic exclusion, stated as a test: a **leaf** payload never enters the cycle collector's
 /// live-object registry (nothing can reach it through a chain of references that returns to it), a
 /// **node** payload always does, and both are counted by the leak oracle's `live_count` either way —

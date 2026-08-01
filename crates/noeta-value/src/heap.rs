@@ -348,24 +348,70 @@ pub(crate) struct FxHasher {
 
 const FX_K: u64 = 0x51_7c_c1_b7_27_22_0a_95;
 
+impl FxHasher {
+    /// **The** mixing round — the single primitive every `write_*` below is built from, so no
+    /// writer can drift into its own variant.
+    ///
+    /// One widening multiply, halves folded (`mulx` + `xor` on x86-64). The classic Fx round is
+    /// `(h.rotate_left(5) ^ word) * K`, and it is *not* good enough once the rounds are counted in
+    /// words instead of bytes: a truncating multiply only ever propagates entropy **upward**, so the
+    /// low bits of the result carry only the low bits of the input — and hashbrown indexes its
+    /// buckets with exactly those low bits. Byte-at-a-time mixing hid that behind sheer round count
+    /// (nine rounds for an eight-byte key); at two or three rounds it shows through as structured
+    /// collisions. Measured on 4096 `"word{i}"` keys over 512 buckets: worst bucket 64 and 198
+    /// buckets empty with the classic round, versus 20 and 0 here — the same spread the byte loop
+    /// gave. Keeping the *whole* product is what makes one round per word sufficient.
+    #[inline]
+    fn mix(&mut self, word: u64) {
+        let wide = u128::from(self.hash ^ word) * u128::from(FX_K);
+        self.hash = (wide as u64) ^ ((wide >> 64) as u64);
+    }
+}
+
 impl std::hash::Hasher for FxHasher {
     #[inline]
     fn finish(&self) -> u64 {
         self.hash
     }
+
+    /// Word-at-a-time. This mixed **one byte per round** until now, so an eight-byte map key cost
+    /// eight serially-dependent multiplies where one does — and that dependency chain, not the
+    /// instruction count, is what put hashing at 2-3% of the `assoc`/`wordcount` profiles.
+    ///
+    /// The length goes in first because the tail is zero-padded into a word: without it `"ab"` and
+    /// `"ab\0\0\0\0\0\0"` would mix identically. (The old byte loop needed no length — it had no
+    /// padding to be confused by.)
     #[inline]
     fn write(&mut self, bytes: &[u8]) {
-        let mut h = self.hash;
-        for &b in bytes {
-            h = (h.rotate_left(5) ^ (b as u64)).wrapping_mul(FX_K);
+        self.mix(bytes.len() as u64);
+        let mut chunks = bytes.chunks_exact(8);
+        for chunk in chunks.by_ref() {
+            self.mix(u64::from_le_bytes(
+                chunk.try_into().expect("chunks_exact(8) yields 8 bytes"),
+            ));
         }
-        self.hash = h;
+        let tail = chunks.remainder();
+        if !tail.is_empty() {
+            let mut word = [0u8; 8];
+            word[..tail.len()].copy_from_slice(tail);
+            self.mix(u64::from_le_bytes(word));
+        }
     }
+
     // A whole-word fast path for `u64` keys (the live-object registry keys on the NaN-boxed pointer
-    // word) — one multiply instead of eight byte rounds, and no SipHash.
+    // word) — one round instead of eight byte rounds, and no SipHash.
     #[inline]
     fn write_u64(&mut self, n: u64) {
-        self.hash = (self.hash.rotate_left(5) ^ n).wrapping_mul(FX_K);
+        self.mix(n);
+    }
+
+    /// One round for a single byte, rather than routing through [`Self::write`]'s length-plus-tail
+    /// pair. `str`'s own `Hash` ends with a `write_u8(0xff)` terminator, so this sits on the hot
+    /// path of every string key. It deliberately does **not** agree with `write(&[n])` — nothing
+    /// hashes one byte both ways, and `Hasher` requires only that each method be deterministic.
+    #[inline]
+    fn write_u8(&mut self, n: u8) {
+        self.mix(n as u64);
     }
 }
 
