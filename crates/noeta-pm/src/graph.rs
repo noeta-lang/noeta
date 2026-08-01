@@ -382,10 +382,7 @@ fn resolve_graph_impl(
         check_toolchain_req(pkg, "this package")?;
     }
     let root_deps = manifest.active_dependencies(target)?;
-    let manifest_dir = manifest_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .to_path_buf();
+    let manifest_dir = manifest_dir_of(&manifest_path);
 
     // Dev-time path override (`[patch]`): honored ONLY from the ROOT app's manifest, resolved
     // here and nowhere else — a dependency's own `[patch]` table is never consulted (no
@@ -2228,6 +2225,25 @@ fn toolchain_req_satisfied(req: &semver::VersionReq, running: &semver::Version) 
 
 /// Check a declared native entry crate exists: `<package root>/<native>/Cargo.toml` must be a
 /// file (Phase 3, N3.1). The manifest parser already rejected absolute/`..` values.
+/// The directory holding `manifest_path`, never empty.
+///
+/// [`Path::parent`] answers `Some("")` — not `None` — for a bare relative filename, and that is
+/// exactly the shape a manifest beside the entry takes when the entry itself was named relatively:
+/// `noeta check html.noe` from a package root resolves the manifest to `noeta.toml`, whose parent is
+/// `""`. A plain `unwrap_or(".")` therefore never fires.
+///
+/// Joining onto `""` yields the same path as joining onto `"."`, which is why the dependency walk
+/// and the lockfile read never noticed. **Statting it does not**: `hash_tree` stats this directory,
+/// so a root package declaring `native`/`dev-native` failed the whole resolve with "No such file or
+/// directory (os error 2)" whenever its entry was named relatively. Normalizing once, here, fixes
+/// every consumer rather than the single call that happened to stat.
+fn manifest_dir_of(manifest_path: &Path) -> PathBuf {
+    match manifest_path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => PathBuf::from("."),
+    }
+}
+
 fn validate_native_crate(package_dir: &Path, native: &str) -> Result<(), PmError> {
     let crate_dir = package_dir.join(native);
     if !crate_dir.join("Cargo.toml").is_file() {
@@ -2482,6 +2498,31 @@ mod tests {
         .unwrap();
         std::fs::write(app.join("main.noe"), "echo 1\n").unwrap();
         (base, app)
+    }
+
+    #[test]
+    fn a_manifest_named_relatively_still_has_a_statable_directory() {
+        // The regression: `Path::new("noeta.toml").parent()` is `Some("")`, not `None`, so the
+        // `unwrap_or(".")` this replaced never fired and the root package's directory came out
+        // empty. Everything that only JOINED onto it kept working, which is what hid the bug — it
+        // surfaced at `hash_tree`, the one caller that stats, and only for a package declaring its
+        // own native crate. `noeta check html.noe` from such a package root failed the resolve.
+        assert_eq!(manifest_dir_of(Path::new("noeta.toml")), Path::new("."));
+        // The shapes that already worked must keep working.
+        assert_eq!(
+            manifest_dir_of(Path::new("pkg/noeta.toml")),
+            Path::new("pkg")
+        );
+        assert_eq!(
+            manifest_dir_of(Path::new("/abs/pkg/noeta.toml")),
+            Path::new("/abs/pkg")
+        );
+        // Never empty, whatever it is handed.
+        assert!(
+            !manifest_dir_of(Path::new("noeta.toml"))
+                .as_os_str()
+                .is_empty()
+        );
     }
 
     #[test]
