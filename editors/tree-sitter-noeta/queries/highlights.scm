@@ -81,8 +81,6 @@
 ; The boolean literals are deliberately absent: `(boolean_literal) @boolean` above captures the
 ; whole literal node, which is more precise than matching its two spellings.
 ; --- BEGIN GENERATED VOCABULARY ---
-; Generated from the lexer's reserved words by crates/noeta-ide/tests/editor_vocabulary.rs.
-; Regenerate: NOETA_UPDATE_EDITOR_VOCABULARY=1 cargo test -p noeta-ide --test editor_vocabulary
 [
   "mut" "fn" "enum" "struct" "type" "class" "destruct" "impl"
   "trait" "namespace" "use" "pub" "echo"

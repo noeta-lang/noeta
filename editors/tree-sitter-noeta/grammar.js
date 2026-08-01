@@ -703,9 +703,6 @@ module.exports = grammar({
     // the kind-types (`Enum`, `Struct`, `Class`) are deliberately NOT here: they are ordinary
     // identifiers to the grammar, reached through `generic_type`.
     // --- BEGIN GENERATED VOCABULARY ---
-    // Generated from `noeta_ast::BuiltinTy` by crates/noeta-ide/tests/editor_vocabulary.rs.
-    // Regenerate: NOETA_UPDATE_EDITOR_VOCABULARY=1 cargo test -p noeta-ide --test editor_vocabulary
-    //
     // `never` is a type NAME, not a keyword: an ordinary identifier spelled `never`
     // elsewhere still parses as one, since `$.identifier` is also a `$._type` and the
     // grammar declares `word: $.identifier`, so these literals are only recognised

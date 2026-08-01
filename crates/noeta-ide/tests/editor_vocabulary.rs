@@ -25,8 +25,8 @@
 //! instead. A keyword in `grammar.js` is not a list entry — it is a literal inside the *production
 //! rule that uses it* (`'fn'` lives in `function_declaration`), and no generator can place it
 //! there. So the 33 word tokens `grammar.js` carries are checked for **coverage in both
-//! directions** against the lexer, with [`GRAMMAR_JS_OMISSIONS`] carrying a reason per deliberate
-//! absence. That is the audit's census, applied only where generation genuinely cannot reach.
+//! directions** against the lexer, with [`grammar_js_omissions`] carrying the rule behind each
+//! deliberate absence. That is the audit's census, applied only where generation cannot reach.
 //!
 //! # What this would have caught
 //!
@@ -315,14 +315,8 @@ fn regions() -> Vec<Region> {
     // -- tree-sitter: the highlight query's keyword captures ------------------------------------
     //
     // Grouped by capture rather than by family: three families share `@keyword`, so they share one
-    // bracket list. The boolean literals are absent on purpose (see `SCM_OMISSIONS`).
+    // bracket list. The boolean literals are absent on purpose (see `scm_omissions`).
     let mut scm = String::new();
-    scm.push_str(
-        "; Generated from the lexer's reserved words by \
-         crates/noeta-ide/tests/editor_vocabulary.rs.\n\
-         ; Regenerate: NOETA_UPDATE_EDITOR_VOCABULARY=1 cargo test -p noeta-ide --test \
-         editor_vocabulary\n",
-    );
     for (capture, families) in SCM_CAPTURES {
         let words: Vec<&str> = families.iter().flat_map(|f| words_in(*f)).collect();
         scm.push_str("[\n");
@@ -376,12 +370,7 @@ fn regions() -> Vec<Region> {
     // generated. Everything else in that file is vocabulary embedded in structure.
     let mut js = String::new();
     js.push_str(
-        "    // Generated from `noeta_ast::BuiltinTy` by \
-         crates/noeta-ide/tests/editor_vocabulary.rs.\n\
-         \x20   // Regenerate: NOETA_UPDATE_EDITOR_VOCABULARY=1 cargo test -p noeta-ide --test \
-         editor_vocabulary\n\
-         \x20   //\n\
-         \x20   // `never` is a type NAME, not a keyword: an ordinary identifier spelled `never`\n\
+        "    // `never` is a type NAME, not a keyword: an ordinary identifier spelled `never`\n\
          \x20   // elsewhere still parses as one, since `$.identifier` is also a `$._type` and the\n\
          \x20   // grammar declares `word: $.identifier`, so these literals are only recognised\n\
          \x20   // where a type is expected. The same is true of `unit`, `number` and `Any`.\n\
@@ -427,36 +416,28 @@ const SCM_CAPTURES: &[(&str, &[Family])] = &[
 /// Reserved words `grammar.js` deliberately does not carry as a token, **with the reason**.
 ///
 /// An allow-list without a reason is a list of things nobody has looked at yet; the reason is what
-/// makes a later reader able to tell "deliberate" from "forgotten". Each entry here has to say why
-/// the grammar can live without the token, and every one of them shares a single reason, so it is
-/// stated once and the entries name themselves.
-const GRAMMAR_JS_OMISSIONS: (&str, &[&str]) = (
-    "a reflection primitive is not a grammar token: `type_of::<T>()` parses as an ordinary \
-     `turbofish_call` over an `identifier`, so the grammar never needs the literal. Highlighting \
-     them is done by spelling, in queries/highlights.scm's `#any-of?` rule.",
-    &[
-        "attributes_of",
-        "type_of",
-        "type_name",
-        "fields_of",
-        "traits_of",
-        "from_bytes",
-        "roles_of",
-        "params_of",
-        "returns_of",
-        "invoke",
-        "field_specs_of",
-        "variants_of",
-        "construct",
-    ],
-);
+/// lets a later reader tell "deliberate" from "forgotten". And an allow-list of *names* is one more
+/// hand list to forget, which is the disease this whole file treats — so the entries are derived
+/// from the property that makes them omissible. The reason is not prose *about* the list; it is the
+/// rule that produces it.
+fn grammar_js_omissions() -> (&'static str, Vec<&'static str>) {
+    (
+        "a reflection primitive is not a grammar token: `type_of::<T>()` parses as an ordinary \
+         `turbofish_call` over an `identifier`, so the grammar never needs the literal. \
+         Highlighting them is done by spelling, in queries/highlights.scm's `#any-of?` rule.",
+        words_in(Family::Reflection),
+    )
+}
 
 /// Reserved words the tree-sitter **highlight query** deliberately does not name, with the reason.
-const SCM_OMISSIONS: (&str, &[&str]) = (
-    "captured structurally instead: `(boolean_literal) @boolean` colours the whole literal node, \
-     which is more precise than matching its two spellings.",
-    &["true", "false"],
-);
+/// Derived from the same property, for the same reason as [`grammar_js_omissions`].
+fn scm_omissions() -> (&'static str, Vec<&'static str>) {
+    (
+        "captured structurally instead: `(boolean_literal) @boolean` colours the whole literal \
+         node, which is more precise than matching its two spellings.",
+        words_in(Family::Boolean),
+    )
+}
 
 // ---------------------------------------------------------------------------------------------
 // The gate.
@@ -687,7 +668,7 @@ fn apply(mut edits: Vec<(&str, std::ops::Range<usize>, String)>) {
 /// The census the audit asked for, applied where generation cannot reach: a keyword in a
 /// tree-sitter grammar is a literal inside the production rule that uses it, so no generator can
 /// place `'fn'` inside `function_declaration`. Coverage is still checkable in both directions, and
-/// the deliberate absences carry a reason in [`GRAMMAR_JS_OMISSIONS`].
+/// the deliberate absences carry their reason in [`grammar_js_omissions`].
 #[test]
 fn the_tree_sitter_grammar_carries_every_keyword_token() {
     let text = read("editors/tree-sitter-noeta/grammar.js");
@@ -719,7 +700,7 @@ fn the_tree_sitter_grammar_carries_every_keyword_token() {
         tokens.len()
     );
 
-    let (reason, omitted) = GRAMMAR_JS_OMISSIONS;
+    let (reason, omitted) = grammar_js_omissions();
     let census: BTreeSet<&str> = ReservedWord::all().iter().map(|w| w.word).collect();
     let allowed: BTreeSet<&str> = omitted.iter().copied().collect();
     for word in &allowed {
@@ -802,7 +783,7 @@ fn the_highlight_query_names_every_keyword() {
         rest = &after[close + 1..];
     }
 
-    let (reason, omitted) = SCM_OMISSIONS;
+    let (reason, omitted) = scm_omissions();
     let allowed: BTreeSet<&str> = omitted.iter().copied().collect();
     let census: BTreeSet<&str> = ReservedWord::all().iter().map(|w| w.word).collect();
     for word in &allowed {
