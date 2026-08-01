@@ -166,19 +166,22 @@ fn fresh_frame_template() -> Box<Frame> {
 /// (P-AOT L3.2b): the same native codegen as the runtime JIT, emitted into a host object
 /// (ELF/Mach-O/COFF) with the [`noeta_jit_abi::AOT_DISPATCH_SYMBOL`] dispatch table, instead of
 /// finalized to executable pages. Returns the object bytes for `noeta build --native` to link
-/// against the AOT runtime staticlib.
+/// against the AOT runtime staticlib, and **how many prototypes got a real native body** (the rest
+/// are left for the interpreter) — the AOT twin of the JIT's `native_count`, so a caller can tell a
+/// linked artifact that dispatches native code from one whose dispatch table is all nulls.
 ///
 /// This lives in `noeta-vm` (not the CLI) because only this crate knows the [`Frame`] layout: the
 /// object bakes the [`fresh_frame_template`] words as immediates, so it must be built from the exact
 /// same template the runtime uses. The template is read during `compile_module` and needs to outlive
 /// only that call, so a local box suffices.
 #[cfg(feature = "jit")]
-pub fn compile_module_aot(module: &Module) -> Result<Vec<u8>, String> {
+pub fn compile_module_aot(module: &Module) -> Result<(Vec<u8>, usize), String> {
     let template = fresh_frame_template();
     let template_ptr = template.as_ref() as *const Frame as *const u8;
     let mut jit = noeta_jit::Jit::new_object("noeta_aot", frame_layout(), template_ptr)?;
-    jit.compile_module(module)?;
-    jit.finish()
+    let manifest = jit.compile_module(module)?;
+    let natives = manifest.native_count();
+    jit.finish().map(|object| (object, natives))
 }
 
 /// Identify which of a `Vec`'s three pointer-sized words hold its data pointer, length, and capacity,
@@ -782,6 +785,11 @@ impl<'m> Vm<'m> {
         let cancel = self.isolates.cancel_flag.clone();
         match noeta_jit::Jit::new(&helpers, frame_layout(), template_ptr, cancel) {
             Ok(mut jit) => {
+                // AOT-form codegen (P-AOT L3.1), armed *before* the `force_jit` sweep below so every
+                // body this engine emits carries it — a body already compiled keeps its form.
+                if self.tier1.aot_bodies {
+                    jit.set_aot_bodies(true);
+                }
                 if self.tier1.force_jit {
                     for p in 0..self.module.protos.len() {
                         if let Ok(f) = jit.compile(self.module, p) {

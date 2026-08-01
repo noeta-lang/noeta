@@ -59,6 +59,7 @@ A language feature is added as a **vertical slice**, in this order:
 - **The leak oracle** — heap residency must be 0 at clean exit, both backends, whole corpus.
 - **The refcount-anomaly oracle** — during cycle collection, every unreachable object's refcount must equal its in-edges from the garbage set (unreachable garbage can only reference itself), so a *skipped* retain or release is caught even when teardown's backup sweep would have absorbed the orphan. Runs inside the leak and JIT oracles.
 - **The JIT oracle** (`--jit-differential`, `jit` feature) — every corpus program through the interpreter and the forced-Tier-1 JIT: byte-identical `RunResult`, zero residency, zero anomalies. This is the gate for native-code refcount contracts that miri cannot see.
+- **The AOT oracles** (row 9 of the parallel-path audit) — `noeta build --native` links a *second shape* of native code (inline caches off, null call sites, no cancellation poll) into a binary with no compiler in it, and until 2026-08 the only thing gating it was one hand-written program comparing stdout. Two arms now: `--jit-differential --aot-bodies` runs the whole corpus through that body shape in-process (per-commit, no linker), and `--aot-differential` builds the real artifact per corpus program and compares it against `noeta run` over the same module — stdout, stderr and exit code (gate tier, one `cc` link per program). Both are in `scripts/gate.sh` and `ci.yml`.
 - **miri** — covers the quarantined `unsafe` that can execute under it: `noeta-value`, `noeta-gc`, the `noeta-db` newtype, a `noeta-stdlib` reinterpret, and the test-only `noeta-alloc-probe`. The compiler and the default-feature interpreter paths are `unsafe`-free.
 - **What miri cannot see — the JIT oracle covers it.** The Tier-1 seam's `unsafe` (`noeta-jit`, the VM's `jit`-feature helpers) executes as generated native code, which miri can't run; the JIT oracle above is that code's gate for memory and refcount correctness.
 - **The hot-reload end-to-end suites** (`scripts/hot-e2e.sh`) — `hot_serve`, `hot_live`, `parallel_hot`, `live_serve`, `graceful_drain`, driven through the shipped binary against a real listening socket: edit a running handler and assert the new body serves, the signal state survives, the swap reaches every worker, and a live client is told to reload. They stay `#[ignore]`d because they bind ports and spawn processes, so nothing runs them implicitly; the script is the one place that does, called by both the `jit` CI job and the merge tier of `scripts/gate.sh`. Everything else about a hot swap is checked on the compile side — this is the only gate that watches one land in a server that is actually serving.
@@ -73,7 +74,8 @@ A language feature is added as a **vertical slice**, in this order:
 scripts/gate.sh --quick   # fmt + both clippy splits                        (1m20s warm)
 scripts/gate.sh           # + the suite & oracles, doc samples, JIT gates,
                           #   and the real-socket hot-reload e2e suites     (~15 min warm, 35 cold)
-scripts/gate.sh --full    # + wasm portability, miri, editor tooling        (before a release tag)
+scripts/gate.sh --full    # + wasm portability, the linked --native AOT
+                          #   differential, miri, editor tooling            (before a release tag)
 ```
 
 - Zero compiler warnings (`cargo build` produces no `warning:` lines).

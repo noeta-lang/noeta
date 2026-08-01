@@ -134,9 +134,11 @@ fn aot_bound_dispatch_runs_native_in_process() {
 
 /// P-AOT L3.2b(3): [`compile_module_aot`] wires the object backend end-to-end — it emits a
 /// relocatable object carrying the [`noeta_jit_abi::AOT_DISPATCH_SYMBOL`] table. Byte-identity of the
-/// native codegen itself is proven corpus-wide by the `NOETA_JIT_AOT` oracle; this asserts the
-/// object is produced, is non-trivial, and defines the dispatch symbol (its name lands in the
-/// object's string table as raw ASCII — a dependency-free way to see the table was emitted).
+/// native codegen itself is proven corpus-wide by the JIT differential's **AOT-bodies arm**
+/// (`noeta-conformance --jit-differential --aot-bodies`, per-commit) and by the linked-artifact
+/// oracle (`--aot-differential`, gate); this asserts the object is produced, is non-trivial, carries
+/// at least one native body, and defines the dispatch symbol (its name lands in the object's string
+/// table as raw ASCII — a dependency-free way to see the table was emitted).
 #[cfg(feature = "jit")]
 #[test]
 fn compile_module_aot_emits_a_linkable_object_with_the_dispatch_table() {
@@ -146,8 +148,9 @@ fn compile_module_aot_emits_a_linkable_object_with_the_dispatch_table() {
     let parsed = parse(&source, &lexed.tokens);
     let module = compile(&parsed.program).expect("compiles");
 
-    let obj = compile_module_aot(&module).expect("emits an object");
+    let (obj, natives) = compile_module_aot(&module).expect("emits an object");
     assert!(obj.len() > 64, "object carries real content");
+    assert!(natives > 0, "the loop prototype compiles to a native body");
     let needle = noeta_jit_abi::AOT_DISPATCH_SYMBOL.as_bytes();
     assert!(
         obj.windows(needle.len()).any(|w| w == needle),

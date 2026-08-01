@@ -115,6 +115,64 @@ pub struct RunOptions {
     /// promotion counts don't race the program's runtime (the OSR tests assert them exactly).
     #[cfg(feature = "jit")]
     pub drain_at_exit: bool,
+    /// Emit **AOT-form** native bodies (P-AOT L3.1): inline caches off, null call sites, no
+    /// cancellation poll — bit-for-bit the codegen `noeta build --native` links into an artifact,
+    /// but finalized to executable pages so an ordinary in-process run executes it. Semantics are
+    /// identical (the IC-off path is the always-correct helper slow path), which is exactly the
+    /// claim: pair this with [`Tiering::Forced`] and the JIT differential becomes an **AOT codegen
+    /// differential** over the whole corpus, with no linker in sight.
+    ///
+    /// Meaningful only with [`Tiering::Forced`]: tier 0 compiles nothing, and the [`Tiering::Hot`]
+    /// service compiles on its own thread from its own engine (the oracle forces, so it never needs
+    /// it there). `false` on every production run — the shipped JIT keeps its inline caches.
+    #[cfg(feature = "jit")]
+    pub aot_bodies: bool,
+    /// A **linked-in AOT dispatch table** to bind before the run (P-AOT L3.2b): the native bodies
+    /// `noeta build --native` compiled ahead of time and the linker resolved into this executable's
+    /// text. Binding installs them in the per-prototype mirror tables, so eligible prototypes
+    /// dispatch straight to native code and the rest interpret — no JIT engine involved (pair with
+    /// [`Tiering::Off`]; an AOT binary carries no compiler).
+    ///
+    /// The `unsafe` lives in [`AotDispatch::new`], where the caller asserts the table's validity,
+    /// rather than in a parallel `run_module_*` function that repeats the core's nine init steps to
+    /// get one extra pre-run step. See [`AotDispatch`].
+    #[cfg(feature = "jit-rt")]
+    pub aot_dispatch: Option<AotDispatch>,
+}
+
+/// A **linked AOT dispatch table** plus the caller's assertion that it is real (P-AOT L3.2b).
+///
+/// The table is `[count][main_0, fast_0, main_1, fast_1, …]` — pointer-width words the linker
+/// resolved to the entry points of the ahead-of-time-compiled prototype bodies, with a null slot for
+/// any prototype that has no native (or no fast) body. Only the AOT runtime's `main` ever produces
+/// one: it takes the address of the `noeta_aot_dispatch` symbol its program object defined.
+///
+/// It exists as a newtype rather than a raw pointer field on [`RunOptions`] so the `unsafe` sits at
+/// the boundary where a human can actually discharge it — the one line that says "this is the
+/// linker-resolved table in my own text" — instead of forcing the whole run into a parallel
+/// `unsafe fn`. That parallel function is what let the AOT path miss `cancel`, `hot_mailbox` and the
+/// profiler seam as the core grew them (parallel-path audit row 13).
+#[cfg(feature = "jit-rt")]
+#[derive(Debug, Clone, Copy)]
+pub struct AotDispatch(*const usize);
+
+#[cfg(feature = "jit-rt")]
+impl AotDispatch {
+    /// Assert that `table` is a dispatch table this run may bind.
+    ///
+    /// # Safety
+    /// `table` must point at a valid dispatch table of the layout above whose function pointers stay
+    /// valid for the whole run — in a linked AOT binary they live in the executable's text, so this
+    /// always holds. A null pointer is allowed: it binds nothing and everything interprets.
+    #[allow(unsafe_code)]
+    pub unsafe fn new(table: *const usize) -> AotDispatch {
+        AotDispatch(table)
+    }
+
+    /// The table's address, for the one binding site in the core runner.
+    pub(crate) fn as_ptr(self) -> *const usize {
+        self.0
+    }
 }
 
 // Hand-written: the host/executor/debugger/profiler/session fields are trait objects with
@@ -134,7 +192,10 @@ impl std::fmt::Debug for RunOptions {
         d.field("session", &self.session.is_some());
         #[cfg(feature = "jit")]
         d.field("bail_histogram", &self.bail_histogram)
-            .field("drain_at_exit", &self.drain_at_exit);
+            .field("drain_at_exit", &self.drain_at_exit)
+            .field("aot_bodies", &self.aot_bodies);
+        #[cfg(feature = "jit-rt")]
+        d.field("aot_dispatch", &self.aot_dispatch.is_some());
         d.finish_non_exhaustive()
     }
 }
@@ -159,6 +220,10 @@ impl Default for RunOptions {
             bail_histogram: false,
             #[cfg(feature = "jit")]
             drain_at_exit: false,
+            #[cfg(feature = "jit")]
+            aot_bodies: false,
+            #[cfg(feature = "jit-rt")]
+            aot_dispatch: None,
         }
     }
 }
@@ -272,9 +337,23 @@ impl VmBackend {
                 #[cfg(feature = "jit")]
                 {
                     vm.tier1.force_jit = true;
+                    vm.tier1.aot_bodies = opts.aot_bodies;
                     vm.init_jit();
                 }
             }
+        }
+        // Pre-compiled native bodies, bound instead of compiled (P-AOT L3.2b). After the tiering
+        // arm and before the run: the mirror tables must carry the linked entries by the first
+        // dispatch, and an AOT binary pairs this with `Tiering::Off` (it has no compiler at all).
+        #[cfg(feature = "jit-rt")]
+        if let Some(dispatch) = opts.aot_dispatch {
+            vm.tier1.aot = true;
+            // SAFETY: `AotDispatch::new`'s caller asserted this table is the linker-resolved one in
+            // its own executable's text, valid for the whole run — that is the type's contract.
+            #[allow(unsafe_code)]
+            unsafe {
+                vm.bind_aot_dispatch(dispatch.as_ptr())
+            };
         }
         #[cfg(feature = "jit")]
         if opts.bail_histogram {
@@ -578,8 +657,14 @@ impl VmBackend {
     /// [`noeta_jit_abi::AOT_DISPATCH_SYMBOL`] table (`[count][main_0, fast_0, …]`, pointer-width words the
     /// linker resolved to real code addresses) — into the mutable per-proto mirror tables, then run.
     /// Prototypes with a null slot (ineligible, or no fast body) interpret. Real host + executor +
-    /// isolate factory, exactly like the production `parallel` path; out-of-oracle. Stays off the
-    /// [`RunOptions`] core: the dispatch bind is an unsafe pre-run step no other mode has.
+    /// isolate factory, exactly like the production `parallel` path; out-of-oracle.
+    ///
+    /// A [`RunOptions`] preset like every other mode. It used to be a parallel body — "stays off the
+    /// `RunOptions` core: the dispatch bind is an unsafe pre-run step no other mode has" — and that
+    /// was true about the `unsafe` and was also the mechanism by which this path silently stopped
+    /// receiving `cancel`, `hot_mailbox` and the profiler seam as the core grew them (parallel-path
+    /// audit row 13). The bind is now [`RunOptions::aot_dispatch`], whose [`AotDispatch`] newtype
+    /// carries the safety contract, so a tenth mandatory init step reaches this caller too.
     ///
     /// # Safety
     /// `dispatch` must point at a valid dispatch table of that layout whose function pointers stay
@@ -595,18 +680,19 @@ impl VmBackend {
         executor: Box<dyn noeta_stdlib::Executor>,
         factory: IsolateFactory,
     ) -> (RunResult, Vec<TraceFrame>) {
-        noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
-        noeta_value::safepoint_gc_arm(noeta_value::safepoint_gc_default_threshold());
-        let mut vm = Vm::load(&module, host, executor);
-        vm.isolates.parallel_isolates = true;
-        vm.isolates.isolate_module = Some(Arc::clone(&module));
-        vm.isolates.isolate_factory = Some(factory);
-        vm.tier1.aot = true;
-        // SAFETY: the caller guarantees `dispatch` is a valid, live dispatch table (contract above).
-        unsafe { vm.bind_aot_dispatch(dispatch) };
-        let result = run_and_teardown(&mut vm, noeta_value::CollectorMode::Trace);
-        let trace = std::mem::take(&mut vm.out.abort_trace);
-        (result, trace)
+        // SAFETY: this function's own contract is `AotDispatch::new`'s, forwarded verbatim.
+        let dispatch = unsafe { AotDispatch::new(dispatch) };
+        let out = self.run_module_with(
+            &Arc::clone(&module),
+            RunOptions {
+                host,
+                executor,
+                isolates: Some((module, factory)),
+                aot_dispatch: Some(dispatch),
+                ..RunOptions::default()
+            },
+        );
+        (out.result, out.trace)
     }
 
     /// Execute under an explicit cycle-collector mode (Phase 6.4 benchmark seam). Production paths

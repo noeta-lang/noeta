@@ -214,11 +214,82 @@ fn jit_differential_tiers_agree() {
             "the JIT oracle must cover 100% of the comparable corpus; got:\n{}",
             report.to_human()
         );
+        assert_native_proto_ratchet(report.native_protos, &report.to_human());
+    });
+}
+
+/// The **native-prototype ratchet**. This was `native_protos > 0` — a floor so low that a regression
+/// in `is_fast_op` turning 2600 prototypes into bail stubs passed it (parallel-path audit row 9): the
+/// oracle would still compare tier 0 against tier 1 and still agree, because an all-bail tier 1 *is*
+/// tier 0. The number below is a measurement of the corpus, and it only ever goes up.
+///
+/// Slack is deliberate but small: prototype counts move when the corpus gains or loses a case, and a
+/// gate that fails on an unrelated fixture edit gets deleted. A real codegen regression sheds
+/// hundreds at once, not tens.
+///
+/// **When this fails high** ("the corpus now compiles more"), raise it — that is the ratchet
+/// tightening. **When it fails low**, do not lower it: find out which prototypes stopped compiling.
+/// `cargo run -p noeta-conformance --features jit -- --jit-differential` prints the live number.
+///
+/// `jit`-gated with the three oracles that assert it: without Cranelift nothing compiles a prototype
+/// to native code, so the number does not exist to ratchet.
+#[cfg(feature = "jit")]
+const NATIVE_PROTO_FLOOR: usize = 2550; // measured 2633 on 2026-08-01
+
+#[cfg(feature = "jit")]
+fn assert_native_proto_ratchet(native_protos: usize, human: &str) {
+    assert!(
+        native_protos >= NATIVE_PROTO_FLOOR,
+        "the corpus compiled only {native_protos} prototypes to native code, below the ratchet of \
+         {NATIVE_PROTO_FLOOR} — some prototypes that used to go native are now bail stubs (tier 1 \
+         still AGREES with tier 0 in that case: an all-bail tier 1 is tier 0, which is why a bare \
+         `> 0` floor could not see this). Do not lower the ratchet; find what stopped \
+         compiling:\n{human}"
+    );
+}
+
+/// The **AOT-bodies** JIT differential gate (parallel-path audit row 9): the same corpus, the same
+/// two tiers, but the forced-JIT run emits the body shape `noeta build --native` links — inline
+/// caches off, null call sites, no cancellation poll — and the result must still be byte-identical.
+///
+/// Three comments in the tree said this codegen was "proven corpus-wide by the `NOETA_JIT_AOT`
+/// oracle". It was not: that knob is an environment variable read at `Jit` construction, it appeared
+/// in no gate script and no CI workflow, and the only thing actually gating `--native` was one
+/// hand-written all-int program comparing stdout, which skipped silently without a C toolchain. An
+/// AOT-only soundness bug (`0f9752d4c`, a misaligned dispatch table) had already been found late in
+/// exactly that gap. This test makes the claim true, per-commit, with no linker: the knob became
+/// [`RunOptions::aot_bodies`] so an in-process arm can set it.
+///
+/// The linked half — the real `cc`-linked artifact, which also covers the AOT *run tail* and the
+/// dispatch table itself — is `--aot-differential`, run from `scripts/gate.sh` because a link per
+/// program is minutes rather than seconds.
+///
+/// [`RunOptions::aot_bodies`]: noeta_vm::RunOptions::aot_bodies
+#[cfg(feature = "jit")]
+#[test]
+fn jit_differential_aot_bodies_agree() {
+    on_deep_stack(|| {
+        let report = noeta_conformance::run_jit_differential_with(
+            &corpus_root(),
+            None,
+            noeta_conformance::JitDiffArm::AotBodies,
+        );
+        eprintln!("{}", report.to_human());
         assert!(
-            report.native_protos > 0,
-            "expected the corpus to compile prototypes to native code (J1); got:\n{}",
+            report.ok(),
+            "the ahead-of-time body shape changed a program's observable behaviour (or \
+             leaked):\n{}",
             report.to_human()
         );
+        assert_eq!(
+            report.not_run.unsupported,
+            0,
+            "the AOT-bodies oracle must cover 100% of the comparable corpus; got:\n{}",
+            report.to_human()
+        );
+        // Coverage, not just agreement: AOT-form bodies that all bailed would agree with tier 0
+        // trivially and prove nothing about the codegen a `--native` artifact carries.
+        assert_native_proto_ratchet(report.native_protos, &report.to_human());
     });
 }
 
@@ -255,11 +326,7 @@ fn jit_differential_cancel_poll_agrees() {
             "the cancel-poll oracle must cover 100% of the comparable corpus; got:\n{}",
             report.to_human()
         );
-        assert!(
-            report.native_protos > 0,
-            "expected the corpus to compile prototypes to native code under the poll; got:\n{}",
-            report.to_human()
-        );
+        assert_native_proto_ratchet(report.native_protos, &report.to_human());
     });
 }
 

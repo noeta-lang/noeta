@@ -353,6 +353,30 @@ impl<M: ClifModule> Jit<M> {
         self.fast_compiled.get(proto).copied().flatten()
     }
 
+    /// Emit **AOT-form** bodies from here on (P-AOT L3.1): inline caches off, null call sites, no
+    /// cancellation poll — the exact codegen [`Jit::new_object`] produces for a `noeta build
+    /// --native` object, but finalized to executable pages so an ordinary in-process run exercises
+    /// it. Set by the VM from [`RunOptions::aot_bodies`], which is how the JIT differential gets its
+    /// AOT arm: same corpus, same comparison, second codegen shape.
+    ///
+    /// This is the *option* form of the `NOETA_JIT_AOT` environment knob [`Jit::new`] still honours.
+    /// The knob arms a whole process (and cannot be set from inside a `#[test]` without an `unsafe`
+    /// mutation of the process environment); this arms one run, which is what lets the arm be a
+    /// per-commit `cargo test` gate rather than a shell-only one.
+    ///
+    /// Must be set **before** the first `compile` — bodies already emitted keep the form they were
+    /// emitted in. `Vm::init_jit` sets it at construction, before the `force_jit` sweep.
+    ///
+    /// [`RunOptions::aot_bodies`]: ../noeta_vm/struct.RunOptions.html#structfield.aot_bodies
+    pub fn set_aot_bodies(&mut self, on: bool) {
+        self.aot_bodies = on;
+    }
+
+    /// Whether this engine emits AOT-form bodies — the env knob or [`Jit::set_aot_bodies`].
+    pub fn aot_bodies(&self) -> bool {
+        self.aot_bodies
+    }
+
     /// How many prototypes have any compiled entry (native or bail stub).
     pub fn compiled_count(&self) -> usize {
         self.compiled.iter().filter(|c| c.is_some()).count()

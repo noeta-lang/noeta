@@ -108,6 +108,29 @@ pub fn temp_dir(name: &str, files: &[(&str, &str)]) -> PathBuf {
     dir
 }
 
+/// A missing prerequisite: a SKIP on a dev box, a FAILURE where the tooling is supposed to be
+/// installed (`CI`, or `NOETA_GATE_REQUIRE_TOOLS=1` — the same switch `scripts/gate.sh` reads).
+///
+/// The asymmetry is `gate.sh`'s, for its reason: not every dev box has a C toolchain, and hard
+/// failing there would make the suite unrunnable; but in an environment that installs the tooling,
+/// "prerequisite missing" means the *detection* or the *install* broke, and that must not read as a
+/// pass. Several `--native` tests `return`ed silently on a missing `cc` for months, which is a large
+/// part of why `noeta build --native` reached a differential oracle only in this audit.
+///
+/// `jit`-gated like [`has_cc`], because its callers are: a lean (`--no-default-features`) build has
+/// no `--native` and would only warn that this is unused.
+#[cfg(feature = "jit")]
+pub fn skip_or_fail(what: &str, fix: &str) {
+    let required = std::env::var_os("CI").is_some()
+        || std::env::var("NOETA_GATE_REQUIRE_TOOLS").is_ok_and(|v| v == "1");
+    assert!(
+        !required,
+        "prerequisite missing: {what}\n  fix: {fix}\n  (CI / NOETA_GATE_REQUIRE_TOOLS=1 is set, so \
+         a missing prerequisite is a failure here rather than a silent skip.)"
+    );
+    eprintln!("SKIP: {what} — fix: {fix}");
+}
+
 /// Whether a C toolchain (`cc`) is on PATH — `--native`'s linker. Overridable via `NOETA_CC`, as the
 /// CLI's linker driver is.
 #[cfg(feature = "jit")]

@@ -24,6 +24,8 @@ use std::path::{Path, PathBuf};
 use noeta_diagnostics::Diagnostic;
 use noeta_span::{Source, SourceId, SourceMap};
 
+#[cfg(feature = "jit")]
+mod aot;
 mod bundle;
 mod determinism;
 mod differential;
@@ -38,6 +40,8 @@ pub mod reference;
 mod report;
 mod wasm;
 
+#[cfg(feature = "jit")]
+pub use aot::{AotDiffFailure, AotDiffReport, run_aot_differential};
 pub use bundle::{BundleFailure, BundleReport, run_bundle_roundtrip};
 pub use determinism::{DeterminismReport, digest_corpus};
 pub use differential::{DiffReport, Mismatch, run_differential};

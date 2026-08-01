@@ -138,34 +138,28 @@ fn build_aot_archive() -> Option<(PathBuf, String)> {
     archive.exists().then_some((archive, libs))
 }
 
-/// Report that a native-AOT test could not run, and why.
+/// Build the native binary for `file` at `app`, or `None` when the host cannot — reported through
+/// [`skip_or_fail`], never silent.
 ///
-/// A silent `return` is how `build_native_matches_a_source_run_byte_for_byte` guarded four live
-/// defects for a month: it was the *only* gate on the `--native` tail (there is no AOT differential
-/// oracle — audit row 9), it compared stdout only, and on a host without `cargo`/`cc` it reported
-/// as a pass having run nothing. The repository's rule is that a skip is not a pass; say so.
+/// A silent `return` is how these tests guarded four live defects for a month: this was the *only*
+/// gate on the `--native` tail (there was no AOT differential oracle until audit row 9 built one),
+/// it compared stdout only, and on a host without `cargo`/`cc` it reported as a pass having run
+/// nothing. Two branches of that audit independently reached for a skip helper here; the one that
+/// survived is the one that FAILS where the tooling is supposed to be installed.
 #[cfg(feature = "jit")]
-fn skip(test: &str, why: &str) {
-    eprintln!(
-        "SKIPPED {test}: {why}. This test is the only gate on the `noeta build --native` run tail \
-         (plans/parallel-path-audit.md rows 1 and 9) — a green run that printed this line proved \
-         nothing about it."
-    );
-}
-
-/// Build the native binary for `file` at `app`, or `None` when the host cannot (reported, not
-/// silent). Shared by the `--native` tail tests so the skip discipline lives in one place.
-#[cfg(feature = "jit")]
-fn build_native(test: &str, file: &std::path::Path, app: &std::path::Path) -> Option<()> {
+fn build_native(file: &std::path::Path, app: &std::path::Path) -> Option<()> {
     let Some((archive, libs)) = build_aot_archive() else {
-        skip(
-            test,
-            "the AOT runtime archive could not be built (no `cargo`?)",
+        skip_or_fail(
+            "cannot build the AOT runtime archive (no cargo, or the build failed)",
+            "cargo rustc -p noeta-aot-runtime -- --print native-static-libs",
         );
         return None;
     };
     if !has_cc() {
-        skip(test, "no `cc` on PATH");
+        skip_or_fail(
+            "no C toolchain (`cc`) on PATH — `--native`'s linker",
+            "sudo apt install build-essential   # or set NOETA_CC=/path/to/cc",
+        );
         return None;
     }
     let _ = std::fs::remove_file(app);
@@ -186,6 +180,10 @@ fn build_native(test: &str, file: &std::path::Path, app: &std::path::Path) -> Op
 #[test]
 #[cfg(feature = "jit")] // `--native` exists only in the JIT-enabled build (it exits 2 otherwise).
 fn build_native_matches_a_source_run_byte_for_byte() {
+    // This is a smoke test, not the gate: the corpus-wide gate is the conformance harness's
+    // AOT differential (`--aot-differential`), which links an artifact per corpus program. For
+    // years this test WAS the gate, and being one hand-written all-int program that compared
+    // stdout only, it watched neither the AOT run tail nor any other codegen shape.
     // P-AOT L3.2b(3), the end-to-end AOT differential: `noeta build --native` compiles the eligible
     // prototypes to machine code, links them into a native binary, and staples the bundle on. That
     // binary — dispatching native bodies for the hot loop / `sq` / `fib` and interpreting the rest —
@@ -213,13 +211,7 @@ fn build_native_matches_a_source_run_byte_for_byte() {
         "the fixture must produce stderr, or this test cannot see the defect it guards"
     );
 
-    if build_native(
-        "build_native_matches_a_source_run_byte_for_byte",
-        &file,
-        &app,
-    )
-    .is_none()
-    {
+    if build_native(&file, &app).is_none() {
         return;
     }
 
@@ -252,13 +244,7 @@ fn build_native_reports_an_out_of_range_exit_code_as_a_failure() {
     // clamps out-of-range codes to 1, and now so does this one.
     let file = temp_program("build_native_exit", "use std.os\nos.exit(256)\n");
     let app = file.parent().unwrap().join("app_native_exit");
-    if build_native(
-        "build_native_reports_an_out_of_range_exit_code_as_a_failure",
-        &file,
-        &app,
-    )
-    .is_none()
-    {
+    if build_native(&file, &app).is_none() {
         return;
     }
     // The reference: a source run of the same program.
@@ -313,16 +299,16 @@ fn build_native_strips_debug_info_from_the_shipped_binary() {
     // and halves the image (~11 MB → ~5.8 MB on a core program). Guard it structurally — assert the
     // ELF has no `.debug_*` or `.symtab`/`.strtab` sections — rather than by a brittle size ceiling.
     let Some((archive, libs)) = build_aot_archive() else {
-        skip(
-            "build_native_strips_debug_info_from_the_shipped_binary",
-            "the AOT runtime archive could not be built (no `cargo`?)",
+        skip_or_fail(
+            "cannot build the AOT runtime archive (no cargo, or the build failed)",
+            "cargo rustc -p noeta-aot-runtime -- --print native-static-libs",
         );
         return;
     };
     if !has_cc() {
-        skip(
-            "build_native_strips_debug_info_from_the_shipped_binary",
-            "no `cc` on PATH",
+        skip_or_fail(
+            "no C toolchain (`cc`) on PATH — `--native`'s linker",
+            "sudo apt install build-essential   # or set NOETA_CC=/path/to/cc",
         );
         return;
     }
