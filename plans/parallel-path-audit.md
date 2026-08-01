@@ -164,6 +164,27 @@ if (trimmed.length === 0 || trimmed.length > MAX_DESCRIPTION || /[\u0000-\u001f\
 4. Move the publish limits into the fixture set as a boundary-length `publish-request` fixture and align the counting semantics. **~30 lines.**
 5. Commit the throwaway semver differential as `crates/noeta-pm/examples/semver_vectors.rs` emitting the case list as JSON, consumed by the TS test. **~50 lines.**
 
+**Progress (2026-08-01) — all five chokepoints closed, plus the sixth this row's first pass named.**
+Items 1 and 2 landed earlier (the `✗`/exit-1 split and `--all-features` in `ci.yml` + `gate.sh`).
+Items 3, 4 and 5 landed on `audit/pm-trust` here and `audit/pm-trust` in `noeta-registry`.
+
+**3.** `MANIFEST.sha256` now hashes to a source constant on each side — `noeta_pm::registry::WIRE_MANIFEST_SHA256` and the registry's `src/wire-manifest.ts` — deliberately the one value *not* inside the copied directory.
+The chokepoint is `scripts/sync-wire-fixtures.sh`: it regenerates the manifest, rewrites both stamps and mirrors the directory in one command, and `--check` is a `gate.sh` step that diffs the two checkouts.
+Verified by mutation across repos: edit a fixture here, regenerate, `cp` the set across → **the registry's suite fails**, naming the stamp; forget to update the stamp *here* → this repo's suite fails first.
+**The residual gap is worth stating plainly.** If the fixtures are never copied at all, the registry repo alone still passes — that is structural, not an oversight: a repo cannot detect the staleness of a copy it does not have. What closes it is `sync-wire-fixtures.sh --check` in the gate, which sees both checkouts and names the drifting file (verified). The stamp closes the *copied-but-unacknowledged* case, which the manifest alone could not.
+
+**4.** The publish limits agree on Unicode, not on each language's default string model: the Worker now counts code points (`[...trimmed].length`) and rejects the whole `Cc` category, matching `char::is_control`.
+Two boundary fixtures pin it from both ends of the wire against the same bytes — one description of exactly `MAX_DESCRIPTION` astral-plane code points (400 UTF-16 units, must be accepted and must round-trip untruncated) and one containing U+0085 (must be rejected).
+Each test asserts the fixture *is still the boundary* before asserting the verdict, so a regeneration that flattened it fails rather than passing vacuously. All four mutations (each side, each axis) fail a test that names which side drifted.
+
+**5.** The throwaway binary is `crates/noeta-pm/examples/semver_vectors.rs`, emitting **85 cases** as a generated wire fixture that both suites replay — Rust against `VersionReq::matches`, TypeScript against the hand port.
+**The port agrees with the crate on all 85 cases**, including the pre-release corners: no live bug in dependency resolution or advisory matching. Recording that as a fact is the point.
+One thing the exercise surfaced: the hand-written TS cases did **not** cover `^0.2` (a bare-minor caret below 1.0), and a mutation making it widen like `^1.2` passed the old suite and is caught only by the differential.
+
+**Plus the sixth.** `list_advisories`, `advisory_checkpoint` and `advisory_public_key` classified a malformed *body* as `PmError::Network` — so a JSON-shape drift, which is precisely what the fixture set exists to prevent, degraded to a grey note and exit 0 in `noeta audit`: the same silence class as item 1, at the same altitude, reached by a different door. All three now return `PmError::Trust` with a message naming `test_data/wire`.
+
+Both cross-repo pins are **integration tests with no feature gate** (`tests/wire_fixture_manifest.rs`, `tests/semver_vectors.rs`, `tests/publish_limits.rs`), so they run in the plain `cargo test --workspace` step and not only under `--all-features`: a pin that exists to catch a forgotten step must not itself sit behind a step someone can forget. `cargo test -p noeta-pm` bare went 203 → 209 tests; `--all-features` runs 267.
+
 ---
 
 ## 5. `noeta check`, the LSP and MCP give three different answers to "is this project clean"

@@ -27,6 +27,27 @@ use semver::{Version, VersionReq};
 
 use crate::error::PmError;
 
+/// SHA-256 of `test_data/wire/MANIFEST.sha256` — the **cross-repo protocol stamp**.
+///
+/// The wire fixtures pin the registry protocol's bytes, and `MANIFEST.sha256` pins the fixtures. But
+/// the manifest lives *inside* the copied directory and is copied with it, so before this constant
+/// each repo hashed its own fixtures against its own manifest: edit a fixture here, regenerate the
+/// manifest, forget to copy — lang green, registry green, protocol diverged. The hash test proved a
+/// local hand-edit hadn't happened; it could not prove the copy was current, which is the case the
+/// ritual exists to prevent.
+///
+/// This constant is the one value that is **not** inside the copied set. The registry repo carries
+/// the identical stamp in `src/wire-manifest.ts`, so a protocol change now has to be acknowledged in
+/// each repo's *source*, not just have bytes dropped into a fixture directory. `cp`-ing the fixtures
+/// without touching the stamp fails the receiving repo's build, by name.
+///
+/// **Never edit it by hand.** `scripts/sync-wire-fixtures.sh` regenerates the manifest, rewrites
+/// both stamps and copies the set across in one step; `scripts/sync-wire-fixtures.sh --check` is the
+/// read-only assertion the gate runs. That script is the chokepoint — the four-step ritual in
+/// `test_data/wire/README.md` is now one command, and the step everyone could forget is inside it.
+pub const WIRE_MANIFEST_SHA256: &str =
+    "c12ee1002795ca4edba7ba50c3ec021bd2bdf383155878f366efbd06ffa8ba9e";
+
 /// The git coordinates a registry release resolves to (package-manager P2.5). The **commit SHA** the
 /// tag resolved to at publish time is pinned here too (Phase 4, S2): the index — not just the
 /// lockfile — is authoritative on "this version = this commit", so a *first* registry resolve fetches
@@ -1237,6 +1258,29 @@ pub struct VerifiedAdvisories {
     pub advisories: Vec<crate::advisory::Advisory>,
 }
 
+/// A response body in the **advisory trust chain** that does not parse — classified [`PmError::Trust`],
+/// not [`PmError::Network`].
+///
+/// `noeta audit` splits the two deliberately: `Network`/`Io` is transient and environmental (an
+/// offline CI box, a 502) and degrades to a grey note with exit 0; `Trust` is evidence and exits
+/// non-zero (`crates/noeta-cli/src/cmd/pm.rs`, the advisory section). A *transport* failure is
+/// genuinely transient. A body that arrives with a 200 and does not match the wire schema is not:
+/// these three endpoints are the signed inputs to the whole advisory chain, their shapes are pinned
+/// by `test_data/wire/` from both repos, and a registry serving something else is either drifted or
+/// lying. Either way **no dependency was checked against the feed**, which is the one thing the
+/// audit's output must never look like a clean result.
+///
+/// So a JSON-shape drift now fails loudly at exactly the altitude a bad signature does — the audit
+/// row's amplifier (`a`) closed for the shape half as well as the crypto half. A security check that
+/// reports nothing is indistinguishable from a security check that passed.
+#[cfg(all(feature = "registry-http", feature = "provenance"))]
+fn shape_drift(what: &str, err: reqwest::Error) -> PmError {
+    PmError::Trust(format!(
+        "malformed {what}: {err} — the registry's response does not match the wire schema pinned by \
+         `crates/noeta-pm/test_data/wire`, so nothing in the advisory chain could be verified"
+    ))
+}
+
 #[cfg(all(feature = "registry-http", feature = "provenance"))]
 impl HttpIndex {
     /// The advisory feed's **public key** (hex) to pin, or `None` if the registry serves none.
@@ -1263,7 +1307,7 @@ impl HttpIndex {
         }
         Ok(Some(
             resp.json::<KeyResponse>()
-                .map_err(|err| PmError::Network(format!("malformed advisory-feed key: {err}")))?
+                .map_err(|err| shape_drift("advisory-feed key", err))?
                 .public_key,
         ))
     }
@@ -1286,7 +1330,7 @@ impl HttpIndex {
             )));
         }
         resp.json()
-            .map_err(|err| PmError::Network(format!("malformed advisory-feed checkpoint: {err}")))
+            .map_err(|err| shape_drift("advisory-feed checkpoint", err))
     }
 
     /// The raw advisory feed: `GET /v1/advisories`.
@@ -1308,7 +1352,7 @@ impl HttpIndex {
         }
         Ok(resp
             .json::<FeedResponse>()
-            .map_err(|err| PmError::Network(format!("malformed advisory feed: {err}")))?
+            .map_err(|err| shape_drift("advisory feed", err))?
             .advisories)
     }
 
@@ -3272,38 +3316,44 @@ mod wire_fixture_tests {
         assert!(!a.affects(&Version::new(1, 2, 0)));
     }
 
-    /// The manifest pins the fixture BYTES: both repos carry the identical `MANIFEST.sha256`, so a
-    /// copy that drifts from the canonical set fails this test (here) or its mirror (in the
-    /// noeta-registry repo). Every fixture must be listed, and every listed hash must match.
-    #[cfg(feature = "provenance")] // sha2
+    /// A 200 whose body is not the pinned shape is a **trust** failure, not a network one.
+    ///
+    /// This is the drift the fixture set exists to prevent, arriving anyway — a registry deployed
+    /// from a repo whose copy went stale. Classified `Network` it degraded to `not checked — …` and
+    /// exit 0 in `noeta audit`, which is the row's core failure mode: a security check that reports
+    /// nothing is indistinguishable from one that passed. All three endpoints of the advisory trust
+    /// chain are covered, because the audit reaches the feed through whichever one answers first.
+    #[cfg(feature = "provenance")]
     #[test]
-    fn manifest_pins_the_fixture_bytes() {
-        use sha2::{Digest, Sha256};
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("test_data/wire");
-        let manifest = fixture("MANIFEST.sha256");
-        let mut listed = std::collections::BTreeSet::new();
-        for line in manifest.lines() {
-            let (hash, name) = line.split_once("  ").expect("sha256sum format");
-            listed.insert(name.to_string());
-            let bytes = std::fs::read(dir.join(name)).unwrap();
-            let actual = Sha256::digest(&bytes)
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>();
-            assert_eq!(
-                actual, hash,
-                "fixture `{name}` does not match MANIFEST.sha256 — regenerate the manifest and \
-                 re-copy the fixtures to the noeta-registry repo (see test_data/wire/README.md)"
+    fn a_shape_drift_in_the_advisory_chain_is_a_trust_failure() {
+        // Well-formed JSON, wrong schema: `advisories` renamed, the key/checkpoint fields missing.
+        let base = mock_server(|_, path, _| match path {
+            "/v1/advisories" => (200, r#"{"entries":[]}"#.to_string()),
+            "/v1/advisories/checkpoint" => (200, r#"{"n":0}"#.to_string()),
+            "/v1/advisories/key" => (200, r#"{"key":"deadbeef"}"#.to_string()),
+            _ => (404, fixture("error-response.json")),
+        });
+        let index = HttpIndex::new(base).unwrap();
+        for (what, err) in [
+            ("feed", index.list_advisories().unwrap_err()),
+            ("checkpoint", index.advisory_checkpoint().unwrap_err()),
+            ("key", index.advisory_public_key().unwrap_err()),
+        ] {
+            assert!(
+                matches!(err, PmError::Trust(_)),
+                "a shape-drifted advisory {what} was classified {err:?} — anything but `Trust` \
+                 makes `noeta audit` print a grey note and exit 0"
+            );
+            assert!(
+                err.message().contains("wire schema"),
+                "the {what} message must name the fixture set, so the reader knows which side \
+                 drifted: {err}"
             );
         }
-        for entry in std::fs::read_dir(&dir).unwrap() {
-            let name = entry.unwrap().file_name().into_string().unwrap();
-            if name.ends_with(".json") {
-                assert!(
-                    listed.contains(&name),
-                    "fixture `{name}` is not in MANIFEST.sha256 — regenerate it"
-                );
-            }
-        }
     }
+
+    // The fixture-BYTES pin (`MANIFEST.sha256` + the cross-repo stamp) deliberately does NOT live
+    // here: it is `tests/wire_fixture_manifest.rs`, an integration test with no feature gate, so it
+    // runs in the plain `cargo test --workspace` step and not only under `--all-features`. A pin
+    // that only fires when a human types the right feature list is most of the way to no pin at all.
 }

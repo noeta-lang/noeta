@@ -54,6 +54,13 @@ base64 = { workspace = true, optional = true }
 # Fixture directories for the unit tests (see `src/test_temp.rs`): per-process roots, so two test
 # processes or two checkouts never share — and delete — one fixture path.
 noeta-test-temp = { workspace = true }
+# The two cross-repo pins — `tests/semver_vectors.rs` (the semver differential) and
+# `tests/wire_fixture_manifest.rs` (the fixture bytes + the protocol stamp) — are integration tests
+# with NO feature gate, so they run in the plain `cargo test --workspace` step and not only under
+# `--all-features`. A pin that exists to catch a forgotten step must not sit behind a step someone
+# can forget. Hence these two, unconditional, rather than the optional copies above.
+serde_json = { workspace = true }
+sha2 = { workspace = true }
 
 [features]
 # The `[fmt]` config resolver (`resolve_fmt_config` + `noeta-fmt`). Off by default; the CLI (which

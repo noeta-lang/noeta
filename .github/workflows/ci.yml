@@ -95,6 +95,14 @@ jobs:
       # advisory-feed and transparency-log chain verification and the attestation goldens. Excluding
       # `noeta-cli` from the workspace run took these with it: nothing else enables the features.
       # `--all-features`, not a feature list — a list is a second place to forget.
+      # The fixture-bytes pin and the semver differential moved to feature-free integration tests, so
+      # the workspace step above covers them too; this step is what runs the rest of the trust chain.
+      # What NO single-repo job can see is whether the registry's verbatim copy of those fixtures is
+      # current — both suites stay green on stale copies of two different protocols. The cross-repo
+      # half is `scripts/sync-wire-fixtures.sh --check`, run by `scripts/gate.sh` where both
+      # checkouts exist. What CI does enforce is the protocol stamp: `MANIFEST.sha256` must hash to
+      # `noeta_pm::registry::WIRE_MANIFEST_SHA256`, so fixtures cannot change without a source change
+      # that a reviewer of either repo can see.
       - name: cargo test -p noeta-pm --all-features (registry wire fixtures + trust chain)
         run: cargo test -p noeta-pm --all-features --locked
       # The `noeta` binary is JIT-enabled by default; prove `--no-default-features` still yields a

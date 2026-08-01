@@ -404,6 +404,12 @@ step 2 test "lean CLI build (--no-default-features)" -- \
 # feature is added, which is the failure this audit is about.
 step 2 test "cargo test -p noeta-pm --all-features (registry wire fixtures + trust chain)" -- \
     "${CARGO[@]}" test -p noeta-pm --all-features --locked
+# ...and the half no single-repo test run can see. The wire fixtures are copied verbatim into the
+# noeta-registry repo, so the two suites can be green on stale copies of two different protocols;
+# `--check` compares this checkout against the registry checkout when one is present (it names the
+# drifting file and exits non-zero), and reports "checked this repo only" when there is not.
+step 1 test "wire fixtures in sync with the registry repo" -- \
+    "$ROOT/scripts/sync-wire-fixtures.sh" --check
 # The lean feature SHAPES the AOT/native-size/p2p stories depend on. ci.yml runs these as one
 # step; split here so a failure names the shape instead of a line number in a shell block.
 step 2 test "shape: noeta-vm aot" -- \
