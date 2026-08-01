@@ -150,6 +150,8 @@ They agree today. `diff -r` of the two fixture directories is byte-identical acr
 
 ## 7. "Which op carries a jump target" is written out four times, twice with a silently-wrong catch-all
 
+**✅ CLOSED** on `audit/op-jump-targets`. The set is now `Op::for_each_jump_pc`/`_mut` in `noeta-bytecode` — one `macro_rules!` arm list, no `_` catch-all, so a new `Op` variant is a compile error there; the ten fields are declared `JumpPc` (a `u32` alias) so the declaration itself says which indices are code. Every site calls it, and the JIT's `succ_all`/`analysis_succ` — the same function written twice with different coverage — collapsed into one `tier0_succ`. `crates/noeta-bytecode/tests/op_jump_pc_census.rs` classifies every `u32`-shaped field of `Op` and fails until a new one is declared a destination or declared not to be. The count of ten was right; the count of sites was five — `regalloc.rs`'s `op_facts` repeated the answer too (safely, being exhaustive over variants).
+
 **No live defect — all four lists currently agree. Nothing forces them to.**
 
 Exactly ten `Op` variants carry a code index (`fallback: u32` ×1 at `crates/noeta-bytecode/src/lib.rs:821`, `fail: u32` ×5 at `:1235-1262`, `target: u32` ×4 at `:1391-1410`). That set is written by hand in four places:
