@@ -921,11 +921,10 @@ impl Os for SandboxHost {
             .ok_or_else(|| OsError::unknown_process("write", handle))?;
         match proc.stdin {
             ScriptedStdin::Open => Ok(()),
-            ScriptedStdin::Closed => Err(OsError::new(
-                "write",
-                OsErrorKind::StdinClosed,
-                "the child's stdin is closed",
-            )),
+            ScriptedStdin::Closed => Err(OsError::stdin_closed()),
+            // The detail is the OS's own text on a real host, so the sandbox spells the Linux one
+            // and the cross-host tie asserts the KIND, which is the portable half. See
+            // `OsError::STDIN_CLOSED_DETAIL`.
             ScriptedStdin::Broken => Err(OsError::new(
                 "write",
                 OsErrorKind::BrokenPipe,

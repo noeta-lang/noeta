@@ -2013,19 +2013,13 @@ impl Os for RealHost {
         handle: u64,
         data: &str,
     ) -> Result<(), noeta_stdlib::os::OsError> {
-        use noeta_stdlib::os::{OsError, OsErrorKind};
+        use noeta_stdlib::os::OsError;
         use std::io::Write;
         let proc = self
             .procs
             .get_mut(&handle)
             .ok_or_else(|| OsError::unknown_process("write", handle))?;
-        let stdin = proc.stdin.as_mut().ok_or_else(|| {
-            OsError::new(
-                "write",
-                OsErrorKind::StdinClosed,
-                "the child's stdin is closed",
-            )
-        })?;
+        let stdin = proc.stdin.as_mut().ok_or_else(OsError::stdin_closed)?;
         stdin
             .write_all(data.as_bytes())
             .and_then(|()| stdin.flush())
@@ -2584,6 +2578,75 @@ fn spawn_metric_exporter(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The sandbox's model of the recoverable write door, held to the real host.**
+    ///
+    /// `tests/conformance/std/os_try_write.noe` exercises both failing states of `Process.try_write`
+    /// — a child that is already gone, and a stdin the program closed itself — and it exercises them
+    /// entirely against `SandboxHost`, because that is the only host the conformance oracle runs.
+    /// The sandbox reaches the first state through a *scripted* command named `dead`, which is not a
+    /// program and cannot be spawned anywhere else.
+    ///
+    /// So the fixture's coverage of the real host rested on a sentence in a comment: *"the real host
+    /// reports the same, its `ChildStdin` having been dropped"*. A true claim, and one nothing
+    /// checked — the same shape as every other maintained duplicate in this tree, and the reason
+    /// this test exists rather than a note saying it should.
+    ///
+    /// Both states are produced here from real processes:
+    ///
+    /// * **`broken_pipe`** — spawn a child, `wait` for it (so it is reaped and its read end is
+    ///   definitely closed), then write. The kernel answers `EPIPE`. This is not a race the test has
+    ///   to win: after `wait` returns there is no reader, so the write cannot succeed.
+    /// * **`stdin_closed`** — `close_stdin` drops the `ChildStdin`, and the next write has nothing
+    ///   to write to.
+    ///
+    /// The **kind** is asserted for both, and the **detail** only for `stdin_closed`: that one is
+    /// ours (`OsError::STDIN_CLOSED_DETAIL`, now the single constant both hosts read), while
+    /// `broken_pipe`'s comes from `io::Error` and is the operating system's own wording. Pinning the
+    /// latter would be a portability claim this repo cannot keep — which is exactly why programs are
+    /// told to branch on `e.kind()`.
+    #[test]
+    fn the_recoverable_write_door_reports_what_the_sandbox_models() {
+        use noeta_stdlib::os::OsErrorKind;
+
+        let mut host = RealHost::new().expect("a runtime");
+
+        // A child that is already gone. `true` exits immediately; `wait` reaps it, so by the time
+        // the write happens there is no reader left on the pipe at all.
+        let gone = host
+            .os_try_spawn("true", &[])
+            .expect("`true` is on any POSIX path");
+        host.os_proc_wait(gone).expect("the child exits promptly");
+        let error = host
+            .os_proc_try_write_stdin(gone, "input")
+            .expect_err("writing to a reaped child cannot succeed");
+        assert_eq!(
+            error.kind,
+            OsErrorKind::BrokenPipe,
+            "a write to a child that has exited is `broken_pipe` on the real host, as the sandbox's \
+             scripted `dead` command models it; got {}: {}",
+            error.kind.label(),
+            error.message()
+        );
+
+        // A stdin the program closed itself — a different cause, and it reports as one.
+        let closed = host
+            .os_try_spawn("cat", &[])
+            .expect("`cat` is on any POSIX path");
+        host.os_proc_close_stdin(closed)
+            .expect("closing is allowed");
+        let error = host
+            .os_proc_try_write_stdin(closed, "input")
+            .expect_err("writing after close_stdin cannot succeed");
+        assert_eq!(error.kind, OsErrorKind::StdinClosed);
+        assert_eq!(
+            error.detail,
+            noeta_stdlib::os::OsError::STDIN_CLOSED_DETAIL,
+            "both hosts read this detail from one constant; a program branching on `message()` \
+             sees the same sentence whichever host it runs on"
+        );
+        let _ = host.os_proc_kill(closed);
+    }
 
     /// M2 — the metrics periodic-export reader actually POSTs the aggregated OTLP/JSON. Runs the
     /// reader against a local `TcpListener` (a stand-in collector) with a short interval, records a
