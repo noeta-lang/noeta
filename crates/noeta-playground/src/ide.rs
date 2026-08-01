@@ -99,9 +99,14 @@ pub fn definition_source(text: &str, line: u32, character: u32) -> String {
     })
 }
 
-/// Completion candidates at the cursor: `{"items": [{"label", "kind", "detail"}…]}`. Member
-/// completion after `.` (including the bare-dot mid-edit form), type names in annotation
-/// position, otherwise keywords + declarations + in-scope bindings — the LSP's exact behavior.
+/// Completion candidates at the cursor: `{"items": [{"label", "kind", "detail", "insertText"}…]}`.
+/// Member completion after `.` (including the bare-dot mid-edit form), type names in annotation
+/// position, otherwise keywords + reflection primitives + declarations + in-scope bindings — the
+/// LSP's exact behavior.
+///
+/// `insertText` is `null` for all but the turbofish-only reflection primitives, where it carries the
+/// `::<` the bare word cannot be written without; a client that ignores it inserts the label, which
+/// is the same default the LSP's own clients apply.
 pub fn complete_source(text: &str, line: u32, character: u32) -> String {
     with_document(text, |store| {
         let items: Vec<_> = store
@@ -113,6 +118,7 @@ pub fn complete_source(text: &str, line: u32, character: u32) -> String {
                     "label": candidate.label,
                     "kind": kind_word(candidate.kind),
                     "detail": candidate.detail,
+                    "insertText": candidate.insert_text,
                 })
             })
             .collect();

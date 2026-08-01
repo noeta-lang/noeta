@@ -2,11 +2,11 @@
 //!
 //! Three forms, chosen by the caller from the cursor context:
 //!
-//! - [`complete`] — **identifier completion** (C1): the language keywords, the top-level
-//!   declarations (functions and types), and the value bindings in scope at the cursor (locals,
-//!   parameters, `for`/`match`/closure bindings, and earlier module-level bindings). In-scope
-//!   bindings come from [`resolve::visible_at`], so the same scoping walk backs completion and
-//!   go-to-definition.
+//! - [`complete`] — **identifier completion** (C1): the language keywords, the reflection
+//!   primitives (as functions, with their signatures), the top-level declarations (functions and
+//!   types), and the value bindings in scope at the cursor (locals, parameters, `for`/`match`/closure
+//!   bindings, and earlier module-level bindings). In-scope bindings come from
+//!   [`resolve::visible_at`], so the same scoping walk backs completion and go-to-definition.
 //! - [`members_of`] — **member completion** (C2): the fields, enum variants, and methods of a named
 //!   type, offered on a `receiver.member` access once the caller has resolved the receiver's type.
 //! - [`directives`] — **directive completion** (C4): the decorator directives and the tier
@@ -57,24 +57,41 @@ pub enum CandidateKind {
     Directive,
 }
 
-/// One completion candidate: the inserted/filtered text, its kind, and an optional short detail.
+/// One completion candidate: the filter/display text, its kind, an optional short detail, and — for
+/// the few candidates whose spelling is not what the user sees — the text to insert instead.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Candidate {
     pub label: String,
     pub kind: CandidateKind,
     pub detail: Option<String>,
+    /// What to insert when the candidate is accepted, when that differs from [`Self::label`].
+    /// `None` — the overwhelming majority — means "insert the label", the client's own default.
+    ///
+    /// It exists for the three reflection intrinsics that have **no bare call form**:
+    /// `type_name::<T>()`, `attributes_of::<T>()` and `from_bytes::<T>(blob)` are the only ways to
+    /// write those words, so inserting a bare `type_name` produces a parse error every single time.
+    /// The label stays the bare word (it is what the user is typing, so it is what must filter and
+    /// what must sort), and the insertion carries the `::<` that has to follow it.
+    pub insert_text: Option<String>,
 }
 
-/// The Noeta surface keywords offered everywhere: **every word the lexer reserves except the
-/// reflection primitives** (`type_of`, `field_specs_of`, …), which are deliberately omitted as
-/// niche — each is a turbofish or by-name call form, not something a developer types by reflex.
+/// The Noeta surface keywords offered as **keywords**: every word the lexer reserves except the
+/// reflection primitives, which are offered too — by [`reflection_intrinsics`], as
+/// [`CandidateKind::Function`] with their signatures. The split is a split of *kind*, not of
+/// coverage: `type_of(value: dyn): Type` is a call, so it gets a function's icon, a function's sort
+/// bucket, and a `detail` showing its shape, where `if` gets a keyword's.
+///
+/// It was for a while a split of coverage — the reflection words were filtered out here and offered
+/// nowhere, on the grounds of being niche. They are the *only* spelling those queries have (there is
+/// no `std.reflect` module and no method form), so "niche" meant the editor could not complete a
+/// language surface at all, which is the `isolate` bug this derivation was built to prevent.
 ///
 /// **Derived, not maintained.** [`noeta_lexer::ReservedWord::all`] is the census and each word's
 /// own [`ReservedRole`](noeta_lexer::ReservedRole) is the filter, so neither half is a second hand
 /// list: a keyword added to the lexer is offered the moment it is added, a retired one stops being
-/// offered, and a new reflection intrinsic is excluded automatically by the role it declares. This
-/// was a 32-entry hand list, and it had drifted — `isolate` was in the lexer, in
-/// `highlight::is_keyword`, in TextMate and in `highlights.scm`, and the editor silently never
+/// offered, and a new reflection intrinsic routes itself to the other function automatically by the
+/// role it declares. This was a 32-entry hand list, and it had drifted — `isolate` was in the lexer,
+/// in `highlight::is_keyword`, in TextMate and in `highlights.scm`, and the editor silently never
 /// offered it. Same pattern, same reason, as `highlight.rs`'s `is_primitive_type_name` after the
 /// same thing happened to `unit`.
 fn keywords() -> Vec<&'static str> {
@@ -82,6 +99,38 @@ fn keywords() -> Vec<&'static str> {
         .into_iter()
         .filter(|word| word.role != noeta_lexer::ReservedRole::Reflection)
         .map(|word| word.word)
+        .collect()
+}
+
+/// The reflection primitives, offered as **functions** with their signatures — the other half of the
+/// language's reserved vocabulary, and the half [`keywords`] leaves to this one.
+///
+/// Read straight from [`noeta_builtins::REFLECTION_INTRINSICS`], which the lexer's own census keeps
+/// complete: a fourteenth intrinsic is offered here the moment it has an entry, and it cannot reach
+/// the lexer without one. Nothing about the thirteen is restated in this crate.
+///
+/// Three details are deliberate:
+///
+/// - **[`CandidateKind::Function`], not [`CandidateKind::Keyword`].** These are calls, and a client
+///   sorts and icons by kind — filed as keywords they would rank beside `if` and `else`, which is
+///   not where a developer reaching for `field_specs_of` is looking.
+/// - **A `detail` showing the call**, so the turbofish shape is visible in the list itself:
+///   `construct::<T>(fields: List<dyn>): Result<dyn, string>` says everything the bare word cannot.
+/// - **An `insert_text` carrying the `::<`** for the three with no bare form — see
+///   [`Candidate::insert_text`]. The other ten insert their label: `roles_of`, `construct` and
+///   `field_specs_of` all have a legitimate bare form, so forcing a turbofish on them would be as
+///   wrong as withholding one from `type_name`.
+fn reflection_intrinsics() -> Vec<Candidate> {
+    noeta_builtins::REFLECTION_INTRINSICS
+        .iter()
+        .map(|intrinsic| Candidate {
+            label: intrinsic.name.to_string(),
+            kind: CandidateKind::Function,
+            detail: Some(intrinsic.signature()),
+            insert_text: intrinsic
+                .requires_turbofish()
+                .then(|| format!("{}::<", intrinsic.name)),
+        })
         .collect()
 }
 
@@ -108,6 +157,7 @@ pub fn complete(program: &Program, offset: u32, source: SourceId) -> Vec<Candida
             label: name.to_string(),
             kind,
             detail: None,
+            insert_text: None,
         });
     }
 
@@ -120,8 +170,14 @@ pub fn complete(program: &Program, offset: u32, source: SourceId) -> Vec<Candida
             label: name,
             kind: CandidateKind::Variable,
             detail: None,
+            insert_text: None,
         });
     }
+
+    // The reflection primitives, as functions with their signatures. Before the keywords because
+    // they are calls rather than grammar, and after the user's own names for the same reason those
+    // come first — though nothing here can collide, since the lexer reserves all thirteen spellings.
+    candidates.extend(reflection_intrinsics());
 
     // Keywords last: a same-spelled user name (rare) is the more useful suggestion.
     for keyword in keywords() {
@@ -129,6 +185,7 @@ pub fn complete(program: &Program, offset: u32, source: SourceId) -> Vec<Candida
             label: keyword.to_string(),
             kind: CandidateKind::Keyword,
             detail: None,
+            insert_text: None,
         });
     }
 
@@ -171,6 +228,7 @@ pub fn namespace_members(prefix: &str) -> Vec<Candidate> {
                 label: name,
                 kind,
                 detail: None,
+                insert_text: None,
             }
         })
         .collect()
@@ -196,6 +254,7 @@ pub fn directives(program: &Program) -> Vec<Candidate> {
             label: entry.name,
             kind: CandidateKind::Directive,
             detail: Some(entry.detail),
+            insert_text: None,
         })
         .collect()
 }
@@ -306,6 +365,7 @@ pub fn directive_arg_candidates(ctxt: &DirectiveArgContext, program: &Program) -
                 label: (*kind).to_string(),
                 kind: CandidateKind::Keyword,
                 detail: Some(format!("attach to every {}", kind.to_lowercase())),
+                insert_text: None,
             })
             .collect(),
         Some(BuiltinDirective::Packed) => packed_candidates(ctxt),
@@ -331,6 +391,7 @@ pub fn directive_arg_candidates(ctxt: &DirectiveArgContext, program: &Program) -
                     label: label.to_string(),
                     kind: CandidateKind::Keyword,
                     detail: Some(detail.to_string()),
+                    insert_text: None,
                 })
                 .collect()
             }
@@ -352,6 +413,7 @@ fn derive_candidates(ctxt: &DirectiveArgContext, program: &Program) -> Vec<Candi
                 label: (*format).to_string(),
                 kind: CandidateKind::Type,
                 detail: Some("serialization format".to_string()),
+                insert_text: None,
             })
             .collect();
     }
@@ -367,6 +429,7 @@ fn derive_candidates(ctxt: &DirectiveArgContext, program: &Program) -> Vec<Candi
                 label: t.name().to_string(),
                 kind: CandidateKind::Trait,
                 detail: Some(detail),
+                insert_text: None,
             }
         })
         .collect();
@@ -381,6 +444,7 @@ fn derive_candidates(ctxt: &DirectiveArgContext, program: &Program) -> Vec<Candi
                 detail: Some(
                     "user trait — fully defaulted, derive adopts the defaults".to_string(),
                 ),
+                insert_text: None,
             });
         }
     }
@@ -396,6 +460,7 @@ fn derive_candidates(ctxt: &DirectiveArgContext, program: &Program) -> Vec<Candi
             label: d.name.to_string(),
             kind: CandidateKind::Trait,
             detail: Some(format!("native derive — synthesizes {methods}")),
+            insert_text: None,
         });
     }
     dedupe_by_label(candidates)
@@ -430,6 +495,7 @@ fn role_candidates(ctxt: &DirectiveArgContext, program: &Program) -> Vec<Candida
                 label: name,
                 kind: CandidateKind::EnumMember,
                 detail: Some(format!("role — {head} variant")),
+                insert_text: None,
             })
             .collect();
     }
@@ -437,6 +503,7 @@ fn role_candidates(ctxt: &DirectiveArgContext, program: &Program) -> Vec<Candida
         label: noeta_ast::reflect::SEMANTIC_ENUM.to_string(),
         kind: CandidateKind::Enum,
         detail: Some("built-in role vocabulary".to_string()),
+        insert_text: None,
     }];
     for stmt in &program.stmts {
         if let Stmt::Enum(decl) = stmt
@@ -446,6 +513,7 @@ fn role_candidates(ctxt: &DirectiveArgContext, program: &Program) -> Vec<Candida
                 label: decl.name.to_string(),
                 kind: CandidateKind::Enum,
                 detail: Some("@semantic enum".to_string()),
+                insert_text: None,
             });
         }
     }
@@ -468,6 +536,7 @@ fn packed_candidates(ctxt: &DirectiveArgContext) -> Vec<Candidate> {
                     label: (*v).to_string(),
                     kind: CandidateKind::EnumMember,
                     detail: Some(detail(v).to_string()),
+                    insert_text: None,
                 })
                 .collect()
         }
@@ -478,6 +547,7 @@ fn packed_candidates(ctxt: &DirectiveArgContext) -> Vec<Candidate> {
                 label: format!("{}.{v}", noeta_ast::reflect::LAYOUT_ENUM),
                 kind: CandidateKind::EnumMember,
                 detail: Some(detail(v).to_string()),
+                insert_text: None,
             })
             .collect(),
     }
@@ -514,6 +584,7 @@ fn tier_config_candidates(tier: &str, program: &Program) -> Vec<Candidate> {
                         ""
                     }
                 )),
+                insert_text: None,
             })
             .collect();
     }
@@ -529,6 +600,7 @@ fn tier_config_candidates(tier: &str, program: &Program) -> Vec<Candidate> {
                         label: format!("{}: ", f.name),
                         kind: CandidateKind::Field,
                         detail: f.ty.as_ref().map(symbols::render_type_ref),
+                        insert_text: None,
                     })
                     .collect(),
             ),
@@ -581,6 +653,7 @@ pub fn members_of(program: &Program, type_name: &str) -> Vec<Candidate> {
                         label: field.name.clone(),
                         kind: CandidateKind::Field,
                         detail: field.ty.as_ref().map(symbols::render_type_ref),
+                        insert_text: None,
                     });
                 }
                 push_methods(&mut members, &decl.methods);
@@ -599,6 +672,7 @@ pub fn members_of(program: &Program, type_name: &str) -> Vec<Candidate> {
                         label: field.name.clone(),
                         kind: CandidateKind::Field,
                         detail: field.ty.as_ref().map(symbols::render_type_ref),
+                        insert_text: None,
                     });
                 }
                 push_methods(&mut members, &decl.methods);
@@ -617,6 +691,7 @@ pub fn members_of(program: &Program, type_name: &str) -> Vec<Candidate> {
                         label: variant.name.clone(),
                         kind: CandidateKind::EnumMember,
                         detail: symbols::variant_detail(variant),
+                        insert_text: None,
                     });
                 }
                 push_methods(&mut members, &decl.methods);
@@ -726,6 +801,7 @@ pub fn bundle_members(
                     module,
                     bundle.name
                 )),
+                insert_text: None,
             });
         }
     }
@@ -738,6 +814,7 @@ fn push_methods(members: &mut Vec<Candidate>, methods: &[noeta_ast::FnDecl]) {
             label: method.name.to_string(),
             kind: CandidateKind::Method,
             detail: Some(symbols::fn_signature(method)),
+            insert_text: None,
         });
     }
 }
@@ -779,6 +856,7 @@ pub fn type_names(program: &Program) -> Vec<Candidate> {
             label: name.to_string(),
             kind,
             detail: None,
+            insert_text: None,
         });
     }
     for name in builtin_type_names() {
@@ -786,6 +864,7 @@ pub fn type_names(program: &Program) -> Vec<Candidate> {
             label: name,
             kind: CandidateKind::Type,
             detail: None,
+            insert_text: None,
         });
     }
     dedupe_by_label(candidates)
@@ -1366,33 +1445,50 @@ mod tests {
         assert!(directive_arg_candidates(&arg_ctx("@test(").unwrap(), &program).is_empty());
     }
 
-    /// **The keyword offer is the lexer's own reserved words, minus the reflection primitives.**
+    /// **The offer is the lexer's own reserved words — every one of them, each in its own kind.**
     ///
-    /// [`keywords`] derives the list rather than restating it, so the census direction is not
-    /// checkable here — it cannot go wrong. What *is* checkable is that the derivation is the rule
-    /// the doc claims and that the filter has not inverted: every offered word is a word the lexer
-    /// actually reserves, no reflection primitive is offered, and the count is the census minus
-    /// exactly the reflection family.
+    /// [`keywords`] and [`reflection_intrinsics`] both derive their list rather than restating it,
+    /// so the census direction is not checkable here — it cannot go wrong. What *is* checkable is
+    /// that the derivations are the rule the docs claim and that neither filter has inverted: the
+    /// two offers partition the census by role, exactly, with nothing dropped between them and
+    /// nothing offered that the lexer does not reserve.
     ///
-    /// The drift that motivated the derivation is named so a regression reads as itself: the hand
-    /// list carried 32 of the 46 reserved words, and `isolate` — present in the lexer, in
-    /// `highlight::is_keyword`, in TextMate and in `highlights.scm` — was simply absent.
+    /// This test used to pin the opposite of half of that — `assert!(!offered.contains("type_of"))`
+    /// — because the reflection primitives were filtered out of the keyword list and offered
+    /// nowhere else. That was never a decision, and it inverted the very precedent the derivation
+    /// was built on: `isolate` was a word the lexer reserved that the editor never offered, and
+    /// thirteen more were in exactly that state by rule. Both halves are pinned now, in both
+    /// directions, so neither can quietly go missing again.
     #[test]
     fn the_keyword_offer_is_the_lexers_own_reserved_words() {
         use noeta_lexer::{ReservedRole, ReservedWord};
 
         let offered = keywords();
+        let reflection: Vec<String> = reflection_intrinsics()
+            .into_iter()
+            .map(|c| c.label)
+            .collect();
         let census = ReservedWord::all();
-        let reflection = census
+        let reflection_census = census
             .iter()
             .filter(|w| w.role == ReservedRole::Reflection)
             .count();
-        assert!(reflection > 0, "the reflection family has emptied out");
-        assert_eq!(
-            offered.len(),
-            census.len() - reflection,
-            "the offer is not the census minus the reflection primitives"
+        assert!(
+            reflection_census > 0,
+            "the reflection family has emptied out"
         );
+
+        // The two offers partition the census: no word is in both, none is in neither.
+        assert_eq!(
+            offered.len() + reflection.len(),
+            census.len(),
+            "the two offers are not the census: {} keywords + {} reflection primitives != {} \
+             reserved words",
+            offered.len(),
+            reflection.len(),
+            census.len()
+        );
+        assert_eq!(reflection.len(), reflection_census);
         for word in &offered {
             let role = ReservedWord::from_spelling(word)
                 .unwrap_or_else(|| panic!("`{word}` is offered but the lexer does not reserve it"))
@@ -1400,11 +1496,80 @@ mod tests {
             assert_ne!(
                 role,
                 ReservedRole::Reflection,
-                "`{word}` is a reflection primitive and should not be offered"
+                "`{word}` is a reflection primitive and belongs in the function offer, not the \
+                 keyword offer"
+            );
+        }
+        for word in &reflection {
+            let role = ReservedWord::from_spelling(word)
+                .unwrap_or_else(|| panic!("`{word}` is offered but the lexer does not reserve it"))
+                .role;
+            assert_eq!(
+                role,
+                ReservedRole::Reflection,
+                "`{word}` is offered as a reflection primitive but the lexer files it as {role:?}"
             );
         }
         assert!(offered.contains(&"isolate"));
-        assert!(!offered.contains(&"type_of"));
+        assert!(
+            reflection.iter().any(|w| w == "type_of"),
+            "`type_of` is the whole reason this half exists"
+        );
+    }
+
+    /// **All thirteen reflection primitives reach identifier completion, as functions.**
+    ///
+    /// The measurable statement of the row: drive [`complete`] over an ordinary buffer and find each
+    /// one, with a `detail` that shows its call. Kept separate from the partition test above because
+    /// that one proves the *offer functions* agree with the lexer, and this one proves the offer
+    /// actually reaches the candidate list — the two failed independently before (the offer function
+    /// was correct, and `complete` never called it).
+    #[test]
+    fn every_reflection_primitive_is_offered_as_a_function() {
+        let src = "fn f() { x = 1 }";
+        let cands = complete_at(src, src.len() as u32 - 2);
+        let functions = labels_of(&cands, CandidateKind::Function);
+        for intrinsic in noeta_builtins::REFLECTION_INTRINSICS {
+            assert!(
+                functions.contains(&intrinsic.name),
+                "`{}` is not offered: {functions:?}",
+                intrinsic.name
+            );
+            let candidate = cands
+                .iter()
+                .find(|c| c.label == intrinsic.name)
+                .expect("just found above");
+            assert_eq!(
+                candidate.detail.as_deref(),
+                Some(intrinsic.signature().as_str())
+            );
+        }
+        // Not offered as keywords — the kind is what a client sorts and icons by.
+        let kws = labels_of(&cands, CandidateKind::Keyword);
+        assert!(!kws.contains(&"type_of"), "offered as a keyword: {kws:?}");
+    }
+
+    /// The three intrinsics with no bare call form insert their turbofish; the other ten insert
+    /// their label. A bare `construct` is a legitimate call head (`construct(name, fields)`), a bare
+    /// `type_name` is a parse error in every program that could ever exist.
+    #[test]
+    fn only_the_turbofish_only_intrinsics_carry_insert_text() {
+        let src = "fn f() { x = 1 }";
+        let cands = complete_at(src, src.len() as u32 - 2);
+        let insert = |name: &str| {
+            cands
+                .iter()
+                .find(|c| c.label == name)
+                .unwrap_or_else(|| panic!("`{name}` is not offered"))
+                .insert_text
+                .clone()
+        };
+        assert_eq!(insert("type_name").as_deref(), Some("type_name::<"));
+        assert_eq!(insert("attributes_of").as_deref(), Some("attributes_of::<"));
+        assert_eq!(insert("from_bytes").as_deref(), Some("from_bytes::<"));
+        assert_eq!(insert("construct"), None);
+        assert_eq!(insert("roles_of"), None);
+        assert_eq!(insert("type_of"), None);
     }
 
     #[test]
