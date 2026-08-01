@@ -1406,21 +1406,21 @@ fn reachable_pcs_from(chunk: &noeta_bytecode::Chunk, entries: Vec<usize>) -> Vec
             continue; // a bail point: no native successor
         }
         match op {
-            Op::Jump { target } => stack.push(*target as usize),
-            Op::JumpIfTrue { target, .. } | Op::JumpIfFalse { target, .. } => {
-                stack.push(*target as usize);
-                stack.push(pc + 1);
-            }
-            Op::CondBranch { target, .. } => {
-                stack.push(*target as usize);
-                stack.push(pc + 1);
-            }
             // A native `Call`/`CallGlobal` continues at `pc + 1` on the direct/fast path
             // (J3/S4.1) — this edge is what lets a fast body run its post-call ops natively
             // instead of compiling them to bail fillers. `Return` ends the frame.
             Op::Call { .. } | Op::CallGlobal { .. } => stack.push(pc + 1),
             Op::Return { .. } => {}
-            _ => stack.push(pc + 1), // fast straight-line op
+            // Branch destinations come from [`Op::for_each_jump_pc`] rather than a list repeated
+            // here; `Jump` is the only branch that does not also fall through. Today `is_fast_op`
+            // admits no other destination-carrying op, so this is exactly the previous edge set —
+            // and it stays exact if the whitelist grows one.
+            _ => {
+                op.for_each_jump_pc(|t| stack.push(t as usize));
+                if !matches!(op, Op::Jump { .. }) {
+                    stack.push(pc + 1); // fast straight-line op, or a branch's fall-through
+                }
+            }
         }
     }
     seen
