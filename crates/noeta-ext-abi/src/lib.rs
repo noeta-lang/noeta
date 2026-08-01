@@ -113,7 +113,15 @@
 /// that must NOT be. Remapping one carrier and not another is silent (the program keeps running
 /// with the wrong type argument), so the distinction moved into the type, where
 /// `noeta_check::SITE_POLICIES`'s gate can read it.
-pub const ABI_VERSION: u32 = 12;
+///
+/// **13** — [`command::CommandCtx::serve_parallel`] takes the command's own
+/// [`command::EntryCall`] (`serve_parallel(file, entry, host, port, workers)`) instead of
+/// rebuilding one from `port`/`host`. A source break only for a driver that *overrides* the
+/// method; the default body is now a plain forward to `run_file`. The break is the point: the
+/// serve entry call was declared three times — in `SERVE_COMMAND`, in this trait's default, and
+/// in the CLI's multi-core path — so its signature was three edits in two crates, and the copies
+/// were kept in step by a comment (audit-10). One declaration, passed down.
+pub const ABI_VERSION: u32 = 13;
 
 pub mod args;
 pub mod channel;

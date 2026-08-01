@@ -219,25 +219,31 @@ pub const SERVE_COMMAND: ExtCommand = ExtCommand {
         let port = args.int("port");
         let host = args.str("host").to_string();
         let parallel = args.int("parallel").max(1);
+        // **The** serve entry call — one declaration, read by both the single-worker path and the
+        // multi-core fleet (audit-10). It used to be written three times: here, in the ABI's
+        // default `serve_parallel`, and by hand in the CLI, under a comment asserting the copies
+        // were "built the same way"; changing this call's shape was two edits in two crates.
+        let entry = EntryCall {
+            // Qualified: the entry call binds `server` itself, so a serve program need not
+            // import a module it never names (its handler signature uses `Request`/`Response`).
+            module: "std.http.server",
+            func: "serve",
+            args: vec![
+                EntryArg::Int(port),
+                EntryArg::Ident("fetch"),
+                EntryArg::Str(host.clone()),
+            ],
+        };
         // Multi-core (server-hmr S1): the driver binds the listener once and runs the serve
         // program in N worker isolates sharing `try_clone`d fds. Delegated to the CLI because it
         // owns real-host/thread construction; the single-worker path stays the plain run below.
+        // Both run the same `entry`.
         if parallel > 1 {
-            return ctx.serve_parallel(args.path("file"), port, &host, parallel as usize);
+            return ctx.serve_parallel(args.path("file"), &entry, &host, port, parallel as usize);
         }
         ctx.run_file(
             args.path("file"),
-            Some(&EntryCall {
-                // Qualified: the entry call binds `server` itself, so a serve program need not
-                // import a module it never names (its handler signature uses `Request`/`Response`).
-                module: "std.http.server",
-                func: "serve",
-                args: vec![
-                    EntryArg::Int(port),
-                    EntryArg::Ident("fetch"),
-                    EntryArg::Str(host.clone()),
-                ],
-            }),
+            Some(&entry),
             Some(&format!(
                 "noeta serve: listening on http://{host}:{port} (Ctrl-C to stop)"
             )),

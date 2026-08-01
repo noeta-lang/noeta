@@ -6,8 +6,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use noeta_ast::{Expr, Stmt};
-use noeta_diagnostics::render;
-use noeta_pm::{graph, manifest};
+use noeta_pm::manifest;
 use noeta_runner::compile::Loaded;
 use noeta_runner::compile_real;
 use noeta_span::{SourceMap, Span};
@@ -16,14 +15,6 @@ use noeta_vm::VmBackend;
 use crate::cmd::run::{p2p_app_namespace, run_program};
 use crate::output::emit_diagnostics_mapped;
 use crate::{compose, watch};
-
-/// The request-handler function `noeta serve` drives — the one name a served program must define.
-const HANDLER: &str = "fetch";
-
-/// The module the serve entry call names, qualified — see [`EntryCall::module`](noeta_stdlib::EntryCall).
-/// The multi-core path never reaches `run_file` (it binds the listener itself), so it assembles the
-/// same `EntryCall` from here; both paths therefore name one module and build one call.
-const SERVE_ENTRY_MODULE: &str = "std.http.server";
 
 /// The statements a synthesized [`EntryCall`](noeta_stdlib::EntryCall) contributes to the entry
 /// program: the `use` that binds the module the call names, then the call —
@@ -293,53 +284,21 @@ impl noeta_stdlib::CommandCtx for CliCommandCtx {
             Err(_) => return 1,
             Ok(resolved) => resolved,
         };
-
-        // Dependency packages so `noeta serve` (and any entry-call command) sees the same
-        // cross-package `use <dep-key>.…` the plain `run` path does (package-manager P2.1c) —
-        // the compose probe's graph when it resolved (audit-5 F2), else resolved here so the
-        // error renders on this path.
-        let (deps, package_uses) = match resolved {
-            Some(graph) => (graph.packages, graph.package_uses),
-            None => match graph::resolve_graph(file) {
-                Ok(graph) => (graph.packages, graph.package_uses),
-                Err(err) => {
-                    eprintln!("noeta: {err}");
-                    return 2;
-                }
-            },
-        };
         // The entry call and the `use` that binds it, handed to the *loader* rather than pushed
         // onto the linked program: a synthesized statement has to go through the linker exactly as
         // a handwritten one does, or its import resolves nothing and its names are left unqualified
         // (see `load_with_deps_appending`).
         let tail = entry.map(entry_tail).unwrap_or_default();
-        let linked = match noeta_loader::load_with_deps_appending(
+        // The one front half (audit-10): dependency graph → loader-with-tail → the runner's
+        // `Loaded`, shared with the `--parallel` path and with the hot watcher's re-link.
+        let (loaded, entry_source, front) = match crate::context::load_entry_with_tail(
             file,
-            manifest::root_edition(file),
-            &deps,
-            &package_uses,
-            noeta_pm::sources::package_root(file).as_ref(),
             &tail,
+            crate::context::Front::Resolve(resolved.map(Box::new)),
         ) {
-            Err(err) => {
-                eprintln!("noeta: cannot read {}: {err}", file.display());
-                return 2;
-            }
-            Ok(Err(load_diagnostics)) => {
-                let mut stderr = io::stderr();
-                for ld in &load_diagnostics {
-                    let _ = stderr.write_all(render(&ld.source, &ld.diagnostic).as_bytes());
-                }
-                return 1;
-            }
-            Ok(Ok(linked)) => linked,
+            Ok(program) => program.into_loaded(),
+            Err(failure) => return crate::context::report_u8(&failure),
         };
-        // The entry source, kept past the `Loaded` rewrap: the hot path's diff baseline is the
-        // entry unit of THIS program — the one about to be compiled and served.
-        let entry_source = linked.entry.clone();
-        // Rewrap as the runner's `Loaded` so the type check below rides `Loaded::check` — the
-        // editions-threading choke point (audit-3 F8).
-        let loaded = crate::context::loaded(linked);
 
         // Armed, not printed: the serve loop emits it once the listener is actually bound, so a
         // bind clash or a check error is never preceded by "listening on …".
@@ -350,7 +309,7 @@ impl noeta_stdlib::CommandCtx for CliCommandCtx {
         // debug-session machinery with the hot-swap mailbox, so edits swap into the LIVE process.
         if std::env::var_os("NOETA_HOT").is_some() {
             let baseline = watch::EntryUnit::of(&loaded.program, &entry_source);
-            return run_program_hot(file, &loaded, tail, baseline);
+            return run_program_hot(file, &loaded, tail, baseline, front);
         }
         // An entry call injected before compiling means the module differs from `run`'s for the
         // same source — a command run must never share the startup cache's `(source+tiers)` key,
@@ -363,11 +322,12 @@ impl noeta_stdlib::CommandCtx for CliCommandCtx {
     fn serve_parallel(
         &mut self,
         file: &std::path::Path,
-        port: i64,
+        entry: &noeta_stdlib::EntryCall,
         host: &str,
+        port: i64,
         workers: usize,
     ) -> u8 {
-        serve_parallel_impl(file, port, host, workers)
+        serve_parallel_impl(file, entry, host, port, workers)
     }
 }
 
@@ -376,67 +336,34 @@ impl noeta_stdlib::CommandCtx for CliCommandCtx {
 /// dup of the listening socket. Intra-process fds are shared across threads, so the kernel
 /// load-balances `accept()` across the workers with no `SO_REUSEPORT`/`socket2` and no new dep.
 /// The process-wide shutdown flag (S0) drains every worker on SIGINT.
+///
+/// `entry` is the command's own [`noeta_stdlib::EntryCall`] — the *same value* the single-worker
+/// path runs, handed down rather than rebuilt here (audit-10). The CLI used to hand-write a twin of
+/// it from local `SERVE_ENTRY_MODULE`/`HANDLER` constants, under a comment asserting the two were
+/// "built the same way".
 pub(crate) fn serve_parallel_impl(
     file: &std::path::Path,
-    port: i64,
+    entry: &noeta_stdlib::EntryCall,
     host: &str,
+    port: i64,
     workers: usize,
 ) -> u8 {
     let resolved = match compose::maybe_delegate(file) {
         Err(_) => return 1,
         Ok(resolved) => resolved,
     };
-    // The compose probe's graph when it resolved (audit-5 F2), else resolved here so the error
-    // renders on this path.
-    let (deps, package_uses) = match resolved {
-        Some(graph) => (graph.packages, graph.package_uses),
-        None => match graph::resolve_graph(file) {
-            Ok(graph) => (graph.packages, graph.package_uses),
-            Err(err) => {
-                eprintln!("noeta: {err}");
-                return 2;
-            }
-        },
-    };
-    // The multi-core entry call is the same `server.serve(port, fetch, host)` the single-worker path
-    // makes, built the same way and handed to the loader the same way — including the hot-mode
-    // handler trampoline, which `entry_tail` applies to an `Ident` argument (server-hmr F5).
-    let tail = entry_tail(&noeta_stdlib::EntryCall {
-        module: SERVE_ENTRY_MODULE,
-        func: "serve",
-        args: vec![
-            noeta_stdlib::EntryArg::Int(port),
-            noeta_stdlib::EntryArg::Ident(HANDLER),
-            noeta_stdlib::EntryArg::Str(host.to_string()),
-        ],
-    });
-    let linked = match noeta_loader::load_with_deps_appending(
+    // The same tail the single-worker path builds from the same declaration — including the
+    // hot-mode handler trampoline, which `entry_tail` applies to an `Ident` argument (F5).
+    let tail = entry_tail(entry);
+    // The one front half (audit-10), shared with the single-worker path and the hot re-link.
+    let (loaded, entry_source, front) = match crate::context::load_entry_with_tail(
         file,
-        manifest::root_edition(file),
-        &deps,
-        &package_uses,
-        noeta_pm::sources::package_root(file).as_ref(),
         &tail,
+        crate::context::Front::Resolve(resolved.map(Box::new)),
     ) {
-        Err(err) => {
-            eprintln!("noeta: cannot read {}: {err}", file.display());
-            return 2;
-        }
-        Ok(Err(load_diagnostics)) => {
-            let mut stderr = io::stderr();
-            for ld in &load_diagnostics {
-                let _ = stderr.write_all(render(&ld.source, &ld.diagnostic).as_bytes());
-            }
-            return 1;
-        }
-        Ok(Ok(linked)) => linked,
+        Ok(program) => program.into_loaded(),
+        Err(failure) => return crate::context::report_u8(&failure),
     };
-    // The entry source, kept past the `Loaded` rewrap — the hot fleet's diff baseline (see the
-    // single-worker path).
-    let entry_source = linked.entry.clone();
-    // Rewrap as the runner's `Loaded` so the type check below rides `Loaded::check` — the
-    // editions-threading choke point (audit-3 F8).
-    let loaded = crate::context::loaded(linked);
 
     let checked = loaded.check();
     // Report first, gate on errors only — a warning must not stop a server from starting.
@@ -464,18 +391,33 @@ pub(crate) fn serve_parallel_impl(
     // the shared broadcast queue and every worker drains it, so a swap spans the whole fleet.
     if std::env::var_os("NOETA_HOT").is_some() {
         let baseline = watch::EntryUnit::of(&loaded.program, &entry_source);
-        return serve_parallel_hot(
-            file,
-            tail,
-            baseline,
-            &loaded.program,
-            &checked,
-            &loaded.sources,
-            base,
+        eprintln!(
+            "noeta serve: listening on http://{addr} across {workers} workers, hot-reloading \
+             (Ctrl-C to stop)"
+        );
+        // One consumer per worker isolate: the queue reclaims a deposited plan (its fragment AST
+        // and its whole-program `Sites` bundle) only once ALL of them have installed it, so a
+        // worker still compiling its session — or parked mid-request — cannot lose a swap.
+        let rig = HotRig::arm(file, tail, baseline, front, workers);
+        let program = std::sync::Arc::new(loaded.program);
+        let sites = std::sync::Arc::new(checked.sites);
+        let sources = std::sync::Arc::new(loaded.sources);
+        return spawn_fleet(
+            &base,
             workers,
-            args,
-            app_id,
-            &addr,
+            std::sync::Arc::new(move |_worker, listener| {
+                rig.run_isolate(
+                    &program,
+                    sites.as_ref().clone(),
+                    &sources,
+                    HotIsolate {
+                        listener: Some(listener),
+                        args: args.clone(),
+                        app_id: app_id.clone(),
+                        label: Some(WORKER_ABORT),
+                    },
+                )
+            }),
         );
     }
 
@@ -487,6 +429,34 @@ pub(crate) fn serve_parallel_impl(
         }
     };
     eprintln!("noeta serve: listening on http://{addr} across {workers} workers (Ctrl-C to stop)");
+    let sources = loaded.sources;
+    spawn_fleet(
+        &base,
+        workers,
+        std::sync::Arc::new(move |_worker, listener| {
+            run_worker(
+                std::sync::Arc::clone(&module),
+                listener,
+                args.clone(),
+                app_id.clone(),
+                sources.clone(),
+            )
+        }),
+    )
+}
+
+/// Run `body` in `workers` OS threads, each handed its own `try_clone`d dup of the bound listener,
+/// and join them — the fleet's shape, shared by the cold and hot `--parallel` paths.
+///
+/// Every worker drains and returns on shutdown; a non-zero worker exit propagates as the fleet's.
+/// A listener that cannot be duplicated is fatal for the whole fleet: a serve process that quietly
+/// came up with fewer workers than asked for would look identical to one that came up with all of
+/// them, only slower.
+fn spawn_fleet(
+    base: &std::net::TcpListener,
+    workers: usize,
+    body: std::sync::Arc<dyn Fn(usize, std::net::TcpListener) -> u8 + Send + Sync>,
+) -> u8 {
     let mut handles = Vec::with_capacity(workers);
     for worker in 0..workers {
         let listener = match base.try_clone() {
@@ -496,15 +466,9 @@ pub(crate) fn serve_parallel_impl(
                 return 1;
             }
         };
-        let module = std::sync::Arc::clone(&module);
-        let args = args.clone();
-        let app_id = app_id.clone();
-        let sources = loaded.sources.clone();
-        handles.push(std::thread::spawn(move || {
-            run_worker(module, listener, args, app_id, sources)
-        }));
+        let body = std::sync::Arc::clone(&body);
+        handles.push(std::thread::spawn(move || body(worker, listener)));
     }
-    // Every worker drains and returns on shutdown; a non-zero worker exit propagates.
     let mut code = 0u8;
     for handle in handles {
         match handle.join() {
@@ -513,6 +477,30 @@ pub(crate) fn serve_parallel_impl(
         }
     }
     code
+}
+
+/// The real host **every serving isolate** runs on: the process argv, the p2p app namespace, live
+/// output, and — for a `--parallel` worker — the pre-bound listener it adopts.
+///
+/// Live output is not optional here, and this is why it is one function: a server by construction
+/// never exits on its own, so without it every byte the program prints is buffered for the whole
+/// process lifetime and an `echo` from a request handler appears *never*. Four hand-written copies
+/// of this chain existed (cold worker, hot worker, single hot worker, and the nested isolate
+/// factory), and two of them were missing the flag until audit row 1 found them.
+fn serve_host(
+    args: Vec<String>,
+    app_id: Option<String>,
+    listener: Option<std::net::TcpListener>,
+) -> Result<Box<dyn noeta_stdlib::Host>, String> {
+    let host = noeta_host_real::RealHost::new()
+        .map_err(|e| format!("cannot start the serve runtime: {e}"))?
+        .with_args(args)
+        .with_p2p_app(app_id)
+        .with_live_output(true);
+    Ok(match listener {
+        Some(listener) => Box::new(host.with_prebound_listener(listener)),
+        None => Box::new(host),
+    })
 }
 
 /// One `--parallel` worker (server-hmr S1): a real host seeded with the pre-bound listener plus a
@@ -529,20 +517,10 @@ pub(crate) fn run_worker(
     app_id: Option<String>,
     sources: SourceMap,
 ) -> u8 {
-    let host: Box<dyn noeta_stdlib::Host> = match noeta_host_real::RealHost::new() {
-        Ok(h) => Box::new(
-            // Live output, like every other foreground run surface (`noeta run`, the single-worker
-            // `serve` path through `run_program`). Without it a server — which by construction
-            // never exits on its own — buffers every byte it prints for its whole lifetime, so
-            // `echo` from a request handler appears never (audit row 1's live-output half, found on
-            // the worker paths as well as the AOT one).
-            h.with_args(args.clone())
-                .with_p2p_app(app_id.clone())
-                .with_live_output(true)
-                .with_prebound_listener(listener),
-        ),
-        Err(e) => {
-            eprintln!("noeta: cannot start a worker runtime: {e}");
+    let host = match serve_host(args.clone(), app_id.clone(), Some(listener)) {
+        Ok(host) => host,
+        Err(msg) => {
+            eprintln!("noeta: {msg}");
             return 1;
         }
     };
@@ -555,13 +533,9 @@ pub(crate) fn run_worker(
     };
     let app_id_for_factory = app_id.clone();
     let factory: noeta_vm::IsolateFactory = std::sync::Arc::new(move || {
-        let host: Box<dyn noeta_stdlib::Host> = Box::new(
-            noeta_host_real::RealHost::new()
-                .expect("cannot start a nested isolate's runtime")
-                .with_args(args.clone())
-                .with_p2p_app(app_id_for_factory.clone())
-                .with_live_output(true),
-        );
+        // A nested isolate binds no listener of its own — it inherits the worker's accept loop.
+        let host = serve_host(args.clone(), app_id_for_factory.clone(), None)
+            .expect("cannot start a nested isolate's runtime");
         let executor: Box<dyn noeta_stdlib::Executor> = Box::new(
             noeta_host_real::RealExecutor::new().expect("cannot start a nested isolate's executor"),
         );
@@ -569,143 +543,143 @@ pub(crate) fn run_worker(
     });
     let (result, trace, _) = VmBackend::new()
         .run_module_with_host_and_executor_parallel(module, host, executor, factory, false, None);
-    emit_worker_tail(&result, &trace, &sources)
+    emit_run_tail(&result, &trace, &sources, Some(WORKER_ABORT))
 }
 
-/// Hot multi-core serve (server-hmr F5): each of `workers` worker isolates runs the debug-session
-/// hot path against a `try_clone`d listener, all sharing ONE [`noeta_vm::HotChannel`] broadcast
-/// queue that a single watcher deposits into — so an edit swaps into every worker in place. The
-/// `--parallel --watch` wrapper spawned this (via `NOETA_HOT`); a change the fleet cannot absorb
-/// exits with the restart sentinel, restarting the whole wrapper.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn serve_parallel_hot(
-    entry_path: &std::path::Path,
-    tail: Vec<Stmt>,
-    baseline: watch::EntryUnit,
-    program: &noeta_ast::Program,
-    checked: &noeta_check::Checked,
-    sources: &SourceMap,
-    base: std::net::TcpListener,
-    workers: usize,
-    args: Vec<String>,
-    app_id: Option<String>,
-    addr: &str,
-) -> u8 {
-    // One consumer per worker isolate: the queue reclaims a deposited plan (its fragment AST and
-    // its whole-program `Sites` bundle) only once ALL of them have installed it, so a worker still
-    // compiling its session below — or parked mid-request — cannot lose a swap.
-    let mailbox: noeta_vm::HotSwapMailbox = std::sync::Arc::new(noeta_vm::HotChannel::new(workers));
-    let wake = std::sync::Arc::new(noeta_host_real::Notify::new());
-    watch::spawn_hot_watcher(
-        entry_path.to_path_buf(),
-        tail,
-        baseline,
-        std::sync::Arc::clone(&mailbox),
-        std::sync::Arc::clone(&wake),
-    );
-    eprintln!(
-        "noeta serve: listening on http://{addr} across {workers} workers, hot-reloading \
-         (Ctrl-C to stop)"
-    );
-    let mut handles = Vec::with_capacity(workers);
-    for worker in 0..workers {
-        let listener = match base.try_clone() {
-            Ok(l) => l,
-            Err(e) => {
-                eprintln!("noeta: cannot clone the listener for worker {worker}: {e}");
-                return 1;
-            }
-        };
-        let program = program.clone();
-        let sites = checked.sites.clone();
-        let mailbox = std::sync::Arc::clone(&mailbox);
-        let wake = std::sync::Arc::clone(&wake);
-        let args = args.clone();
-        let app_id = app_id.clone();
-        let sources = sources.clone();
-        handles.push(std::thread::spawn(move || {
-            run_worker_hot(
-                program, sites, listener, mailbox, wake, args, app_id, sources,
-            )
-        }));
-    }
-    let mut code = 0u8;
-    for handle in handles {
-        match handle.join() {
-            Ok(worker_code) => code = code.max(worker_code),
-            Err(_) => code = code.max(1),
-        }
-    }
-    code
-}
+/// The banner a `--parallel` worker labels an abort with, before everything the runtime has to say
+/// about it. The single-worker path passes `None` — it *is* the process, so there is no "which one"
+/// to answer.
+const WORKER_ABORT: &str = "[worker] aborted";
 
-/// One hot `--parallel` worker (server-hmr F5): compiles its own session (each isolate is
-/// shared-nothing, so it holds its own `SessionCompiler` for fragment installs), adopts the
-/// pre-bound listener, arms the shared broadcast queue + wake, and runs the debug-session hot VM.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn run_worker_hot(
-    program: noeta_ast::Program,
-    sites: noeta_compiler::Sites,
-    listener: std::net::TcpListener,
+// ---------------------------------------------------------------------- the one hot install
+
+/// The **process-wide half of a hot install** (audit-10, steps 4–6 of the hot sequence): the
+/// hot-swap mailbox sized for its consumers, the wake that rouses a blocked executor, and the
+/// watcher thread armed over both.
+///
+/// It exists because `noeta serve` assembled this sequence twice — once for the single worker and
+/// once for the fleet — and the only genuine difference between the two was the consumer count.
+/// Every other difference between them was drift: the parallel path took a `&SourceMap` it never
+/// used (its first statement was `let _ = sources;`), because the step that consumes one was never
+/// copied across. A parameterised install has no delta to drift in.
+///
+/// **The watcher is armed before anything compiles**, deliberately: a save made in the seconds a
+/// cold compile takes must already be queued when the run thread starts. The single-worker path
+/// used to compile first and arm second, so that save was silently lost; the fleet armed first.
+/// One order now, and it is the safe one.
+#[derive(Clone)]
+pub(crate) struct HotRig {
     mailbox: noeta_vm::HotSwapMailbox,
     wake: std::sync::Arc<noeta_host_real::Notify>,
+}
+
+/// The per-isolate inputs of a hot install: what this one isolate has that its siblings do not.
+pub(crate) struct HotIsolate {
+    /// The pre-bound listener this isolate adopts (`--parallel`), or `None` when the program binds
+    /// its own socket (the single worker).
+    listener: Option<std::net::TcpListener>,
     args: Vec<String>,
     app_id: Option<String>,
-    sources: SourceMap,
-) -> u8 {
-    let (module, compiler) =
-        match noeta_compiler::compile_with_sites_session(&program, sites, false, false) {
-            Ok(pair) => pair,
-            Err(u) => {
-                eprintln!("noeta: cannot compile a hot worker: {}", u.reason);
+    /// How an abort is labelled — [`WORKER_ABORT`] in the fleet, `None` for the single worker.
+    label: Option<&'static str>,
+}
+
+impl HotRig {
+    /// Steps 4–6: build the mailbox for `consumers` isolates, build the wake, arm the watcher.
+    ///
+    /// `consumers` is the count the queue gates reclamation on, so it must equal the number of VMs
+    /// that will arm this mailbox — 1 for `serve --watch`, N for `serve --parallel N --watch`. It
+    /// is the *only* parameter, because it is the only real difference between the two installs.
+    ///
+    /// The wake lets the watcher rouse a *blocked* executor the moment it deposits (server-hmr L3)
+    /// — otherwise an idle server (accept pending, no traffic) would only apply the swap at its
+    /// next request (the W1 one-request lag).
+    fn arm(
+        entry_path: &std::path::Path,
+        tail: Vec<Stmt>,
+        baseline: watch::EntryUnit,
+        front: std::sync::Arc<noeta_runner::compile::FrontFacts>,
+        consumers: usize,
+    ) -> HotRig {
+        let mailbox: noeta_vm::HotSwapMailbox =
+            std::sync::Arc::new(noeta_vm::HotChannel::new(consumers));
+        let wake = std::sync::Arc::new(noeta_host_real::Notify::new());
+        watch::spawn_hot_watcher(
+            entry_path.to_path_buf(),
+            tail,
+            baseline,
+            front,
+            std::sync::Arc::clone(&mailbox),
+            std::sync::Arc::clone(&wake),
+        );
+        HotRig { mailbox, wake }
+    }
+
+    /// Steps 3 and 7–9 for one isolate: compile its own session (each isolate is shared-nothing, so
+    /// it holds its own `SessionCompiler` for fragment installs), build the real host, build the
+    /// executor **and give it this rig's wake**, run the hot VM, render the tail.
+    ///
+    /// Every hot isolate in the process runs this — the fleet's workers and the single worker
+    /// alike — so the two cannot serve a swap differently. That equality is exactly what two
+    /// implementations were free to break, and it is what `parallel_hot`/`hot_serve` pin.
+    fn run_isolate(
+        &self,
+        program: &noeta_ast::Program,
+        sites: noeta_compiler::Sites,
+        sources: &SourceMap,
+        isolate: HotIsolate,
+    ) -> u8 {
+        let (module, compiler) =
+            match noeta_compiler::compile_with_sites_session(program, sites, false, false) {
+                Ok(pair) => pair,
+                Err(u) => {
+                    eprintln!("noeta: cannot compile for hot reload: {}", u.reason);
+                    return 1;
+                }
+            };
+        let host = match serve_host(isolate.args, isolate.app_id, isolate.listener) {
+            Ok(host) => host,
+            Err(msg) => {
+                eprintln!("noeta: {msg}");
                 return 1;
             }
         };
-    let host: Box<dyn noeta_stdlib::Host> = match noeta_host_real::RealHost::new() {
-        Ok(h) => Box::new(
-            // Live output, like every other foreground run surface (`noeta run`, the single-worker
-            // `serve` path through `run_program`). Without it a server — which by construction
-            // never exits on its own — buffers every byte it prints for its whole lifetime, so
-            // `echo` from a request handler appears never (audit row 1's live-output half, found on
-            // the worker paths as well as the AOT one).
-            h.with_args(args)
-                .with_p2p_app(app_id)
-                .with_live_output(true)
-                .with_prebound_listener(listener),
-        ),
-        Err(e) => {
-            eprintln!("noeta: cannot start a hot worker runtime: {e}");
-            return 1;
-        }
-    };
-    let executor: Box<dyn noeta_stdlib::Executor> = match noeta_host_real::RealExecutor::new() {
-        Ok(mut ex) => {
-            ex.set_wake(wake);
-            Box::new(ex)
-        }
-        Err(e) => {
-            eprintln!("noeta: cannot start a hot worker executor: {e}");
-            return 1;
-        }
-    };
-    let (result, trace) =
-        VmBackend::new().run_module_hot(&module, compiler, host, executor, mailbox);
-    emit_worker_tail(&result, &trace, &sources)
+        let executor: Box<dyn noeta_stdlib::Executor> = match noeta_host_real::RealExecutor::new() {
+            Ok(mut executor) => {
+                executor.set_wake(std::sync::Arc::clone(&self.wake));
+                Box::new(executor)
+            }
+            Err(e) => {
+                eprintln!("noeta: cannot start the async executor: {e}");
+                return 1;
+            }
+        };
+        let (result, trace) = VmBackend::new().run_module_hot(
+            &module,
+            compiler,
+            host,
+            executor,
+            std::sync::Arc::clone(&self.mailbox),
+        );
+        emit_run_tail(&result, &trace, sources, isolate.label)
+    }
 }
 
-/// The shared run epilogue for one `--parallel` worker (audit row 1): the program's stdout, its own
-/// stderr stream, the run's diagnostics and — the part both worker paths were missing — the abort
-/// traceback, which used to be the five words `[worker] aborted` and no stack.
+/// The shared run epilogue of every serving isolate (audit row 1): the program's stdout, its own
+/// stderr stream, the run's diagnostics and the abort traceback — which on the worker paths used to
+/// be the five words `[worker] aborted` and no stack.
 ///
 /// This writes the tail's [`parts`](noeta_backend::RunTail::parts) rather than calling
 /// `emit_status`, because a worker labels its failure: the `[worker] aborted` banner belongs after
 /// the program's own stdout and before everything the runtime has to say about the abort. Reading
 /// the parts is what makes that possible without re-deriving the epilogue — and a component added
-/// to a run lands in the right half of this split with no edit here.
-fn emit_worker_tail(
+/// to a run lands in the right half of this split with no edit here. `label` of `None` is the plain
+/// `RunTail` order with nothing inserted.
+fn emit_run_tail(
     result: &noeta_backend::RunResult,
     trace: &[noeta_vm::TraceFrame],
     sources: &SourceMap,
+    label: Option<&str>,
 ) -> u8 {
     let tail = noeta_backend::RunTail::render(result, trace, sources);
     let (mut out, mut err) = (io::stdout(), io::stderr());
@@ -713,8 +687,10 @@ fn emit_worker_tail(
         let _ = out.write_all(part.text.as_bytes());
     }
     let _ = out.flush();
-    if tail.aborted() {
-        let _ = writeln!(err, "[worker] aborted");
+    if let Some(label) = label
+        && tail.aborted()
+    {
+        let _ = writeln!(err, "{label}");
     }
     for part in tail.parts_for(noeta_backend::Stream::Stderr) {
         let _ = err.write_all(part.text.as_bytes());
@@ -729,11 +705,15 @@ fn emit_worker_tail(
 /// watcher thread ([`watch::spawn_hot_watcher`]) re-links/checks/diffs each edit of the entry file
 /// and deposits swappable plans (blockers or non-entry edits exit with the restart sentinel the
 /// `--watch` wrapper honors). JIT stays unarmed on this path (H3 lifts).
+///
+/// A fleet of exactly one: the install is [`HotRig`], the same nine steps the `--parallel` fleet
+/// runs, with one consumer instead of N.
 pub(crate) fn run_program_hot(
     entry_path: &std::path::Path,
     loaded: &Loaded,
     tail: Vec<Stmt>,
     baseline: watch::EntryUnit,
+    front: std::sync::Arc<noeta_runner::compile::FrontFacts>,
 ) -> u8 {
     // `Loaded::check`: the editions ride structurally with the program they govern.
     let checked = loaded.check();
@@ -745,61 +725,19 @@ pub(crate) fn run_program_hot(
     if noeta_diagnostics::has_errors(&checked.diagnostics) {
         return 1;
     }
-    let (module, compiler) = match noeta_compiler::compile_with_sites_session(
-        &loaded.program,
-        checked.sites.clone(),
-        // Cooperative isolates: the hot path is the debug-session path (single OS thread).
-        false,
-        false,
-    ) {
-        Ok(pair) => pair,
-        Err(u) => {
-            eprintln!(
-                "noeta: internal error: cannot compile for hot reload: {}",
-                u.reason
-            );
-            return 1;
-        }
-    };
-    let mailbox: noeta_vm::HotSwapMailbox = std::sync::Arc::new(noeta_vm::HotChannel::default());
-    // The wake lets the watcher rouse a *blocked* executor the moment it deposits (server-hmr
-    // L3) — otherwise an idle server (accept pending, no traffic) would only apply the swap at
-    // its next request (the W1 one-request lag).
-    let wake = std::sync::Arc::new(noeta_host_real::Notify::new());
-    watch::spawn_hot_watcher(
-        entry_path.to_path_buf(),
-        tail,
-        baseline,
-        std::sync::Arc::clone(&mailbox),
-        std::sync::Arc::clone(&wake),
-    );
-
+    let rig = HotRig::arm(entry_path, tail, baseline, front, 1);
     let args: Vec<String> = std::env::args().collect();
     let app_id = p2p_app_namespace(&args);
-    let host: Box<dyn noeta_stdlib::Host> = match noeta_host_real::RealHost::new() {
-        // Live output: `serve --watch`'s hot mode is a foreground server too (see the worker paths).
-        Ok(host) => Box::new(
-            host.with_args(args)
-                .with_p2p_app(app_id)
-                .with_live_output(true),
-        ),
-        Err(e) => {
-            eprintln!("noeta: cannot start the runtime: {e}");
-            return 1;
-        }
-    };
-    let executor: Box<dyn noeta_stdlib::Executor> = match noeta_host_real::RealExecutor::new() {
-        Ok(mut executor) => {
-            executor.set_wake(wake);
-            Box::new(executor)
-        }
-        Err(e) => {
-            eprintln!("noeta: cannot start the async executor: {e}");
-            return 1;
-        }
-    };
-    let (result, trace) =
-        VmBackend::new().run_module_hot(&module, compiler, host, executor, mailbox);
-    // The shared run epilogue (audit row 1) — an eighth hand-written copy of it lived here.
-    noeta_backend::RunTail::render(&result, &trace, &loaded.sources).emit_status()
+    rig.run_isolate(
+        &loaded.program,
+        checked.sites,
+        &loaded.sources,
+        HotIsolate {
+            // The single worker's program binds its own socket through `server.serve`.
+            listener: None,
+            args,
+            app_id,
+            label: None,
+        },
+    )
 }

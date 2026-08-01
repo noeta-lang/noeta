@@ -200,26 +200,31 @@ pub trait CommandCtx {
         None
     }
 
-    /// Serve `file`'s handler across `workers` worker isolates on `host:port` (server-hmr S1
-    /// multi-core). The driver binds the listener once and gives each worker a cloned fd; the
-    /// kernel load-balances connections. Default: fall back to a single-worker
+    /// Serve `file` across `workers` worker isolates on `host:port` (server-hmr S1 multi-core).
+    /// The driver binds the listener once and gives each worker a cloned fd; the kernel
+    /// load-balances connections. Default: fall back to a single-worker
     /// [`run_file`](CommandCtx::run_file) — a driver that has not implemented multi-core still
     /// serves, just on one core. Returns the process exit code.
-    fn serve_parallel(&mut self, file: &Path, port: i64, host: &str, workers: usize) -> u8 {
-        let _ = workers;
-        self.run_file(
-            file,
-            Some(&EntryCall {
-                module: "std.http.server",
-                func: "serve",
-                args: vec![
-                    EntryArg::Int(port),
-                    EntryArg::Ident("fetch"),
-                    EntryArg::Str(host.to_string()),
-                ],
-            }),
-            None,
-        )
+    ///
+    /// `entry` is **the command's own call**, the same [`EntryCall`] value it would hand
+    /// [`run_file`](CommandCtx::run_file) for one worker (audit-10). It is passed rather than
+    /// rebuilt because it used to be rebuilt: `std`'s `serve` declared the call, the ABI default
+    /// here declared a second copy of it, and the CLI's multi-core path a third — under a comment
+    /// asserting all of them were "built the same way". They were, until a signature change reached
+    /// one and not the others. Now the declaration is one expression and every path runs *that*.
+    ///
+    /// `host`/`port` stay separate because they are not the call: they are the address the **driver**
+    /// binds once, before any worker exists.
+    fn serve_parallel(
+        &mut self,
+        file: &Path,
+        entry: &EntryCall,
+        host: &str,
+        port: i64,
+        workers: usize,
+    ) -> u8 {
+        let _ = (host, port, workers);
+        self.run_file(file, Some(entry), None)
     }
 }
 
