@@ -1884,10 +1884,7 @@ pub enum Expr {
     /// instantiation), `roles_of(name)` scopes by a runtime `string`. `materialize_roles` filters
     /// the whole index by `enum_name == e` in both backends, so it is total on an arbitrary name
     /// and the dynamic arm costs the query nothing.
-    RolesOf {
-        ty: Option<TypeOperand>,
-        span: Span,
-    },
+    RolesOf { ty: Option<TypeOperand>, span: Span },
     /// The reflection query `params_of(target)` — a callable's declared parameter list, returned as a
     /// `List<ParamInfo>` (each `{ name: string, type: Type, optional: bool }`). `target` is a runtime `string`
     /// naming a function or method (a bare fn name, or a qualified `Type.method`), the same target

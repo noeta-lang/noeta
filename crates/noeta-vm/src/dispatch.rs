@@ -2927,8 +2927,8 @@ impl<'m> Vm<'m> {
                     }
                     Op::RolesOf { dst, src } => {
                         // The optional scope arrives the same way; `None` is the unscoped query.
-                        let filter =
-                            src.map(|src| regs[fbase + src as usize].as_string().unwrap_or_default());
+                        let filter = src
+                            .map(|src| regs[fbase + src as usize].as_string().unwrap_or_default());
                         let result = self.materialize_roles(filter.as_deref());
                         set_reg(regs, fbase, *dst, result);
                         pc += 1;
