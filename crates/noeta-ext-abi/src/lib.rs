@@ -104,7 +104,24 @@
 /// because it widens the registry surface. The `Err` side is a plain `string` rather than a
 /// classified extern error: a pattern has exactly one way to be invalid, so a `kind()` would be a
 /// constant, and the engine's own caret-carrying diagnostic is the whole value.
-pub const ABI_VERSION: u32 = 11;
+///
+/// **12** — [`registry::HiddenArg::Table`] carries a [`registry::TypeArgIndex`] instead of a bare
+/// `u32`. A genuine source break for anything that matched the variant and used its payload as an
+/// integer (call `.get()`), and the point of the break: an index into the program's type-argument
+/// table is the one integer in the checker→lowering vocabulary a LIVE session must renumber, and it
+/// sat beside three `u32`s — hidden-slot ordinals and a type parameter's declaration position —
+/// that must NOT be. Remapping one carrier and not another is silent (the program keeps running
+/// with the wrong type argument), so the distinction moved into the type, where
+/// `noeta_check::SITE_POLICIES`'s gate can read it.
+///
+/// **13** — [`command::CommandCtx::serve_parallel`] takes the command's own
+/// [`command::EntryCall`] (`serve_parallel(file, entry, host, port, workers)`) instead of
+/// rebuilding one from `port`/`host`. A source break only for a driver that *overrides* the
+/// method; the default body is now a plain forward to `run_file`. The break is the point: the
+/// serve entry call was declared three times — in `SERVE_COMMAND`, in this trait's default, and
+/// in the CLI's multi-core path — so its signature was three edits in two crates, and the copies
+/// were kept in step by a comment (audit-10). One declaration, passed down.
+pub const ABI_VERSION: u32 = 13;
 
 pub mod args;
 pub mod channel;
@@ -152,8 +169,8 @@ pub use registry::{
     FieldDefault, FieldRecipe, FieldedDispatch, FieldedKind, HiddenArg, ModuleDispatch, NativeOut,
     NativeValue, Nominal, NominalKind, NominalType, PackedConstraint, PackedLayoutKind, RetTy,
     Scalar, ScalarVec, SigType, TierRoot, TierRoots, TierRun, TierRunner, TierText, TraitDispatch,
-    TypeArgInfo, TypeDispatch, TypeRecipe, TypedDispatch, TypedTypeDispatch, VariantRecipe,
-    VariantTag, VariantValue,
+    TypeArgIndex, TypeArgInfo, TypeDispatch, TypeRecipe, TypedDispatch, TypedTypeDispatch,
+    VariantRecipe, VariantTag, VariantValue,
 };
 pub use stream::{
     Frame, FrameDecoder, FrameStream, Framing, SseCloseIo, SseSendIo, SseSink, StreamRecvIo,

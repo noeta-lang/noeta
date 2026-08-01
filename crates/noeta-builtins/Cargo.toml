@@ -10,5 +10,11 @@ rust-version.workspace = true
 noeta-span = { workspace = true }
 noeta-ast = { workspace = true }
 
+[dev-dependencies]
+# Test-only: `PRELUDE`'s `Keyword`/`Value` form is a claim about the lexer's token table, checked
+# against it here. A dev-dependency keeps the claim honest without putting the lexer on this
+# crate's (or `noeta-check`'s) build graph.
+noeta-lexer = { workspace = true }
+
 [lints]
 workspace = true

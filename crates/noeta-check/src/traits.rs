@@ -329,7 +329,7 @@ impl Checker {
     /// native kernel-binding mechanism with their own conflict rules, not trait impls.
     pub(crate) fn check_package_orphan(&mut self, decl: &ImplDecl) {
         // Unknown provenance ⇒ no judgement. Cloned so the `&mut self` diagnostic below does not
-        // conflict with the borrow of `self.config.packages`.
+        // conflict with the borrow of `self.config.provenance.packages`.
         let Some(impl_pkg) = self.package_at(decl.span).cloned() else {
             return;
         };

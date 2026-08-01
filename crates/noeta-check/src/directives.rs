@@ -266,9 +266,9 @@ impl Checker {
         // empty binding table is the reliable "no per-package context" signal. A package that DOES use
         // the binding regime still requires a binding for each `@name` it writes (per-package opt-in).
         if let Some(origin) = self.package_at(span)
-            && !self.config.package_uses.is_empty()
+            && !self.config.provenance.uses.is_empty()
         {
-            let use_ = self.config.package_uses.get(origin, name)?;
+            let use_ = self.config.provenance.uses.get(origin, name)?;
             return self
                 .reg()
                 .find_ext_directive_scoped(&use_.provider_roots, &use_.exported);
@@ -289,7 +289,7 @@ impl Checker {
         self.symbols.tier_registry.resolve_at(
             name,
             self.package_at(span),
-            &self.config.package_uses,
+            &self.config.provenance.uses,
         )
     }
 

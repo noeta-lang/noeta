@@ -29,8 +29,6 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use noeta_ast::Expr;
-// `render` is re-exported here for `watch`'s diagnostic rendering (`crate::render`).
-use noeta_diagnostics::render;
 
 // The package manager (package-manager P2) now lives in the `noeta-pm` library so `noeta-lsp` and
 // `noeta-db` resolve dependencies through the same code; the CLI names its modules unqualified.
@@ -1521,11 +1519,7 @@ fn try_tier_dispatch(err: &clap::Error) -> Option<ExitCode> {
     )
     .ok()?
     .ok()?;
-    let ctx = noeta_check::TierContext {
-        uses: &linked.package_uses,
-        packages: &linked.packages,
-    };
-    let activated = noeta_check::activate_tiers_with(&linked.program, &[&name], &ctx);
+    let activated = noeta_check::activate_tiers(&linked.program, &[&name], &linked.provenance);
     // A tier the ROOT renamed in `[tiers]` (`crit = "depB:fuzz"`, or a collision it disambiguated)
     // must dispatch by **identity**, not by the literal local name: the runner is registered under
     // what the provider exported (`fuzz` on `depB`), so `find_tier_runner(&"crit")` /
@@ -1535,14 +1529,15 @@ fn try_tier_dispatch(err: &clap::Error) -> Option<ExitCode> {
     // `[tiers]` entry and falls through to the ambient path below — a std tier, a real-named
     // third-party tier, or a program `@tier` of that bare name — so nothing that works today changes.
     let bound = linked
-        .package_uses
+        .provenance
+        .uses
         .get(&noeta_span::PackageOrigin::Root, &name)
         .is_some()
         .then(|| {
             match activated.registry.resolve_at(
                 &name,
                 Some(&noeta_span::PackageOrigin::Root),
-                &linked.package_uses,
+                &linked.provenance.uses,
             ) {
                 // A native extension runner (`std:test`, a third-party tier that ships one).
                 Some(noeta_check::ResolvedTier::Ext(t, root)) => {
@@ -1715,30 +1710,18 @@ pub(crate) fn run_declared_tier(
     // runner's signature, and the synthesized call all validate together — under the project's
     // per-package editions and package provenance (the user code keeps its source ids; the
     // synthesized nodes are default/unattributed).
-    let opts = noeta_check::CheckOptions {
-        editions: linked.editions.clone(),
-        packages: linked.packages.clone(),
-        // The `@name` tables belong with the package map they are keyed by: empty means "no package
-        // binds any extension `@name`", so a project that *renames* one (`[directives] gen =
-        // "para:openapi"`) would see it resolve to nothing here and report a spurious E0036 — on a
-        // declared-tier run of a project `noeta check` calls clean.
-        package_uses: linked.package_uses.clone(),
-        ..noeta_check::CheckOptions::default()
-    };
+    let opts = noeta_check::CheckOptions::for_workspace(linked.provenance.clone());
     let checked = context::check_under(&program, &opts);
     emit_diagnostics_mapped(&linked.sources, checked.diagnostics.iter());
     if noeta_diagnostics::has_errors(&checked.diagnostics) {
         return 1;
     }
     match execute_real_host(&program, &checked, std::env::args().collect(), true, None) {
+        // The shared run epilogue (audit row 1). This tail used to write stdout, diagnostics and
+        // the traceback but *not* the program's own `stderr` stream, so a declared-tier run silently
+        // swallowed every `std.io` `err`/`errln` byte.
         Ok((result, trace)) => {
-            print!("{}", result.stdout);
-            let _ = io::stdout().flush();
-            emit_diagnostics_mapped(&linked.sources, result.diagnostics.iter());
-            if trace.len() >= 2 {
-                eprint!("{}", noeta_vm::render_trace(&trace, &linked.sources));
-            }
-            result.exit_code.clamp(0, 255) as u8
+            noeta_backend::RunTail::render(&result, &trace, &linked.sources).emit_status()
         }
         // `to_text` yields the pre-rendered failure and its `u8` code — the tier subsystem's exit
         // type — where `CompileFailure::report` would hand back a `std::process::ExitCode`.

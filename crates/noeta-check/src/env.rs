@@ -198,9 +198,16 @@ pub(crate) fn lookup<'e>(env: &'e Env, name: &str) -> Option<&'e Type> {
         .find_map(|frame| frame.get(name).map(|b| &b.ty))
 }
 
-/// The reserved prelude names (`Ok`/`Err`/`some`/`none`/`panic`/`assert`) — always resolvable,
-/// so the unknown-name gate never flags them (see [`Checker::is_known_name`]).
-pub(crate) const RESERVED_PRELUDE: &[&str] = &["Ok", "Err", "some", "none", "panic", "assert"];
+/// Whether `name` is a **prelude value binding** (`Ok`/`Err`/`some`/`none`/`panic`/`assert`) —
+/// always resolvable, so the unknown-name gate never flags them (see [`Checker::is_known_name`]).
+///
+/// Derived from [`noeta_builtins::PRELUDE`], the one prelude census, rather than restated: this
+/// was a second copy of the same six names, and "did a prelude name land?" had two answers. The
+/// keyword-form entries (`echo`) are filtered out because they never reach identifier resolution
+/// at all — that distinction now travels with the name instead of being re-derived here.
+pub(crate) fn is_reserved_prelude(name: &str) -> bool {
+    noeta_builtins::prelude_names(noeta_builtins::PreludeForm::Value).any(|n| n == name)
+}
 
 /// A representative `Type` for a built-in type *name* used as a method-handle receiver
 /// (`list.len`, `string.upper`), with unknown element/value types as `dyn`. `None` for a name that

@@ -73,9 +73,10 @@ use noeta_ast::{
     Stmt, StrPart, StructDecl, TypeParam, TypeRef, UnaryOp,
 };
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
+pub use noeta_edition::Provenance;
 use noeta_edition::{Edition, EditionMap};
 use noeta_ext_abi::NominalType;
-use noeta_span::{PackageMap, PackageOrigin, Span};
+use noeta_span::{PackageOrigin, Span};
 use noeta_types::{BuiltinTrait, ParamId, ParamRef, Type};
 
 mod args;
@@ -100,9 +101,8 @@ mod traits;
 
 pub use setup::{SetupDrop, SetupWarning, dropped_setup_warnings, is_tier_setup, setup_drop};
 pub use tiers::{
-    Activated, DeclaredTier, DocTarget, ResolvedProvider, ResolvedTier, TextBlock, TierContext,
-    TierFn, TierId, activate_tiers, activate_tiers_with, code_tiers_in, dedent_doc,
-    extend_reflection, resolve_docs, resolve_texts,
+    Activated, DeclaredTier, DocTarget, ResolvedProvider, ResolvedTier, TextBlock, TierFn, TierId,
+    activate_tiers, code_tiers_in, dedent_doc, extend_reflection, resolve_docs, resolve_texts,
 };
 
 use constructors::compute_fresh_constructors;
@@ -167,13 +167,17 @@ pub struct Checked {
 
 /// Everything that varies a whole-program check, so callers configure one entry point
 /// ([`check_all_with`]) instead of the checker growing a `_with_types_and_editions_and_registry`
-/// combinatorial family. `Default` is an ordinary compile-path check (no type index, process-global
-/// registry, every declaration at [`Edition::DEFAULT`]) — identical to [`check_all`].
+/// combinatorial family.
+///
+/// `#[non_exhaustive]` and the absence of `Default` are load-bearing, not ceremony: outside this
+/// crate the only way to make one is a constructor, so provenance arrives as an *argument* and a
+/// future field cannot be silently defaulted at a dozen call sites the way `package_uses` was.
 /// `Clone` so a driver can carry one configured value alongside the program it describes — the CLI's
 /// tier verbs re-check *synthesized* programs (a per-test case, a bench loop) against the parent
 /// workspace's options, and pairing the fields by hand at each of those call sites is exactly how
 /// editions and provenance would drift apart.
-#[derive(Clone, Default)]
+#[derive(Clone)]
+#[non_exhaustive]
 pub struct CheckOptions {
     /// Record every expression's inferred type into [`Checked::expr_types`] — the span→type index the
     /// IDE hover path reads. Off on the compile path (it pays nothing for the index).
@@ -182,21 +186,56 @@ pub struct CheckOptions {
     /// modules/functions/extern types/bundles against, instead of the process-global default. `None`
     /// routes every lookup through the default registry — identical to an ordinary check.
     pub registry: Option<&'static noeta_ext_abi::registry::Registry>,
-    /// Which language [`Edition`] governs each source, keyed by `SourceId` (editions arc): the loader
-    /// builds it per merged program. Empty means every declaration is [`Edition::DEFAULT`].
-    pub editions: EditionMap,
-    /// Which **package** each source was read from, keyed by `SourceId` (the package orphan rule):
-    /// the loader builds it per merged program. Empty means provenance is unknown everywhere, and
-    /// the orphan rule stands down — the right answer for a single-file check or a synthetic
-    /// program, which have no package graph to judge against.
-    pub packages: PackageMap,
-    /// Per-package `@`-name resolution tables (`[directives]`; `[tiers]` later), keyed by
-    /// [`PackageOrigin`](noeta_span::PackageOrigin): the loader/pm builds them from each package's
-    /// manifest in that package's own dependency context. The checker resolves a `@name` by the
-    /// package that wrote it (via the span's `SourceId` through [`Self::packages`]). Empty means no
-    /// package binds any extension `@name` — the single-file default, where only built-in directives
-    /// and program-declared tiers resolve.
-    pub package_uses: noeta_span::PackageUses,
+    /// Where this program's sources came from — see [`Provenance`], which exists because these three
+    /// facts were once three fields here and two of them kept getting left out.
+    pub provenance: Provenance,
+}
+
+impl CheckOptions {
+    /// A program with no package graph: a lone file, a synthetic program, a REPL entry. The
+    /// compile-path default in every other respect — no type index, process-global registry.
+    pub fn for_program() -> CheckOptions {
+        CheckOptions {
+            record_expr_types: false,
+            registry: None,
+            provenance: Provenance::unattributed(),
+        }
+    }
+
+    /// A program whose sources carry per-source editions but no package graph.
+    pub fn for_sources(editions: EditionMap) -> CheckOptions {
+        CheckOptions::for_workspace(Provenance::of_sources(editions))
+    }
+
+    /// A linked workspace program, checked under the provenance the loader resolved for it. This is
+    /// the constructor every whole-project surface wants: the CLI's `check`/`run`/tier verbs, the
+    /// LSP's workspace diagnostics, MCP's tools, the conformance runner.
+    pub fn for_workspace(provenance: Provenance) -> CheckOptions {
+        CheckOptions {
+            record_expr_types: false,
+            registry: None,
+            provenance,
+        }
+    }
+
+    /// Also record every expression's inferred type into [`Checked::expr_types`] — the span→type
+    /// index the IDE hover path reads.
+    #[must_use]
+    pub fn with_expr_types(mut self) -> CheckOptions {
+        self.record_expr_types = true;
+        self
+    }
+
+    /// Resolve native modules, functions, extern types and bundles against a per-session extension
+    /// [`Registry`] (instance-registry F2) rather than the process-global default.
+    #[must_use]
+    pub fn with_registry(
+        mut self,
+        registry: &'static noeta_ext_abi::registry::Registry,
+    ) -> CheckOptions {
+        self.registry = Some(registry);
+        self
+    }
 }
 
 impl std::fmt::Debug for CheckOptions {
@@ -205,8 +244,7 @@ impl std::fmt::Debug for CheckOptions {
             .field("record_expr_types", &self.record_expr_types)
             // The registry is a `&'static` handle whose contents aren't `Debug`; report only presence.
             .field("registry", &self.registry.is_some())
-            .field("editions", &self.editions)
-            .field("packages", &self.packages)
+            .field("provenance", &self.provenance)
             .finish()
     }
 }
@@ -225,20 +263,14 @@ pub fn check_all_with(program: &Program, opts: CheckOptions) -> Checked {
 /// the single-pass entry point the hot paths (the CLI, the conformance/differential harnesses,
 /// the `noeta-db` `bytecode` query) use so the checker runs exactly once per program.
 pub fn check_all(program: &Program) -> Checked {
-    check_all_with(program, CheckOptions::default())
+    check_all_with(program, CheckOptions::for_program())
 }
 
 /// Like [`check_all`], but additionally records every expression's inferred type into
 /// [`Checked::expr_types`] — the span→type index the IDE hover feature reads. Diagnostics are
 /// identical either way — recording types is a pure side-channel.
 pub fn check_all_with_types(program: &Program) -> Checked {
-    check_all_with(
-        program,
-        CheckOptions {
-            record_expr_types: true,
-            ..CheckOptions::default()
-        },
-    )
+    check_all_with(program, CheckOptions::for_program().with_expr_types())
 }
 
 /// [`check_all`] against the per-source [`EditionMap`] the loader built for a merged program, so the
@@ -247,13 +279,7 @@ pub fn check_all_with_types(program: &Program) -> Checked {
 /// paths call this with `Linked::editions`; today, with one edition, the result is byte-identical to
 /// [`check_all`], but the per-package edition is now carried into the checker.
 pub fn check_all_with_editions(program: &Program, editions: EditionMap) -> Checked {
-    check_all_with(
-        program,
-        CheckOptions {
-            editions,
-            ..CheckOptions::default()
-        },
-    )
+    check_all_with(program, CheckOptions::for_sources(editions))
 }
 
 /// [`check_all`] against an explicit per-session extension [`Registry`] (instance-registry F2)
@@ -266,13 +292,7 @@ pub fn check_all_with_registry(
     program: &Program,
     registry: &'static noeta_ext_abi::registry::Registry,
 ) -> Checked {
-    check_all_with(
-        program,
-        CheckOptions {
-            registry: Some(registry),
-            ..CheckOptions::default()
-        },
-    )
+    check_all_with(program, CheckOptions::for_program().with_registry(registry))
 }
 
 /// [`check_all_with_editions`], but polling `cancel` once per top-level declaration during body
@@ -288,17 +308,7 @@ pub fn check_all_cancellable(program: &Program, opts: CheckOptions, cancel: &dyn
 }
 
 fn check_all_impl(program: &Program, opts: CheckOptions, cancel: &dyn Fn()) -> Checked {
-    let mut checker = Checker {
-        config: Config {
-            record_expr_types: opts.record_expr_types,
-            registry: opts.registry,
-            editions: opts.editions,
-            packages: opts.packages,
-            package_uses: opts.package_uses,
-            ..Config::default()
-        },
-        ..Checker::default()
-    };
+    let mut checker = Checker::new(Config::of(opts, false));
     checker.register_prelude();
     checker.collect_imports(program);
     checker.collect(program);
@@ -361,13 +371,7 @@ pub fn check_all_session_with(
     program: &Program,
     editions: EditionMap,
 ) -> (Checked, SessionChecker) {
-    check_all_session_opts(
-        program,
-        CheckOptions {
-            editions,
-            ..CheckOptions::default()
-        },
-    )
+    check_all_session_opts(program, CheckOptions::for_sources(editions))
 }
 
 /// [`check_all_session`] against explicit [`CheckOptions`] — the session-mode counterpart of
@@ -375,15 +379,12 @@ pub fn check_all_session_with(
 /// per-session registry, the IDE type index) without a bespoke constructor per combination
 /// (audit-3 finding 9).
 pub fn check_all_session_opts(program: &Program, opts: CheckOptions) -> (Checked, SessionChecker) {
-    let mut checker = Checker {
-        config: Config {
-            record_expr_types: opts.record_expr_types,
-            registry: opts.registry,
-            editions: opts.editions,
-            ..Config::default()
-        },
-        ..Checker::default()
-    };
+    // Session mode, and — since 2026-08-01 — the caller's *whole* provenance. This site used to
+    // spell the fields out and stop after `editions`, so `Loaded::check_session` threaded the package
+    // map and the `@name` tables in and the session dropped both: no orphan rule, and a spurious
+    // `E0036` in the REPL and the debug console on any project that renames a directive. That is the
+    // bug `Provenance` and `Config::of` exist to make unwriteable.
+    let mut checker = Checker::new(Config::of(opts, true));
     checker.register_prelude();
     checker.collect_imports(program);
     checker.collect(program);
@@ -473,7 +474,7 @@ impl std::fmt::Debug for SessionChecker {
 impl SessionChecker {
     /// A fresh session: prelude registered, empty registries, an empty persistent global scope.
     pub fn new() -> SessionChecker {
-        Self::with_options(CheckOptions::default())
+        Self::with_options(CheckOptions::for_program())
     }
 
     /// A fresh session bound to an explicit per-session extension [`Registry`] (instance-registry
@@ -481,27 +482,14 @@ impl SessionChecker {
     /// than the process-global default — the session-mode counterpart of [`check_all_with_registry`],
     /// so an embedding host's REPL/debug console sees exactly the host's extension set.
     pub fn with_registry(registry: &'static noeta_ext_abi::registry::Registry) -> SessionChecker {
-        Self::with_options(CheckOptions {
-            registry: Some(registry),
-            ..CheckOptions::default()
-        })
+        Self::with_options(CheckOptions::for_program().with_registry(registry))
     }
 
     /// A fresh session against explicit [`CheckOptions`] — the constructor the presets above are
     /// thin forms of, so a session can carry editions or the IDE type index without a bespoke
     /// constructor per combination (audit-3 finding 9).
     pub fn with_options(opts: CheckOptions) -> SessionChecker {
-        let mut checker = Checker {
-            config: Config {
-                session_mode: true,
-                record_expr_types: opts.record_expr_types,
-                registry: opts.registry,
-                editions: opts.editions,
-                packages: opts.packages,
-                package_uses: opts.package_uses,
-            },
-            ..Checker::default()
-        };
+        let mut checker = Checker::new(Config::of(opts, true));
         checker.register_prelude();
         SessionChecker {
             checker,
@@ -664,9 +652,7 @@ pub fn check(program: &Program) -> Vec<Diagnostic> {
 /// Empty means every construct that owns a body was type-checked. A non-empty result is a defect in
 /// the *checker*, not in `program`.
 pub fn unchecked_bodies_for(program: &Program) -> Vec<noeta_ast::bodies::BodySite> {
-    let mut checker = Checker {
-        ..Checker::default()
-    };
+    let mut checker = Checker::new(Config::of(CheckOptions::for_program(), false));
     checker.register_prelude();
     checker.collect_imports(program);
     checker.collect(program);
@@ -1338,7 +1324,14 @@ struct Coloring {
 
 /// The checker's **run configuration** — what varies a whole-program check (mirrors
 /// [`CheckOptions`]) plus session mode. One of [`Checker`]'s four field groups.
-#[derive(Clone, Default)]
+///
+/// Built only by [`Config::of`]. The three entry points that used to assemble one by hand — the
+/// batch check, the session check, and [`SessionChecker::with_options`] — each spelled the fields
+/// out and ended in `..Config::default()`, and one of them stopped after `editions`, which is how
+/// the session path silently lost the package map and the `@name` tables. One constructor,
+/// destructuring [`CheckOptions`] with no rest-pattern, means a field added to either struct is a
+/// compile error here rather than a default nobody chose.
+#[derive(Clone)]
 struct Config {
     /// When set, [`Checker::synth`] records every expression's inferred type into
     /// [`SiteMaps::expr_types`] for the IDE hover path. Off by default so the compile path is
@@ -1359,25 +1352,54 @@ struct Config {
     /// return `&'static` (its units are static); the handle is `Copy`, so `Clone` (the transactional
     /// session snapshot) stays cheap.
     registry: Option<&'static noeta_ext_abi::registry::Registry>,
-    /// Which language [`Edition`] governs each source of the merged program, keyed by `SourceId`
-    /// (editions compiler arc). The loader builds this from each package's own edition; the checker
-    /// recovers a declaration's edition from its span via [`Checker::edition_at`]. Empty — the
-    /// default — means every declaration is [`Edition::DEFAULT`] (a single-file check, or the
-    /// one-edition world), so an ordinary check is unchanged. The first rule to branch on it is the
-    /// editions arc's S3 (the first edition-gated behaviour); until then this is threaded and
-    /// per-span-queryable but consulted by no rule.
-    editions: EditionMap,
-    /// Which **package** each source of the merged program came from, keyed by `SourceId`. The
-    /// loader builds this from the dependency graph it linked; the checker recovers a declaration's
-    /// package from its span via [`Checker::package_at`]. Empty — the default — means provenance is
-    /// unknown, and the package orphan rule ([`Checker::check_package_orphan`]) does not fire.
-    packages: PackageMap,
-    /// Per-package `@`-name resolution tables (`[directives]`; `[tiers]` later), keyed by
-    /// [`PackageOrigin`](noeta_span::PackageOrigin). The checker resolves an extension `@name` by the
-    /// package that wrote it — [`Checker::package_at`] gives the [`PackageOrigin`], then this maps the
-    /// local name to the provider namespace root(s) and exported name. Empty — the default — means no
-    /// package binds any extension `@name`, so only built-in directives and program tiers resolve.
-    package_uses: noeta_span::PackageUses,
+    /// Where the merged program's sources came from — per-source editions ([`Checker::edition_at`]),
+    /// per-source package ([`Checker::package_at`], feeding the orphan rule), and each package's
+    /// `@name` bindings. One field rather than three, so the three ways into this struct cannot
+    /// carry different subsets of it; see [`Provenance`].
+    provenance: Provenance,
+}
+
+impl Checker {
+    /// A fresh checker against `config` — every other field at its empty start. The only way to make
+    /// one, so a checker cannot exist without someone having decided what it is checking under.
+    fn new(config: Config) -> Checker {
+        Checker {
+            config,
+            ..Checker::default()
+        }
+    }
+}
+
+/// Exists only so [`Checker`] can derive `Default` for its "every other field empty" spread. It is
+/// **not** a way to configure a check: [`Config::of`] is the only path from a caller's
+/// [`CheckOptions`] to a [`Config`], and [`Checker::new`] the only path from a `Config` to a checker.
+impl Default for Config {
+    fn default() -> Config {
+        Config {
+            record_expr_types: false,
+            session_mode: false,
+            registry: None,
+            provenance: Provenance::unattributed(),
+        }
+    }
+}
+
+impl Config {
+    /// The one way to build a [`Config`]. Destructures [`CheckOptions`] with **no** rest-pattern, so
+    /// a new option is a compile error at this single site instead of a silent default at three.
+    fn of(opts: CheckOptions, session_mode: bool) -> Config {
+        let CheckOptions {
+            record_expr_types,
+            registry,
+            provenance,
+        } = opts;
+        Config {
+            record_expr_types,
+            session_mode,
+            registry,
+            provenance,
+        }
+    }
 }
 
 // `Clone` so a [`SessionChecker`] entry is transactional (clone-before, restore-on-error) —
@@ -1470,7 +1492,7 @@ impl Checker {
     /// unit-tested now so that slice adds only the divergent behaviour, not the plumbing.
     #[allow(dead_code)]
     fn edition_at(&self, span: Span) -> Edition {
-        self.config.editions.at(span)
+        self.config.provenance.editions.at(span)
     }
 
     /// The **package** that declared whatever `span` points at — resolved from the per-source
@@ -1482,7 +1504,7 @@ impl Checker {
     /// provenance is a side-table and not a namespace-prefix heuristic — a namespace is declared per
     /// file and says nothing about which package shipped it.
     fn package_at(&self, span: Span) -> Option<&PackageOrigin> {
-        self.config.packages.at(span)
+        self.config.provenance.packages.at(span)
     }
 
     /// Record an error diagnostic, returning `&mut` to the just-pushed diagnostic so a help line can
@@ -1567,7 +1589,7 @@ impl Checker {
     }
 
     fn check_reserved_name(&mut self, name: &str, span: Span) {
-        if RESERVED_PRELUDE.contains(&name) {
+        if is_reserved_prelude(name) {
             self.error(
                 DiagnosticCode::ReservedName,
                 span,

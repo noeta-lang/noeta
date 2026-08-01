@@ -389,22 +389,16 @@ pub fn test(p: &Prepared, filter: Option<&str>, real: bool, limits: &RunLimits) 
         Err(diags) => return empty(map_diagnostics(&source_map, diags)),
     };
 
-    let activated = noeta_check::activate_tiers(program, &["test"]);
+    // Tier activation and the check below share one provenance, so the `@name`s this resolves are
+    // the ones the checker then judges — see `noeta_db::workspace_provenance`.
+    let prov = noeta_db::workspace_provenance(&p.db, p.ws);
+    let activated = noeta_check::activate_tiers(program, &["test"], &prov);
     if noeta_diagnostics::has_errors(&activated.diagnostics) {
         return empty(map_diagnostics(&source_map, &activated.diagnostics));
     }
     let checked = noeta_check::check_all_with(
         &activated.program,
-        noeta_check::CheckOptions {
-            editions: noeta_db::workspace_editions(&p.db, p.ws),
-            packages: noeta_db::workspace_packages(&p.db, p.ws),
-            // …and the `@name` tables that go WITH that package map. Empty does not mean "unknown"
-            // here — it means "no package binds any extension `@name`", so a `@directive` anywhere
-            // in the project resolves to nothing and this reports a spurious E0036, failing the
-            // whole suite before a single case runs on a project `noeta test` runs clean.
-            package_uses: p.ws.package_uses(&p.db).0.clone(),
-            ..noeta_check::CheckOptions::default()
-        },
+        noeta_check::CheckOptions::for_workspace(prov),
     );
     // A lint in the file must not swallow the whole suite — only a real error can.
     if noeta_diagnostics::has_errors(&checked.diagnostics) {

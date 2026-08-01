@@ -102,6 +102,82 @@ impl fmt::Display for Edition {
 /// synthetic REPL fragment, the one-edition world — is governed by the default edition, so
 /// [`Self::at`] never fails. An empty map therefore means "everything is the default edition", which
 /// is exactly what a plain `check_all` / single-file `parse` wants.
+/// **Where a merged program's sources came from — one value, never three.**
+///
+/// A linked program carries three facts about every source in it: which language [`Edition`] governs
+/// it, which **package** wrote it, and which extension `@name`s that package binds. The loader and
+/// the package manager resolve all three in one pass, from one dependency graph, and every rule that
+/// consults one of them consults the others: the checker recovers a declaration's package from its
+/// span, then reads *that* package's `@name` table; tier activation does the same.
+///
+/// They were three independent fields on [`CheckOptions`] until 2026-08-01, and the shape of that
+/// mistake is worth keeping written down, because it cost four surfaces a wrong answer each and one
+/// of them was inside this crate. Empty `packages` means "provenance unknown", and every provenance
+/// rule correctly stands down — the right answer for a lone file. Empty `uses` does **not** mean
+/// unknown: it means *no package binds any `@name`*, so a project that renames a directive
+/// (`[directives] gen = "para:openapi"`) sees it resolve to nothing and gets a spurious `E0036` on
+/// code the compiler accepts. A caller that knows enough to fill in `packages` has `uses` in hand
+/// from the very same resolve, so half-supplying was never a decision anyone made — it was
+/// `..Default::default()` answering a question nobody asked.
+///
+/// Making the triple one value removes the choice. There is no `Default`, for the same reason
+/// `LowerOptions` has none: an unattributed program is a *decision* ([`Provenance::unattributed`]),
+/// not a fallback.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct Provenance {
+    /// Which language [`Edition`] governs each source, keyed by `SourceId` (editions arc). Empty
+    /// means every declaration is at [`Edition::DEFAULT`].
+    pub editions: EditionMap,
+    /// Which **package** each source was read from, keyed by `SourceId` (the package orphan rule).
+    /// Empty means provenance is unknown everywhere and the orphan rule stands down — the right
+    /// answer for a single-file check or a synthetic program, neither of which has a package graph
+    /// to judge against.
+    pub packages: noeta_span::PackageMap,
+    /// Per-package `@`-name resolution tables (`[directives]`, `[tiers]`), keyed by
+    /// [`PackageOrigin`](noeta_span::PackageOrigin): the loader/pm builds them from each package's
+    /// manifest in that package's own dependency context. Empty means no package binds any extension
+    /// `@name`, so only built-in directives and program-declared tiers resolve.
+    pub uses: noeta_span::PackageUses,
+}
+
+impl Provenance {
+    /// A program with no package graph and no per-source editions: a lone file, a synthetic program
+    /// the CLI assembled, a REPL entry. Every provenance rule stands down and only built-in
+    /// directives and program-declared tiers resolve — which is correct here, because there is no
+    /// manifest that could have said otherwise.
+    pub fn unattributed() -> Provenance {
+        Provenance {
+            editions: EditionMap::default(),
+            packages: noeta_span::PackageMap::default(),
+            uses: noeta_span::PackageUses::default(),
+        }
+    }
+
+    /// Per-source editions, still no package graph — a multi-source program linked without a
+    /// manifest (the salsa single-document queries).
+    pub fn of_sources(editions: EditionMap) -> Provenance {
+        Provenance {
+            editions,
+            ..Provenance::unattributed()
+        }
+    }
+
+    /// The full triple, as the loader resolved it for a linked workspace program. The three
+    /// arguments have three distinct types, so they cannot be transposed.
+    pub fn of(
+        editions: EditionMap,
+        packages: noeta_span::PackageMap,
+        uses: noeta_span::PackageUses,
+    ) -> Provenance {
+        Provenance {
+            editions,
+            packages,
+            uses,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EditionMap {
     by_source: HashMap<SourceId, Edition>,

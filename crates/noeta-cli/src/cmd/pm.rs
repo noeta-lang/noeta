@@ -1146,8 +1146,10 @@ pub(crate) fn cmd_audit(path: &std::path::Path) -> ExitCode {
     // row 4a). A [`PmError::Network`]/`Io` is transient and environmental — an offline CI box, a 502 —
     // and degrades to a note, exactly as the IDE's resolve does (`noeta-ide/src/workspace.rs`) and as
     // this whole section's best-effort contract says. A [`PmError::Trust`] is a signature that did not
-    // verify, a head that does not attest to the served advisories, or a log leaf that does not match:
-    // never routine, and it means *no dependency was checked against the feed at all*. That is reported
+    // verify, a head that does not attest to the served advisories, a log leaf that does not match, or
+    // a 200 whose body is not the shape `test_data/wire` pins (a cross-repo protocol drift, which is
+    // the *cause* the fixtures exist to catch — see `registry::shape_drift`): never routine, and every
+    // one of them means *no dependency was checked against the feed at all*. That is reported
     // on stderr and exits non-zero, the same answer `noeta watch-scope` already gives to the same call
     // and the same answer resolution gives to a bad release signature. The `[trust.advisories]` policy
     // is deliberately NOT consulted: it selects which *intake tier's* hits fail a build, and an
@@ -1170,7 +1172,8 @@ pub(crate) fn cmd_audit(path: &std::path::Path) -> ExitCode {
             None => match index.advisory_public_key() {
                 Ok(Some(served)) => Some(index.fetch_advisories(Some(&served))),
                 Ok(None) => None,
-                // Transient — report it as the "not checked" note below, not as "no feed".
+                // A failure fetching the key is not "this registry runs no feed": pass it down so the
+                // match below classifies it — transient → note, drifted/unverifiable → ✗ and exit 1.
                 Err(err) => Some(Err(err)),
             },
         };
@@ -1283,15 +1286,17 @@ pub(crate) fn cmd_audit(path: &std::path::Path) -> ExitCode {
                 );
             }
             // The feed did not VERIFY: a bad per-advisory signature, a head that does not attest to the
-            // served advisories (a withheld advisory), a malformed key. Nothing was checked, so this is
-            // reported like any other trust refusal — on stderr, with a non-zero exit.
+            // served advisories (a withheld advisory), or a response that is not the pinned wire shape
+            // at all. Nothing was checked, so this is reported like any other trust refusal — on
+            // stderr, with a non-zero exit.
             Some(Err(err @ noeta_pm::PmError::Trust(_))) => {
                 advisory_unverified =
                     Some("the dependency graph was NOT checked against the advisory feed");
                 eprintln!("    ✗ the advisory feed did not verify — {err}");
             }
-            // Transient/environmental (offline, a 5xx, a malformed response): the section is
-            // best-effort by design, so it stays a note and the audit still succeeds.
+            // Transient/environmental (offline, a 5xx, a refused connection): the section is
+            // best-effort by design, so it stays a note and the audit still succeeds. A malformed
+            // *body* is no longer in this bucket — see the classification note above.
             Some(Err(err)) => println!("    not checked — {err}"),
         }
     }

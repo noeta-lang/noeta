@@ -138,50 +138,163 @@ fn build_aot_archive() -> Option<(PathBuf, String)> {
     archive.exists().then_some((archive, libs))
 }
 
+/// Build the native binary for `file` at `app`, or `None` when the host cannot — reported through
+/// [`skip_or_fail`], never silent.
+///
+/// A silent `return` is how these tests guarded four live defects for a month: this was the *only*
+/// gate on the `--native` tail (there was no AOT differential oracle until audit row 9 built one),
+/// it compared stdout only, and on a host without `cargo`/`cc` it reported as a pass having run
+/// nothing. Two branches of that audit independently reached for a skip helper here; the one that
+/// survived is the one that FAILS where the tooling is supposed to be installed.
+#[cfg(feature = "jit")]
+fn build_native(file: &std::path::Path, app: &std::path::Path) -> Option<()> {
+    let Some((archive, libs)) = build_aot_archive() else {
+        skip_or_fail(
+            "cannot build the AOT runtime archive (no cargo, or the build failed)",
+            "cargo rustc -p noeta-aot-runtime -- --print native-static-libs",
+        );
+        return None;
+    };
+    if !has_cc() {
+        skip_or_fail(
+            "no C toolchain (`cc`) on PATH — `--native`'s linker",
+            "sudo apt install build-essential   # or set NOETA_CC=/path/to/cc",
+        );
+        return None;
+    }
+    let _ = std::fs::remove_file(app);
+    lang()
+        .arg("build")
+        .arg(file)
+        .arg("--native")
+        .arg("-o")
+        .arg(app)
+        .env("NOETA_AOT_RUNTIME_LIB", &archive)
+        .env("NOETA_AOT_LINK_LIBS", &libs)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("native AOT"));
+    Some(())
+}
+
 #[test]
 #[cfg(feature = "jit")] // `--native` exists only in the JIT-enabled build (it exits 2 otherwise).
 fn build_native_matches_a_source_run_byte_for_byte() {
+    // This is a smoke test, not the gate: the corpus-wide gate is the conformance harness's
+    // AOT differential (`--aot-differential`), which links an artifact per corpus program. For
+    // years this test WAS the gate, and being one hand-written all-int program that compared
+    // stdout only, it watched neither the AOT run tail nor any other codegen shape.
     // P-AOT L3.2b(3), the end-to-end AOT differential: `noeta build --native` compiles the eligible
     // prototypes to machine code, links them into a native binary, and staples the bundle on. That
     // binary — dispatching native bodies for the hot loop / `sq` / `fib` and interpreting the rest —
     // must produce exactly what `noeta run` produces on the same source. This is the linked-binary
     // proof the in-process test (`aot_bound_dispatch_runs_native_in_process`) forecast: only the
     // linker was unproven, and here it runs for real.
-    let Some((archive, libs)) = build_aot_archive() else {
-        return; // no build toolchain for the runtime archive — skip.
-    };
-    if !has_cc() {
-        eprintln!("skipping native AOT test: no `cc` on PATH");
+    //
+    // "Byte for byte" now means **both** streams and the exit code, not stdout alone. Comparing
+    // stdout only is what let the AOT tail drop the program's own `stderr` stream — `std.io`'s
+    // `err`/`errln`, the normal way a CLI reports — for a month with this test green (audit row 1).
+    let src = "use std.io\n\
+               fn sq(n: int): int { return n * n }\n\
+               fn fib(n: int): int { if n < 2 { return n }\n  return fib(n - 1) + fib(n - 2) }\n\
+               mut t = 0\nfor i in 0..1000 { t = t + sq(i) }\n\
+               echo t\nio.errln(\"warming up\")\necho fib(20)\n\
+               io.err(\"no trailing newline\")\necho \"done\"\n";
+    let file = temp_program("build_native", src);
+    let app = file.parent().unwrap().join("app_native");
+
+    // Reference: a plain source run — all three observables.
+    let reference = lang().arg("run").arg(&file).output().expect("noeta runs");
+    assert!(reference.status.success());
+    assert!(
+        !reference.stderr.is_empty(),
+        "the fixture must produce stderr, or this test cannot see the defect it guards"
+    );
+
+    if build_native(&file, &app).is_none() {
         return;
     }
 
-    let src = "fn sq(n: int): int { return n * n }\n\
-               fn fib(n: int): int { if n < 2 { return n }\n  return fib(n - 1) + fib(n - 2) }\n\
-               mut t = 0\nfor i in 0..1000 { t = t + sq(i) }\n\
-               echo t\necho fib(20)\necho \"done\"\n";
-    let file = temp_program("build_native", src);
-    let app = file.parent().unwrap().join("app_native");
+    // The native binary runs on its own and matches the source run exactly — on both streams.
+    let native = Command::new(&app).output().expect("the native binary runs");
+    assert_eq!(
+        String::from_utf8_lossy(&native.stdout),
+        String::from_utf8_lossy(&reference.stdout),
+        "stdout diverged"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&native.stderr),
+        String::from_utf8_lossy(&reference.stderr),
+        "stderr diverged — the `--native` tail must write the program's own `err`/`errln` stream"
+    );
+    assert_eq!(
+        native.status.code(),
+        reference.status.code(),
+        "exit code diverged"
+    );
     let _ = std::fs::remove_file(&app);
+}
 
-    // Reference: a plain source run.
-    let reference = lang().arg("run").arg(&file).assert().success();
-    let expected = String::from_utf8(reference.get_output().stdout.clone()).unwrap();
+#[test]
+#[cfg(feature = "jit")]
+fn build_native_reports_an_out_of_range_exit_code_as_a_failure() {
+    // A live wrong answer until the tails were unified: the AOT tail converted with
+    // `result.exit_code as u8`, so a `--native` binary exiting 256 exited **0** — a failure
+    // reported to the shell, to CI, and to any calling script as a success. Every other surface
+    // clamps out-of-range codes to 1, and now so does this one.
+    let file = temp_program("build_native_exit", "use std.os\nos.exit(256)\n");
+    let app = file.parent().unwrap().join("app_native_exit");
+    if build_native(&file, &app).is_none() {
+        return;
+    }
+    // The reference: a source run of the same program.
+    let reference = lang().arg("run").arg(&file).output().expect("noeta runs");
+    assert_eq!(reference.status.code(), Some(1));
+    let native = Command::new(&app).output().expect("the native binary runs");
+    assert_eq!(
+        native.status.code(),
+        Some(1),
+        "256 truncated to {:?} — `as u8` is back",
+        native.status.code()
+    );
+    let _ = std::fs::remove_file(&app);
+}
 
-    // Build the native binary, pointing the linker driver at the archive we just built.
-    lang()
-        .arg("build")
-        .arg(&file)
-        .arg("--native")
-        .arg("-o")
-        .arg(&app)
-        .env("NOETA_AOT_RUNTIME_LIB", &archive)
-        .env("NOETA_AOT_LINK_LIBS", &libs)
-        .assert()
-        .success()
-        .stderr(predicate::str::contains("native AOT"));
-
-    // The native binary runs on its own and matches the source run exactly.
-    Command::new(&app).assert().success().stdout(expected);
+/// A `--native` binary exits with the code the program asked for, not merely a nonzero one.
+#[test]
+#[cfg(feature = "jit")]
+fn build_native_reports_the_programs_own_exit_code() {
+    // Two independent narrowings sat on this path, and fixing either alone left it wrong. The tail
+    // converted with `result.exit_code as u8` (so 256 became 0); and downstream of that,
+    // `run_embedded_with_extensions` mapped `ExitCode::SUCCESS` to 0 and *everything else* to 1,
+    // because `ExitCode` has no getter — so once the number was inside one it was gone, and
+    // `os.exit(3)` exited 1. The audit's row 1 fixed the first; the AOT differential built by row 9
+    // is what turned the second from a plausible reading of the code into a failing case.
+    //
+    // `assert_ne!(0)` would pass on the bug. Pin the number.
+    let file = temp_program(
+        "build_native_exit_code",
+        "use std.os
+os.exit(3)
+",
+    );
+    let app = file.parent().unwrap().join("app_native_exit_code");
+    if build_native(&file, &app).is_none() {
+        return;
+    }
+    let reference = lang().arg("run").arg(&file).output().expect("noeta runs");
+    assert_eq!(
+        reference.status.code(),
+        Some(3),
+        "the source run is the truth"
+    );
+    let native = Command::new(&app).output().expect("the native binary runs");
+    assert_eq!(
+        native.status.code(),
+        Some(3),
+        "`--native` reported {:?} for a program that asked for 3 — a narrowing is back on this path",
+        native.status.code()
+    );
     let _ = std::fs::remove_file(&app);
 }
 
@@ -224,10 +337,17 @@ fn build_native_strips_debug_info_from_the_shipped_binary() {
     // and halves the image (~11 MB → ~5.8 MB on a core program). Guard it structurally — assert the
     // ELF has no `.debug_*` or `.symtab`/`.strtab` sections — rather than by a brittle size ceiling.
     let Some((archive, libs)) = build_aot_archive() else {
-        return; // no build toolchain for the runtime archive — skip.
+        skip_or_fail(
+            "cannot build the AOT runtime archive (no cargo, or the build failed)",
+            "cargo rustc -p noeta-aot-runtime -- --print native-static-libs",
+        );
+        return;
     };
     if !has_cc() {
-        eprintln!("skipping native strip test: no `cc` on PATH");
+        skip_or_fail(
+            "no C toolchain (`cc`) on PATH — `--native`'s linker",
+            "sudo apt install build-essential   # or set NOETA_CC=/path/to/cc",
+        );
         return;
     }
     let file = temp_program("build_native_strip", "echo \"ok\"\n");

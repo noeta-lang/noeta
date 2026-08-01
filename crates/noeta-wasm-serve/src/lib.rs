@@ -16,11 +16,13 @@
 //! (`noeta_bundle::staple_wasm`, component-aware) — ~1 ms, no cargo at build time. The decoded
 //! module is cached in a thread-local so platforms that *do* reuse an instance skip the decode.
 //! A handler that never replies (a non-serving program, an abort, an unstapled generic
-//! component) answers **500** with the run's output as the body — the debugging view you want
-//! at the edge, not a hung connection. A handler that errors mid-request is different:
-//! `http.serve` recovers it into its own generic 500 (the reply slot IS filled), so the run's
-//! recorded diagnostics are echoed to **stderr**, which serve platforms forward to their log —
-//! the body stays generic, the cause stays findable.
+//! component) answers **500** with every component of the run — both streams, the diagnostics,
+//! the traceback — as the body: the debugging view you want at the edge, not a hung connection.
+//! A handler that errors mid-request is different: `http.serve` recovers it into its own generic
+//! 500 (the reply slot IS filled), so the body stays generic and the cause stays findable in the
+//! platform log, to which the whole run tail is written on **every** path (serve platforms forward
+//! guest stdout/stderr to their own log). Both come from one [`noeta_backend::RunTail`], the
+//! epilogue every execution surface shares (`plans/parallel-path-audit.md` row 1).
 //!
 //! Split on purpose: this module (request → run → response over neutral `NetRequest`/
 //! `NetResponse`) is target-agnostic and natively unit-tested; the `wasi:http` type glue lives
@@ -33,6 +35,8 @@ mod outbound;
 
 use std::cell::OnceCell;
 
+use noeta_backend::RunTail;
+use noeta_span::{Source, SourceId, SourceMap};
 use noeta_stdlib::{NetRequest, NetResponse};
 use noeta_wasi_host::{OutboundHook, WasiHost};
 
@@ -155,35 +159,45 @@ fn run(
     let (host, reply) = host.with_inbound(request);
     let executor: Box<dyn noeta_stdlib::Executor> = Box::new(noeta_stdlib::SandboxExecutor::new());
     // The documented plain-run-plus-traceback entry — cooperative, tier-0, the wasm shape.
-    let (result, _trace) =
+    let (result, trace) =
         noeta_vm::VmBackend::new().run_module_debug(module, Box::new(host), executor, None);
 
-    // Surface recorded runtime diagnostics on stderr **even when a reply exists**: a handler
+    // The shared run epilogue (audit row 1). This surface wants *structured* output — it composes a
+    // response body — which is exactly why the epilogue is a value and not a print statement: the
+    // components are enumerable here and writable everywhere else. A component-per-request has no
+    // source text, so spans render name+line only, like a `.noeb` run.
+    let sources = SourceMap::new(vec![Source::new(SourceId::FIRST, "<serve>", "")]);
+    let tail = RunTail::render(&result, &trace, &sources);
+
+    // Everything the run said goes to the platform log, **even when a reply exists**: a handler
     // abort is recovered by `http.serve` into a generic 500 (clients must not see internals),
-    // which is indistinguishable from a platform failure without the cause. The platform
-    // forwards guest stderr to its own log (`wasmtime serve`, Spin), so this is the debugging
-    // view at the edge — it is what names the real error when the e2e's only symptom is
-    // "unexpected proxy body: Internal Server Error".
-    for diagnostic in &result.diagnostics {
-        eprintln!(
-            "noeta-wasm-serve: runtime diagnostic: {}",
-            diagnostic.message
-        );
-    }
+    // which is indistinguishable from a platform failure without the cause. The platform forwards
+    // guest stdout/stderr to its own log (`wasmtime serve`, Spin), so this is the debugging view at
+    // the edge — it is what names the real error when the e2e's only symptom is "unexpected proxy
+    // body: Internal Server Error". Previously this printed one line per diagnostic *message* and
+    // nothing else: the program's stdout was dropped on the success path, its own `err`/`errln`
+    // stream was dropped on every path, and an abort's traceback was never rendered at all.
+    let _ = tail.write_to(&mut std::io::stdout(), &mut std::io::stderr());
 
     if let Some(response) = reply.lock().expect("reply slot not poisoned").take() {
         return response;
     }
-    // No reply reached the slot: the program never served, or it aborted first. Surface what it
-    // did produce — stdout and any diagnostics — as a 500 body instead of hanging the client.
-    let mut body = String::new();
-    body.push_str("the program produced no HTTP response\n");
-    if !result.stdout.is_empty() {
-        body.push_str("--- stdout ---\n");
-        body.push_str(&result.stdout);
-    }
-    for diagnostic in &result.diagnostics {
-        body.push_str(&format!("--- diagnostic ---\n{}\n", diagnostic.message));
+    // No reply reached the slot: the program never served, or it aborted first. Surface what it did
+    // produce as a 500 body instead of hanging the client — every component of the tail, labelled,
+    // so a future one lands in the body without an edit here.
+    let mut body = String::from("the program produced no HTTP response\n");
+    for part in tail.parts() {
+        if part.text.is_empty() {
+            continue;
+        }
+        body.push_str(&format!(
+            "--- {} ---\n{}",
+            part.component.label(),
+            part.text
+        ));
+        if !part.text.ends_with('\n') {
+            body.push('\n');
+        }
     }
     failure(&body)
 }
@@ -315,6 +329,39 @@ mod tests {
         let body = String::from_utf8_lossy(&response.body);
         assert!(body.contains("no HTTP response"), "{body}");
         assert!(body.contains("just a script"), "{body}");
+    }
+
+    #[test]
+    fn a_non_serving_program_answers_500_with_every_component_of_its_run() {
+        // The `wasi:http` tail (plans/parallel-path-audit.md row 1). It composed the 500 body from
+        // stdout plus each diagnostic's bare `message`, and dropped the program's own `stderr`
+        // stream (`std.io`'s `err`/`errln`) on every path and its stdout entirely on the success
+        // path. The body is now assembled from `RunTail::parts()`, so a component added to a run
+        // lands here without an edit — and the two streams a program actually writes are both in it.
+        let module = compile("use std.io\necho \"on stdout\"\nio.errln(\"on stderr\")\n");
+        let response = serve_bundle(&noeta_bundle::write(&module), get("/"));
+        assert_eq!(response.status, 500);
+        let body = String::from_utf8_lossy(&response.body);
+        assert!(body.contains("no HTTP response"), "{body}");
+        assert!(body.contains("on stdout"), "stdout is missing: {body}");
+        assert!(body.contains("on stderr"), "stderr is missing: {body}");
+    }
+
+    #[test]
+    fn an_aborting_program_puts_its_traceback_in_the_body() {
+        // The same tail rendered no traceback at all — a handler that never replied answered 500
+        // with a bare diagnostic message and no stack, at an edge where the platform log is the
+        // only debugging view there is.
+        let module = compile("fn boom(): int {\n  panic(\"edge kaboom\")\n}\necho boom()\n");
+        let response = serve_bundle(&noeta_bundle::write(&module), get("/"));
+        assert_eq!(response.status, 500);
+        let body = String::from_utf8_lossy(&response.body);
+        assert!(body.contains("edge kaboom"), "no diagnostic: {body}");
+        assert!(body.contains("stack trace"), "no traceback: {body}");
+        assert!(
+            body.contains("boom"),
+            "the traceback names no frame: {body}"
+        );
     }
 
     /// Compile through the salsa pipeline (dev-dependency), like the runner's tests.

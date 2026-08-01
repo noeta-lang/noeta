@@ -28,6 +28,7 @@ mod pm;
 mod pm_native;
 mod repl;
 mod run;
+mod run_tail;
 mod targets;
 mod test_runner;
 mod upgrade;

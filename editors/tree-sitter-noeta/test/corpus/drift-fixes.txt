@@ -117,3 +117,73 @@ mut r = 'raw ${name} {brace} $dollar'
   (let_statement
     (identifier)
     (string_literal)))
+
+==================
+Associated types in a trait body and an impl body
+==================
+
+trait Store {
+  type Item
+  type Key = string
+  fn get(k: Key): Item
+}
+
+impl Store for Bag {
+  type Item = int
+}
+
+---
+
+(source_file
+  (trait_declaration
+    (identifier)
+    (trait_body
+      (associated_type
+        (identifier))
+      (associated_type
+        (identifier)
+        (primitive_type))
+      (trait_method
+        (identifier)
+        (parameters
+          (parameter
+            (identifier)
+            (identifier)))
+        (identifier))))
+  (impl_block
+    (trait_reference
+      (identifier))
+    (identifier)
+    (associated_type
+      (identifier)
+      (primitive_type))))
+
+==================
+Any is the canonical spelling of the dynamic top type
+==================
+
+fn f(x: Any): Any { return x }
+
+struct Any {
+  n: int
+}
+
+---
+
+(source_file
+  (function_declaration
+    (identifier)
+    (parameters
+      (parameter
+        (identifier)
+        (primitive_type)))
+    (primitive_type)
+    (block
+      (return_statement
+        (identifier))))
+  (struct_declaration
+    (identifier)
+    (type_body
+      (field_declaration
+        (identifier)
+        (primitive_type)))))

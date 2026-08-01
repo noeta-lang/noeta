@@ -18,7 +18,7 @@
 #
 #   scripts/gate.sh --quick     the inner loop  — fmt + both clippy splits           1m20s / 2m10s
 #   scripts/gate.sh             the merge gate  — + tests, doc samples, JIT oracles    ~15m / 35m
-#   scripts/gate.sh --full      full CI parity  — + wasm, miri, editor tooling         +2m and up
+#   scripts/gate.sh --full      full CI parity  — + wasm, AOT, miri, editor tooling    +2m and up
 #
 # The merge tier also runs the `#[ignore]`d real-socket suites (`scripts/hot-e2e.sh` — hot reload,
 # LiveView, graceful drain) against the JIT-enabled CLI it has already built. Measured at 5s warm,
@@ -48,7 +48,9 @@
 #
 # Options:
 #   --quick / --full        pick a tier (default: the merge gate, in between)
-#   --only <substring>      run only steps whose group or name matches (e.g. --only clippy)
+#   --only <substring>      run only steps whose group or name matches (e.g. --only clippy).
+#                           Overrides the tier: naming a step is the selection, so `--only wasm`
+#                           runs the wasm steps without also needing --full.
 #   --list                  print the plan for the chosen tier and exit
 #   --install-hook [--force]  install an OPT-IN .git/hooks/pre-push running --quick (see below)
 #   -h | --help             this header
@@ -200,10 +202,19 @@ STEP_N=0
 FAILED=0
 
 # selected <tier> <group> <name> -> 0 when this step is in scope
+#
+# `--only` overrides the tier, deliberately: naming a step IS the selection, and asking for one that
+# lives above the current tier should run it rather than silently match nothing. `--only wasm`
+# without `--full` used to report zero steps — honest since the vacuous-pass fix, but the reason it
+# gave ("no step matched, in tier 2") named a tier the caller had not thought about, on a group whose
+# whole history is of not running. If you asked for it by name, you get it.
 selected() {
     local tier="$1" group="$2" name="$3"
+    if [[ -n "$ONLY" ]]; then
+        [[ "$group" == *"$ONLY"* || "$name" == *"$ONLY"* ]] && return 0
+        return 1
+    fi
     ((tier > TIER)) && return 1
-    if [[ -n "$ONLY" && "$group" != *"$ONLY"* && "$name" != *"$ONLY"* ]]; then return 1; fi
     return 0
 }
 
@@ -357,10 +368,12 @@ has_target() {
 #                                     doc samples, the JIT's own differential, and the `#[ignore]`d
 #                                     real-socket end-to-end suites (hot reload, LiveView, drain).
 #                                     This is the set a merge to `main` must clear.
-#   wasm/miri/editors (tier 3)       — portability, `unsafe` soundness, and the editor grammars.
-#                                     Real gates, but they need wasmtime/nightly+miri/npm and they
-#                                     dominate the runtime, so they are opt-in per merge, not per
-#                                     commit. `--full` is what you run before a release tag.
+#   wasm/aot/miri/editors (tier 3)   — portability, the linked `--native` differential, `unsafe`
+#                                     soundness, and the editor grammars. Real gates, but they need
+#                                     wasmtime/a C toolchain/nightly+miri/npm and they dominate the
+#                                     runtime (the AOT one links a binary per corpus program), so
+#                                     they are opt-in per merge, not per commit. `--full` is what
+#                                     you run before a release tag.
 
 if ((LIST_ONLY)); then
     echo "gate: plan for tier $TIER (toolchain: $TC)"
@@ -391,6 +404,12 @@ step 2 test "lean CLI build (--no-default-features)" -- \
 # feature is added, which is the failure this audit is about.
 step 2 test "cargo test -p noeta-pm --all-features (registry wire fixtures + trust chain)" -- \
     "${CARGO[@]}" test -p noeta-pm --all-features --locked
+# ...and the half no single-repo test run can see. The wire fixtures are copied verbatim into the
+# noeta-registry repo, so the two suites can be green on stale copies of two different protocols;
+# `--check` compares this checkout against the registry checkout when one is present (it names the
+# drifting file and exits non-zero), and reports "checked this repo only" when there is not.
+step 1 test "wire fixtures in sync with the registry repo" -- \
+    "$ROOT/scripts/sync-wire-fixtures.sh" --check
 # The lean feature SHAPES the AOT/native-size/p2p stories depend on. ci.yml runs these as one
 # step; split here so a failure names the shape instead of a line number in a shell block.
 step 2 test "shape: noeta-vm aot" -- \
@@ -415,6 +434,12 @@ step 2 jit "JIT differential (coverage summary)" -- \
     "${CARGO[@]}" run -p noeta-conformance --features jit --locked -- --jit-differential
 step 2 jit "JIT differential (cancel-poll arm)" -- \
     "${CARGO[@]}" run -p noeta-conformance --features jit --locked -- --jit-differential --cancel-poll
+# The AOT arm: `noeta build --native` emits a third shape of native code (inline caches off, null
+# call sites, no poll). Three comments in the tree claimed it was "proven corpus-wide by the
+# NOETA_JIT_AOT oracle" — an environment variable that ran in no gate and no workflow. It is now a
+# run option, so this arm is the same corpus at the same cost as the two above, with no linker.
+step 2 jit "JIT differential (AOT-bodies arm)" -- \
+    "${CARGO[@]}" run -p noeta-conformance --features jit --locked -- --jit-differential --aot-bodies
 step 2 jit "JIT-enabled CLI (integration + doc samples)" -- \
     "${CARGO[@]}" test -p noeta-cli --locked
 # The `#[ignore]`d real-socket suites — hot reload, LiveView, graceful drain. The step above builds
@@ -424,6 +449,35 @@ step 2 jit "JIT-enabled CLI (integration + doc samples)" -- \
 # server that is actually serving. See scripts/hot-e2e.sh for what it covers and what it asserts.
 step 2 jit "hot-reload e2e (#[ignore]d real-socket suites)" -- \
     env "NOETA_GATE_TOOLCHAIN=$TC" bash "$ROOT/scripts/hot-e2e.sh"
+
+# --- aot: the LINKED `--native` differential ---------------------------------------------------
+#
+# The in-process arm above proves the AOT *codegen*. This proves the artifact: for every corpus
+# program, `cc`-link the AOT object against the real `libnoeta_aot.a`, staple the bundle on, run the
+# binary, and compare it against `noeta run` over the same module — stdout, stderr and exit code.
+# That is the only thing watching the linker, the dispatch table's layout (an AOT-only soundness bug
+# once lived exactly there: `0f9752d4c`) and the AOT run tail.
+#
+# Tier 3, not 2: a link per program is minutes, not seconds — measured and recorded in the oracle's
+# own summary line, which prints the wall-clock split every run. Its one prerequisite is a C
+# toolchain, named with the command that installs it rather than skipped in silence.
+CC_BIN="${NOETA_CC:-cc}"
+if have "$CC_BIN"; then
+    # The archive is its own step so a failure to BUILD it does not read as an oracle failure. The
+    # oracle re-runs the same `cargo rustc` (a no-op once built) to read the `native-static-libs`
+    # line, which is how `noeta build --native` itself learns the link line.
+    step 3 aot "build the AOT runtime archive (libnoeta_aot.a)" -- \
+        "${CARGO[@]}" rustc -p noeta-aot-runtime --locked -- --print native-static-libs
+    # The truth side is the shipped `noeta` binary, so it must exist before the oracle runs.
+    step 3 aot "build the noeta CLI (the AOT oracle's truth side)" -- \
+        "${CARGO[@]}" build -p noeta-cli --locked
+    step 3 aot "AOT differential (linked --native artifacts vs noeta run)" -- \
+        "${CARGO[@]}" run -p noeta-conformance --features jit --locked -- --aot-differential
+else
+    skip 3 aot "AOT differential (linked --native artifacts vs noeta run)" \
+        "no C toolchain: \`$CC_BIN\` is not on PATH" \
+        "sudo apt install build-essential   # or set NOETA_CC=/path/to/cc"
+fi
 
 # --- wasm: the portability invariant + the wasm/browser/serve oracles --------------------------
 #
@@ -579,15 +633,18 @@ done
 echo "--------------------------------------------------------------------------------"
 printf ' %d passed, %d failed, %d skipped\n' "$n_pass" "$n_fail" "$n_skip"
 
-# A run that executed NOTHING is not a pass. `--only wasm` against the default tier matches no step
+# A run that executed NOTHING is not a pass. `--only wasm` against the default tier matched no step
 # (the wasm steps live in --full), and this printed `GATE PASSED`, exit 0 — a green light for a run
 # that gated nothing, which is the exact failure mode the rest of this script is built to avoid.
 # Found by using it: I typed that command to verify the wasm tier and was told everything was fine.
+#
+# `--only` now overrides the tier (see `selected`), so that particular command works. This stays,
+# because the class does not: a typo'd substring still matches nothing, and a run that gated nothing
+# must never read as a run that passed.
 if ((n_pass + n_fail + n_skip == 0)); then
     echo
     if [[ -n "$ONLY" ]]; then
-        printf ' \033[31mNO STEP MATCHED --only %s in tier %s.\033[0m\n' "$ONLY" \
-            "$([[ $TIER == 1 ]] && echo quick || { [[ $TIER == 3 ]] && echo full || echo merge; })"
+        printf ' \033[31mNO STEP MATCHED --only %s.\033[0m\n' "$ONLY"
         echo '  Nothing ran, so nothing is known. `--list` prints this tier'"'"'s steps; a step may'
         echo '  live in a wider tier (the wasm and miri steps are --full).'
     else

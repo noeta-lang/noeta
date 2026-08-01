@@ -80,57 +80,16 @@ fn is_primitive_type_name(word: &str) -> bool {
     }
 }
 
+/// Whether a token is one of the language's **reserved words** — coloured as a keyword.
+///
+/// Asks the token itself rather than restating the list. [`TokenKind::reserved_word`] answers
+/// `Some` exactly when the token's spelling is identifier-shaped, which is the same question this
+/// one is asking: an operator carries no keyword colour, and a keyword is precisely a word the
+/// user could otherwise have meant as a name. This replaced a 46-arm `matches!` — the same move
+/// [`is_primitive_type_name`] made onto [`noeta_ast::BuiltinTy`], for the same reason, and the
+/// list it replaced had the same failure mode waiting in it.
 fn is_keyword(kind: TokenKind) -> bool {
-    use TokenKind::*;
-    matches!(
-        kind,
-        EchoKw
-            | MutKw
-            | TrueKw
-            | FalseKw
-            | FnKw
-            | ReturnKw
-            | YieldKw
-            | AsyncKw
-            | AwaitKw
-            | ConcurrentKw
-            | SpawnKw
-            | IsolateKw
-            | IfKw
-            | ThenKw
-            | ElseKw
-            | ForKw
-            | WhileKw
-            | BreakKw
-            | ContinueKw
-            | InKw
-            | EnumKw
-            | MatchKw
-            | StructKw
-            | TypeKw
-            | ClassKw
-            | DestructKw
-            | ImplKw
-            | TraitKw
-            | NamespaceKw
-            | UseKw
-            | PubKw
-            | AsKw
-            | IsKw
-            | AttributesOfKw
-            | TypeOfKw
-            | TypeNameKw
-            | FieldsOfKw
-            | TraitsOfKw
-            | FromBytesKw
-            | RolesOfKw
-            | ParamsOfKw
-            | ReturnsOfKw
-            | FieldSpecsOfKw
-            | VariantsOfKw
-            | ConstructKw
-            | InvokeKw
-    )
+    kind.reserved_word().is_some()
 }
 
 /// Highlight one standalone snippet. Returns non-overlapping spans sorted by start, in UTF-16

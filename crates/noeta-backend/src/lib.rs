@@ -7,9 +7,18 @@
 //! differential oracle). Comparing `RunResult` — observable output, not internal value
 //! representation — is exactly what lets the two backends use completely different value
 //! models (the interpreter's `Rc`-based enum vs. the VM's NaN-boxed words).
+//!
+//! It also owns the other end of that seam: [`RunTail`], the one rendering of a finished run into
+//! output. This crate is where it can live — it is the common ancestor of every execution surface
+//! (the CLI, the lean runner, the AOT runtime staticlib, the wasip1 runner, the `wasi:http`
+//! component), each of which reaches it without acquiring a host, a compiler, or tokio.
 
 use noeta_ast::Program;
 use noeta_diagnostics::Diagnostic;
+
+mod tail;
+
+pub use tail::{Component, Part, RunTail, Stream};
 
 /// The observable outcome of running a program: everything it wrote to stdout and stderr, its
 /// process exit code, and any runtime diagnostics it produced. This is the unit the

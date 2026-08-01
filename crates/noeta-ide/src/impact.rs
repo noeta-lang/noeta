@@ -84,11 +84,15 @@ pub fn impact_of_edit(old_src: &str, new_src: &str, edition: noeta_lexer::Editio
     // types — which the residual (stripped) form never gets.
     let tier_names = declared_tiers(&new_program);
     let tier_refs: Vec<&str> = tier_names.iter().map(String::as_str).collect();
-    let activated = noeta_check::activate_tiers(&new_program, &tier_refs);
-    let program = &activated.program;
+    // A single freshly-parsed buffer, not a linked workspace: it has an edition and nothing else, so
+    // the provenance it is checked under says so explicitly.
     let mut editions = noeta_lexer::EditionMap::new();
     editions.set(noeta_span::SourceId::FIRST, edition);
-    let checked = noeta_check::check_all_with_editions(program, editions);
+    let prov = noeta_check::Provenance::of_sources(editions);
+    let activated = noeta_check::activate_tiers(&new_program, &tier_refs, &prov);
+    let program = &activated.program;
+    let checked =
+        noeta_check::check_all_with(program, noeta_check::CheckOptions::for_workspace(prov));
     if noeta_diagnostics::has_errors(
         activated
             .diagnostics
@@ -508,24 +512,17 @@ impl ImpactSession {
         };
         let tier_names = declared_tiers(linked);
         let tier_refs: Vec<&str> = tier_names.iter().map(String::as_str).collect();
-        let activated = noeta_check::activate_tiers(linked, &tier_refs);
+        // The whole workspace's provenance, in one query — tier activation and the check must judge
+        // every `@name` by the package that wrote it, and asking for the pieces separately is how
+        // this site once passed two of three and declared `Impact::All` ("the edit does not check")
+        // on a project that compiles, re-running the whole suite on every keystroke.
+        let prov = noeta_db::workspace_provenance(&self.db, cache.workspace);
+        let activated = noeta_check::activate_tiers(linked, &tier_refs, &prov);
         let checked = noeta_check::check_all_with(
             &activated.program,
-            noeta_check::CheckOptions {
-                // The span→type index resolves method receivers to `Function` edges (more
-                // precise than the member-name fallback alone) — cheap at dev-loop rate.
-                record_expr_types: true,
-                editions: noeta_db::workspace_editions(&self.db, cache.workspace),
-                packages: noeta_db::workspace_packages(&self.db, cache.workspace),
-                // …and the `@name` tables that go WITH that package map. An empty `package_uses`
-                // does not mean "unknown" the way an empty `packages` does — it means "no package
-                // binds any extension `@name`", so every `@directive` in the project resolves to
-                // nothing and the check reports a spurious E0036. Omitting it here made the
-                // watcher declare `Impact::All` ("the edit does not check") on a project that
-                // compiles, so every keystroke re-ran the whole suite.
-                package_uses: cache.workspace.package_uses(&self.db).0.clone(),
-                ..noeta_check::CheckOptions::default()
-            },
+            // The span→type index resolves method receivers to `Function` edges (more precise than
+            // the member-name fallback alone) — cheap at dev-loop rate.
+            noeta_check::CheckOptions::for_workspace(prov).with_expr_types(),
         );
         if noeta_diagnostics::has_errors(
             activated

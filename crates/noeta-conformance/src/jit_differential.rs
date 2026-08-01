@@ -34,6 +34,13 @@ use crate::leaks::Leak;
 /// safepoints read `false`, every compiled loop header carries its poll, and the program must still
 /// produce the byte-identical result. The oracle is then asking exactly the right question: does a
 /// cancellable run that is never cancelled behave like an ordinary one?
+/// A third shape is the **ahead-of-time** one: [`Arm::AotBodies`] emits the bodies
+/// `noeta build --native` links — inline caches off, null call sites, no poll — into ordinary
+/// executable pages, so the whole corpus runs the AOT codegen with no linker involved. That codegen
+/// had exactly one gate before (`build_native_matches_a_source_run_byte_for_byte`: one hand-written
+/// all-int program, stdout only, silently skipped without `cc`), and one AOT-only soundness bug
+/// found late (`0f9752d4c`, the misaligned dispatch table). This is the cheap 80% of the linked
+/// oracle in [`crate::aot`]: same corpus, same full-`RunResult` comparison, seconds not minutes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Arm {
     /// Production shape: no cancellation flag anywhere, so the JIT emits no poll and the bodies are
@@ -42,15 +49,25 @@ pub enum Arm {
     Plain,
     /// The cancellable shape: a never-set flag on the forced-JIT run, so every loop header polls.
     CancelPoll,
+    /// The ahead-of-time shape (P-AOT L3.1): inline caches off, null call sites, no cancellation
+    /// poll — the codegen a `--native` artifact carries, finalized to pages instead of an object
+    /// file. The IC-off path is the always-correct helper slow path, so the result must be
+    /// byte-identical; that identity is the entire basis on which `noeta build --native` ships.
+    AotBodies,
 }
 
 impl Arm {
     /// The flag to arm the forced-JIT run with — a fresh, never-set one per case.
     fn flag(self) -> Option<Arc<AtomicBool>> {
         match self {
-            Arm::Plain => None,
+            Arm::Plain | Arm::AotBodies => None,
             Arm::CancelPoll => Some(Arc::new(AtomicBool::new(false))),
         }
+    }
+
+    /// Whether the forced-JIT run emits AOT-form bodies ([`noeta_vm::RunOptions::aot_bodies`]).
+    fn aot_bodies(self) -> bool {
+        self == Arm::AotBodies
     }
 
     /// How this arm names itself in the report.
@@ -58,6 +75,7 @@ impl Arm {
         match self {
             Arm::Plain => "jit-differential",
             Arm::CancelPoll => "jit-differential (cancel-poll)",
+            Arm::AotBodies => "jit-differential (AOT bodies)",
         }
     }
 }
@@ -299,12 +317,14 @@ fn run_and_compare(name: &str, module: &noeta_bytecode::Module, report: &mut Jit
     let before = noeta_value::live_count() as i64;
     noeta_value::reset_refcount_anomalies();
     // `Arm::Plain` is exactly `run_module_jit_with_stats`; `Arm::CancelPoll` is the same run with a
-    // never-set cancellation flag, which is what makes the JIT emit its loop-header polls.
+    // never-set cancellation flag, which is what makes the JIT emit its loop-header polls;
+    // `Arm::AotBodies` is the same run emitting the ahead-of-time body shape.
     let out = VmBackend::new().run_module_with(
         module,
         RunOptions {
             tiering: Tiering::Forced,
             cancel: report.arm.flag(),
+            aot_bodies: report.arm.aot_bodies(),
             ..RunOptions::default()
         },
     );

@@ -714,15 +714,61 @@ pub struct TypeArgInfo {
     pub recipe: Option<TypeRecipe>,
 }
 
+/// An index into the program's **type-argument table** ([`TypeArgInfo`]) — and the one integer in
+/// the checker→lowering vocabulary that a LIVE session must RENUMBER.
+///
+/// A newtype rather than a bare `u32`, and the reason is a shipped bug. The table is numbered
+/// **per check run**: a whole-program re-check (what saving an edited file produces) numbers it from
+/// zero in its own discovery order, while the running session's values already hold indices into an
+/// earlier numbering. So a session install must merge the incoming table by content and rewrite
+/// every incoming index into session space (`noeta_compiler::SessionCompiler::absorb_type_args`) —
+/// and the bug was doing that for one carrier and not another, which is silent: the program keeps
+/// running and resolves a hidden type argument to the *wrong type*.
+///
+/// The checker's site bundle is full of `u32`s that are NOT this: a hidden-slot ordinal, a type
+/// parameter's declaration position, an argument position, a bit width, a count. They look
+/// identical at a glance and must not be remapped. Giving the one that must be remapped a name of
+/// its own is what lets `noeta_check::SITE_POLICIES` (and its gate) tell them apart by TYPE instead
+/// of by a comment — a field whose type says `TypeArgIndex` is one the session has to rewrite, and
+/// the census gate fails if it is classified as anything else.
+///
+/// Produced in exactly one place — `noeta_check::intern_type_arg_entry`, which is also the only
+/// place the table's dedup key is applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TypeArgIndex(u32);
+
+impl TypeArgIndex {
+    /// The index of the table entry at position `i`. Called by the interner that appended it and by
+    /// the session merge that renumbered it; everything else should be *carrying* one, not minting
+    /// one from an integer it happens to hold.
+    pub fn new(i: u32) -> TypeArgIndex {
+        TypeArgIndex(i)
+    }
+
+    /// The raw index — for indexing the table, and for the one place lowering turns it into a
+    /// runtime constant.
+    pub fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl std::fmt::Display for TypeArgIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// How an instantiating call supplies one **hidden type-argument slot** of a forwarding generic
 /// function (poly-values F2b). Checker → lowering vocabulary only (lowering turns it into an
 /// ordinary prepended call argument), so it is not serialized.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HiddenArg {
-    /// A concrete instantiation: pass this index into the program's [`TypeArgInfo`] table.
-    Table(u32),
+    /// A concrete instantiation: pass this index into the program's [`TypeArgInfo`] table. The
+    /// [`TypeArgIndex`] is what a session install renumbers; see its doc for why it is not a `u32`.
+    Table(TypeArgIndex),
     /// A pass-through: forward the ENCLOSING function's own hidden slot `i` (the caller is itself
-    /// generic and forwards its `T` onward), i.e. the local `$ty<i>`.
+    /// generic and forwards its `T` onward), i.e. the local `$ty<i>`. A per-body SLOT ordinal, not
+    /// a table index — resolved through the slot's runtime value, so a session never renumbers it.
     Forward(u32),
 }
 

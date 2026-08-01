@@ -95,6 +95,14 @@ jobs:
       # advisory-feed and transparency-log chain verification and the attestation goldens. Excluding
       # `noeta-cli` from the workspace run took these with it: nothing else enables the features.
       # `--all-features`, not a feature list — a list is a second place to forget.
+      # The fixture-bytes pin and the semver differential moved to feature-free integration tests, so
+      # the workspace step above covers them too; this step is what runs the rest of the trust chain.
+      # What NO single-repo job can see is whether the registry's verbatim copy of those fixtures is
+      # current — both suites stay green on stale copies of two different protocols. The cross-repo
+      # half is `scripts/sync-wire-fixtures.sh --check`, run by `scripts/gate.sh` where both
+      # checkouts exist. What CI does enforce is the protocol stamp: `MANIFEST.sha256` must hash to
+      # `noeta_pm::registry::WIRE_MANIFEST_SHA256`, so fixtures cannot change without a source change
+      # that a reviewer of either repo can see.
       - name: cargo test -p noeta-pm --all-features (registry wire fixtures + trust chain)
         run: cargo test -p noeta-pm --all-features --locked
       # The `noeta` binary is JIT-enabled by default; prove `--no-default-features` still yields a
@@ -161,10 +169,29 @@ jobs:
       # so the only variable is the codegen.
       - name: JIT differential — cancel-poll arm (coverage summary)
         run: cargo run -p noeta-conformance --features jit --locked -- --jit-differential --cancel-poll
+      # The ahead-of-time arm: `noeta build --native` links a THIRD shape of native code (inline
+      # caches off, null call sites, no poll), and until this existed the only thing gating it was
+      # one hand-written all-int program comparing stdout, which skipped silently without a C
+      # toolchain — while three comments in the tree claimed the shape was "proven corpus-wide by
+      # the NOETA_JIT_AOT oracle" that ran in no gate at all. It costs what the other two arms cost
+      # (no linker involved), so it runs here rather than only in the full gate.
+      - name: JIT differential — AOT-bodies arm (coverage summary)
+        run: cargo run -p noeta-conformance --features jit --locked -- --jit-differential --aot-bodies
       # The shipped CLI defaults to the `jit` feature, so its integration tests and doc-sample gate now
       # exercise the production hot-counter JIT end-to-end (real-host `noeta run`/`test`). Gate that path.
       - name: JIT-enabled CLI (integration + doc samples)
         run: cargo test -p noeta-cli --locked
+      # The LINKED half of the AOT gate: the real `cc`-linked `--native` artifact, per corpus
+      # program, against `noeta run` over the same module. It covers what the in-process arm cannot —
+      # the linker, the dispatch table's layout (an AOT-only soundness bug once lived exactly there),
+      # and the AOT run tail, which is the surface row 1 of the parallel-path audit found dropping
+      # `stderr`. Minutes rather than seconds: one link plus two process launches per program. Runs
+      # after the CLI step because the truth side IS the shipped `noeta` binary, which that step
+      # builds; the archive step below is the one `noeta build --native` itself would run.
+      - name: Build the AOT runtime archive (libnoeta_aot.a)
+        run: cargo rustc -p noeta-aot-runtime --locked -- --print native-static-libs
+      - name: AOT differential (linked --native artifacts vs `noeta run`)
+        run: cargo run -p noeta-conformance --features jit --locked -- --aot-differential
       # The hot-reload / real-socket end-to-end suites. They are `#[ignore]`d — real port, real
       # child processes, real file edits — so the step above BUILDS them and runs none of them, and
       # until this step existed nothing ran them unless a human typed `-- --ignored`. That is not a

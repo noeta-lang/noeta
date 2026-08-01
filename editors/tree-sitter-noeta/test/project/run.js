@@ -62,8 +62,20 @@ try {
     path.join(work, "test", "corpus", "generated.txt"),
   );
 
+  // The overlaid build gets its OWN parser cache. The tree-sitter CLI caches each compiled parser
+  // in `$TREE_SITTER_LIBDIR/<language-name>.so` (default `~/.cache/tree-sitter/lib`), keyed by the
+  // grammar's name and nothing else — and this build is called `noeta` too, because renaming it
+  // would orphan `scanner.c`'s `tree_sitter_noeta_external_scanner_*` symbols. Sharing the cache
+  // meant the overlaid parser REPLACED the static one, so the next `tree-sitter test` in the repo
+  // ran the STATIC corpus against the OVERLAID parser: `npm test` passed on its first run and
+  // failed on its second, on the one case that can tell the two apart ("an undeclared custom tier
+  // is NOT verbatim"). A private cache dir inside the throwaway build leaves the repo's alone.
   const run = (args) =>
-    execFileSync(treeSitter, args, { cwd: work, stdio: "inherit" });
+    execFileSync(treeSitter, args, {
+      cwd: work,
+      stdio: "inherit",
+      env: { ...process.env, TREE_SITTER_LIBDIR: path.join(work, "lib") },
+    });
 
   console.log("test:project: generating the overlaid grammar…");
   run(["generate"]);

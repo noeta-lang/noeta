@@ -1,6 +1,18 @@
 # The parallel-path audit — where the next four bugs live
 
-Status: **findings** — each row proposes a chokepoint and sizes it. No chokepoint has been built. Row 1's *live defect* in the wasm tail is fixed (see its Progress note) because the gate that was supposed to catch it had to be repaired first; the row's seven-copy problem is untouched.
+Status: **in progress on `audit/parallel-paths`** since 2026-08-01 — the rows are being built, not just proposed. Each closed row carries a note in its own section saying what was built and what the row got wrong; this header says only which are done. Everything below the header is the original reading pass, kept as written so the *predictions* can be scored against the outcomes.
+
+**Closed:** rows 1 (one run tail), 2 (cache-key census), 3 (provenance is one value), 6 (Sites policies), 7 (one jump-target answer), 8 (one text-tier resolution), 9 + 13 (the AOT oracle and the run core), 10 (one hot install), 11 (the vocabulary), 12 (both artifact halves gated), 14 (a generator that renumbers). **In flight:** row 5. **Open:** row 4.
+
+Three corrections the work made to the reading pass, all worth carrying into the next audit.
+
+**It undercounts copies, every time it counted them.** Row 7 said four sites, there were five. Row 1 said seven run tails, there were eight — plus the oracle, a ninth. Row 10 said the serve `EntryCall` was written twice, there were three. Row 3 said four bad `CheckOptions` literals, there were six, and two of them were inside the crate the row was about. Row 12 said `Module` had seventeen fields; it has eighteen. Row 8 said the verbatim-tier set was derived in four places, there were five — and the fifth, `noeta fmt`, was the one carrying a live defect.
+
+**It under-sizes fixes that are structurally right.** Row 3's "~40 lines in `noeta-check`, ~11 call sites" became a value object threaded down into the loader, because constructors alone still let a caller pass two of three arguments. Row 12's "~120 lines, most of it the digest walk" was out by ~9×, for a reason worth carrying: postcard carries no schema, so there is no structural walk to write — the hand-built canonical value *is* the work.
+
+**Twice the proposed fix was wrong in a way only measurement caught.** The audit's single `hot_install` for row 10 would have built N watchers, because three of its nine steps are per-process and the rest per-isolate. Row 14's declaration-rotation — mine, not the original audit's — renumbered nothing at all, because type-argument rows are interned at concrete call sites and a declaration body forwards its `T` through a hidden slot that is not a table index. Both were found by building the proposal and measuring it, not by reading it again.
+
+None of the three errs in the safe direction.
 
 The compile/swap arc closed a bug class by deleting a copy. `compile_to_mc` and `SessionCompiler::extend_impl` were two implementations of one eleven-step sequence, four shipped bugs lived in the delta, and the fix was one `install` plus a `TABLE_POLICIES` census — one function, one list, no second place to forget. The module docs of `crates/noeta-compiler/tests/pipeline_tables.rs` and `crates/noeta-ir/tests/lowerer_field_census.rs` tell that story better than this file can.
 
@@ -14,7 +26,7 @@ Two sections follow the rows: what is **already tracked elsewhere** (so this fil
 
 ## 1. `RunResult.stderr` is written by two of seven run tails, and the wasm oracle forgot it the same way
 
-**Live. Silent. Reproducible today.**
+**CLOSED 2026-08-01** — one `RunTail`, seven (eight) callers, four live defects fixed. The findings below are kept as written; the closing note is at the end of the section.
 
 `std.io`'s `err`/`errln` are *observable program output*, buffered into `RunResult.stderr` (`crates/noeta-backend/src/lib.rs:18-24`, filled at `crates/noeta-vm/src/lifecycle.rs:463`) exactly as `stdout` is. Seven places turn a `(RunResult, trace)` into process output. Seven hand-written copies of one epilogue.
 
@@ -27,6 +39,9 @@ Two sections follow the rows: what is **already tracked elsewhere** (so this fil
 | `crates/noeta-wasm-runner/src/main.rs:111-126` (`build --wasm`) | ✅ | ✅ *(fixed)* | `render_mapped` | ✅ |
 | `crates/noeta-wasm-serve/src/lib.rs:161-183` (`wasi:http` edge) | ✗ on success | **✗** | — | — |
 | `crates/noeta-cli/src/cmd/serve.rs:559-567` / `:678-686` (workers) | ✅ | ✅ | **✗** | **✗** — prints `[worker] aborted` |
+
+(The table above is the state the audit found. **Row closed** — see the closing note at the end of
+this section; every cell is ✅ now, through one shared value rather than seven agreeing copies.)
 
 `run_compiled_module`'s own doc says it exists so "the CLI (`run`, bundle run) and the standalone runner … both present identical output". **It is the chokepoint, and five of the seven tails do not call it.**
 
@@ -48,6 +63,21 @@ That the oracle was blind here for weeks had a second cause worth recording with
 
 A note for whoever does the unification: `run_compiled_module` would **not** drop into the wasm runner as-is. The runner constructs its own `Host`/`Executor` pair (`SandboxHost` vs `WasiHost`) and runs `run_module_debug(…, None)`, whereas `run_compiled_module` owns host selection itself. The reusable piece is the *tail* — the `(RunResult, trace, SourceMap) → process output` half — which is why the row proposes a `RunTail` value beside the function rather than the function alone. Split that out and the wasm runner is a two-line caller; hand it the whole function and it is not a caller at all.
 
+**CLOSED (2026-08-01), `audit/run-tail`.** `noeta_backend::RunTail` is the epilogue, and all seven tails call it — plus an eighth the audit missed, `serve.rs`'s single-process `run_program_hot`.
+
+It went into `noeta-backend`, not "beside `run_compiled_module`" as the row proposed, and the reason is worth recording: `noeta-runner` links the L2 compile front-end, so the AOT runtime staticlib (whose `aot_runtime_does_not_link_the_compiler_frontend` guard exists to keep it out) and the two wasm crates (which have no `noeta-host-real`/tokio) cannot depend on it. `noeta-backend` already owns `RunResult` and `render_trace` and is the common ancestor of every execution surface. The type is `render` → components → `emit()` / `parts()`, so a surface that wants *structured* output — the `wasi:http` edge composes a 500 body, a serve worker labels an abort — reads the parts instead of hand-writing the epilogue again, which is how seven copies happened in the first place. `parts()` destructures `Self` exhaustively, so a **new output component** fails to compile until it is classified onto a stream and given a position in the order, and every structured consumer picks it up with no edit.
+
+Four live defects went with it: the dropped stderr on `run_declared_tier` / the AOT runtime / the `wasi:http` edge (which also dropped stdout on the success path); `result.exit_code as u8` on the AOT path (a `--native` binary exiting 256 exited 0); the AOT host's missing `with_live_output`; and the serve workers' `[worker] aborted`, five words replaced by the diagnostic and the stack.
+
+Two more the row did not name, both found by looking for the copies of a thing it did name:
+
+- **The serve workers had the AOT tail's live-output bug too.** `run_worker`, `run_worker_hot` and `run_program_hot` all built their real host without `with_live_output`, while the single-worker `serve` path — through `run_program` — had it. A server never exits on its own, so a `--parallel` worker buffered every byte it printed for its whole lifetime: `echo` from a request handler appeared *never*, not merely late. One defect, two surfaces, found once.
+- **The oracle is a caller now, not a ninth copy.** `crates/noeta-conformance/src/wasm.rs`'s `compare` composed its expected stderr by hand and forgot `native.stderr` — the same omission, in the gate that existed to catch it, so both sides dropped the stream and agreed. Adding `native.stderr` (the 07-31 fix) made it right; building a `RunTail` makes it *unable to drift*, and a future output component reaches the comparison by construction. `exit_code_byte` deleted with it — that was the tail's exit conversion, hand-copied a tenth time.
+
+The tests are per-surface and behavioural, not "did you call the function": stderr bytes, their order relative to the diagnostics and the traceback, and the exit-code conversion, in `crates/noeta-runner/tests/runner.rs`, `crates/noeta-wasm-runner/tests/runner.rs`, `crates/noeta-cli/tests/cli/run_tail.rs`, `crates/noeta-wasm-serve/src/lib.rs`, and `crates/noeta-cli/tests/parallel_serve.rs` (in `hot-e2e.sh`'s census, count bumped to 2). `build_native_matches_a_source_run_byte_for_byte` is the one that mattered most and was the weakest: it compared **stdout only** over a fixture that wrote no stderr and `return`ed silently without `cargo`/`cc` — the only gate on a surface with no oracle at all (row 9), reading green over three defects. It now compares both streams and the exit code, and its skips say what they did not prove. Mutation-verified: restoring the pre-unification AOT epilogue verbatim fails both native tests (`stderr diverged`, and `256 truncated to Some(0) — as u8 is back`).
+
+Row 9 is unchanged by this and is the remaining exposure: `--native` still has no differential oracle, so its correctness rests on those two hand-written programs.
+
 ---
 
 ## 2. The startup-cache key is a hand-enumerated list of compilation inputs, and it is incomplete today
@@ -65,6 +95,8 @@ Same shape one level down: `DepPackage` has seven public fields (`crates/noeta-l
 **Past drift.** `2495394f4 fix(cache): key on the entry file, not just the source set` — `noeta run a.noe` then `noeta run b.noe` in one directory ran the same program. And `key_deps`'s own doc (`compile.rs:566-569`): "Before S2 only the root package's edition was keyed, so a dependency-edition change could serve a stale artifact." Two shipped instances, both "an input nobody added to the hand-enumerated key". The tests (`crates/noeta-cache/src/lib.rs:429-561`, `compile.rs:694`) are hand-written "changing X changes the key" assertions — one per input someone remembered, which is the same discipline the key relies on.
 
 **Chokepoint.** A `FrontFacts` / `DepPackage` field census in the style of `lowerer_field_census.rs`: every field is either key material or explicitly declared irrelevant *with a reason*, and a new field fails the test until classified. **Size: ~120 lines of test, plus two or three lines for the live gaps.** `PackageUses` is `HashMap`-backed — folding it in must sort first, or it reintroduces the bug the cross-process determinism gate exists for.
+
+**Closed 2026-08-01.** The first pass had already made `open_startup_cache` and `key_deps` **destructure** their inputs with no rest-pattern, so a new field on either struct is a compile error — the strong half, needing no test. What was left is the half a destructure cannot carry: `let FrontFacts { thing: _, .. }` compiles as happily as folding it and reads as a decision nobody made. `crates/noeta-runner/tests/cache_key_census.rs` now requires every destructured field to be *used*, or listed with a reason. Exactly one is listed — `DepPackage::prefix`, which is folded into every one of that dependency's key names rather than keyed as a value of its own — and the excuse list is itself checked against the source, so it cannot outlive what it excuses. Mutation-verified both ways: underscore `package_uses` and it names it; put the rest-pattern back and it says so.
 
 ---
 
@@ -84,6 +116,12 @@ This is the cleanest example in the audit of a language feature that makes a par
 
 **Chokepoint.** Replace the literals with constructors that take provenance as an argument — `CheckOptions::for_program(editions)` and `CheckOptions::for_workspace(editions, packages, package_uses)` — and make the struct non-exhaustive so a literal cannot be written outside the crate. Then `activate_tiers` and `activate_tiers_with` collapse into one function that takes the context the constructor already carries. **Size: ~40 lines in `noeta-check`, ~11 call sites rewritten, and the two live bugs disappear as a side effect.**
 
+**Done (2026-08-01), and the sizing was wrong in an instructive way.** The constructors alone would have left three arguments a caller can still pass two of, so the triple became a value object: `noeta_edition::Provenance { editions, packages, uses }`, `#[non_exhaustive]`, no `Default`, re-exported as `noeta_check::Provenance`. It lives in `noeta-edition` because that is the lowest crate that can name all three types (`noeta-span` owns `PackageMap`/`PackageUses` and cannot depend upward on editions), which means the **loader** can carry it: `noeta_loader::Linked` now has one `provenance` field instead of three, and so does `noeta_runner::Loaded`. There is no longer a layer at which the three exist apart, so `Linked` cannot be constructed with two of them — the CLI's `linked.package_uses = facts.package_uses;` patch-after-construction is deleted, and `noeta-db` grew one `workspace_provenance` query in place of three separate asks.
+
+`CheckOptions` is `#[non_exhaustive]` with `for_program`/`for_sources`/`for_workspace` + `with_expr_types`/`with_registry`, and `Config::of` destructures it with no rest-pattern, so a new option is a compile error at one site. `TierContext` is deleted and `activate_tiers`/`activate_tiers_with` are one function taking `&Provenance`.
+
+**A fifth instance of the bug, inside `noeta-check` itself, that the audit did not find:** `check_all_session_opts` spelled the `Config` fields out and stopped after `editions`, dropping `packages` and `package_uses` through `..Config::default()`. Every REPL entry, every debug-console fragment and every hot-swap session therefore ran with no package map and no `@name` bindings — no orphan rule, and a spurious E0036 on any project that renames a directive. A sixth: `noeta-mcp`'s debug entry took `loaded.editions` alone and passed it to `check_all_session_with`, so the agent debug tools had the same defect from the other side. Both are structurally unwriteable now.
+
 ---
 
 ## 4. The package-manager's trust chain: eleven cross-repo byte formats, a manual ritual, and a CI that never runs the tests
@@ -102,6 +140,21 @@ They agree today. `diff -r` of the two fixture directories is byte-identical acr
 
 **Live divergence in the publish limits.** `crates/noeta-pm/src/manifest.rs:1643` counts `trimmed.chars().count()`; `registry/src/index.ts:525` counts `.length` (UTF-16 code units). `manifest.rs:1645` uses `char::is_control` (which includes C1, U+0080–U+009F) where `index.ts:1083` uses an ASCII-only regex. A 180-character description with astral-plane characters passes `noeta check` and is 400'd at publish; U+0085 is client-rejected and server-accepted. Loud, but it is the tell that the "MUST match the server" comments are load-bearing and unassisted.
 
+*Verified 2026-08-01, both halves still exactly as described.* The two lines, for whoever fixes it:
+
+```rust
+// crates/noeta-pm/src/manifest.rs:1643-1644
+|| trimmed.chars().count() > MAX_DESCRIPTION      // Unicode scalar values
+|| trimmed.chars().any(|c| c.is_control())        // Cc: U+0000–U+001F and U+007F–U+009F
+```
+```ts
+// registry/src/index.ts:1083
+if (trimmed.length === 0 || trimmed.length > MAX_DESCRIPTION || /[\u0000-\u001f\u007f]/.test(trimmed))
+//     UTF-16 code units ────────┘                                     ASCII control + DEL only ┘
+```
+
+**Adopt the Rust side's semantics, because they are the ones a human means by "characters"** — an emoji is one character, not two — and because the client is where the message is actionable. The registry becomes `[...trimmed].length` (code points, not UTF-16 units) and `/[\u0000-\u001f\u007f-\u009f]/` (the full `Cc` category). Both halves then agree on Unicode rather than on an accident of each language's default string model. Pin it with a boundary-length `publish-request` fixture in the shared wire set — one description at exactly `MAX_DESCRIPTION` code points built from astral-plane characters, and one containing U+0085 — since a limit that only agrees on ASCII is not a limit that was checked.
+
 **Past drift.** Registry `fe9139d`: "reconcile PROTOCOL.md with the implemented wire schema … The spec had drifted from what both sides actually implement." Registry `6407107` documents a *deliberate* divergence window, because lockstep across two repos is painful. And registry `d815220` is the near-miss: the log public key is a raw 32-byte Ed25519 key, not the 44-byte SPKI DER openssl emits by default, and "**the mismatch fails as signatures that never verify rather than as a load error**" — caught only because the author checked production by hand.
 
 **Chokepoints, cheapest first.**
@@ -110,6 +163,27 @@ They agree today. `diff -r` of the two fixture directories is byte-identical acr
 3. Embed the manifest's own SHA-256 as a source constant on each side, so an un-propagated regeneration fails the *other* repo's build. **~20 lines across two repos.**
 4. Move the publish limits into the fixture set as a boundary-length `publish-request` fixture and align the counting semantics. **~30 lines.**
 5. Commit the throwaway semver differential as `crates/noeta-pm/examples/semver_vectors.rs` emitting the case list as JSON, consumed by the TS test. **~50 lines.**
+
+**Progress (2026-08-01) — all five chokepoints closed, plus the sixth this row's first pass named.**
+Items 1 and 2 landed earlier (the `✗`/exit-1 split and `--all-features` in `ci.yml` + `gate.sh`).
+Items 3, 4 and 5 landed on `audit/pm-trust` here and `audit/pm-trust` in `noeta-registry`.
+
+**3.** `MANIFEST.sha256` now hashes to a source constant on each side — `noeta_pm::registry::WIRE_MANIFEST_SHA256` and the registry's `src/wire-manifest.ts` — deliberately the one value *not* inside the copied directory.
+The chokepoint is `scripts/sync-wire-fixtures.sh`: it regenerates the manifest, rewrites both stamps and mirrors the directory in one command, and `--check` is a `gate.sh` step that diffs the two checkouts.
+Verified by mutation across repos: edit a fixture here, regenerate, `cp` the set across → **the registry's suite fails**, naming the stamp; forget to update the stamp *here* → this repo's suite fails first.
+**The residual gap is worth stating plainly.** If the fixtures are never copied at all, the registry repo alone still passes — that is structural, not an oversight: a repo cannot detect the staleness of a copy it does not have. What closes it is `sync-wire-fixtures.sh --check` in the gate, which sees both checkouts and names the drifting file (verified). The stamp closes the *copied-but-unacknowledged* case, which the manifest alone could not.
+
+**4.** The publish limits agree on Unicode, not on each language's default string model: the Worker now counts code points (`[...trimmed].length`) and rejects the whole `Cc` category, matching `char::is_control`.
+Two boundary fixtures pin it from both ends of the wire against the same bytes — one description of exactly `MAX_DESCRIPTION` astral-plane code points (400 UTF-16 units, must be accepted and must round-trip untruncated) and one containing U+0085 (must be rejected).
+Each test asserts the fixture *is still the boundary* before asserting the verdict, so a regeneration that flattened it fails rather than passing vacuously. All four mutations (each side, each axis) fail a test that names which side drifted.
+
+**5.** The throwaway binary is `crates/noeta-pm/examples/semver_vectors.rs`, emitting **85 cases** as a generated wire fixture that both suites replay — Rust against `VersionReq::matches`, TypeScript against the hand port.
+**The port agrees with the crate on all 85 cases**, including the pre-release corners: no live bug in dependency resolution or advisory matching. Recording that as a fact is the point.
+One thing the exercise surfaced: the hand-written TS cases did **not** cover `^0.2` (a bare-minor caret below 1.0), and a mutation making it widen like `^1.2` passed the old suite and is caught only by the differential.
+
+**Plus the sixth.** `list_advisories`, `advisory_checkpoint` and `advisory_public_key` classified a malformed *body* as `PmError::Network` — so a JSON-shape drift, which is precisely what the fixture set exists to prevent, degraded to a grey note and exit 0 in `noeta audit`: the same silence class as item 1, at the same altitude, reached by a different door. All three now return `PmError::Trust` with a message naming `test_data/wire`.
+
+Both cross-repo pins are **integration tests with no feature gate** (`tests/wire_fixture_manifest.rs`, `tests/semver_vectors.rs`, `tests/publish_limits.rs`), so they run in the plain `cargo test --workspace` step and not only under `--all-features`: a pin that exists to catch a forgotten step must not itself sit behind a step someone can forget. `cargo test -p noeta-pm` bare went 203 → 209 tests; `--all-features` runs 267.
 
 ---
 
@@ -128,6 +202,18 @@ They agree today. `diff -r` of the two fixture directories is byte-identical acr
 **Failure mode.** A type error inside a `@test { … }` block is invisible in the editor and to MCP, and reported by `noeta check`. `cmd_check`'s doc comment (`cmd/check.rs:36-41`) describes closing precisely this for the CLI — "`noeta check .` said '0 errors' about a file `noeta test` could not compile". `crates/noeta-ide/src/lib.rs:506-508` names it from the other side: "the editor shows the file as clean while `noeta check` fails on it, which is exactly the compiler/editor disagreement this arc exists to end." Both statements are true, and neither reaches the tier bodies.
 
 **Chokepoint.** One `project_check(root, options) -> Diagnostics` in `noeta-ide` (which already owns the `DocumentStore` all three surfaces share), driving the file walk, the tier activation and the per-tier sweep once. `noeta check` becomes its printer; the LSP calls it for workspace diagnostics; MCP calls it for `check`. **Size: ~200 lines moved out of `cmd/check.rs`, three thin callers.** Row 3's constructor lands first — the three surfaces cannot share a function while they disagree about what `CheckOptions` to build.
+
+**Closed (2026-08-01).** The table's "per-tier sweep" column closed first, in `3e0bfa646` — the editor and the agent read the tier-aware query family rather than re-deriving the CLI's sweep. What stayed open is the column beside it: **which entries**, and the three hand-written copies of the walk that decided it.
+
+`noeta_ide::project_check` is the walk, and `noeta_db::entry_diagnostics` is the whole of "which shapes of one entry". `noeta check` is its printer; the MCP `check` tool is a thin adapter that finally accepts a **directory** (it took a single `.noe` file and checked whatever entry that file happened to be); the LSP gained `workspace/diagnostic` and `textDocument/diagnostic`, so a fault in a file nobody has opened is reported in the editor at all. The surfaces now differ in which entries they sweep and in nothing else — one fixture with one test per surface (`crates/noeta-cli/tests/three_surfaces.rs`) fails naming whichever one goes quiet, verified by mutation both ways: skipping the sweep in `DocumentStore::diagnostics` fails only the open-document test; skipping it in `project_check` fails the other three.
+
+The engine is salsa. The decisive argument is not speed but singularity — the editor's per-document path *must* be salsa, so a filesystem-based walk would have left the shapes question answered twice. Speed is not an obstacle: min-of-7, release, `tests/conformance` (1260 files) 286 → 286 ms, one flat 111-entry pool 40 → 48 ms, and `check <one file>` inside that pool 18 → **4 ms** (the query path parses what the entry reaches, not the whole directory). Output is byte-identical over `tests/conformance`, `tests/bench`, `docs`, `examples`, the vscode test workspace, the `init` template and the whole `para` repo.
+
+Putting the surfaces behind one function surfaced three more disagreements of exactly this shape, each of them *quietly clean* in the editor (pinned in `crates/noeta-ide/tests/agreement.rs`):
+
+- the salsa link passed `native_roots: None` unconditionally, so it stayed **lenient** where `noeta check` was strict — a `use` that named nothing at all was silently fine in the editor. Strictness is now a property of the workspace, set by whoever resolved the graph;
+- `tokens_in`/`ast_in` never called the loader's `retarget`, so every lex/parse diagnostic built with the default entry id landed on `SourceId::FIRST` — a lex error in any member but the directory's first was attributed to the wrong file, and the editor's per-document filter dropped it entirely;
+- `DocumentStore::tests` hardcoded `&["test"]`, which survives a plain tier rename (activation matches by identity) but not a package that moves the name `test` onto another tier — an empty test explorer for a file full of tests.
 
 ---
 
@@ -150,6 +236,8 @@ They agree today. `diff -r` of the two fixture directories is byte-identical acr
 
 ## 7. "Which op carries a jump target" is written out four times, twice with a silently-wrong catch-all
 
+**✅ CLOSED** on `audit/op-jump-targets`. The set is now `Op::for_each_jump_pc`/`_mut` in `noeta-bytecode` — one `macro_rules!` arm list, no `_` catch-all, so a new `Op` variant is a compile error there; the ten fields are declared `JumpPc` (a `u32` alias) so the declaration itself says which indices are code. Every site calls it, and the JIT's `succ_all`/`analysis_succ` — the same function written twice with different coverage — collapsed into one `tier0_succ`. `crates/noeta-bytecode/tests/op_jump_pc_census.rs` classifies every `u32`-shaped field of `Op` and fails until a new one is declared a destination or declared not to be. The count of ten was right; the count of sites was five — `regalloc.rs`'s `op_facts` repeated the answer too (safely, being exhaustive over variants).
+
 **No live defect — all four lists currently agree. Nothing forces them to.**
 
 Exactly ten `Op` variants carry a code index (`fallback: u32` ×1 at `crates/noeta-bytecode/src/lib.rs:821`, `fail: u32` ×5 at `:1235-1262`, `target: u32` ×4 at `:1391-1410`). That set is written by hand in four places:
@@ -171,6 +259,8 @@ Two files each state an invariant they cannot check. That is a chokepoint that w
 
 ## 8. The loader's text-tier lexing has a salsa twin, ~80 lines, comment-linked and untested
 
+**CLOSED 2026-08-01** — lifted, not mirrored. **Two live defects**, both of which the row said it had not found. The findings below are kept as written; the closing note is at the end of the section.
+
 **No live defect found. Maximally silent failure mode, in the seam between "what the compiler sees" and "what the editor sees".**
 
 `crates/noeta-db/src/lib.rs:717` `workspace_renamed_text_tiers` is documented as "the salsa twin of the loader's `renamed_text_tier_locals`", with "Mirrors the loader's `declared_by_segment`" (`:723`) and "exactly as the loader lines them up" (`:713`); `:765` `source_text_tiers` is "The salsa twin of the loader's per-package re-lex"; `:788` says "Matches the loader's `union` in `lex_program`." The original is `crates/noeta-loader/src/lib.rs:1522` `lex_program`.
@@ -182,6 +272,28 @@ Four "twin"/"mirrors" comments, ~80 lines of resolution logic, **no parity test*
 Counting the two grammar generators (`noeta grammar tree-sitter` → `project-tiers.json`, and `generated-tiers.tmLanguage.json`), the same "which `@name`s lex verbatim" set is derived in four places. The twin was created by `30136f1ed feat(ide): per-package lexing of renamed text tiers in the editor (3g)` — memory records the remaining lexer half of that item as open.
 
 **Chokepoint.** Lift the resolution — manifest bindings + per-package declarations → the set of verbatim-lexing `@name`s — into one pure function in `noeta-loader` that takes its inputs rather than reading the filesystem, and have the salsa query call it. **Size: ~80 lines lifted, ~30 for the query wrapper.** Failing that, the backend-mirror policy applies as-is: a corpus case that would catch divergence, plus a parity test over a package with a renamed text tier.
+
+### Closing note (2026-08-01)
+
+**The row's "no live defect found" was wrong twice, and the second one is not even in the two files it named.**
+
+**Defect 1 — the twin resolved an extension provider by bare name.** The loader used `find_ext_tier_scoped(provider_roots, exported)`; the salsa copy tested `ext_verbatim_tier_names().contains(exported)`, with a comment arguing the weakening was safe ("under the single-registry stance there is no same-name provider collision, and a false positive would only capture more prose"). Both halves of that are false. The collision needs no second *extension* — a `.noe` dependency shipping `@tier(json)`, a **code** tier, collides with std's verbatim `@json`, and `[tiers] notes = "speckit:json"` is then a perfectly valid binding onto a code tier. And capturing more prose is not benign when only one surface does it: on the fixture now in `crates/noeta-ide/tests/agreement.rs`, `noeta check` reported **zero diagnostics** on a project the loader could not lex (`E0002` unterminated string, `E0004`). The quiet direction, exactly as the row predicted the failure mode — it just predicted it would not be live yet.
+
+Since row 5, `noeta check` *is* the editor's engine, so the axis had moved: the disagreement was no longer LSP-vs-`check` but **`noeta check` + the LSP vs `noeta run`/`build`/`test`**.
+
+**Defect 2 — `noeta fmt` is a fifth derivation, and it dropped the manifest half entirely.** The row counted four (loader, salsa, two grammar generators). `crates/noeta-cli/src/cmd/fmt.rs`'s `fmt_dir_tiers` is a fifth: it scans `@tier(…, text:)` declarations and the installed extensions, *already resolves the dependency graph*, and never looks at `graph.package_uses`. So the project this repo ships as `a_renamed_text_tier_captures_under_its_local_name` — `[tiers] docs = "std:doc"` over a markdown body — runs clean, checks clean, and `noeta fmt` says `not formatted — source does not parse (3 diagnostic(s))`. Fixed, root-package bindings only: fmt's set is one flat project set, so a dependency's local spelling must not capture in the files being formatted.
+
+**Lifted, not mirrored.** `noeta_loader::renamed_text_tier_locals` is now pure — `PackageUses` + per-dependency declared text tiers + `ExtTiers` in, the verbatim-lexing `@name`s per `PackageOrigin` out — and the salsa query, the loader's `lex_program` and `noeta fmt` all call it. What genuinely stays per-surface is *enumerating* the inputs (a `Vec<Lexed>` beside a `PackageMap` on one side, salsa's `dep_modules` on the other, `graph.packages` on the third); nothing about what they mean. The "salsa's query granularity forces a second implementation" hypothesis did not survive contact: the one thing the query could not do was reach the process registry, and that is solved by the registry travelling as a value — `ExtEnv` now carries `ExtTiers` (provider root + name + verbatim) instead of bare names, which is also what makes the scoping possible on that side at all.
+
+**The row's other two "twin" comments are gone too.** `source_text_tiers` ("the salsa twin of the loader's per-package re-lex") and `workspace_text_tiers_union` ("Matches the loader's `union` in `lex_program`") are the same assembly written twice: a program-wide set widened by some package's renamed locals, once per source and once over every package. `noeta_loader::widened_text_tiers` is that assembly and all four sites call it. No "twin"/"mirrors" comment about text-tier lexing survives.
+
+**Two smaller findings, folded in.** The resolved locals were returned in `HashMap` walk order; the salsa side memoizes that value and compares it to decide whether to re-lex, and a `RandomState` walk is not stable across two constructions of the same map, so the answer could compare unequal to itself. They are sorted now. And `find_ext_tier_scoped` is *first-match*, not any-match, so `ExtTiers::is_verbatim_scoped` replicates first-match; a test pins the two against each other over the real registry.
+
+**The grammar generators are still a separate derivation — row 11 did not touch them.** `crates/noeta-ide/tests/editor_vocabulary.rs` generates keywords, built-in types and prelude names from the compiler's own censuses, and explicitly *excludes* tier names (`GRAMMAR_JS_NON_VOCABULARY` carries `doc` with the note "a per-project `project-tiers.json` widens the set"). Both generators — `noeta grammar tree-sitter` (`collect_project_tiers`, which scans `.noe` files plus `ext_tiers()`) and the VS Code `tierHighlighting.js` regex scan — have **the same omission fmt had**: neither reads `[tiers]`, so a renamed text tier's body is mis-parsed by tree-sitter and mis-coloured by TextMate. **Not fixed here**, deliberately: the lifted function answers a *boolean* ("is this verbatim"), and a grammar needs the provider tier's **body language and text-vs-expr kind** to emit an injection — so making the generators consumers means generalizing the lifted function to return the resolved provider tier, not calling it as-is. The TextMate half is JavaScript and cannot call it at all; it would have to consume what `noeta grammar` emits instead of scanning for itself. That is a well-formed follow-up row, and it is highlighting-only — no compile/run/check surface is affected.
+
+Also worth carrying: `project-tiers.json` is one flat per-*project* list while a `[tiers]` rename is per-*package*, so a follow-up has a modelling question to answer before it starts widening that list.
+
+**Verification.** `crates/noeta-ide/tests/agreement.rs` runs one project on disk through both surfaces and compares diagnostic codes, over three fixtures differing only in the app's `[tiers]` line and the dependency's `@tier(…)`: a bound **text** tier (both clean), no binding (both `E0002` — the control that proves the capture is load-bearing), and the binding-onto-a-code-tier collision. The positive fixture also asserts outright that it produced a renamed text tier, so a fixture that renamed nothing cannot pass on two empty answers. Mutation-verified both ways: restoring bare-name matching on the salsa side alone fails the collision fixture; dropping the per-dependency declaration lookup on the salsa side alone fails the text-tier fixture. Note what a parity test cannot do — a bug *inside* the shared function keeps both sides equal, which is why the function carries its own unit tests in `noeta-loader` and why lifting beats mirroring.
 
 ---
 
@@ -201,9 +313,31 @@ That is why the AOT tail's dropped stderr and truncated exit code went unnoticed
 
 **Chokepoint.** `crates/noeta-conformance/src/aot.rs` shaped like `bundle.rs`: for every corpus program that compiles, build the `--native` artifact and assert the whole `RunResult` matches the native VM run; plus a `NOETA_JIT_AOT` arm in `gate.sh`/`ci.yml`. **Size: ~200 lines for the oracle — link time is the real cost, so it may have to be a gate-only rather than per-commit arm — and ~4 lines for the JIT arm.** Also change `report.native_protos > 0` (`corpus.rs:216`, `:259`) from a floor to a ratchet: a regression in `is_fast_op` that dropped 2600 prototypes to bail stubs passes today.
 
+**Done (2026-08-01, `audit/aot-oracle`).** Both arms exist, and the split is the one the row guessed at:
+
+* **Per-commit, no linker.** The `NOETA_JIT_AOT` environment knob became `RunOptions::aot_bodies`, so the AOT body shape can be armed for *one run* instead of one process — which is what lets it be a `cargo test` arm rather than a shell-only one. `JitDiffArm::AotBodies` runs the whole corpus through it (`jit_differential_aot_bodies_agree`), and it is green: **821 programs, 2633/2640 prototypes native, ~48s** against the plain arm's ~32s. In `gate.sh` (tier 2) and `ci.yml`'s jit job. The three comments claiming the codegen was "proven corpus-wide by the `NOETA_JIT_AOT` oracle" are now true.
+* **Gate-only, linked.** `--aot-differential` builds the real artifact per corpus program — AOT object, `cc`-link against `libnoeta_aot.a`, staple, run — and compares it against `noeta run` over the same module's bundle. The bundle is written to a file literally named `<aot>` so both tails render diagnostics against the same synthetic source name and the stderr comparison is byte-for-byte. Tier 3 in `gate.sh` (its own `aot` group, with the C-toolchain prerequisite named), and a step in `ci.yml`'s jit job.
+
+**It found a live `--native` crash on its first full-corpus run.** `modules/derived_package_path/main.noe` — three prototypes, two cross-module calls inside one interpolation — produces a linked artifact that aborts **every time** with a Rust panic in `noeta-vm/src/dispatch.rs` at `&chunk.code[pc]`: `the len is 3 but the index is 94253172131408`. The index is a pointer (it varies with ASLR run to run), so after returning from a linked native body the interpreter resumes at a *code address* instead of a program counter. `noeta run` over the identical module prints `deep + root` and exits 0.
+
+The variable is isolated: the **same module agrees with tier 0 under the in-process AOT-bodies arm**, which emits the same bodies and installs them through `jit_install` — so the codegen is not the difference. What differs is the linked path: entries bound from the `noeta_aot_dispatch` table into a VM with no engine at all (`tier1.jit == None`, `tier1.aot == true`). That is the seam that already produced one AOT-only soundness bug (`0f9752d4c`, the misaligned dispatch table), and it is the seam nothing was watching. Reproduce with `NOETA_AOT_KEEP=1 … --aot-differential --file modules/derived_package_path/main.noe` and run the kept `app` — it aborts 12 times out of 12.
+
+Worth recording how nearly it hid: a Rust panic prints an ASLR-varying address, so on the first pass the case looked like a program that *does not reproduce itself* and was classified as nondeterministic — the oracle would have gone green over a crash. Host-level aborts (a signal, an exit ≥ 128, `panicked at` in stderr) are now checked **before** the reproducibility test, because "it fell over differently each time" is not an excuse.
+
+**It also found row 1's AOT tail, on the real artifact, immediately**: `io/streams.noe` and `io/to_string_parity.noe` print nothing on stderr from a `--native` binary (`RunResult.stderr` is dropped), and `std/os_exit.noe` exits **1** where `noeta run` exits 3. The exit-code half is worse than the row states: `result.exit_code as u8` is not the binding constraint — `run_embedded_with_extensions` maps the resulting `ExitCode` to `0` for success and **`1` for everything else**, so *every* nonzero exit code collapses to 1, and fixing only the documented `as u8` line will not move this case. Those three, plus the crash above, live in `KNOWN_DIVERGENCES` — an expect-fail ratchet, not a suppression: the oracle fails on anything new **and** on a listed row that stops reproducing, so no row can outlive the bug it names.
+
+Two things the row did not anticipate, both now measured rather than assumed:
+
+* **Real host means real sockets.** Every other oracle runs the corpus under the sandbox executor, where time is fake and the whole corpus is instant. A `--native` artifact runs on the real host, so the server cases block. Each side is capped (20s, `NOETA_AOT_TIMEOUT_SECS`) and a case that outlives it is `timed_out` — excluded, counted, **named**.
+* **Nondeterminism is measured, not listed.** A case that disagrees gets one truth re-run; if the truth does not reproduce *itself* (clock, RNG, ports) it is `nondeterministic` — excluded, counted, named. No hand-maintained exclusion list to rot.
+
+The `native_protos > 0` floor is now `assert_native_proto_ratchet` (floor 2550, measured 2633) on all three arms, with the failure message spelling out why an all-bail tier 1 still *agrees* with tier 0.
+
 ---
 
 ## 10. `noeta serve`'s three hot paths — confirmed, and it has already dropped a feature
+
+**CLOSED 2026-08-01**, `audit/hot-install`. The findings below are kept as written; the closing note is at the end of the section.
 
 **Known and unfixed. Confirmed, characterized, with a smoking gun.**
 
@@ -218,6 +352,22 @@ There is a third copy of the front half, in another file. `crates/noeta-cli/src/
 Finally, `entry_tail` is called with an `EntryCall` the extension command declared (`serve.rs:315`) on one path and with one hand-written in the CLI (`:404-412`, `SERVE_ENTRY_MODULE` + `HANDLER`) on the other, under a comment asserting they are "built the same way". They are, *now*; a change to the serve entry's signature is two edits in two crates.
 
 **Chokepoint.** One `hot_install(program, sites, consumers, host_builder)` covering steps 3–8, one `run_tail` for step 9 (row 1's chokepoint), and one `load_entry_with_tail(file, tail)` for the front half shared with `watch.rs`. The `--parallel` `EntryCall` comes from the same `ExtCommand` declaration the single-worker path reads. **Size: ~120 lines moved; the three functions become three short callers.** Row 1 subsumes the tail half, so doing that first makes this smaller.
+
+### Closing note
+
+**The install split in two, not one, and the row's own sentence says why.** Steps 4–6 (mailbox, wake, watcher) happen once per *process*; steps 3 and 7–9 (session compile, host, executor, run, tail) happen once per *isolate*. `serve::HotRig` is both halves — `HotRig::arm(entry, tail, baseline, front, consumers)` and `rig.run_isolate(program, sites, sources, HotIsolate { … })` — and the parameter the row predicted is the only one there is: `consumers`. `run_program_hot` arms a rig of 1 and runs one isolate; `serve_parallel_hot` folded into `serve_parallel_impl`, arms a rig of N and runs the same `run_isolate` in each. `run_worker_hot` no longer exists.
+
+**The front half went further than the row asked.** `context::load_entry_with_tail(file, tail, Front)` is shared by all three sites, but the loader call itself moved *down* a layer into `noeta_runner::compile::load_linked_appending`, beside the `load_linked` that `run` and the tier verbs already used. The three serve loads were the only loads in the tree that called `noeta_loader` directly with a hand-assembled argument list, i.e. the only ones outside the `FrontFacts` firewall — which is a better statement of the defect than "three copies".
+
+**The `relink_entry_unit` re-resolve was a bug, and a worse one than a wasted resolve.** `graph::resolve_graph` refreshes `noeta.lock`, and under `[trust].require_transparency` it is by definition a live registry round trip — so a hot server re-solved its dependency graph on every keystroke-save, over the network, and a transient failure came back as `RelinkError::Unreadable`, which is "no verdict": printed, skipped, the developer's edit silently discarded. It bought no freshness at all, because a change to `noeta.toml`, `noeta.lock` or any file but the entry never reaches the re-link — the watcher exits with `HOT_RESTART_CODE` and the wrapper restarts the process, which resolves from scratch. Dependency freshness is the restart's job. The boot's `FrontFacts` are now handed to the watcher (`Front::Given`) exactly as the diff baseline already was.
+
+**The `EntryCall` was written three times, not two.** The row found `SERVE_COMMAND`'s and the CLI's hand-written twin; the third was the ABI's own default `CommandCtx::serve_parallel`, which rebuilt the call from `port`/`host` to forward it to `run_file`. The undercount is the audit's own recorded pattern. `serve_parallel(file, entry, host, port, workers)` now takes the declared call (ABI 13); `host`/`port` stay because they are the address the *driver* binds, not the call.
+
+**Two behaviour fixes fell out of unifying, neither of them the drift the row named.** The single worker armed its watcher *after* compiling and the fleet armed *before*, so a save made during a cold compile was lost only on the single-worker path — the fleet's order won. And every serving isolate's host now comes from one `serve_host`, which is where `with_live_output` had already been forgotten twice (row 1 found those).
+
+**Open, found here, not fixed: the fleet's wake reaches exactly two workers.** With the wake armed, an idle `--parallel N` fleet applies a deposited swap in two workers before the next request whatever N is — 0 stale responses at N=1 and N=2, 1 at N=3, 3 at N=5. With `set_wake` removed, *every* worker serves exactly one stale request (1 of 1, 3 of 3), so the wake works and simply does not reach a worker that is not awaiting it. Per-consumer `Notify`s were built and measured and changed nothing at N = 1, 2, 3 and 5, which rules out the `notify_one` single-permit race and points at where an idle worker holding a pre-bound listener actually blocks. That is a row of its own, in the host/VM, not in the install; the measurement lives in `watch::wake_all`'s doc and `parallel_hot` pins the bound (`stale < workers`) so a regression to "the wake reaches nobody" fails.
+
+**Gates.** `cmd::serve::tests::every_step_of_the_hot_install_is_performed_in_exactly_one_place` censuses the serve/watch pair for the single call performing each step, so a second install fails the build naming the step; `parallel_hot::a_fleet_and_a_single_worker_apply_an_idle_swap_identically` (`#[ignore]`d, `hot-e2e.sh`, count bumped 1 → 2) runs one edit against both shapes and pins the idle wake. Dropping `set_wake` fails both.
 
 ---
 
@@ -240,9 +390,23 @@ Finally, `entry_tail` is called with an `EntryCall` the extension command declar
 
 **Chokepoint.** A Rust test that reads `TokenKind`, `BuiltinTy` and `PRELUDE_NAMES` and greps the two grammar files plus the two IDE lists, asserting coverage in both directions with an explicit allow-list for deliberate omissions. The grammars are plain JSON and JS; `noeta-diagnostics` already greps its own source for the `ALL` gate, so the technique is in-house. **Size: ~120 lines, plus the four one-line vocabulary fixes.**
 
+**CLOSED (2026-08-01).** Seven lists became one census and two generated files.
+
+The lexer now *enumerates* its own vocabulary: `TokenKind::RESERVED_WORD_KINDS` lists the words as token **variants** (a renamed variant is a compile error, which a `&str` list can never be), `ReservedWord::all()` derives spelling and role from the token itself, and the lexer's own suite scrapes this file's `#[token("…")]` attributes and asserts the list is exactly them, both ways. The three Rust restatements stopped being lists: `highlight::is_keyword` is `kind.reserved_word().is_some()`, `completion::KEYWORDS` is the census filtered by role, and the test-only `RESERVED_WORDS` census is gone — what is left is the two *closed* role families (`true`/`false`, the thirteen intrinsics) pinned by name, because `reserved_role`'s wildcard default would otherwise file a mis-roled word as a keyword in silence.
+
+The prelude was the same shape one crate over: `noeta-check` kept its own copy of the six value names because it deliberately does not link the lexer and so cannot ask which prelude names are keywords. `PRELUDE` is now `(name, PreludeForm)` and the checker filters it; `noeta-builtins` takes the lexer as a **dev**-dependency to check the form against the token table without putting it on anyone's build graph.
+
+The two grammars are **generated**, not censused — `crates/noeta-ide/tests/editor_vocabulary.rs` renders each managed region from the three censuses, checks it by default, and rewrites it under `NOETA_UPDATE_EDITOR_VOCABULARY=1`. The colour family a keyword belongs to is the one thing no census knows, so it is decided once there, for both grammars, and a new keyword fails **by name** until somebody decides. Where generation genuinely cannot reach it censuses instead, which is the audit's original sizing applied only where it is the right tool: a keyword in `grammar.js` lives inside the production rule that uses it, so its word tokens are checked for coverage both ways with a reason per deliberate omission.
+
+Six drifts fixed, all of them now named by a failing gate: `Any` missing from both grammars; `Enum`/`Struct`/`Class` missing from TextMate's; TextMate's prelude rule matching `signal|computed|effect|len` and never matching `Ok`/`Err`/`some`/`none`; the thirteen intrinsics with no tree-sitter rule at all. Plus two this row had not found — **`type` was not a token of the tree-sitter grammar in any form**, so an `impl` carrying an associated binding failed to parse outright (fixed with an `associated_type` rule and two corpus cases), and the two grammars disagreed about `await`.
+
+And one more disarmed gate, the same shape as row 1's: `npm test` in `editors/tree-sitter-noeta` **passed on its first run and failed on its second**. The per-project overlay harness builds a grammar also called `noeta`, and the tree-sitter CLI caches compiled parsers as `$TREE_SITTER_LIBDIR/<name>.so` keyed by name alone — so the overlaid parser replaced the static one and the *static* corpus then ran against the *overlaid* build. The harness now uses a private `TREE_SITTER_LIBDIR`. Confirmed live afterwards: `tree-sitter test` runs 28 corpus cases and then validates `queries/*.scm` against the compiled grammar (a bogus node type or a bogus token both fail it), and `test:project` runs 6 more.
+
 ---
 
 ## 12. On-disk artifacts whose two halves are hand-maintained
+
+**CLOSED 2026-08-01, `audit/artifact-halves`** — both halves gated, plus `ABI_VERSION`. The findings below are kept as written; the closing note is at the end of the section.
 
 Two instances of one shape: an artifact written and read by independent hand-written code, with nothing tying the halves together.
 
@@ -251,6 +415,80 @@ Two instances of one shape: an artifact written and read by independent hand-wri
 **`noeta.lock`'s two walks.** `crates/noeta-pm/src/lock.rs`: `Lock::read` (`:140`) is a hand-rolled `table.get("…").and_then(as_str)` walk; `render` (`:341`) is a hand-rolled `push_str(format!(…))` walk. They share no schema; adding a `[[package]]` field means touching both, in two idioms, two hundred lines apart. Four fields are already write-only — `native` (`:386`), `edition` (`:389`), `source`, `path` — and that is *deliberate and documented* (`:538`). **That is the finding, not a bug**: because some fields are legitimately written and not read, "the sets should match" is not a checkable invariant, so a field that is *accidentally* write-only looks exactly like the four that are meant to be. The tests (`:490-724`) all construct `LockedPackage` by hand and cannot see it. Usually the cost is degradation — a missed pin means a re-resolve — except for `scope_trust` / `log_trust` / `advisory_trust`, where a dropped pin turns a TOFU downgrade defense into a fresh trust-on-first-use against whatever the registry currently serves. Same family as row 4, quiet in the same way. `LOCK_VERSION` (`:45`) is checked strictly (`:147`), which is the right failure direction.
 
 **Chokepoints.** For the bundle: a stable structural digest of `Module`'s serde shape pinned in a source constant next to `FORMAT_VERSION`, so changing the layout fails until both are updated (**~120 lines**, most of it the digest walk); the cheap 80% version is one checked-in golden `.noeb` per format version, which catches the additive case that has actually happened (**~40 lines**). For the lockfile: either derive both directions from one serde schema — the `.noeb` payload's answer, see below — or a `LockedPackage` field census classifying each field `RoundTrip` or `WriteOnly(reason)` (**~80 lines**).
+
+**CLOSED (2026-08-01), `audit/artifact-halves`.** Three gates, and two corrections to the row.
+
+`crates/noeta-bundle/tests/module_layout_digest.rs` builds one canonical `Module` from struct literals with every field named and no `..Default::default()` anywhere in the reachable graph, encodes it with `Module::encode` and pins the SHA-256 in `MODULE_LAYOUT_DIGEST` beside `FORMAT_VERSION`. Two guards fall out of one value: adding a field anywhere reachable **stops compiling** at that one site — verified by adding a trailing `Vec<String>` to `reflect::TypeInfo`, the historically real case, which lands as `E0063 missing field` in the canonical builder — and reordering two same-typed fields moves the bytes and so the digest, verified by swapping `TypeInfo::field_optional` with `field_public`, which compiles everywhere and fires the digest alone. A legitimate bump (version + changelog paragraph, no layout change) leaves every test green: the gate does not cry wolf. The digest is over the raw postcard payload, not over `write()`, so `RUNTIME_VERSION` and the deflate transform cannot churn it; it was stable across five processes and a from-scratch build in a separate target dir.
+
+**The row under-priced it, in the usual direction.** "~120 lines, most of it the digest walk" assumed a *structural* walk over the serde shape. There is no such walk available — postcard carries no schema — so the digest is over a hand-built value, and the value is the work: 104 `Op` variants (the row's own history says nine of the seventeen bumps were `Op` changes, and `for_each_jump_pc_arms!` binds fields with `..`, so a new *field* on an existing variant is invisible to the compiler there), plus every variant of eleven leaf enums folded through the one variant that carries a list of itself, plus every record in `reflect`, `noeta-object`, `noeta-diagnostics` and `noeta-ext-abi`. ~1100 lines. The cheap golden-`.noeb` alternative was not taken: it catches the additive case and misses the swap, and a golden file compared by re-encoding cannot see a positional reorder at all.
+
+**The lockfile got the census, not the serde schema, and the row's preference was wrong for a reason worth recording.** `crates/noeta-pm/src/lock_census.rs` classifies all 22 fields of `LockedPackage`, `ResolvedSource`, `GitRef`, `ScopeTrust`, `LogTrust` and `AdvisoryTrust` as `RoundTrip` (with the public accessor that recovers it), `WriteOnly` (with the reason and the text it renders as), or `Unwritten`, checked against the declarations parsed out of the sources *and* against one real write→read. Serde would not have removed the class: `#[derive(Serialize, Deserialize)]` makes both directions exist but says nothing about whether a field is populated from `LockedPackage` on the way out or consumed into `Lock` on the way in, so the two TOML walks would have become two conversion functions with exactly the same drift. Three further reasons, in the module docs: `Lock` is deliberately a set of pre-keyed projections (`git_pins` keyed by `(url, GitRef::lock_key())`) rather than the wire shape; `read` is lenient per entry where `from_str` drops every pin in the file over one malformed table — including the trust pins, the failure the row says is the one worth guarding; and `noeta.lock` is generated *and committed*, so a serde rendering would rewrite every lock in the tree for no behavioural gain. Verified both ways: deleting the `scope_trust.insert` in `read` fails naming all three trust fields, and adding a `ResolvedSource` variant fails the completeness half naming its field.
+
+`ABI_VERSION` (now **12**, not 11 — bumped by another branch during this arc) got a *different* gate on purpose, and the row's "same shape" is the third correction. It is not the same shape: **nothing reads it.** It appears once in the whole tree, at its own declaration, because extensions compile from source against the exact toolchain and an ABI break is a compile error; the constant is recorded for a future dynamic-loading handshake. There is no artifact to mis-decode, so there is nothing to digest, and a digest of the ABI *surface* would fire on precisely the churn its own doc instructs you to bump for ("bump it freely"). What it lacked was the tie between the number and its paragraph, so `crates/noeta-ext-abi/tests/abi_version_changelog.rs` asserts the current version has a `**N** —` entry, that no entry describes a version not yet reached, and that the run is contiguous from 2.
+
+Both version constants now also have a **changelog gate** — the cheapest half of this row and the one nobody proposed. A bump with no paragraph fails; a paragraph with no bump fails. That is what turns a 140-line changelog from an unusually good habit into an enforced one.
+
+---
+
+## 13. `run_module_aot` is a sixth VM setup that does not go through the core, and it says so
+
+**Found 2026-08-01 while surveying row 3's `..Default::default()` class. No live defect proven; the same shape as row 1 one layer down.**
+
+`Vm::run_module_with` is the run core, and it is a real one: nine or so mandatory init steps — collector mode, the safepoint-GC arm, the debug-session arena, the hot-mailbox consumer cursor (whose comment explains that claiming it *before* the run can drain is what stops a worker losing a swap), the isolate module handle, the cancel flag, the profiler seam. Eleven `run_module_*` methods are thin `RunOptions` presets over it.
+
+`run_module_aot` (`crates/noeta-vm/src/backend.rs`) is not. It hand-rolls `Vm::load`, sets three isolate fields and `tier1.aot`, binds the dispatch table and calls `run_and_teardown` — and its own doc states the reason: *"Stays off the `RunOptions` core: the dispatch bind is an unsafe pre-run step no other mode has."* That is a true statement about `unsafe`, and it is also the entire mechanism by which this path stopped receiving `cancel`, `hot_mailbox` and the profiler. All three are N/A for a `--native` binary **today**; the point is that nothing makes the twelfth caller reconsider when a tenth init step is added to the core.
+
+Row 9 records the consequence from the other end: `--native` is the one execution surface with no differential oracle, so this divergence is unobserved by construction. The two rows are the same finding seen from opposite sides, and doing row 9 first is what would make this one falsifiable.
+
+**Chokepoint.** `RunOptions` grows the dispatch table as an option — a newtype carrying the safety contract, so the `unsafe` stays at the boundary where the caller asserts it rather than justifying a parallel function — and `run_module_aot` becomes the twelfth preset. **Size: ~40 lines.** Then add a census in the shape of `lowerer_field_census.rs`: every `RunOptions` field is consumed by `run_module_with`, and every `run_module_*` method reaches it.
+
+**Done (2026-08-01, `audit/aot-oracle`).** `RunOptions::aot_dispatch: Option<AotDispatch>`, where `AotDispatch::new` is the one `unsafe fn` and carries the whole contract; the core runner binds it after the tiering arm and before the run. `run_module_aot` keeps its signature, its safety doc and its callers, and is now twelve lines of preset. It picked up `cancel`, `hot_mailbox`, the profiler seam, `gc_threshold` and the debug-session arena by construction.
+
+`crates/noeta-vm/tests/run_options_census.rs` holds the line with three properties: completeness (an exhaustive destructuring — the compiler — *and* the field list parsed out of `backend.rs` — the text), consumption (every field appears as `opts.<field>` inside `run_module_with`), and reachability (every `run_module_*` reaches the core, transitively). All three were mutation-verified: an unconsumed field fails completeness, then consumption once it is classified; restoring the pre-fix parallel body fails reachability by name.
+
+What the census **cannot** catch, recorded so nobody assumes otherwise: it reads `opts.<field>` as text, so a field consumed by being *mentioned* but not acted on still passes, and it says nothing about the ORDER of the init steps — the hot-mailbox cursor being claimed before the run can drain is a comment, not a checked property.
+
+---
+
+## 14. The hot-swap corpus only generates swaps that need no remap, so the fix it exists to protect was never exercised
+
+**Found 2026-08-01 by row 6's mutation testing. Not a parallel path — a gate that is weaker than its own documentation. CLOSED the same day; the proposed shape was measured wrong and replaced — see the Progress note at the end of the row, which also carries a new finding of its own.**
+
+`crates/noeta-vm/tests/hotswap_corpus.rs` is the strongest swap gate in the tree: four generators over the whole conformance corpus, 1566 cases, `KNOWN_DIVERGENCES` empty. It found seven of the nine divergences the compile/swap arc fixed. It cannot see the eighth kind at all.
+
+Row 6 established this by deleting `absorb_type_args`'s type-argument remap outright — the fix for bug 3 of the original four, "the type-argument table replaced where it had to be merged". **All 50 hand-written `hotswap.rs` cases and all 1566 corpus cases stay green.** Only four unit tests over synthetic bundles fail.
+
+The cause is structural and applies to the whole harness, not to one generator: all four generators produce **append-only** programs — clone-and-append, clone-and-change-a-body, re-run the top level, re-run and change a body. An appended entry interns its type arguments *after* the ones already in the session table, so the incoming indices equal the merged indices and every remap in the tree is the identity function. A gate that runs 1566 cases through the identity case is measuring one case.
+
+This generalises past type arguments. **Any session-merge table whose remap is the identity under append is untested by this corpus** — which is most of `TABLE_POLICIES`' merge-by-content rows. The gates added by the compile/swap arc classify the tables correctly and check that the classification is *stated*; the corpus was supposed to check that the classification is *acted on*, and for the append-only shape there is nothing to act on.
+
+Row 6 added one hand-written case that pins the mechanism (`a_swap_that_renumbers_the_type_argument_table_still_resolves_every_t`: v2 mentions the same three types in reverse order, so its freshly-checked table is a permutation and every index moves; the test asserts the non-identity precondition so it cannot silently degenerate). That covers the mechanism. It does not cover the corpus.
+
+**Chokepoint.** A fifth generator that **permutes** rather than appends. Reordering top-level *statements* changes observable output for most corpus programs; reordering *declarations* does not, because they are hoisted. So the permutation is over the declaration region.
+
+**The non-obvious part, from reading the harness:** a permutation *alone* generates nothing. The differ is name-keyed, so v1 and v2 holding the same declarations in a different order compare as **no change at all** — no fragment is built and the case is vacuous, which is the very failure mode the row exists to fix. The generator must therefore permute **and** make the swap re-running (append the marker statement, as `RerunTopLevel` does). Then the differ sees the added statement, the whole top level is fragment-compiled *from v2*, and the fragment's freshly-checked type-argument table is built in v2's declaration order while the session's was built in v1's — which is exactly the non-identity merge nothing else in the corpus produces. The observation stays the re-run's own output (`Generator::observes_the_rerun`), which declaration order does not affect.
+
+Shape: rotate the **last** top-level declaration to just before the **first** one — inside the declaration region, so it never moves above a leading `use` and changes name resolution. Skip with its own named `Skip` variant when a program has fewer than two top-level declarations, so the tally stays honest about what was not covered. **Size: ~80 lines in the harness, plus whatever the first run finds.** Worth doing before trusting the corpus about any merge-by-content table.
+
+**Closed 2026-08-01 — with the proposed shape measured wrong and replaced.** The fifth generator is `Generator::PermuteTypeArgs` in `crates/noeta-vm/tests/hotswap_corpus.rs`. It compares 633 corpus cases, all 633 of which run through a non-identity `absorb_type_args` merge; deleting `owned.remap_type_arg_indices(&remap)` now fails **633 of 633** of them while the four append-only generators stay at 296/277/674/328 compared and **zero** divergences — the row's acceptance test, run in both directions.
+
+The rotation this row specified does not work, and the reason is worth keeping because it generalises. **Type-argument rows are interned at concrete call sites, and in every corpus program that has any, every one of those sites is a top-level statement.** A declaration body forwards its `T` through a hidden *slot*, which is not a table index; only `f::<Concrete>()` interns a row. Rotating the hoisted declarations therefore renumbered **0 of the 17** corpus programs whose table has two or more rows — and only 32 programs in 1102 have even one row, so the rotation could never have reached far. Measured, not argued.
+
+What replaces it keeps the row's real content — *insert where every other generator appends* — and drops the assumption that the insertion has to be a reorder of the program's own text. Both versions carry an injected forwarding generic (`fn __swap_permute_forward<T>(): string { return type_name::<T>() }`) plus two marker structs, byte-identical, so the name-keyed differ reports them unchanged and the fragment holds only top-level statements — which means its calls resolve to a generic the *session* installed and must carry a session-space index. Both versions call it **last**; v2 calls it a second time, with the other marker type, **before** the program's own code. The session's table is then `[…program…, First]`, v2's fresh check is `[Second, …program…, First]`, the merge is `[…program…, First, Second]`, and every row moves. `type_name::<T>()` in the callee turns a wrong index into stdout instead of into silence: under the mutation, `async/all.noe` swaps to `"__SwapPermuteFirst\n…\n__SwapPermuteSecond\n"` where a cold start prints `"__SwapPermuteSecond\n…\n__SwapPermuteFirst\n"`.
+
+Because the construction guarantees the precondition, the harness asserts it rather than hoping: renumbering must equal the compared count exactly, plus a floor of 500 so the generator cannot quietly stop generating. The flag travels on a *divergence* as well as on a pass — the first cut counted only passes, so the mutation turned all 633 renumbering cases into divergences, reported "renumbering 0", and fired the floor assertion first, blaming the generator for the failure it had just caught.
+
+### The rotation was not inert either — eleven reflection programs diverge under it
+
+Before it was abandoned, the declaration rotation ran the full corpus and reported **11 divergences, all one family**: `reflection/attribute_enum_arg_payload`, `attribute_type_ref_generic_args`, `attributes_of`, `attributes_of_field_default`, `attributes_on_fields`, `attributes_on_functions`, `attributes_on_params`, `attributes_on_standalone_impl_methods`, `attributes_on_struct_methods`, `attributes_on_variants`, `roles_of`. In each, swap and cold start print the **same rows in a different order** — the swap keeps v1's, the cold start has v2's.
+
+That is a real difference between a hot swap and a restart of the same file, and it is not a mechanism bug: **the reflection manifest is source-ordered, and the differ is name-keyed, so a pure reorder is invisible to it.** Nothing is reported changed, no declaration enters the fragment, and the manifest keeps the order it was built in. The arc's own fix for the manifest — supersede in place rather than append — is what makes a *body edit* not move a declaration's attributes, and it is also exactly what makes a *reorder* not move them.
+
+Fixing it means teaching `diff_programs` that the declaration **order** is part of the comparison and re-registering the manifest in the new order when it changes; that is a production change to the differ with its own blast radius, and it is not what this row was scoped to. Recorded here as its own finding, not swept into `KNOWN_DIVERGENCES` — that list stays empty and stays the state worth defending.
+
+### Still blind, specifically
+
+`TABLE_POLICIES`' other merge-by-content rows are **not** covered by the new generator. It permutes exactly one table — `type_args`, and `type_arg_reprs` in lockstep with it — because that is the one whose row order the harness can force from source text. The reflection manifest is the only *other* merge-by-content table this work reached, it was reached by the rotation rather than by the shipped generator, and what it found is the paragraph above. Every remaining row is still exercised only under append, where its remap is the identity. Closing that properly wants the row-6 shape — a synthetic-bundle unit test per policy row — rather than another corpus generator.
 
 ---
 
@@ -302,7 +540,7 @@ Recording these so the next audit does not re-walk them.
 
 1. `pm.rs:1239` (row 4a) and the `noeta-pm` CI features (row 4b) — ~15 lines, and the only place where the current behaviour is *silence about a security check*.
 2. `native.stderr` in the wasm oracle (row 1) — one line, and it makes the rest of row 1 fail loudly instead of needing to be argued.
-3. The three live one-liners: the cache-key gaps (row 2), `package_uses` at `impact.rs:517` and `execute.rs:399` (row 3), the four stale vocabulary entries (row 11).
+3. The three live one-liners: the cache-key gaps (row 2), `package_uses` at `impact.rs:517` and `execute.rs:399` (row 3), ~~the four stale vocabulary entries (row 11)~~ — row 11 is closed.
 4. Rows 1, 10 as one pass, then row 3's constructor and row 5 as the next — they are four views of "the tail, the install and the options are copied", and the chokepoints overlap.
 5. Rows 6, 7, 8, 9, 12 as separate small arcs.
 
@@ -336,10 +574,10 @@ lexer's own tokens).
    agent that fixed all four of its bugs: `..Default::default()` converts "I did
    not consider this field" into "I chose the default", and the compiler cannot
    tell them apart. The census merged here is a stopgap and says so.
-4. **A grammar census** (~120 lines, Rust, reading the JSON/JS as text) for the
-   TextMate and tree-sitter keyword/intrinsic lists. Four drifts are known and
-   were deliberately NOT hand-edited: hand-editing the files whose problem is
-   silent hand-editing is the wrong trade.
+4. ~~A grammar census for the TextMate and tree-sitter keyword/intrinsic
+   lists.~~ **Closed 2026-08-01** — and closed by *generation* rather than a
+   census, which is why the four known drifts could be fixed without
+   hand-editing the files whose problem is silent hand-editing. See row 11.
 5. Rows 5–12 as originally written, plus: `MANIFEST.sha256` is still
    self-referential (the new CI step catches a local edit, not an un-propagated
    copy), and `list_advisories` classifies a malformed feed body as `Network`, so

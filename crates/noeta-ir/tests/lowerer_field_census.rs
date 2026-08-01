@@ -41,7 +41,13 @@
 //!   and a fragment caller states it exactly as a whole-program caller does.
 //! - [`Kind::CheckerSites`] — the checker's span-keyed lowering hints. Whole-program by
 //!   construction: the checker that produced them saw the whole program, and a fragment install
-//!   carries the sites the checker computed for it.
+//!   carries the sites the checker computed for it. That is right about the **bundle** and says
+//!   nothing about a new **field** of it, so the bundle has a census of its own —
+//!   `noeta_check::SITE_POLICIES`, gated by `noeta-check/tests/site_policies.rs`, which asks each
+//!   field the question this class cannot: *whose numbering are its values in?* A fresh check
+//!   numbers the type-argument table from zero in its own discovery order, so a field carrying one
+//!   of those indices is only meaningful together with the run that produced it and a live session
+//!   must renumber it on install.
 //! - [`Kind::ProgramDerived`] — read off the program being lowered. **There must be exactly one**,
 //!   and it must be the [`ProgramFacts`] bundle. This is the class that has failed three times, and
 //!   the singleton rule is the whole point: a second one is a fragment bug waiting to happen. It
@@ -114,6 +120,11 @@ enum Kind {
     /// Supplied by the caller. The anchor is the [`noeta_ir::LowerOptions`] field it comes from.
     Environment(Anchor),
     /// The checker's whole-program lowering hints. The anchor is the bundle they arrive in.
+    ///
+    /// This class is about the bundle as a whole. Per-*field* obligations — above all "is this
+    /// value's meaning tied to the check run that produced it, so that a live session has to
+    /// renumber it?" — live in `noeta_check::SITE_POLICIES`, which classifies all thirty-five and
+    /// is gated by `noeta-check/tests/site_policies.rs`.
     CheckerSites(Anchor),
     /// Read off the program being lowered. Exactly one field may be this, and it must be the
     /// `ProgramFacts` bundle; the anchor is the fold rule that gives a fragment the enclosing
@@ -190,6 +201,10 @@ const TABLE: &[Row] = &[
     // produced them saw a whole program, and a hot-swap install carries the bundle the checker
     // computed for the fragment (`a_mailbox_deposit_installs_the_fragment_with_its_sites`). Empty on
     // the deliberately hint-free REPL/IR-corpus path, where "empty" costs a fusion, never a meaning.
+    // Whether an individual field of the bundle is safe to install into a LIVE compiler is a
+    // separate question, asked field by field in `noeta_check::SITE_POLICIES`: a fresh check numbers
+    // the type-argument table from zero, so an index into it means nothing without its own run and
+    // `absorb_type_args` has to rewrite it.
     Row(
         "sites",
         CheckerSites(Anchor(LOWER, "pub struct LoweringSites<'a> {")),

@@ -272,7 +272,20 @@ module.exports = grammar({
       optional($.type_parameters),
       field('body', $.trait_body),
     ),
-    trait_body: $ => seq('{', repeat($.trait_method), '}'),
+    trait_body: $ => seq('{', repeat(choice($.associated_type, $.trait_method)), '}'),
+    // `type Name` / `type Name = T` — an associated type. DECLARED in a trait body (bodiless is a
+    // required binding every impl must supply; `= T` gives a default an impl may omit) and BOUND in
+    // an impl body (`type Item = int`). One rule for both: the two spellings differ only in whether
+    // the `= T` is there, and the `type`-led form is tried before a method in each body for the same
+    // reason the parser tries it first — a leading `type` opens an associated type, not a malformed
+    // method. Without this rule `type` was not a token of the grammar at all, so an `impl` carrying
+    // an associated binding failed to parse and every tree-sitter editor lost the whole block.
+    associated_type: $ => seq(
+      'type',
+      field('name', $.identifier),
+      optional(seq('=', field('value', $._type))),
+      optional($._terminator),
+    ),
     trait_method: $ => seq(
       optional('async'),
       'fn',
@@ -333,7 +346,7 @@ module.exports = grammar({
       field('trait', $.trait_reference),
       optional(seq('for', field('type', $._type))),
       '{',
-      repeat($.function_declaration),
+      repeat(choice($.associated_type, $.function_declaration)),
       '}',
     ),
     // The reference right after `impl`: the trait for a trait impl, or the type for an inherent impl.
@@ -684,14 +697,23 @@ module.exports = grammar({
       '(', optional(commaSep($._type)), ')',
       '->', field('return', $._type),
     )),
+    // The built-in type names. GENERATED from `noeta_ast::BuiltinTy` — do not hand-edit between
+    // the markers; the generator is `crates/noeta-ide/tests/editor_vocabulary.rs`, which also
+    // checks this region on every `cargo test -p noeta-ide`. The containers (`List`, `Map`, …) and
+    // the kind-types (`Enum`, `Struct`, `Class`) are deliberately NOT here: they are ordinary
+    // identifiers to the grammar, reached through `generic_type`.
+    // --- BEGIN GENERATED VOCABULARY ---
+    // `never` is a type NAME, not a keyword: an ordinary identifier spelled `never`
+    // elsewhere still parses as one, since `$.identifier` is also a `$._type` and the
+    // grammar declares `word: $.identifier`, so these literals are only recognised
+    // where a type is expected. The same is true of `unit`, `number` and `Any`.
     primitive_type: _ => choice(
-      'int', 'float', 'f32', 'f64', 'number', 'bool', 'string', 'bytes', 'void', 'unit', 'dyn',
-      // The bottom type. A type NAME, not a keyword — it is listed here (like 'unit' and
-      // 'number') so it highlights as a primitive in type position; an ordinary identifier
-      // spelled 'never' elsewhere still parses as one, since $.identifier is also a $._type.
-      'never',
-      'i8', 'i16', 'i32', 'i64', 'u8', 'u16', 'u32', 'u64',
+      'int', 'float', 'f32', 'f64', 'bool', 'string', 'bytes', 'void',
+      'unit', 'dyn', 'Any', 'never', 'number', 'i8', 'i16', 'i32',
+      'i64', 'u8', 'u16', 'u32', 'u64',
     ),
+    // --- END GENERATED VOCABULARY ---
+
     generic_type: $ => prec(3, seq(
       field('name', choice($.identifier, $.primitive_type)),
       '<', commaSep1($._type), '>',

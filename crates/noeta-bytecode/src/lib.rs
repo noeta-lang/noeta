@@ -392,6 +392,138 @@ impl TypeArgs {
     }
 }
 
+/// A **jump destination**: an index into a [`Chunk::code`] vector, and not an index into any other
+/// table. Every field of [`Op`] that holds one is declared with this alias and is visited by
+/// [`Op::for_each_jump_pc`]; every other `u32` field of `Op` (shape, prototype, inline-cache,
+/// element and reflect-table indices) stays a plain `u32` and must never be rewritten as code.
+///
+/// The pairing is enforced. `crates/noeta-bytecode/tests/op_jump_pc_census.rs` reads the `Op`
+/// declaration and asserts that the fields declared `JumpPc` are exactly the fields the visitor
+/// hands to its callback, and that every other `u32` field is classified as *not* a jump
+/// destination — so a new index field on `Op` fails the census until its author says which it is.
+pub type JumpPc = u32;
+
+/// The one arm list naming every [`Op`] variant that carries a [`JumpPc`], and — with no `_`
+/// catch-all — every variant that does not. Adding an `Op` variant is a compile error here, which
+/// is the point: this is the single place "which op carries a jump target" is written down.
+///
+/// Shared by [`Op::for_each_jump_pc`] and [`Op::for_each_jump_pc_mut`]; match ergonomics
+/// bind the fields as `&JumpPc` or `&mut JumpPc` from the receiver, so one body serves both.
+///
+/// The census parses this macro's text, so the marker comment below (`no jump pc`) delimits the
+/// carrying arms from the rest — keep it.
+macro_rules! for_each_jump_pc_arms {
+    ($op:expr, $f:ident) => {
+        match $op {
+            Op::Jump { target }
+            | Op::JumpIfTrue { target, .. }
+            | Op::JumpIfFalse { target, .. }
+            | Op::CondBranch { target, .. } => $f(target),
+            Op::Coalesce { fallback, .. } => $f(fallback),
+            Op::MatchInt { fail, .. }
+            | Op::MatchStr { fail, .. }
+            | Op::MatchBool { fail, .. }
+            | Op::MatchVariant { fail, .. }
+            | Op::MatchTuple { fail, .. } => $f(fail),
+            // ── every remaining variant carries no jump pc ──
+            Op::LoadConst { .. }
+            | Op::Move { .. }
+            | Op::LoadGlobal { .. }
+            | Op::StoreGlobal { .. }
+            | Op::TakeGlobal { .. }
+            | Op::Drop { .. }
+            | Op::ConcatInPlace { .. }
+            | Op::MakeClosure { .. }
+            | Op::MakeCell { .. }
+            | Op::CellGet { .. }
+            | Op::CellSet { .. }
+            | Op::UpvalueGet { .. }
+            | Op::UpvalueSet { .. }
+            | Op::LoadNativeFn { .. }
+            | Op::BindMethod { .. }
+            | Op::MakeList { .. }
+            | Op::PackedListNew { .. }
+            | Op::PackedListPush { .. }
+            | Op::MakeTuple { .. }
+            | Op::TupleIndex { .. }
+            | Op::MakeRange { .. }
+            | Op::MakeMap { .. }
+            | Op::RequireMapKey { .. }
+            | Op::IterSnapshot { .. }
+            | Op::ListLen { .. }
+            | Op::ListGet { .. }
+            | Op::IterForNext { .. }
+            | Op::CallBuiltin { .. }
+            | Op::CallMethod { .. }
+            | Op::Index { .. }
+            | Op::IndexField { .. }
+            | Op::MakeStruct { .. }
+            | Op::MakeStructInPlace { .. }
+            | Op::MakeOpaque { .. }
+            | Op::MakeEnum { .. }
+            | Op::EnumFromStr { .. }
+            | Op::LoadField { .. }
+            | Op::SetField { .. }
+            | Op::Panic { .. }
+            | Op::TryUnwrap { .. }
+            | Op::Narrow { .. }
+            | Op::IsType { .. }
+            | Op::MakeGen { .. }
+            | Op::MakeFuture { .. }
+            | Op::RunFuture { .. }
+            | Op::PollFuture { .. }
+            | Op::LoadPending { .. }
+            | Op::ScopeBegin
+            | Op::ScopeBeginValue { .. }
+            | Op::ScopeReady { .. }
+            | Op::Spawn { .. }
+            | Op::SpawnIsolate { .. }
+            | Op::ScopeEnd { .. }
+            | Op::ScopeEndAt { .. }
+            | Op::MakeChannel { .. }
+            | Op::AttributesOf { .. }
+            | Op::RolesOf { .. }
+            | Op::ParamsOf { .. }
+            | Op::ReturnsOf { .. }
+            | Op::FieldSpecsOf { .. }
+            | Op::VariantsOf { .. }
+            | Op::Construct { .. }
+            | Op::Retag { .. }
+            | Op::RetagDynamic { .. }
+            | Op::TypeOf { .. }
+            | Op::TypeArgName { .. }
+            | Op::TypeSlotName { .. }
+            | Op::FieldsOf { .. }
+            | Op::TraitsOf { .. }
+            | Op::FromBytes { .. }
+            | Op::TypeOfStatic { .. }
+            | Op::TypeValue { .. }
+            | Op::Invoke { .. }
+            | Op::TypedModuleCall { .. }
+            | Op::TypedMethodCall { .. }
+            | Op::DecodeTyped { .. }
+            | Op::TraitMethod { .. }
+            | Op::ExtractField { .. }
+            | Op::MatchFail { .. }
+            | Op::Call { .. }
+            | Op::CallGlobal { .. }
+            | Op::Return { .. }
+            | Op::Unary { .. }
+            | Op::MaskWidth { .. }
+            | Op::WideInt { .. }
+            | Op::WidthIntMethod { .. }
+            | Op::Binary { .. }
+            | Op::RequireBool { .. }
+            | Op::RequireCondBool { .. }
+            | Op::Echo { .. }
+            | Op::Stringify { .. }
+            | Op::BuildString { .. }
+            | Op::Raise { .. }
+            | Op::Halt => {}
+        }
+    };
+}
+
 /// One register-machine instruction.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum Op {
@@ -818,7 +950,7 @@ pub enum Op {
     Coalesce {
         dst: Reg,
         src: Reg,
-        fallback: u32,
+        fallback: JumpPc,
         span: Span,
     },
     /// `dst = src.as<T>()` — checked narrowing. `dst = some(src)` (built from `some_shape`) if
@@ -1232,17 +1364,17 @@ pub enum Op {
     MatchInt {
         src: Reg,
         value: i64,
-        fail: u32,
+        fail: JumpPc,
     },
     MatchStr {
         src: Reg,
         value: NameId,
-        fail: u32,
+        fail: JumpPc,
     },
     MatchBool {
         src: Reg,
         value: bool,
-        fail: u32,
+        fail: JumpPc,
     },
     /// A `match` variant test: if `src` is an enum of the given variant (and, when
     /// `type_name` is set, that enum) with `arity` data fields, continue; else jump to `fail`.
@@ -1251,7 +1383,7 @@ pub enum Op {
         type_name: Option<NameId>,
         variant: NameId,
         arity: u16,
-        fail: u32,
+        fail: JumpPc,
     },
     /// A `match` **tuple** test (object-model slice 4b.2): if `src` is a tuple of exactly `arity`
     /// elements, continue; else jump to `fail`. Elements are then read with `TupleIndex` for the
@@ -1259,7 +1391,7 @@ pub enum Op {
     MatchTuple {
         src: Reg,
         arity: u16,
-        fail: u32,
+        fail: JumpPc,
     },
     /// `dst = src.data[index]` (retained) — extract an enum variant's positional field for a
     /// sub-pattern, after a `MatchVariant` has confirmed the shape.
@@ -1388,17 +1520,17 @@ pub enum Op {
     },
     /// Unconditional jump to `target`.
     Jump {
-        target: u32,
+        target: JumpPc,
     },
     /// Jump to `target` if `reg` (a bool) is true.
     JumpIfTrue {
         reg: Reg,
-        target: u32,
+        target: JumpPc,
     },
     /// Jump to `target` if `reg` (a bool) is false.
     JumpIfFalse {
         reg: Reg,
-        target: u32,
+        target: JumpPc,
     },
     /// A fused conditional branch (P-VMT-CBR): require `reg` be a bool (else raise E0007, `` `if`
     /// condition must be a bool ``, at `span`), then jump to `target` if it is `false` and fall
@@ -1407,7 +1539,7 @@ pub enum Op {
     /// byte-identical behavior, the Binary that computes the condition is untouched.
     CondBranch {
         reg: Reg,
-        target: u32,
+        target: JumpPc,
         span: Span,
     },
     /// Print `reg`'s display form followed by a newline.
@@ -1440,6 +1572,35 @@ pub enum Op {
     },
     /// Stop the program successfully.
     Halt,
+}
+
+impl Op {
+    /// Apply `f` to every [`JumpPc`] this op carries — its jump/branch destinations, in
+    /// declaration order. An op with no branch destination calls `f` zero times.
+    ///
+    /// This is the single answer to "which op carries a jump target, and where". Its arm list has
+    /// no `_` catch-all, so a new `Op` variant is a compile error here rather than a silent
+    /// omission at the sites that ask the question: the compiler's `patch_jump`, `op_facts` and
+    /// LICM target fix-up (a miss there rewrites nothing and the op jumps to a stale index), and
+    /// the JIT's `tier0_succ` (a miss there drops a CFG edge, under-approximating liveness — an
+    /// unsound spill omission in native code).
+    pub fn for_each_jump_pc(&self, mut f: impl FnMut(JumpPc)) {
+        let mut g = |t: &JumpPc| f(*t);
+        for_each_jump_pc_arms!(self, g);
+    }
+
+    /// [`Op::for_each_jump_pc`] over `&mut` destinations, for rewriting them (a chunk rebuild's
+    /// old→new remap).
+    pub fn for_each_jump_pc_mut(&mut self, mut f: impl FnMut(&mut JumpPc)) {
+        for_each_jump_pc_arms!(self, f);
+    }
+
+    /// Whether this op carries at least one [`JumpPc`] — i.e. whether it can branch.
+    pub fn has_jump_pc(&self) -> bool {
+        let mut any = false;
+        self.for_each_jump_pc(|_| any = true);
+        any
+    }
 }
 
 /// A compiled function prototype: instructions, the constant pool, the precomputed raise

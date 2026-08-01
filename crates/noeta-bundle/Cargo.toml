@@ -15,6 +15,19 @@ miniz_oxide = { workspace = true }
 # output with a full IR parse. The patcher itself is a dependency-free section-level rewrite, so
 # walrus never rides a consumer — the wasm runner links this crate with zero extra weight.
 walrus = { workspace = true }
+# The wire-layout gate (tests/module_layout_digest.rs) builds one canonical `Module` by hand, so it
+# needs the crates whose types the payload reaches — every one of them a dev-dependency, since the
+# container itself still knows nothing but `Module`.
+noeta-ast = { workspace = true }
+noeta-diagnostics = { workspace = true }
+noeta-ext-abi = { workspace = true }
+noeta-object = { workspace = true }
+noeta-span = { workspace = true }
+sha2 = { workspace = true }
+# The `serde(default)` probe: the changelog's whole argument is "postcard is not self-describing",
+# and the probe checks that rather than restating it.
+serde = { workspace = true }
+postcard = { workspace = true }
 
 [lints]
 workspace = true

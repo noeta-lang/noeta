@@ -17,8 +17,6 @@
 //! The native bodies call back into the runtime through the `noeta_jit_*` helper symbols this crate
 //! re-exports via `noeta-vm`'s `aot` feature; the linker resolves those against this archive.
 
-use std::process::ExitCode;
-
 use noeta_bytecode::Module;
 use noeta_span::{Source, SourceId, SourceMap};
 use noeta_vm::VmBackend;
@@ -43,19 +41,22 @@ unsafe extern "C" {
 /// runtime carries no more dev tooling than the plain one (each mixed crate is built with its formatter
 /// feature off). The plain [`main`] passes an empty slice, giving exactly today's std-only behavior.
 ///
-/// Maps the process `ExitCode` to a C `int`: `ExitCode` has no getter, so the honest bridge reports
-/// success as 0 and any failure as 1 — the AOT differential compares stdout + success, and the
-/// program's own `exit_code` is already folded into `run`'s return.
+/// Returns the program's own status byte, widened to a C `int`.
+///
+/// It used to return `ExitCode`, mapped `SUCCESS => 0` and everything else to **1** — because
+/// `ExitCode` has no getter, so once the code is inside one the number is gone. The comment here
+/// justified that by saying the AOT differential "compares stdout + success"; then row 9 built an
+/// AOT differential that compares the whole `RunResult`, and `std/os_exit.noe` — `os.exit(3)` —
+/// came back as 1. Fixing the `as u8` truncation in the tail was not enough on its own, because
+/// this collapse sits downstream of it: `RunTail::status()` had the right byte and `emit()` threw
+/// it away one call later. The tail now hands over `emit_status()` and nothing narrows it again.
 pub fn run_embedded_with_extensions(
     units: &'static [&'static (dyn noeta_stdlib::Extension + Sync)],
 ) -> core::ffi::c_int {
     // Seed the default registry with std + the app's native units before any lookup (the VM's first
     // module/type/tier resolution reads it). An empty slice is exactly the lazy std-only default.
     noeta_stdlib::registry::install_with_extras(units);
-    match run() {
-        c if c == ExitCode::SUCCESS => 0,
-        _ => 1,
-    }
+    core::ffi::c_int::from(run())
 }
 
 /// C-runtime entry point of a native AOT binary. `crt0` calls this after process setup; it returns
@@ -79,15 +80,15 @@ pub unsafe extern "C" fn main() -> core::ffi::c_int {
 }
 
 /// Recover the embedded program, run it native-bound, and print its output — the body of [`main`],
-/// split out so it deals in an ordinary [`ExitCode`]. Any failure to locate/decode the bundle is a
+/// split out so it deals in an ordinary status byte. Any failure to locate/decode the bundle is a
 /// corrupt-artifact error on stderr (this binary is *only* ever a stapled artifact; there is no
 /// "plain toolchain" fallback as in the CLI).
-fn run() -> ExitCode {
+fn run() -> u8 {
     let module = match load_embedded_module() {
         Ok(module) => module,
         Err(err) => {
             eprintln!("noeta: cannot load embedded program: {err}");
-            return ExitCode::from(2);
+            return 2;
         }
     };
     let (result, trace) = run_native(std::sync::Arc::new(module));
@@ -96,19 +97,12 @@ fn run() -> ExitCode {
     // code + location show, but there is no snippet — the honest cost of shipping no `.noe` (same as
     // the L1/L2 bundle runner).
     let sources = SourceMap::new(vec![Source::new(SourceId::FIRST, "<aot>", "")]);
-    print!("{}", result.stdout);
-    use std::io::Write as _;
-    let _ = std::io::stdout().flush();
-    for diagnostic in &result.diagnostics {
-        eprint!(
-            "{}",
-            noeta_diagnostics::render(sources.source(diagnostic.span.source), diagnostic)
-        );
-    }
-    if trace.len() >= 2 {
-        eprint!("{}", noeta_vm::render_trace(&trace, &sources));
-    }
-    ExitCode::from(result.exit_code as u8)
+    // The shared run epilogue (audit row 1). This tail was hand-rolled and wrong three ways: it
+    // dropped the program's own `stderr` stream entirely, it rendered diagnostics one-by-one
+    // through `render` instead of `render_mapped` (so a multi-source span resolved against the
+    // wrong file), and it converted the exit code with `as u8` — which made a program exiting 256
+    // exit **0**, a failure reported as a success.
+    noeta_backend::RunTail::render(&result, &trace, &sources).emit_status()
 }
 
 /// Read this executable's stapled trailer to recover the embedded bundle, and decode it to a
@@ -126,10 +120,18 @@ fn load_embedded_module() -> Result<Module, String> {
 /// per-isolate factory mints a fresh real host + wall-clock executor (isolates I.4b), exactly as the
 /// CLI's `run_module_real_host` does; the extra step here is binding the linker-resolved
 /// [`noeta_aot_dispatch`] table so eligible prototypes dispatch to native code.
+///
+/// The host runs with **live output** (`with_live_output(true)`), like every other foreground run
+/// surface. Without it a `--native` binary buffered its whole stdout until exit, so a long-running
+/// or killed program showed nothing at all — exactly what made a slow run indistinguishable from a
+/// hung one on the paths that already turned it on (audit row 1).
 fn run_native(module: std::sync::Arc<Module>) -> (noeta_vm::RunResult, Vec<noeta_vm::TraceFrame>) {
     let factory: noeta_vm::IsolateFactory = std::sync::Arc::new(|| {
-        let host: Box<dyn noeta_stdlib::Host> =
-            Box::new(noeta_host_real::RealHost::new().expect("cannot start an isolate's runtime"));
+        let host: Box<dyn noeta_stdlib::Host> = Box::new(
+            noeta_host_real::RealHost::new()
+                .expect("cannot start an isolate's runtime")
+                .with_live_output(true),
+        );
         let executor: Box<dyn noeta_stdlib::Executor> = Box::new(
             noeta_host_real::RealExecutor::new().expect("cannot start an isolate's async executor"),
         );

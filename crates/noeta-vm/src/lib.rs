@@ -285,6 +285,13 @@ struct Tier1State {
     /// promotion.
     #[cfg(feature = "jit")]
     force_jit: bool,
+    /// When set, the engine built by [`Vm::init_jit`] emits **AOT-form** bodies (inline caches off,
+    /// null call sites, no cancellation poll) — the codegen `noeta build --native` links, run
+    /// in-process. Armed from [`RunOptions::aot_bodies`]; see [`noeta_jit::Jit::set_aot_bodies`].
+    ///
+    /// [`RunOptions::aot_bodies`]: crate::RunOptions::aot_bodies
+    #[cfg(feature = "jit")]
+    aot_bodies: bool,
     /// Per-prototype tier-1 entry counter, indexed by prototype index; a prototype is compiled once
     /// its count crosses [`JIT_HOT_THRESHOLD`] (or immediately under `force_jit`).
     #[cfg(feature = "jit")]

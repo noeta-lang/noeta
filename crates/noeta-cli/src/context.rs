@@ -23,7 +23,7 @@ use crate::{compose, run_declared_tier};
 /// failure) end to end, so `CompileFailure::report` (which returns a `std::process::ExitCode` the
 /// seam cannot read) is unwrapped to the code here. `ExitCode` reappears only at the CLI's outer
 /// clap boundary, where a verb wraps this crate's `u8` back into one.
-fn report_u8(f: &noeta_runner::CompileFailure) -> u8 {
+pub(crate) fn report_u8(f: &noeta_runner::CompileFailure) -> u8 {
     let (text, code) = f.to_text();
     let _ = std::io::stderr().write_all(text.as_bytes());
     code
@@ -84,35 +84,102 @@ pub(crate) fn load_linked(
     file: &std::path::Path,
     resolved: Option<noeta_pm::graph::ResolvedGraph>,
 ) -> Result<noeta_loader::Linked, u8> {
+    load_entry_with_tail(file, &[], Front::Resolve(resolved.map(Box::new)))
+        .map(|entry| entry.linked)
+        .map_err(|f| report_u8(&f))
+}
+
+/// Where the dependency graph a link runs under comes from (audit-10).
+///
+/// The resolved graph is boxed: it is an order of magnitude larger than an `Arc`, and this enum is
+/// passed by value at every call.
+pub(crate) enum Front {
+    /// Resolve it — reusing the graph the caller's compose probe already resolved when it has one
+    /// (audit-5 F2), else resolving here so the error renders on this path.
+    Resolve(Option<Box<noeta_pm::graph::ResolvedGraph>>),
+    /// **The facts a boot already resolved.** The hot re-link's source: every re-link of a running
+    /// server must link against the graph the running program was built with, not against whatever
+    /// a fresh resolve finds a hundred edits later. See [`load_entry_with_tail`].
+    Given(std::sync::Arc<noeta_runner::compile::FrontFacts>),
+}
+
+/// A linked entry program, its rewrapped [`Loaded`] view, and the facts it linked under.
+pub(crate) struct EntryProgram {
+    pub(crate) linked: noeta_loader::Linked,
+    /// The **entry file's own source**, kept past the [`loaded`] rewrap: the hot path's diff
+    /// baseline is the entry unit of *this* program, the one about to be compiled and served.
+    pub(crate) entry: noeta_span::Source,
+    /// The front facts this link ran under — handed to the hot watcher so its re-links are the
+    /// boot's ([`Front::Given`]).
+    pub(crate) front: std::sync::Arc<noeta_runner::compile::FrontFacts>,
+}
+
+impl EntryProgram {
+    /// The runner's [`Loaded`] view, for the type check ([`loaded`]). Consumes the linked program.
+    pub(crate) fn into_loaded(
+        self,
+    ) -> (
+        Loaded,
+        noeta_span::Source,
+        std::sync::Arc<noeta_runner::compile::FrontFacts>,
+    ) {
+        (loaded(self.linked), self.entry, self.front)
+    }
+}
+
+/// **The one front half of an entry-call run** (audit-10): resolve the dependency graph → load and
+/// link `file` with `tail` appended → keep the entry source → hand back the facts it linked under.
+///
+/// Three call sites assembled this by hand before it existed — `noeta serve`'s single-worker path,
+/// its `--parallel` path, and the hot watcher's re-link in `watch.rs` — each with its own copy of
+/// the graph resolution, its own loader argument list and its own error rendering. The three were
+/// not identical: the two in `serve.rs` reused the compose probe's graph and the watcher always
+/// re-resolved from scratch, which meant a hot server's re-links could link against a *different*
+/// graph than the program they were swapping into (and, with `[trust].require_transparency` on,
+/// re-resolved over the network on every keystroke-save — where a transient failure silently
+/// discarded the edit). [`Front::Given`] is the fix: the watcher is handed the boot's facts.
+///
+/// The failure is a [`noeta_runner::CompileFailure`] rather than an exit code, because the two
+/// consumers need different things from it — `serve` prints it and exits, the watcher renders it
+/// into the browser's error overlay and keeps serving.
+pub(crate) fn load_entry_with_tail(
+    file: &std::path::Path,
+    tail: &[noeta_ast::Stmt],
+    front: Front,
+) -> Result<EntryProgram, noeta_runner::CompileFailure> {
     // The shared front half (drift firewall): deps + edition resolve exactly as `noeta run`'s
     // pipeline resolves them; the verbs stage tier activation themselves.
-    let facts = noeta_runner::compile::resolve_front_with(
-        file,
-        &[],
-        &None,
-        resolved.map(|g| noeta_runner::compile::ResolvedFront {
-            packages: g.packages,
-            package_uses: g.package_uses,
-        }),
-    )
-    .map_err(|f| report_u8(&f))?;
-    // The loader has no manifest data, so it leaves `package_uses` empty; fill it from the resolved
-    // facts (which hold the per-package `@`-name tables) so `loaded(..)`’s check resolves directives.
-    let mut linked = noeta_runner::compile::load_linked(file, &facts).map_err(|f| report_u8(&f))?;
-    linked.package_uses = facts.package_uses;
-    Ok(linked)
+    let front = match front {
+        Front::Given(facts) => facts,
+        Front::Resolve(resolved) => std::sync::Arc::new(noeta_runner::compile::resolve_front_with(
+            file,
+            &[],
+            &None,
+            resolved.map(|g| noeta_runner::compile::ResolvedFront {
+                packages: g.packages,
+                package_uses: g.package_uses,
+            }),
+        )?),
+    };
+    // The dep-aware loader carries the resolved `@name` tables through on `Linked::provenance`, so
+    // there is nothing left to patch in afterwards — the field it used to be patched into is gone.
+    let linked = noeta_runner::compile::load_linked_appending(file, &front, tail)?;
+    let entry = linked.entry.clone();
+    Ok(EntryProgram {
+        linked,
+        entry,
+        front,
+    })
 }
 
 /// Rewrap a linker result as the runner's [`Loaded`], so type-checking goes through
 /// [`Loaded::check`] — the editions/provenance threading choke point — instead of a hand-paired
-/// `check_all_with_editions(&linked.program, linked.editions.clone())`.
+/// `check_all_with_editions(&linked.program, linked.provenance.editions.clone())`.
 pub(crate) fn loaded(linked: noeta_loader::Linked) -> Loaded {
     Loaded {
         program: linked.program,
         sources: linked.sources,
-        editions: linked.editions,
-        packages: linked.packages,
-        package_uses: linked.package_uses,
+        provenance: linked.provenance,
         // A raw link performs no tier activation, so there is nothing advisory to carry yet — the
         // caller's own check supplies whatever warnings there are.
         warnings: Vec::new(),
@@ -227,11 +294,7 @@ pub(crate) fn tier_prologue(
     // Activate the tier: inline its `@<tier>` blocks as ordinary top-level declarations and
     // collect the tier fns. An unknown-tier block is an E0036 (a typo must not silently vanish).
     // Each `@name` resolves per the package that wrote it (per-package naming arc).
-    let ctx = noeta_check::TierContext {
-        uses: &linked.package_uses,
-        packages: &linked.packages,
-    };
-    let activated = noeta_check::activate_tiers_with(&linked.program, &[tier], &ctx);
+    let activated = noeta_check::activate_tiers(&linked.program, &[tier], &linked.provenance);
     let mut activated = match provider_escape(tier, &linked, activated, &providers) {
         Ok(activated) => activated,
         Err(code) => return Prologue::Ran(code),
@@ -248,17 +311,13 @@ pub(crate) fn tier_prologue(
     // here rather than redundantly inside every per-case run.
     let noeta_loader::Linked {
         sources,
-        editions,
-        packages,
-        package_uses,
+        provenance,
         ..
     } = linked;
     let checking = Loaded {
         program: activated.program,
         sources,
-        editions,
-        packages,
-        package_uses,
+        provenance,
         // Activation's own diagnostics were reported above; nothing left to carry.
         warnings: Vec::new(),
     };
@@ -272,9 +331,7 @@ pub(crate) fn tier_prologue(
     let diverging = checked.diverging_stmts;
     let Loaded {
         program,
-        editions,
-        packages,
-        package_uses,
+        provenance,
         sources,
         // Empty by construction here (this `Loaded` was built above with none), and activation's own
         // diagnostics were already reported.
@@ -285,11 +342,6 @@ pub(crate) fn tier_prologue(
         activated,
         diverging,
         sources,
-        opts: noeta_check::CheckOptions {
-            editions,
-            packages,
-            package_uses,
-            ..noeta_check::CheckOptions::default()
-        },
+        opts: noeta_check::CheckOptions::for_workspace(provenance),
     }))
 }

@@ -578,7 +578,11 @@ enum Color { Red; Green }
             !resolved.deps.is_empty(),
             "the path dependency must resolve into the workspace"
         );
-        let out = crate::run_check(&resolved);
+        let out = crate::run_check(&crate::CheckArgs {
+            source: None,
+            file: Some(entry.display().to_string()),
+        })
+        .expect("check");
         assert!(out.ok, "diagnostics: {:?}", out.diagnostics);
     }
 
@@ -633,14 +637,11 @@ enum Color { Red; Green }
     fn check_refuses_a_program_whose_native_extension_is_not_composed() {
         noeta_stdlib::registry::default_seeded();
         let entry = native_dep_project("mcp_check_uncomposed");
-        let resolved =
-            crate::resolve_workspace(&None, &Some(entry.display().to_string())).expect("resolve");
-        assert_eq!(
-            resolved.uncomposed,
-            vec!["acme/imgfx".to_string()],
-            "a stock process carries no package's native extension"
-        );
-        let out = crate::run_check(&resolved);
+        let out = crate::run_check(&crate::CheckArgs {
+            source: None,
+            file: Some(entry.display().to_string()),
+        })
+        .expect("check");
         assert!(!out.ok, "a refusal is not a pass");
         assert_eq!(
             out.diagnostics.len(),
@@ -660,9 +661,11 @@ enum Color { Red; Green }
     fn a_pure_noeta_project_is_never_withheld() {
         noeta_stdlib::registry::default_seeded();
         let entry = dep_role_project("mcp_check_pure_noeta");
-        let resolved =
-            crate::resolve_workspace(&None, &Some(entry.display().to_string())).expect("resolve");
-        assert!(resolved.uncomposed.is_empty());
-        assert!(crate::run_check(&resolved).uncomposed.is_empty());
+        let out = crate::run_check(&crate::CheckArgs {
+            source: None,
+            file: Some(entry.display().to_string()),
+        })
+        .expect("check");
+        assert!(out.uncomposed.is_empty());
     }
 }

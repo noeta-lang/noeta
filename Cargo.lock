@@ -2406,9 +2406,9 @@ version = "0.3.1"
 name = "noeta-aot-runtime"
 version = "0.3.1"
 dependencies = [
+ "noeta-backend",
  "noeta-bundle",
  "noeta-bytecode",
- "noeta-diagnostics",
  "noeta-host-real",
  "noeta-span",
  "noeta-stdlib",
@@ -2438,6 +2438,7 @@ name = "noeta-builtins"
 version = "0.3.1"
 dependencies = [
  "noeta-ast",
+ "noeta-lexer",
  "noeta-span",
 ]
 
@@ -2446,7 +2447,15 @@ name = "noeta-bundle"
 version = "0.3.1"
 dependencies = [
  "miniz_oxide",
+ "noeta-ast",
  "noeta-bytecode",
+ "noeta-diagnostics",
+ "noeta-ext-abi",
+ "noeta-object",
+ "noeta-span",
+ "postcard",
+ "serde",
+ "sha2",
  "walrus",
 ]
 
@@ -2478,6 +2487,7 @@ dependencies = [
  "criterion",
  "insta",
  "noeta-ast",
+ "noeta-builtins",
  "noeta-diagnostics",
  "noeta-edition",
  "noeta-ext-abi",
@@ -2739,6 +2749,7 @@ version = "0.3.1"
 dependencies = [
  "include_dir",
  "noeta-ast",
+ "noeta-builtins",
  "noeta-check",
  "noeta-compiler",
  "noeta-db",
@@ -2754,6 +2765,7 @@ dependencies = [
  "noeta-test-temp",
  "noeta-types",
  "salsa",
+ "serde_json",
 ]
 
 [[package]]
@@ -3115,7 +3127,6 @@ dependencies = [
  "noeta-backend",
  "noeta-bundle",
  "noeta-db",
- "noeta-diagnostics",
  "noeta-span",
  "noeta-stdlib",
  "noeta-test-temp",
@@ -3127,6 +3138,7 @@ dependencies = [
 name = "noeta-wasm-serve"
 version = "0.3.1"
 dependencies = [
+ "noeta-backend",
  "noeta-bundle",
  "noeta-bytecode",
  "noeta-db",

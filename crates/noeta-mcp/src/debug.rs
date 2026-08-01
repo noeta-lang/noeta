@@ -482,7 +482,7 @@ struct Compiled {
 /// DAP launch runs, host-agnostic. `real_isolates` mirrors the host choice: real OS threads on the
 /// real host, cooperative on the sandbox.
 fn compile_debug(entry: &Entry, real_isolates: bool) -> Result<Compiled, String> {
-    let (program, sources, editions) = match entry {
+    let (program, sources, provenance) = match entry {
         Entry::Inline(text) => {
             let source = Source::new(SourceId::FIRST, "<inline>".to_string(), text.clone());
             let lexed = noeta_lexer::lex(&source);
@@ -494,24 +494,31 @@ fn compile_debug(entry: &Entry, real_isolates: bool) -> Result<Compiled, String>
             if !diags.is_empty() {
                 return Err(diags);
             }
-            // An inline debug snippet has no manifest, so every source is the default edition.
+            // An inline debug snippet has no manifest: default edition, no package graph, and so
+            // nothing binds an extension `@name`.
             (
                 parsed.program,
                 SourceMap::new(vec![source]),
-                noeta_lexer::EditionMap::new(),
+                noeta_check::Provenance::unattributed(),
             )
         }
         Entry::File(path) => {
             // The shared front half (drift firewall): the agent's debug tools see the same
             // dependency packages and editions `noeta run` (and the MCP `run` tool) resolve.
             match noeta_runner::compile::load_default_project(path) {
-                Ok(loaded) => (loaded.program, loaded.sources, loaded.editions),
+                // The project's whole provenance, not just its editions: the debug console's
+                // session checker resolves `@name`s per the package that wrote them, so dropping
+                // the package map here reported a spurious E0036 on every renamed directive.
+                Ok(loaded) => (loaded.program, loaded.sources, loaded.provenance),
                 Err(failure) => return Err(failure.to_text().0),
             }
         }
     };
 
-    let (checked, checker) = noeta_check::check_all_session_with(&program, editions);
+    let (checked, checker) = noeta_check::check_all_session_opts(
+        &program,
+        noeta_check::CheckOptions::for_workspace(provenance),
+    );
     // Errors only — a warning leaves a runnable program, and refusing to attach to it is the one
     // thing a debugger must never do.
     if noeta_diagnostics::has_errors(&checked.diagnostics) {

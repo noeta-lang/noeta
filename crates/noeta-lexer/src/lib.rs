@@ -15,7 +15,7 @@ use noeta_span::{Source, Span};
 /// fmt, conformance, check) can name the edition it threads into [`lex_in`] /
 /// `noeta_parser::parse_in`, and the per-source map it builds/consumes, without a separate
 /// dependency on `noeta-edition`.
-pub use noeta_edition::{Edition, EditionMap};
+pub use noeta_edition::{Edition, EditionMap, Provenance};
 
 /// The lexical category of a token. Declarative `logos` definitions keep the lexer
 /// fast and the token set legible. `logos` resolves overlaps by longest match (so `==`
@@ -695,6 +695,69 @@ impl TokenKind {
             _ => ReservedRole::Keyword,
         }
     }
+
+    /// **Every** token whose spelling is a reserved word, in the order the token table declares
+    /// them — the enumeration companion of [`TokenKind::reserved_word`], for the surfaces that must
+    /// *list* the language's vocabulary rather than classify one token.
+    ///
+    /// Written as [`TokenKind`] variants rather than strings on purpose: a variant that is renamed
+    /// or deleted is a **compile error** here, which a `&str` list can never be. The spelling and
+    /// the role are still derived — [`TokenKind::describe`] supplies one, [`Self::reserved_role`]
+    /// the other — so this list carries no information that could disagree with the lexer.
+    ///
+    /// Like [`noeta_ast::BuiltinTy::all`] one crate over, a list cannot be compile-forced the way a
+    /// `match` is — **adding a keyword: add it here too.** The
+    /// `every_reserved_word_token_is_listed` test keeps it honest in both directions by scraping
+    /// this file's own `#[token("…")]` attributes, so a keyword that joins or leaves the language
+    /// without passing through here fails the lexer's own suite.
+    pub const RESERVED_WORD_KINDS: &'static [TokenKind] = &[
+        TokenKind::EchoKw,
+        TokenKind::MutKw,
+        TokenKind::TrueKw,
+        TokenKind::FalseKw,
+        TokenKind::FnKw,
+        TokenKind::ReturnKw,
+        TokenKind::YieldKw,
+        TokenKind::AsyncKw,
+        TokenKind::AwaitKw,
+        TokenKind::ConcurrentKw,
+        TokenKind::SpawnKw,
+        TokenKind::IsolateKw,
+        TokenKind::IfKw,
+        TokenKind::ThenKw,
+        TokenKind::ElseKw,
+        TokenKind::ForKw,
+        TokenKind::WhileKw,
+        TokenKind::BreakKw,
+        TokenKind::ContinueKw,
+        TokenKind::InKw,
+        TokenKind::EnumKw,
+        TokenKind::MatchKw,
+        TokenKind::StructKw,
+        TokenKind::TypeKw,
+        TokenKind::ClassKw,
+        TokenKind::DestructKw,
+        TokenKind::ImplKw,
+        TokenKind::TraitKw,
+        TokenKind::NamespaceKw,
+        TokenKind::UseKw,
+        TokenKind::PubKw,
+        TokenKind::AsKw,
+        TokenKind::IsKw,
+        TokenKind::AttributesOfKw,
+        TokenKind::TypeOfKw,
+        TokenKind::TypeNameKw,
+        TokenKind::FieldsOfKw,
+        TokenKind::TraitsOfKw,
+        TokenKind::FromBytesKw,
+        TokenKind::RolesOfKw,
+        TokenKind::ParamsOfKw,
+        TokenKind::ReturnsOfKw,
+        TokenKind::InvokeKw,
+        TokenKind::FieldSpecsOfKw,
+        TokenKind::VariantsOfKw,
+        TokenKind::ConstructKw,
+    ];
 }
 
 /// What the language reserves a word for.
@@ -738,6 +801,25 @@ pub struct ReservedWord {
 }
 
 impl ReservedWord {
+    /// **The language's word vocabulary** — every word the lexer holds back, in token-table order,
+    /// each with the role it is held back for.
+    ///
+    /// This is the census the whole toolchain's other keyword lists are supposed to *be*: the IDE's
+    /// highlighter and completion offer, the TextMate grammar, the tree-sitter grammar and its
+    /// highlight queries. Before it existed each of those was a hand-written copy and four of them
+    /// had drifted. Deriving from it — or, for the two files that are JSON and JavaScript, checking
+    /// against it — is what `crates/noeta-ide/tests/editor_vocabulary.rs` does.
+    pub fn all() -> Vec<ReservedWord> {
+        TokenKind::RESERVED_WORD_KINDS
+            .iter()
+            .map(|kind| {
+                kind.reserved_word().unwrap_or_else(|| {
+                    panic!("{kind:?} is in RESERVED_WORD_KINDS but is not a reserved word")
+                })
+            })
+            .collect()
+    }
+
     /// The reserved word a piece of source text spells, if any. Goes through the lexer itself, so
     /// the answer can never disagree with what the lexer actually produces for that text — the
     /// caller is typically holding a span, not a token.
@@ -1593,78 +1675,132 @@ mod tests {
         (source, lexed)
     }
 
-    /// Every word the lexer holds back, with the role the diagnostic names it by. Written out in
-    /// full — this is the census the "a name is reserved" diagnostic speaks for, and a keyword
-    /// that silently joins or leaves the language should show up as a failure here rather than as
-    /// a message nobody notices went missing.
-    const RESERVED_WORDS: &[(&str, ReservedRole)] = &[
-        ("echo", ReservedRole::Keyword),
-        ("mut", ReservedRole::Keyword),
-        ("true", ReservedRole::BooleanLiteral),
-        ("false", ReservedRole::BooleanLiteral),
-        ("fn", ReservedRole::Keyword),
-        ("return", ReservedRole::Keyword),
-        ("yield", ReservedRole::Keyword),
-        ("async", ReservedRole::Keyword),
-        ("await", ReservedRole::Keyword),
-        ("concurrent", ReservedRole::Keyword),
-        ("spawn", ReservedRole::Keyword),
-        ("isolate", ReservedRole::Keyword),
-        ("if", ReservedRole::Keyword),
-        ("then", ReservedRole::Keyword),
-        ("else", ReservedRole::Keyword),
-        ("for", ReservedRole::Keyword),
-        ("while", ReservedRole::Keyword),
-        ("break", ReservedRole::Keyword),
-        ("continue", ReservedRole::Keyword),
-        ("in", ReservedRole::Keyword),
-        ("enum", ReservedRole::Keyword),
-        ("match", ReservedRole::Keyword),
-        ("struct", ReservedRole::Keyword),
-        ("type", ReservedRole::Keyword),
-        ("class", ReservedRole::Keyword),
-        ("destruct", ReservedRole::Keyword),
-        ("impl", ReservedRole::Keyword),
-        ("trait", ReservedRole::Keyword),
-        ("namespace", ReservedRole::Keyword),
-        ("use", ReservedRole::Keyword),
-        ("pub", ReservedRole::Keyword),
-        ("as", ReservedRole::Keyword),
-        ("is", ReservedRole::Keyword),
-        ("attributes_of", ReservedRole::Reflection),
-        ("type_of", ReservedRole::Reflection),
-        ("type_name", ReservedRole::Reflection),
-        ("fields_of", ReservedRole::Reflection),
-        ("traits_of", ReservedRole::Reflection),
-        ("from_bytes", ReservedRole::Reflection),
-        ("roles_of", ReservedRole::Reflection),
-        ("params_of", ReservedRole::Reflection),
-        ("returns_of", ReservedRole::Reflection),
-        ("invoke", ReservedRole::Reflection),
-        ("field_specs_of", ReservedRole::Reflection),
-        ("variants_of", ReservedRole::Reflection),
-        ("construct", ReservedRole::Reflection),
-    ];
+    /// Every `#[token("…")]` in **this file** whose spelling is identifier-shaped — the language's
+    /// word vocabulary read straight out of the token table that defines it, with no list in
+    /// between. Operator tokens (`#[token("&&")]`) are not vocabulary and are skipped.
+    ///
+    /// This is the same technique `noeta-diagnostics`' `ALL` gate uses on its own enum body: the
+    /// one place a census may legitimately be *scraped* is the file that owns the truth.
+    fn tokens_declared_in_this_file() -> Vec<&'static str> {
+        let text = include_str!("lib.rs");
+        let mut words: Vec<&str> = text
+            .lines()
+            .filter_map(|line| {
+                let rest = line.trim().strip_prefix("#[token(\"")?;
+                let word = rest.split('"').next()?;
+                let mut chars = word.chars();
+                let head = chars.next()?;
+                ((head.is_ascii_alphabetic() || head == '_')
+                    && chars.all(|c| c.is_ascii_alphanumeric() || c == '_'))
+                .then_some(word)
+            })
+            .collect();
+        words.sort_unstable();
+        words.dedup();
+        assert!(
+            words.len() > 40,
+            "the `#[token(\"…\")]` scrape found only {} words — it has stopped matching this \
+             file's own source, so every test built on it is passing vacuously",
+            words.len()
+        );
+        words
+    }
+
+    /// **[`TokenKind::RESERVED_WORD_KINDS`] is the token table, in both directions.**
+    ///
+    /// The kinds list is the one place in the tree where the language's vocabulary is enumerated
+    /// rather than classified, and everything downstream — `noeta-ide`'s highlighter and completion
+    /// offer, the TextMate grammar, the tree-sitter grammar and queries — now derives from or is
+    /// checked against it. So it has to be exactly the `#[token("…")]` declarations: a keyword
+    /// added to the token table and not listed here would be invisible to all of them (that is how
+    /// `isolate` went missing from completion), and a keyword *removed* from the table but left
+    /// here would keep being offered for a word the lexer no longer knows.
+    #[test]
+    fn every_reserved_word_token_is_listed() {
+        let declared = tokens_declared_in_this_file();
+        let mut listed: Vec<&str> = ReservedWord::all().iter().map(|r| r.word).collect();
+        let census = listed.len();
+        listed.sort_unstable();
+        listed.dedup();
+        assert_eq!(
+            listed.len(),
+            census,
+            "RESERVED_WORD_KINDS lists a kind twice"
+        );
+        assert_eq!(
+            listed, declared,
+            "RESERVED_WORD_KINDS has drifted from this file's `#[token(\"…\")]` declarations"
+        );
+    }
 
     /// Each census word round-trips: the lexer produces one token for it, that token reports
     /// itself as a reserved word, and the spelling it reports back is the text that was lexed.
     #[test]
     fn every_reserved_word_round_trips() {
-        for (word, role) in RESERVED_WORDS {
+        for reserved in ReservedWord::all() {
+            let word = reserved.word;
             let (_, lexed) = lex_str(word);
             assert_eq!(
                 lexed.tokens.len(),
                 1,
                 "`{word}` lexed to more than one token"
             );
-            let reserved = lexed.tokens[0]
+            let from_token = lexed.tokens[0]
                 .kind
                 .reserved_word()
                 .unwrap_or_else(|| panic!("`{word}` is not reported as a reserved word"));
-            assert_eq!(reserved.word, *word);
-            assert_eq!(reserved.role, *role, "`{word}` has the wrong role");
+            assert_eq!(from_token, reserved);
             assert_eq!(ReservedWord::from_spelling(word), Some(reserved));
         }
+    }
+
+    /// The two **closed** reserved-word families, named in full.
+    ///
+    /// [`TokenKind::reserved_role`] defaults to [`ReservedRole::Keyword`] through a wildcard — the
+    /// right default, since a new reserved word is a keyword of the grammar unless it is
+    /// deliberately one of the other two, but it means a word that *should* have been filed as a
+    /// reflection primitive is silently filed as a keyword instead. The role is load-bearing
+    /// downstream: completion offers the keywords and withholds the reflection primitives, and the
+    /// two grammars colour them differently. So the closed sets are pinned by name and the open one
+    /// is checked as their complement.
+    #[test]
+    fn the_closed_role_families_are_exactly_these_words() {
+        let by_role = |role| {
+            ReservedWord::all()
+                .into_iter()
+                .filter(|r| r.role == role)
+                .map(|r| r.word)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            by_role(ReservedRole::BooleanLiteral),
+            ["true", "false"],
+            "the boolean-literal family has changed"
+        );
+        assert_eq!(
+            by_role(ReservedRole::Reflection),
+            [
+                "attributes_of",
+                "type_of",
+                "type_name",
+                "fields_of",
+                "traits_of",
+                "from_bytes",
+                "roles_of",
+                "params_of",
+                "returns_of",
+                "invoke",
+                "field_specs_of",
+                "variants_of",
+                "construct",
+            ],
+            "the reflection-primitive family has changed"
+        );
+        assert_eq!(
+            by_role(ReservedRole::Keyword).len(),
+            ReservedWord::all().len() - 15,
+            "every word that is not a boolean literal or a reflection primitive is a keyword"
+        );
     }
 
     /// Nothing that is not a word is a reserved *word*: operators, literal classes, and plain

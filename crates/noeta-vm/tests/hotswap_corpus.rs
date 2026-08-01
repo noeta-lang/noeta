@@ -15,7 +15,7 @@
 //!
 //! > swap(v1 → v2) then probe must be observationally identical to cold-starting v2 then probing.
 //!
-//! Four generators, because the differ has distinct code paths and one generator exercises one:
+//! Five generators, because the differ has distinct code paths and one generator exercises one:
 //!
 //! * [`Generator::CloneAppend`] — clone an eligible top-level `fn` under a fresh name and append
 //!   it. The differ reports it `added`; the fragment holds a body written against *this program's*
@@ -34,6 +34,25 @@
 //!   most corpus functions take arguments: here the program's own re-running top level supplies the
 //!   call, so a body of any arity gets fragment-compiled and then actually executed. Every
 //!   divergence but one was found by this generator.
+//! * [`Generator::PermuteTypeArgs`] — a re-running swap whose v2 **inserts** an instantiation
+//!   before the program's own code instead of appending one after it. The four above are all
+//!   *append-only*, and that is a blind spot with a name: an appended entry interns its type
+//!   arguments after the ones already in the session's table, so every incoming index equals its
+//!   merged index and `SessionCompiler::absorb_type_args`' remap is the identity function. Delete
+//!   that remap outright and all 1566 cases of the other four stay green — measured twice. Insert
+//!   rather than append and the fresh table is a *permutation* of the session's, so the remap has
+//!   to be right or the fragment decodes the wrong type. Reported as `renumbering` in the tally,
+//!   with a floor asserted, because a permutation that happens to renumber nothing is exactly the
+//!   vacuous pass this generator exists to end.
+//!
+//!   The audit row that commissioned it proposed reordering the **declaration** region instead, on
+//!   the premise that declarations are hoisted and so a reorder is observationally inert. Both
+//!   halves of that premise measured false against this corpus, and the measurement is recorded
+//!   here so nobody re-derives it: type-argument rows are interned at concrete **call sites**, and
+//!   in every corpus program that has any, every one of those sites is a top-level statement — so
+//!   rotating the hoisted declarations renumbered **0 of 17** of them. And the reorder is not
+//!   inert: the reflection manifest is source-ordered, so eleven `reflection/attributes_*`
+//!   programs diverge under a rotation (see the note above [`KNOWN_DIVERGENCES`]).
 //!
 //! **Coverage is reported, never capped silently.** Every program lands in exactly one bucket per
 //! generator — exercised, or skipped with a machine-assigned reason — and the tally prints, against
@@ -222,6 +241,26 @@ enum Generator {
     /// the re-run top level. Works for a `fn` of any arity, which is why it exists: the clone
     /// generators can only probe a zero-arity function, and most corpus functions take arguments.
     RerunWithBodyEdit,
+    /// Both versions carry the same injected forwarding generic and call it **last**; v2 calls it
+    /// a second time, with a different type, **before** the program's own code. Verdict: a
+    /// re-running swap whose freshly-checked type-argument table is a *permutation* of the live
+    /// session's rather than an extension of it.
+    ///
+    /// This is the one generator that is not append-only, and that is its entire reason to exist.
+    /// Under an append the merge in `SessionCompiler::absorb_type_args` is the identity function —
+    /// every incoming index already equals its merged index — so the remap that rewrites a
+    /// fragment's indices into session space is never asked to do anything. Delete that remap and
+    /// all 1566 cases of the other four generators stay green; measured, twice. Insert rather than
+    /// append and every row moves: the session holds `[…program…, First]`, v2's fresh check holds
+    /// `[Second, …program…, First]`, and the merged table is `[…program…, First, Second]`.
+    ///
+    /// The injected declarations are byte-identical in both versions on purpose. The differ is
+    /// name-keyed, so it reports them unchanged and the fragment holds only top-level statements —
+    /// which means the fragment's calls resolve to a generic function the *session* installed, and
+    /// the type-argument index they carry has to be a session-space index or the callee decodes the
+    /// wrong type. `type_name::<T>()` inside the callee makes that visible as stdout instead of as
+    /// silence.
+    PermuteTypeArgs,
 }
 
 impl Generator {
@@ -231,6 +270,7 @@ impl Generator {
             Generator::CloneChanged => "clone-changed (body edit)",
             Generator::RerunTopLevel => "rerun (top-level edit)",
             Generator::RerunWithBodyEdit => "rerun + changed fn body",
+            Generator::PermuteTypeArgs => "rerun + permuted type-arg table",
         }
     }
 
@@ -238,7 +278,7 @@ impl Generator {
     fn observes_the_rerun(self) -> bool {
         matches!(
             self,
-            Generator::RerunTopLevel | Generator::RerunWithBodyEdit
+            Generator::RerunTopLevel | Generator::RerunWithBodyEdit | Generator::PermuteTypeArgs
         )
     }
 }
@@ -248,6 +288,12 @@ struct Case {
     v1: String,
     v2: String,
     probe: String,
+    /// Whether v2's freshly-checked type-argument table is numbered **differently** from the one
+    /// the session was booted with — i.e. whether `SessionCompiler::absorb_type_args` will produce
+    /// a non-identity remap for this case. Measured, not assumed: see
+    /// [`renumbers_the_type_arg_table`]. Only [`Generator::PermuteTypeArgs`] can ever set it,
+    /// because every other generator is append-only.
+    renumbers: bool,
 }
 
 /// The fresh name every generated declaration takes. Deliberately unspellable-by-accident so a
@@ -464,6 +510,95 @@ fn callable<'a>(program: &'a Program, src: &str) -> Result<(&'a FnDecl, String),
     }
 }
 
+/// The declarations the type-argument permutation injects. Present in **both** versions, character
+/// for character, so the name-keyed differ reports them unchanged and the swap stays a re-running
+/// top-level swap rather than an `added` declaration — the fragment then calls a generic function
+/// the *session* already installed, which is exactly the path that has to carry a session-space
+/// table index.
+///
+/// `__swap_permute_forward` is a **forwarding** generic: its body consumes `T` through the hidden
+/// type-argument slot, so each call site of it interns a real row in `Sites::type_arg_table` rather
+/// than resolving statically. Two marker structs, because one call cannot be permuted against
+/// itself.
+const PERMUTE_DECLS: &str = "struct __SwapPermuteFirst { z: int }\n\
+                             struct __SwapPermuteSecond { z: int }\n\
+                             fn __swap_permute_forward<T>(): string {\n\
+                             \x20   return type_name::<T>()\n\
+                             }\n";
+
+/// The call both versions **end** with, so the session's table holds it last.
+const PERMUTE_LAST: &str = "echo __swap_permute_forward::<__SwapPermuteFirst>()\n";
+
+/// The call only v2 has, inserted **before** the program's own code, so v2's freshly-checked table
+/// holds it first. That single word — *before* — is the whole generator: every other one appends.
+const PERMUTE_FIRST: &str = "echo __swap_permute_forward::<__SwapPermuteSecond>()\n";
+
+/// Where injected code goes: the start of the line holding the first top-level statement that is
+/// not a `use` or a `namespace`.
+///
+/// Before the program's own code (so the injected instantiation is interned first) but after its
+/// imports (so nothing moves above a `use` and changes name resolution). Falls back to the end of
+/// the source when the program is nothing but imports, or when that statement shares its line with
+/// something else — the permutation is weaker there (the program's own rows keep their indices) but
+/// still non-identity, and [`renumbers_the_type_arg_table`] measures which case a program landed in
+/// rather than assuming.
+fn insertion_point(program: &Program, src: &str) -> usize {
+    for stmt in &program.stmts {
+        if matches!(stmt, Stmt::Use { .. } | Stmt::Namespace { .. }) {
+            continue;
+        }
+        let start = stmt.span().start as usize;
+        let line = src[..start].rfind('\n').map_or(0, |nl| nl + 1);
+        return if src[line..start].trim().is_empty() {
+            line
+        } else {
+            src.len()
+        };
+    }
+    src.len()
+}
+
+/// The dedup keys of a version's freshly-checked type-argument table, in the order the checker
+/// interned them — the pair key `absorb_type_args` merges on (`TypeArgInfo` **and** its
+/// `TypeRepr`, which is what tells `Repository<Todo>` from `Repository<Order>`).
+fn type_arg_keys(src: &str) -> Vec<String> {
+    let (program, clean) = parse(src);
+    if !clean {
+        return Vec::new();
+    }
+    let checked = noeta_check::check_all(&program);
+    let sites = &checked.sites;
+    sites
+        .type_arg_table
+        .iter()
+        .enumerate()
+        .map(|(i, info)| format!("{info:?}|{:?}", sites.type_arg_reprs.get(i)))
+        .collect()
+}
+
+/// Whether swapping `v1 → v2` makes `SessionCompiler::absorb_type_args` produce a **non-identity**
+/// remap — the precondition this generator exists to create, measured rather than assumed.
+///
+/// Mirrors the merge exactly: keep every entry the session already has at its existing index,
+/// append genuinely new ones in v2's order, and call it the identity iff the session gained nothing
+/// *and* every fresh entry sits at its own index. That is the same test `absorb_type_args` runs
+/// before deciding it can borrow the incoming bundle back unchanged.
+fn renumbers_the_type_arg_table(v1: &str, v2: &str) -> bool {
+    let before = type_arg_keys(v1);
+    // An empty session table can only be appended to, never permuted.
+    if before.is_empty() {
+        return false;
+    }
+    let after = type_arg_keys(v2);
+    let mut merged = before;
+    for key in &after {
+        if !merged.contains(key) {
+            merged.push(key.clone());
+        }
+    }
+    !(merged.len() == after.len() && merged.iter().zip(&after).all(|(m, a)| m == a))
+}
+
 fn generate(gtor: Generator, src: &str, program: &Program) -> Result<Case, Skip> {
     match gtor {
         Generator::CloneAppend => {
@@ -472,6 +607,7 @@ fn generate(gtor: Generator, src: &str, program: &Program) -> Result<Case, Skip>
                 v1: src.to_string(),
                 v2: format!("{src}\n{}\n", clone_text(decl, src)),
                 probe: probe_call(decl, &call),
+                renumbers: false,
             })
         }
         Generator::CloneChanged => {
@@ -480,6 +616,7 @@ fn generate(gtor: Generator, src: &str, program: &Program) -> Result<Case, Skip>
                 v1: format!("{src}\n{}\n", delegate_text(decl, src, &call)),
                 v2: format!("{src}\n{}\n", clone_text(decl, src)),
                 probe: probe_call(decl, &call),
+                renumbers: false,
             })
         }
         Generator::RerunTopLevel => Ok(Case {
@@ -487,6 +624,7 @@ fn generate(gtor: Generator, src: &str, program: &Program) -> Result<Case, Skip>
             v2: format!("{src}\necho \"__swap_rerun_marker\"\n"),
             // The re-run's own output *is* the observation; the probe only has to be a legal entry.
             probe: String::new(),
+            renumbers: false,
         }),
         Generator::RerunWithBodyEdit => {
             let decl = pick(program, src, false).ok_or(Skip::NoTopLevelFn)?;
@@ -494,6 +632,22 @@ fn generate(gtor: Generator, src: &str, program: &Program) -> Result<Case, Skip>
                 v1: with_edited_body(decl, src),
                 v2: format!("{src}\necho \"__swap_rerun_marker\"\n"),
                 probe: String::new(),
+                renumbers: false,
+            })
+        }
+        Generator::PermuteTypeArgs => {
+            let at = insertion_point(program, src);
+            let (head, tail) = (&src[..at], &src[at..]);
+            // The shared prefix is identical in both versions; only where the *second* call sits
+            // differs, and that is what renumbers the table.
+            let v1 = format!("{head}\n{PERMUTE_DECLS}{tail}\n{PERMUTE_LAST}");
+            let v2 = format!("{head}\n{PERMUTE_DECLS}{PERMUTE_FIRST}{tail}\n{PERMUTE_LAST}");
+            let renumbers = renumbers_the_type_arg_table(&v1, &v2);
+            Ok(Case {
+                v1,
+                v2,
+                probe: String::new(),
+                renumbers,
             })
         }
     }
@@ -567,6 +721,11 @@ impl Skip {
 struct Divergence {
     case: String,
     generator: Generator,
+    /// Whether this case ran through a non-identity type-argument merge ([`Case::renumbers`]).
+    /// Carried on the divergence too, not only on a pass: a mutation that breaks the remap turns
+    /// every renumbering case into a *divergence*, and a counter that only counted passes would
+    /// then report zero renumbering and blame the generator for the very failure it just caught.
+    renumbers: bool,
     v1: String,
     v2: String,
     probe: String,
@@ -580,6 +739,9 @@ enum Verdict {
     /// rather than counted as if it had pinned an answer.
     Exercised {
         silent: bool,
+        /// Whether this comparison ran through a **non-identity** type-argument merge
+        /// ([`Case::renumbers`]) — the property the permute generator exists to produce.
+        renumbers: bool,
     },
     Skipped(Skip),
     Diverged(Box<Divergence>),
@@ -650,11 +812,13 @@ fn oracle(name: &str, gtor: Generator, case: &Case) -> Verdict {
     if via_swap == first {
         Verdict::Exercised {
             silent: first.stdout.is_empty(),
+            renumbers: case.renumbers,
         }
     } else {
         Verdict::Diverged(Box::new(Divergence {
             case: name.to_string(),
             generator: gtor,
+            renumbers: case.renumbers,
             v1: case.v1.clone(),
             v2: case.v2.clone(),
             probe: case.probe.clone(),
@@ -736,6 +900,9 @@ struct Tally {
     exercised: BTreeMap<Generator, usize>,
     /// Of the exercised cases, those whose comparison saw no stdout on either side.
     silent: BTreeMap<Generator, usize>,
+    /// Of the exercised cases, those that ran through a **non-identity** type-argument merge.
+    /// Zero for every append-only generator by construction; the permute generator's floor.
+    renumbered: BTreeMap<Generator, usize>,
     skipped: BTreeMap<(Generator, Skip), usize>,
     divergences: Vec<Divergence>,
 }
@@ -743,14 +910,22 @@ struct Tally {
 impl Tally {
     fn record(&mut self, gtor: Generator, verdict: Verdict) {
         match verdict {
-            Verdict::Exercised { silent } => {
+            Verdict::Exercised { silent, renumbers } => {
                 *self.exercised.entry(gtor).or_default() += 1;
                 if silent {
                     *self.silent.entry(gtor).or_default() += 1;
                 }
+                if renumbers {
+                    *self.renumbered.entry(gtor).or_default() += 1;
+                }
             }
             Verdict::Skipped(skip) => *self.skipped.entry((gtor, skip)).or_default() += 1,
-            Verdict::Diverged(d) => self.divergences.push(*d),
+            Verdict::Diverged(d) => {
+                if d.renumbers {
+                    *self.renumbered.entry(gtor).or_default() += 1;
+                }
+                self.divergences.push(*d);
+            }
         }
     }
 
@@ -760,6 +935,9 @@ impl Tally {
         }
         for (k, v) in other.silent {
             *self.silent.entry(k).or_default() += v;
+        }
+        for (k, v) in other.renumbered {
+            *self.renumbered.entry(k).or_default() += v;
         }
         for (k, v) in other.skipped {
             *self.skipped.entry(k).or_default() += v;
@@ -819,11 +997,12 @@ fn sweep_one(name: &str, src: &str) -> Tally {
     tally
 }
 
-const GENERATORS: [Generator; 4] = [
+const GENERATORS: [Generator; 5] = [
     Generator::CloneAppend,
     Generator::CloneChanged,
     Generator::RerunTopLevel,
     Generator::RerunWithBodyEdit,
+    Generator::PermuteTypeArgs,
 ];
 
 /// Run one case on its own thread with a wall-clock budget.
@@ -951,6 +1130,17 @@ fn report(tally: &Tally, programs: usize, multi: usize, elapsed: Duration) {
         for (skip, n) in reasons {
             println!("        {n:>4}  {}", skip.label());
         }
+        // Printed for the permute generator even when it is zero: a permutation that renumbers
+        // nothing is a generator that runs and proves nothing, and that has to be visible.
+        if gtor == Generator::PermuteTypeArgs {
+            println!(
+                "        {:>4}  of the {} compared cases renumber the type-argument table (a \
+                 NON-IDENTITY absorb_type_args merge — the property no append-only generator \
+                 can produce)",
+                tally.renumbered.get(&gtor).copied().unwrap_or(0),
+                exercised + diverged
+            );
+        }
     }
     let compared: usize = tally.exercised.values().sum::<usize>() + tally.divergences.len();
     let silent: usize = tally.silent.values().sum();
@@ -1019,6 +1209,15 @@ fn indent(text: &str) -> String {
 /// superseded in place (`reflection/attributes_on_functions`, `attributes_on_params`).
 const KNOWN_DIVERGENCES: &[(&str, Generator)] = &[];
 
+/// The minimum number of [`Generator::PermuteTypeArgs`] cases that must run through a
+/// **non-identity** type-argument merge. Measured at 633 when the generator landed.
+///
+/// A floor rather than an exact count so adding corpus programs does not churn this file, and a
+/// floor rather than nothing because the failure mode this generator was written to end is a
+/// generator that runs everywhere and exercises the identity function everywhere. If it ever trips,
+/// the answer is to find out what stopped renumbering, not to lower it.
+const PERMUTE_RENUMBERING_FLOOR: usize = 500;
+
 /// Compare what the sweep found against [`KNOWN_DIVERGENCES`], in both directions.
 fn assert_against_the_known_defects(tally: &Tally, exhaustive: bool) {
     let found: Vec<(&str, Generator)> = tally
@@ -1065,5 +1264,41 @@ fn the_whole_corpus_swaps_like_a_cold_start() {
         compared > 800,
         "the sweep compared only {compared} cases — the generators have stopped generating"
     );
+    // Divergences first: they are the finding, and a generator-health assertion firing ahead of
+    // them would bury it.
     assert_against_the_known_defects(&tally, true);
+    // The permutation's precondition, asserted rather than hoped for — the same guard row 6's
+    // hand-written case carries, at corpus scale. Two halves: it must renumber in EVERY compared
+    // case (the construction guarantees it, so a shortfall means the construction broke — the
+    // checker's discovery order moved, or the injected declarations stopped interning), and it
+    // must compare enough cases to be worth having.
+    let permuted = tally
+        .exercised
+        .get(&Generator::PermuteTypeArgs)
+        .copied()
+        .unwrap_or(0)
+        + tally
+            .divergences
+            .iter()
+            .filter(|d| d.generator == Generator::PermuteTypeArgs)
+            .count();
+    let renumbering = tally
+        .renumbered
+        .get(&Generator::PermuteTypeArgs)
+        .copied()
+        .unwrap_or(0);
+    assert_eq!(
+        renumbering,
+        permuted,
+        "{} of {permuted} permuted cases exercised the IDENTITY type-argument merge — the \
+         injected instantiation stopped landing before the program's own rows, so those cases \
+         prove exactly what the four append-only generators already proved",
+        permuted - renumbering
+    );
+    assert!(
+        renumbering >= PERMUTE_RENUMBERING_FLOOR,
+        "only {renumbering} permuted cases produced a NON-IDENTITY type-argument merge, below \
+         the floor of {PERMUTE_RENUMBERING_FLOOR} — the permute generator has stopped exercising \
+         the remap it exists for, and the corpus is back to measuring the identity case"
+    );
 }

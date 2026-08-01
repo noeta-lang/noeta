@@ -286,11 +286,7 @@ pub(crate) fn cmd_doc(
         }
     };
     if providers.get("doc").is_some_and(|p| p != "std") {
-        let ctx = noeta_check::TierContext {
-            uses: &linked.package_uses,
-            packages: &linked.packages,
-        };
-        let activated = noeta_check::activate_tiers_with(&linked.program, &["doc"], &ctx);
+        let activated = noeta_check::activate_tiers(&linked.program, &["doc"], &linked.provenance);
         // The shared declared-provider dispatch (context): a package's `@tier(doc)` runner owns
         // the invocation; an Extension resolution falls through to the native extractor below —
         // which reads the *unactivated* program, so the activation is discarded here.

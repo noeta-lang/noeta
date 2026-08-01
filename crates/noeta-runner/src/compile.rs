@@ -232,18 +232,12 @@ pub fn resolve_front_with(
 pub struct Loaded {
     pub program: noeta_ast::Program,
     pub sources: SourceMap,
-    /// Which edition governs each source (entry/siblings = root package's; each dependency's own),
-    /// keyed by `SourceId`. SourceIds survive tier activation, so the map stays valid against the
-    /// activated program.
-    pub editions: noeta_edition::EditionMap,
-    /// Which **package** each source came from, keyed by `SourceId` (the loader's `Linked::packages`)
-    /// — the provenance the package orphan rule (E0070) reads. `SourceId`s survive tier activation,
-    /// so the map stays valid against the activated program, exactly as [`Loaded::editions`] does.
-    pub packages: noeta_span::PackageMap,
-    /// The per-package `@`-name resolution tables (`[directives]`; `[tiers]` later), keyed by
-    /// [`noeta_span::PackageOrigin`] — read by the checker via a span's `SourceId` so a `@name`
-    /// resolves in the package that wrote it. Carried alongside `packages`, from the same resolve.
-    pub package_uses: noeta_span::PackageUses,
+    /// Where every source came from — its edition, its package, and that package's `@name` bindings
+    /// ([`noeta_check::Provenance`]). This is the layer that turns the loader's three separate maps
+    /// into the checker's one value: below here they are raw link output, above here they are always
+    /// carried and passed together. `SourceId`s survive tier activation, so it stays valid against
+    /// the activated program.
+    pub provenance: noeta_check::Provenance,
     /// Non-blocking diagnostics the front half already produced (tier activation's warnings), to be
     /// rendered alongside whatever the later type-check reports. Carried rather than dropped for the
     /// same reason [`Compiled::warnings`] is.
@@ -255,12 +249,7 @@ impl Loaded {
     /// provenance. One place, so no caller can thread half of it (a `check_all` alone would silently
     /// drop both, and the orphan rule would then never fire on a real dependency graph).
     fn check_options(&self) -> noeta_check::CheckOptions {
-        noeta_check::CheckOptions {
-            editions: self.editions.clone(),
-            packages: self.packages.clone(),
-            package_uses: self.package_uses.clone(),
-            ..noeta_check::CheckOptions::default()
-        }
+        noeta_check::CheckOptions::for_workspace(self.provenance.clone())
     }
 
     /// Type-check the loaded program under its per-source editions and package provenance — the one
@@ -286,8 +275,7 @@ pub fn load_project(file: &Path, facts: &FrontFacts) -> Result<Loaded, CompileFa
     noeta_stdlib::registry::default_seeded();
     let linked = load_linked(file, facts)?;
     let sources = linked.sources;
-    let editions = linked.editions;
-    let packages = linked.packages;
+    let provenance = linked.provenance;
     // Activation inlines each `@<tier> { … }` block; with no active tiers the program runs as-is and
     // every tier block is stripped at lowering (the default). Activation is only done when needed.
     let (program, warnings) = if facts.active.is_empty() {
@@ -296,11 +284,7 @@ pub fn load_project(file: &Path, facts: &FrontFacts) -> Result<Loaded, CompileFa
         let active_refs: Vec<&str> = facts.active.iter().map(String::as_str).collect();
         // Activation resolves each `@name` per the package that wrote it (per-package naming arc):
         // the whole-program `[tiers]`/`[directives]` bindings and the span→package map.
-        let ctx = noeta_check::TierContext {
-            uses: &facts.package_uses,
-            packages: &packages,
-        };
-        let mut activated = noeta_check::activate_tiers_with(&linked.program, &active_refs, &ctx);
+        let mut activated = noeta_check::activate_tiers(&linked.program, &active_refs, &provenance);
         // Only an *error* stops the load; anything advisory rides out on `Loaded::warnings` for the
         // caller to report.
         if has_errors(&activated.diagnostics) {
@@ -317,9 +301,7 @@ pub fn load_project(file: &Path, facts: &FrontFacts) -> Result<Loaded, CompileFa
     Ok(Loaded {
         program,
         sources,
-        editions,
-        packages,
-        package_uses: facts.package_uses.clone(),
+        provenance,
         warnings,
     })
 }
@@ -331,12 +313,31 @@ pub fn load_linked(
     file: &Path,
     facts: &FrontFacts,
 ) -> Result<noeta_loader::Linked, CompileFailure> {
-    match noeta_loader::load_with_deps(
+    load_linked_appending(file, facts, &[])
+}
+
+/// As [`load_linked`], appending `tail` — a **driver's synthesized entry call** (`noeta serve`'s
+/// `server.serve(port, fetch, host)`, `noeta migrate`'s `migrations.emit(…)`) — to the entry
+/// program *before* it links, exactly as [`noeta_loader::load_with_deps_appending`] documents.
+///
+/// The tail is the only thing an entry-call command's load does differently from `run`'s, so it is
+/// the only thing this takes: everything else — which dependency packages, which per-package `@`
+/// tables, which edition — comes out of the same [`FrontFacts`] the plain run resolves, through the
+/// same loader call. Before this existed, `noeta serve`'s three load sites each called the loader
+/// directly with a hand-assembled argument list (audit-10), which is how they came to be the only
+/// load sites in the tree that never went through the front-facts firewall.
+pub fn load_linked_appending(
+    file: &Path,
+    facts: &FrontFacts,
+    tail: &[noeta_ast::Stmt],
+) -> Result<noeta_loader::Linked, CompileFailure> {
+    match noeta_loader::load_with_deps_appending(
         file,
         facts.edition,
         &facts.deps,
         &facts.package_uses,
         noeta_pm::sources::package_root(file).as_ref(),
+        tail,
     ) {
         Err(err) => Err(CompileFailure::Unreadable(format!(
             "cannot read {}: {err}",

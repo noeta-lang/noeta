@@ -48,6 +48,19 @@ struct Cli {
     /// poll rests on. Without this flag the oracle covers the production, poll-free codegen.
     #[arg(long)]
     cancel_poll: bool,
+    /// With `--jit-differential`: emit **AOT-form** bodies from the forced JIT (inline caches off,
+    /// null call sites, no cancellation poll) — the codegen `noeta build --native` links, run
+    /// in-process. The cheap arm of the AOT oracle: same corpus, same full-`RunResult` comparison,
+    /// no linker. Mutually exclusive with `--cancel-poll` (they are two different codegen shapes).
+    #[arg(long)]
+    aot_bodies: bool,
+    /// Run the **linked** AOT differential oracle (parallel-path audit row 9): for every corpus
+    /// program, AOT-compile it, `cc`-link it against the real `libnoeta_aot.a`, staple its bundle on,
+    /// and assert the artifact's stdout, stderr and exit code match the interpreted run through the
+    /// same runtime entry. Needs a C toolchain (`NOETA_CC`, else `cc`) and the runtime archive
+    /// (`NOETA_AOT_RUNTIME_LIB`, else built here). Minutes, not seconds — the gate arm.
+    #[arg(long)]
+    aot_differential: bool,
     /// Run the wasm differential oracle (P-WASM W1.3): compile every corpus program to a `.noeb`
     /// and execute it through the wasm runner under wasmtime (`--sandbox`), asserting stdout,
     /// exit code, and rendered stderr byte-identical to the native VM. Needs `wasmtime` (or
@@ -63,7 +76,21 @@ struct Cli {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     if cli.jit_differential {
-        cmd_jit_differential(cli.file.as_deref(), &cli.dir, cli.cancel_poll)
+        if cli.cancel_poll && cli.aot_bodies {
+            eprintln!(
+                "noeta-conformance: --cancel-poll and --aot-bodies are two different codegen \
+                 shapes; run them as two arms"
+            );
+            return ExitCode::from(2);
+        }
+        cmd_jit_differential(
+            cli.file.as_deref(),
+            &cli.dir,
+            cli.cancel_poll,
+            cli.aot_bodies,
+        )
+    } else if cli.aot_differential {
+        cmd_aot_differential(cli.file.as_deref(), &cli.dir)
     } else if cli.wasm_differential {
         cmd_wasm_differential(cli.file.as_deref(), &cli.dir)
     } else if cli.check_leaks {
@@ -179,19 +206,78 @@ fn cmd_jit_differential(
     file: Option<&std::path::Path>,
     dir: &std::path::Path,
     cancel_poll: bool,
+    aot_bodies: bool,
 ) -> ExitCode {
-    let arm = if cancel_poll {
-        noeta_conformance::JitDiffArm::CancelPoll
-    } else {
-        noeta_conformance::JitDiffArm::Plain
+    let arm = match (cancel_poll, aot_bodies) {
+        (true, _) => noeta_conformance::JitDiffArm::CancelPoll,
+        (_, true) => noeta_conformance::JitDiffArm::AotBodies,
+        _ => noeta_conformance::JitDiffArm::Plain,
     };
     let report = noeta_conformance::run_jit_differential_with(dir, file, arm);
     print!("{}", report.to_human());
+    // A whole-corpus arm that ran ZERO programs is a broken harness, not a pass — the posture the
+    // wasm oracle had to learn (it sat green at `0 skipped` while executing nothing).
+    if file.is_none() && report.matched == 0 {
+        eprintln!(
+            "noeta-conformance: --jit-differential ran ZERO programs over {} — that is a broken \
+             harness, not a pass (wrong --dir?).",
+            dir.display()
+        );
+        return ExitCode::FAILURE;
+    }
     if report.ok() {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
     }
+}
+
+/// Run the **linked** AOT differential oracle (parallel-path audit row 9): every corpus program as a
+/// real `noeta build --native` artifact, against the interpreted run through the same runtime entry.
+/// Missing tooling (a C toolchain, the runtime archive) is a loud setup error and exit 2 — never a
+/// silent pass, which is exactly what the one hand-written `--native` test did.
+#[cfg(feature = "jit")]
+fn cmd_aot_differential(file: Option<&std::path::Path>, dir: &std::path::Path) -> ExitCode {
+    match noeta_conformance::run_aot_differential(dir, file) {
+        Ok(report) => {
+            print!("{}", report.to_human());
+            // A floor, not a zero-check. "Ran nothing" is the failure mode the wasm oracle shipped,
+            // but "ran a tenth of the corpus" is the same failure wearing a number: a change that
+            // makes 700 programs stop compiling would otherwise pass here while covering almost
+            // nothing. Measured at 801 on 2026-08-01; raise it when it climbs, and if it drops, find
+            // out which programs stopped running before touching this line.
+            const MIN_CASES: usize = 760;
+            if file.is_none() && report.matched < MIN_CASES {
+                eprintln!(
+                    "noeta-conformance: --aot-differential compared only {} programs over {} \
+                     (floor {MIN_CASES}) — that is a broken harness or a corpus that stopped \
+                     compiling, not a pass.",
+                    report.matched,
+                    dir.display(),
+                );
+                return ExitCode::FAILURE;
+            }
+            if report.ok() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        Err(setup) => {
+            eprintln!("noeta-conformance: --aot-differential setup failed: {setup}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// Fallback when the binary was built without the `jit` feature: there is no AOT codegen to test.
+#[cfg(not(feature = "jit"))]
+fn cmd_aot_differential(_file: Option<&std::path::Path>, _dir: &std::path::Path) -> ExitCode {
+    eprintln!(
+        "noeta-conformance: --aot-differential requires the `jit` feature \
+         (build with `cargo run -p noeta-conformance --features jit -- --aot-differential`)"
+    );
+    ExitCode::from(2)
 }
 
 /// Fallback when the binary was built without the `jit` feature: the oracle cannot run.
@@ -200,6 +286,7 @@ fn cmd_jit_differential(
     _file: Option<&std::path::Path>,
     _dir: &std::path::Path,
     _cancel_poll: bool,
+    _aot_bodies: bool,
 ) -> ExitCode {
     eprintln!(
         "noeta-conformance: --jit-differential requires the `jit` feature \

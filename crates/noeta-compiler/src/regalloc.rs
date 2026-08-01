@@ -34,7 +34,7 @@
 //!
 //! [`set_reg`]: ../../noeta_vm/index.html
 
-use noeta_bytecode::{CaptureFrom, Chunk, Const, Op, Reg, StrPart};
+use noeta_bytecode::{CaptureFrom, Chunk, Const, JumpPc, Op, Reg, StrPart};
 
 /// Coalesce `chunk`'s registers in place: rename register numbers onto the smallest set of physical
 /// slots that respects liveness, and shrink `num_registers` to match. Behaviour-preserving — only
@@ -48,24 +48,6 @@ fn is_primitive_const(c: &Const) -> bool {
         c,
         Const::Unit | Const::Bool(_) | Const::Int(_) | Const::Float(_) | Const::F32(_)
     )
-}
-
-/// Apply `f` to each jump-target field an op carries (the same set [`patch_jump`] handles), for the
-/// LICM rebuild's target fix-up.
-fn for_each_target_mut(op: &mut Op, mut f: impl FnMut(&mut u32)) {
-    match op {
-        Op::Jump { target }
-        | Op::JumpIfFalse { target, .. }
-        | Op::JumpIfTrue { target, .. }
-        | Op::CondBranch { target, .. } => f(target),
-        Op::Coalesce { fallback, .. } => f(fallback),
-        Op::MatchInt { fail, .. }
-        | Op::MatchStr { fail, .. }
-        | Op::MatchBool { fail, .. }
-        | Op::MatchVariant { fail, .. }
-        | Op::MatchTuple { fail, .. } => f(fail),
-        _ => {}
-    }
 }
 
 /// Hoist loop-invariant primitive-constant loads out of loops (P-VMT-LICM). Runs on the **monotonic**
@@ -170,8 +152,10 @@ pub fn hoist_loop_invariant_consts(chunk: &mut Chunk) {
         remap[old] = new_code.len() as u32;
         new_code.push(chunk.code[old].clone());
     }
+    // Every branch destination moves with the code. `for_each_jump_pc_mut` is the one place
+    // that knows which ops carry one, so a new branching op cannot silently keep a stale index.
     for op in &mut new_code {
-        for_each_target_mut(op, |t| *t = remap[*t as usize]);
+        op.for_each_jump_pc_mut(|t| *t = remap[*t as usize]);
     }
     // The debug line table is pc-keyed, so it moves with the code (empty in a non-debug compile, so
     // this is then a no-op). Every original pc is retained — a hoisted load keeps its entry, now at
@@ -255,15 +239,17 @@ pub fn coalesce(chunk: &mut Chunk) {
 struct OpFacts {
     def: Option<Reg>,
     uses: Vec<Reg>,
-    /// Explicit jump targets (instruction indices).
-    targets: Vec<u32>,
+    /// Explicit jump targets (instruction indices), filled from
+    /// [`Op::for_each_jump_pc`] rather than per-arm.
+    targets: Vec<JumpPc>,
     /// Whether control can fall through to the next instruction.
     fallthrough: bool,
 }
 
 /// Enumerate an op's register reads/writes and control flow. Exhaustive by design — there is no
 /// `_` arm, so adding an `Op` variant forces this to be revisited (a missed register would be a
-/// silent use-after-free).
+/// silent use-after-free). The arms model registers and fall-through only; `targets` is filled
+/// afterwards from [`Op::for_each_jump_pc`], the one answer to which op branches where.
 fn op_facts(op: &Op) -> OpFacts {
     // Most ops fall through to the next instruction; only jumps/terminators differ.
     let mut f = OpFacts {
@@ -474,12 +460,9 @@ fn op_facts(op: &Op) -> OpFacts {
                 f.uses.push(*reg);
             }
         }
-        Op::Coalesce {
-            dst, src, fallback, ..
-        } => {
+        Op::Coalesce { dst, src, .. } => {
             f.def = Some(*dst);
             f.uses.push(*src);
-            f.targets.push(*fallback);
         }
         // A narrow's `dynamic` head-name register is a use like any other — it holds the
         // instantiation's name, produced by a preceding `TypeArgName`/`TypeSlotName`. Missing it
@@ -557,26 +540,11 @@ fn op_facts(op: &Op) -> OpFacts {
             f.uses.push(*name);
             f.uses.push(*fields);
         }
-        Op::MatchInt { src, fail, .. } => {
-            f.uses.push(*src);
-            f.targets.push(*fail);
-        }
-        Op::MatchStr { src, fail, .. } => {
-            f.uses.push(*src);
-            f.targets.push(*fail);
-        }
-        Op::MatchBool { src, fail, .. } => {
-            f.uses.push(*src);
-            f.targets.push(*fail);
-        }
-        Op::MatchVariant { src, fail, .. } => {
-            f.uses.push(*src);
-            f.targets.push(*fail);
-        }
-        Op::MatchTuple { src, fail, .. } => {
-            f.uses.push(*src);
-            f.targets.push(*fail);
-        }
+        Op::MatchInt { src, .. } => f.uses.push(*src),
+        Op::MatchStr { src, .. } => f.uses.push(*src),
+        Op::MatchBool { src, .. } => f.uses.push(*src),
+        Op::MatchVariant { src, .. } => f.uses.push(*src),
+        Op::MatchTuple { src, .. } => f.uses.push(*src),
         Op::ExtractField { dst, src, .. } => {
             f.def = Some(*dst);
             f.uses.push(*src);
@@ -676,21 +644,9 @@ fn op_facts(op: &Op) -> OpFacts {
         }
         Op::RequireBool { reg, .. } => f.uses.push(*reg),
         Op::RequireCondBool { reg, .. } => f.uses.push(*reg),
-        Op::Jump { target } => {
-            f.targets.push(*target);
-            f.fallthrough = false;
-        }
-        Op::JumpIfTrue { reg, target } => {
-            f.uses.push(*reg);
-            f.targets.push(*target);
-        }
-        Op::JumpIfFalse { reg, target } => {
-            f.uses.push(*reg);
-            f.targets.push(*target);
-        }
-        Op::CondBranch { reg, target, .. } => {
-            f.uses.push(*reg);
-            f.targets.push(*target);
+        Op::Jump { .. } => f.fallthrough = false,
+        Op::JumpIfTrue { reg, .. } | Op::JumpIfFalse { reg, .. } | Op::CondBranch { reg, .. } => {
+            f.uses.push(*reg)
         }
         Op::Echo { reg } => f.uses.push(*reg),
         Op::Stringify { dst, src, .. } => {
@@ -708,6 +664,10 @@ fn op_facts(op: &Op) -> OpFacts {
         Op::Raise { .. } => f.fallthrough = false,
         Op::Halt => f.fallthrough = false,
     }
+    // Explicit successors come from the one place that knows which ops carry a branch destination,
+    // so the arms above only have to model *registers*. A target missed here would under-approximate
+    // liveness and let two simultaneously-live values coalesce onto one slot.
+    op.for_each_jump_pc(|t| f.targets.push(t));
     f
 }
 

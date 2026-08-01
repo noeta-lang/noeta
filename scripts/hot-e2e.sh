@@ -42,7 +42,9 @@ SUITES=(
     "hot_serve:2"       # a body edit swaps in and the signal counter survives it — bare file, and
                         # inside a package, where the handler is qualified (that one shipped broken)
     "hot_live:1"        # the L3 showcase: reload frame, preserved state, error overlay on red check
-    "parallel_hot:1"    # `--parallel 3`: one edit must reach EVERY worker isolate
+    "parallel_hot:2"    # `--parallel 3`: one edit must reach EVERY worker isolate; plus the
+                        # audit-10 equality — the fleet and the single worker are ONE hot install,
+                        # so an idle swap must reach both on the first request after it
     "live_serve:1"      # LiveView over a real RFC 6455 socket: snapshot, patches, second session
     "graceful_drain:1"  # SIGINT mid-request drains it, then the listener closes
     # The four siblings this list was first scoped to leave out. It was scoped to the hot-swap arc;
@@ -52,7 +54,8 @@ SUITES=(
     # at ambient load, beside a lean-CLI build, beside a release build, with unrestricted intra-suite
     # threads, and pinned to two cores. All four cost under 3s of test time.
     "serve:1"           # plain routing over a loopback socket, plus the empty-probe regression
-    "parallel_serve:1"  # `--parallel 4`: shared listener, concurrent slow requests, SIGINT drains all
+    "parallel_serve:2"  # `--parallel 4`: shared listener, concurrent slow requests, SIGINT drains all;
+                        # plus the worker run tail — an aborting worker renders its diagnostic AND its stack
     "live_stream:3"     # SSE both directions, including a body split mid-frame and mid-CRLF
     "impact_watch:2"    # `noeta test --watch` impact filtering, single-file and across modules
 )

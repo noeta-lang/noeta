@@ -121,28 +121,26 @@ pub(crate) fn reg_effect(op: &Op, consts: &[Const]) -> Option<RegEffect> {
     })
 }
 
-/// The analysis CFG successors of `pc` under *tier-0* (interpreter) semantics — the paths along which a
-/// register's value flows. Every op falls through to `pc + 1` except a jump (to its target), a
-/// conditional branch (both), and the terminators `Return`/`Halt` (none). Modeled only for the
-/// whitelisted ops ([`reg_effect`]); the caller has already rejected any other op.
-pub(crate) fn analysis_succ(op: &Op, pc: usize, n: usize, out: &mut Vec<usize>) {
+/// The CFG successors of `pc` under *tier-0* (interpreter) semantics — the paths along which a
+/// register's value flows: every jump destination the op carries, plus fall-through to `pc + 1`.
+///
+/// Which ops carry a destination is [`Op::for_each_jump_pc`]'s answer, not a list repeated here,
+/// so an op that grows one cannot silently lose its edge. This matters in both directions: the
+/// register plan's liveness ([`crate::plan`]) runs over *every* op, where a missed edge
+/// under-approximates liveness and omits a spill (unsound in native code); the forward analyses
+/// below only ever see [`reg_effect`]'s arithmetic whitelist today, but a `Match*` entering that
+/// whitelist would silently drop its `fail` edge under a hand-written list.
+///
+/// Fall-through is the conservative default: only `Jump` (which always transfers) and the
+/// terminators `Return`/`Halt` have none. An op that raises rather than continuing (`MatchFail`,
+/// `Panic`, `Raise`) keeps its fall-through edge — over-approximation only, which is safe for both
+/// consumers.
+pub(crate) fn tier0_succ(op: &Op, pc: usize, n: usize, out: &mut Vec<usize>) {
     out.clear();
-    match op {
-        Op::Jump { target } => out.push(*target as usize),
-        Op::JumpIfTrue { target, .. }
-        | Op::JumpIfFalse { target, .. }
-        | Op::CondBranch { target, .. } => {
-            out.push(*target as usize);
-            if pc + 1 < n {
-                out.push(pc + 1);
-            }
-        }
-        Op::Return { .. } | Op::Halt => {}
-        _ => {
-            if pc + 1 < n {
-                out.push(pc + 1);
-            }
-        }
+    op.for_each_jump_pc(|t| out.push(t as usize));
+    let falls_through = !matches!(op, Op::Jump { .. } | Op::Return { .. } | Op::Halt);
+    if falls_through && pc + 1 < n {
+        out.push(pc + 1);
     }
 }
 
@@ -239,7 +237,7 @@ pub(crate) fn slot_hazard_map(chunk: &noeta_bytecode::Chunk, heap_in: &[bool]) -
                 Some(RegEffect::Inert) => {}
                 None => return vec![true; n * nreg], // unmodeled → no residency anyway
             }
-            analysis_succ(&chunk.code[pc], pc, n, &mut succ);
+            tier0_succ(&chunk.code[pc], pc, n, &mut succ);
             for &su in &succ {
                 let base = su * nreg;
                 for (r, &o) in out.iter().enumerate() {
@@ -351,7 +349,7 @@ pub(crate) fn heap_at_fixpoint(
                 RegEffect::Copy { dst, src } => out[dst as usize] = out[src as usize],
             }
             // Propagate out into each successor's in-set (join = OR).
-            analysis_succ(&chunk.code[pc], pc, n, &mut succ);
+            tier0_succ(&chunk.code[pc], pc, n, &mut succ);
             for &s in &succ {
                 let base = s * nreg;
                 for (r, &o) in out.iter().enumerate() {
@@ -554,7 +552,7 @@ pub(crate) fn kind_in_map(chunk: &noeta_bytecode::Chunk) -> Vec<Kind> {
                 // Inert for registers (the reg_effect whitelist guarantees nothing else appears).
                 _ => {}
             }
-            analysis_succ(&chunk.code[pc], pc, n, &mut succ);
+            tier0_succ(&chunk.code[pc], pc, n, &mut succ);
             for &s in &succ {
                 let base = s * nreg;
                 for (r, &o) in out.iter().enumerate() {
@@ -577,7 +575,7 @@ pub(crate) fn kind_in_map(chunk: &noeta_bytecode::Chunk) -> Vec<Kind> {
 /// happened. With S5's universal residency the only defs that write slots are the
 /// known-constant registers' `LoadConst`s (everything else is a pure variable def); sync spills
 /// also write slots, but path-dependently, so they are not counted. Meet = AND over
-/// [`analysis_succ`] predecessors; pc 0 starts all-unwritten. Requires every op modeled by
+/// [`tier0_succ`] predecessors; pc 0 starts all-unwritten. Requires every op modeled by
 /// [`reg_effect`] (the caller checks [`fast_ok`] first).
 pub(crate) fn must_slot_written_map(
     chunk: &noeta_bytecode::Chunk,
@@ -609,7 +607,7 @@ pub(crate) fn must_slot_written_map(
                 Some(RegEffect::Inert) => {}
                 None => unreachable!("fast_ok requires a fully modeled prototype"),
             }
-            analysis_succ(&chunk.code[pc], pc, n, &mut succ);
+            tier0_succ(&chunk.code[pc], pc, n, &mut succ);
             for &su in &succ {
                 let base = su * nreg;
                 for (r, &o) in out.iter().enumerate() {

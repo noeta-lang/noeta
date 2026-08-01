@@ -353,6 +353,30 @@ impl<M: ClifModule> Jit<M> {
         self.fast_compiled.get(proto).copied().flatten()
     }
 
+    /// Emit **AOT-form** bodies from here on (P-AOT L3.1): inline caches off, null call sites, no
+    /// cancellation poll — the exact codegen [`Jit::new_object`] produces for a `noeta build
+    /// --native` object, but finalized to executable pages so an ordinary in-process run exercises
+    /// it. Set by the VM from [`RunOptions::aot_bodies`], which is how the JIT differential gets its
+    /// AOT arm: same corpus, same comparison, second codegen shape.
+    ///
+    /// This is the *option* form of the `NOETA_JIT_AOT` environment knob [`Jit::new`] still honours.
+    /// The knob arms a whole process (and cannot be set from inside a `#[test]` without an `unsafe`
+    /// mutation of the process environment); this arms one run, which is what lets the arm be a
+    /// per-commit `cargo test` gate rather than a shell-only one.
+    ///
+    /// Must be set **before** the first `compile` — bodies already emitted keep the form they were
+    /// emitted in. `Vm::init_jit` sets it at construction, before the `force_jit` sweep.
+    ///
+    /// [`RunOptions::aot_bodies`]: ../noeta_vm/struct.RunOptions.html#structfield.aot_bodies
+    pub fn set_aot_bodies(&mut self, on: bool) {
+        self.aot_bodies = on;
+    }
+
+    /// Whether this engine emits AOT-form bodies — the env knob or [`Jit::set_aot_bodies`].
+    pub fn aot_bodies(&self) -> bool {
+        self.aot_bodies
+    }
+
     /// How many prototypes have any compiled entry (native or bail stub).
     pub fn compiled_count(&self) -> usize {
         self.compiled.iter().filter(|c| c.is_some()).count()
@@ -1406,21 +1430,21 @@ fn reachable_pcs_from(chunk: &noeta_bytecode::Chunk, entries: Vec<usize>) -> Vec
             continue; // a bail point: no native successor
         }
         match op {
-            Op::Jump { target } => stack.push(*target as usize),
-            Op::JumpIfTrue { target, .. } | Op::JumpIfFalse { target, .. } => {
-                stack.push(*target as usize);
-                stack.push(pc + 1);
-            }
-            Op::CondBranch { target, .. } => {
-                stack.push(*target as usize);
-                stack.push(pc + 1);
-            }
             // A native `Call`/`CallGlobal` continues at `pc + 1` on the direct/fast path
             // (J3/S4.1) — this edge is what lets a fast body run its post-call ops natively
             // instead of compiling them to bail fillers. `Return` ends the frame.
             Op::Call { .. } | Op::CallGlobal { .. } => stack.push(pc + 1),
             Op::Return { .. } => {}
-            _ => stack.push(pc + 1), // fast straight-line op
+            // Branch destinations come from [`Op::for_each_jump_pc`] rather than a list repeated
+            // here; `Jump` is the only branch that does not also fall through. Today `is_fast_op`
+            // admits no other destination-carrying op, so this is exactly the previous edge set —
+            // and it stays exact if the whitelist grows one.
+            _ => {
+                op.for_each_jump_pc(|t| stack.push(t as usize));
+                if !matches!(op, Op::Jump { .. }) {
+                    stack.push(pc + 1); // fast straight-line op, or a branch's fall-through
+                }
+            }
         }
     }
     seen

@@ -67,8 +67,16 @@ pub struct Shape {
     /// struct every one of whose fields is an integer/`bool` (or a nested key-capable packed
     /// struct) — content identity over a canonical fixed-width encoding, no floats. Computed by
     /// `noeta_ast::key_capable_packed` and baked in by the compiler. Type metadata like
-    /// `structural_eq`: excluded from equality/hashing below. `#[serde(default)]` so bundles
-    /// serialized before the field read back as not-capable.
+    /// `structural_eq`: excluded from equality/hashing below.
+    ///
+    /// The `#[serde(default)]` is for the *self-describing* readers (the JSON/TOML paths tooling
+    /// uses), and **not** for `.noeb` bundles, which this comment used to claim. postcard writes a
+    /// struct's fields back to back with no tags and reads exactly as many as the current
+    /// declaration has, so the default never fires: a bundle written before this field is misread
+    /// from here on, not defaulted. `noeta-bundle`'s
+    /// `serde_default_does_not_make_an_added_field_readable_by_postcard` checks that rather than
+    /// restating it. What actually protects an older bundle is `FORMAT_VERSION`, which has moved
+    /// many times since this field landed.
     #[serde(default)]
     pub key_capable: bool,
 }
