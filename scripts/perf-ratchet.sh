@@ -406,26 +406,31 @@ icount() {
     printf '%s' "$best"
 }
 
-# What tier 1 did with this row: `native`, `declined`, or `none` (nothing hot enough to consider).
-# Also captures the ops that blocked compilation, which is the finding a benchmark table cannot
-# show you. Empty output means the binary has no JIT compiled in at all, which is itself a
-# mismatch against any row expecting `native`.
-DECLINED_OPS=""
-tier1_state() { # <bin> <verb> <rest...> -> prints native|declined|none
-    local out compiled bin="$1" verb="$2"
+# What tier 1 did with this row: `native`, `declined`, or `none` (nothing hot enough to consider),
+# together with the ops that blocked compilation — the finding a benchmark table cannot show you.
+#
+# It prints `state:ops` rather than setting globals: the caller reads this through `$( … )`, which
+# is a SUBSHELL, so an assignment in here would never reach the caller. It did not, and the effect
+# was silent — the state came back correctly and the blocked-by ops were simply always empty, i.e.
+# the one piece of diagnosis this row exists to surface quietly went missing while the gate kept
+# reporting PASS. Returning both through stdout is what makes that unrepresentable.
+tier1_state() { # <bin> <verb> <rest...> -> prints "<native|declined|none>:<op op op>"
+    local out compiled ops bin="$1" verb="$2"
     shift 2
     # `--jit-stats` goes immediately after the verb, not at the end: everything after the FILE
     # positional is the program's own argv, so appending it would pass the flag to the Noeta
     # program instead of to the CLI and this check would report `none` for every row.
     out="$("${PIN[@]}" "$bin" "$verb" --jit-stats "$@" 2>&1 > /dev/null)"
-    DECLINED_OPS="$(printf '%s' "$out" | sed -n '/loops declined tier 1/,$p' | tail -n +2 \
-        | awk 'NF && !/— blocked by:/ {print $2}' | sort -u | tr '\n' ' ')"
+    # `  <file>:<line>  <Op>  <disassembly>` under the declined header; the `main — blocked by:`
+    # line names the prototype, not an op.
+    ops="$(printf '%s' "$out" | sed -n '/loops declined tier 1/,$p' | tail -n +2 \
+        | awk 'NF && !/blocked by:/ {print $2}' | sort -u | tr '\n' ' ')"
     if printf '%s' "$out" | grep -q 'loops declined tier 1'; then
-        printf 'declined'
+        printf 'declined:%s' "$ops"
         return
     fi
     compiled="$(printf '%s' "$out" | sed -n 's/^tier 1: \([0-9]*\) of .*/\1/p' | head -1)"
-    if [[ "${compiled:-0}" -gt 0 ]]; then printf 'native'; else printf 'none'; fi
+    if [[ "${compiled:-0}" -gt 0 ]]; then printf 'native:'; else printf 'none:'; fi
 }
 
 # ------------------------------------------------------------------------------------- the report
@@ -477,8 +482,11 @@ for r in "${ROWS[@]}"; do
     GOT["$id"]="$n"
 
     tier="n/a"
+    DECLINED_OPS=""
     if [[ "$want_tier" != "n/a" ]]; then
-        tier="$(tier1_state "$BIN" "${ARGV[@]}")"
+        t1="$(tier1_state "$BIN" "${ARGV[@]}")"
+        tier="${t1%%:*}"
+        DECLINED_OPS="${t1#*:}"
         STATE["$id"]="$tier"
     fi
 
