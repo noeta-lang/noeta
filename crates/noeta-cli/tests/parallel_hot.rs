@@ -279,7 +279,8 @@ fn an_idle_swap_reaches_every_worker_before_the_next_request() {
         .collect();
 
     for (what, swap) in &runs {
-        let all_v1: Vec<String> = std::iter::repeat_n("v1".to_string(), swap.before.len()).collect();
+        let all_v1: Vec<String> =
+            std::iter::repeat_n("v1".to_string(), swap.before.len()).collect();
         assert_eq!(swap.before, all_v1, "{what} did not start on v1");
         assert!(
             swap.settled,
