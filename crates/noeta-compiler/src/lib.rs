@@ -683,7 +683,11 @@ impl SessionCompiler {
     /// alone — as are `forwarded_slot_sites` / `dynamic_construction_sites`, whose `u32`s are the
     /// same kind of slot ordinal (the table lookup happens at run time, through the slot's value),
     /// and `self_type_arg_sites`, whose `u32` is a position in a type's own parameter list.
-    /// `hidden_arg_sites` is the only `Sites` field that carries a type-arg TABLE index.
+    /// `hidden_arg_sites` is the only `Sites` field that carries a type-arg TABLE index — and that
+    /// sentence is no longer load-bearing prose: the rewrite itself is
+    /// [`Sites::remap_type_arg_indices`], whose exhaustive destructure makes a thirty-sixth field a
+    /// compile error until someone answers the question, and `noeta_check::SITE_POLICIES` classifies
+    /// all of them under a gate.
     ///
     /// Borrowed back unchanged when the remap is the identity (the append-only REPL case, and any
     /// re-absorption of an already-absorbed bundle — the operation is idempotent), so the common
@@ -694,25 +698,21 @@ impl SessionCompiler {
         // Identity ⟺ the session table gained nothing AND every fresh entry sits at its own index;
         // then the incoming bundle already speaks session space and needs no rewrite.
         if self.mc.type_args.len() == sites.type_arg_table.len()
-            && remap.iter().enumerate().all(|(i, to)| *to == i as u32)
+            && remap.iter().enumerate().all(|(i, to)| to.get() == i as u32)
         {
             return std::borrow::Cow::Borrowed(sites);
         }
         let mut owned = sites.clone();
-        // Lowering embeds these verbatim as `Program::type_args` / `Program::type_arg_reprs` →
-        // `Module::type_args` / `Module::type_arg_reprs`; they must be the merged SUPERSET, not the
-        // fresh tables, or the snapshot would shrink out from under indices older code still holds.
+        // `TheTable` rows of `noeta_check::SITE_POLICIES`. Lowering embeds these verbatim as
+        // `Program::type_args` / `Program::type_arg_reprs` → `Module::type_args` /
+        // `Module::type_arg_reprs`; they must be the merged SUPERSET, not the fresh tables, or the
+        // snapshot would shrink out from under indices older code still holds.
         owned.type_arg_table = self.mc.type_args.clone();
         owned.type_arg_reprs = merged_reprs;
-        for slots in owned.hidden_arg_sites.values_mut() {
-            for slot in slots.iter_mut() {
-                if let noeta_ext_abi::HiddenArg::Table(i) = slot
-                    && let Some(&to) = remap.get(*i as usize)
-                {
-                    *slot = noeta_ext_abi::HiddenArg::Table(to);
-                }
-            }
-        }
+        // …and every `TableIndexed` row is rewritten into session space. The walk lives beside
+        // `Sites` (which fields carry a table index is a fact about `Sites`), destructures it
+        // exhaustively with no `..`, and is what the census gate checks this call against.
+        owned.remap_type_arg_indices(&remap);
         std::borrow::Cow::Owned(owned)
     }
 
@@ -731,7 +731,10 @@ impl SessionCompiler {
         &mut self,
         fresh: &[noeta_ext_abi::TypeArgInfo],
         fresh_reprs: &[Option<noeta_ast::reflect::TypeRepr>],
-    ) -> (Vec<u32>, Vec<Option<noeta_ast::reflect::TypeRepr>>) {
+    ) -> (
+        Vec<noeta_ext_abi::TypeArgIndex>,
+        Vec<Option<noeta_ast::reflect::TypeRepr>>,
+    ) {
         let mut reprs: Vec<Option<noeta_ast::reflect::TypeRepr>> = self
             .mc
             .type_arg_reprs
@@ -739,7 +742,7 @@ impl SessionCompiler {
             .map(|slot| slot.map(|i| self.mc.type_reprs[i as usize].clone()))
             .collect();
         let table = &mut self.mc.type_args;
-        let remap: Vec<u32> = fresh
+        let remap: Vec<noeta_ext_abi::TypeArgIndex> = fresh
             .iter()
             .zip(fresh_reprs)
             .map(|(info, repr)| {
@@ -6019,8 +6022,14 @@ mod tests {
 
     use super::{SessionCompiler, Sites};
     use noeta_ast::reflect::TypeRepr;
-    use noeta_ext_abi::{HiddenArg, TypeArgInfo};
+    use noeta_ext_abi::{HiddenArg, TypeArgIndex, TypeArgInfo};
     use std::borrow::Cow;
+
+    /// A concrete instantiation supplied at table index `i` — the one carrier of a
+    /// [`TypeArgIndex`], and so the one thing a session install has to renumber.
+    fn tbl(i: u32) -> HiddenArg {
+        HiddenArg::Table(TypeArgIndex::new(i))
+    }
 
     /// One entry of the parallel tables: a plain `struct T` instantiation, distinguished by name.
     /// The merge's key is the PAIR (`TypeArgInfo`, `TypeRepr`) — exactly the checker's own interning
@@ -6091,11 +6100,13 @@ mod tests {
                 match (b, a) {
                     (HiddenArg::Table(i), HiddenArg::Table(j)) => {
                         assert_eq!(
-                            fresh.type_arg_table[*i as usize], absorbed.type_arg_table[*j as usize],
+                            fresh.type_arg_table[i.get() as usize],
+                            absorbed.type_arg_table[j.get() as usize],
                             "remapped table index {j} must mean what fresh index {i} meant"
                         );
                         assert_eq!(
-                            fresh.type_arg_reprs[*i as usize], absorbed.type_arg_reprs[*j as usize],
+                            fresh.type_arg_reprs[i.get() as usize],
+                            absorbed.type_arg_reprs[j.get() as usize],
                             "…including the repr half of the key, which is all that tells two \
                              instantiations of one generic class apart"
                         );
@@ -6114,10 +6125,7 @@ mod tests {
         // Entry 1 — the running program's table: [A, B].
         let first = ta_sites(
             &[ta("A"), ta("B")],
-            &[
-                vec![HiddenArg::Table(0)],
-                vec![HiddenArg::Table(1), HiddenArg::Forward(3)],
-            ],
+            &[vec![tbl(0)], vec![tbl(1), HiddenArg::Forward(3)]],
         );
         let absorbed = session.absorb_type_args(&first);
         // A virgin session adopts the initial table verbatim: identity remap, no clone.
@@ -6128,10 +6136,7 @@ mod tests {
         // own order. Live values still hold session index 0 = A and 1 = B.
         let fresh = ta_sites(
             &[ta("B"), ta("C")],
-            &[
-                vec![HiddenArg::Table(0)],
-                vec![HiddenArg::Table(1), HiddenArg::Forward(3)],
-            ],
+            &[vec![tbl(0)], vec![tbl(1), HiddenArg::Forward(3)]],
         );
         let absorbed = session.absorb_type_args(&fresh);
         // A and B keep their indices; only the genuinely new C appends.
@@ -6139,13 +6144,10 @@ mod tests {
         // The bundle lowering will see carries the merged SUPERSET, not the fresh table.
         assert_eq!(ta_names(&absorbed.type_arg_table), ["A", "B", "C"]);
         // Fresh 0 (B) → session 1; fresh 1 (C) → the appended 2. `Forward(3)` is untouched.
-        assert_eq!(
-            absorbed.hidden_arg_sites[&call_span(0)],
-            vec![HiddenArg::Table(1)]
-        );
+        assert_eq!(absorbed.hidden_arg_sites[&call_span(0)], vec![tbl(1)]);
         assert_eq!(
             absorbed.hidden_arg_sites[&call_span(1)],
-            vec![HiddenArg::Table(2), HiddenArg::Forward(3)]
+            vec![tbl(2), HiddenArg::Forward(3)]
         );
         assert_meaning_preserved(&fresh, &absorbed);
     }
@@ -6155,11 +6157,7 @@ mod tests {
         let mut session = SessionCompiler::new();
         let first = ta_sites(
             &[ta("A"), ta("B"), ta("C")],
-            &[vec![
-                HiddenArg::Table(0),
-                HiddenArg::Table(1),
-                HiddenArg::Table(2),
-            ]],
+            &[vec![tbl(0), tbl(1), tbl(2)]],
         );
         session.absorb_type_args(&first);
         assert_eq!(ta_names(session.type_args()), ["A", "B", "C"]);
@@ -6168,11 +6166,7 @@ mod tests {
         // remap, not one new entry — the table must not grow on every swap of an unchanged program.
         let permuted = ta_sites(
             &[ta("C"), ta("A"), ta("B")],
-            &[vec![
-                HiddenArg::Table(0),
-                HiddenArg::Table(1),
-                HiddenArg::Table(2),
-            ]],
+            &[vec![tbl(0), tbl(1), tbl(2)]],
         );
         let absorbed = session.absorb_type_args(&permuted);
         assert_eq!(
@@ -6183,11 +6177,7 @@ mod tests {
         assert_eq!(ta_names(session.type_args()), ["A", "B", "C"]);
         assert_eq!(
             absorbed.hidden_arg_sites[&call_span(0)],
-            vec![
-                HiddenArg::Table(2),
-                HiddenArg::Table(0),
-                HiddenArg::Table(1)
-            ]
+            vec![tbl(2), tbl(0), tbl(1)]
         );
         assert_meaning_preserved(&permuted, &absorbed);
 
@@ -6208,7 +6198,7 @@ mod tests {
         let mut session = SessionCompiler::new();
         let first = ta_sites(
             &[repo("Todo"), repo("Order")],
-            &[vec![HiddenArg::Table(0)], vec![HiddenArg::Table(1)]],
+            &[vec![tbl(0)], vec![tbl(1)]],
         );
         assert_eq!(
             first.type_arg_table[0], first.type_arg_table[1],
@@ -6235,7 +6225,7 @@ mod tests {
         // means `Repository<Todo>`, so the sites must CROSS OVER rather than stay put.
         let fresh = ta_sites(
             &[repo("Order"), repo("Todo")],
-            &[vec![HiddenArg::Table(0)], vec![HiddenArg::Table(1)]],
+            &[vec![tbl(0)], vec![tbl(1)]],
         );
         let absorbed = session.absorb_type_args(&fresh);
         assert_eq!(
@@ -6245,12 +6235,12 @@ mod tests {
         );
         assert_eq!(
             absorbed.hidden_arg_sites[&call_span(0)],
-            vec![HiddenArg::Table(1)],
+            vec![tbl(1)],
             "fresh 0 (`Order`) is session 1"
         );
         assert_eq!(
             absorbed.hidden_arg_sites[&call_span(1)],
-            vec![HiddenArg::Table(0)],
+            vec![tbl(0)],
             "fresh 1 (`Todo`) is session 0"
         );
         assert_meaning_preserved(&fresh, &absorbed);

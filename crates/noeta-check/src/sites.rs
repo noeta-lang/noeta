@@ -240,10 +240,15 @@ pub struct Sites {
     /// arguments — never inside them, so the callee's value parameter positions are exactly what
     /// the source wrote.
     ///
-    /// The ONLY field of this bundle carrying a [`Sites::type_arg_table`] **index** — the `u32`s in
-    /// `forwarded_slot_sites` / `dynamic_construction_sites`, like `Forward(j)` here, are per-body
-    /// hidden SLOT ordinals, resolved through the slot's runtime value. So a session absorbing a
-    /// fresh table (see [`intern_type_arg_entry`]) remaps this map and nothing else.
+    /// The only field of this bundle carrying a [`Sites::type_arg_table`] **index** — and that is
+    /// no longer a claim in prose: a table index has its own type
+    /// ([`noeta_ext_abi::TypeArgIndex`], reached here through
+    /// [`HiddenArg::Table`](noeta_ext_abi::HiddenArg::Table)), every field is classified in
+    /// [`SITE_POLICIES`], and the census gate fails a field that carries one and says otherwise.
+    /// The `u32`s in `forwarded_slot_sites` / `dynamic_construction_sites`, like `Forward(j)` here,
+    /// are per-body hidden SLOT ordinals resolved through the slot's runtime value. So a session
+    /// absorbing a fresh table (see [`intern_type_arg_entry`]) remaps this map and nothing else —
+    /// which is what [`Sites::remap_type_arg_indices`] spells out, exhaustively.
     pub hidden_arg_sites: HashMap<Span, Vec<noeta_ext_abi::HiddenArg>>,
     /// Spans whose turbofish is a **FORWARDED type parameter** of the enclosing top-level generic
     /// `fn` → the hidden slot index holding the instantiation's entry in [`Sites::type_arg_table`].
@@ -289,6 +294,193 @@ pub struct Sites {
     pub destructor_relevance: DestructorRelevance,
 }
 
+/// What a [`Sites`] field carries — asked as the question a **live session** has to answer about
+/// it: *does anything in here index a table the session renumbers?*
+///
+/// A cold whole-program compile never has to care: the compiler is empty, the checker's numbering
+/// is adopted whole, and every class below behaves the same. A REPL entry or a hot swap installs a
+/// freshly-checked bundle into a compiler whose tables are already numbered — and the incoming
+/// [`Sites::type_arg_table`] was numbered from zero, in this check run's own discovery order, while
+/// live runtime values hold indices into the *previous* numbering. That is bug 3 of the four that
+/// closed the `compile_to_mc` / `extend_impl` split ("the type-argument table replaced where it had
+/// to be merged"), and its shape is: one carrier of a table index gets remapped, another does not,
+/// and the program keeps running with the wrong type argument.
+///
+/// So every field states its class here, and the classes are the distinctions that mistake is made
+/// out of. Three of these fields carry a `u32` that looks *exactly* like a table index and is not
+/// one; that near-miss is why [`SiteClass::Ordinal`] exists as its own class instead of being
+/// folded into [`SiteClass::SpanKeyed`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum SiteClass {
+    /// Carries a [`noeta_ext_abi::TypeArgIndex`] — an index into [`Sites::type_arg_table`].
+    /// `noeta_compiler::SessionCompiler::absorb_type_args` **must** rewrite it into session space,
+    /// which it does through [`Sites::remap_type_arg_indices`].
+    TableIndexed,
+    /// The type-argument table itself, or a projection indexed in lockstep with it. Not remapped —
+    /// *replaced*, by the merged superset the session already holds.
+    TheTable,
+    /// Carries an integer that indexes or counts something ELSE, and must therefore be left alone.
+    /// The note names the space: a per-body hidden **slot** ordinal (`$tyN`, resolved through the
+    /// slot's runtime value — the table lookup happens at run time), an argument position, a type
+    /// parameter's declaration index, a bit width, a count. This is the class a table index gets
+    /// mistaken for.
+    Ordinal,
+    /// Keyed by [`Span`], with a payload that holds no integer index at all — a type, a name, a
+    /// layout, a flag, or nothing (a bare span set). Span keys are stable across installs (a
+    /// [`Span`] carries its `SourceId`), so nothing here is renumbered.
+    SpanKeyed,
+    /// Not span-keyed: a `Vec` or a name-keyed table of pure payload, consumed by content.
+    Content,
+}
+
+/// **Every field of [`Sites`]**, with its [`SiteClass`] and what its integer payload (if any)
+/// actually indexes.
+///
+/// [`Sites`] is the *input* to the compile pipeline whose own tables are classified by
+/// `noeta_compiler::TABLE_POLICIES`. That table exists because four bugs lived in the delta between
+/// a cold compile and a session install; this one exists because the bundle those installs consume
+/// had thirty-five fields, one hand-maintained sentence claiming a property of all of them, and no
+/// check. Adding a thirty-sixth field that carries a type-argument table index is the natural shape
+/// of any future call-site-typed feature — three fields already hold a `u32` that *looks* like one
+/// — and it would compile clean, pass every cold test, and be wrong only in a REPL or a hot swap.
+///
+/// Machine-checked by `noeta-check/tests/site_policies.rs`, which reads this file as source text and
+/// requires:
+///
+/// * every declared field to appear here exactly once, with a note (adding a field fails the gate);
+/// * the fields BOUND (rather than `_`-ignored) by [`Sites::remap_type_arg_indices`]'s destructure
+///   to be exactly the [`SiteClass::TableIndexed`] rows — the census cannot claim a remap the code
+///   does not perform, or hide one it does;
+/// * the fields `noeta_compiler::SessionCompiler::absorb_type_args` overwrites to be exactly the
+///   [`SiteClass::TheTable`] rows;
+/// * any field whose declared type mentions [`noeta_ext_abi::TypeArgIndex`] — directly, or through
+///   an ABI type that carries one, which is how `hidden_arg_sites` does it — to be classified
+///   [`SiteClass::TableIndexed`]. This is the half the newtype bought: a table index written in the
+///   type cannot be classified as anything else.
+///
+/// What no gate here can catch is a table index written as a **bare `u32`** and classified
+/// [`SiteClass::Ordinal`] or [`SiteClass::SpanKeyed`]. Nothing in the type distinguishes it, and no
+/// text scan can. That is what [`noeta_ext_abi::TypeArgIndex`] exists to make unnecessary, what the
+/// `Ordinal` note is for (say what the integer indexes, and the answer "the type-argument table" is
+/// the wrong answer to write there), and what the non-identity absorption oracle in
+/// `noeta-vm/tests/hotswap.rs` catches behaviorally once such a field reaches lowering.
+///
+/// Read as source *text* by the gate rather than as a value, like `TABLE_POLICIES`: its job is to
+/// be impossible to omit, not to be executed.
+#[allow(dead_code)]
+#[rustfmt::skip]
+pub(crate) const SITE_POLICIES: &[(&str, SiteClass, &str)] = &[
+    ("type_of_sites", SiteClass::SpanKeyed, "span → TypeRepr: a structural type (names and widths), nothing numbered"),
+    ("construction_sites", SiteClass::SpanKeyed, "span → TypeRepr, statically interned at the site; the DYNAMIC twin is the row below"),
+    ("dynamic_construction_sites", SiteClass::Ordinal, "the enclosing body's hidden SLOT ordinal ($tyN); the table lookup happens at run time, through the slot's value"),
+    ("inferred_object_types", SiteClass::SpanKeyed, "span → the nominal type name a `.{ … }` resolved to"),
+    ("variant_pattern_sites", SiteClass::SpanKeyed, "span → (enum qualifier, variant name)"),
+    ("packed_list_sites", SiteClass::SpanKeyed, "span → PackedLayout: field names, kinds and bit widths; no index"),
+    ("from_bytes_validated", SiteClass::SpanKeyed, "a bare span set"),
+    ("typed_module_call_sites", SiteClass::SpanKeyed, "span → TypeRecipe: structural; its VariantRecipe.index is an enum's DECLARATION position"),
+    ("typed_method_call_sites", SiteClass::SpanKeyed, "span → TypeRecipe, the extern-method twin of the row above"),
+    ("deserialize_recipes", SiteClass::Content, "Vec<(type name, TypeRecipe)>, lifted into a name-keyed runtime registry"),
+    ("decode_typed_sites", SiteClass::SpanKeyed, "a bare span set"),
+    ("map_packed_sites", SiteClass::SpanKeyed, "span → PackedLayout"),
+    ("bundle_schema_layouts", SiteClass::Content, "Vec<PackedLayout>, interned into the module's packed_schemas by content"),
+    ("packed_type_layouts", SiteClass::Content, "Vec<PackedLayout>, interned by (qualified) name"),
+    ("index_field_sites", SiteClass::SpanKeyed, "a bare span set"),
+    ("arg_orders", SiteClass::Ordinal, "each usize is an ARGUMENT position in written order, permuted by lowering"),
+    ("for_stream_sites", SiteClass::SpanKeyed, "a bare span set"),
+    ("width_sites", SiteClass::Ordinal, "(signed, bits): a fixed-width arithmetic BIT WIDTH, not an index"),
+    ("folded_type_tests", SiteClass::SpanKeyed, "span → the constant answer of a statically decided `is`"),
+    ("handle_sites", SiteClass::SpanKeyed, "span → (type, method, associated)"),
+    ("bound_handle_sites", SiteClass::SpanKeyed, "a bare span set"),
+    ("field_call_sites", SiteClass::SpanKeyed, "a bare span set"),
+    ("member_method_call_sites", SiteClass::SpanKeyed, "a bare span set"),
+    ("trait_call_sites", SiteClass::SpanKeyed, "span → (trait qualified identity, method)"),
+    ("namespace_module_sites", SiteClass::SpanKeyed, "span → the root-qualified module identity"),
+    ("f32_literal_sites", SiteClass::SpanKeyed, "a bare span set"),
+    ("try_conversion_sites", SiteClass::SpanKeyed, "span → the target error type's name"),
+    ("type_arg_table", SiteClass::TheTable, "the table itself; absorb_type_args REPLACES it with the session's merged superset"),
+    ("type_arg_reprs", SiteClass::TheTable, "the table's reflection projection, indexed in lockstep; replaced with it"),
+    ("hidden_arg_sites", SiteClass::TableIndexed, "HiddenArg::Table(TypeArgIndex) — the one carrier; the Forward(j) beside it is a slot ordinal and passes through"),
+    ("forwarded_slot_sites", SiteClass::Ordinal, "a hidden SLOT ordinal ($tyN) of the enclosing forwarding fn, read at run time"),
+    ("self_type_arg_sites", SiteClass::Ordinal, "the type parameter's position in its own type's declaration order, read off the receiver's reflected tag"),
+    ("forwarding_fns", SiteClass::Ordinal, "the callable's hidden-slot COUNT (Func::hidden), keyed by traced name"),
+    ("fn_value_sites", SiteClass::Ordinal, "the fn's VALUE-parameter arity; its hidden atoms live in hidden_arg_sites under the same span"),
+    ("destructor_relevance", SiteClass::Content, "spans, (span, param name) pairs and type names; nothing numbered"),
+];
+
+impl Sites {
+    /// Rewrite every type-argument **table** index in this bundle through `remap` (a freshly-checked
+    /// index → the session index the same entry was merged to), in place.
+    ///
+    /// Called by `noeta_compiler::SessionCompiler::absorb_type_args` and nowhere else, and split out
+    /// to here on purpose: *which fields carry a table index* is a fact about [`Sites`], so it
+    /// belongs beside [`Sites`] and beside [`SITE_POLICIES`], where the author of a thirty-sixth
+    /// field is already looking — not in the compiler, where a reader has no reason to check the
+    /// list is still complete.
+    ///
+    /// **The destructure is exhaustive and has no `..`, deliberately.** A new field fails to
+    /// *compile* here until its author says which arm it belongs in, and the arms are the only two
+    /// answers there are: remapped, or explicitly not. That is the compile-time half of the census;
+    /// the gate is the half that checks the answer against [`SITE_POLICIES`] and against the field's
+    /// own type.
+    pub fn remap_type_arg_indices(&mut self, remap: &[noeta_ext_abi::TypeArgIndex]) {
+        let Sites {
+            // Carries a type-arg TABLE index. Bound, because it is rewritten below — and the gate
+            // reads exactly that: a binding here must be a `TableIndexed` row of `SITE_POLICIES`.
+            hidden_arg_sites,
+            // The tables themselves. Not remapped but REPLACED, by the caller, with the merged
+            // superset — see the `TheTable` rows.
+            type_arg_table: _,
+            type_arg_reprs: _,
+            // Everything else: no index into the type-argument table. Three of these hold a `u32`
+            // that looks like one (`dynamic_construction_sites`, `forwarded_slot_sites`,
+            // `self_type_arg_sites`); `SITE_POLICIES` says what each actually indexes, and the one
+            // thing none of them indexes is this table.
+            type_of_sites: _,
+            construction_sites: _,
+            dynamic_construction_sites: _,
+            inferred_object_types: _,
+            variant_pattern_sites: _,
+            packed_list_sites: _,
+            from_bytes_validated: _,
+            typed_module_call_sites: _,
+            typed_method_call_sites: _,
+            deserialize_recipes: _,
+            decode_typed_sites: _,
+            map_packed_sites: _,
+            bundle_schema_layouts: _,
+            packed_type_layouts: _,
+            index_field_sites: _,
+            arg_orders: _,
+            for_stream_sites: _,
+            width_sites: _,
+            folded_type_tests: _,
+            handle_sites: _,
+            bound_handle_sites: _,
+            field_call_sites: _,
+            member_method_call_sites: _,
+            trait_call_sites: _,
+            namespace_module_sites: _,
+            f32_literal_sites: _,
+            try_conversion_sites: _,
+            forwarded_slot_sites: _,
+            self_type_arg_sites: _,
+            forwarding_fns: _,
+            fn_value_sites: _,
+            destructor_relevance: _,
+        } = self;
+
+        for slots in hidden_arg_sites.values_mut() {
+            for slot in slots.iter_mut() {
+                if let noeta_ext_abi::HiddenArg::Table(i) = slot
+                    && let Some(&to) = remap.get(i.get() as usize)
+                {
+                    *slot = noeta_ext_abi::HiddenArg::Table(to);
+                }
+            }
+        }
+    }
+}
+
 /// **The type-argument table's interning key, and the only place it is applied.** Look `(info,
 /// repr)` up in the parallel tables [`Sites::type_arg_table`] / [`Sites::type_arg_reprs`], returning
 /// the existing entry's index or appending a new one to *both* and returning that.
@@ -311,22 +503,24 @@ pub fn intern_type_arg_entry(
     reprs: &mut Vec<Option<noeta_ast::reflect::TypeRepr>>,
     info: noeta_ext_abi::TypeArgInfo,
     repr: Option<noeta_ast::reflect::TypeRepr>,
-) -> u32 {
+) -> noeta_ext_abi::TypeArgIndex {
     debug_assert_eq!(
         table.len(),
         reprs.len(),
         "the type-argument table and its reflection projection are grown in lockstep"
     );
+    // The ONE place a `TypeArgIndex` is minted. Its type — rather than the `u32` it wraps — is what
+    // marks the value as "an index a live session has to renumber"; see `TypeArgIndex`.
     match table
         .iter()
         .zip(reprs.iter())
         .position(|(e, r)| *e == info && *r == repr)
     {
-        Some(i) => i as u32,
+        Some(i) => noeta_ext_abi::TypeArgIndex::new(i as u32),
         None => {
             table.push(info);
             reprs.push(repr);
-            (table.len() - 1) as u32
+            noeta_ext_abi::TypeArgIndex::new((table.len() - 1) as u32)
         }
     }
 }

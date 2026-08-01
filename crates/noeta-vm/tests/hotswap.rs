@@ -542,6 +542,88 @@ fn a_swapped_declaration_keeps_its_place_in_the_attribute_manifest() {
     );
 }
 
+/// **The type-argument table absorption, end to end, with a NON-IDENTITY remap.**
+///
+/// The session's `Module::type_args` is addressed **by index** from live runtime values: a call of a
+/// forwarding generic fn passes its instantiation's table index as a hidden `int` argument, and
+/// `type_name::<T>()` / `attributes_of::<T>()` / `json.try_parse::<T>` inside the body all resolve
+/// through that one slot. The table is numbered **per check run** — and a hot swap re-checks the
+/// whole edited file, so the fresh numbering is the checker's own discovery order over the NEW
+/// source, not the running session's. `SessionCompiler::absorb_type_args` is what reconciles them:
+/// merge by content, keep every existing entry at its existing index, and rewrite the incoming
+/// bundle's indices into session space. Getting that wrong is *silent* — the program runs on and
+/// answers with a different `T`.
+///
+/// Every other guard on this is a shape check (`noeta_check::SITE_POLICIES` and its gate; the unit
+/// tests in `noeta_compiler`, which assert over a synthetic bundle). This is the one that watches
+/// meaning, through the real checker, the real install and the real VM.
+///
+/// **The renumbering is the point, and it is asserted rather than hoped for.** v2 mentions the same
+/// three instantiations in the *reverse* order, so its freshly-checked table is a permutation of the
+/// session's and every index moves. Nothing about a swap that merely *appends* instantiations would
+/// notice a missing remap — the remap is the identity there, which is exactly the case the corpus
+/// oracle (`hotswap_corpus`) generates, since its generators only ever add code.
+///
+/// Delete the `hidden_arg_sites` rewrite in `Sites::remap_type_arg_indices` and this test reports
+/// `Alpha/Beta/Gamma` where a cold start says `Gamma/Beta/Alpha`.
+#[test]
+fn a_swap_that_renumbers_the_type_argument_table_still_resolves_every_t() {
+    const DECLS: &str = "struct Alpha { id: int }\n\
+                         struct Beta { id: int }\n\
+                         struct Gamma { id: int }\n\
+                         fn label<T>(): string {\n\
+                         \x20   return type_name::<T>()\n\
+                         }\n";
+    // v1 interns [Alpha, Beta, Gamma]; the running session's hidden arguments hold those indices.
+    let v1 = format!(
+        "{DECLS}\
+         echo label::<Alpha>()\n\
+         echo label::<Beta>()\n\
+         echo label::<Gamma>()\n"
+    );
+    // v2 — the edited file, re-checked WHOLE — mentions them in reverse, so its own table is
+    // numbered [Gamma, Beta, Alpha] and *every* index it emits has to be rewritten.
+    let v2 = format!(
+        "{DECLS}\
+         fn probe(): string {{\n\
+         \x20   return label::<Gamma>() ~ \"/\" ~ label::<Beta>() ~ \"/\" ~ label::<Alpha>()\n\
+         }}\n\
+         echo label::<Gamma>()\n"
+    );
+
+    let names = |src: &str| -> Vec<String> {
+        noeta_stdlib::registry::default_seeded();
+        let checked = noeta_check::check_all(&parse(src));
+        assert!(
+            checked.diagnostics.is_empty(),
+            "the oracle's own sources must check cleanly: {:?}",
+            checked.diagnostics
+        );
+        checked
+            .sites
+            .type_arg_table
+            .iter()
+            .map(|e| e.name.clone())
+            .collect()
+    };
+    let (before, after) = (names(&v1), names(&v2));
+    let mut sorted = (before.clone(), after.clone());
+    sorted.0.sort();
+    sorted.1.sort();
+    assert_eq!(
+        sorted.0, sorted.1,
+        "the two versions must intern the SAME instantiations — otherwise the merge appends \
+         instead of permuting and the remap could be the identity"
+    );
+    assert_ne!(
+        before, after,
+        "v2's freshly-checked table must be numbered DIFFERENTLY from the session's, or this test \
+         exercises the identity remap and proves nothing: {before:?} vs {after:?}"
+    );
+
+    oracle(&v1, &v2, "echo probe()");
+}
+
 /// The parameter-keyed half of the same ordering rule: a callable's `callable#param` rows are
 /// purged and re-added as a group when its body swaps, so they must land back where the callable
 /// was declared — not after a later callable's rows.
