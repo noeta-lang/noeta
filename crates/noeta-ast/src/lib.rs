@@ -1525,6 +1525,11 @@ pub enum TypeOperand {
     /// The turbofish surface: `field_specs_of::<T>()` / `construct::<T>(fields)`. Lowering (which
     /// runs post-qualification) takes [`TypeRef::head_name`] — the *qualified* identity, exactly the
     /// key the reflection registry stores the type under.
+    ///
+    /// One such type has no compile-time name and still resolves: a bare **type parameter** of an
+    /// enclosing generic, whose instantiation reaches the body on a per-call channel. The checker
+    /// records the site and lowering reads the name off that channel instead of folding a constant,
+    /// so this arm means `field_specs_of(type_name::<T>())` there — the same answer, one arm.
     Static(TypeRef),
     /// The runtime-string surface: `field_specs_of(name)` / `construct(name, fields)`. Any
     /// expression; the checker requires it to be a `string`.
@@ -1740,8 +1745,9 @@ pub enum Expr {
     /// `field_specs_of::<T>()` had.
     ///
     /// Turbofish only, with no dynamic string surface: `type_name(s)` would be the identity function
-    /// on `s`. An unresolvable `T` is an `E0013`; an erased type *parameter* is an `E0058`, since a
-    /// parameter has no name at run time.
+    /// on `s`. An unresolvable `T` is an `E0013`; a type *parameter* resolves wherever one of the two
+    /// per-instantiation channels carries its name into the body, and is an `E0058` where neither
+    /// does — the same judgment the other name-keyed surfaces make, through the same helper.
     TypeName { ty: TypeRef, span: Span },
     /// The reflection query `type_of(value)` — the runtime [`Type`] descriptor of a value. At this
     /// fidelity (B) it is the **head constructor** (`type_of([1])` is `List(Dyn)`, generics erased);

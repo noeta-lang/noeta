@@ -5,11 +5,11 @@
 // instantiation that has no recipe at all (the CLASS below: a class is reference/identity, so it
 // never decodes, and its table entry carries a name and a `None` recipe).
 //
-// It also closes the loop the surface's own diagnostic pointed at. `field_specs_of::<T>()` stays
-// E0058 — the turbofish arm is a *compile-time* key, resolved like an annotation — but its
-// runtime-string arm now reaches the instantiation: `field_specs_of(type_name::<T>())` inside a
-// generic body answers the real per-instantiation schema, where before the name had to be
-// reflected at the call site and handed in.
+// It also opens the other name-keyed queries to a generic body: `field_specs_of(type_name::<T>())`
+// answers the real per-instantiation schema, where before the name had to be reflected at the call
+// site and handed in. That composition is what `field_specs_of::<T>()` itself now lowers to
+// (`reflection/reflect_over_type_param.noe`); it is spelled out here because this file is the pin on
+// the *slot*, and the composed form reads the slot through one more hop than the turbofish does.
 //
 // Nested `fn`s and closures read the enclosing fn's slot exactly as the recipe forwards do (D2b).
 // The qualified-name agreement with the concrete turbofish needs the loader, so it is pinned

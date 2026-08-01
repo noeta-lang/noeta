@@ -1307,9 +1307,11 @@ struct Coloring {
     /// Empty in a method, in a nested fn's own shadowing parameters, and at top level.
     ///
     /// Distinct from [`Self::current_forwarding`], which holds only the slots some site actually
-    /// consumes: this is the *capability*, not the realized layout, so a diagnostic about a
-    /// different surface can say whether the composed route (`field_specs_of(type_name::<T>())`)
-    /// is open here without a `type_name::<T>()` having to appear first.
+    /// consumes: this is the *capability*, not the realized layout, so a question about a parameter
+    /// can be answered whether or not a site consuming it appears in the body — which is what
+    /// [`Checker::reject_erased_type_param`] needs to tell "reachable, just not from here" apart
+    /// from "not reachable at all", and what the packed check reads to decide whether a slot could
+    /// carry a layout.
     forwardable_params: Vec<ParamRef>,
     /// How many `fn` bodies enclose the statement being checked: `0` at top level, `1` inside a
     /// top-level fn/method body, `2+` inside a nested `fn`. Distinguishes a TOP-LEVEL fn (whose
@@ -2729,8 +2731,8 @@ impl Checker {
         // The forwarding *capability* alongside the realized layout: which parameters a
         // `type_name::<T>()` here would resolve through a hidden slot. Same top-level-fn scope and
         // same D2b shadow-masking as the layout above, but derived from the declaration rather
-        // than from the sites, so a diagnostic can point at the composed route
-        // (`field_specs_of(type_name::<T>())`) whether or not a `type_name::<T>()` already appears.
+        // than from the sites, so a diagnostic can say whether a parameter is reachable at all
+        // whether or not a site consuming it already appears in the body.
         // A **self-less member of a generic type** forwards its CLASS's parameters too: it has no
         // receiver to read the instantiation's tag off, so the hidden slot is its only channel (see
         // `forwarding::forwardable_class_params`, which decides the same thing for the layout).

@@ -271,31 +271,44 @@ A generic type's parameter reaches an instance method off the **value's recorded
 
 ### Reflection over a type parameter
 
-`field_specs_of::<T>()`, `variants_of::<T>()` and `construct::<T>(…)` are keyed on a type **name**, and their turbofish arm is a *compile-time* key — resolved like an annotation, folded to a constant. One compiled body serves every instantiation, so inside `fn f<T>()` there is no constant to fold to. That is `E0058`.
+`field_specs_of::<T>()`, `variants_of::<T>()` and `construct::<T>(…)` are keyed on a type **name**, and for a statically written type that key is a compile-time constant — resolved like an annotation, folded, and never looked at again at run time.
 
-```noeta error
-fn count_of<T>(): int {
-    return field_specs_of::<T>().len()   // E0058 — the turbofish arm is a compile-time key
-}
-
-echo count_of::<int>()
-```
-
-The fix is to hand the query a **name** instead of a type, through the runtime-string arm each of them already has — and inside a generic function that name is available, because `type_name::<T>()` [forwards](Generics-and-Traits#asking-what-t-is-called):
+A type **parameter** has no such constant: one compiled body serves every instantiation, and inside `fn f<T>()` the letter `T` is only ever the letter `T`. What the body does have is the instantiation's *name*, delivered per call — and a name is all these queries key on, so they take it:
 
 ```noeta
-struct Todo { id: int }
-
-fn count_of<T>(): int {
-    return field_specs_of(type_name::<T>()).len()
+struct Todo {
+    id: int
+    title: string
 }
 
-echo count_of::<Todo>()      // 1 — the real schema, per instantiation
+fn count_of<T>(): int {
+    return field_specs_of::<T>().len()
+}
+
+echo count_of::<Todo>()      // 2 — the real schema, per instantiation
 ```
 
-The `E0058` help says exactly this wherever that route is open. Where it is not — a generic **type**'s parameter inside a method, which reaches the body as a name but not as a recipe — reflect where the type is concrete and pass the result in, taking a `List<FieldSpec>` (or a `string`) as a parameter and letting the caller supply it. A generic **method's own** `<U>` forwards like a function's, so it needs none of that.
+This is exactly `field_specs_of(type_name::<T>())`, which has always worked and still does — the turbofish arm now composes it for you, through the same channel and the same helper `type_name::<T>()`, `v.as<T>()` and `v is T` read, so all of them agree about `T` by construction.
 
-Two reflection turbofishes take a forwarded type parameter directly, both riding the hidden type-argument slot a generic call already carries: `attributes_of::<T>()`, which reads the slot's name to key the manifest, and `type_name::<T>()`, which *is* that name. The rest key on a compile-time constant by design.
+Two channels carry that name, and a surface reads whichever reaches it: a generic **type**'s parameter rides the receiver's recorded instantiation inside an instance method, and a generic **function's or method's own** parameter rides the hidden type-argument slot the call site fills. A **self-less** member of a generic type (a constructor, say — there is no receiver yet) takes the slot too, filled from the call's own instantiation.
+
+`E0058` is what remains when *neither* channel reaches the body, and there the composed spelling fails for the same reason — so the help does not suggest it. The two cases are a nested `fn`'s own type parameter, which no call site instantiates, and a class's parameter inside a nested `fn`, which has no receiver to read the tag off. Reflect where the type is concrete and pass the result in — take a `List<FieldSpec>` (or a `string`) as a parameter and let the caller supply it.
+
+```noeta error
+class Repo<T> {
+    pub tbl: string
+
+    fn nested(): int {
+        fn inner(): int { return field_specs_of::<T>().len() }   // E0058 — no receiver here
+        if self.tbl == "" { return 0 }
+        return inner()
+    }
+}
+```
+
+The **static** arm's other guarantee is unchanged: a turbofish naming a type that resolves to nothing is `E0013`, not a silent empty list. Leniency about an unrecognized *name* belongs to the runtime-string arm alone, where the name is data.
+
+`attributes_of::<T>()` takes a forwarded parameter as well, on the slot channel only — a generic type's parameter inside an instance method is still `E0058` there.
 
 ### The prelude enums are ordinary enums
 

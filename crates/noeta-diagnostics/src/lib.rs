@@ -266,9 +266,10 @@ pub enum DiagnosticCode {
     /// function (or not a function at all), or the count does not match the declared type parameters
     /// —; a **built-in type constructor** applied at the wrong arity in a type reference
     /// (`List<int, string>`, `Map<int>`); and a **name-keyed reflection turbofish**
-    /// (`field_specs_of::<T>()`, `variants_of::<T>()`, `construct::<T>(…)`) whose argument is a type
-    /// **parameter**. In the first two cases type arguments bind to the constructor's parameters
-    /// in order; supply exactly one per parameter, or omit `<…>` entirely and let them infer.
+    /// (`type_name::<T>()`, `field_specs_of::<T>()`, `variants_of::<T>()`, `construct::<T>(…)`)
+    /// whose argument is a type **parameter no instantiation reaches**. In the first two cases type
+    /// arguments bind to the constructor's parameters in order; supply exactly one per parameter,
+    /// or omit `<…>` entirely and let them infer.
     ///
     /// The reflection case is the same shape — a turbofish that cannot apply — for a reason peculiar
     /// to erasure: those queries are keyed on a type NAME, and one compiled body serves every
@@ -277,12 +278,14 @@ pub enum DiagnosticCode {
     /// (or an `Err`) and no diagnostic at all — a wrong answer indistinguishable from a real type with
     /// no fields.
     ///
-    /// The fix is to hand the query a *name* rather than a type, and the name is now reachable from
-    /// inside a generic body: `type_name::<T>()` resolves a forwarded parameter through the same
-    /// hidden type-argument slot that carries a forwarded decode recipe, so
-    /// `field_specs_of(type_name::<T>())` answers the real per-instantiation schema. `type_name`
-    /// itself is E0058 only where neither instantiation channel reaches — a generic **method's own**
-    /// `<U>`, or a self-less member of a generic type, whose parameter rides the receiver.
+    /// What a body *does* have is the instantiation's NAME, where one of the two per-instantiation
+    /// channels delivers it: a generic **type**'s parameter rides the receiver's reflected type tag
+    /// inside an instance method, and a generic **fn's or method's own** parameter rides the hidden
+    /// type-argument slot that also carries a forwarded decode recipe. A name is all these queries
+    /// key on, so all four take a parameter there and resolve it per call. E0058 is the residue: a
+    /// nested `fn`'s own parameter, which no call site instantiates, and a class's parameter inside
+    /// a nested `fn`, which has no receiver. Reflect where the type is concrete and pass the result
+    /// in.
     InvalidTypeArguments,
     /// A binder (parameter, `for` variable, match-pattern binding, local binding) reuses a name
     /// that already means something in scope — an enclosing binding, a top-level function or type,

@@ -3980,6 +3980,85 @@ echo r.rebuild();
     );
 }
 
+/// **The name-keyed reflection surfaces agree with `type_name` about which `T` they can see.**
+///
+/// All four key on a type NAME, and the two per-instantiation channels that carry one — the
+/// receiver's reflected type tag, and the hidden type-argument slot — are decided in a single
+/// place (`Checker::record_type_param`). `type_name::<T>()` read them from 0.3; the other three
+/// rejected the very same spelling with E0058 while their help prescribed
+/// `field_specs_of(type_name::<T>())`, a composition that worked — so the capability was already
+/// there and only the turbofish arm refused to reach it.
+///
+/// The corpus (`reflection/reflect_over_type_param.noe`,
+/// `reflection/reflect_type_param_in_method.noe`) pins the ANSWERS. This pins the checker's
+/// judgment directly, over every combination of surface and channel, so a routing change that
+/// re-narrows one surface fails here with the surface named rather than as one line of stdout.
+#[test]
+fn every_name_keyed_reflection_surface_forwards_a_type_parameter_like_type_name() {
+    // Each channel, spelled once, with `type_name` alongside as the control.
+    let bodies = [
+        // The hidden slot, from a top-level generic fn.
+        "fn f<T>(): void { echo SURFACE; }\n",
+        // The receiver's reflected tag, from an INSTANCE method of a generic type (the `self` read
+        // is what makes it one, and so what selects the tag channel over the slot).
+        "class Repo<T> {\n  pub n: int\n  fn new(): Repo<T> { return Repo { n: 0 }; }\n  \
+         fn f(): void { echo \"${self.n}\"; echo SURFACE; }\n}\n",
+        // The hidden slot again, from a generic METHOD's own parameter.
+        "class Box2 {\n  pub n: int\n  fn new(): Box2 { return Box2 { n: 0 }; }\n  \
+         fn f<T>(): void { echo \"${self.n}\"; echo SURFACE; }\n}\n",
+    ];
+    let surfaces = [
+        ("type_name", "type_name::<T>()"),
+        ("field_specs_of", "field_specs_of::<T>()"),
+        ("variants_of", "variants_of::<T>()"),
+        ("construct", "construct::<T>([])"),
+    ];
+    for body in bodies {
+        for (name, call) in surfaces {
+            let src = body.replace("SURFACE", call);
+            assert!(
+                codes(&src).is_empty(),
+                "`{name}` must forward here like `type_name` does — got {:?} for:\n{src}",
+                codes(&src)
+            );
+        }
+    }
+}
+
+/// **The E0058 that remains must not prescribe a route that is also shut.**
+///
+/// While the turbofish arm was a compile-time key, the help pointed at the composition
+/// (`field_specs_of(type_name::<T>())`) wherever the slot was open. Now the turbofish takes that
+/// route itself, so reaching the diagnostic means NO channel reaches the body — and `type_name`
+/// would fail there for the same reason. Repeating the old advice would send the author to write a
+/// second error. A nested `fn` inside an instance method is the case: the class's `T` rides a
+/// receiver the nested body does not have.
+#[test]
+fn the_residual_erased_parameter_help_no_longer_prescribes_type_name() {
+    let src = "\
+class Repo<T> {
+  pub tbl: string
+  fn new(tbl: string): Repo<T> { return Repo { tbl: tbl }; }
+  fn outer(): int {
+    fn inner(): int { return field_specs_of::<T>().len() }
+    if self.tbl == \"\" { return 0 }
+    return inner();
+  }
+}
+";
+    assert_eq!(codes(src), vec!["E0058"], "{:?}", codes(src));
+    let h = &helps(src)[0];
+    assert!(
+        !h.contains("type_name"),
+        "the composed route is shut wherever this fires — got: {h}"
+    );
+    assert!(
+        h.contains("reflect where the type is concrete")
+            || h.contains("resolves in a method that takes `self`"),
+        "the help must still name a fix that works — got: {h}"
+    );
+}
+
 /// **The type walkers must be total over the lattice.** `erase_type_params`, `apply_subst` and
 /// `bind_type_params` descended into every container the language has EXCEPT `Tuple` and `Union`,
 /// so a parameter written inside one was neither erased nor instantiated — it survived as a

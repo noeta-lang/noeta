@@ -242,23 +242,23 @@ echo decode::<Order>("{\"id\": 1}")
 
 The answer is the **qualified** identity, byte-identical to what the concrete `type_name::<Order>()` yields at the same site — the declaring module's path, a `use … as` alias and a rename all followed. That agreement is the whole contract: the string exists to key a name-keyed registry, so a forwarded parameter answering the short name would silently miss every type declared in a module.
 
-It is also what opens the *other* name-keyed queries to a generic body. Their **turbofish** arm stays a compile-time key, so `field_specs_of::<T>()`, `variants_of::<T>()` and `construct::<T>(…)` over a parameter remain E0058 — but each has a **runtime-string** arm, and `type_name::<T>()` now supplies it:
+It is also what opens the *other* name-keyed queries to a generic body. `field_specs_of::<T>()`, `variants_of::<T>()` and `construct::<T>(…)` key on that same name, so a parameter in their turbofish resolves through the same channel rather than demanding a compile-time constant — the compiler composes `field_specs_of(type_name::<T>())` for you, and the hand-written composition still means exactly the same thing:
 
 ```noeta check
 struct Order { id: int }
 
 fn field_count<T>(): int {
-    return field_specs_of(type_name::<T>()).len()   // the real schema, per instantiation
+    return field_specs_of::<T>().len()   // the real schema, per instantiation
 }
 
 echo field_count::<Order>()
 ```
 
-The E0058 diagnostic points at exactly this route wherever it is open. See [Reflection over a type parameter](Attributes-and-Reflection#reflection-over-a-type-parameter).
+See [Reflection over a type parameter](Attributes-and-Reflection#reflection-over-a-type-parameter).
 
 The two channels are separate and both reach a method body, so a method's own `<U>` and its class's `<K>` can be asked about in the same expression: `U` resolves through the slot the call supplied, `K` off the receiver's type tag. Where a name shadows, the method's own wins — ordinary scoping.
 
-What stays E0058 is a site **no** channel reaches: a self-less member of a generic type, whose parameter rides a receiver it does not have. A *composite* turbofish is unaffected either way: `type_name::<List<T>>()` heads at `List` whatever `T` is, so it is a compile-time constant.
+What stays E0058 is a site **no** channel reaches: a nested `fn`'s own parameter, which no call site instantiates, and a class's parameter inside a nested `fn`, which has no receiver to read the tag off. A *composite* turbofish is unaffected either way: `type_name::<List<T>>()` heads at `List` whatever `T` is, so it is a compile-time constant.
 
 ## Generic functions as values
 

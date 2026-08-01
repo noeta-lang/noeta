@@ -1,0 +1,91 @@
+// The same three surfaces over a type parameter reached through the **other** channel — a method's.
+//
+// A body is handed its instantiation by exactly one of two channels, and the name-keyed reflection
+// surfaces read whichever one reaches them, in the same order and through the same helper as
+// `type_name::<T>()`, `v.as<T>()` and `v is T`. That shared helper is the whole design: all five
+// surfaces answer with the same `T` by construction rather than by convention.
+//
+//   * an INSTANCE method of a generic type reads the class's parameter off the **receiver's
+//     reflected type tag**, stamped at the construction site (Gap B);
+//   * a SELF-LESS member of a generic type has no receiver, so its class's parameter rides the
+//     **hidden type-argument slot** the call site fills from its own instantiation;
+//   * a method's OWN `<U>` rides that same slot, filled from the call's turbofish.
+//
+// The receiver is consulted first: two channels for one fact would let a call through a
+// receiverless entry point supply nothing where the tag was right there.
+// expect: stdout "todos fields: 2"
+// expect: stdout "colors variants: 2"
+// expect: stdout "made: Todo {id: 1, title: \"x\"}"
+// expect: stdout "self-less fields: 2"
+// expect: stdout "self-less variants: 2"
+// expect: stdout "own param: 2 / 0"
+// expect: stdout "own param: 0 / 2"
+// expect: exit 0
+struct Todo {
+    id: int
+    title: string
+}
+enum Color {
+    Red
+    Blue
+}
+
+class Repo<T> {
+    pub tbl: string
+
+    fn new(tbl: string): Repo<T> {
+        return Repo { tbl: tbl };
+    }
+
+    // Self-less: no receiver exists yet, so `T` arrives on the hidden slot the call site fills.
+    fn describe(): string {
+        return "self-less fields: ${field_specs_of::<T>().len()}";
+    }
+
+    fn describe_cases(): string {
+        return "self-less variants: ${variants_of::<T>().len()}";
+    }
+
+    // Reads `self`, so an INSTANCE method: `T` comes off the receiver's reflected tag.
+    fn width(): string {
+        return "${self.tbl} fields: ${field_specs_of::<T>().len()}";
+    }
+
+    fn cases(): string {
+        return "${self.tbl} variants: ${variants_of::<T>().len()}";
+    }
+
+    fn make(fields: List<dyn>): Result<dyn, string> {
+        if self.tbl == "" { return Err("no table") }
+        return construct::<T>(fields);
+    }
+}
+
+// A generic method's OWN type parameter, on a non-generic type: the slot channel again, filled from
+// the call's own turbofish rather than from an enclosing declaration.
+class Inspector {
+    pub tag: int
+
+    fn new(): Inspector {
+        return Inspector { tag: 0 };
+    }
+
+    fn shape<U>(): string {
+        return "own param: ${field_specs_of::<U>().len() + self.tag} / ${variants_of::<U>().len()}";
+    }
+}
+
+rt: Repo<Todo> = Repo.new("todos");
+rc: Repo<Color> = Repo.new("colors");
+echo rt.width();
+echo rc.cases();
+match rt.make([1, "x"]) {
+    Ok(v) => { echo "made: ${v}" },
+    Err(e) => { echo "err: ${e}" },
+}
+echo Repo::<Todo>.describe();
+echo Repo::<Color>.describe_cases();
+
+i = Inspector.new();
+echo i.shape::<Todo>();
+echo i.shape::<Color>();
