@@ -1760,9 +1760,13 @@ impl DocumentStore {
     /// Signature help for the call the cursor at `position` is inside: the called function's or
     /// method's signature and the active argument. Token-based (so a half-typed call with an
     /// unbalanced paren still resolves). A plain call `f(` resolves the callee among the merged
-    /// program's top-level functions (imported functions included); a method call `recv.m(` resolves
-    /// the receiver's type — by closing the call in a munged copy and re-checking off the salsa graph
-    /// — and finds `m` among that type's methods. `None` if the cursor is not in a resolvable call.
+    /// program's top-level functions (imported functions included) — or, when the callee is one of
+    /// the thirteen **reflection primitives**, among
+    /// [`noeta_builtins::REFLECTION_INTRINSICS`](noeta_builtins::REFLECTION_INTRINSICS), which is
+    /// where those signatures live because a reserved word has no declaration to read them from. A
+    /// method call `recv.m(` resolves the receiver's type — by closing the call in a munged copy and
+    /// re-checking off the salsa graph — and finds `m` among that type's methods. `None` if the
+    /// cursor is not in a resolvable call.
     pub fn signature_help(
         &self,
         uri: &str,
@@ -1791,8 +1795,21 @@ impl DocumentStore {
 
         let call = signature::enclosing_call(tokens, text, offset)?;
         match call.receiver {
-            // Plain function call: the callee is a top-level function.
+            // Plain function call: a reflection intrinsic, or a top-level function.
             None => {
+                // The thirteen reflection primitives are reserved words, not declarations — there is
+                // no `FnDecl` to resolve, which is why they had no signature help. Their signatures
+                // come from `noeta_builtins::REFLECTION_INTRINSICS`, the same table completion reads,
+                // and the checker's own answers are held to it by
+                // `tests/reflection_intrinsics.rs`. Checked first only for clarity: a user function
+                // can never be spelled `construct`, because the lexer reserves the word.
+                if let Some(intrinsic) = noeta_builtins::reflection_intrinsic(&call.callee) {
+                    return Some(signature::from_intrinsic(
+                        intrinsic,
+                        call.turbofish,
+                        call.active,
+                    ));
+                }
                 let decl = top_level_fn(program, &call.callee)?;
                 Some(signature::from_decl(decl, call.active))
             }

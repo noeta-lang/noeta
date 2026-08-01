@@ -15,6 +15,10 @@ rust-version.workspace = true
 noeta-span = { workspace = true }
 noeta-ast = { workspace = true }
 noeta-lexer = { workspace = true }
+# The language's own per-name censuses: `REFLECTION_INTRINSICS` is where the thirteen reflection
+# primitives' call signatures live, and completion and signature help both read it rather than each
+# restating what the checker knows.
+noeta-builtins = { workspace = true }
 noeta-diagnostics = { workspace = true }
 noeta-db = { workspace = true }
 # `ExpandedSource` — the generated sources a link produced, which the addressing layer resolves spans
@@ -51,9 +55,9 @@ noeta-ext-abi = { workspace = true }
 # get a per-process temp root, so two test processes never share — and delete — one project.
 noeta-test-temp = { workspace = true }
 # `tests/editor_vocabulary.rs` generates the editor grammars' keyword/type/prelude vocabulary from
-# the three censuses and checks them against it: the prelude census, and `serde_json` to prove the
-# TextMate grammar is still valid JSON after the generator writes into it.
-noeta-builtins = { workspace = true }
+# the three censuses and checks them against it; `serde_json` proves the TextMate grammar is still
+# valid JSON after the generator writes into it. (`noeta-builtins`, the prelude census, is a real
+# dependency now — the reflection intrinsics' signatures come from it.)
 serde_json = { workspace = true }
 
 [lints]

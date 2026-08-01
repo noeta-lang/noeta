@@ -192,22 +192,29 @@ pub fn directive_signature(
     }
 }
 
-/// The call the cursor is inside: the callee name, the 0-based active argument index, and — when the
-/// call is a method call `recv.callee(` — the span of the receiver `recv` (so the caller can resolve
-/// its type and find the method). `receiver` is `None` for a plain function call.
+/// The call the cursor is inside: the callee name, the 0-based active argument index, whether the
+/// call head carried a turbofish, and — when the call is a method call `recv.callee(` — the span of
+/// the receiver `recv` (so the caller can resolve its type and find the method). `receiver` is
+/// `None` for a plain function call.
 #[derive(Debug)]
 pub struct CallContext {
     pub callee: String,
     pub active: usize,
     pub receiver: Option<Span>,
+    /// Whether the head was written `callee::<…>(` rather than `callee(`. Read by the reflection
+    /// intrinsics, several of which have a turbofish form and a bare form that differ in arity
+    /// (`construct::<T>(fields)` vs `construct(name, fields)`) — the two cannot be told apart from
+    /// the callee and the comma count alone.
+    pub turbofish: bool,
 }
 
-/// One bracket frame on the scan stack. A call frame (a `(` opened right after an identifier) counts
+/// One bracket frame on the scan stack. A call frame (a `(` opened right after a callee head) counts
 /// its own top-level commas; a plain grouping/list/map frame does not, so a comma inside an argument
 /// (`foo([a, b|])`) is not mistaken for an argument separator of the call.
 struct Frame {
     callee: Option<String>,
     receiver: Option<Span>,
+    turbofish: bool,
     active: usize,
 }
 
@@ -216,23 +223,26 @@ struct Frame {
 /// preceded by `.`, and the count of top-level commas inside it as the active-argument index.
 pub fn enclosing_call(tokens: &[Token], text: &str, offset: u32) -> Option<CallContext> {
     let mut stack: Vec<Frame> = Vec::new();
-    // The three tokens preceding the current one (`window[2]` is the most recent), for reading the
-    // `receiver . callee (` head of a call.
-    let mut window: [Option<(TokenKind, Span)>; 3] = [None; 3];
 
-    for token in tokens.iter().take_while(|t| t.span.start < offset) {
+    for (i, token) in tokens
+        .iter()
+        .enumerate()
+        .take_while(|(_, t)| t.span.start < offset)
+    {
         match token.kind {
             TokenKind::LParen => {
-                let (callee, receiver) = call_head(&window, text);
+                let head = call_head(tokens, i, text);
                 stack.push(Frame {
-                    callee,
-                    receiver,
+                    callee: head.callee,
+                    receiver: head.receiver,
+                    turbofish: head.turbofish,
                     active: 0,
                 });
             }
             TokenKind::LBracket | TokenKind::LBrace => stack.push(Frame {
                 callee: None,
                 receiver: None,
+                turbofish: false,
                 active: 0,
             }),
             TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
@@ -247,7 +257,6 @@ pub fn enclosing_call(tokens: &[Token], text: &str, offset: u32) -> Option<CallC
             }
             _ => {}
         }
-        window = [window[1], window[2], Some((token.kind, token.span))];
     }
 
     // The innermost enclosing call (nearest call frame from the top of the stack).
@@ -256,26 +265,148 @@ pub fn enclosing_call(tokens: &[Token], text: &str, offset: u32) -> Option<CallC
             callee,
             active: frame.active,
             receiver: frame.receiver,
+            turbofish: frame.turbofish,
         })
     })
 }
 
-/// Read the `receiver . callee` head from the tokens just before a `(`: the callee is the immediately
-/// preceding identifier; the receiver is the identifier before a `.` (a method call). `(None, _)`
-/// when the `(` does not follow an identifier — plain grouping, not a call.
-fn call_head(
-    window: &[Option<(TokenKind, Span)>; 3],
-    text: &str,
-) -> (Option<String>, Option<Span>) {
-    let callee = match window[2] {
-        Some((TokenKind::Ident, span)) => Some(slice(text, span).to_string()),
+/// What sits in front of a `(`: the callee, its receiver, and whether a turbofish came between.
+struct CallHead {
+    callee: Option<String>,
+    receiver: Option<Span>,
+    turbofish: bool,
+}
+
+/// Read the `receiver . callee ::<…>` head from the tokens before the `(` at `lparen`. `callee` is
+/// `None` when the `(` opens plain grouping rather than a call.
+///
+/// Three shapes reach here, and the third is why this reads the token slice by index rather than a
+/// fixed window of the preceding tokens:
+///
+/// - `callee(` — an ordinary call.
+/// - `recv.callee(` — a method call; `recv`'s span goes back for type resolution.
+/// - `callee::<T, U>(` — a turbofish head. Its length is unbounded (`construct::<Map<K, V>>(`), so
+///   the `::` and the callee are found by scanning back from the closing `>` to its match. Without
+///   this, every reflection intrinsic written in its turbofish form — and every explicitly
+///   instantiated generic call — looked like plain grouping and got no signature help at all.
+fn call_head(tokens: &[Token], lparen: usize, text: &str) -> CallHead {
+    let nothing = CallHead {
+        callee: None,
+        receiver: None,
+        turbofish: false,
+    };
+    let Some(mut head) = lparen.checked_sub(1) else {
+        return nothing;
+    };
+
+    // Step back over a `::<…>` turbofish. The `::` is required: `a < b > (c)` also ends in `>`
+    // just before a `(`, and it is a comparison, not a call head.
+    let mut turbofish = false;
+    if tokens[head].kind == TokenKind::Gt {
+        let Some(open) = matching_lt(tokens, head) else {
+            return nothing;
+        };
+        let Some(colons) = open.checked_sub(1) else {
+            return nothing;
+        };
+        if tokens[colons].kind != TokenKind::ColonColon {
+            return nothing;
+        }
+        let Some(before) = colons.checked_sub(1) else {
+            return nothing;
+        };
+        head = before;
+        turbofish = true;
+    }
+
+    let callee = callee_name(&tokens[head], text);
+    let receiver = match (head.checked_sub(1), head.checked_sub(2)) {
+        (Some(dot), Some(recv))
+            if tokens[dot].kind == TokenKind::Dot && tokens[recv].kind == TokenKind::Ident =>
+        {
+            Some(tokens[recv].span)
+        }
         _ => None,
     };
-    let receiver = match (window[1], window[0]) {
-        (Some((TokenKind::Dot, _)), Some((TokenKind::Ident, span))) => Some(span),
-        _ => None,
-    };
-    (callee, receiver)
+    CallHead {
+        callee,
+        receiver,
+        turbofish,
+    }
+}
+
+/// The callee a token can name: an identifier, or a **reflection primitive**.
+///
+/// The reflection primitives are the one keyword family that is a call head — `type_of(v)`,
+/// `construct::<T>(fields)` — so `type_of(` lexes as `TypeOfKw LParen` and never as an identifier.
+/// Which words those are, and how each is spelled, is asked of the lexer rather than restated:
+/// [`TokenKind::reserved_word`] derives the spelling from the token's own `#[token("…")]`, and the
+/// role filter keeps `while (x)` and `if (x)` from reading as calls.
+fn callee_name(token: &Token, text: &str) -> Option<String> {
+    match token.kind {
+        TokenKind::Ident => Some(slice(text, token.span).to_string()),
+        kind => kind
+            .reserved_word()
+            .filter(|word| word.role == noeta_lexer::ReservedRole::Reflection)
+            .map(|word| word.word.to_string()),
+    }
+}
+
+/// The index of the `<` that the `>` at `gt` closes, counting nesting (`::<Map<K, V>>`). `None` if
+/// the scan leaves what a turbofish could possibly be — a bracket, a brace, or a statement end.
+fn matching_lt(tokens: &[Token], gt: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut i = gt;
+    loop {
+        match tokens[i].kind {
+            TokenKind::Gt => depth += 1,
+            TokenKind::Lt => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            TokenKind::LParen
+            | TokenKind::RParen
+            | TokenKind::LBrace
+            | TokenKind::RBrace
+            | TokenKind::LBracket
+            | TokenKind::RBracket
+            | TokenKind::Semicolon => return None,
+            _ => {}
+        }
+        i = i.checked_sub(1)?;
+    }
+}
+
+/// The signature to show for a **reflection intrinsic** call — the thirteen reserved words that have
+/// no [`FnDecl`] for [`from_decl`] to render, and so had no signature help at all.
+///
+/// Everything shown comes from [`noeta_builtins::REFLECTION_INTRINSICS`]: the form is chosen by what
+/// the user has typed so far (whether a turbofish opened the call, and which argument the cursor is
+/// in — the two `invoke` arities and the two `construct` surfaces are told apart by exactly that),
+/// and its parameters and result are rendered from the entry. Nothing about the thirteen is spelled
+/// out in this crate.
+pub fn from_intrinsic(
+    intrinsic: &noeta_builtins::ReflectionIntrinsic,
+    turbofish: bool,
+    active: usize,
+) -> SignatureData {
+    let form = intrinsic.form_for(turbofish, active);
+    let parameters: Vec<String> = form
+        .params
+        .iter()
+        .map(noeta_builtins::ReflectParam::render)
+        .collect();
+    SignatureData {
+        label: format!(
+            "{} — {}",
+            intrinsic.render_form(form),
+            intrinsic.summary
+        ),
+        active_param: active.min(parameters.len().saturating_sub(1)),
+        parameters,
+    }
 }
 
 fn slice(text: &str, span: Span) -> &str {

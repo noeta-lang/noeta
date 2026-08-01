@@ -122,7 +122,9 @@ fn to_lsp_diagnostic(
 }
 
 /// Map a completion [`Candidate`](completion::Candidate) to its LSP `CompletionItem`: the label, an
-/// icon kind, and any detail. The label is also the inserted and filter text (client default).
+/// icon kind, any detail, and — for the few candidates whose insertion differs from their label —
+/// the text to insert. Absent an `insertText`, the label is both the inserted and the filter text
+/// (client default), which is what all but the turbofish-only reflection primitives want.
 fn to_completion_item(candidate: &completion::Candidate) -> CompletionItem {
     use completion::CandidateKind;
     let kind = match candidate.kind {
@@ -145,6 +147,14 @@ fn to_completion_item(candidate: &completion::Candidate) -> CompletionItem {
         label: candidate.label.clone(),
         kind: Some(kind),
         detail: candidate.detail.clone(),
+        insert_text: candidate.insert_text.clone(),
+        // `insertText` overrides the filter text too in some clients, and `type_name::<` must not be
+        // what a user's `type_n` is filtered against — pin the label as the filter text whenever the
+        // two differ.
+        filter_text: candidate
+            .insert_text
+            .is_some()
+            .then(|| candidate.label.clone()),
         ..Default::default()
     }
 }
