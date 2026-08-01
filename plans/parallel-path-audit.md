@@ -295,6 +295,24 @@ Row 9 records the consequence from the other end: `--native` is the one executio
 
 ---
 
+## 14. The hot-swap corpus only generates swaps that need no remap, so the fix it exists to protect was never exercised
+
+**Found 2026-08-01 by row 6's mutation testing. Not a parallel path — a gate that is weaker than its own documentation.**
+
+`crates/noeta-vm/tests/hotswap_corpus.rs` is the strongest swap gate in the tree: four generators over the whole conformance corpus, 1566 cases, `KNOWN_DIVERGENCES` empty. It found seven of the nine divergences the compile/swap arc fixed. It cannot see the eighth kind at all.
+
+Row 6 established this by deleting `absorb_type_args`'s type-argument remap outright — the fix for bug 3 of the original four, "the type-argument table replaced where it had to be merged". **All 50 hand-written `hotswap.rs` cases and all 1566 corpus cases stay green.** Only four unit tests over synthetic bundles fail.
+
+The cause is structural and applies to the whole harness, not to one generator: all four generators produce **append-only** programs — clone-and-append, clone-and-change-a-body, re-run the top level, re-run and change a body. An appended entry interns its type arguments *after* the ones already in the session table, so the incoming indices equal the merged indices and every remap in the tree is the identity function. A gate that runs 1566 cases through the identity case is measuring one case.
+
+This generalises past type arguments. **Any session-merge table whose remap is the identity under append is untested by this corpus** — which is most of `TABLE_POLICIES`' merge-by-content rows. The gates added by the compile/swap arc classify the tables correctly and check that the classification is *stated*; the corpus was supposed to check that the classification is *acted on*, and for the append-only shape there is nothing to act on.
+
+Row 6 added one hand-written case that pins the mechanism (`a_swap_that_renumbers_the_type_argument_table_still_resolves_every_t`: v2 mentions the same three types in reverse order, so its freshly-checked table is a permutation and every index moves; the test asserts the non-identity precondition so it cannot silently degenerate). That covers the mechanism. It does not cover the corpus.
+
+**Chokepoint.** A fifth generator that **permutes** rather than appends. The difficulty is real and is why row 6 left it: reordering top-level statements changes observable output for most corpus programs, so the generator needs a permutation that is order-insensitive by construction — reordering *declarations* (whose order is not observable) rather than statements is the obvious candidate, and would move the interning order without moving the output. **Size: ~80 lines in the harness, plus whatever the first run finds.** Worth doing before trusting the corpus about any merge-by-content table.
+
+---
+
 ## Already tracked elsewhere — not re-reported
 
 **The formatter's safety proxy** is `plans/fmt-structural-safety-gate.md`, which is a better write-up of that parallel path than this file would manage. Its §A (the corpus structural property, `crates/noeta-fmt/tests/structural.rs`) landed; §B (`zero_spans` + derived `PartialEq`) has not. Worth noting only that the run-time gate does hold the line for the printer's 19 `_ =>` arms: a miss at `crates/noeta-fmt/src/print.rs:3536` (`_ => u8::MAX` in the precedence table — a new `Expr` variant defaults to "never parenthesise") is a *refusal to format*, not a corruption, because `crates/noeta-fmt/src/lib.rs:316-329` reparses its own output and returns `FmtError::Safety` on mismatch.
