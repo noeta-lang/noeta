@@ -796,13 +796,24 @@ fn walk_expr(expr: &Expr, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
                 rec!(a);
             }
         }
-        // The name-keyed manifest consumer: bare parameters only (an attribute type is a bare
-        // struct name by construction).
-        Expr::AttributesOf { ty, .. } => {
-            if let Some(p) = cx.bare_param(ty) {
-                mark(p, false);
+        // The name-keyed manifest consumers, on the same two-arm operand as `field_specs_of` below:
+        // bare parameters only (an attribute type, or a role enum, is a bare name by construction).
+        Expr::AttributesOf { ty, .. } => match ty {
+            TypeOperand::Static(ty) => {
+                if let Some(p) = cx.bare_param(ty) {
+                    mark(p, false);
+                }
             }
-        }
+            TypeOperand::Dynamic(e) => rec!(e),
+        },
+        Expr::RolesOf { ty: Some(ty), .. } => match ty {
+            TypeOperand::Static(ty) => {
+                if let Some(p) = cx.bare_param(ty) {
+                    mark(p, false);
+                }
+            }
+            TypeOperand::Dynamic(e) => rec!(e),
+        },
         // `type_name::<T>()` — the other **name-only** consumer, and the cheapest of them: it wants
         // the slot's `TypeArgInfo.name` and nothing else, no build recipe, so it forwards wherever
         // `attributes_of` does and additionally for instantiations that have no recipe at all.
@@ -1074,7 +1085,8 @@ fn walk_expr(expr: &Expr, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
         | Expr::F64 { .. }
         | Expr::Bool { .. }
         | Expr::Ident { .. }
-        | Expr::RolesOf { .. }
+        // The unscoped `roles_of()` — no operand at all.
+        | Expr::RolesOf { ty: None, .. }
         | Expr::NativeFnRef { .. } => {}
     }
 }

@@ -732,14 +732,10 @@ fn all_ops() -> Vec<Op> {
         capacity: 141,
         span: span(31),
     });
-    ops.push(Op::AttributesOf {
-        dst: 142,
-        type_name: n,
-        dynamic: Some(143),
-    });
+    ops.push(Op::AttributesOf { dst: 142, src: 143 });
     ops.push(Op::RolesOf {
         dst: 144,
-        role_enum: Some(n),
+        src: Some(143),
     });
     ops.push(Op::ParamsOf { dst: 145, src: 146 });
     ops.push(Op::ReturnsOf { dst: 147, src: 148 });

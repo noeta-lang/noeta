@@ -628,18 +628,19 @@ pub enum Rvalue {
     /// `(Sender, Receiver)` tuple of scheduler-owned endpoint ids. The message type `T` is a
     /// checker-only concern (the runtime channel is untyped), so only `capacity` reaches here.
     MakeChannel { capacity: Atom, span: Span },
-    /// `attributes_of::<T>()` — the manifest's `#[T(...)]` attributes. `dynamic` (poly-values
-    /// F2b) is the enclosing forwarding fn's hidden slot when `T` is a forwarded type parameter:
-    /// the backend resolves the concrete type NAME through [`Program::type_args`] at runtime
-    /// (the manifest is name-keyed either way).
-    AttributesOf {
-        ty: TypeRef,
-        dynamic: Option<Atom>,
-        span: Span,
-    },
-    /// `roles_of()` / `roles_of::<RoleEnum>()` — the `(declaration, Role)` index, optionally scoped
-    /// to a single role enum.
-    RolesOf { ty: Option<TypeRef>, span: Span },
+    /// `attributes_of::<T>()` / `attributes_of(name)` — the manifest's `#[T(...)]` attributes for
+    /// the attribute type named by the runtime `name` string.
+    ///
+    /// One name operand, exactly as [`Rvalue::FieldSpecsOf`] takes one: the manifest is name-keyed,
+    /// so the turbofish arm folds to a constant name, the dynamic arm is the operand as written,
+    /// and a type parameter of an enclosing generic arrives as the very
+    /// [`Rvalue::TypeArgName`]/[`Rvalue::TypeSlotName`] that answers `type_name::<T>()` — the same
+    /// three cases `Lowerer::lower_type_operand` produces for every name-keyed surface.
+    AttributesOf { name: Atom, span: Span },
+    /// `roles_of()` / `roles_of::<RoleEnum>()` / `roles_of(name)` — the `(declaration, Role)` index,
+    /// optionally scoped to a single role enum by NAME. `None` is the unscoped query (the whole
+    /// index); `Some` carries the same name atom [`Rvalue::AttributesOf`] does, from the same helper.
+    RolesOf { name: Option<Atom>, span: Span },
     /// `params_of(target)` — the declared parameter list of the fn/method named by the runtime
     /// `target` string, materialized as `List<ParamInfo>`.
     ParamsOf { target: Atom, span: Span },

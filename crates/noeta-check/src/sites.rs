@@ -253,14 +253,16 @@ pub struct Sites {
     /// Spans whose turbofish is a **FORWARDED type parameter** of the enclosing top-level generic
     /// `fn` → the hidden slot index holding the instantiation's entry in [`Sites::type_arg_table`].
     ///
-    /// One map over three surfaces, because there is one fact: `Expr::TypedModuleCall`
-    /// (`json.try_parse::<T>` — lowering emits a dynamic recipe operand instead of a baked
-    /// `TypeRecipe`), `Expr::AttributesOf` (`attributes_of::<T>` — the manifest query resolves the
-    /// type NAME through the table at runtime), and `Expr::TypeName` (`type_name::<T>()` — lowering
-    /// emits an [`Rvalue::TypeSlotName`](noeta_ir::Rvalue) instead of folding a constant string).
-    /// A span belongs to exactly one `Expr`, and each consumer consults this from its own variant's
-    /// arm, so the variant the span came from is already known where the slot is read; three
-    /// parallel `HashMap<Span, u32>`s only spread one lookup across three places to keep in step.
+    /// One map over every surface that names a type, because there is one fact. Two shapes read it:
+    /// `Expr::TypedModuleCall` (`json.try_parse::<T>` — lowering emits a dynamic *recipe* operand
+    /// instead of a baked `TypeRecipe`), and every **name-keyed** surface — `type_name::<T>()`,
+    /// `attributes_of::<T>()`, `roles_of::<E>()`, `field_specs_of::<T>()`, `variants_of::<T>()`,
+    /// `construct::<T>(…)`, `v.as<T>()`, `v is T` — which all reach it through the one helper
+    /// `Lowerer::type_param_name_atom`, emitting an [`Rvalue::TypeSlotName`](noeta_ir::Rvalue)
+    /// instead of folding a constant string. A span belongs to exactly one `Expr`, and each consumer
+    /// consults this from its own variant's arm, so the variant the span came from is already known
+    /// where the slot is read; parallel `HashMap<Span, u32>`s would only spread one lookup across
+    /// several places to keep in step.
     ///
     /// The type-side twin is [`Sites::self_type_arg_sites`], which reads a generic *type*'s
     /// argument off the receiver's reflected tag; there is no receiver here, so the name and the

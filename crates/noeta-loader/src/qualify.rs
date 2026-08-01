@@ -1280,10 +1280,14 @@ fn q_expr(e: &mut Expr, visit: &mut NameVisitor) {
             q_expr(expr, visit);
             q_typeref(ty, visit);
         }
-        // `attributes_of::<T>()` and `type_name::<T>()` both hold a real type reference, and both
-        // qualify here. For `type_name` that rewrite IS the feature: the string it yields is the
-        // *qualified* identity precisely because the type survives to lowering as a type.
-        Expr::AttributesOf { ty, span: _ } | Expr::TypeName { ty, span: _ } => q_typeref(ty, visit),
+        // `type_name::<T>()` holds a real type reference and qualifies here. That rewrite IS the
+        // feature: the string it yields is the *qualified* identity precisely because the type
+        // survives to lowering as a type.
+        Expr::TypeName { ty, span: _ } => q_typeref(ty, visit),
+        // `attributes_of`'s operand qualifies through the same `TypeOperand` split every other
+        // name-keyed surface takes — the turbofish arm is a type and rewrites, the dynamic arm is a
+        // runtime string and must not.
+        Expr::AttributesOf { ty, span: _ } => q_type_operand(ty, visit),
         Expr::FromBytes { ty, blob, span: _ } => {
             q_typeref(ty, visit);
             q_expr(blob, visit);
@@ -1583,7 +1587,7 @@ fn q_expr(e: &mut Expr, visit: &mut NameVisitor) {
         // qualified user enum, so qualify it (a bare `roles_of()` has nothing to qualify).
         Expr::RolesOf { ty, span: _ } => {
             if let Some(ty) = ty {
-                q_typeref(ty, visit);
+                q_type_operand(ty, visit);
             }
         }
     }

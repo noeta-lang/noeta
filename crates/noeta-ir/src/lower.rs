@@ -1989,11 +1989,23 @@ impl Lowerer<'_> {
         out: &mut Vec<Stmt>,
     ) -> Result<Atom, Unsupported> {
         match operand {
-            TypeOperand::Static(ty) => Ok(match self.type_param_name_atom(ty, span, out) {
-                Some(atom) => atom,
-                None => Atom::Const(Const::Str(self.reflection_head_name(ty))),
-            }),
+            TypeOperand::Static(ty) => Ok(self.static_type_name_atom(ty, span, out)),
             TypeOperand::Dynamic(e) => self.lower_expr(e, out),
+        }
+    }
+
+    /// The **turbofish half** of [`Self::lower_type_operand`]: the run-time name of a statically
+    /// written type — a folded constant, or the per-instantiation channel read when the checker
+    /// resolved the head to a type parameter.
+    ///
+    /// Its own function because `type_name::<T>()` needs exactly this and has no dynamic arm to go
+    /// with it, and because "what name does this turbofish denote at run time" is one question with
+    /// one answer: `type_name::<T>()` and `field_specs_of::<T>()`'s operand are the same two
+    /// instructions in the same order, by construction rather than by two copies agreeing.
+    fn static_type_name_atom(&mut self, ty: &TypeRef, span: &Span, out: &mut Vec<Stmt>) -> Atom {
+        match self.type_param_name_atom(ty, span, out) {
+            Some(atom) => atom,
+            None => Atom::Const(Const::Str(self.reflection_head_name(ty))),
         }
     }
 
@@ -2100,10 +2112,7 @@ impl Lowerer<'_> {
             // type-argument slot — F2b). One compiled body serves every instantiation, so there is
             // no constant to fold: the name arrives per call, from `type_param_name_atom` — the same
             // helper the narrow surfaces read, so `type_name::<T>()` and `v.as<T>()` agree on `T`.
-            Expr::TypeName { ty, span } => match self.type_param_name_atom(ty, span, out) {
-                Some(atom) => Ok(atom),
-                None => Ok(Atom::Const(Const::Str(self.reflection_head_name(ty)))),
-            },
+            Expr::TypeName { ty, span } => Ok(self.static_type_name_atom(ty, span, out)),
             Expr::Int { value, .. } => Ok(Atom::Const(Const::Int(*value))),
             // A fixed-width integer literal (Tier W) is **erased to an ordinary `int` const**: the
             // magnitude's bit pattern is the runtime i64 word (a `u64` with the high bit set boxes as
@@ -3187,34 +3196,16 @@ impl Lowerer<'_> {
                 ))
             }
             Expr::AttributesOf { ty, span } => {
-                // A forwarded type parameter (F2b) resolves its concrete NAME at runtime through
-                // the hidden slot; a concrete `T` stays a compile-time name as before.
-                let dynamic = self
-                    .sites
-                    .forwarded_slot_sites
-                    .get(span)
-                    .map(|&i| Atom::Var {
-                        name: hidden_param_name(i),
-                        span: *span,
-                    });
-                Ok(self.emit(
-                    out,
-                    Rvalue::AttributesOf {
-                        ty: ty.clone(),
-                        dynamic,
-                        span: *span,
-                    },
-                    *span,
-                ))
+                let name = self.lower_type_operand(ty, span, out)?;
+                Ok(self.emit(out, Rvalue::AttributesOf { name, span: *span }, *span))
             }
-            Expr::RolesOf { ty, span } => Ok(self.emit(
-                out,
-                Rvalue::RolesOf {
-                    ty: ty.clone(),
-                    span: *span,
-                },
-                *span,
-            )),
+            Expr::RolesOf { ty, span } => {
+                let name = match ty {
+                    Some(ty) => Some(self.lower_type_operand(ty, span, out)?),
+                    None => None,
+                };
+                Ok(self.emit(out, Rvalue::RolesOf { name, span: *span }, *span))
+            }
             Expr::ParamsOf { target, span } => {
                 let target = self.lower_expr(target, out)?;
                 Ok(self.emit(

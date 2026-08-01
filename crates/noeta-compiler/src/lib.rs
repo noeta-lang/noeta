@@ -4194,35 +4194,23 @@ impl<'m> FnCompiler<'m> {
                 self.code.push(Op::TraitsOf { dst, src });
                 Ok(())
             }
-            Rvalue::AttributesOf { ty, dynamic, .. } => {
-                // The attribute type is resolved at compile time (closed-world); the VM reads the
-                // matching manifest entries from `Module::reflection` and materializes them. A
-                // FORWARDED type parameter (F2b) instead resolves its name at runtime through the
-                // hidden slot register and the module's type-argument table.
-                let dynamic = match dynamic {
-                    Some(slot) => Some(self.atom_reg(slot)?),
-                    None => None,
-                };
-                let type_name = match ty {
-                    TypeRef::Named { name, .. } => name.as_str(),
-                    _ => "",
-                };
-                let type_name = self.module.intern_name(type_name);
-                self.code.push(Op::AttributesOf {
-                    dst,
-                    type_name,
-                    dynamic,
-                });
+            Rvalue::AttributesOf { name, .. } => {
+                // The attribute type's name is a runtime string, exactly as `FieldSpecsOf`'s is:
+                // a folded constant for a written type, or the per-instantiation channel read for a
+                // type parameter. The VM reads the matching manifest entries from
+                // `Module::reflection` under that name and materializes them.
+                let src = self.atom_reg(name)?;
+                self.code.push(Op::AttributesOf { dst, src });
                 Ok(())
             }
-            Rvalue::RolesOf { ty, .. } => {
-                // Optional turbofish scope (mirrors `AttributesOf`): resolve the role enum name at
-                // compile time (closed-world); the VM keeps only bindings of that enum. `None` = all.
-                let role_enum = ty.as_ref().and_then(|ty| match ty {
-                    TypeRef::Named { name, .. } => Some(self.module.intern_name(name.as_str())),
-                    _ => None,
-                });
-                self.code.push(Op::RolesOf { dst, role_enum });
+            Rvalue::RolesOf { name, .. } => {
+                // Optional scope (mirrors `AttributesOf`, through the same operand path): the VM
+                // keeps only bindings whose role enum matches the name in `src`. `None` = all.
+                let src = match name {
+                    Some(name) => Some(self.atom_reg(name)?),
+                    None => None,
+                };
+                self.code.push(Op::RolesOf { dst, src });
                 Ok(())
             }
             Rvalue::ParamsOf { target, .. } => {

@@ -1,0 +1,51 @@
+// The two **misdiagnoses** that closed with the operand unification, pinned as the diagnostic they
+// should always have been.
+//
+// A type parameter no channel reaches is E0058 — the code for a well-formed turbofish that cannot
+// apply — with a message that names the missing channel. That is what `field_specs_of::<T>()` has
+// reported since the turbofish arm learned to forward, and these two now report it through the same
+// helper instead of each guessing:
+//
+//   * `roles_of::<E>()` said *"requires a `@semantic` enum, but `E` is not one"*. `E` may well be a
+//     `@semantic` enum at every call site; the gate simply had nothing to gate, because the operand
+//     was a parameter and not a type. The gate now applies to the static arm alone.
+//   * `attributes_of::<T>()` said *"cannot forward `T` here: call-site-typed forwarding carries a
+//     generic `fn`'s or method's OWN type parameters"* — which was true of the SLOT channel it read
+//     and irrelevant to the receiver channel it could not, so it fired for a `T` that was reachable.
+//
+// Both survivors here are bodies a per-call channel genuinely cannot reach: a nested `fn` inside an
+// instance method (the class's `T` rides the receiver's tag, and a nested `fn` has no receiver), and
+// a nested `fn`'s OWN parameter (no call site fills a slot for it).
+// expect: error E0058 at 37:50
+// expect: error E0058 at 45:44
+// expect: exit 1
+@semantic
+enum Kind {
+    One
+    Two
+}
+
+@attribute(Function)
+struct Route { path: string }
+
+class Scanner<T> {
+    pub label: string
+
+    fn new(label: string): Scanner<T> { return Scanner { label: label }; }
+
+    fn nested(): int {
+        fn inner(): int { return attributes_of::<T>().len() }
+        if self.label == "" { return 0 }
+        return inner();
+    }
+}
+
+fn outer<E>(): int {
+    // The enclosing `E` forwards; this nested declaration's own `F` has no call site to fill it.
+    fn inner<F>(): int { return roles_of::<F>().len() }
+    return inner() + roles_of::<E>().len();
+}
+
+s: Scanner<Route> = Scanner.new("routes");
+echo s.nested();
+echo outer::<Kind>();

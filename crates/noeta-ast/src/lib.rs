@@ -1504,7 +1504,11 @@ impl TypeRef {
 }
 
 /// **How a name-keyed reflection surface names its type** — the two disjoint arms of
-/// `field_specs_of` and `construct`, which each spell one query under one keyword in two ways.
+/// `field_specs_of`, `variants_of`, `construct`, `attributes_of` and `roles_of`, which each spell
+/// one query under one keyword in two ways. It is the operand contract for the whole name-keyed
+/// surface, not a shape a few of them happen to share: the ones that kept a bare [`TypeRef`] were
+/// exactly the ones a type parameter could not reach, because a `TypeRef` has no arm for "the name
+/// arrives per call".
 ///
 /// Both arms end at the same runtime node (a type *name*, because the reflection registries are
 /// name-keyed), but they must stay distinguishable all the way through the compiler, and the static
@@ -1728,10 +1732,19 @@ pub enum Expr {
         ty: TypeRef,
         span: Span,
     },
-    /// The reflection query `attributes_of::<T>()` — a compile-time-resolved lookup into the build
+    /// The reflection query `attributes_of::<T>()` / `attributes_of(name)` — a lookup into the build
     /// manifest that returns the materialized `#[T(...)]` attributes (each as a real `T` struct
-    /// paired with its annotated target). `ty` is the attribute type between the angle brackets.
-    AttributesOf { ty: TypeRef, span: Span },
+    /// paired with its annotated target).
+    ///
+    /// `ty` is the two arms of [`TypeOperand`], exactly as [`Expr::FieldSpecsOf`] carries them: the
+    /// turbofish surface names the attribute type statically (and a bare type parameter of an
+    /// enclosing generic resolves per instantiation, through whichever of the two channels reaches
+    /// the body), the dynamic surface takes a runtime `string`. The manifest is **name-keyed**
+    /// either way — `materialize_attributes` takes a `&str` in both backends and answers the empty
+    /// list for a name it holds nothing for — so nothing about the query needs the compile-time
+    /// type; only the `@attribute` capability gate does, and that gate applies where a compile-time
+    /// type exists.
+    AttributesOf { ty: TypeOperand, span: Span },
     /// The reflection query `type_name::<T>()` — a type's **qualified runtime identity** as a
     /// `string` (`"app.storage.Todo"`). The same name [`Expr::TypeOf`] reports for a value of that
     /// type, and the same key the name-keyed registries ([`Expr::FieldSpecsOf`], [`Expr::Construct`],
@@ -1769,6 +1782,18 @@ pub enum Expr {
     /// `from_bytes::<T>(blob)` — deserialize a `bytes` buffer into a `List<T>` (P-PACK 4.4). `ty` is
     /// the element type (turbofish; must be a `@packed` struct), `blob` the `bytes` operand. The byte
     /// buffer is opaque, so the element type must be named at the call site.
+    ///
+    /// **The one reflection surface that is not a [`TypeOperand`], and deliberately.** Every other
+    /// one keys on a type *name*, which is exactly what the two per-instantiation channels deliver,
+    /// so their turbofish arm resolves a type parameter at run time and their dynamic arm takes a
+    /// runtime string. Decoding an opaque buffer needs the element's packed **layout** — field kinds
+    /// and bit widths — and no channel carries one: the hidden type-argument slot carries a name and
+    /// an optional JSON decode recipe, the receiver's reflected tag carries a name. A name-keyed
+    /// lookup would also trade a compile-time guarantee for a runtime abort, since nothing in the
+    /// language can bound `T` to a packable type — where `attributes_of`/`roles_of` lose nothing,
+    /// their manifest queries being total on an arbitrary name. So the turbofish stays a `TypeRef`,
+    /// a type parameter here is an `E0058` with its own message, and the checker keeps the layout it
+    /// resolves at the site.
     FromBytes {
         ty: TypeRef,
         blob: Box<Expr>,
@@ -1853,7 +1878,13 @@ pub enum Expr {
     /// `@role(...)` tags. The optional turbofish scopes the query to a single role enum (mirroring
     /// `attributes_of::<T>()`): `roles_of::<Semantic>()` returns only bindings whose role is a
     /// `Semantic` variant; bare `roles_of()` (`ty = None`) returns the whole index.
-    RolesOf { ty: Option<TypeRef>, span: Span },
+    ///
+    /// The scope, when present, is the two arms of [`TypeOperand`] like every other name-keyed
+    /// surface — `roles_of::<E>()` names the enum statically (a bare type parameter resolving per
+    /// instantiation), `roles_of(name)` scopes by a runtime `string`. `materialize_roles` filters
+    /// the whole index by `enum_name == e` in both backends, so it is total on an arbitrary name
+    /// and the dynamic arm costs the query nothing.
+    RolesOf { ty: Option<TypeOperand>, span: Span },
     /// The reflection query `params_of(target)` — a callable's declared parameter list, returned as a
     /// `List<ParamInfo>` (each `{ name: string, type: Type, optional: bool }`). `target` is a runtime `string`
     /// naming a function or method (a bare fn name, or a qualified `Type.method`), the same target
@@ -2326,9 +2357,7 @@ impl Expr {
             | Expr::F32 { .. }
             | Expr::F64 { .. }
             | Expr::Bool { .. }
-            | Expr::AttributesOf { .. }
-            | Expr::TypeName { .. }
-            | Expr::RolesOf { .. } => false,
+            | Expr::TypeName { .. } => false,
             Expr::Ident { name: n, .. } => n == name,
             Expr::Unary { operand, .. } => operand.mentions(name),
             Expr::Binary { lhs, rhs, .. }
@@ -2401,9 +2430,12 @@ impl Expr {
             | Expr::FromBytes { blob: expr, .. } => expr.mentions(name),
             Expr::Channel { capacity, .. } => capacity.mentions(name),
             // A turbofish operand is a type, never a value binding; only a dynamic one can mention.
-            Expr::FieldSpecsOf { name: n, .. } | Expr::VariantsOf { name: n, .. } => {
-                n.dynamic().is_some_and(|e| e.mentions(name))
-            }
+            Expr::FieldSpecsOf { name: n, .. }
+            | Expr::VariantsOf { name: n, .. }
+            | Expr::AttributesOf { ty: n, .. } => n.dynamic().is_some_and(|e| e.mentions(name)),
+            Expr::RolesOf { ty: n, .. } => n
+                .as_ref()
+                .is_some_and(|n| n.dynamic().is_some_and(|e| e.mentions(name))),
             Expr::Construct {
                 name: n, fields, ..
             } => n.dynamic().is_some_and(|e| e.mentions(name)) || fields.mentions(name),
@@ -2451,9 +2483,7 @@ impl Expr {
             | Expr::F64 { .. }
             | Expr::Bool { .. }
             | Expr::Ident { .. }
-            | Expr::AttributesOf { .. }
             | Expr::TypeName { .. }
-            | Expr::RolesOf { .. }
             // A closure is a separate callable: its own `.await`s are not this level's (they are
             // E0040 unless the closure is itself async, which builtins' callbacks are not).
             | Expr::Closure { .. }
@@ -2522,9 +2552,12 @@ impl Expr {
             | Expr::ReturnsOf { target: expr, .. }
             | Expr::FromBytes { blob: expr, .. } => expr.has_await(),
             Expr::Channel { capacity, .. } => capacity.has_await(),
-            Expr::FieldSpecsOf { name, .. } | Expr::VariantsOf { name, .. } => {
-                name.dynamic().is_some_and(Expr::has_await)
-            }
+            Expr::FieldSpecsOf { name, .. }
+            | Expr::VariantsOf { name, .. }
+            | Expr::AttributesOf { ty: name, .. } => name.dynamic().is_some_and(Expr::has_await),
+            Expr::RolesOf { ty: name, .. } => name
+                .as_ref()
+                .is_some_and(|n| n.dynamic().is_some_and(Expr::has_await)),
             Expr::Construct { name, fields, .. } => {
                 name.dynamic().is_some_and(Expr::has_await) || fields.has_await()
             }

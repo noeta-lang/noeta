@@ -1,0 +1,8 @@
+---
+source: crates/noeta-parser/src/lib.rs
+expression: "pretty(\"x = attributes_of(n);\")"
+---
+(program @0..21
+  (binding x @0..21
+    (attributes_of @4..20
+      (ident n @18..19))))

@@ -1,0 +1,70 @@
+// `attributes_of` and `roles_of` over a **forwarded type parameter**, on the SLOT channel.
+//
+// These two were the last name-keyed surfaces holding a bare `TypeRef` operand, and the gap was
+// mechanical rather than accidental: `attributes_of`'s dynamic operand held an *index* into the
+// type-argument table and resolved the name itself, while the two channel ops that serve every
+// other surface (`TypeArgName`/`TypeSlotName`) produce a **string** — so it could consume only the
+// slot channel and never the receiver tag. `roles_of` had no register at all, and reported a
+// forwarded `E` as "requires a `@semantic` enum, but `E` is not one" — a diagnosis that sends the
+// author to mark an enum that is already marked, when the real reason was that no channel carried
+// it. Both now take the same `TypeOperand` `field_specs_of` does, resolved by the same helper.
+//
+// Each query is called at two different instantiations from ONE body: answering differently per
+// call is the whole point of the channel.
+// expect: stdout "Route attrs: 2"
+// expect: stdout "Persist attrs: 1"
+// expect: stdout "Semantic roles: 3"
+// expect: stdout "WebRole roles: 1"
+// expect: stdout "agrees: true"
+// expect: exit 0
+@semantic
+enum WebRole {
+    Controller
+    Middleware
+}
+
+@attribute(Function)
+@role(Semantic.EntryPoint)
+struct Route {
+    path: string
+}
+
+@attribute(Function)
+@role(Semantic.Sink)
+struct Persist {
+    table: string
+}
+
+@attribute(Function)
+@role(WebRole.Controller)
+struct Page {
+    path: string
+}
+
+#[Route("/users")]
+fn handleUsers(): int { return 1; }
+
+#[Route("/orders")]
+fn handleOrders(): int { return 2; }
+
+#[Persist("users")]
+fn writeUser(): int { return 3; }
+
+#[Page("/")]
+fn renderHome(): int { return 4; }
+
+// The slot channel: a top-level generic `fn`'s own parameter rides the hidden type-argument slot
+// the call site fills from its turbofish.
+fn attrs_of<T>(): int { return attributes_of::<T>().len() }
+
+fn roles_in<E>(): int { return roles_of::<E>().len() }
+
+// The dynamic arm of the same operand — the composition the surface's turbofish arm now lowers to.
+// It must answer identically, or the two arms have drifted.
+fn attrs_by_name<T>(): int { return attributes_of(type_name::<T>()).len() }
+
+echo "Route attrs: ${attrs_of::<Route>()}"
+echo "Persist attrs: ${attrs_of::<Persist>()}"
+echo "Semantic roles: ${roles_in::<Semantic>()}"
+echo "WebRole roles: ${roles_in::<WebRole>()}"
+echo "agrees: ${attrs_of::<Route>() == attrs_by_name::<Route>()}"

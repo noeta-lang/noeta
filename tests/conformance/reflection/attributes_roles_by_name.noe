@@ -1,0 +1,49 @@
+// The **dynamic arm** of `attributes_of` and `roles_of` — the other half of the operand contract
+// they adopted, and the one that shows the queries were name-keyed all along.
+//
+// `materialize_attributes` takes a `&str` in both backends, and `materialize_roles` filters the
+// whole index by `enum_name == e`; neither has ever needed a compile-time type. So the surfaces get
+// the same two arms `field_specs_of` has: `attributes_of::<Route>()` names the attribute statically
+// (and is gated on `@attribute`), `attributes_of(name)` takes a runtime string and is lenient about
+// what it names — an unknown name is the empty list, not an error, exactly like `field_specs_of`.
+//
+// The turbofish and the string must agree, because the turbofish arm lowers to the string one.
+// expect: stdout "by name Route: 2"
+// expect: stdout "by name Semantic: 3"
+// expect: stdout "unknown attrs: 0"
+// expect: stdout "unknown roles: 0"
+// expect: stdout "arms agree: true"
+// expect: exit 0
+@semantic
+enum WebRole {
+    Controller
+    Middleware
+}
+
+@attribute(Function)
+@role(Semantic.EntryPoint)
+struct Route {
+    path: string
+}
+
+@attribute(Function)
+@role(Semantic.Sink)
+struct Persist {
+    table: string
+}
+
+#[Route("/users")]
+fn handleUsers(): int { return 1; }
+
+#[Route("/orders")]
+fn handleOrders(): int { return 2; }
+
+#[Persist("users")]
+fn writeUser(): int { return 3; }
+
+echo "by name Route: ${attributes_of("Route").len()}"
+echo "by name Semantic: ${roles_of("Semantic").len()}"
+// Lenient about the answer, like every other name-keyed query: nothing is registered under these.
+echo "unknown attrs: ${attributes_of("NoSuchAttribute").len()}"
+echo "unknown roles: ${roles_of("NoSuchEnum").len()}"
+echo "arms agree: ${attributes_of::<Route>().len() == attributes_of("Route").len() && roles_of::<WebRole>().len() == roles_of("WebRole").len()}"

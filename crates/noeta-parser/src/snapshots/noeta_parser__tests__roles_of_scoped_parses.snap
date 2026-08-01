@@ -1,0 +1,11 @@
+---
+source: crates/noeta-parser/src/lib.rs
+expression: "pretty(\"x = roles_of::<Semantic>(); y = roles_of(e);\")"
+---
+(program @0..44
+  (binding x @0..27
+    (roles_of @4..26
+      (type-arg Semantic @15..23)))
+  (binding y @28..44
+    (roles_of @32..43
+      (ident e @41..42))))

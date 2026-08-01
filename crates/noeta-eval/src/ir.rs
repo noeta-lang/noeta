@@ -1678,32 +1678,15 @@ impl Interpreter {
                 }
                 Ok(list)
             }
-            noeta_ir::Rvalue::AttributesOf { ty, dynamic, span } => {
-                // A forwarded type parameter (F2b) resolves the concrete NAME through the hidden
-                // slot's table entry; a static turbofish keeps the compile-time name.
-                if let Some(slot) = dynamic {
-                    let idx = self.eval_ir_atom(slot, frame)?;
-                    let name = match idx {
-                        Value::Int(i) => self
-                            .type_args
-                            .get(i as usize)
-                            .map(|e| e.name.clone())
-                            .unwrap_or_default(),
-                        _ => {
-                            return Err(self.runtime_error(
-                                DiagnosticCode::TypeMismatch,
-                                *span,
-                                "corrupt hidden type-argument slot".to_string(),
-                            ));
-                        }
-                    };
-                    return Ok(self.materialize_attributes(&name));
-                }
-                let type_name = match ty {
-                    noeta_ir::TypeRef::Named { name, .. } => name.as_str(),
-                    _ => "",
+            noeta_ir::Rvalue::AttributesOf { name, .. } => {
+                // The manifest is name-keyed: the atom is the attribute type's name, folded from a
+                // written turbofish or read off a per-instantiation channel by the preceding
+                // `TypeArgName`/`TypeSlotName` — the same string either way, and the VM's twin.
+                let name = match self.eval_ir_atom(name, frame)? {
+                    Value::Str(s) => s,
+                    _ => String::new(),
                 };
-                Ok(self.materialize_attributes(type_name))
+                Ok(self.materialize_attributes(&name))
             }
             noeta_ir::Rvalue::Object {
                 type_name,
@@ -1945,12 +1928,17 @@ impl Interpreter {
                     Value::Receiver(ChannelId::from_index(id)),
                 ])))
             }
-            noeta_ir::Rvalue::RolesOf { ty, .. } => {
-                let role_enum = ty.as_ref().and_then(|ty| match ty {
-                    noeta_ir::TypeRef::Named { name, .. } => Some(name.as_str()),
-                    _ => None,
-                });
-                Ok(self.materialize_roles(role_enum))
+            noeta_ir::Rvalue::RolesOf { name, .. } => {
+                // The optional scope arrives as a name atom, exactly as `AttributesOf`'s does;
+                // `None` is the unscoped query over the whole index.
+                let role_enum = match name {
+                    Some(name) => Some(match self.eval_ir_atom(name, frame)? {
+                        Value::Str(s) => s,
+                        _ => String::new(),
+                    }),
+                    None => None,
+                };
+                Ok(self.materialize_roles(role_enum.as_deref()))
             }
             noeta_ir::Rvalue::ParamsOf { target, .. } => {
                 // The runtime target string names a fn or method; materialize its declared params.

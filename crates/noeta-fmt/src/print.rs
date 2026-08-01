@@ -2562,11 +2562,18 @@ impl Printer<'_> {
             Expr::TypeTest { expr, ty, .. } => {
                 Doc::concat([self.receiver(expr)?, Doc::text(" is "), self.type_ref(ty)?])
             }
-            Expr::AttributesOf { ty, .. } => Doc::concat([
-                Doc::text("attributes_of::<"),
-                self.type_ref(ty)?,
-                Doc::text(">()"),
-            ]),
+            // Two arms, printed as written — the same reconstruction `field_specs_of` gets below,
+            // because it is the same operand contract.
+            Expr::AttributesOf { ty, .. } => match ty {
+                TypeOperand::Static(ty) => Doc::concat([
+                    Doc::text("attributes_of::<"),
+                    self.type_ref(ty)?,
+                    Doc::text(">()"),
+                ]),
+                TypeOperand::Dynamic(e) => {
+                    Doc::concat([Doc::text("attributes_of("), self.expr(e)?, Doc::text(")")])
+                }
+            },
             // Turbofish only — there is no call form to resugar into, by design.
             Expr::TypeName { ty, .. } => Doc::concat([
                 Doc::text("type_name::<"),
@@ -2728,11 +2735,18 @@ impl Printer<'_> {
                 parts.push(Doc::text(">"));
                 Doc::concat(parts)
             }
-            Expr::RolesOf { ty: Some(ty), .. } => Doc::concat([
+            Expr::RolesOf {
+                ty: Some(TypeOperand::Static(ty)),
+                ..
+            } => Doc::concat([
                 Doc::text("roles_of::<"),
                 self.type_ref(ty)?,
                 Doc::text(">()"),
             ]),
+            Expr::RolesOf {
+                ty: Some(TypeOperand::Dynamic(e)),
+                ..
+            } => Doc::concat([Doc::text("roles_of("), self.expr(e)?, Doc::text(")")]),
             Expr::RolesOf { ty: None, .. } => Doc::text("roles_of()"),
             Expr::Invoke {
                 recv, name, args, ..

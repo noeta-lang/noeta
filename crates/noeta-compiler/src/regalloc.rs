@@ -493,16 +493,17 @@ fn op_facts(op: &Op) -> OpFacts {
         Op::LoadPending { dst } | Op::ScopeBeginValue { dst, .. } => f.def = Some(*dst),
         Op::ScopeEndAt { src, .. } => f.uses.push(*src),
         Op::ScopeBegin | Op::ScopeEnd { .. } => {}
-        Op::AttributesOf { dst, dynamic, .. } => {
+        // `roles_of()`'s scope is optional; `attributes_of`'s name register never is.
+        Op::RolesOf { dst, src } => {
             f.def = Some(*dst);
-            f.uses.extend(dynamic.iter().copied());
+            f.uses.extend(src.iter().copied());
         }
-        Op::RolesOf { dst, .. } => f.def = Some(*dst),
         Op::ParamsOf { dst, src } | Op::ReturnsOf { dst, src } => {
             f.def = Some(*dst);
             f.uses.push(*src);
         }
-        Op::TypeOf { dst, src }
+        Op::AttributesOf { dst, src }
+        | Op::TypeOf { dst, src }
         | Op::FieldsOf { dst, src }
         | Op::TraitsOf { dst, src }
         | Op::FieldSpecsOf { dst, src }
@@ -1027,18 +1028,18 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
         Op::LoadPending { dst } | Op::ScopeBeginValue { dst, .. } => m(dst),
         Op::ScopeEndAt { src, .. } => m(src),
         Op::ScopeBegin | Op::ScopeEnd { .. } => {}
-        Op::AttributesOf { dst, dynamic, .. } => {
+        Op::RolesOf { dst, src } => {
             m(dst);
-            if let Some(slot) = dynamic {
-                m(slot);
+            if let Some(src) = src {
+                m(src);
             }
         }
-        Op::RolesOf { dst, .. } => m(dst),
         Op::ParamsOf { dst, src } | Op::ReturnsOf { dst, src } => {
             m(dst);
             m(src);
         }
-        Op::TypeOf { dst, src }
+        Op::AttributesOf { dst, src }
+        | Op::TypeOf { dst, src }
         | Op::FieldsOf { dst, src }
         | Op::TraitsOf { dst, src }
         | Op::FieldSpecsOf { dst, src }

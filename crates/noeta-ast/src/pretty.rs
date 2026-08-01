@@ -1354,11 +1354,9 @@ impl Pretty for Expr {
                 out.push(')');
             }
             Expr::AttributesOf { ty, span: s } => {
-                out.push_str(&format!(
-                    "(attributes_of {} {})",
-                    type_ref_str(ty),
-                    span(*s)
-                ));
+                out.push_str(&format!("(attributes_of {}\n", span(*s)));
+                ty.pretty(out, level + 1);
+                out.push(')');
             }
             Expr::TypeName { ty, span: s } => {
                 out.push_str(&format!("(type_name {} {})", type_ref_str(ty), span(*s)));
@@ -1393,7 +1391,11 @@ impl Pretty for Expr {
                 out.push(')');
             }
             Expr::RolesOf { ty, span: s } => match ty {
-                Some(ty) => out.push_str(&format!("(roles_of {} {})", type_ref_str(ty), span(*s))),
+                Some(ty) => {
+                    out.push_str(&format!("(roles_of {}\n", span(*s)));
+                    ty.pretty(out, level + 1);
+                    out.push(')');
+                }
                 None => out.push_str(&format!("(roles_of {})", span(*s))),
             },
             Expr::ParamsOf { target, span: s } => {
