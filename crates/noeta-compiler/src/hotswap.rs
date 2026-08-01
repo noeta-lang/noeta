@@ -229,6 +229,27 @@ pub fn diff_programs(old: &Program, old_src: &str, new: &Program, new_src: &str)
         return SwapDiff::NeedsRestart(blockers);
     }
 
+    // Declaration ORDER is part of the comparison, and it is the one part a name-keyed diff cannot
+    // see. Every table above is keyed by name, so two versions holding the same declarations in a
+    // different order compared as *nothing changed* — while the reflection artifact is
+    // source-ordered, so a cold start of the new version answers `attributes_of` / `roles_of` /
+    // `params_of` in the new order and the untouched live session answers in the old one
+    // (`plans/parallel-path-audit.md` §14: eleven corpus programs, all reflection).
+    //
+    // The repair is to hand the region to the fragment when it moved, in the NEW program's order:
+    // re-evaluating a declaration re-registers its reflection records, and
+    // `ReflectionInfo::accumulate` fills the slots they held in the fragment's order. So the
+    // fragment's own sequence carries the new order — nothing beside it has to describe it, and
+    // nothing can drift from it.
+    //
+    // Only when it actually moved. An edit that appends declarations at the end of the file — the
+    // ordinary "add a function" save — leaves every existing declaration where it was and the
+    // merge's append rule already lands the newcomer where a cold start has it, so that edit keeps
+    // its one-declaration fragment.
+    if declaration_region_moved(&old_items.decls, &new_items.decls) {
+        include.extend(new_items.decls.iter().copied());
+    }
+
     // Assemble the fragment in the NEW program's source order: added `use`s (an import re-run is
     // an idempotent global (re)bind; removed ones just leave a stale binding), the included
     // declarations, and — on a re-running swap — every top-level statement except the preserved
@@ -300,6 +321,36 @@ pub fn diff_programs(old: &Program, old_src: &str, new: &Program, new_src: &str)
     })
 }
 
+/// Whether the two versions' **declaration sequences** describe a different region — the question a
+/// name-keyed comparison cannot answer, and the one the source-ordered reflection artifact depends
+/// on.
+///
+/// Two shapes count, and they are the two the reflection merge cannot repair on its own:
+///
+/// - **A reorder** — the declarations both versions have, read in each version's own order, differ.
+/// - **An insertion** — a declaration new in this version sits before one the old version also had.
+///   The merge has no slot for a name the session has never seen, so it appends; a cold start has it
+///   in the middle. Only a newcomer in the file's *trailing* run of new declarations is safely
+///   appended, which is what an ordinary "add a function at the end" edit produces.
+///
+/// Everything else — a body edit, a pure append, a removal — leaves the surviving declarations in
+/// their order, and answering `false` keeps that edit's fragment down to what it changed.
+fn declaration_region_moved(old: &[&str], new: &[&str]) -> bool {
+    let old_names: HashSet<&str> = old.iter().copied().collect();
+    let new_names: HashSet<&str> = new.iter().copied().collect();
+    if !old
+        .iter()
+        .filter(|n| new_names.contains(*n))
+        .eq(new.iter().filter(|n| old_names.contains(*n)))
+    {
+        return true;
+    }
+    match new.iter().rposition(|n| old_names.contains(n)) {
+        Some(last) => new[..last].iter().any(|n| !old_names.contains(n)),
+        None => false,
+    }
+}
+
 /// If `stmt` is a top-level binding whose initializer is a **reactive constructor** call —
 /// `signal(…)`, `computed(…)`, `synced_signal(…)`, or `cell.new(…)` — return the bound name.
 /// These are the state anchors the HMR rule preserves when their text is unchanged. Detection is
@@ -339,6 +390,10 @@ struct Items<'a> {
     namespaces: Vec<&'a str>,
     /// Text of every other top-level statement, in source order.
     others: Vec<&'a str>,
+    /// The name of every declaration [`Items::fns`] and [`Items::types`] hold, **in source order** —
+    /// the sequence the reflection artifact is built in, and the one thing about a program that the
+    /// name-keyed buckets above throw away. Read by [`declaration_region_moved`].
+    decls: Vec<&'a str>,
 }
 
 /// A struct/class/enum declaration, viewed uniformly for diffing.
@@ -374,24 +429,29 @@ fn classify<'a>(stmts: &'a [Stmt], src: &'a str) -> Items<'a> {
         uses: HashSet::new(),
         namespaces: Vec::new(),
         others: Vec::new(),
+        decls: Vec::new(),
     };
     for stmt in stmts {
         match stmt {
             Stmt::Fn(decl) => {
                 items.fns.insert(decl.name.as_str(), decl);
+                items.decls.push(decl.name.as_str());
             }
             Stmt::Struct(decl) => {
                 items
                     .types
                     .insert(decl.name.as_str(), TypeItem::Struct(decl));
+                items.decls.push(decl.name.as_str());
             }
             Stmt::Class(decl) => {
                 items
                     .types
                     .insert(decl.name.as_str(), TypeItem::Class(decl));
+                items.decls.push(decl.name.as_str());
             }
             Stmt::Enum(decl) => {
                 items.types.insert(decl.name.as_str(), TypeItem::Enum(decl));
+                items.decls.push(decl.name.as_str());
             }
             Stmt::Impl(decl) => {
                 // Key + body text: an edited impl body must register as a difference too, so the
@@ -419,6 +479,7 @@ fn classify<'a>(stmts: &'a [Stmt], src: &'a str) -> Items<'a> {
                     match item {
                         Stmt::Fn(decl) => {
                             items.fns.insert(decl.name.as_str(), decl);
+                            items.decls.push(decl.name.as_str());
                         }
                         other => items.others.push(text(src, other.span())),
                     }

@@ -119,6 +119,39 @@ fn oracle(v1: &str, v2: &str, probe_src: &str) {
     );
 }
 
+/// [`oracle`] for an edit the differ might report as **no change at all**: apply the plan when there
+/// is one, probe either way, and compare.
+///
+/// A `SwapDiff::Unchanged` verdict is not a pass by itself — it means the live session kept every
+/// artifact it had, which is precisely what the comparison below catches when the new version's
+/// differ from them. So the content assertion fires first and the verdict assertion second: the
+/// failure a reader sees is "the swap kept v1's answer", not "the differ returned the wrong enum".
+fn oracle_over_a_reorder(v1: &str, v2: &str, probe_src: &str) {
+    let mut swapped = boot(v1);
+    let seen = verdict(v1, v2);
+    let swappable = matches!(seen, SwapDiff::Swap(_));
+    if swappable {
+        apply(&mut swapped, v1, v2);
+    }
+    let via_swap = probe(&mut swapped, probe_src);
+    swapped.teardown();
+
+    let mut cold = boot(v2);
+    let via_cold = probe(&mut cold, probe_src);
+    cold.teardown();
+
+    assert_eq!(
+        via_swap, via_cold,
+        "a reordered declaration region must reach the live session's reflection artifact — \
+         the swap answered with the OLD version's order (verdict: {seen:?})"
+    );
+    assert!(
+        swappable,
+        "a declaration reorder is a change the session has to absorb, not `no change at all`: \
+         {seen:?}"
+    );
+}
+
 // ---------------------------------------------------------------- the differential corpus
 
 #[test]
@@ -644,6 +677,98 @@ fn a_swapped_callables_parameter_attributes_keep_their_place() {
         &app("v1"),
         &app("v2"),
         "for a in attributes_of::<Arg>() { echo \"${a.target} -> ${a.value.help}\" }",
+    );
+}
+
+/// **A declaration REORDER is a change, and it has to reach the manifest.** The reflection artifact
+/// is source-ordered and the differ is name-keyed, so two versions holding the same declarations in
+/// a different order compared as *nothing changed*: no fragment was built, and the live session kept
+/// v1's order where a cold start of v2 has v2's. Eleven corpus programs printed their rows permuted
+/// after such a swap (`plans/parallel-path-audit.md` §14).
+///
+/// The fix is two halves that only work together. The differ compares the declaration **sequence**
+/// and, when it moved, puts the whole declaration region in the fragment — the fragment's own order
+/// is the new order, carried rather than implied. And `ReflectionInfo::accumulate` assigns the
+/// fragment's groups to the base's anchor slots **in the fragment's order** instead of pinning each
+/// group to the slot it already occupied. Either half alone leaves this test red: without the differ
+/// half nothing is re-registered, without the merge half every group re-lands where it was.
+#[test]
+fn a_reordered_declaration_region_reorders_the_attribute_manifest() {
+    let route = "@attribute\nstruct Route { path: string }\n";
+    let users = "#[Route(\"/users\")]\nstruct Users { id: int }\n";
+    let orders = "#[Route(\"/orders\")]\nstruct Orders { id: int }\n";
+    oracle_over_a_reorder(
+        &format!("{route}{users}{orders}echo \"up\"\n"),
+        &format!("{route}{orders}{users}echo \"up\"\n"),
+        "for r in attributes_of::<Route>() { echo \"${r.target}=${r.value.path}\" }",
+    );
+}
+
+/// The same rule over **functions and their roles**, the other half of the family the audit found:
+/// `roles_of()` is derived from the manifest, so a reordered declaration region permutes it too.
+#[test]
+fn a_reordered_declaration_region_reorders_the_role_index() {
+    let decls = "@attribute(Function)\n@role(Semantic.EntryPoint)\nstruct Route { path: string }\n";
+    let handle = "#[Route(\"/users\")]\nfn handleUsers(): int { return 1; }\n";
+    let render = "#[Route(\"/\")]\nfn renderHome(): int { return 3; }\n";
+    oracle_over_a_reorder(
+        &format!("{decls}{handle}{render}echo \"up\"\n"),
+        &format!("{decls}{render}{handle}echo \"up\"\n"),
+        "for b in roles_of() { echo b.target }",
+    );
+}
+
+/// A declaration **inserted between two others** is the same bug wearing an append: the merge had
+/// nowhere to put a name the session had never seen but the end of the table, so a cold start listed
+/// it in the middle and the swap listed it last. The fragment's order answers this one too — a new
+/// group rides along to the anchor of whichever group follows it in the new source.
+#[test]
+fn a_declaration_inserted_between_two_others_lands_between_them_in_the_manifest() {
+    let route = "@attribute\nstruct Route { path: string }\n";
+    let users = "#[Route(\"/users\")]\nstruct Users { id: int }\n";
+    let orders = "#[Route(\"/orders\")]\nstruct Orders { id: int }\n";
+    let carts = "#[Route(\"/carts\")]\nstruct Carts { id: int }\n";
+    oracle_over_a_reorder(
+        &format!("{route}{users}{orders}echo \"up\"\n"),
+        &format!("{route}{users}{carts}{orders}echo \"up\"\n"),
+        "for r in attributes_of::<Route>() { echo \"${r.target}=${r.value.path}\" }",
+    );
+}
+
+/// A declaration **appended at the end** must stay on the cheap path: the sequence grew at its tail,
+/// nothing moved, and the merge's own append rule already lands the newcomer where a cold start has
+/// it. Pinned so the reorder trigger above cannot quietly widen into "every edit re-registers the
+/// whole file" — the fragment carries the added declaration and nothing else.
+#[test]
+fn an_appended_declaration_leaves_the_rest_of_the_file_out_of_the_fragment() {
+    let route = "@attribute\nstruct Route { path: string }\n";
+    let users = "#[Route(\"/users\")]\nstruct Users { id: int }\n";
+    let orders = "#[Route(\"/orders\")]\nstruct Orders { id: int }\n";
+    let v1 = format!("{route}{users}echo \"up\"\n");
+    let v2 = format!("{route}{users}{orders}echo \"up\"\n");
+    match verdict(&v1, &v2) {
+        SwapDiff::Swap(plan) => {
+            let names: Vec<&str> = plan
+                .fragment
+                .stmts
+                .iter()
+                .filter_map(|s| match s {
+                    noeta_ast::Stmt::Struct(d) => Some(d.name.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                names,
+                vec!["Orders"],
+                "an append must not drag the unchanged declarations into the fragment"
+            );
+        }
+        other => panic!("expected a swappable diff, got {other:?}"),
+    }
+    oracle_over_a_reorder(
+        &v1,
+        &v2,
+        "for r in attributes_of::<Route>() { echo \"${r.target}=${r.value.path}\" }",
     );
 }
 

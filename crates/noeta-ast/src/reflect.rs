@@ -544,9 +544,9 @@ fn manifest_group(target: &str) -> &str {
         .unwrap_or(target)
 }
 
-/// Merge `fragment`'s records into `base`, **in place**: the records of each incoming key land at
-/// the position of the first record they supersede, and records whose key superseded nothing append
-/// in the fragment's own order.
+/// Merge `fragment`'s records into `base`, **in place**: the positions the superseded records held
+/// are the positions the incoming ones take, filled in the **fragment's** order, and records whose
+/// key superseded nothing append in the fragment's order too.
 ///
 /// `purged` says whether a record already in `base` is superseded by this fragment; `key` names the
 /// declaration a record belongs to, over `base` and `fragment` alike.
@@ -554,6 +554,22 @@ fn manifest_group(target: &str) -> &str {
 /// The in-place rule exists because these tables are **ordered surfaces**: `attributes_of` hands the
 /// manifest back in declaration order and callers pin it, so appending a superseded declaration's
 /// records permuted a listing on nothing more than which body was edited last.
+///
+/// **Which slot each incoming group gets is the fragment's answer, not the base's**, and that is
+/// the other half of the same rule. The positions are the base's — one per key the fragment
+/// actually re-supplies, in base order — but they are handed out by walking the *fragment*, so a
+/// fragment that re-declares its groups in a different order than the session holds them re-orders
+/// the table rather than re-landing every group where it already was. Pinning each group to its own
+/// old slot made a declaration reorder unobservable: the differ built the fragment and the merge
+/// undid it (`plans/parallel-path-audit.md` §14). A fragment carrying ONE group has one slot and
+/// therefore cannot move anything — which is exactly the body-edit case the in-place rule is for,
+/// preserved by construction rather than by a second code path.
+///
+/// A key the fragment carries that the base has never seen is **buffered onto the next slot**
+/// instead of appending: a declaration inserted between two existing ones lands between them, the
+/// way a cold compile of the same source has it. With nothing after it (the ordinary "append a
+/// function at the end of the file" edit), the buffer flushes at the end, which is the same append
+/// as before.
 ///
 /// Ordering discipline for the append path: the fragment's records keep their relative order
 /// whatever their keys, because a whole-program compile is *this same merge onto an empty table* —
@@ -592,23 +608,64 @@ where
 {
     // The incoming records, in fragment order; each is taken as it is placed.
     let mut incoming: Vec<Option<T>> = fragment.into_iter().map(Some).collect();
+    // The fragment's keys, in the fragment's own order — the order it wants the table to hold.
+    let mut fragment_keys: Vec<String> = Vec::new();
+    for record in incoming.iter().flatten() {
+        let k = key(record);
+        if !fragment_keys.contains(&k) {
+            fragment_keys.push(k);
+        }
+    }
+    // The slots: the first superseded record of each key the fragment actually re-supplies, in base
+    // order. A key whose records are purged with nothing to replace them (a callable re-declared
+    // without the attribute it used to carry) opens no slot — its rows simply go, and the keys that
+    // do arrive must not shift into the hole it leaves.
+    let mut slots: Vec<String> = Vec::new();
+    for record in base.iter() {
+        if !purged(record) {
+            continue;
+        }
+        let k = key(record);
+        if fragment_keys.contains(&k) && !slots.contains(&k) {
+            slots.push(k);
+        }
+    }
+    // What each slot emits, assigned by walking the fragment: the i-th slot (in base order) takes
+    // the i-th key the fragment re-supplies (in fragment order), preceded by any keys new to the
+    // base that the fragment declared just before it.
+    let mut emitted: Vec<Vec<String>> = vec![Vec::new(); slots.len()];
+    let mut pending: Vec<String> = Vec::new();
+    let mut next = 0usize;
+    for k in &fragment_keys {
+        if slots.contains(k) {
+            emitted[next].append(&mut pending);
+            emitted[next].push(k.clone());
+            next += 1;
+        } else {
+            pending.push(k.clone());
+        }
+    }
     let mut merged: Vec<T> = Vec::with_capacity(base.len());
     let mut anchored: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut slot = 0usize;
     for record in base.drain(..) {
         if !purged(&record) {
             merged.push(record);
             continue;
         }
-        // The first record a key supersedes is that key's anchor: every incoming record of that
-        // key lands here. The remaining superseded records are dropped — their replacements have
-        // already been placed.
+        // The first record a key supersedes opens that key's slot — which the assignment above may
+        // have given to a *different* key's records. The remaining superseded records are dropped;
+        // their replacements have already been placed.
         let k = key(&record);
-        if anchored.insert(k.clone()) {
-            for slot in incoming.iter_mut() {
-                if slot.as_ref().is_some_and(|r| key(r) == k) {
-                    merged.push(slot.take().expect("just matched Some"));
+        if anchored.insert(k.clone()) && slots.contains(&k) {
+            for group in &emitted[slot] {
+                for held in incoming.iter_mut() {
+                    if held.as_ref().is_some_and(|r| key(r) == *group) {
+                        merged.push(held.take().expect("just matched Some"));
+                    }
                 }
             }
+            slot += 1;
         }
     }
     for record in incoming.into_iter().flatten() {
