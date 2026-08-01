@@ -133,6 +133,27 @@ pub const RETURN_HELPER: &str = "noeta_jit_return";
 /// ([`OUTCOME_CONTINUE`]) or propagate.
 pub const PREPARE_CALL_HELPER: &str = "noeta_jit_prepare_call";
 pub const AFTER_CALL_HELPER: &str = "noeta_jit_after_call";
+
+/// **Fast-convention tag** (P-JSSA S4.1): the bit `jit_prepare_call` sets in the entry pointer it
+/// returns to say "this is a *fast*-convention body — its window was reserved uninitialized and the
+/// arguments travel as machine arguments". The native caller tests it and strips it (`& !1`) before
+/// the indirect call; a clear bit means the classic [`CompiledFn`] convention.
+///
+/// Tagging a pointer only works while the bit is **free**, which is the whole content of
+/// [`MIN_BODY_ALIGNMENT`]: on an odd entry address `ptr | FAST_ENTRY_TAG == ptr`, so the tag says
+/// nothing and the caller's `& !FAST_ENTRY_TAG` lands one byte *before* the real body. Everything
+/// that produces an entry pointer — the runtime JIT's `finalize_ptr`, the AOT dispatch table's
+/// linker-resolved slots — owes this alignment, and `jit_install` refuses an entry that breaks it
+/// rather than passing a pointer the tag cannot describe.
+pub const FAST_ENTRY_TAG: usize = 1;
+
+/// The alignment every compiled body's entry point must have, in bytes — the precondition
+/// [`FAST_ENTRY_TAG`] rests on. Cranelift guarantees nothing here on its own (x86-64's
+/// `function_alignment().minimum` and `symbol_alignment()` are both 1, so the object backend packs
+/// bodies back to back and one can land odd), so `noeta_jit` sets the `log2_min_function_alignment`
+/// flag to this on both the JIT and the object ISA. Only bit 0 is load-bearing; 16 is the target's
+/// ordinary function alignment and is what the codegen actually asks for.
+pub const MIN_BODY_ALIGNMENT: usize = 16;
 /// The leaf-heap-op helper (J4): runs a single non-dispatching heap/collection op (the interpreter's
 /// exact arm, refcounts included) and returns [`OUTCOME_CONTINUE`] (done — the caller advances) or a
 /// resume pc (it can't handle this instance — a dispatch or an error — so the interpreter runs it).

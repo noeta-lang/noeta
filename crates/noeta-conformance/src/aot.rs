@@ -129,7 +129,18 @@ pub struct AotDiffFailure {
 /// **Known divergences**: defects this oracle found or confirmed, which are not its to fix, listed
 /// so it can land green while still failing on anything new.
 ///
-/// **Three rows have already left this list, and the ratchet is why.**
+/// **Four rows have already left this list, and the ratchet is why.**
+///
+/// `modules/derived_package_path/main.noe` was the one crash — and it was the row this list existed
+/// for. The linked artifact aborted every time at `dispatch.rs`'s `&chunk.code[pc]` with a
+/// pointer-shaped `pc`. The mechanism was the S4.1 direct-call convention tag: `jit_prepare_call`
+/// marks a fast-convention callee by setting bit 0 of the entry pointer, and Cranelift's object
+/// backend aligns function bodies to **1** on x86-64, so a body could land on an odd address —
+/// `ff | 1` said nothing, the caller's `& !1` called `ff - 1`, that `ret` handed the address back as
+/// the callee's outcome, and `jit_after_call` wrote it into the callee frame as a resume pc. Fixed
+/// at the root by asking Cranelift for a real function alignment on both ISAs, with `jit_install`
+/// refusing any entry the tag cannot describe. The in-process AOT-bodies arm never saw it because
+/// the runtime JIT allocates each body through its own finalize, which hands out aligned memory.
 ///
 /// `io/streams.noe` and `io/to_string_parity.noe` were here because the AOT tail dropped the
 /// program's own `std.io` `err`/`errln` stream. `std/os_exit.noe` was here because `os.exit(3)`
@@ -146,20 +157,10 @@ pub struct AotDiffFailure {
 ///
 /// The list is an **expect-fail ratchet**, not a suppression: the oracle asserts the failure set is
 /// *exactly* this list, so a new divergence fails **and a fixed one fails too**, with instructions to
-/// delete the row. A stale entry cannot outlive the bug it describes. Read the rows: one of them is a
-/// crash, and it should be the shortest-lived entry here.
-pub const KNOWN_DIVERGENCES: &[(&str, &str)] = &[
-    // NOT a tail gap — a live `--native` crash this oracle found on its first full-corpus run, and
-    // the reason row 9 exists. The linked artifact aborts every time with a Rust panic at
-    // `noeta-vm/src/dispatch.rs`'s `&chunk.code[pc]`, where `pc` is a pointer-shaped value: after
-    // returning from a linked native body the interpreter resumes at an address instead of a
-    // program counter. The SAME module agrees with tier 0 under the in-process AOT-bodies arm, so
-    // the codegen is not the variable — the linked dispatch bind is, which is the seam that already
-    // produced one AOT-only soundness bug (`0f9752d4c`, the misaligned dispatch table).
-    // Reproduce: `NOETA_AOT_KEEP=1 cargo run -p noeta-conformance --features jit -- \
-    //   --aot-differential --file modules/derived_package_path/main.noe`, then run the kept `app`.
-    ("modules/derived_package_path/main.noe", "crash"),
-];
+/// delete the row. A stale entry cannot outlive the bug it describes. The list is currently
+/// **empty**: every corpus program's linked artifact runs byte-identically to `noeta run`, and the
+/// next entry added here should be as short-lived as the crash row was.
+pub const KNOWN_DIVERGENCES: &[(&str, &str)] = &[];
 
 impl AotDiffReport {
     /// Divergences that are not a known, tracked tail gap — the ones that fail this oracle.

@@ -249,6 +249,32 @@ impl<M: ClifModule> Jit<M> {
         flags
             .set("enable_verifier", if verify { "true" } else { "false" })
             .map_err(|e| e.to_string())?;
+        // **Every compiled body must start at an even address** ([`noeta_jit_abi::MIN_BODY_ALIGNMENT`]).
+        // The S4.1 direct-call protocol tags the fast convention in *bit 0* of the entry pointer —
+        // `jit_prepare_call` returns `ff | FAST_ENTRY_TAG` and the caller strips it with `& !1` — so
+        // an odd entry makes the tag indistinguishable from the address's own low bit and the caller
+        // jumps **one byte before** the real body.
+        //
+        // Nothing gave us that for free: on x86-64 Cranelift's `function_alignment().minimum` and
+        // `symbol_alignment()` are both **1**, so `cranelift-object` packs bodies back to back and a
+        // body whose predecessor ends on an odd boundary lands odd. That is exactly how a linked
+        // `--native` artifact crashed (`modules/derived_package_path`): a leaf prototype's fast body
+        // sat at an odd address, `ff | 1` was a no-op, and the caller called `ff - 1`, whose `ret`
+        // handed that address straight back as the callee's "outcome" — which `jit_after_call` then
+        // wrote into the callee frame as a bytecode pc. The runtime JIT never hit it only because its
+        // per-body `finalize_definitions` hands out freshly aligned code memory; the property was
+        // luck, not contract, on both paths.
+        //
+        // 16 is the ordinary function alignment for this target (Cranelift's own `preferred` is 32);
+        // it costs a few padding bytes per body and makes the tag's precondition structural.
+        flags
+            .set(
+                "log2_min_function_alignment",
+                &noeta_jit_abi::MIN_BODY_ALIGNMENT
+                    .trailing_zeros()
+                    .to_string(),
+            )
+            .map_err(|e| e.to_string())?;
         let isa_builder = cranelift_native::builder().map_err(|m| m.to_string())?;
         isa_builder
             .finish(settings::Flags::new(flags))
@@ -2436,21 +2462,27 @@ fn emit_call(
 
     // Try a direct native→native call: `prepare_call` returns the callee's compiled entry pointer
     // and its reserved window base in one roundtrip (S4.0), or a zero pointer if the call is not
-    // direct-able (uncompiled callee, defaults/upvalues, no stack capacity). A pointer with bit 0
-    // set is a **fast-convention** entry (S4.1): its window was reserved uninitialized and the
-    // arguments travel as machine arguments.
+    // direct-able (uncompiled callee, defaults/upvalues, no stack capacity). A pointer carrying
+    // [`noeta_jit_abi::FAST_ENTRY_TAG`] is a **fast-convention** entry (S4.1): its window was
+    // reserved uninitialized and the arguments travel as machine arguments. The tag is only
+    // readable because every body is [`noeta_jit_abi::MIN_BODY_ALIGNMENT`]-aligned (`make_isa`);
+    // `jit_install` refuses any entry that is not, so an untagged pointer here is always an address.
     let prep = cg.prepare_call_ref;
     let pinst =
         cg.b.ins()
             .call(prep, &[vm, frames, regs_vec, base, proto, pcv, site]);
     let fnptr = cg.b.inst_results(pinst)[0];
     let callee_base = cg.b.inst_results(pinst)[1];
-    let fast_bit = cg.b.ins().band_imm(fnptr, 1);
+    let fast_bit =
+        cg.b.ins()
+            .band_imm(fnptr, noeta_jit_abi::FAST_ENTRY_TAG as i64);
     let tagged_blk = cg.b.create_block();
     let untagged = cg.b.create_block();
     cg.b.ins().brif(fast_bit, tagged_blk, &[], untagged, &[]);
     cg.b.switch_to_block(tagged_blk);
-    let fp_untagged = cg.b.ins().band_imm(fnptr, -2);
+    let fp_untagged =
+        cg.b.ins()
+            .band_imm(fnptr, !(noeta_jit_abi::FAST_ENTRY_TAG as i64));
     cg.b.ins()
         .jump(fast_blk, &[fp_untagged.into(), callee_base.into()]);
 
@@ -3491,6 +3523,107 @@ mod tests {
         assert_eq!(
             body_relocs, expected_relocs,
             "the dispatch table relocates to exactly every native main+fast body"
+        );
+    }
+
+    /// **Every AOT-emitted body starts on a [`noeta_jit_abi::MIN_BODY_ALIGNMENT`] boundary**, so bit
+    /// 0 of an entry pointer belongs to [`noeta_jit_abi::FAST_ENTRY_TAG`] and not to the address.
+    ///
+    /// This is the exact property whose absence crashed every `--native` build of
+    /// `modules/derived_package_path`: `cranelift-object` places a body at
+    /// `max(buffer.alignment, isa.symbol_alignment())`, both of which are **1** on x86-64, so it
+    /// packed bodies back to back and one landed odd. `jit_prepare_call`'s `ff | 1` was then a no-op
+    /// and the caller's `& !1` called `ff - 1` — a `ret` that handed the address itself back as the
+    /// callee's outcome, which `jit_after_call` stored as a bytecode pc.
+    ///
+    /// The assertion is over **both halves of the placement**, because either alone is satisfiable
+    /// by accident: each body symbol sits at an aligned offset *within* its section, and the section
+    /// carries at least that alignment so the linker cannot shift the whole block onto an odd
+    /// address. Before the `log2_min_function_alignment` fix the section alignment is 1 and this
+    /// fails deterministically, rather than depending on how the emitted bodies happened to size.
+    #[test]
+    fn aot_bodies_are_aligned_so_the_fast_convention_tag_is_a_free_bit() {
+        use noeta_compiler::compile;
+        noeta_stdlib::registry::default_seeded();
+        use noeta_lexer::lex;
+        use noeta_parser::parse;
+        use noeta_span::{Source, SourceId};
+        use object::{Object, ObjectSection, ObjectSymbol};
+
+        // Odd-sized bodies of several different shapes, so the "next body lands odd" case is live:
+        // a leaf returning a heap constant is exactly the shape whose fast body landed at an odd
+        // address in the crashing artifact.
+        let src = "fn a(): string { return \"a\" }\n\
+                   fn b(): string { return \"bb\" }\n\
+                   fn c(n: int): int { return n * n + 1 }\n\
+                   fn d(n: int): int { return c(n) + 7 }\n\
+                   echo \"${a()} ${b()} ${d(3)}\"\n";
+        let source = Source::new(SourceId::FIRST, "aot_align.noe", src);
+        let lexed = lex(&source);
+        let parsed = parse(&source, &lexed.tokens);
+        let module = compile(&parsed.program).expect("program is in the VM subset");
+
+        let template = [0u8; 64];
+        let layout = FrameLayout {
+            frame_size: 64,
+            frame_align: 8,
+            proto_offset: 0,
+            base_offset: 8,
+            pc_offset: 16,
+            ret_dst_offset: 24,
+            ret_transform_offset: 32,
+            upvalues_offset: 40,
+            vec_ptr_word: 0,
+            vec_len_word: 1,
+            vec_cap_word: 2,
+        };
+        let mut aot = Jit::<ObjectModule>::new_object("aot_align", layout, template.as_ptr())
+            .expect("object backend builds");
+        let manifest = aot.compile_module(&module).expect("whole module compiles");
+        let obj = aot.finish().expect("object file emits");
+
+        let bodies: Vec<String> = manifest
+            .protos
+            .iter()
+            .flat_map(|e| e.symbol.iter().chain(e.fast_symbol.iter()))
+            .cloned()
+            .collect();
+        assert!(
+            bodies.len() > 2,
+            "the program emits several bodies (main + fast) to place: {bodies:?}"
+        );
+
+        let align = noeta_jit_abi::MIN_BODY_ALIGNMENT as u64;
+        let file = object::File::parse(&*obj).expect("valid object file");
+        let mut checked = 0usize;
+        for sym in file.symbols().filter(|s| s.is_definition()) {
+            let Ok(name) = sym.name() else { continue };
+            if !bodies.iter().any(|b| b == name) {
+                continue;
+            }
+            assert_eq!(
+                sym.address() % align,
+                0,
+                "body {name} is placed at offset {:#x}, which is not {align}-byte aligned — bit 0 \
+                 of its entry pointer belongs to FAST_ENTRY_TAG, not to the address",
+                sym.address(),
+            );
+            let section = sym
+                .section_index()
+                .and_then(|i| file.section_by_index(i).ok())
+                .expect("a defined body lives in a section");
+            assert!(
+                section.align() >= align,
+                "the section holding {name} is {}-byte aligned, so the linker may place the whole \
+                 block on an odd address and undo the per-symbol alignment",
+                section.align(),
+            );
+            checked += 1;
+        }
+        assert_eq!(
+            checked,
+            bodies.len(),
+            "every manifest body was found in the object's symbol table and checked"
         );
     }
 

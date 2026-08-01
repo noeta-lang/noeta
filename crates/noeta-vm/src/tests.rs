@@ -132,6 +132,79 @@ fn aot_bound_dispatch_runs_native_in_process() {
     drop(keep); // hold the code pages live until the AOT run has finished
 }
 
+/// The runtime half of the [`noeta_jit_abi::FAST_ENTRY_TAG`] contract: an entry pointer that cannot
+/// carry the tag never reaches the call protocol.
+///
+/// A `--native` artifact crashed because a *linked* fast body sat at an odd address. The direct-call
+/// protocol marks the fast convention by setting bit 0 of the entry pointer, so `ff | 1` said
+/// nothing about `ff`, and the caller's `& !1` called `ff - 1`: one byte before the body, on a `ret`
+/// that returned the address itself as the callee's outcome — which the interpreter then indexed
+/// bytecode with. The root fix aligns every emitted body; this asserts the *binding* refuses an
+/// unaligned one regardless, so a future emitter or linker cannot re-open the hole silently.
+///
+/// The bogus address is never called — the point is that it is never *stored*, so nothing can call
+/// it. The main entry stays live and the program still runs, which is the intended degradation: the
+/// classic convention, not a disabled prototype.
+#[cfg(feature = "jit")]
+#[allow(unsafe_code)]
+#[test]
+fn an_unalignable_fast_entry_is_refused_by_the_dispatch_binding() {
+    let src = "fn sq(n: int): int { return n * n }\nmut t = 0\nfor i in 0..50 { t = t + sq(i) }\necho t\n";
+    let source = Source::new(SourceId::FIRST, "aot_tag.noe", src);
+    let lexed = lex(&source);
+    let parsed = parse(&source, &lexed.tokens);
+    let module = compile(&parsed.program).expect("compiles");
+    let expected = VmBackend::new().run_module(&module).stdout;
+
+    let mut keep = Vm::load(
+        &module,
+        Box::new(noeta_stdlib::SandboxHost::new()),
+        Box::new(noeta_stdlib::SandboxExecutor::new()),
+    );
+    keep.tier1.force_jit = true;
+    keep.init_jit();
+    let n = keep.tier1.jit_entries.len();
+    let fast_proto = (0..n)
+        .find(|p| keep.tier1.jit_fast[*p].is_some())
+        .expect("some prototype has a fast-convention body");
+
+    // The table the linker would have produced if a body had landed one byte off.
+    let mut table = vec![0usize; 1 + 2 * n];
+    table[0] = n;
+    for p in 0..n {
+        if let Some(f) = keep.tier1.jit_entries[p] {
+            table[1 + 2 * p] = f as usize;
+        }
+        if let Some(ff) = keep.tier1.jit_fast[p] {
+            table[1 + 2 * p + 1] = ff | noeta_jit_abi::FAST_ENTRY_TAG;
+        }
+    }
+
+    let mut vm = Vm::load(
+        &module,
+        Box::new(noeta_stdlib::SandboxHost::new()),
+        Box::new(noeta_stdlib::SandboxExecutor::new()),
+    );
+    vm.tier1.aot = true;
+    noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
+    unsafe { vm.bind_aot_dispatch(table.as_ptr()) };
+    assert!(
+        vm.tier1.jit_fast[fast_proto].is_none(),
+        "an odd fast entry is dropped rather than tagged into a pointer that means something else"
+    );
+    assert!(
+        vm.tier1.jit_entries[fast_proto].is_some(),
+        "the prototype keeps its main entry — the degradation is the classic convention, not \
+         losing the body"
+    );
+    let result = run_and_teardown(&mut vm, noeta_value::CollectorMode::Trace);
+    assert_eq!(
+        result.stdout, expected,
+        "the run stays correct on the classic call convention"
+    );
+    drop(keep);
+}
+
 /// P-AOT L3.2b(3): [`compile_module_aot`] wires the object backend end-to-end — it emits a
 /// relocatable object carrying the [`noeta_jit_abi::AOT_DISPATCH_SYMBOL`] table. Byte-identity of the
 /// native codegen itself is proven corpus-wide by the JIT differential's **AOT-bodies arm**

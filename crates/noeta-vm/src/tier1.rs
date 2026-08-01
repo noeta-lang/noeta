@@ -340,7 +340,9 @@ extern "C" fn jit_return(
 #[cfg(feature = "jit-rt")]
 #[repr(C)]
 struct PreparedCall {
-    /// The callee's compiled entry pointer, or `0` (fall back to `jit_call`).
+    /// The callee's compiled entry pointer, or `0` (fall back to `jit_call`). Bit 0 is
+    /// [`noeta_jit_abi::FAST_ENTRY_TAG`], not part of the address — every entry the mirror tables
+    /// hold is body-aligned (`jit_install`), so the caller recovers the address by clearing it.
     fnptr: i64,
     /// The callee's reserved window base (meaningful only when `fnptr != 0`).
     base: usize,
@@ -436,7 +438,9 @@ extern "C" fn jit_prepare_call(
     // Fast convention (P-JSSA S4.1): the callee has a frameless-window body — reserve the window
     // WITHOUT initializing it (the fast body normalizes it before the interpreter can ever see
     // it) and skip the argument copy/retain (the arguments travel as machine arguments, borrowed
-    // from the caller's still-live registers). Bit 0 of the returned pointer tags the convention.
+    // from the caller's still-live registers). [`noeta_jit_abi::FAST_ENTRY_TAG`] tags the convention
+    // into bit 0 of the returned pointer — free because `jit_install` only ever stored an aligned
+    // body here.
     // Lookups go through the VM's mirror tables (P-PAR S4) — empty when the JIT is off, and the
     // only tier-1 tables the mutator may read in service mode.
     if let Some(ff) = vm
@@ -482,8 +486,15 @@ extern "C" fn jit_prepare_call(
             ret_transform: RetTransform::None,
             upvalues: Vec::new(),
         });
+        // `jit_install` guarantees `ff` is body-aligned, so ORing the tag in cannot be a no-op and
+        // the caller's `& !FAST_ENTRY_TAG` recovers exactly `ff`.
+        debug_assert_eq!(
+            ff & noeta_jit_abi::FAST_ENTRY_TAG,
+            0,
+            "fast entry is taggable"
+        );
         return PreparedCall {
-            fnptr: ff as i64 | 1,
+            fnptr: (ff | noeta_jit_abi::FAST_ENTRY_TAG) as i64,
             base: new_base,
         };
     }
@@ -862,14 +873,34 @@ impl<'m> Vm<'m> {
 
     /// Install a compiled prototype into the mirror tables — the single lookup source for the
     /// dispatch loop and the native call helpers, in both sync and service modes.
+    ///
+    /// **This is where the [`noeta_jit_abi::FAST_ENTRY_TAG`] precondition is enforced.** A direct
+    /// native→native call reads the convention out of bit 0 of the entry pointer, which is only a
+    /// free bit while every body is [`noeta_jit_abi::MIN_BODY_ALIGNMENT`]-aligned. `make_isa` asks
+    /// Cranelift for that alignment on both the JIT and the object ISA — but *asking* is the JIT
+    /// crate's business and *relying* is this crate's, and the two have already drifted apart once
+    /// (a linked `--native` artifact whose fast body landed on an odd address called it one byte
+    /// early). So an entry the tag cannot describe is refused here rather than handed to the call
+    /// protocol: the prototype simply interprets, or keeps the classic convention. Correct and
+    /// slower beats fast and jumping into the middle of an instruction. Two masked compares, once
+    /// per compiled prototype.
+    ///
+    /// This guard degrades silently *by design* — it is the safety net, not the alarm. The alarm is
+    /// `noeta_jit`'s `aot_bodies_are_aligned_so_the_fast_convention_tag_is_a_free_bit`, which fails
+    /// the build the moment the emitter stops aligning bodies.
     #[cfg(feature = "jit-rt")]
     fn jit_install(&mut self, proto: usize, entry: noeta_jit_abi::CompiledFn, fast: Option<usize>) {
+        let taggable = |p: usize| p & noeta_jit_abi::FAST_ENTRY_TAG == 0;
+        if !taggable(entry as usize) {
+            return; // untaggable main entry: interpret this prototype instead
+        }
         if proto >= self.tier1.jit_entries.len() {
             self.tier1.jit_entries.resize(proto + 1, None);
             self.tier1.jit_fast.resize(proto + 1, None);
         }
         self.tier1.jit_entries[proto] = Some(entry);
-        self.tier1.jit_fast[proto] = fast;
+        // An untaggable fast body is dropped, not installed: the call keeps the classic convention.
+        self.tier1.jit_fast[proto] = fast.filter(|f| taggable(*f));
     }
 
     /// The mirrored tier-1 entry point for `proto`, if compiled.
