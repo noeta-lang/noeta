@@ -735,6 +735,38 @@ fn a_declaration_inserted_between_two_others_lands_between_them_in_the_manifest(
     );
 }
 
+/// A reorder re-registers **every** declaration in the region, and the fragment carries no
+/// standalone `impl Trait for T` — an impl edit is a restart blocker, so the fragment has never
+/// needed one. A re-registered type must therefore keep the methods a standalone impl gave it,
+/// both to dispatch and in the manifest: `Counter.describe` is declared nowhere in the fragment's
+/// copy of `class Counter`. (One of the eleven programs the audit found is this exact shape.)
+#[test]
+fn a_reordered_region_keeps_a_standalone_impls_methods() {
+    let head = "@attribute\nstruct Route { path: string }\n\
+                trait Describe { fn describe(): string }\n";
+    let counter = "class Counter {\n\
+                   \x20   count: int\n\
+                   \x20   fn new(count: int): Counter { return Counter { count: count }; }\n\
+                   }\n\
+                   impl Describe for Counter {\n\
+                   \x20   #[Route(\"/counter\")]\n\
+                   \x20   fn describe(): string { return \"counter=${self.count}\"; }\n\
+                   }\n";
+    let holder = "class Holder {\n\
+                  \x20   impl Describe {\n\
+                  \x20       #[Route(\"/holder\")]\n\
+                  \x20       fn describe(): string { return \"holder\"; }\n\
+                  \x20   }\n\
+                  }\n";
+    oracle_over_a_reorder(
+        &format!("{head}{counter}{holder}echo \"up\"\n"),
+        &format!("{head}{holder}{counter}echo \"up\"\n"),
+        "for r in attributes_of::<Route>() { echo \"${r.target} ${r.value.path}\" }\n\
+         echo Counter.new(7).describe()\n\
+         echo Holder.describe()",
+    );
+}
+
 /// A declaration **appended at the end** must stay on the cheap path: the sequence grew at its tail,
 /// nothing moved, and the merge's own append rule already lands the newcomer where a cold start has
 /// it. Pinned so the reorder trigger above cannot quietly widen into "every edit re-registers the
@@ -747,22 +779,11 @@ fn an_appended_declaration_leaves_the_rest_of_the_file_out_of_the_fragment() {
     let v1 = format!("{route}{users}echo \"up\"\n");
     let v2 = format!("{route}{users}{orders}echo \"up\"\n");
     match verdict(&v1, &v2) {
-        SwapDiff::Swap(plan) => {
-            let names: Vec<&str> = plan
-                .fragment
-                .stmts
-                .iter()
-                .filter_map(|s| match s {
-                    noeta_ast::Stmt::Struct(d) => Some(d.name.as_str()),
-                    _ => None,
-                })
-                .collect();
-            assert_eq!(
-                names,
-                vec!["Orders"],
-                "an append must not drag the unchanged declarations into the fragment"
-            );
-        }
+        SwapDiff::Swap(plan) => assert_eq!(
+            plan.fragment_declarations(),
+            vec!["Orders"],
+            "an append must not drag the unchanged declarations into the fragment"
+        ),
         other => panic!("expected a swappable diff, got {other:?}"),
     }
     oracle_over_a_reorder(
@@ -855,6 +876,33 @@ fn a_formatting_only_edit_is_unchanged() {
     let v1 = "fn a(): int { return 1; }\nfn b(): int { return 2; }\n";
     let v2 = "fn a(): int { return 1; }\n\n\nfn b(): int { return 2; }\n";
     assert!(matches!(verdict(v1, v2), SwapDiff::Unchanged));
+}
+
+/// The differ half of the reorder rule, as a verdict: a moved declaration region is a **change**,
+/// and the fragment holds the whole region in the NEW order. The fragment's sequence is the only
+/// carrier of that order — a fragment holding a subset could not express where the declarations it
+/// left behind belong — while the report stays empty, because a reorder changes no declaration's
+/// behaviour and a consumer counting changed *definitions* must not be told otherwise.
+#[test]
+fn a_declaration_reorder_puts_the_whole_region_in_the_fragment() {
+    let decl = |n: &str, v: i32| format!("fn {n}(): int {{ return {v}; }}\n");
+    let v1 = format!("{}{}{}", decl("a", 1), decl("b", 2), decl("c", 3));
+    let v2 = format!("{}{}{}", decl("c", 3), decl("a", 1), decl("b", 2));
+    match verdict(&v1, &v2) {
+        SwapDiff::Swap(plan) => {
+            assert_eq!(
+                plan.fragment_declarations(),
+                vec!["c", "a", "b"],
+                "the fragment must carry the whole region, in the new version's order"
+            );
+            assert!(
+                plan.changed.is_empty() && plan.added.is_empty() && plan.removed.is_empty(),
+                "a reorder changes no definition: {plan:?}"
+            );
+            assert!(!plan.rerun_top_level, "no top-level statement moved");
+        }
+        other => panic!("expected a swappable diff, got {other:?}"),
+    }
 }
 
 #[test]
