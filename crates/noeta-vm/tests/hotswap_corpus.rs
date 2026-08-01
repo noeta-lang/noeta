@@ -52,7 +52,13 @@
 //!   in every corpus program that has any, every one of those sites is a top-level statement — so
 //!   rotating the hoisted declarations renumbered **0 of 17** of them. And the reorder is not
 //!   inert: the reflection manifest is source-ordered, so eleven `reflection/attributes_*`
-//!   programs diverge under a rotation (see the note above [`KNOWN_DIVERGENCES`]).
+//!   programs diverge under a rotation (see the note above [`KNOWN_DIVERGENCES`]). Those eleven are
+//!   **fixed** — the differ compares the declaration sequence and hands the region to the fragment
+//!   when it moved, and `ReflectionInfo::accumulate` fills the base's slots in the fragment's order
+//!   — but nothing here generates a reorder, so what holds that line is five hand-written cases in
+//!   `hotswap.rs`, not this corpus. A sixth generator that rotates the region is the way to change
+//!   that, and it is worth writing precisely because the rotation prototype found something in one
+//!   run.
 //!
 //! **Coverage is reported, never capped silently.** Every program lands in exactly one bucket per
 //! generator — exercised, or skipped with a machine-assigned reason — and the tally prints, against
@@ -1207,6 +1213,13 @@ fn indent(text: &str) -> String {
 /// E0016 abort in `prelude_structs_constructible`, which was the same defect escalating), and the
 /// attribute manifest reordering when a re-registered declaration was appended instead of
 /// superseded in place (`reflection/attributes_on_functions`, `attributes_on_params`).
+///
+/// A third family is fixed in the same function and was found by neither: the declaration-rotation
+/// prototype that row 14 of `plans/parallel-path-audit.md` built and abandoned reported eleven
+/// `reflection/*` programs whose rows came back permuted after a **reordered** declaration region,
+/// because a name-keyed differ reported no change at all and the merge pinned every group to the
+/// slot it already held. Both halves changed; `hotswap.rs` pins it, since no generator here moves a
+/// declaration.
 const KNOWN_DIVERGENCES: &[(&str, Generator)] = &[];
 
 /// The minimum number of [`Generator::PermuteTypeArgs`] cases that must run through a
