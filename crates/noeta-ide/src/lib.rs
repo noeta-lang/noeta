@@ -64,6 +64,13 @@ use crate::workspace::{
 };
 
 pub use offsets::{Encoding, LineIndex, Position, Range};
+
+/// The filesystem path a `file:` document URI names, or `None` for any other scheme. The one
+/// decoder every adapter shares, so a wire URI becomes a path in one place.
+pub fn uri_path(uri: &str) -> Option<PathBuf> {
+    uri_to_path(uri)
+}
+
 pub use project::{
     ProjectCheck, ProjectCheckOptions, ProjectDiagnostic, check_sources, project_check,
 };
@@ -273,6 +280,31 @@ impl DocumentStore {
     /// The URIs of the open documents.
     pub fn open_uris(&self) -> Vec<String> {
         self.buffers.keys().cloned().collect()
+    }
+
+    /// **The whole project's diagnostics** — the editor's answer to `noeta check`, over
+    /// [`project_check`](crate::project_check) with the unsaved buffers overlaid on the disk scan.
+    ///
+    /// Every `.noe` file under `root` is checked as its own entry, in every shape it can be built
+    /// in — the same walk, the same tier sweep and the same dedup the CLI runs, because it is the
+    /// same function. What the editor adds is the overlay: an unsaved edit is part of the project
+    /// the user is looking at, and a project answer that described the files on disk would
+    /// contradict the squiggles in the buffer.
+    ///
+    /// It is deliberately **not** the per-keystroke path. [`Self::diagnostics`] answers for one open
+    /// document off the incremental graph and is what runs on every edit; this is a batch scan on
+    /// its own databases, for the pull the client makes when it wants the project view
+    /// (`workspace/diagnostic`). The two split on *which entries*, never on which shapes: the narrow
+    /// one calls [`noeta_db::entry_diagnostics`] and so does this one.
+    pub fn project_check(&self, root: &Path) -> crate::ProjectCheck {
+        let overlay = self
+            .buffers
+            .iter()
+            .filter_map(|(uri, text)| uri_to_path(uri).map(|path| (path, text.clone())));
+        crate::project_check(
+            root,
+            &crate::ProjectCheckOptions::new().with_overlay(overlay),
+        )
     }
 
     /// The store's current mutation revision — see the field docs. Capture it together with a
@@ -2576,11 +2608,15 @@ impl DocumentStore {
     /// this file, so the explorer and `noeta test` can never disagree about what a test is.
     ///
     /// Which tiers to activate comes from the entry's **own declared blocks**
-    /// ([`entry_code_tiers`](noeta_db::entry_code_tiers)), not from the literal name `test`: a
-    /// package is free to bind the test runner to a name of its own (`[tiers] spec = "std:test"`),
-    /// and a hardcoded `"test"` activated nothing at all in such a package — an empty test explorer
-    /// for a file full of tests. Activation still runs one tier per pass, as everywhere else; a
-    /// block whose tier is *not* the test runner's simply contributes no `tests`.
+    /// ([`entry_code_tiers`](noeta_db::entry_code_tiers)), not from the literal name `test`.
+    /// Activation resolves a tier by identity rather than spelling, so a plain rename
+    /// (`[tiers] spec = "std:test"`) survived a hardcoded `"test"` — that name still resolved to
+    /// `(std, test)` and brought `@spec` alive with it. What did not survive is a package that
+    /// moves the name `test` itself onto some other tier: the hardcoded name then activated a
+    /// different shape and the explorer was empty for a file full of tests. Asking the entry what
+    /// it declares has no such assumption to be wrong about. Activation still runs one tier per
+    /// pass, as everywhere else; a block whose tier is not the test runner's contributes no
+    /// `tests`.
     pub fn tests(&self, uri: &str, encoding: Encoding) -> Option<Vec<TestItem>> {
         let (cache, entry, source) = self.workspace_of(uri)?;
         let db = &self.db;

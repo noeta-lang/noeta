@@ -613,14 +613,28 @@ pub(crate) fn disk_noe_uris(dir: &Path) -> Vec<String> {
             .map(|m| path_to_uri(Path::new(&m.name)))
             .collect();
     }
+    // An **empty** directory path is the current one, reached from a bare relative entry
+    // (`noeta check main.noe` run from the project). `read_dir("")` errors, so the scan came up
+    // empty and the entry linked against nothing — the loader's own `read_dir_modules` special-cases
+    // this for the same reason. The scan reads `.`, and the `./` it prepends is stripped back off so
+    // the member URIs stay byte-equal to how the invocation spells the entry.
+    let bare = dir.as_os_str().is_empty();
+    let scan = if bare { Path::new(".") } else { dir };
     let mut uris = Vec::new();
-    if let Ok(read_dir) = std::fs::read_dir(dir) {
+    if let Ok(read_dir) = std::fs::read_dir(scan) {
         uris.extend(
             read_dir
                 .flatten()
                 .map(|e| e.path())
                 .filter(|p| p.is_file() && p.extension().is_some_and(|ext| ext == "noe"))
-                .map(|p| path_to_uri(&p)),
+                .map(|p| {
+                    let named = if bare {
+                        p.strip_prefix(".").unwrap_or(&p).to_path_buf()
+                    } else {
+                        p.clone()
+                    };
+                    path_to_uri(&named)
+                }),
         );
     }
     uris

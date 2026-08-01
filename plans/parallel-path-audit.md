@@ -135,6 +135,18 @@ They agree today. `diff -r` of the two fixture directories is byte-identical acr
 
 **Chokepoint.** One `project_check(root, options) -> Diagnostics` in `noeta-ide` (which already owns the `DocumentStore` all three surfaces share), driving the file walk, the tier activation and the per-tier sweep once. `noeta check` becomes its printer; the LSP calls it for workspace diagnostics; MCP calls it for `check`. **Size: ~200 lines moved out of `cmd/check.rs`, three thin callers.** Row 3's constructor lands first — the three surfaces cannot share a function while they disagree about what `CheckOptions` to build.
 
+**Closed (2026-08-01).** The table's "per-tier sweep" column closed first, in `3e0bfa646` — the editor and the agent read the tier-aware query family rather than re-deriving the CLI's sweep. What stayed open is the column beside it: **which entries**, and the three hand-written copies of the walk that decided it.
+
+`noeta_ide::project_check` is the walk, and `noeta_db::entry_diagnostics` is the whole of "which shapes of one entry". `noeta check` is its printer; the MCP `check` tool is a thin adapter that finally accepts a **directory** (it took a single `.noe` file and checked whatever entry that file happened to be); the LSP gained `workspace/diagnostic` and `textDocument/diagnostic`, so a fault in a file nobody has opened is reported in the editor at all. The surfaces now differ in which entries they sweep and in nothing else — one fixture with one test per surface (`crates/noeta-cli/tests/three_surfaces.rs`) fails naming whichever one goes quiet, verified by mutation both ways: skipping the sweep in `DocumentStore::diagnostics` fails only the open-document test; skipping it in `project_check` fails the other three.
+
+The engine is salsa. The decisive argument is not speed but singularity — the editor's per-document path *must* be salsa, so a filesystem-based walk would have left the shapes question answered twice. Speed is not an obstacle: min-of-7, release, `tests/conformance` (1260 files) 286 → 286 ms, one flat 111-entry pool 40 → 48 ms, and `check <one file>` inside that pool 18 → **4 ms** (the query path parses what the entry reaches, not the whole directory). Output is byte-identical over `tests/conformance`, `tests/bench`, `docs`, `examples`, the vscode test workspace, the `init` template and the whole `para` repo.
+
+Putting the surfaces behind one function surfaced three more disagreements of exactly this shape, each of them *quietly clean* in the editor (pinned in `crates/noeta-ide/tests/agreement.rs`):
+
+- the salsa link passed `native_roots: None` unconditionally, so it stayed **lenient** where `noeta check` was strict — a `use` that named nothing at all was silently fine in the editor. Strictness is now a property of the workspace, set by whoever resolved the graph;
+- `tokens_in`/`ast_in` never called the loader's `retarget`, so every lex/parse diagnostic built with the default entry id landed on `SourceId::FIRST` — a lex error in any member but the directory's first was attributed to the wrong file, and the editor's per-document filter dropped it entirely;
+- `DocumentStore::tests` hardcoded `&["test"]`, which survives a plain tier rename (activation matches by identity) but not a package that moves the name `test` onto another tier — an empty test explorer for a file full of tests.
+
 ---
 
 ## 6. `Sites` has thirty-five fields, no census, and one hand-maintained claim about all of them

@@ -1278,7 +1278,7 @@ pub(crate) fn resolve_workspace(
     }
 }
 
-/// Answer "is this clean?" for whatever the agent handed over — an inline buffer, a file, or a
+/// **The `check` tool's engine.** Answer "is this clean?" for whatever the agent handed over — an inline buffer, a file, or a
 /// **project directory** — and resolve the diagnostics into the canonical `JsonDiagnostic` form
 /// (the same one `noeta check --format json` emits).
 ///
@@ -1292,7 +1292,7 @@ pub(crate) fn resolve_workspace(
 /// Every shape of every entry, not just the one that ships: a dev-tier block is stripped before the
 /// checker sees it, so a `@test` body's type error is reported here exactly as the CLI reports it,
 /// with `tiers_checked` naming what was looked inside.
-fn run_check(args: &CheckArgs) -> Result<CheckOutput, ErrorData> {
+pub fn run_check(args: &CheckArgs) -> Result<CheckOutput, ErrorData> {
     let options = noeta_ide::ProjectCheckOptions::new();
     let checked = match (&args.source, &args.file) {
         // Inline source is one in-memory member of a one-member pool — a different **entry set**,

@@ -14,27 +14,44 @@
 //! |---|---|
 //! | `noeta check [PATH]` | every `.noe` under `PATH` ([`project_check`]) |
 //! | MCP `check` | the same, for a path; the one inline buffer for `source` |
-//! | LSP `workspace/diagnostic` | the same, over the editor's live database and unsaved buffers |
+//! | LSP `workspace/diagnostic` | the same, with the editor's unsaved buffers overlaid |
 //! | LSP `textDocument/diagnostic` + push | the one open document ([`noeta_db::entry_diagnostics`]) |
 //!
 //! The narrow editor path is a different **entry set**, never a different **shape set**: it calls
 //! the same [`noeta_db::entry_diagnostics`] this module calls, so a document the editor happens to
 //! have open is reported exactly as `noeta check` reports it. Splitting on shapes is the drift this
-//! module exists to end; splitting on entries is the whole reason it is affordable.
+//! module exists to end; splitting on entries is the whole reason it is affordable — whole-project
+//! checking on every keystroke is not, so the project answer is a *pull* and the per-edit answer
+//! narrows to the edited document.
 //!
 //! # The engine
 //!
 //! The sweep drives **salsa**, not the loader's directory reader, and that was measured rather than
-//! assumed. The two engines buy the same thing by different means: `noeta_loader::parse_dir` reads,
-//! lexes and parses a pool once and links every entry against the shared pool, and salsa memoizes
-//! `ast_in` per source so the pool's parse likewise happens once however many entries link against
-//! it. What salsa buys on top is that the editor's incremental path and the batch path are then the
-//! same queries — the LSP cannot drive `parse_dir` (it must overlay unsaved buffers and reuse work
-//! across keystrokes), so a filesystem-based chokepoint would have left the editor with a second
-//! implementation, which is the thing being fixed.
+//! assumed.
+//!
+//! The decisive argument is not speed but singularity. The editor's per-document path *must* be
+//! salsa — it overlays unsaved buffers and reuses work across keystrokes — so a filesystem-based
+//! project walk would have left "which shapes of one entry" answered twice, by `parse_dir` for the
+//! batch and by the query family for the editor, which is precisely the drift being fixed.
+//!
+//! Speed then had to not be an obstacle, and is not. The two engines buy the same sharing by
+//! different means: `noeta_loader::parse_dir` reads, lexes and parses a pool once and links every
+//! entry against the shared pool; salsa memoizes `ast_in` per source, so a pool's parse likewise
+//! happens once however many entries link against it — and lazily, which the batch reader cannot
+//! be. Measured min-of-7, release, on this repo:
+//!
+//! | invocation | `parse_dir` | salsa |
+//! |---|---|---|
+//! | `check tests/conformance` (1260 files, 45 packages) | 286 ms | 286 ms |
+//! | `check tests/conformance/std` (111 entries, one pool) | 40 ms | 48 ms |
+//! | `check tests/conformance/std/math_basics.noe` | 18 ms | **4 ms** |
+//!
+//! The last row is the lazy parse: a single entry no longer pays for its whole directory. The
+//! middle row is salsa's per-query bookkeeping over 111 entries, the price of the first.
 //!
 //! One database **per pool**, dropped when the pool is done: the per-entry link memo holds a whole
-//! merged program, so a thousand-file project must not accumulate a thousand of them at once.
+//! merged program, so a thousand-file project must not accumulate a thousand of them at once. Peak
+//! RSS over that 1260-file tree is 30 MB against the batch reader's 24 MB.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
