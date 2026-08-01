@@ -112,8 +112,10 @@ pub struct CheckArgs {
     /// Inline Noeta source to check. Provide this or `file`.
     #[serde(default)]
     pub source: Option<String>,
-    /// Path to a `.noe` file to check. Sibling `.noe` files in its directory are resolved as
-    /// modules so `use` imports type-check. Provide this or `source`.
+    /// Path to a `.noe` file **or a project directory** to check. A directory is walked recursively
+    /// and every `.noe` file under it is checked as its own entry, exactly as `noeta check <dir>`
+    /// does; for a single file, the rest of its module pool is resolved so `use` imports type-check.
+    /// Provide this or `source`.
     #[serde(default)]
     pub file: Option<String>,
 }
@@ -489,11 +491,12 @@ impl NoetaMcp {
     /// Type-check Noeta code and return its diagnostics — the agent's compile feedback loop.
     #[tool(
         description = "Type-check Noeta (.noe) code and return its diagnostics (stable E0xxx code, \
-severity, source span, message, help). Provide `source` (inline) or `file` (a path; sibling .noe \
-modules are resolved so imports check). Checks every shape of the source the way `noeta check` \
-does: once as it ships, then once per dev-tier block it declares (`@test`, `@bench`, …), so a type \
-error inside a `@test` body is reported here too — `tiers_checked` names which were covered. Run \
-this before claiming Noeta code compiles."
+severity, source span, message, help). Provide `source` (inline) or `file` — a `.noe` file, or a \
+project DIRECTORY, which is walked recursively and checked file by file exactly as `noeta check \
+<dir>` does. Checks every shape of the source the way `noeta check` does: once as it ships, then \
+once per dev-tier block it declares (`@test`, `@bench`, …), so a type error inside a `@test` body \
+is reported here too — `tiers_checked` names which were covered. Run this before claiming Noeta \
+code compiles."
     )]
     async fn check(
         &self,
