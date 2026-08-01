@@ -606,13 +606,17 @@ where
     G: Fn(&T) -> String,
     D: Fn(&[T], &T) -> bool,
 {
-    // The incoming records, in fragment order; each is taken as it is placed.
+    // The incoming records, in fragment order; each is taken as it is placed. Every key set below
+    // is a `Vec` for its order plus a `HashSet` for its membership: the ordinary whole-program
+    // compile is this merge onto an EMPTY base with thousands of distinct keys, and a linear
+    // `contains` per record would make a cold `noeta run` quadratic in its own declarations.
     let mut incoming: Vec<Option<T>> = fragment.into_iter().map(Some).collect();
     // The fragment's keys, in the fragment's own order — the order it wants the table to hold.
     let mut fragment_keys: Vec<String> = Vec::new();
+    let mut fragment_key_set: std::collections::HashSet<String> = std::collections::HashSet::new();
     for record in incoming.iter().flatten() {
         let k = key(record);
-        if !fragment_keys.contains(&k) {
+        if fragment_key_set.insert(k.clone()) {
             fragment_keys.push(k);
         }
     }
@@ -620,24 +624,25 @@ where
     // order. A key whose records are purged with nothing to replace them (a callable re-declared
     // without the attribute it used to carry) opens no slot — its rows simply go, and the keys that
     // do arrive must not shift into the hole it leaves.
-    let mut slots: Vec<String> = Vec::new();
+    let mut slot_count = 0usize;
+    let mut slot_set: std::collections::HashSet<String> = std::collections::HashSet::new();
     for record in base.iter() {
         if !purged(record) {
             continue;
         }
         let k = key(record);
-        if fragment_keys.contains(&k) && !slots.contains(&k) {
-            slots.push(k);
+        if fragment_key_set.contains(&k) && slot_set.insert(k) {
+            slot_count += 1;
         }
     }
     // What each slot emits, assigned by walking the fragment: the i-th slot (in base order) takes
     // the i-th key the fragment re-supplies (in fragment order), preceded by any keys new to the
     // base that the fragment declared just before it.
-    let mut emitted: Vec<Vec<String>> = vec![Vec::new(); slots.len()];
+    let mut emitted: Vec<Vec<String>> = vec![Vec::new(); slot_count];
     let mut pending: Vec<String> = Vec::new();
     let mut next = 0usize;
     for k in &fragment_keys {
-        if slots.contains(k) {
+        if slot_set.contains(k) {
             emitted[next].append(&mut pending);
             emitted[next].push(k.clone());
             next += 1;
@@ -657,7 +662,7 @@ where
         // have given to a *different* key's records. The remaining superseded records are dropped;
         // their replacements have already been placed.
         let k = key(&record);
-        if anchored.insert(k.clone()) && slots.contains(&k) {
+        if anchored.insert(k.clone()) && slot_set.contains(&k) {
             for group in &emitted[slot] {
                 for held in incoming.iter_mut() {
                     if held.as_ref().is_some_and(|r| key(r) == *group) {
