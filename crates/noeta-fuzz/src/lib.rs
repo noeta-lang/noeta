@@ -28,6 +28,7 @@ pub mod bundle_target;
 pub mod census;
 pub mod fmt_target;
 pub mod generate;
+pub mod leak_target;
 pub mod run_target;
 
 use noeta_span::{Source, SourceId};

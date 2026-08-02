@@ -2730,11 +2730,13 @@ dependencies = [
  "noeta-compiler",
  "noeta-conformance",
  "noeta-diagnostics",
+ "noeta-eval",
  "noeta-fmt",
  "noeta-lexer",
  "noeta-parser",
  "noeta-span",
  "noeta-stdlib",
+ "noeta-value",
  "noeta-vm",
  "proptest",
 ]
