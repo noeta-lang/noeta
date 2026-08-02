@@ -2836,6 +2836,35 @@ fn a_top_level_statement_does_not_see_a_binding_declared_later() {
     assert_eq!(codes("f()\nf = fn(): int => 1\n"), vec!["E0005"]);
 }
 
+/// A declared type is not callable, and saying so is the checker's job.
+///
+/// `S(n: 5)` used to type-check — a type name as a callee was deferred to the runtime — and the
+/// first report was the runtime's `cannot find `S` in this scope`, which blames the type rather
+/// than the call form and so reads as a missing import. The language builds a record with a literal
+/// and reaches an associated function through the type; neither is a call on the bare name. Found
+/// by the `noeta-fuzz` execution oracle.
+#[test]
+fn a_declared_type_is_not_callable() {
+    assert_eq!(codes("struct S { n: int = 5 }\necho S().n\n"), vec!["E0007"]);
+    assert_eq!(
+        codes("struct S { n: int }\necho S(n: 5).n\n"),
+        vec!["E0007"]
+    );
+    assert_eq!(codes("class C { n: int = 1 }\necho C().n\n"), vec!["E0007"]);
+    // The forms that ARE construction stay clean.
+    assert!(codes("struct S { n: int }\necho S { n: 5 }.n\n").is_empty());
+    assert!(
+        codes(
+            "struct S {\n  \
+               pub n: int\n  \
+               fn make(): S { return S { n: 1 } }\n\
+             }\n\
+             echo S.make().n\n"
+        )
+        .is_empty()
+    );
+}
+
 /// The other side of the same boundary: a **closure body** is evaluated where it is called, not
 /// where it is written, so it does see a global declared later — and this program really runs.
 /// Removing the hoist outright rather than scoping it to deferred positions would reject it.
