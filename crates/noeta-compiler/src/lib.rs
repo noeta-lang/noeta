@@ -977,11 +977,13 @@ impl SessionCompiler {
             &native_roles,
             &native_traits,
         ));
-        // Embed the installed extensions' attribute shapes (tier-extensions port): `attributes_of`
-        // materializes `#[Skip]`/`#[Bench]`/… from the artifact, and their declarations live in the
-        // registry now, not the AST. Re-run per install because `accumulate` purges a redeclared
-        // name's records; idempotent for names already present.
-        noeta_check::extend_reflection(&mut self.reflection);
+        // The installed extensions' own declarations are NOT embedded here. An artifact used to be
+        // seeded with a materialized copy of the whole registry (`extend_reflection`), which cost
+        // 1.83M instructions per `noeta run` — a third of a one-line program's whole process — for
+        // data that is a pure function of the `&'static` registry and identical in every artifact.
+        // `ReflectionInfo`'s lookups resolve a native declaration lazily instead
+        // (`noeta_ast::native_reflect`), so the answers are unchanged and only the ones a program
+        // actually asks for are ever built.
 
         // `destruct_reachable` — Derived. PRECISE from the checker's fixpoint when there is a
         // bundle; otherwise the conservative over-approximation to *all* declared type names, so
@@ -5995,21 +5997,19 @@ mod tests {
         let lexed = lex(&source);
         let parsed = parse(&source, &lexed.tokens);
         let from_module = compile(&parsed.program).expect("compiles").reflection;
-        // `compile` embeds the installed extensions' attribute shapes (`#[Skip]`/`#[Bench]`/…,
-        // now registry-declared) via `extend_reflection`, so the parity comparison applies the
-        // same embedding to the raw builder output.
         // `compile` builds reflection against the process-global registry (`CompileOptions::default`),
-        // so the parity comparison must feed the raw builder the same native-role table.
+        // so the parity comparison must feed the raw builder the same native-role table. The
+        // extensions' own declarations are in neither artifact: both resolve them lazily through the
+        // shared `ReflectionInfo` lookups (`noeta_ast::native_reflect`), which is exactly why the two
+        // can no longer disagree about them.
         let registry = noeta_ext_abi::registry::single_registry_process();
         let native_roles = registry.native_roles();
         let native_traits = noeta_ir::native_trait_impls(registry);
-        let mut from_builder =
+        let from_builder =
             noeta_ast::reflect::build(&parsed.program, &native_roles, &native_traits);
-        noeta_check::extend_reflection(&mut from_builder);
         assert_eq!(from_module, from_builder);
         // Deterministic: the same AST always yields the same artifact.
-        let mut again = noeta_ast::reflect::build(&parsed.program, &native_roles, &native_traits);
-        noeta_check::extend_reflection(&mut again);
+        let again = noeta_ast::reflect::build(&parsed.program, &native_roles, &native_traits);
         assert_eq!(from_builder, again);
     }
 

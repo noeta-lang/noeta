@@ -276,13 +276,13 @@ impl Session {
             &native_roles,
             &native_traits,
         ));
-        // Re-seed the types the **language and its extensions** declare (prelude enums, extension
-        // attribute shapes, native enums): `build` walks this entry's AST only, and `accumulate`
-        // purges a redeclared name's records — so without this the whole-program path and the REPL
-        // told different stories about `variants_of("Ordering")` (3 there, 0 here), and so did the
-        // two REPLs, since the VM's `SessionCompiler` has always re-embedded after accumulating.
-        // Idempotent for names already present, so a user's own `enum Ordering` keeps shadowing.
-        noeta_check::extend_reflection(&mut self.interp.reflection);
+        // The types the **language and its extensions** declare (prelude enums, extension attribute
+        // shapes, native enums) need no re-seeding here: `build` walks this entry's AST only and
+        // `accumulate` purges a redeclared name's records, which is exactly why they used to have to
+        // be re-embedded after every entry — the whole-program path and the REPL otherwise told
+        // different stories about `variants_of("Ordering")` (3 there, 0 here). Resolved lazily
+        // through the shared `ReflectionInfo` lookups, they cannot be purged and cannot diverge, and
+        // a user's own `enum Ordering` still shadows (the program's tables answer first).
         let flow = self.interp.run_ir_batch(&ir);
         // **Remove** (not clone) the sentinel so an evaluated trailing value never lingers in scope.
         // Keeping it bound would hold a reference to the value across entries, which would both leak

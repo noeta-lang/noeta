@@ -2296,12 +2296,7 @@ impl Checker {
             return true;
         }
         if let Type::Named(n, args) = ty {
-            if !self
-                .symbols
-                .trait_impls
-                .get(n)
-                .is_some_and(|s| s.contains(&t))
-            {
+            if !self.has_builtin_trait(n, t) {
                 return false;
             }
             // A **generic** derive is conditional (derive-soundness S4): `Box<T>` deriving

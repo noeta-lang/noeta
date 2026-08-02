@@ -2420,6 +2420,7 @@ dependencies = [
 name = "noeta-ast"
 version = "0.4.0"
 dependencies = [
+ "noeta-ext-abi",
  "noeta-span",
  "serde",
  "serde_json",

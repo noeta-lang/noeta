@@ -259,9 +259,9 @@ impl Interpreter {
         // through the same registry projection seam as the roles — the VM's compile does the same.
         let native_traits = noeta_ir::native_trait_impls(self.reg());
         self.reflection = noeta_ast::reflect::build(ast, &native_roles, &native_traits);
-        // Extension attribute shapes ride the artifact (tier-extensions port) — same embed the
-        // bytecode path does, so the differential stays green by construction.
-        noeta_check::extend_reflection(&mut self.reflection);
+        // The extensions' own declarations are NOT embedded: both backends resolve a native
+        // declaration through the shared lazy `ReflectionInfo` lookups (`noeta_ast::native_reflect`),
+        // so the differential stays green by construction and neither pays for the whole registry.
         self.type_of_sites = type_of_sites;
         // The `@derive(Deserialize<Json>)` decode registry (L2.2 DI) `json.decode_typed` resolves
         // against — lifted from the checker's sites, identical to the VM's map by construction.

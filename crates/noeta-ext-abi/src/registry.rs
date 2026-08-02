@@ -1235,7 +1235,7 @@ pub struct ExtEnum {
     /// the enum satisfy that trait: `seed_ext_traits` records it into
     /// `user_trait_impls[qualified][trait]`, so a native enum value coerces to `dyn Trait` and its
     /// trait-method call dispatches to the enum's native method (via `call_native_enum_method`). A
-    /// built-in name (e.g. `"Comparable"`) is picked up by `seed_native_builtin_traits`
+    /// built-in name (e.g. `"Comparable"`) is answered on the lookup by `Checker::has_builtin_trait`
     /// (`record_trait_impls` filters to built-in names). Default empty.
     pub traits: &'static [&'static str],
     /// The **built-in directives** this enum carries (native type-declaration unification, Slice D) —
@@ -3371,7 +3371,7 @@ impl Registry {
 
     /// Every registered native trait (native-extensibility S3), across all units — what
     /// `Checker::seed_ext_traits` walks to pre-populate the user-trait tables at prelude time, and
-    /// what `seed_native_builtin_traits` matches an [`ExtType::traits`] / [`ExtFielded::traits`] /
+    /// what `Checker::has_builtin_trait` matches an [`ExtType::traits`] / [`ExtFielded::traits`] /
     /// [`ExtEnum::traits`] name against.
     pub fn traits(&self) -> impl Iterator<Item = &'static ExtTrait> + '_ {
         self.units.iter().flat_map(|e| e.traits())

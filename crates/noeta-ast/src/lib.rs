@@ -15,6 +15,7 @@ pub mod builtin_ty;
 pub mod derive;
 pub mod desugar;
 mod name;
+pub mod native_reflect;
 mod pretty;
 pub mod reflect;
 pub mod shape;

@@ -168,10 +168,17 @@ impl ReflectionInfo {
 
     /// The parameter list declared for `target`, or empty if the target names no known callable — the
     /// projection `params_of(target)` materializes for dependency injection.
+    ///
+    /// The program's own declarations answer first; a target none of them names falls through to the
+    /// **native** lookup ([`native_reflect::native_param_record`](crate::native_reflect::native_param_record)),
+    /// so a shipped stdlib callable is reported as the callable it is rather than as a typo. The
+    /// program-first order is not incidental: it is the prelude-shadowing rule, and it is what the
+    /// eager seeding's "only if absent" guard used to express.
     pub fn params_for(&self, target: &str) -> &[ParamSig] {
         self.params
             .iter()
             .find(|p| p.target == target)
+            .or_else(|| crate::native_reflect::native_param_record(target))
             .map(|p| p.params.as_slice())
             .unwrap_or(&[])
     }
@@ -187,10 +194,15 @@ impl ReflectionInfo {
     /// typo in a target string indistinguishable from a `void` method, which is exactly the
     /// vanishing-route failure a reflection-driven framework must be able to detect. So the
     /// missing case gets its own `none`, and the caller has to look at it.
+    ///
+    /// Falls through to the native lookup on a miss, on the same terms as
+    /// [`params_for`](Self::params_for) — one record answers both queries, so a callable present in
+    /// one index is present in the other.
     pub fn returns_for(&self, target: &str) -> Option<&TypeRepr> {
         self.params
             .iter()
             .find(|p| p.target == target)
+            .or_else(|| crate::native_reflect::native_param_record(target))
             .map(|p| &p.ret)
     }
 
@@ -230,8 +242,18 @@ impl ReflectionInfo {
     }
 
     /// The reflectable shape of a declared type by name.
+    ///
+    /// The program's own declarations answer first; a name none of them declares falls through to
+    /// the **prelude and native** lookup
+    /// ([`native_reflect::native_type_info`](crate::native_reflect::native_type_info)), so
+    /// `Ordering` and `std.http.Framing` are as knowable to reflection as they are to the rest of
+    /// the language. Program-first *is* the shadowing rule: a program that declares its own
+    /// `Ordering` reflects its own.
     pub fn type_named(&self, name: &str) -> Option<&TypeInfo> {
-        self.types.iter().find(|t| t.name == name)
+        self.types
+            .iter()
+            .find(|t| t.name == name)
+            .or_else(|| crate::native_reflect::native_type_info(name))
     }
 
     /// The **type-level field schema** of the declared struct/class `type_name` — one
@@ -3067,7 +3089,7 @@ pub fn prelude_type_infos() -> Vec<TypeInfo> {
             })
             .collect(),
     });
-    let structs = prelude_structs().into_iter().map(|decl| TypeInfo {
+    let structs = prelude_struct_table().iter().cloned().map(|decl| TypeInfo {
         name: decl.name.to_string(),
         kind: TypeKind::Struct,
         field_types: decl.field_types.iter().map(|t| t.repr()).collect(),
@@ -3221,6 +3243,20 @@ pub struct PreludeStruct {
 ///   itself as a first-class value the runner calls.
 /// * `TierText { target: string, text: string }` — its verbatim-body twin.
 pub fn prelude_structs() -> Vec<PreludeStruct> {
+    prelude_struct_table().to_vec()
+}
+
+/// The prelude-struct table itself, built once. The declarations are a fixed list with no input, so
+/// the table is a constant in everything but spelling — and a `Vec<PreludeStruct>` of it costs ~25
+/// `String` allocations to build. `Checker::register_prelude` asks for eight of them by name on the
+/// way to checking *any* program, so rebuilding the whole table per lookup was ~200 allocations
+/// before a one-line file was looked at.
+fn prelude_struct_table() -> &'static [PreludeStruct] {
+    static TABLE: std::sync::OnceLock<Vec<PreludeStruct>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(build_prelude_structs)
+}
+
+fn build_prelude_structs() -> Vec<PreludeStruct> {
     use PreludeStructFieldTy as F;
     let s = |name: &'static str, fields: &[(&str, PreludeStructFieldTy)]| PreludeStruct {
         name,
@@ -3264,7 +3300,10 @@ pub fn prelude_structs() -> Vec<PreludeStruct> {
 
 /// The prelude struct of this name, or `None` when the name is not one.
 pub fn prelude_struct(name: &str) -> Option<PreludeStruct> {
-    prelude_structs().into_iter().find(|s| s.name == name)
+    prelude_struct_table()
+        .iter()
+        .find(|s| s.name == name)
+        .cloned()
 }
 
 /// The fields of the prelude struct `name`, in slot order — the lookup every materialization site
