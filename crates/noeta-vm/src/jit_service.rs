@@ -28,16 +28,40 @@ use noeta_bytecode::Module;
 
 use crate::JitStats;
 
+/// One compile request. A prototype may need both shapes over its life — a back-edge asks for the
+/// hot loop's window, a hot call entry asks for the whole prototype — so the job says which, and
+/// each gets its own response.
+#[derive(Clone, Copy)]
+pub(crate) enum Job {
+    /// The whole-prototype body (+ its fast-convention twin): the frame-entry shape.
+    Main(usize),
+    /// The **region-scoped OSR body** (P-OSRW) for the loop that got hot at `header`. Falls back
+    /// to the whole-prototype body when the window is the whole prototype, so a back-edge-born
+    /// promotion always ends up with *something* native.
+    Osr { proto: usize, header: usize },
+}
+
+impl Job {
+    fn proto(self) -> usize {
+        match self {
+            Job::Main(p) | Job::Osr { proto: p, .. } => p,
+        }
+    }
+}
+
 /// One compile response: the prototype's finalized entry point (`None` = the compile failed —
-/// the mutator declines the prototype and keeps interpreting) plus its fast-convention body.
+/// the mutator declines the prototype and keeps interpreting) plus its fast-convention body, or —
+/// for a back-edge-born request the engine could scope — the region body instead.
 pub(crate) struct Ready {
     pub proto: usize,
     pub entry: Option<noeta_jit::CompiledFn>,
     pub fast: Option<usize>,
+    /// The region-scoped body, when the engine produced one. Mutually exclusive with `entry`.
+    pub osr_body: Option<noeta_jit::OsrBody>,
 }
 
 pub(crate) struct JitService {
-    tx: Option<mpsc::Sender<usize>>,
+    tx: Option<mpsc::Sender<Job>>,
     ready: Arc<Mutex<Vec<Ready>>>,
     stats: Arc<Mutex<Option<JitStats>>>,
     /// Abandon flag: set by a discarding shutdown so the thread drains the remaining queue
@@ -72,7 +96,7 @@ impl JitService {
         let ready = Arc::new(Mutex::new(Vec::new()));
         let stats = Arc::new(Mutex::new(None));
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let (tx, rx) = mpsc::channel::<usize>();
+        let (tx, rx) = mpsc::channel::<Job>();
         let ready_tx = Arc::clone(&ready);
         let stats_tx = Arc::clone(&stats);
         let stop_rx = Arc::clone(&stop);
@@ -86,23 +110,37 @@ impl JitService {
                 let mut jit =
                     noeta_jit::Jit::new(&helper_ptrs, layout, template_addr as *const u8, cancel)
                         .ok();
-                while let Ok(proto) = rx.recv() {
+                while let Ok(job) = rx.recv() {
+                    let proto = job.proto();
                     let abandoned = stop_rx.load(std::sync::atomic::Ordering::Acquire);
+                    let mut osr_body = None;
                     let (entry, fast) = match jit.as_mut() {
                         // A discarding shutdown abandoned the queue: drain without compiling
                         // (each request still gets its response, keeping the protocol total).
                         _ if abandoned => (None, None),
-                        Some(engine) => match engine.compile(&module, proto) {
-                            Ok(f) => (Some(f), engine.get_fast(proto)),
-                            Err(_) => (None, None),
-                        },
                         // No engine (ISA unavailable): every request still gets its response.
                         None => (None, None),
+                        Some(engine) => {
+                            // A back-edge-born request first asks for the loop's own window; the
+                            // engine declines when that window IS the whole prototype, and then
+                            // the whole-prototype body is the region body.
+                            if let Job::Osr { header, .. } = job {
+                                osr_body = engine.compile_osr(&module, proto, header);
+                            }
+                            match osr_body {
+                                Some(_) => (None, None),
+                                None => match engine.compile(&module, proto) {
+                                    Ok(f) => (Some(f), engine.get_fast(proto)),
+                                    Err(_) => (None, None),
+                                },
+                            }
+                        }
                     };
                     ready_tx.lock().expect("jit mailbox poisoned").push(Ready {
                         proto,
                         entry,
                         fast,
+                        osr_body,
                     });
                 }
                 // Channel closed (shutdown): snapshot the compile accounting, then drop the
@@ -129,10 +167,10 @@ impl JitService {
         })
     }
 
-    /// Queue prototype `proto` for compilation. `false` if the service thread is gone (the
-    /// mutator then declines the prototype rather than waiting forever).
-    pub fn request(&self, proto: usize) -> bool {
-        self.tx.as_ref().is_some_and(|tx| tx.send(proto).is_ok())
+    /// Queue one compile job. `false` if the service thread is gone (the mutator then declines the
+    /// prototype rather than waiting forever).
+    pub fn request(&self, job: Job) -> bool {
+        self.tx.as_ref().is_some_and(|tx| tx.send(job).is_ok())
     }
 
     /// Take every response that has landed. Cheap when empty (one uncontended lock); the caller
