@@ -91,6 +91,25 @@ pub struct GenOptions {
     /// Node budget. Generation forces terminal choices once it is spent, bounding output size
     /// independently of how many bytes the driver supplied.
     pub budget: u32,
+    /// Emit only programs that provably **terminate**, so the output is safe to execute.
+    ///
+    /// The formatter never runs what it formats, so the default generator is free to emit
+    /// `while c { … }` and a call to any name at all. An execution oracle is not: a generated
+    /// program that loops forever hangs the suite, and one that recurses forever overflows the
+    /// stack — which is a process abort, not a catchable failure, since neither backend caps call
+    /// depth. Neither is a finding; both are just the harness hurting itself.
+    ///
+    /// So termination is established by *construction* rather than by a watchdog:
+    ///
+    /// - **Loops are bounded.** `while` is not emitted at all, and a `for` iterates a literal
+    ///   range or a literal list, never a name. Loop nesting is already capped by `max_depth`.
+    /// - **The call graph is acyclic.** Each function gets a unique name, and a name enters the
+    ///   callable set only *after* its own body is generated — so a body can call only functions
+    ///   declared strictly before it. No function can reach itself.
+    ///
+    /// Both properties are structural, so they hold for every byte string rather than for the ones
+    /// a sweep happened to try.
+    pub terminating: bool,
 }
 
 impl Default for GenOptions {
@@ -101,6 +120,25 @@ impl Default for GenOptions {
             layout_noise: true,
             max_depth: 4,
             budget: 220,
+            terminating: false,
+        }
+    }
+}
+
+impl GenOptions {
+    /// The options an execution oracle wants: programs that provably terminate, and none of the
+    /// syntactic noise that only ever mattered to a formatter.
+    ///
+    /// Comments and layout variation are turned off deliberately. They are the *point* of fmt
+    /// fuzzing and pure cost here — they cannot change what a program does, so every byte spent on
+    /// them is a byte not spent on program shape.
+    pub fn terminating() -> Self {
+        GenOptions {
+            comment_density: 0,
+            trailing_comment_density: 0,
+            layout_noise: false,
+            terminating: true,
+            ..GenOptions::default()
         }
     }
 }
@@ -123,6 +161,8 @@ pub fn program_with(bytes: &[u8], opts: &GenOptions) -> String {
         in_fn: false,
         in_loop: false,
         inline_only: false,
+        callable: Vec::new(),
+        fn_serial: 0,
     };
     g.program();
     g.out
@@ -175,6 +215,14 @@ struct Gen<'a> {
     /// Inside a block collapsed onto one line, where a `//` comment would run to end of line and
     /// swallow the closing `}`. Every comment emitted under this flag uses the `/* … */` form.
     inline_only: bool,
+    /// Functions whose bodies are already emitted, and which a body may therefore call — the
+    /// acyclicity half of [`GenOptions::terminating`]. Only consulted in that mode; the default
+    /// generator calls any plausible name, since it never runs what it writes.
+    callable: Vec<String>,
+    /// Serial for minting unique function names in terminating mode. Reusing a name from
+    /// `FN_NAMES` would leave the call graph's shape depending on how a redeclaration resolves,
+    /// which is exactly the question acyclicity-by-construction exists to not have to ask.
+    fn_serial: u32,
 }
 
 impl Gen<'_> {
@@ -374,7 +422,14 @@ impl Gen<'_> {
     /// A named function. Deliberately carries no attribute: `@derive` is a type-level directive and
     /// the parser rejects it on a `fn`, so emitting one here would only manufacture parse failures.
     fn fn_decl(&mut self) {
-        let name = FN_NAMES[self.e.below(FN_NAMES.len())];
+        // Terminating mode mints a fresh name and publishes it only after the body below, so this
+        // function is not callable from inside itself.
+        let name = if self.opts.terminating {
+            self.fn_serial += 1;
+            format!("f{}", self.fn_serial)
+        } else {
+            FN_NAMES[self.e.below(FN_NAMES.len())].to_string()
+        };
         let _ = write!(self.out, "fn {name}(");
         let params = self.e.below(3);
         for i in 0..params {
@@ -398,6 +453,11 @@ impl Gen<'_> {
         self.block();
         self.in_fn = was_fn;
         self.in_loop = was_loop;
+        // Now — and only now — the name is callable: everything generated from here on may call it,
+        // nothing already generated can.
+        if self.opts.terminating {
+            self.callable.push(name);
+        }
     }
 
     /// A literal of the given declared type, so defaults and returns stay plausible.
@@ -503,6 +563,9 @@ impl Gen<'_> {
         match choice {
             0..=2 => self.simple_stmt(),
             3 => self.if_stmt(),
+            // A `while` has no bound the generator can guarantee, so terminating mode spends the
+            // arm on the loop form that does.
+            4 if self.opts.terminating => self.for_stmt(),
             4 => self.while_stmt(),
             5 => self.for_stmt(),
             6 if self.in_fn => self.return_stmt(),
@@ -635,7 +698,13 @@ impl Gen<'_> {
         if parens {
             self.push("(");
         }
-        match self.e.below(3) {
+        // A name could denote an arbitrarily long sequence; a literal cannot. Terminating mode
+        // therefore iterates only literals, which is what bounds the trip count.
+        match if self.opts.terminating {
+            self.e.below(2)
+        } else {
+            self.e.below(3)
+        } {
             0 => self.push("0..5"),
             1 => self.push("[1, 2, 3]"),
             _ => {
@@ -732,7 +801,16 @@ impl Gen<'_> {
     }
 
     fn call(&mut self) {
-        let name = FN_NAMES[self.e.below(FN_NAMES.len())];
+        let name = if self.opts.terminating {
+            // Nothing declared yet — there is no acyclic call to make, so emit a leaf instead.
+            if self.callable.is_empty() {
+                self.atom();
+                return;
+            }
+            self.callable[self.e.below(self.callable.len())].clone()
+        } else {
+            FN_NAMES[self.e.below(FN_NAMES.len())].to_string()
+        };
         let _ = write!(self.out, "{name}(");
         let args = self.e.below(3);
         for i in 0..args {

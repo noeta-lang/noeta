@@ -27,6 +27,7 @@
 pub mod bundle_target;
 pub mod fmt_target;
 pub mod generate;
+pub mod run_target;
 
 use noeta_span::{Source, SourceId};
 
