@@ -24,6 +24,7 @@
 //! cleanly, and `tests/generator.rs` asserts a floor on it. Any change to [`generate`] that breaks the
 //! grammar fails that test rather than quietly hollowing out the suite.
 
+pub mod bundle_target;
 pub mod fmt_target;
 pub mod generate;
 
