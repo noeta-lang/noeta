@@ -1245,6 +1245,22 @@ backdating_update!(WorkspaceProvenance);
 /// Public so a consumer that checks a *derived* program (e.g. `noeta-mcp` re-checking a
 /// tier-activated linked program) can apply the same per-source editions — the `SourceId`s survive
 /// activation, so the map stays valid.
+///
+/// # Why this one is *not* memoized, unlike [`workspace_packages`]
+///
+/// It has the same shape — a fold over every member building an N-entry map — and that shape made
+/// `workspace_packages` quadratic. What made *that* quadratic was not the shape but a **second
+/// caller**: `source_text_tiers` asked it which package one source belongs to, and that query runs
+/// once per source, so a directory of N files rebuilt an N-entry map N times.
+///
+/// This function has exactly one caller, [`workspace_provenance_memo`], which is itself
+/// `#[salsa::tracked]` — so it already runs once per workspace and a memo of its own would buy
+/// nothing while costing another salsa entry on every check.
+///
+/// **The invariant to preserve is the caller count, not the memo.** Adding a caller that runs per
+/// *source* (or per entry, or per shape) reintroduces exactly the quadratic that `workspace_packages`
+/// had; the fix then is to memoize this the way `workspace_package_map` is, and to have the
+/// per-source caller read the memo rather than this wrapper.
 pub fn workspace_editions(db: &dyn salsa::Database, ws: Workspace) -> noeta_lexer::EditionMap {
     let mut map = noeta_lexer::EditionMap::new();
     for src in ws
