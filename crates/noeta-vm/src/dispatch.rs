@@ -693,329 +693,56 @@ impl<'m> Vm<'m> {
                             pc += 1;
                             continue;
                         }
-                        // `json.parse(...)` — a Ring 2 native module function call, dispatched before
-                        // the object/collection paths.
-                        if hk == Some(HeapKind::NativeModule)
-                            && let Some(module_name) = v.native_module_name()
-                        {
-                            let arg_values = ArgBuf::collect(args, regs, fbase);
-                            let value = self.call_native_module(
-                                &module_name,
-                                method,
-                                arg_values.as_slice(),
-                                *span,
-                            )?;
-                            set_reg(regs, fbase, *dst, value);
-                            pc += 1;
-                            continue;
-                        }
-                        // An extern receiver routes through the per-site cache (H5 perf): a
-                        // declared arena read inlines to an arena load while its gate is open;
-                        // ctx methods go straight to their dispatch; anything else falls to the
-                        // shared by-value chain below.
-                        if hk == Some(HeapKind::Extern) {
-                            let ci = *cache as usize;
-                            // The value's qualified identity (`std.id.Uuid`) — one interned
-                            // `&'static` literal per type, so the cache key stays a pointer
-                            // compare and the same string keys ctx dispatch and the read gates.
-                            let identity = v.with_extern(|e| e.type_identity());
-                            let route = match extern_caches[ci] {
-                                Some((key, route)) if key == identity.as_ptr() => route,
-                                _ => {
-                                    let route = crate::methods::resolve_extern_route(
-                                        self.reg(),
-                                        identity,
-                                        method,
-                                    );
-                                    extern_caches[ci] = Some((identity.as_ptr(), route));
-                                    route
-                                }
-                            };
-                            let is_ctx = match route {
-                                crate::methods::ExternRoute::FastRead { project } => {
-                                    if args.is_empty()
-                                        && (self.persist.ext_closed_gates.is_empty()
-                                            || !self.persist.ext_closed_gates.contains(&identity))
-                                    {
-                                        let retained = v.with_extern(|e| project(e));
-                                        let value = self.persist.ext_arena[retained as usize]
-                                            .expect("a live arena entry");
-                                        retain(value);
-                                        set_reg(regs, fbase, *dst, value);
-                                        pc += 1;
-                                        continue;
-                                    }
-                                    // Gate closed (or a misuse the dispatch reports): full path.
-                                    true
-                                }
-                                crate::methods::ExternRoute::Ctx => true,
-                                // The shared by-value chain below owns this (incl. errors).
-                                crate::methods::ExternRoute::Plain => false,
-                            };
-                            if is_ctx {
-                                let arg_values = ArgBuf::collect(args, regs, fbase);
-                                let value = self.call_ctx_type_method(
-                                    identity,
-                                    v,
-                                    method,
-                                    arg_values.as_slice(),
-                                    *span,
-                                )?;
-                                set_reg(regs, fbase, *dst, value);
-                                pc += 1;
-                                continue;
-                            }
-                        }
-                        // An object dispatches to a user method through the type's method table;
-                        // anything else falls to the built-in `count`/`enumerate` methods.
-                        if hk == Some(HeapKind::Object) {
-                            // `o.to_json()` on a type that `@derive(Serialize<Json>)` (so has no hand-written
-                            // `to_json`) synthesizes a structural JSON string — a pure value
-                            // computation, so it is produced inline rather than via a call frame. Only a
-                            // literal `to_json` site reaches here, so the shape clone stays off the common
-                            // method-call path.
-                            if method == "to_json" && args.is_empty() {
-                                let type_name = v.shape().unwrap().name.clone();
-                                if self.tojson_derives.contains(&type_name) {
-                                    let json = Value::string(&v.to_json());
-                                    set_reg(regs, fbase, *dst, json);
-                                    pc += 1;
+                        // Receiver-dispatching method routes, OUTLINED (perf/outline-cold).
+                        //
+                        // A native module, an extern value, an object or an enum resolves its
+                        // method through a table and usually pushes a callee frame; those four
+                        // routes were ~325 of this arm's ~430 lines, and they held the arm's whole
+                        // operand set live across the dispatch loop. They now live in
+                        // [`Vm::call_method_dispatch`] (`#[cold] #[inline(never)]`), moved
+                        // verbatim, guarded by ONE receiver-kind test that replaces the four they
+                        // each performed — so a built-in receiver (`xs.len()`, a string method, a
+                        // map read) reaches the value-in/value-out chain below without entering
+                        // them, exactly as it did before. `Ok(None)` means "not one of these four
+                        // after all", the same fall-through the blocks always had.
+                        if matches!(
+                            hk,
+                            Some(
+                                HeapKind::NativeModule
+                                    | HeapKind::Extern
+                                    | HeapKind::Object
+                                    | HeapKind::Enum
+                            )
+                        ) && let Some(step) = self.call_method_dispatch(
+                            v,
+                            hk,
+                            method,
+                            dst,
+                            args,
+                            type_args,
+                            span,
+                            cache,
+                            supplied,
+                            frames,
+                            regs,
+                            caches,
+                            extern_caches,
+                            module,
+                            fbase,
+                            top,
+                            pc,
+                        )? {
+                            match step {
+                                ColdStep::Next(next) => {
+                                    pc = next;
                                     continue;
                                 }
-                            }
-                            // Inline cache: a hit (the receiver's shape pointer matches the cached one)
-                            // gives the resolved prototype directly, skipping the `(type, method)` hashmap
-                            // lookup and its two `String` clones. The hit check avoids bumping the shape
-                            // refcount (raw pointer compare); only a miss clones the shape into the cache.
-                            let ci = *cache as usize;
-                            let shape_ptr = v.object_shape_ptr();
-                            let hit = match &caches[ci] {
-                                Some((cs, p))
-                                    if Some(std::ptr::from_ref::<Shape>(cs)) == shape_ptr =>
-                                {
-                                    Some(*p)
-                                }
-                                _ => None,
-                            };
-                            let proto = match hit {
-                                Some(proto) => proto,
-                                None => {
-                                    let shape = v.shape().unwrap();
-                                    let Some(proto) = self.method_proto(&shape.name, method) else {
-                                        // A native class's instance method (native-extensibility S3
-                                        // / Pass 2a): no hoisted proto by this name, but the shape
-                                        // names a registered native class that declares it — route
-                                        // to the class's native `dispatch` (the Object-arm twin of
-                                        // the extern-method seam). A user class always resolves
-                                        // through the proto table above, so only a genuine native
-                                        // class reaches here. Left uncached like the field path.
-                                        if self
-                                            .reg()
-                                            .find_class_method(&shape.name, method)
-                                            .is_some()
-                                        {
-                                            let arg_values = ArgBuf::collect(args, regs, fbase);
-                                            let result = self.call_native_class_method(
-                                                v,
-                                                method,
-                                                arg_values.as_slice(),
-                                                *span,
-                                            )?;
-                                            set_reg(regs, fbase, *dst, result);
-                                            pc += 1;
-                                            continue;
-                                        }
-                                        // The runtime member-call fallback (the field-access-then-
-                                        // call desugar's `dyn` path): no method `method`, but the
-                                        // shape HAS a field of that name — `obj.f(args)` means
-                                        // `(obj.f)(args)`, so call the field's value through the
-                                        // shared closure-call setup (the `Op::Call` machinery).
-                                        // The same order the checker pins statically (a method
-                                        // wins, the field is consulted only on a miss) and the
-                                        // same route the lowered `Field` + `Call` takes — a
-                                        // non-callable field value raises the indirect-call E0007
-                                        // ("... is not callable"), identically in both backends.
-                                        // Left uncached: the method cache memoizes prototypes,
-                                        // and this dyn-only path re-probes per call.
-                                        if let Some(callee_val) =
-                                            shape.slot_of(method).and_then(|s| v.slot_at(s))
-                                        {
-                                            if self.setup_closure_call(
-                                                frames,
-                                                regs,
-                                                top,
-                                                fbase,
-                                                *dst,
-                                                callee_val,
-                                                args,
-                                                // A field holding a callable is a first-class
-                                                // value, so there is no type-argument channel to
-                                                // carry; a forwarding callee reached this way
-                                                // aborts in the setup rather than misbinding.
-                                                &[],
-                                                *span,
-                                                pc + 1,
-                                                // A member call carries no mask yet — named
-                                                // arguments bind only to top-level `fn`s so far.
-                                                None,
-                                            )? {
-                                                continue 'reload;
-                                            }
-                                            pc += 1;
-                                            continue;
-                                        }
-                                        return Err(self.error(
-                                            DiagnosticCode::UnknownName,
-                                            *span,
-                                            format!(
-                                                "type `{}` has no method `{method}`",
-                                                shape.name
-                                            ),
-                                        ));
-                                    };
-                                    caches[ci] = Some((shape, proto));
-                                    proto
-                                }
-                            };
-                            let callee_chunk = &module.protos[proto as usize];
-                            // The prototype takes the receiver in register 0 and the user arguments
-                            // after it, so its declared arity is one more than the supplied args. A
-                            // method may have trailing defaulted parameters, so the supplied count is a
-                            // range `[total - defaults, total]` (all less the receiver). A forwarding
-                            // generic's hidden slots are not value parameters either — they are filled
-                            // from `type_args`, so they come off the count too.
-                            let total =
-                                callee_chunk.num_params as usize - 1 - callee_chunk.hidden as usize;
-                            let required = total - callee_chunk.defaults.len();
-                            if args.len() < required || args.len() > total {
-                                return Err(self.error(
-                                    DiagnosticCode::TypeMismatch,
-                                    *span,
-                                    arity_message("method", required, total, args.len()),
-                                ));
-                            }
-                            let arg_values = ArgBuf::collect(args, regs, fbase);
-                            let ty_values = ArgBuf::collect(type_args.regs(), regs, fbase);
-                            self.push_callee_frame(
-                                frames,
-                                regs,
-                                top,
-                                proto,
-                                Some(v),
-                                arg_values.as_slice(),
-                                ty_values.as_slice(),
-                                *dst,
-                                RetTransform::None,
-                                pc + 1,
-                                noeta_bytecode::supplied_of(*supplied),
-                                *span,
-                            )?;
-                            continue 'reload;
-                        }
-                        // An enum value dispatches to a user method (the unified body, object-model
-                        // slice 3) through the same type→method table as an object — and, audit-1
-                        // finding 7, through the same per-site inline cache: an enum's `&'static
-                        // Shape` handle is as stable an identity as an object's, so a hit resolves
-                        // the prototype with one pointer compare (the object arm's exact hit test;
-                        // the two kinds share the slot safely because their shapes are distinct).
-                        // An unknown method falls through to the built-in paths below — never
-                        // cached, so the fall-through re-probes exactly as before.
-                        if hk == Some(HeapKind::Enum) {
-                            let shape = v.shape().unwrap();
-                            // `e.to_json()` on an enum that `@derive(Serialize<Json>)`s (and has no
-                            // hand-written `to_json`): the variant rendering, exactly what
-                            // `json.stringify` produces — the enum twin of the object arm above.
-                            if method == "to_json"
-                                && args.is_empty()
-                                && self.tojson_derives.contains(&shape.name)
-                            {
-                                let json = Value::string(&v.to_json());
-                                set_reg(regs, fbase, *dst, json);
-                                pc += 1;
-                                continue;
-                            }
-                            // `color.value()` on a native **backed** enum (native-extensibility
-                            // S1): a native enum has no user method proto, so its backing constant
-                            // is resolved from the registry by the value's (short) name + variant —
-                            // the twin of the tree-walker's `.value()` accessor.
-                            if method == "value"
-                                && args.is_empty()
-                                && let Some(en) = self.reg().resolve_enum(&shape.name)
-                                && let Some(variant) = shape.variant.as_deref()
-                                && let Some((_, vdef)) = en.variant(variant)
-                            {
-                                let out = match vdef.value {
-                                    noeta_stdlib::VariantValue::Str(s) => Value::string(s),
-                                    noeta_stdlib::VariantValue::Int(n) => Value::int(n),
-                                    noeta_stdlib::VariantValue::None => Value::unit(),
-                                };
-                                set_reg(regs, fbase, *dst, out);
-                                pc += 1;
-                                continue;
-                            }
-                            let ci = *cache as usize;
-                            let hit = match &caches[ci] {
-                                Some((cs, p)) if std::ptr::eq::<Shape>(*cs, shape) => Some(*p),
-                                _ => None,
-                            };
-                            let proto = match hit {
-                                Some(proto) => Some(proto),
-                                None => {
-                                    let resolved = self.method_proto(&shape.name, method);
-                                    if let Some(proto) = resolved {
-                                        caches[ci] = Some((shape, proto));
-                                    }
-                                    resolved
-                                }
-                            };
-                            if let Some(proto) = proto {
-                                let callee_chunk = &module.protos[proto as usize];
-                                let total = callee_chunk.num_params as usize
-                                    - 1
-                                    - callee_chunk.hidden as usize;
-                                let required = total - callee_chunk.defaults.len();
-                                if args.len() < required || args.len() > total {
-                                    return Err(self.error(
-                                        DiagnosticCode::TypeMismatch,
-                                        *span,
-                                        arity_message("method", required, total, args.len()),
-                                    ));
-                                }
-                                let arg_values = ArgBuf::collect(args, regs, fbase);
-                                let ty_values = ArgBuf::collect(type_args.regs(), regs, fbase);
-                                self.push_callee_frame(
-                                    frames,
-                                    regs,
-                                    top,
-                                    proto,
-                                    Some(v),
-                                    arg_values.as_slice(),
-                                    ty_values.as_slice(),
-                                    *dst,
-                                    RetTransform::None,
-                                    pc + 1,
-                                    noeta_bytecode::supplied_of(*supplied),
-                                    *span,
-                                )?;
-                                continue 'reload;
-                            }
-                            // A native enum's instance method (native-extensibility S1 / Slice B):
-                            // no user proto and not the built-in `value()`/`to_json`, but the shape
-                            // names a registered native enum that declares it — route to the enum's
-                            // native `dispatch`, the enum twin of the Object arm's `find_class_method`
-                            // → `call_native_class_method` fall-through above. Left uncached like the
-                            // value/field paths.
-                            if self.reg().find_enum_method(&shape.name, method).is_some() {
-                                let arg_values = ArgBuf::collect(args, regs, fbase);
-                                let result = self.call_native_enum_method(
-                                    v,
-                                    method,
-                                    arg_values.as_slice(),
-                                    *span,
-                                )?;
-                                set_reg(regs, fbase, *dst, result);
-                                pc += 1;
-                                continue;
+                                ColdStep::Reload => continue 'reload,
+                                // These routes never end the program — they either write `dst` and
+                                // advance, or transfer to a callee frame.
+                                ColdStep::Done(_) => unreachable!(
+                                    "a method-dispatch route cannot return the bottom frame"
+                                ),
                             }
                         }
                         // Everything below the object/enum dispatch is a built-in method on a
@@ -2047,6 +1774,322 @@ impl<'m> Vm<'m> {
                 }
             }
         }
+    }
+
+    /// The four **receiver-dispatching** `Op::CallMethod` routes — native module, extern value,
+    /// object, enum — outlined out of the dispatch loop (perf/outline-cold); see the call site.
+    ///
+    /// Each of these resolves a method through a table and, for the user-method cases, pushes a
+    /// callee frame. They are cold relative to the built-in chain (`xs.len()`, string methods, map
+    /// reads) that every interpreted loop actually runs, and they were more than three quarters of
+    /// the arm — which meant the arm's whole operand set stayed live across the dispatch loop and
+    /// every other arm paid for it. Moved VERBATIM: same order (native module, extern, object,
+    /// enum), same inline caches, same diagnostics. `None` is the fall-through the blocks always
+    /// had — the receiver was not one of these four, or the route declined it.
+    #[cold]
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn call_method_dispatch(
+        &mut self,
+        v: Value,
+        hk: Option<HeapKind>,
+        method: &str,
+        dst: &Reg,
+        args: &[Reg],
+        type_args: &noeta_bytecode::TypeArgs,
+        span: &Span,
+        cache: &u32,
+        supplied: &Option<std::num::NonZero<u64>>,
+        frames: &mut Vec<Frame>,
+        regs: &mut Vec<Value>,
+        caches: &mut [MethodCacheEntry],
+        extern_caches: &mut [ExternCacheEntry],
+        module: &'m Module,
+        fbase: usize,
+        top: usize,
+        pc: usize,
+    ) -> Result<Option<ColdStep>, Abort> {
+        // `json.parse(...)` — a Ring 2 native module function call, dispatched before
+        // the object/collection paths.
+        if hk == Some(HeapKind::NativeModule)
+            && let Some(module_name) = v.native_module_name()
+        {
+            let arg_values = ArgBuf::collect(args, regs, fbase);
+            let value =
+                self.call_native_module(&module_name, method, arg_values.as_slice(), *span)?;
+            set_reg(regs, fbase, *dst, value);
+            return Ok(Some(ColdStep::Next(pc + 1)));
+        }
+        // An extern receiver routes through the per-site cache (H5 perf): a
+        // declared arena read inlines to an arena load while its gate is open;
+        // ctx methods go straight to their dispatch; anything else falls to the
+        // shared by-value chain below.
+        if hk == Some(HeapKind::Extern) {
+            let ci = *cache as usize;
+            // The value's qualified identity (`std.id.Uuid`) — one interned
+            // `&'static` literal per type, so the cache key stays a pointer
+            // compare and the same string keys ctx dispatch and the read gates.
+            let identity = v.with_extern(|e| e.type_identity());
+            let route = match extern_caches[ci] {
+                Some((key, route)) if key == identity.as_ptr() => route,
+                _ => {
+                    let route = crate::methods::resolve_extern_route(self.reg(), identity, method);
+                    extern_caches[ci] = Some((identity.as_ptr(), route));
+                    route
+                }
+            };
+            let is_ctx = match route {
+                crate::methods::ExternRoute::FastRead { project } => {
+                    if args.is_empty()
+                        && (self.persist.ext_closed_gates.is_empty()
+                            || !self.persist.ext_closed_gates.contains(&identity))
+                    {
+                        let retained = v.with_extern(|e| project(e));
+                        let value =
+                            self.persist.ext_arena[retained as usize].expect("a live arena entry");
+                        retain(value);
+                        set_reg(regs, fbase, *dst, value);
+                        return Ok(Some(ColdStep::Next(pc + 1)));
+                    }
+                    // Gate closed (or a misuse the dispatch reports): full path.
+                    true
+                }
+                crate::methods::ExternRoute::Ctx => true,
+                // The shared by-value chain below owns this (incl. errors).
+                crate::methods::ExternRoute::Plain => false,
+            };
+            if is_ctx {
+                let arg_values = ArgBuf::collect(args, regs, fbase);
+                let value =
+                    self.call_ctx_type_method(identity, v, method, arg_values.as_slice(), *span)?;
+                set_reg(regs, fbase, *dst, value);
+                return Ok(Some(ColdStep::Next(pc + 1)));
+            }
+        }
+        // An object dispatches to a user method through the type's method table;
+        // anything else falls to the built-in `count`/`enumerate` methods.
+        if hk == Some(HeapKind::Object) {
+            // `o.to_json()` on a type that `@derive(Serialize<Json>)` (so has no hand-written
+            // `to_json`) synthesizes a structural JSON string — a pure value
+            // computation, so it is produced inline rather than via a call frame. Only a
+            // literal `to_json` site reaches here, so the shape clone stays off the common
+            // method-call path.
+            if method == "to_json" && args.is_empty() {
+                let type_name = v.shape().unwrap().name.clone();
+                if self.tojson_derives.contains(&type_name) {
+                    let json = Value::string(&v.to_json());
+                    set_reg(regs, fbase, *dst, json);
+                    return Ok(Some(ColdStep::Next(pc + 1)));
+                }
+            }
+            // Inline cache: a hit (the receiver's shape pointer matches the cached one)
+            // gives the resolved prototype directly, skipping the `(type, method)` hashmap
+            // lookup and its two `String` clones. The hit check avoids bumping the shape
+            // refcount (raw pointer compare); only a miss clones the shape into the cache.
+            let ci = *cache as usize;
+            let shape_ptr = v.object_shape_ptr();
+            let hit = match &caches[ci] {
+                Some((cs, p)) if Some(std::ptr::from_ref::<Shape>(cs)) == shape_ptr => Some(*p),
+                _ => None,
+            };
+            let proto = match hit {
+                Some(proto) => proto,
+                None => {
+                    let shape = v.shape().unwrap();
+                    let Some(proto) = self.method_proto(&shape.name, method) else {
+                        // A native class's instance method (native-extensibility S3
+                        // / Pass 2a): no hoisted proto by this name, but the shape
+                        // names a registered native class that declares it — route
+                        // to the class's native `dispatch` (the Object-arm twin of
+                        // the extern-method seam). A user class always resolves
+                        // through the proto table above, so only a genuine native
+                        // class reaches here. Left uncached like the field path.
+                        if self.reg().find_class_method(&shape.name, method).is_some() {
+                            let arg_values = ArgBuf::collect(args, regs, fbase);
+                            let result = self.call_native_class_method(
+                                v,
+                                method,
+                                arg_values.as_slice(),
+                                *span,
+                            )?;
+                            set_reg(regs, fbase, *dst, result);
+                            return Ok(Some(ColdStep::Next(pc + 1)));
+                        }
+                        // The runtime member-call fallback (the field-access-then-
+                        // call desugar's `dyn` path): no method `method`, but the
+                        // shape HAS a field of that name — `obj.f(args)` means
+                        // `(obj.f)(args)`, so call the field's value through the
+                        // shared closure-call setup (the `Op::Call` machinery).
+                        // The same order the checker pins statically (a method
+                        // wins, the field is consulted only on a miss) and the
+                        // same route the lowered `Field` + `Call` takes — a
+                        // non-callable field value raises the indirect-call E0007
+                        // ("... is not callable"), identically in both backends.
+                        // Left uncached: the method cache memoizes prototypes,
+                        // and this dyn-only path re-probes per call.
+                        if let Some(callee_val) = shape.slot_of(method).and_then(|s| v.slot_at(s)) {
+                            if self.setup_closure_call(
+                                frames,
+                                regs,
+                                top,
+                                fbase,
+                                *dst,
+                                callee_val,
+                                args,
+                                // A field holding a callable is a first-class
+                                // value, so there is no type-argument channel to
+                                // carry; a forwarding callee reached this way
+                                // aborts in the setup rather than misbinding.
+                                &[],
+                                *span,
+                                pc + 1,
+                                // A member call carries no mask yet — named
+                                // arguments bind only to top-level `fn`s so far.
+                                None,
+                            )? {
+                                return Ok(Some(ColdStep::Reload));
+                            }
+                            return Ok(Some(ColdStep::Next(pc + 1)));
+                        }
+                        return Err(self.error(
+                            DiagnosticCode::UnknownName,
+                            *span,
+                            format!("type `{}` has no method `{method}`", shape.name),
+                        ));
+                    };
+                    caches[ci] = Some((shape, proto));
+                    proto
+                }
+            };
+            let callee_chunk = &module.protos[proto as usize];
+            // The prototype takes the receiver in register 0 and the user arguments
+            // after it, so its declared arity is one more than the supplied args. A
+            // method may have trailing defaulted parameters, so the supplied count is a
+            // range `[total - defaults, total]` (all less the receiver). A forwarding
+            // generic's hidden slots are not value parameters either — they are filled
+            // from `type_args`, so they come off the count too.
+            let total = callee_chunk.num_params as usize - 1 - callee_chunk.hidden as usize;
+            let required = total - callee_chunk.defaults.len();
+            if args.len() < required || args.len() > total {
+                return Err(self.error(
+                    DiagnosticCode::TypeMismatch,
+                    *span,
+                    arity_message("method", required, total, args.len()),
+                ));
+            }
+            let arg_values = ArgBuf::collect(args, regs, fbase);
+            let ty_values = ArgBuf::collect(type_args.regs(), regs, fbase);
+            self.push_callee_frame(
+                frames,
+                regs,
+                top,
+                proto,
+                Some(v),
+                arg_values.as_slice(),
+                ty_values.as_slice(),
+                *dst,
+                RetTransform::None,
+                pc + 1,
+                noeta_bytecode::supplied_of(*supplied),
+                *span,
+            )?;
+            return Ok(Some(ColdStep::Reload));
+        }
+        // An enum value dispatches to a user method (the unified body, object-model
+        // slice 3) through the same type→method table as an object — and, audit-1
+        // finding 7, through the same per-site inline cache: an enum's `&'static
+        // Shape` handle is as stable an identity as an object's, so a hit resolves
+        // the prototype with one pointer compare (the object arm's exact hit test;
+        // the two kinds share the slot safely because their shapes are distinct).
+        // An unknown method falls through to the built-in paths below — never
+        // cached, so the fall-through re-probes exactly as before.
+        if hk == Some(HeapKind::Enum) {
+            let shape = v.shape().unwrap();
+            // `e.to_json()` on an enum that `@derive(Serialize<Json>)`s (and has no
+            // hand-written `to_json`): the variant rendering, exactly what
+            // `json.stringify` produces — the enum twin of the object arm above.
+            if method == "to_json" && args.is_empty() && self.tojson_derives.contains(&shape.name) {
+                let json = Value::string(&v.to_json());
+                set_reg(regs, fbase, *dst, json);
+                return Ok(Some(ColdStep::Next(pc + 1)));
+            }
+            // `color.value()` on a native **backed** enum (native-extensibility
+            // S1): a native enum has no user method proto, so its backing constant
+            // is resolved from the registry by the value's (short) name + variant —
+            // the twin of the tree-walker's `.value()` accessor.
+            if method == "value"
+                && args.is_empty()
+                && let Some(en) = self.reg().resolve_enum(&shape.name)
+                && let Some(variant) = shape.variant.as_deref()
+                && let Some((_, vdef)) = en.variant(variant)
+            {
+                let out = match vdef.value {
+                    noeta_stdlib::VariantValue::Str(s) => Value::string(s),
+                    noeta_stdlib::VariantValue::Int(n) => Value::int(n),
+                    noeta_stdlib::VariantValue::None => Value::unit(),
+                };
+                set_reg(regs, fbase, *dst, out);
+                return Ok(Some(ColdStep::Next(pc + 1)));
+            }
+            let ci = *cache as usize;
+            let hit = match &caches[ci] {
+                Some((cs, p)) if std::ptr::eq::<Shape>(*cs, shape) => Some(*p),
+                _ => None,
+            };
+            let proto = match hit {
+                Some(proto) => Some(proto),
+                None => {
+                    let resolved = self.method_proto(&shape.name, method);
+                    if let Some(proto) = resolved {
+                        caches[ci] = Some((shape, proto));
+                    }
+                    resolved
+                }
+            };
+            if let Some(proto) = proto {
+                let callee_chunk = &module.protos[proto as usize];
+                let total = callee_chunk.num_params as usize - 1 - callee_chunk.hidden as usize;
+                let required = total - callee_chunk.defaults.len();
+                if args.len() < required || args.len() > total {
+                    return Err(self.error(
+                        DiagnosticCode::TypeMismatch,
+                        *span,
+                        arity_message("method", required, total, args.len()),
+                    ));
+                }
+                let arg_values = ArgBuf::collect(args, regs, fbase);
+                let ty_values = ArgBuf::collect(type_args.regs(), regs, fbase);
+                self.push_callee_frame(
+                    frames,
+                    regs,
+                    top,
+                    proto,
+                    Some(v),
+                    arg_values.as_slice(),
+                    ty_values.as_slice(),
+                    *dst,
+                    RetTransform::None,
+                    pc + 1,
+                    noeta_bytecode::supplied_of(*supplied),
+                    *span,
+                )?;
+                return Ok(Some(ColdStep::Reload));
+            }
+            // A native enum's instance method (native-extensibility S1 / Slice B):
+            // no user proto and not the built-in `value()`/`to_json`, but the shape
+            // names a registered native enum that declares it — route to the enum's
+            // native `dispatch`, the enum twin of the Object arm's `find_class_method`
+            // → `call_native_class_method` fall-through above. Left uncached like the
+            // value/field paths.
+            if self.reg().find_enum_method(&shape.name, method).is_some() {
+                let arg_values = ArgBuf::collect(args, regs, fbase);
+                let result =
+                    self.call_native_enum_method(v, method, arg_values.as_slice(), *span)?;
+                set_reg(regs, fbase, *dst, result);
+                return Ok(Some(ColdStep::Next(pc + 1)));
+            }
+        }
+        Ok(None)
     }
 
     /// The profiler's per-instruction consult (`noeta profile`), outlined out of the dispatch loop
