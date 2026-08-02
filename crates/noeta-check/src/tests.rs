@@ -2828,12 +2828,44 @@ fn a_top_level_statement_does_not_see_a_binding_declared_later() {
     // The self-referential initializer: `a` is not in scope until this statement finishes.
     assert_eq!(codes("a = a\n"), vec!["E0005"]);
     // Annotated, and through an operator — the same fact, reached differently.
-    assert_eq!(codes("mut right: string = right ?? none\n"), vec!["E0005"]);
+    assert_eq!(codes("mut right: string = right\n"), vec!["E0005"]);
     assert_eq!(codes("b = a + 1\na = 1\n"), vec!["E0005"]);
     // A plain statement before the binding.
     assert_eq!(codes("echo a\na = 1\n"), vec!["E0005"]);
     // Calling one, too: the callee path shares the gate.
     assert_eq!(codes("f()\nf = fn(): int => 1\n"), vec!["E0005"]);
+}
+
+/// `none` is an `Option`, not a value of whatever type is expected.
+///
+/// A bare `none` outside an `Option` expectation synthesized a plain hole, and a hole subsumes into
+/// anything — so `q: int = none`, `f(none)` against a declared `int`, and an `int` struct field
+/// initialized to `none` all type-checked and then aborted with `cannot apply `+` to enum and int`.
+/// That is a soundness hole, not a lenient diagnostic: the language has no implicit wrapping (`q:
+/// ?int = 1` is rejected), so `none` standing in for an `int` was never going to run. Found by the
+/// `noeta-fuzz` execution oracle.
+#[test]
+fn none_does_not_stand_in_for_a_non_option_type() {
+    assert_eq!(codes("q: int = none\n"), vec!["E0007"]);
+    assert_eq!(
+        codes("fn f(n: int): int { return n + 1 }\necho f(none)\n"),
+        vec!["E0007"]
+    );
+    assert_eq!(
+        codes("struct P { n: int }\necho P { n: none }.n\n"),
+        vec!["E0007"]
+    );
+    // A list literal mixing a value with `none` is heterogeneous, and was silently inferring
+    // `List<int>` with a `none` sitting inside it.
+    assert_eq!(codes("xs = [1, none]\necho xs\n"), vec!["E0007"]);
+
+    // Every position where `none` really is an `Option` stays clean — the payload hole is what
+    // makes it absorb any `T`.
+    assert!(codes("q: ?int = none\necho q\n").is_empty());
+    assert!(codes("xs = [some(1), none]\necho xs\n").is_empty());
+    assert!(codes("fn f(n: ?int): int { return 1 }\necho f(none)\n").is_empty());
+    assert!(codes("struct P { n: ?int }\necho P { n: none }\n").is_empty());
+    assert!(codes("fn f(): ?int { return none }\necho f()\n").is_empty());
 }
 
 /// An ordering compares two values of ONE ordered type.

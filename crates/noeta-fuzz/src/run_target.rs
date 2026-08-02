@@ -75,6 +75,30 @@ pub const STATIC_AT_RUNTIME: &[DiagnosticCode] = &[
     DiagnosticCode::NotSend,
 ];
 
+/// Runtime failures that carry a [`STATIC_AT_RUNTIME`] code but are **value-dependent**: the same
+/// well-typed expression succeeds or fails depending on what the values are at the moment it runs.
+/// The checker is not wrong to let these through, so the oracle must not call them divergences.
+///
+/// One entry so far. `[1, 2] - [3]` aborts with `element-wise `-` expects two lists of equal
+/// length`, filed under `TypeMismatch` — but both operands are `List<int>`, the types agree, and it
+/// is the *lengths* that do not. Length is not part of the type, and `xs - ys` over two computed
+/// lists could not be settled statically by any checker.
+///
+/// # This matches on the message, and that is a real limitation
+///
+/// There is no phase or kind on a `Diagnostic` that separates "ill-typed" from "wrong shape at run
+/// time" — both are E0007 — so the message is the only signal available. The failure mode is benign
+/// in the direction that matters: if the wording changes, the exception stops matching and the
+/// sweep reports it again as a violation. It cannot go quietly silent, only quietly loud. Widening
+/// this list is the thing to be suspicious of, and each entry should have to argue, as this one
+/// does, that no checker could have known.
+const VALUE_DEPENDENT: &[&str] = &["expects two lists of equal length"];
+
+/// Whether `message` names one of the [`VALUE_DEPENDENT`] runtime failures.
+fn is_value_dependent(message: &str) -> bool {
+    VALUE_DEPENDENT.iter().any(|m| message.contains(m))
+}
+
 /// How far into the pipeline a program got. The sweep reports the distribution and asserts a floor
 /// on [`Reach::Ran`]: every invariant here is conditioned on a program that *executes*, so a
 /// generator drifting toward programs the checker rejects would leave the suite green and empty.
@@ -232,7 +256,7 @@ pub fn evaluate(src: &str) -> Result<Reach, Violation> {
         if let Some(d) = result
             .diagnostics
             .iter()
-            .find(|d| STATIC_AT_RUNTIME.contains(&d.code))
+            .find(|d| STATIC_AT_RUNTIME.contains(&d.code) && !is_value_dependent(&d.message))
         {
             return Err(Violation::StaticErrorAtRuntime {
                 backend,
