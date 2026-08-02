@@ -2889,6 +2889,26 @@ fn an_ordering_needs_two_operands_of_one_type() {
     assert!(codes("fn m(a: dyn, b: int): bool { return a > b }\necho \"ok\"\n").is_empty());
 }
 
+/// A concretely non-callable value is not callable, and a module does not gain functions.
+///
+/// `x = 5` then `x(1)` typed as `Unknown` and aborted with the runtime's `int is not callable`;
+/// `math.nosuchfn(1)` did the same via `module `std.math` has no function `nosuchfn``. The registry
+/// predicate for the second is documented as the one the checker and both backends share — the
+/// checker just was not asking it. Found by the runtime-rejection census.
+#[test]
+fn a_non_callable_value_and_an_absent_module_function_are_static_errors() {
+    assert_eq!(codes("x = 5\necho x(1)\n"), vec!["E0007"]);
+    assert_eq!(codes("s = \"a\"\necho s(1)\n"), vec!["E0007"]);
+    assert_eq!(
+        codes("use std.math\necho math.nosuchfn(1)\n"),
+        vec!["E0005"]
+    );
+    // Real callables and real module functions stay clean.
+    assert!(codes("f = fn(a: int): int => a\necho f(1)\n").is_empty());
+    assert!(codes("use std.math\necho math.sqrt(4.0)\n").is_empty());
+    assert!(codes("use std.io\nio.out(\"hi\")\n").is_empty());
+}
+
 /// An `if`/`while`/conditional condition must be a `bool`.
 ///
 /// The `while` arm said outright that bool-ness was "enforced at runtime (`RequireCondBool`)".

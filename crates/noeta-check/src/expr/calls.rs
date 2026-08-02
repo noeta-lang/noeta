@@ -845,6 +845,28 @@ impl Checker {
                         return ret;
                     }
                 }
+                // A local of a **concrete non-callable** type invoked as a function. The two
+                // callable shapes are handled above — a `Fn` value, and a user object providing
+                // `call` — so anything else that is neither gradual nor nominal cannot become
+                // callable later: `x = 5` then `x(1)` is the runtime's `int is not callable`, and
+                // the checker had the type all along. `Named` is excluded here rather than above
+                // because `synth_callable_object` already reports its own E0007 for a user type
+                // with no `call`, and a native one stays open.
+                if let Some(ty) = lookup(env, name.as_str())
+                    && !ty.defers_to_runtime()
+                    && !matches!(ty, Type::Fn { .. } | Type::Named(..) | Type::Param(_))
+                {
+                    let ty = ty.clone();
+                    self.error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!("`{name}` is a `{ty}`, which is not callable"),
+                    )
+                    .help(
+                        "only a function value, or a type providing a `call` method, can be called",
+                    );
+                    return Type::Unknown;
+                }
                 if let Some(sig) = self.symbols.functions.get(name.as_str()) {
                     let required = sig.required;
                     // Named arguments bind to the parameters they name, so normalize the written
@@ -1088,6 +1110,22 @@ impl Checker {
                         self.check_args(&params, required, args, arg_exprs, span, name);
                     }
                     self.check_module_bounds(&qm, name, args, span);
+                    // A function the module does not have. `is_module_function` is documented as
+                    // "the single predicate the checker and both backends share … so all three
+                    // agree by construction" — the checker simply was not asking it here, so
+                    // `math.nosuchfn(1)` typed as `Unknown` and the *runtime* reported
+                    // `module `std.math` has no function `nosuchfn``. Asked after the argument
+                    // checks above so a real function with bad arguments still reports those.
+                    if !self.reg().is_module_function(&qm, name)
+                        && self.reg().find_typed_function(&qm, name).is_none()
+                    {
+                        self.error(
+                            DiagnosticCode::UnknownName,
+                            span,
+                            format!("module `{qm}` has no function `{name}`"),
+                        );
+                        return Type::Unknown;
+                    }
                     return stdlib::module_return(self.reg(), &qm, name, args)
                         .unwrap_or(Type::Unknown);
                 }
