@@ -2575,11 +2575,13 @@ fn match_that_is_not_provably_exhaustive_still_falls_through_e0048() {
         ),
         ["E0011", "E0048"]
     );
-    // An `int` scrutinee has an open domain and there is no `_`. E0011 stays silent (open domains
-    // are the runtime backstop's job) but the path to the end is real, so E0048 fires.
+    // An `int` scrutinee with no `_`. This used to be E0048 alone — E0011 stayed silent because an
+    // open domain "is the runtime backstop's job". It is not: enumerating the domain was never
+    // needed to know the answer, since no finite set of literal arms can cover `int`, so the match
+    // is *provably* non-exhaustive and E0011 now says so alongside the fall-through.
     assert_eq!(
         codes("fn f(n: int): int { match n { 1 => { return 1 }, 2 => { return 2 }, } }\n"),
-        ["E0048"]
+        ["E0011", "E0048"]
     );
     // Exhaustive, but one arm falls out of its own block instead of returning.
     assert_eq!(
@@ -2887,6 +2889,37 @@ fn an_ordering_needs_two_operands_of_one_type() {
         codes("fn m<T: Comparable>(a: T, b: T): bool { return a > b }\necho m(1, 2)\n").is_empty()
     );
     assert!(codes("fn m(a: dyn, b: int): bool { return a > b }\necho \"ok\"\n").is_empty());
+}
+
+/// A scalar `match` with no catch-all is provably non-exhaustive.
+///
+/// `match 5 { 1 => "a" }` ran and aborted with `no match arm matched the value 5`. E0011 stayed
+/// silent because a scalar's domain cannot be enumerated — but enumerating it was never needed to
+/// know the answer: no finite set of literal arms covers `int`, and the catch-all check already
+/// handles the arms that would save it. Found by the runtime-rejection census.
+#[test]
+fn a_scalar_match_needs_a_catch_all() {
+    assert_eq!(
+        codes("x = 5\ny = match x { 1 => \"a\" }\necho y\n"),
+        vec!["E0011"]
+    );
+    assert_eq!(
+        codes("x = \"s\"\ny = match x { \"s\" => 1 }\necho y\n"),
+        vec!["E0011"]
+    );
+    assert!(codes("x = 5\ny = match x { 1 => \"a\", _ => \"b\" }\necho y\n").is_empty());
+    // `bool` is the exception: two literal arms really do exhaust it, so it is enumerated like a
+    // two-case enum — which is also what keeps the `if … then … else` desugar clean.
+    assert!(codes("x = true\ny = match x { true => 1, false => 2 }\necho y\n").is_empty());
+    assert_eq!(
+        codes("x = true\ny = match x { true => 1 }\necho y\n"),
+        vec!["E0011"]
+    );
+    // A gradual scrutinee still defers.
+    assert!(
+        codes("fn f(x: dyn): string { return match x { 1 => \"a\", _ => \"b\" } }\necho \"ok\"\n")
+            .is_empty()
+    );
 }
 
 /// `assert` takes a `bool` and at most a message.

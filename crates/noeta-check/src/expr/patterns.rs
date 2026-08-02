@@ -378,9 +378,29 @@ impl Checker {
             };
             return MatchCoverage::from_missing(cases, MatchDomain::Types);
         }
+        // A **scalar** scrutinee. Its domain cannot be enumerated, which is why this used to answer
+        // `Unknown` — but enumerating it was never necessary to know the answer: any finite set of
+        // literal arms leaves values uncovered, and the catch-all check above already returned
+        // `Total` for the arms that would save it. So a scalar `match` with no irrefutable arm is
+        // *provably* non-exhaustive, and saying so is the difference between E0011 while typing and
+        // the runtime's `no match arm matched the value 5`.
+        //
+        // `bool` is the exception that proves the rule: two literal arms really do exhaust it, so
+        // it goes through the variant-style count below rather than here.
+        if matches!(
+            scrut,
+            Type::Int | Type::IntN { .. } | Type::Float | Type::F32 | Type::F64 | Type::String
+        ) {
+            return MatchCoverage::Missing {
+                cases: vec![format!("the other values of `{scrut}`")],
+                domain: MatchDomain::Scalar,
+            };
+        }
         let all: Vec<String> = match scrut {
             Type::Result(..) => vec!["Ok".into(), "Err".into()],
             Type::Option(..) => vec!["some".into(), "none".into()],
+            // Two literal arms genuinely exhaust `bool`, so it is enumerable after all.
+            Type::Bool => vec!["true".into(), "false".into()],
             Type::Named(n, _) => match self.symbols.enums.get(n) {
                 Some(variants) => variants.iter().map(|v| v.name.clone()).collect(),
                 None => return MatchCoverage::Unknown,
@@ -392,6 +412,11 @@ impl Checker {
             .filter(|a| a.guard.is_none())
             .filter_map(|a| match &a.pattern {
                 Pattern::Variant { variant, .. } => Some(variant.as_str()),
+                // `bool` is enumerated like a two-case enum, so its literal arms are what cover
+                // it — `match b { true => …, false => … }` is exhaustive, and so is the
+                // `if … then … else` desugar that produces exactly those two arms.
+                Pattern::Bool { value: true, .. } => Some("true"),
+                Pattern::Bool { value: false, .. } => Some("false"),
                 // A bare payload-free variant covers its case exactly as the qualified spelling
                 // does — so a `match` naming every case bare is exhaustive with no `_`.
                 Pattern::Binding { name, .. } if !self.is_binding_pattern(scrut, name) => {
@@ -416,6 +441,9 @@ pub(crate) enum MatchDomain {
     Types,
     /// Enum-variant arms, including `Result`'s `Ok`/`Err` and `Option`'s `some`/`none`.
     Variants,
+    /// A scalar scrutinee (`int`, `float`, `string`, …): the domain is not enumerable, so the only
+    /// thing that can exhaust it is an irrefutable arm.
+    Scalar,
 }
 
 impl MatchDomain {
@@ -423,6 +451,9 @@ impl MatchDomain {
         match self {
             MatchDomain::Types => "add an `is T` arm for each missing type, or a `_` catch-all",
             MatchDomain::Variants => "add an arm for each missing case, or a `_` catch-all",
+            MatchDomain::Scalar => {
+                "a scalar has no enumerable set of cases — add a `_` catch-all arm"
+            }
         }
     }
 }
