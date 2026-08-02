@@ -1096,6 +1096,15 @@ fn lex_pass(source: &Source, collect_trivia: bool, text_tiers: &TextTiers) -> Le
                     // extended scan is unterminated — keep the original match either way.
                     _ => tokens.push(Token { kind, span }),
                 }
+                // A `${…}` hole is code, and code may carry comments — but the string around it is
+                // one token, so nothing else in this loop will ever see them. Collect them here, in
+                // source order (the holes are walked left to right, at the string's own position),
+                // so the formatter can re-emit them where they were written.
+                if collect_trivia {
+                    for (hole_start, hole_end) in interpolation_holes(text, start, quote) {
+                        comments.extend(hole_comments(source, hole_start, hole_end, text_tiers));
+                    }
+                }
             }
             Ok(kind) => tokens.push(Token { kind, span }),
             Err(()) => diagnostics.push(lex_error(source, span)),
@@ -1359,6 +1368,81 @@ fn interpolated_string_end(text: &str, open: usize, quote: char) -> Option<usize
         }
     }
     None
+}
+
+/// The **content** byte ranges of every `${…}` hole directly inside the string literal opening at
+/// `open` with `quote` — `[just past `${`, the matching `}`)`.
+///
+/// Mirrors [`interpolated_string_end`]'s walk exactly, recording rather than merely skipping. A
+/// nested string's *own* holes are not returned: it is scanned whole, and the recursive sub-lex in
+/// [`hole_comments`] reaches them when it lexes that string as a token in its own right.
+///
+/// Raw `'…'` strings do not interpolate, so they have no holes.
+///
+/// Public because the formatter needs the same bounds: a comment inside a hole but outside any
+/// block has no region for the comment interleave to walk, so the printer locates it by asking this
+/// scanner rather than re-deriving hole bounds from expression spans.
+pub fn interpolation_holes(text: &str, open: usize, quote: char) -> Vec<(usize, usize)> {
+    let mut holes = Vec::new();
+    if quote == '\'' {
+        return holes;
+    }
+    let mut i = open + quote.len_utf8();
+    while i < text.len() {
+        let rest = &text[i..];
+        let Some(c) = rest.chars().next() else { break };
+        if c == '\\' {
+            i += 1;
+            if let Some(next) = text[i..].chars().next() {
+                i += next.len_utf8();
+            }
+        } else if c == quote {
+            break;
+        } else if c == '$' && rest.as_bytes().get(1) == Some(&b'{') {
+            let content_start = i + 2;
+            let Some(end) = interpolation_hole_end(text, content_start) else {
+                break;
+            };
+            // `end` is just past the closing `}`.
+            holes.push((content_start, end - 1));
+            i = end;
+        } else {
+            i += c.len_utf8();
+        }
+    }
+    holes
+}
+
+/// The comments inside one `${…}` hole, with spans rebased onto the enclosing source.
+///
+/// A string is a single token, so nothing in the main loop ever looks inside one — which is why a
+/// comment written in a hole used to reach no consumer at all: the formatter had nothing to emit
+/// and deleted it, and the completeness oracle was blind for the same reason and called the file
+/// clean. Re-lexing the hole's text is what surfaces them, and it inherits every comment form
+/// (line, block, nesting) rather than re-implementing the scan.
+///
+/// Diagnostics from the sub-lex are discarded: the hole's *code* is re-lexed and reported by the
+/// parser, and duplicating those errors here would double every message in a malformed hole. Only
+/// on the trivia path, so the compile path pays nothing.
+fn hole_comments(
+    source: &Source,
+    start: usize,
+    end: usize,
+    text_tiers: &TextTiers,
+) -> Vec<Comment> {
+    let Some(inner_text) = source.text().get(start..end) else {
+        return Vec::new();
+    };
+    let inner = Source::new(source.id(), source.name(), inner_text);
+    let offset = start as u32;
+    lex_pass(&inner, true, text_tiers)
+        .comments
+        .into_iter()
+        .map(|c| Comment {
+            span: Span::new_in(source.id(), c.span.start + offset, c.span.end + offset),
+            kind: c.kind,
+        })
+        .collect()
 }
 
 /// From byte offset `start` (just past a `${`), scan to the matching `}` and return the byte offset
@@ -2016,6 +2100,58 @@ mod tests {
             lexed.diagnostics[0].code,
             DiagnosticCode::UnterminatedString
         );
+    }
+
+    /// Comments inside a `${…}` hole are collected as trivia, with spans into the **enclosing**
+    /// source.
+    ///
+    /// A string is one token, so nothing in the main lex loop looks inside one — and a hole is
+    /// code, which may carry comments. They used to reach no consumer at all, so `noeta fmt`
+    /// silently deleted them (and its completeness oracle, reading the same trivia, reported such
+    /// files clean). The spans are what matter here: they must index the outer text, or the
+    /// formatter would slice the wrong bytes.
+    #[test]
+    fn comments_inside_an_interpolation_hole_are_collected() {
+        let text = "b = \"x ${ // note\n  a} y\"\n";
+        let source = Source::new(SourceId::FIRST, "test.noe", text);
+        let lexed = lex_with_trivia(&source);
+        assert!(lexed.diagnostics.is_empty(), "{:?}", lexed.diagnostics);
+        let texts: Vec<&str> = lexed
+            .comments
+            .iter()
+            .map(|c| &text[c.span.start as usize..c.span.end as usize])
+            .collect();
+        assert_eq!(
+            texts,
+            ["// note"],
+            "hole comment not collected at the right span"
+        );
+    }
+
+    /// The same, one level down: a hole containing a string that itself has a hole. The sub-lex
+    /// recurses, and every span still indexes the outermost source.
+    #[test]
+    fn comments_inside_a_nested_interpolation_hole_are_collected() {
+        let text = "b = \"a ${\"c ${/* deep */ d} e\"} f\"\n";
+        let source = Source::new(SourceId::FIRST, "test.noe", text);
+        let lexed = lex_with_trivia(&source);
+        assert!(lexed.diagnostics.is_empty(), "{:?}", lexed.diagnostics);
+        let texts: Vec<&str> = lexed
+            .comments
+            .iter()
+            .map(|c| &text[c.span.start as usize..c.span.end as usize])
+            .collect();
+        assert_eq!(texts, ["/* deep */"]);
+    }
+
+    /// A raw `'…'` string does not interpolate, so `${…}` in one is literal text and holds no code
+    /// — nothing in it is a comment, however much it looks like one.
+    #[test]
+    fn a_raw_string_has_no_holes_to_collect_comments_from() {
+        let text = "b = 'x ${ // not a comment\n } y'\n";
+        let source = Source::new(SourceId::FIRST, "test.noe", text);
+        let lexed = lex_with_trivia(&source);
+        assert!(lexed.comments.is_empty(), "{:?}", lexed.comments);
     }
 
     #[test]

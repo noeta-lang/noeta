@@ -317,23 +317,57 @@ struct Printer<'a> {
 }
 
 /// The `(start, kind)` of every non-`;` token in `source`, in order — the lookup behind
-/// [`Printer::layout_terminates`]. Explicit `;` are dropped so a search finds the next *content*
-/// token, and the natural token order keeps the vec sorted by `start` for a partition search.
+/// [`Printer::layout_terminates`] and [`Printer::else_between`]. Explicit `;` are dropped so a
+/// search finds the next *content* token, and the natural token order keeps the vec sorted by
+/// `start` for a partition search.
+///
+/// **`${…}` hole contents are spliced in.** A string is a single token, so without this the interior
+/// of a hole is invisible to every lookup built on this vec — and one of them decides a region
+/// boundary. `else_between` locates the `else` dividing an `if`'s two blocks; finding none, the
+/// then-block's region was widened to the whole statement, so an *empty* then-branch swallowed the
+/// **else** branch's comment and printed it in the wrong branch. Only inside a hole, because only
+/// there was the keyword unlexed. Hole braces balance within the hole, so nothing outside shifts.
 fn code_tokens(
     source: &str,
     edition: noeta_lexer::Edition,
     text_tiers: &noeta_lexer::TextTiers,
 ) -> Vec<(u32, TokenKind)> {
-    noeta_lexer::lex_in(
+    let mut out = Vec::new();
+    push_code_tokens(source, 0, edition, text_tiers, &mut out);
+    out
+}
+
+/// Append `source`'s tokens (rebased by `offset`) to `out`, recursing into every interpolation hole.
+fn push_code_tokens(
+    source: &str,
+    offset: u32,
+    edition: noeta_lexer::Edition,
+    text_tiers: &noeta_lexer::TextTiers,
+    out: &mut Vec<(u32, TokenKind)>,
+) {
+    let lexed = noeta_lexer::lex_in(
         &Source::new(SourceId(0), "<fmt>", source),
         edition,
         text_tiers,
-    )
-    .tokens
-    .iter()
-    .filter(|t| t.kind != TokenKind::Semicolon)
-    .map(|t| (t.span.start, t.kind))
-    .collect()
+    );
+    for t in &lexed.tokens {
+        if t.kind != TokenKind::Semicolon {
+            out.push((t.span.start + offset, t.kind));
+        }
+        if !matches!(t.kind, TokenKind::StringLit | TokenKind::TemplateStr) {
+            continue;
+        }
+        let open = t.span.start as usize;
+        let Some(quote) = source.get(open..).and_then(|s| s.chars().next()) else {
+            continue;
+        };
+        for (hole_start, hole_end) in noeta_lexer::interpolation_holes(source, open, quote) {
+            if let Some(inner) = source.get(hole_start..hole_end) {
+                // Recurses for a hole containing a string with holes of its own.
+                push_code_tokens(inner, offset + hole_start as u32, edition, text_tiers, out);
+            }
+        }
+    }
 }
 
 impl Printer<'_> {
@@ -2603,7 +2637,7 @@ impl Printer<'_> {
             ]),
             Expr::Interp { parts, span } => match self.backtick_verbatim(*span) {
                 Some(doc) => doc,
-                None => self.interp(parts)?,
+                None => self.interp(parts, *span)?,
             },
             Expr::Closure {
                 params,
@@ -3117,7 +3151,7 @@ impl Printer<'_> {
         }
     }
 
-    fn interp(&self, parts: &[StrPart]) -> Result<Doc, FmtError> {
+    fn interp(&self, parts: &[StrPart], span: Span) -> Result<Doc, FmtError> {
         let mut s = String::from("\"");
         let mut docs: Vec<Doc> = Vec::new();
         let flush = |s: &mut String, docs: &mut Vec<Doc>| {
@@ -3125,13 +3159,35 @@ impl Printer<'_> {
                 docs.push(Doc::text(std::mem::take(s)));
             }
         };
+        // A hole's *expression* carries its comments through its own regions (a block body walks
+        // them), but a comment in the gap around that expression — `${ // why \n x }` — belongs to
+        // no region at all, so the bounds have to come from the same scanner the lexer used.
+        let quote = self.source[span.start as usize..]
+            .chars()
+            .next()
+            .unwrap_or('"');
+        let holes = noeta_lexer::interpolation_holes(self.source, span.start as usize, quote);
+        let mut hole_idx = 0usize;
         for part in parts {
             match part {
                 StrPart::Literal(lit) => s.push_str(&escape(lit)),
                 StrPart::Hole(expr) => {
+                    let bounds = holes.get(hole_idx).copied();
+                    hole_idx += 1;
                     s.push_str("${");
                     flush(&mut s, &mut docs);
-                    docs.push(self.expr(expr)?);
+                    if let Some((hole_start, hole_end)) = bounds {
+                        self.hole_gap_comments(
+                            &mut docs,
+                            hole_start as u32,
+                            expr.span().start,
+                            true,
+                        );
+                        docs.push(self.expr(expr)?);
+                        self.hole_gap_comments(&mut docs, expr.span().end, hole_end as u32, false);
+                    } else {
+                        docs.push(self.expr(expr)?);
+                    }
                     s.push('}');
                 }
             }
@@ -3139,6 +3195,43 @@ impl Printer<'_> {
         s.push('"');
         flush(&mut s, &mut docs);
         Ok(Doc::concat(docs))
+    }
+
+    /// Emit the pending comments in `[start, end)` — one side of the gap around a `${…}` hole's
+    /// expression. `leading` selects which side, which decides where the separator goes.
+    ///
+    /// A `//` comment cannot share a line with what follows it, so it is followed by a hard break;
+    /// a `/* … */` only needs a space. Inside a tier-body hole (`force_flat`) no newline may be
+    /// emitted at all, so the comment is left pending for the enclosing scope — the same concession
+    /// [`Self::dot_link`] makes there, and for the same reason.
+    fn hole_gap_comments(&self, docs: &mut Vec<Doc>, start: u32, end: u32, leading: bool) {
+        if self.force_flat.get() {
+            return;
+        }
+        while let Some(c) = self
+            .comments
+            .get(self.cursor.get())
+            .filter(|c| c.span.start >= start && c.span.start < end)
+            .filter(|c| self.comment_marker(c).is_none())
+        {
+            let doc = self.comment_doc(c);
+            let breaks = c.kind == noeta_lexer::CommentKind::Line;
+            if leading {
+                docs.push(doc);
+                docs.push(if breaks {
+                    Doc::hardline()
+                } else {
+                    Doc::text(" ")
+                });
+            } else {
+                docs.push(Doc::text(" "));
+                docs.push(doc);
+                if breaks {
+                    docs.push(Doc::hardline());
+                }
+            }
+            self.cursor.set(self.cursor.get() + 1);
+        }
     }
 
     /// An anonymous closure. `span` is the whole `fn(…) { … }` expression, and it is what lets a

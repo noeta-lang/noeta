@@ -2109,25 +2109,56 @@ if a {
         assert_eq!(fmt(&out).unwrap(), out, "and it is still idempotent");
     }
 
-    /// **Known defect, not yet fixed:** a comment written *inside* a `${…}` interpolation hole is
-    /// silently deleted.
+    /// A comment in an `else` branch stays in the `else` branch — including inside a `${…}` hole.
     ///
-    /// A string is one lexer token, so a hole's contents are re-lexed separately by the parser and
-    /// their comments never reach `Lexed::comments`. The printer therefore has nothing to emit, and
-    /// — because the same blindness applies to `oracle::comment_texts` — the completeness property
-    /// cannot see the loss either. It surfaced only via idempotence, and only once the printer had
-    /// wrongly moved a comment *into* a hole (fixed above).
+    /// `else_between` locates the `else` dividing an `if`'s two blocks by searching the printer's
+    /// token list, and a string is a single token, so inside a hole there was no `ElseKw` to find.
+    /// Finding none, the then-block's region widened to the whole statement — and an *empty* then
+    /// branch then swallowed the **else** branch's comment and printed it in the wrong branch,
+    /// attached to the opposite condition. Outside a hole the same input has always been correct,
+    /// which is what made this invisible: the defect needed the keyword to be unlexed.
     ///
-    /// Fixing it means re-lexing holes with trivia and threading the offset-corrected comments back
-    /// into the enclosing `Lexed`, which touches the parser's cached hole grammar and the lexer's
-    /// trivia contract. Recorded as an ignored test so the behavior is pinned and visible rather
-    /// than rediscovered: `cargo test -p noeta-fmt -- --ignored`.
+    /// Uncovered by fixing hole-comment collection — the comment had to become visible before it
+    /// could be seen going to the wrong place.
     #[test]
-    #[ignore = "known defect: hole comments are not collected as trivia; needs a lexer change"]
-    fn a_comment_inside_an_interpolation_hole_survives() {
-        let src = "b = \"x ${fn(c) {\n    // kept?\n    echo a\n}} y\"\n";
+    fn a_comment_in_an_else_branch_stays_there_inside_a_hole() {
+        let src = "v = \"${fn(c) {\n    if a {} else if b {\n        /* note */\n    }\n}} x\"\n";
         let out = fmt(src).expect("formats");
-        assert!(out.contains("// kept?"), "the comment was deleted: {out}");
+        let else_at = out.find("else").expect("else survives");
+        let comment_at = out.find("/* note */").expect("comment survives");
+        assert!(
+            comment_at > else_at,
+            "the comment moved out of the else branch: {out}"
+        );
+        assert_eq!(fmt(&out).unwrap(), out, "and it is still idempotent");
+    }
+
+    /// A comment written *inside* a `${…}` interpolation hole survives, in place.
+    ///
+    /// A string is one lexer token, so a hole's contents used to reach no trivia consumer at all:
+    /// the printer had nothing to emit and deleted the comment, and — the same blindness — the
+    /// completeness oracle could not see the loss and called such files clean. It surfaced only
+    /// through idempotence. `lex_with_trivia` now re-lexes each hole and rebases its comments onto
+    /// the enclosing source.
+    ///
+    /// Both halves of a hole are covered: a comment inside a *block* within the hole is walked by
+    /// that block's own region, while one in the gap around the expression belongs to no region and
+    /// is emitted by `hole_gap_comments`.
+    #[test]
+    fn a_comment_inside_an_interpolation_hole_survives() {
+        for src in [
+            // Inside a block within the hole — the shape the fuzzer found.
+            "b = \"x ${fn(c) {\n    // kept\n    echo a\n}} y\"\n",
+            // In the gap before the expression, both comment forms.
+            "b = \"x ${ // kept\n  a} y\"\n",
+            "b = \"x ${/* kept */ a} y\"\n",
+            // And after it.
+            "b = \"x ${a /* kept */} y\"\n",
+        ] {
+            let out = fmt(src).expect("formats");
+            assert!(out.contains("kept"), "the comment was deleted: {out}");
+            assert_eq!(fmt(&out).unwrap(), out, "and it is still idempotent: {out}");
+        }
     }
 
     /// Every operand of a width-wrapped binary chain is rendered in **source order**, because the

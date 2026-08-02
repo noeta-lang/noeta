@@ -20,14 +20,15 @@
 //! programs (unbounded shapes, randomized layout and config). Same contract, two input sources — so
 //! a property proved on the corpus cannot silently weaken for the fuzzer.
 //!
-//! # Known blind spot
+//! # A blind spot worth remembering
 //!
-//! Both comment properties read trivia from `lex_with_trivia`, and a string is a single token — so a
-//! comment written inside a `${…}` interpolation hole is invisible here. The printer drops such a
-//! comment outright, and *this oracle reports the file clean*, because the multiset it compares is
-//! empty on both sides. The loss is observable only through idempotence, and only indirectly. See
-//! `a_comment_inside_an_interpolation_hole_survives` (ignored) in `lib.rs`; closing it requires
-//! collecting hole comments in the lexer, after which the properties here cover them with no change.
+//! Both comment properties read trivia from `lex_with_trivia`, so whatever that does not report is
+//! invisible *here* too. A string is a single token, and comments inside `${…}` holes were not
+//! collected — so the printer deleted them and this oracle reported those files **clean**, because
+//! the multiset it compared was empty on both sides. The loss surfaced only through idempotence,
+//! and only indirectly. The lexer now re-lexes holes for trivia and these properties cover them
+//! with no change here, which is the point: an oracle over trivia is exactly as complete as the
+//! trivia it is handed, and that dependency is not visible from inside it.
 
 use crate::{FmtConfig, FmtError, format_source};
 
@@ -158,6 +159,49 @@ struct CommentAt {
     own_line: bool,
 }
 
+/// The tokens of `src`, with each interpolated string's `${…}` hole contents **spliced in**, spans
+/// rebased by `offset` onto the outermost source.
+///
+/// A string is a single token, so the interior of a hole is invisible to any token-based
+/// measurement — and both placement anchors are token-based. For a comment written inside a hole
+/// that made each of them wrong in its own way. The "next code token" became whatever followed the
+/// *whole string*, which is exactly the kind of thing the formatter legitimately rewrites: a broken
+/// list gains a trailing comma, so a comment sitting untouched inside a hole was reported as having
+/// moved from `]` to `,`. And the hole's own braces never counted toward depth, so a comment nested
+/// inside a `match` in a hole measured as though it were beside the string.
+///
+/// Splicing the hole tokens in fixes both at once, and disturbs nothing outside: a hole's braces
+/// balance within it, so every later token keeps the depth it had. The string token itself is kept
+/// as well, so a comment *before* a string still anchors to the string.
+fn tokens_with_holes(src: &str, offset: u32) -> Vec<noeta_lexer::Token> {
+    let source = noeta_span::Source::new(noeta_span::SourceId(0), "oracle", src);
+    let lexed = noeta_lexer::lex(&source);
+    let mut out = Vec::with_capacity(lexed.tokens.len());
+    for t in &lexed.tokens {
+        out.push(noeta_lexer::Token {
+            kind: t.kind,
+            span: noeta_span::Span::new(t.span.start + offset, t.span.end + offset),
+        });
+        if !matches!(
+            t.kind,
+            noeta_lexer::TokenKind::StringLit | noeta_lexer::TokenKind::TemplateStr
+        ) {
+            continue;
+        }
+        let open = t.span.start as usize;
+        let Some(quote) = src.get(open..).and_then(|s| s.chars().next()) else {
+            continue;
+        };
+        for (hole_start, hole_end) in noeta_lexer::interpolation_holes(src, open, quote) {
+            if let Some(inner) = src.get(hole_start..hole_end) {
+                // Recurses for a hole containing a string that has holes of its own.
+                out.extend(tokens_with_holes(inner, offset + hole_start as u32));
+            }
+        }
+    }
+    out
+}
+
 /// The sorted comment texts of a source, for the completeness comparison. A block comment's interior
 /// is reflowed by neither side, so exact text is compared.
 fn comment_texts(src: &str) -> Vec<String> {
@@ -188,7 +232,7 @@ fn comment_texts(src: &str) -> Vec<String> {
 /// virtual level for the extent of that chain, and the two spellings measure identically. This is
 /// the same move `safety::ast_equal_modulo_spans` makes for import order: normalize away a
 /// transformation the formatter is *entitled* to make, so that everything else stays caught.
-fn block_depths(lexed: &noeta_lexer::Lexed) -> Vec<(u32, i32)> {
+fn block_depths(tokens: &[noeta_lexer::Token]) -> Vec<(u32, i32)> {
     /// Whether the `if` at `if_idx` is the **statement** form (`if cond { … }`) rather than the
     /// **expression** conditional (`if cond then a else b`).
     ///
@@ -227,12 +271,12 @@ fn block_depths(lexed: &noeta_lexer::Lexed) -> Vec<(u32, i32)> {
         false
     }
 
-    let mut marks = Vec::with_capacity(lexed.tokens.len());
+    let mut marks = Vec::with_capacity(tokens.len());
     let mut real = 0i32;
     // The real depths at which a brace-less `else if` block was opened; each pops when the brace
     // depth falls back to it.
     let mut virtual_levels: Vec<i32> = Vec::new();
-    for (i, t) in lexed.tokens.iter().enumerate() {
+    for (i, t) in tokens.iter().enumerate() {
         match t.kind {
             noeta_lexer::TokenKind::LBrace | noeta_lexer::TokenKind::DotLBrace => real += 1,
             noeta_lexer::TokenKind::RBrace => {
@@ -241,8 +285,7 @@ fn block_depths(lexed: &noeta_lexer::Lexed) -> Vec<(u32, i32)> {
                 // braces: in `else if b { … } else { … }` the trailing `else` is part of the same
                 // nested statement, so the level must survive the brace that closes `b`'s block.
                 // Popping eagerly there measured the final `else` one level too shallow.
-                let chain_continues = lexed
-                    .tokens
+                let chain_continues = tokens
                     .get(i + 1)
                     .is_some_and(|n| n.kind == noeta_lexer::TokenKind::ElseKw);
                 if !chain_continues {
@@ -252,11 +295,10 @@ fn block_depths(lexed: &noeta_lexer::Lexed) -> Vec<(u32, i32)> {
                 }
             }
             noeta_lexer::TokenKind::ElseKw
-                if lexed
-                    .tokens
+                if tokens
                     .get(i + 1)
                     .is_some_and(|n| n.kind == noeta_lexer::TokenKind::IfKw)
-                    && opens_a_block(&lexed.tokens, i + 1) =>
+                    && opens_a_block(tokens, i + 1) =>
             {
                 virtual_levels.push(real);
             }
@@ -275,7 +317,8 @@ fn block_depths(lexed: &noeta_lexer::Lexed) -> Vec<(u32, i32)> {
 fn comments(src: &str) -> Vec<CommentAt> {
     let source = noeta_span::Source::new(noeta_span::SourceId(0), "oracle", src);
     let lexed = noeta_lexer::lex_with_trivia(&source);
-    let marks = block_depths(&lexed);
+    let tokens = tokens_with_holes(src, 0);
+    let marks = block_depths(&tokens);
     let mut out = Vec::with_capacity(lexed.comments.len());
     let mut mark_idx = 0usize;
     let mut depth = 0i32;
@@ -289,10 +332,10 @@ fn comments(src: &str) -> Vec<CommentAt> {
         }
         // The first code token that begins at or after the comment's end. Tokens are in source
         // order and so are the comments, so the scan is one shared pass.
-        while tok_idx < lexed.tokens.len() && lexed.tokens[tok_idx].span.start < c.span.end {
+        while tok_idx < tokens.len() && tokens[tok_idx].span.start < c.span.end {
             tok_idx += 1;
         }
-        let next = match lexed.tokens.get(tok_idx) {
+        let next = match tokens.get(tok_idx) {
             Some(t) => format!(
                 "{:?} {}",
                 t.kind,
