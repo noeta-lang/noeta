@@ -1,0 +1,20 @@
+[package]
+name = "noeta-fuzz"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+noeta-lexer = { workspace = true }
+noeta-parser = { workspace = true }
+noeta-span = { workspace = true }
+noeta-fmt = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[lints]
+workspace = true

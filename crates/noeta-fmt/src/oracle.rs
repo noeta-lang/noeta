@@ -109,8 +109,8 @@ pub fn check(name: &str, text: &str, config: &FmtConfig) -> Result<Verdict, Viol
     };
 
     // Idempotence: the output is a fixed point.
-    let twice = format_source(name, &once, config)
-        .map_err(|e| Violation::ReformatFailed(e.to_string()))?;
+    let twice =
+        format_source(name, &once, config).map_err(|e| Violation::ReformatFailed(e.to_string()))?;
     if once != twice {
         return Err(Violation::NotIdempotent { once, twice });
     }
