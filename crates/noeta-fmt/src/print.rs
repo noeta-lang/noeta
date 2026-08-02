@@ -3741,6 +3741,24 @@ fn prec(e: &Expr) -> u8 {
         // Because this only ever LOWERS the reported binding power, it can add parentheses that
         // preserve a parse and can never remove ones that were holding one together.
         Expr::TypeTest { .. } => 5,
+        // An **arrow** closure, `fn(x) => body`. Its body is an expression with no closing
+        // delimiter, so it extends as far to the right as the grammar allows: printing
+        // `(fn() => 1) + 3` without the parentheses yields `fn() => 1 + 3`, a closure whose body is
+        // `1 + 3`. Different AST, different meaning, and — before this — a safety-gate refusal on
+        // every file containing the shape.
+        //
+        // Reporting 0 (below every operator, `|>` at 1 included) parenthesizes it in every operand
+        // position. That is one pair of parentheses more than strictly necessary where nothing
+        // follows the closure — `x |> (fn(y) => y)` — which is the same trade the `is` case above
+        // makes, and for the same reason: lowering a binding power can only ever add parentheses
+        // that preserve a parse, never remove ones that were holding one together.
+        //
+        // A **block**-bodied closure, `fn(x) { … }`, is genuinely self-delimiting — it ends at its
+        // `}` — so it keeps the maximal binding power the fallthrough gives it.
+        Expr::Closure {
+            body: ClosureBody::Expr(..),
+            ..
+        } => 0,
         // Postfix-position forms (bind tightest among operators).
         Expr::Call { .. }
         | Expr::Member { .. }
