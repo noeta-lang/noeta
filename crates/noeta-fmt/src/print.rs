@@ -1917,7 +1917,17 @@ impl Printer<'_> {
     /// marks the right operand of a left-associative operator (which needs parentheses at equal
     /// precedence). Inserts the minimum parentheses that preserve the parse.
     fn operand(&self, e: &Expr, parent_prec: u8, is_right: bool) -> Result<Doc, FmtError> {
-        let cp = prec(e);
+        // A `match` that will print back as `if c then a else b` is not the self-delimiting node
+        // `prec` takes every `Expr::Match` to be: the resugared form's `else` branch has no closing
+        // delimiter and runs to the end of the enclosing expression, so `(if c then 1 else 2) + 3`
+        // would print as `if c then 1 else 2 + 3` — a conditional whose else-branch is `2 + 3`.
+        // Binding power 0 parenthesizes it in every operand position; see the `Expr::Closure` arm of
+        // `prec` for the same shape and the same reasoning. A *literal* `match` is genuinely
+        // brace-delimited and keeps the maximal power.
+        let cp = match e {
+            Expr::Match { arms, span, .. } if self.is_conditional_desugar(arms, *span) => 0,
+            _ => prec(e),
+        };
         let need_parens = cp < parent_prec || (cp == parent_prec && is_right);
         let doc = self.expr(e)?;
         Ok(if need_parens {
@@ -3107,11 +3117,7 @@ impl Printer<'_> {
         arms: &[MatchArm],
         span: Span,
     ) -> Result<Option<Doc>, FmtError> {
-        if arms.len() != 2 || !self.source_starts_with_if(span) {
-            return Ok(None);
-        }
-        // The desugar never produces guarded arms; a guard means a literal (guarded) `match`.
-        if arms.iter().any(|a| a.guard.is_some()) {
+        if !self.is_conditional_desugar(arms, span) {
             return Ok(None);
         }
         // `cond_end` is the byte the condition's source ends at — the start of the ` then ` gap. The
@@ -3207,6 +3213,34 @@ impl Printer<'_> {
     /// Whether the source at `span.start` begins with the `if` keyword as a whole token — so an
     /// identifier like `iffy` is not mistaken for it. Used to tell a desugared conditional from a
     /// literal `match` (both are `Expr::Match`), relying on fmt seeing only freshly parsed source.
+    /// Whether this `match` node is the parser's `if … then … else` desugar — i.e. whether
+    /// [`Self::if_then_else_form`] will reconstruct the surface conditional rather than printing a
+    /// literal `match`.
+    ///
+    /// Split out because two callers need the same answer for different reasons: the printer, to
+    /// choose the form, and [`Self::operand`], to decide parentheses. The two forms have opposite
+    /// delimiting behavior — `match x { … }` closes with a brace, while `if c then a else b` has an
+    /// `else` branch that runs to the end of the enclosing expression — so a single shared
+    /// predicate is what keeps the paren decision from disagreeing with the form actually printed.
+    fn is_conditional_desugar(&self, arms: &[MatchArm], span: Span) -> bool {
+        arms.len() == 2
+            && self.source_starts_with_if(span)
+            // The desugar never produces guarded arms; a guard means a literal (guarded) `match`.
+            && arms.iter().all(|a| a.guard.is_none())
+            && matches!(
+                (&arms[0].pattern, &arms[1].pattern),
+                (
+                    Pattern::Bool { value: true, .. },
+                    Pattern::Bool { value: false, .. }
+                ) | (Pattern::IsType { .. }, Pattern::Wildcard { .. })
+            )
+            // A block arm cannot be the parser's if-then-else desugar.
+            && matches!(
+                (&arms[0].body, &arms[1].body),
+                (ClosureBody::Expr(_), ClosureBody::Expr(_))
+            )
+    }
+
     fn source_starts_with_if(&self, span: Span) -> bool {
         self.source
             .get(span.start as usize..)

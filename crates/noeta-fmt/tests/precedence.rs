@@ -102,6 +102,43 @@ fn a_closure_outside_an_operand_position_is_not_parenthesized() {
     preserved("xs = [1, 2]\nacc = xs.map(fn(n) => n * 2)\necho acc\n");
 }
 
+// --- `if … then … else` is a resugared `match`, and its `else` branch is greedy ---
+//
+// Also found by `noeta-fuzz`. The parser lowers the conditional *expression* to a two-arm `match`,
+// which `prec` correctly treats as brace-delimited — but the printer resugars it back to the surface
+// `if … then … else`, which is not. The paren decision has to follow the form actually printed, so
+// both now consult one shared predicate (`is_conditional_desugar`).
+
+/// The regression. Without the parentheses this reads back as `if a then 1 else (2 + 3)` — the
+/// addition moves inside the else-branch.
+#[test]
+fn a_conditional_operand_keeps_its_parentheses() {
+    preserved("a = true\nacc = (if a then 1 else 2) + 3\necho acc\n");
+}
+
+/// The same shape as a receiver.
+#[test]
+fn a_conditional_receiver_keeps_its_parentheses() {
+    preserved("a = true\nacc = (if a then 1 else 2).to_string()\necho acc\n");
+}
+
+/// The counter-case that makes this precise rather than a blanket parenthesization of every
+/// `Expr::Match`: a **literal** `match` is genuinely brace-delimited, so it needs no parentheses as
+/// an operand — even when its arms happen to have the `true`/`false` shape the desugar produces.
+/// What distinguishes them is whether the node's source starts at `if`, which is exactly what the
+/// shared predicate tests.
+#[test]
+fn a_literal_match_operand_is_not_parenthesized() {
+    preserved("a = true\nacc = match a { true => 1, false => 2 } + 3\necho acc\n");
+}
+
+/// And a conditional outside an operand position keeps its plain surface form.
+#[test]
+fn a_conditional_outside_an_operand_position_is_not_parenthesized() {
+    preserved("a = true\nacc = if a then 1 else 2\necho acc\n");
+    preserved("d: dyn = 42\nacc = if d is int then 1 else 2\necho acc\n");
+}
+
 /// The one place the fix parenthesizes more than strictly necessary: as the *last* operand of a
 /// pipeline nothing follows the closure, so the parentheses are redundant — but "is anything to my
 /// right?" is not decidable from binding power alone, and the alternative (a precedence high enough
