@@ -54,6 +54,10 @@ impl Job {
 /// for a back-edge-born request the engine could scope — the region body instead.
 pub(crate) struct Ready {
     pub proto: usize,
+    /// Whether this answers a [`Job::Osr`] request. The mutator gates window requests on "one in
+    /// flight" rather than "once ever" (a window covers one loop), so it needs to know which gate
+    /// a response releases.
+    pub osr: bool,
     pub entry: Option<noeta_jit::CompiledFn>,
     pub fast: Option<usize>,
     /// The region-scoped body, when the engine produced one. Mutually exclusive with `entry`.
@@ -138,6 +142,7 @@ impl JitService {
                     };
                     ready_tx.lock().expect("jit mailbox poisoned").push(Ready {
                         proto,
+                        osr: matches!(job, Job::Osr { .. }),
                         entry,
                         fast,
                         osr_body,
@@ -150,6 +155,7 @@ impl JitService {
                     Some(engine) => JitStats {
                         native: engine.native_count(),
                         compiled: engine.compiled_count(),
+                        osr_windows: engine.osr_window_count(),
                         compile_ns_total: engine.compile_ns_total(),
                         compile_ns_max: engine.compile_ns_max(),
                         breakdown: engine.compile_breakdown(),

@@ -383,6 +383,7 @@ impl VmBackend {
             .map(|j| JitStats {
                 native: j.native_count(),
                 compiled: j.compiled_count(),
+                osr_windows: j.osr_window_count(),
                 compile_ns_total: j.compile_ns_total(),
                 compile_ns_max: j.compile_ns_max(),
                 breakdown: j.compile_breakdown(),
@@ -833,6 +834,11 @@ impl<'m> Vm<'m> {
 pub struct JitStats {
     pub native: usize,
     pub compiled: usize,
+    /// How many **region-scoped OSR bodies** were compiled (P-OSRW) — loop windows, not
+    /// prototypes, so this is counted alongside `native` rather than inside it. A top-level loop
+    /// that promotes purely through a back-edge shows up here and nowhere else: its prototype may
+    /// never need the whole-prototype body at all.
+    pub osr_windows: usize,
     pub compile_ns_total: u64,
     pub compile_ns_max: u64,
     /// Where `compile_ns_total` goes + compiled volume (P-JCT C0).

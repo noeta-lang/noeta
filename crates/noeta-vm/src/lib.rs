@@ -346,24 +346,27 @@ struct Tier1State {
     /// mutator in service mode (they live on the compile thread).
     jit_entries: Vec<Option<noeta_jit_abi::CompiledFn>>,
     jit_fast: Vec<Option<usize>>,
-    /// The **region-scoped OSR bodies** (P-OSRW), keyed by prototype: a second native body whose
-    /// compiled region is one hot loop's pc window. A native re-entry whose pc falls inside that
-    /// window goes here; every other entry uses `jit_entries`. Deliberately *not* the table the
-    /// native call helpers read — a region body has no fresh-frame entry, so nothing may call it
-    /// as a callee. Left empty on programs that never OSR, which is what makes the routing check
-    /// in `jit_enter` one length test there.
+    /// The **region-scoped OSR bodies** (P-OSRW), keyed by prototype: native bodies whose compiled
+    /// region is one hot loop's pc window — one per distinct hot loop, up to
+    /// `noeta_jit::MAX_OSR_WINDOWS`, and disjoint by construction. A native re-entry whose pc falls
+    /// inside a window goes there; every other entry uses `jit_entries`. Deliberately *not* the
+    /// table the native call helpers read — a region body has no fresh-frame entry, so nothing may
+    /// call it as a callee. Left empty on programs that never OSR, which is what makes the routing
+    /// check in `jit_enter` one length test there.
     #[cfg(feature = "jit")]
-    jit_osr_entries: Vec<Option<noeta_jit::OsrBody>>,
+    jit_osr_entries: Vec<Vec<noeta_jit::OsrBody>>,
     /// Per-prototype "main-body request sent" flag (service mode) — a hot prototype is queued
-    /// exactly once.
+    /// exactly once. One-shot is enough: a whole-prototype body, once compiled, covers every entry.
     #[cfg(feature = "jit")]
     jit_requested: Vec<bool>,
-    /// Per-prototype "OSR-body request sent" flag (service mode). Separate from `jit_requested`
-    /// because the two answer different questions: a back-edge asks for the loop's window, a hot
-    /// call entry asks for the whole prototype, and a prototype that got hot one way may later
-    /// need the other. One request each, at most.
+    /// Per-prototype "an OSR-body request is **in flight**" flag (service mode), cleared when its
+    /// response lands. Not one-shot like `jit_requested`: a window covers one loop, so a prototype
+    /// with several hot loops asks again — once per loop — and the flag exists only to stop a
+    /// second request going out while the first is unanswered. Termination is the engine's: it
+    /// declines past `noeta_jit::MAX_OSR_WINDOWS` and the service then answers with the
+    /// whole-prototype body, which covers everything.
     #[cfg(feature = "jit")]
-    jit_osr_requested: Vec<bool>,
+    jit_osr_inflight: Vec<bool>,
     /// Prototypes whose compile request was born at a **loop back-edge** (service mode): when the
     /// entry lands, the next back-edge OSR-enters mid-loop instead of waiting for a frame entry
     /// that a single long-running loop may never make.

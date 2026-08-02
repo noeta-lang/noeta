@@ -1084,8 +1084,11 @@ fn jit_osr_top_level_loop_goes_native() {
     let module = compile_module(src);
     let interp = VmBackend::new().run_module(&module);
     let (jit, stats) = VmBackend::new().run_module_jit_hot_with_stats(&module);
+    // P-OSRW: a top-level loop promotes into a **region-scoped** body — the loop's own window —
+    // and the prototype's cold prologue/tail never needs the whole-prototype body at all, so
+    // `native` (which counts whole prototypes) may legitimately stay 0 here.
     assert!(
-        stats.native >= 1,
+        stats.native + stats.osr_windows >= 1,
         "the top-level loop must go native via OSR under hot-counter promotion, got {stats:?}"
     );
     assert_eq!(interp, jit, "OSR result must match the interpreter");
@@ -1107,7 +1110,7 @@ fn jit_osr_heap_body_matches_interpreter() {
     let interp = VmBackend::new().run_module(&module);
     let (jit, stats) = VmBackend::new().run_module_jit_hot_with_stats(&module);
     assert!(
-        stats.native >= 1,
+        stats.native + stats.osr_windows >= 1,
         "the heap-body top-level loop must go native via OSR, got {stats:?}"
     );
     assert_eq!(

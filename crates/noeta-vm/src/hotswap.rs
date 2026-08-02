@@ -615,15 +615,12 @@ impl<'m> Vm<'m> {
         }
         self.tier1.jit_entries.iter_mut().for_each(|e| *e = None);
         self.tier1.jit_fast.iter_mut().for_each(|f| *f = None);
-        self.tier1
-            .jit_osr_entries
-            .iter_mut()
-            .for_each(|e| *e = None);
+        self.tier1.jit_osr_entries.iter_mut().for_each(Vec::clear);
         self.tier1.jit_counters.iter_mut().for_each(|c| *c = 0);
         self.tier1.jit_declined.iter_mut().for_each(|d| *d = false);
         self.tier1.jit_requested.iter_mut().for_each(|r| *r = false);
         self.tier1
-            .jit_osr_requested
+            .jit_osr_inflight
             .iter_mut()
             .for_each(|r| *r = false);
         self.tier1

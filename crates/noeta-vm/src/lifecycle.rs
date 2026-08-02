@@ -790,7 +790,7 @@ impl<'m> Vm<'m> {
                 #[cfg(feature = "jit")]
                 jit_requested: Vec::new(),
                 #[cfg(feature = "jit")]
-                jit_osr_requested: Vec::new(),
+                jit_osr_inflight: Vec::new(),
                 #[cfg(feature = "jit")]
                 jit_osr_pending: Vec::new(),
                 #[cfg(feature = "jit")]

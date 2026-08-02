@@ -914,6 +914,21 @@ impl<'m> Vm<'m> {
                             self.jit_install(p, f, fast);
                         }
                     }
+                    // P-OSRW oracle coverage. Production emits a region-scoped body only for the
+                    // back-edge that actually got hot, and the forced sweep above compiles every
+                    // prototype up front — so under the oracle no back-edge ever promotes and that
+                    // codegen would run in the differential exactly never. Emit one per
+                    // loop-bearing prototype (seeded at its first loop header) and let the routing
+                    // do the rest: every mid-frame re-entry landing inside a window then executes
+                    // the region body, and the corpus compares its results and its refcounts like
+                    // any other native code. Forced-JIT only — an ordinary run is untouched.
+                    for p in 0..self.module.protos.len() {
+                        for header in noeta_jit::loop_headers(&self.module.protos[p]) {
+                            if let Some(body) = jit.compile_osr(self.module, p, header) {
+                                self.jit_install_osr(p, body);
+                            }
+                        }
+                    }
                 }
                 self.tier1.jit = Some(jit);
             }
@@ -1021,9 +1036,12 @@ impl<'m> Vm<'m> {
     #[cfg(feature = "jit")]
     fn jit_install_osr(&mut self, proto: usize, body: noeta_jit::OsrBody) {
         if proto >= self.tier1.jit_osr_entries.len() {
-            self.tier1.jit_osr_entries.resize(proto + 1, None);
+            self.tier1.jit_osr_entries.resize_with(proto + 1, Vec::new);
         }
-        self.tier1.jit_osr_entries[proto] = Some(body);
+        let windows = &mut self.tier1.jit_osr_entries[proto];
+        if !windows.iter().any(|b| b.lo == body.lo && b.hi == body.hi) {
+            windows.push(body);
+        }
     }
 
     /// The region-scoped body to re-enter `proto` at `entry_pc`, if that pc is inside one's
@@ -1036,26 +1054,19 @@ impl<'m> Vm<'m> {
         }
         self.tier1
             .jit_osr_entries
-            .get(proto)
-            .copied()
-            .flatten()
-            .filter(|b| b.covers(entry_pc))
+            .get(proto)?
+            .iter()
+            .find(|b| b.covers(entry_pc))
             .map(|b| b.entry)
     }
 
-    /// Whether `proto` has *any* native body — the whole-prototype one or a region-scoped OSR one.
-    /// The promotion gates ask this rather than `jit_entry` so a prototype that already got its
-    /// loop window compiled is not queued for a second back-edge compile.
+    /// Whether some native body of `proto` can be entered at `entry_pc`: the whole-prototype body
+    /// covers every entry, a region-scoped one only its own window (P-OSRW). The back-edge gate
+    /// asks this rather than "is anything compiled" so a prototype whose *second* hot loop falls
+    /// outside the first window still promotes.
     #[cfg(feature = "jit")]
-    fn jit_has_native(&self, proto: usize) -> bool {
-        self.jit_entry(proto).is_some()
-            || self
-                .tier1
-                .jit_osr_entries
-                .get(proto)
-                .copied()
-                .flatten()
-                .is_some()
+    fn jit_covers_entry(&self, proto: usize, entry_pc: usize) -> bool {
+        self.jit_entry(proto).is_some() || self.jit_osr_entry_at(proto, entry_pc).is_some()
     }
 
     /// Whether the frame-entry loop should consult the native mirror tables. Armed when the sync
@@ -1089,6 +1100,13 @@ impl<'m> Vm<'m> {
         };
         for done in service.drain() {
             self.tier1.jit_pending = self.tier1.jit_pending.saturating_sub(1);
+            // A window request is gated on "one in flight", not "once ever": release the gate so a
+            // second hot loop in the same prototype can ask for its own window (P-OSRW).
+            if done.osr
+                && let Some(f) = self.tier1.jit_osr_inflight.get_mut(done.proto)
+            {
+                *f = false;
+            }
             match (done.osr_body, done.entry) {
                 (Some(body), _) => self.jit_install_osr(done.proto, body),
                 (None, Some(entry)) => self.jit_install(done.proto, entry, done.fast),
@@ -1233,7 +1251,7 @@ impl<'m> Vm<'m> {
             return None;
         }
         if self.tier1.jit_service.is_some() {
-            self.jit_request(proto, None);
+            self.jit_request(proto, None, false);
             return None;
         }
         let module = self.module;
@@ -1244,26 +1262,32 @@ impl<'m> Vm<'m> {
         Some(f)
     }
 
-    /// Queue `proto` for off-thread compilation, exactly once per shape (service mode). `header`
-    /// marks a request born at a loop back-edge — the landing entry OSR-enters mid-loop, and the
-    /// service scopes the body to that loop's window (P-OSRW) where it can. The two shapes are
-    /// tracked separately: a prototype promoted through its loop may still want the
-    /// whole-prototype body later (and vice versa), and neither request should silence the other.
+    /// Queue `proto` for off-thread compilation (service mode). `header` asks for the
+    /// region-scoped OSR body of the loop that got hot there (P-OSRW); `None` asks for the
+    /// whole-prototype body. `from_backedge` marks a request born at a loop back-edge, so the
+    /// landing entry OSR-enters mid-loop rather than waiting for a frame entry a long-running loop
+    /// may never make.
+    ///
+    /// The two shapes are gated separately because a prototype may need both over its life — a
+    /// back-edge asks for a window, a hot call entry asks for the whole prototype — and neither
+    /// request may silence the other. The whole-prototype gate is one-shot (that body, once
+    /// compiled, covers every entry); the window gate is only "one in flight", because a window
+    /// covers one loop and a prototype with several hot loops asks once per loop.
     #[cfg(feature = "jit")]
-    fn jit_request(&mut self, proto: usize, header: Option<usize>) {
-        let sent_flags = if header.is_some() {
-            &mut self.tier1.jit_osr_requested
+    fn jit_request(&mut self, proto: usize, header: Option<usize>, from_backedge: bool) {
+        let gate = if header.is_some() {
+            &mut self.tier1.jit_osr_inflight
         } else {
             &mut self.tier1.jit_requested
         };
-        if sent_flags.get(proto).copied().unwrap_or(false) {
+        if gate.get(proto).copied().unwrap_or(false) {
             return;
         }
-        if proto >= sent_flags.len() {
-            sent_flags.resize(proto + 1, false);
+        if proto >= gate.len() {
+            gate.resize(proto + 1, false);
         }
-        sent_flags[proto] = true;
-        if header.is_some() {
+        gate[proto] = true;
+        if from_backedge {
             if proto >= self.tier1.jit_osr_pending.len() {
                 self.tier1.jit_osr_pending.resize(proto + 1, false);
             }
@@ -1316,7 +1340,9 @@ impl<'m> Vm<'m> {
     /// for the **OSR window** the compile is scoped to (P-OSRW: `noeta_jit::Jit::compile_osr`).
     #[cfg(feature = "jit")]
     pub(crate) fn jit_osr_backedge(&mut self, proto: usize, header: usize) -> bool {
-        if self.jit_has_native(proto) {
+        // Native coverage for **this** header already exists — the whole-prototype body covers
+        // every pc, a region body only its own window.
+        if self.jit_covers_entry(proto, header) {
             // Service mode: a back-edge-born compile just landed in the mirror — take the one
             // pending OSR entry now (a single long-running loop gets no other chance to go
             // native mid-flight). A prototype compiled via the call-entry path has no pending
@@ -1338,15 +1364,18 @@ impl<'m> Vm<'m> {
             return false;
         }
         // A back-edge-born request is in flight: harvest the mailbox; enter the moment it lands.
+        // Not one-shot per prototype — a window covers one loop, so a second hot loop asks again
+        // once this answer has landed. Termination is the engine's: past `MAX_OSR_WINDOWS` it
+        // declines and the service answers with the whole-prototype body, which covers every loop.
         if self
             .tier1
-            .jit_osr_requested
+            .jit_osr_inflight
             .get(proto)
             .copied()
             .unwrap_or(false)
         {
             self.jit_drain_service();
-            if self.jit_has_native(proto)
+            if self.jit_covers_entry(proto, header)
                 && self
                     .tier1
                     .jit_osr_pending
@@ -1380,7 +1409,7 @@ impl<'m> Vm<'m> {
             return false;
         }
         if self.tier1.jit_service.is_some() {
-            self.jit_request(proto, Some(header));
+            self.jit_request(proto, Some(header), true);
             return false;
         }
         let module = self.module;
@@ -1389,8 +1418,8 @@ impl<'m> Vm<'m> {
             None => return false,
         };
         // The loop's own window first (P-OSRW). The engine declines when the window *is* the whole
-        // prototype — a second body would then be the same code — and the whole-prototype compile
-        // below is the region body in that case.
+        // prototype — a second body would then be the same code — or when the prototype has
+        // collected its window budget; the whole-prototype compile below covers both cases.
         if let Some(body) = jit.compile_osr(module, proto, header) {
             self.jit_install_osr(proto, body);
             return true;
