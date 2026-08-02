@@ -2238,6 +2238,28 @@ fn link_core(
         })
         .collect();
 
+    // Each module's **value-binding** table: `conn` → `App.Store.conn`, for the top-level bindings
+    // it declares. The twin of `module_maps` for the one namespace that map does not cover, applied
+    // once to the finished merge below (see [`qualify::qualify_module_bindings`]). The entry is
+    // excluded for the same reason it keeps its short handles: its statements are the program's
+    // tail, in their own scope, and nothing merges them anywhere.
+    let binding_maps: std::collections::HashMap<Vec<String>, qualify::QMap> = module_views
+        .iter()
+        .filter(|mv| !mv.namespace.is_empty() && mv.namespace != entry_ns)
+        .map(|mv| {
+            let prefix = mv.namespace.join(".");
+            let mut map = qualify::QMap::new();
+            for name in mv.stmts.iter().flat_map(top_level_binding_names) {
+                let qualified = format!("{prefix}.{name}");
+                // The identity entry makes a second application a no-op, exactly as it does for
+                // declarations in `build_module_map`.
+                map.insert(qualified.clone(), qualified.clone());
+                map.insert(name.to_string(), qualified);
+            }
+            (mv.namespace.clone(), map)
+        })
+        .collect();
+
     let mut imported: Vec<Stmt> = Vec::new();
     // Qualified identities already merged (explicit imports and their transitive same-module
     // dependencies alike) — the dedup key for the reachability closure, keyed on the dotted identity
@@ -2809,53 +2831,29 @@ fn link_core(
         }
     }
 
-    // A merged binding keeps its short name (it gains no qualified identity), so two modules that
-    // each export a capturing declaration over a same-named module binding would land two `x`s in
-    // one flat scope — and the later one would silently win for both. That is a genuine ambiguity
-    // the linker must not adjudicate, so it is an error naming both sides. (Declarations cannot
-    // reach this: they merge under qualified identities.)
+    // **A merged module's bindings become its own.** A declaration merges under a qualified
+    // identity, so two modules exporting a `User` coexist; a binding used to keep its short name in
+    // the one flat scope, and so collided with whatever else in the program bound that name. Nothing
+    // adjudicated it: the later statement assigned to the earlier one's slot, and a module's private
+    // global silently took a value from an entry that had never heard of it. Every merged statement
+    // is therefore rewritten to its module's binding table — the definition, the `use (…)` captures
+    // that name it, and its references (see [`qualify::qualify_module_bindings`] for why that
+    // rewrite is exact and where it declines to guess).
     //
     // A merged statement keeps the span of the module it was cloned from, so the module each one
     // came from is its source — the same identity `source_maps` below keys on.
-    let module_of = |stmt: &Stmt| -> String {
-        module_views
-            .iter()
-            .find(|mv| {
-                mv.stmts
-                    .first()
-                    .is_some_and(|first| first.span().source == stmt.span().source)
-            })
-            .map_or_else(|| "another module".to_string(), |mv| mv.namespace.join("."))
+    let module_of = |stmt: &Stmt| -> Option<&ModuleView> {
+        module_views.iter().find(|mv| {
+            mv.stmts
+                .first()
+                .is_some_and(|first| first.span().source == stmt.span().source)
+        })
     };
-    let mut binding_origin: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
-    for (name, module) in imported.iter().flat_map(|stmt| match stmt {
-        Stmt::Binding { name, .. } => vec![(name.clone(), module_of(stmt))],
-        Stmt::Destructure { targets, .. } => targets
-            .iter()
-            .map(|(name, _)| (name.clone(), module_of(stmt)))
-            .collect(),
-        _ => Vec::new(),
-    }) {
-        if let Some(first) = binding_origin.insert(name.clone(), module.clone())
-            && first != module
-        {
-            errors.push(LoadDiagnostic {
-                source: entry.clone(),
-                diagnostic: Diagnostic::error(
-                    DiagnosticCode::NameCollision,
-                    Span::empty_at(0),
-                    format!(
-                        "the module-level binding `{name}` is needed by declarations merged from \
-                         both `{first}` and `{module}`, and a binding keeps its own name in the \
-                         merged program"
-                    ),
-                )
-                .with_help(
-                    "rename one of them, or move the shared value behind a function both modules call",
-                ),
-            });
-        }
+    for stmt in &mut imported {
+        let Some(map) = module_of(stmt).and_then(|mv| binding_maps.get(&mv.namespace)) else {
+            continue;
+        };
+        qualify::qualify_module_bindings(stmt, map);
     }
 
     if !errors.is_empty() {
@@ -2953,10 +2951,22 @@ struct ModuleView<'a> {
     stmts: &'a [Stmt],
 }
 
+/// The value names a top-level statement binds — `x = …` and every destructure target, and nothing
+/// else (a `for` variable or a local is not top-level). The keys of a module's binding table, and
+/// the one namespace [`qualifiable_decl_name`] does not cover.
+fn top_level_binding_names(stmt: &Stmt) -> Vec<&str> {
+    match stmt {
+        Stmt::Binding { name, .. } => vec![name.as_str()],
+        Stmt::Destructure { targets, .. } => targets.iter().map(|(n, _)| n.as_str()).collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// Whether `stmt` is a top-level **value binding** introducing `name` — `x = …` or a destructure
-/// naming it. Unlike a class/fn/type it gains no qualified identity (it stays `x` in the flat merged
-/// scope), so it is not a [`qualifiable_decl_name`]; it is still a thing a merged declaration can
-/// need, through a `use (…)` capture.
+/// naming it. Unlike a class/fn/type it gains no qualified identity in the *source* module (it is
+/// the linker that gives a merged one its qualified identity, see
+/// [`qualify::qualify_module_bindings`]), so it is not a [`qualifiable_decl_name`]; it is still a
+/// thing a merged declaration can need, through a `use (…)` capture.
 fn binds_top_level_value(stmt: &Stmt, name: &str) -> bool {
     match stmt {
         Stmt::Binding { name: bound, .. } => bound == name,
@@ -3148,7 +3158,22 @@ fn merge_matching(
     let Some(decl) = module.stmts.iter().find(|s| matches(s)) else {
         return false;
     };
-    if !merged_q.insert(format!("{}.{name}", path.join("."))) {
+    // Deduped on **every** identity the statement introduces, not just the one asked for. A
+    // declaration introduces exactly one, but `(host, port) = …` introduces two — and a consumer
+    // capturing both merged the one statement twice, the second copy reading as an assignment to
+    // the first (`cannot assign to host, which is immutable`, against a destructure that binds it).
+    let mut keys: Vec<String> = top_level_binding_names(decl)
+        .iter()
+        .map(|n| format!("{}.{n}", path.join(".")))
+        .collect();
+    if keys.is_empty() {
+        keys.push(format!("{}.{name}", path.join(".")));
+    }
+    let fresh = keys.iter().all(|key| !merged_q.contains(key));
+    for key in keys {
+        merged_q.insert(key);
+    }
+    if !fresh {
         return false;
     }
     let mut decl = decl.clone();
@@ -3198,6 +3223,16 @@ fn expand_module_refs(
         for captured in captures_of(decl) {
             if merge_one_capture(&captured, module, path, module_maps, merged_q, imported) {
                 work.push(captured);
+            }
+        }
+        // The other exact seed: a declaration's **module-scope** code — a field's default, a
+        // `destruct` block — is evaluated in the module's scope, so it names a module binding with
+        // no capture clause to declare it. `class Box { cap: int = limit }` needs `limit` exactly as
+        // a capturing `fn` needs what it captures, and without this the consumer got E0005 against
+        // the module's own field-default line.
+        for referenced in qualify::module_scope_names(decl) {
+            if merge_one_capture(&referenced, module, path, module_maps, merged_q, imported) {
+                work.push(referenced);
             }
         }
         // A merged **binding** carries an initializer that has to evaluate in the consumer's
@@ -6274,8 +6309,8 @@ mod tests {
         .expect("links");
         assert!(has_fn(&linked, "reader"));
         assert!(
-            has_binding(&linked, "x"),
-            "the captured module binding travels with the import: {:?}",
+            has_binding(&linked, "app.lib.x"),
+            "the captured module binding travels with the import, under its module's identity: {:?}",
             linked.program.stmts
         );
         assert!(
@@ -6317,12 +6352,12 @@ mod tests {
         )
         .expect("links");
         assert!(
-            has_binding(&linked, "base"),
+            has_binding(&linked, "app.lib.base"),
             "the binding a merged binding's initializer names travels too: {:?}",
             linked.program.stmts
         );
         assert!(
-            binding_at(&linked, "base") < binding_at(&linked, "x"),
+            binding_at(&linked, "app.lib.base") < binding_at(&linked, "app.lib.x"),
             "`base = 7` has to run before the `x = base + 1` that reads it: {:?}",
             linked.program.stmts
         );
@@ -6353,10 +6388,188 @@ mod tests {
         )
         .expect("links");
         assert!(
-            binding_at(&linked, "conn") < binding_at(&linked, "todos")
-                && binding_at(&linked, "todos") < binding_at(&linked, "live"),
+            binding_at(&linked, "app.lib.conn") < binding_at(&linked, "app.lib.todos")
+                && binding_at(&linked, "app.lib.todos") < binding_at(&linked, "app.lib.live"),
             "the whole chain runs in source order: {:?}",
             linked.program.stmts
+        );
+    }
+
+    /// A merged module's bindings are **its own**. Both modules bind `shared`, and so does the entry
+    /// — three bindings of one name, which used to be three writes to one slot in the flat merged
+    /// program (the later one silently winning for everybody). Each module's now carries its
+    /// module's identity, so all three coexist and the entry's is untouched.
+    #[test]
+    fn a_merged_binding_carries_its_modules_identity() {
+        let a = module(
+            "a.noe",
+            "namespace app.a;\n\
+             shared = 1;\n\
+             pub fn from_a() use (shared): int { return shared; }\n",
+        );
+        let b = module(
+            "b.noe",
+            "namespace app.b;\n\
+             shared = 2;\n\
+             pub fn from_b() use (shared): int { return shared; }\n",
+        );
+        let entry = "use app.a.from_a;\nuse app.b.from_b;\nshared = 3;\necho from_a() + from_b() + shared;\n";
+        let linked = link("main.noe", entry, noeta_lexer::Edition::DEFAULT, &[a, b])
+            .expect("three same-named bindings from three scopes coexist");
+        assert!(
+            has_binding(&linked, "app.a.shared"),
+            "{:?}",
+            linked.program.stmts
+        );
+        assert!(
+            has_binding(&linked, "app.b.shared"),
+            "{:?}",
+            linked.program.stmts
+        );
+        assert!(
+            has_binding(&linked, "shared"),
+            "the entry's own binding keeps its short name — nothing merges it: {:?}",
+            linked.program.stmts
+        );
+    }
+
+    /// The identity is the module's namespace **as this program resolved it**, which for a
+    /// dependency is the prefix its consumer keyed it under — the same namespace the module's
+    /// declarations are qualified with, so the two can never disagree.
+    #[test]
+    fn a_dependency_bindings_identity_follows_the_consumers_import_root() {
+        let dep = DepPackage {
+            prefix: vec!["webclient".to_string()],
+            root: "http".to_string(),
+            modules: vec![module(
+                "client.noe",
+                "namespace http.client;\n\
+                 base = \"https://example.test\";\n\
+                 pub fn url() use (base): string { return base; }\n",
+            )],
+            dep_renames: Default::default(),
+            native: false,
+            edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
+        };
+        let entry = "use webclient.client.url;\nbase = \"mine\";\necho url();\necho base;\n";
+        let linked = link_with_deps(
+            "main.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            &[],
+            std::slice::from_ref(&dep),
+        )
+        .expect("links");
+        assert!(
+            has_binding(&linked, "webclient.client.base"),
+            "the dependency's binding is qualified with the prefix the consumer keyed it under: {:?}",
+            linked.program.stmts
+        );
+        assert!(
+            has_binding(&linked, "base"),
+            "and the consumer's own `base` is a different binding: {:?}",
+            linked.program.stmts
+        );
+    }
+
+    /// Not everything inside a declaration is sealed. A field's default and a `destruct` block are
+    /// evaluated in the module's own scope, so they name a module binding directly — no capture
+    /// clause exists to declare it, and none is needed where the module was written. Importing the
+    /// class has to carry those bindings, and rewrite them, exactly as it does for a capture.
+    #[test]
+    fn an_imported_class_drags_in_the_bindings_its_field_defaults_and_destructor_name() {
+        let sibling = module(
+            "lib.noe",
+            "namespace app.lib;\n\
+             limit = 7;\n\
+             tag = \"bye\";\n\
+             pub class Box {\n\
+               pub cap: int = limit\n\
+               fn new(): Box { return Box {}; }\n\
+               destruct { echo tag }\n\
+             }\n",
+        );
+        let linked = link(
+            "main.noe",
+            "use app.lib.Box;\nlimit = 99;\nb = Box.new();\necho b.cap;\n",
+            noeta_lexer::Edition::DEFAULT,
+            std::slice::from_ref(&sibling),
+        )
+        .expect("links");
+        assert!(
+            has_binding(&linked, "app.lib.limit"),
+            "the field default's binding travels: {:?}",
+            linked.program.stmts
+        );
+        assert!(
+            has_binding(&linked, "app.lib.tag"),
+            "and the `destruct` block's: {:?}",
+            linked.program.stmts
+        );
+        let Some(Stmt::Class(class)) = linked
+            .program
+            .stmts
+            .iter()
+            .find(|s| matches!(s, Stmt::Class(c) if leaf(c.name.as_str()) == "Box"))
+        else {
+            panic!("`Box` merged")
+        };
+        assert!(
+            matches!(&class.fields[0].default, Some(Expr::Ident { name, .. }) if name == "app.lib.limit"),
+            "and the default reads the module's binding, not the consumer's `limit`: {:?}",
+            class.fields[0].default
+        );
+    }
+
+    /// A `fn` that does **not** capture a module binding may name a parameter after one: it is
+    /// sealed, so inside it that name is the parameter and always was. The rewrite is per capture
+    /// scope for exactly this reason — a blanket rename of the module's statements would redirect
+    /// the parameter to the global.
+    #[test]
+    fn a_parameter_named_like_a_module_binding_is_not_rewritten() {
+        let sibling = module(
+            "lib.noe",
+            "namespace app.lib;\n\
+             conn = \"module\";\n\
+             pub fn describe(conn: string): string { return conn; }\n\
+             pub fn global() use (conn): string { return conn; }\n",
+        );
+        let linked = link(
+            "main.noe",
+            "use app.lib.{describe, global};\necho describe(\"x\");\necho global();\n",
+            noeta_lexer::Edition::DEFAULT,
+            std::slice::from_ref(&sibling),
+        )
+        .expect("links");
+        let Some(Stmt::Fn(describe)) = linked
+            .program
+            .stmts
+            .iter()
+            .find(|s| matches!(s, Stmt::Fn(f) if leaf(f.name.as_str()) == "describe"))
+        else {
+            panic!("`describe` merged")
+        };
+        assert_eq!(
+            describe.params[0].name, "conn",
+            "the parameter keeps its name"
+        );
+        assert!(
+            matches!(&describe.body[0], Stmt::Return { value: Some(Expr::Ident { name, .. }), .. } if name == "conn"),
+            "and its body still reads the parameter, not the global: {:?}",
+            describe.body
+        );
+        let Some(Stmt::Fn(global)) = linked
+            .program
+            .stmts
+            .iter()
+            .find(|s| matches!(s, Stmt::Fn(f) if leaf(f.name.as_str()) == "global"))
+        else {
+            panic!("`global` merged")
+        };
+        assert_eq!(
+            global.captures[0].0, "app.lib.conn",
+            "while the capturing one names the module's global by its identity"
         );
     }
 
@@ -6387,7 +6600,7 @@ mod tests {
             .position(|s| matches!(s, Stmt::Use { .. }))
             .expect("the sibling's `use std.math` is retained");
         assert!(
-            first_use < binding_at(&linked, "x"),
+            first_use < binding_at(&linked, "app.lib.x"),
             "the retained `use` binds its handle before the merged binding runs: {:?}",
             linked.program.stmts
         );
@@ -6416,7 +6629,7 @@ mod tests {
         )
         .expect("links");
         assert!(
-            has_binding(&linked, "base"),
+            has_binding(&linked, "app.lib.base"),
             "a method's capture drags its module binding too: {:?}",
             linked.program.stmts
         );
@@ -6449,7 +6662,7 @@ mod tests {
         assert!(has_fn(&linked, "handler"), "the annotated root is merged");
         assert!(has_fn(&linked, "helper"), "and its callee");
         assert!(
-            has_binding(&linked, "x"),
+            has_binding(&linked, "app.routes.x"),
             "and the callee's captured binding: {:?}",
             linked.program.stmts
         );
@@ -6476,42 +6689,9 @@ mod tests {
         .expect("links");
         assert!(has_fn(&linked, "clamp"));
         assert!(
-            !has_binding(&linked, "limit"),
+            !has_binding(&linked, "app.lib.limit") && !has_binding(&linked, "limit"),
             "the module binding is not dragged in by a same-named parameter: {:?}",
             linked.program.stmts
-        );
-    }
-
-    /// A merged binding keeps its own name, so two modules needing same-named bindings is a real
-    /// ambiguity — named, not silently resolved in favour of whichever merged last.
-    #[test]
-    fn two_modules_needing_a_same_named_binding_collide() {
-        let a = module(
-            "a.noe",
-            "namespace app.a;\n\
-             shared = 1;\n\
-             pub fn from_a() use (shared): int { return shared; }\n",
-        );
-        let b = module(
-            "b.noe",
-            "namespace app.b;\n\
-             shared = 2;\n\
-             pub fn from_b() use (shared): int { return shared; }\n",
-        );
-        let entry = "use app.a.from_a;\nuse app.b.from_b;\necho from_a() + from_b();\n";
-        let errors = link("main.noe", entry, noeta_lexer::Edition::DEFAULT, &[a, b])
-            .expect_err("the two `shared` bindings cannot both be `shared`");
-        assert!(
-            errors
-                .iter()
-                .any(|e| e.diagnostic.message.contains("shared")
-                    && e.diagnostic.message.contains("app.a")
-                    && e.diagnostic.message.contains("app.b")),
-            "the error names the binding and both modules: {:?}",
-            errors
-                .iter()
-                .map(|e| e.diagnostic.message.clone())
-                .collect::<Vec<_>>()
         );
     }
 }

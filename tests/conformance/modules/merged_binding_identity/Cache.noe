@@ -1,0 +1,8 @@
+// A second module that picks the same name for its own private state. Nothing about either module
+// says the other exists.
+
+conn = "cache"
+
+pub fn read() use (conn): string {
+    return conn
+}

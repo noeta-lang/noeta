@@ -1,0 +1,12 @@
+// A module with private top-level state, of the name every module of this kind picks.
+
+mut conn = "store"
+
+pub fn read() use (conn): string {
+    return conn
+}
+
+pub fn rename(to: string) use (conn): string {
+    conn = to
+    return conn
+}

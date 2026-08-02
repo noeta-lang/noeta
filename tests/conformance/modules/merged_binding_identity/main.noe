@@ -1,0 +1,23 @@
+// A merged module's top-level bindings are ITS OWN.
+//
+// A declaration merges under a qualified identity, so `Store.read` and `Cache.read` coexist. A
+// binding used to keep its short name in the merged program's one flat scope, so all three `conn`s
+// here — two modules' private state and this file's own — were one slot: whichever statement ran
+// last silently won for everybody, and a module read a value from code that had never heard of it.
+// With both immutable it surfaced instead as `cannot assign to conn, which is immutable`, pointing
+// at a line whose author had bound a name they own.
+//
+// Each module's binding now carries that module's identity, so the three coexist, `rename` writes
+// through the capture to `Store`'s own (a capture is a live view, not a copy), and this file's
+// `conn` is untouched by any of it.
+// expect: stdout "store cache mine"
+// expect: stdout "renamed cache mine"
+// expect: exit 0
+use App.Store.{read as store_read, rename}
+use App.Cache.read as cache_read
+
+conn = "mine"
+
+echo "${store_read()} ${cache_read()} ${conn}"
+rename("renamed")
+echo "${store_read()} ${cache_read()} ${conn}"
