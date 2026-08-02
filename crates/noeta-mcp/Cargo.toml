@@ -54,8 +54,10 @@ tokio = { workspace = true, features = ["io-std", "rt-multi-thread", "macros"] }
 futures-util = { workspace = true }
 rmcp = { workspace = true }
 serde = { workspace = true }
-# Embeds the docs + example corpus (see workspace manifest note) for the M1 Ground-pillar tools.
-include_dir = { workspace = true }
+# (`include_dir` is gone: the example corpus is baked by `build.rs` into one blob + an integer
+# index, because one `&'static str` per embedded file is one `ld.so` relocation per embedded file
+# at every process start — 4,709 of them, 8.9% of the binary's total. The docs corpus still rides
+# `include_dir` inside `noeta-ide`.)
 
 [dev-dependencies]
 # The in-process round-trip fixture drives a real MCP session (client ⇄ server over an in-memory
