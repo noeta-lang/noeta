@@ -24,20 +24,20 @@ fn main() {
         "show" => {
             let src = run_target::source(seed, n);
             println!("{src}");
-            println!("--- verdict: {:?}", run_target::evaluate(&src));
+            println!("--- verdict: {:?}", run_target::evaluate_total(&src));
         }
         // Judge a program supplied on stdin — how a hand-reduced candidate gets confirmed.
         "stdin" => {
             let mut src = String::new();
             std::io::Read::read_to_string(&mut std::io::stdin(), &mut src).expect("read stdin");
-            println!("{:?}", run_target::evaluate(&src));
+            println!("{:?}", run_target::evaluate_total(&src));
             for d in run_target::check_diagnostics(&src) {
                 println!("  check: {d}");
             }
         }
         "min" => {
             let src = run_target::source(seed, n);
-            let Err(v) = run_target::evaluate(&src) else {
+            let Err(v) = run_target::evaluate_total(&src) else {
                 println!("nonce {n} does not violate anything");
                 return;
             };
@@ -60,7 +60,7 @@ fn main() {
                 if run_target::uses_dynamic_typing(&src) {
                     dynamic += 1;
                 }
-                match run_target::evaluate(&src) {
+                match run_target::evaluate_total(&src) {
                     Ok(reach) => *histogram.entry(format!("{reach:?}")).or_default() += 1,
                     Err(v) => {
                         *histogram.entry("VIOLATION".to_string()).or_default() += 1;

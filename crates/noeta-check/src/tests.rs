@@ -2836,6 +2836,33 @@ fn a_top_level_statement_does_not_see_a_binding_declared_later() {
     assert_eq!(codes("f()\nf = fn(): int => 1\n"), vec!["E0005"]);
 }
 
+/// Two top-level declarations under one name in one file collide (E0020).
+///
+/// The symbol tables are maps, so the second registration silently replaced the first — and the
+/// compiler then looked up a method of the *first* class in the second's now-empty table and
+/// panicked with `no entry found for key` on a program the checker had called clean. Found by the
+/// `noeta-fuzz` execution oracle.
+#[test]
+fn two_declarations_of_one_name_in_a_file_collide() {
+    assert_eq!(
+        codes("class Beta {\n  fn f(): void {}\n}\nclass Beta {\n}\n"),
+        vec!["E0020"]
+    );
+    assert_eq!(codes("struct S { n: int }\nstruct S { m: int }\n"), vec!["E0020"]);
+    assert_eq!(
+        codes("fn g(): int { return 1 }\nfn g(): int { return 2 }\n"),
+        vec!["E0020"]
+    );
+    assert_eq!(codes("enum E { A }\nenum E { B }\n"), vec!["E0020"]);
+    // Across kinds, too — a type and a function cannot share a name either.
+    assert_eq!(
+        codes("struct S { n: int }\nfn S(): int { return 1 }\n"),
+        vec!["E0020"]
+    );
+    // One declaration each stays clean.
+    assert!(codes("struct S { n: int }\nclass C { n: int }\nenum E { A }\n").is_empty());
+}
+
 /// A `for (a, b) in …` pattern needs the *element* to be a tuple with a position per name.
 ///
 /// The misses used to bind a hole, so `for (a, b) in [1, 2, 3]` type-checked and then aborted with

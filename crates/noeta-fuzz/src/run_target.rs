@@ -102,6 +102,9 @@ pub enum Violation {
     },
     /// The VM and the Core-IR reference produced different observable results.
     BackendsDisagree { detail: String },
+    /// Some stage panicked. The pipeline reports an unsupported construct as a value
+    /// (`Err(Unsupported)`), so a panic is a different thing entirely: a shape nobody enumerated.
+    Panicked { where_: String },
 }
 
 impl std::fmt::Display for Violation {
@@ -122,6 +125,9 @@ impl std::fmt::Display for Violation {
             Violation::BackendsDisagree { detail } => {
                 write!(f, "the backends disagreed — {detail}")
             }
+            Violation::Panicked { where_ } => {
+                write!(f, "a stage panicked on a program the checker accepted: {where_}")
+            }
         }
     }
 }
@@ -137,6 +143,12 @@ pub fn class(v: &Violation) -> String {
             let field = detail.split(':').next().unwrap_or("?");
             format!("backends-{field}")
         }
+        // The panic's own location, which is what distinguishes two panics; the message around it
+        // varies with the program.
+        Violation::Panicked { where_ } => format!(
+            "panic-{}",
+            where_.split_whitespace().next().unwrap_or("?")
+        ),
     }
 }
 
@@ -284,13 +296,55 @@ fn truncate(text: &str) -> String {
     }
 }
 
+/// [`evaluate`], made total: a panic anywhere in the pipeline becomes a [`Violation::Panicked`]
+/// rather than taking the process with it.
+///
+/// A fuzz driver has to be the thing that *reports* a panic, not the thing that dies of one — a
+/// sweep that aborts at its first hit tells you about one program and nothing about the 5,000
+/// behind it. The panic hook is silenced for the duration, because the default one writes to stderr
+/// and a scan with a few hundred hits is then unreadable; the location is recovered from the
+/// payload instead, which is what `class` deduplicates on.
+///
+/// This is the entry point every sweep should call. [`evaluate`] stays panic-transparent for the
+/// caller that wants a backtrace.
+pub fn evaluate_total(src: &str) -> Result<Reach, Violation> {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::sync::{Arc, Mutex};
+
+    let site: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+    let sink = Arc::clone(&site);
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let at = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_else(|| "?".to_string());
+        *sink.lock().expect("panic-site sink") = format!("{at} — {}", panic_message(info));
+    }));
+    let out = catch_unwind(AssertUnwindSafe(|| evaluate(src)));
+    std::panic::set_hook(prev);
+    out.unwrap_or_else(|_| {
+        let where_ = site.lock().expect("panic-site sink").clone();
+        Err(Violation::Panicked { where_ })
+    })
+}
+
+/// The panic's own message, for the report. `PanicHookInfo::payload` is the only place it lives.
+fn panic_message(info: &std::panic::PanicHookInfo<'_>) -> String {
+    let p = info.payload();
+    p.downcast_ref::<&str>()
+        .map(|s| (*s).to_string())
+        .or_else(|| p.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "<non-string panic payload>".to_string())
+}
+
 /// Whether `src` still fails in the same *class*, for the minimizer.
 ///
 /// Class rather than message, for the same reason the fmt minimizer does it: a reduction that
 /// changes which name is missing has not preserved the defect, and one that merely renumbers a span
 /// has.
 pub fn still_fails(src: &str, target: &str) -> bool {
-    matches!(evaluate(src), Err(v) if class(&v) == target)
+    matches!(evaluate_total(src), Err(v) if class(&v) == target)
 }
 
 /// Line-granular delta debugging that preserves the violation class.
