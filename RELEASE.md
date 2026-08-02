@@ -20,12 +20,26 @@ $EDITOR Cargo.toml                             # [workspace.package] version = "
 cargo metadata --format-version 1 >/dev/null   # refreshes Cargo.lock, no build
 git add Cargo.toml Cargo.lock
 git commit -m "chore(release): bump workspace version to X.Y.Z"
-git push origin main
+
+git push origin main                           # ← branch FIRST, no tag
+#   now WAIT for CI to go green on that push:
+gh run watch "$(gh run list --workflow CI --branch main --limit 1 --json databaseId -q '.[].databaseId')" --exit-status
+
+# only once CI is green on the exact commit you are about to tag:
 git tag -a vX.Y.Z -m "vX.Y.Z
 
 <what ships, in a sentence or three>"
 git push origin vX.Y.Z
 ```
+
+**Push the branch and let CI go green before you push the tag.** The local gate is not a
+substitute: it runs on your box, with your toolchain, your caches and your CPU, and the release's
+own gate job runs *after* the tag exists. Tag a red tree and you have published a tag pointing at
+it — and a tag is what the whole ecosystem's `NOETA_VERSION` chases. Two pushes, in order, costs one
+CI cycle and removes that failure mode entirely.
+
+Tag the commit CI actually verified, which means the **version bump goes in before the push**, not
+between the green run and the tag.
 
 The lock diff should be **version lines only** — one per workspace crate, nothing else. Anything
 more means a dependency moved and you are shipping more than you think:
@@ -251,7 +265,9 @@ in full for that reason.
 ```
 [ ] scripts/gate.sh --full green on main
 [ ] version bumped, Cargo.lock diff is version lines only
-[ ] committed, pushed, tag pushed
+[ ] committed and pushed to main — WITHOUT the tag
+[ ] CI green on that push, in the real environment, on the exact commit to be tagged
+[ ] only then: tag pushed
 [ ] release workflow green — all jobs, not just the gate
 [ ] GitHub release has 4 tarballs + .vsix + SHA256SUMS
 [ ] org NOETA_VERSION reads the new tag
