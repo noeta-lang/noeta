@@ -62,6 +62,62 @@ fn an_executable_shebang_script_runs() {
 }
 
 #[test]
+fn the_plain_run_fast_path_agrees_with_the_parsed_path() {
+    // `noeta run <file>` — exactly three argv entries, no flags — skips building the clap command
+    // tree and calls `cmd_run` directly (~215 k instructions retired, ~9% of process startup, for a
+    // tree a flagless `run` reads nothing out of). This pins the seam: the shortcut and the three
+    // routes that still go through clap must produce the same bytes for the same program.
+    let file = temp_program(
+        "plain_run_fast_path",
+        "use std.args\necho \"n=${args.all().len()}\"\n",
+    );
+    // The fast path itself.
+    let fast = lang().arg("run").arg(&file).assert().success();
+    let fast_out = String::from_utf8(fast.get_output().stdout.clone()).unwrap();
+    assert_eq!(fast_out, "n=1\n");
+    // A flag anywhere declines the fast path — clap parses it, same program, same output.
+    lang()
+        .arg("run")
+        .arg("--no-cache")
+        .arg(&file)
+        .assert()
+        .success()
+        .stdout(fast_out.clone());
+    // So does the bare-file shortcut, which reaches `cmd_run` through clap's unknown-subcommand
+    // recovery.
+    lang().arg(&file).assert().success().stdout(fast_out);
+    // And a `--`-separated program argument still reaches the program (the fast path must not
+    // swallow it).
+    lang()
+        .arg("run")
+        .arg(&file)
+        .arg("--")
+        .arg("extra")
+        .assert()
+        .success()
+        .stdout("n=2\n");
+}
+
+#[test]
+fn run_help_and_flag_errors_are_untouched_by_the_fast_path() {
+    // A leading `-` in the file position is never a path: `run --help` must still render clap's
+    // help, and an unknown flag must still render clap's error, not be handed to the runner as a
+    // filename.
+    lang()
+        .arg("run")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Path to a `.noe` file"));
+    lang()
+        .arg("run")
+        .arg("--nope")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unexpected argument '--nope'"));
+}
+
+#[test]
 fn run_real_host_uuids_are_real() {
     // Under `noeta run` (the real host, id-entropy U3) `id.uuid()` draws OS entropy and
     // `id.uuid_v7()` real wall time — unlike the sandbox's pinned values (`std/id_uuid.noe`),
