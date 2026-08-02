@@ -123,6 +123,39 @@ fn is_decorator_directive(name: &str) -> bool {
 /// (empty) parser state and context suffice here.
 type Extra<'src> = extra::Err<Rich<'src, T, SimpleSpan>>;
 
+/// A **shared handle to the one type grammar** built for a parse.
+///
+/// [`type_parser`] is a doubly-recursive grammar (`recursive` for the type itself, a second
+/// `recursive` for the `?`-tighter base) and a type annotation is reachable from ~30 places — every
+/// binding, parameter, field, variant, cast, turbofish, `is` test and `impl` head. Constructing it
+/// per *site* meant building it dozens of times per parse: with the expression grammar itself built
+/// three times (full, control-flow head, and the head's nested full sub-expression), parsing the
+/// one-line program `echo 0` constructed **80** complete type grammars — counted, not estimated —
+/// each one two `Rc::new_cyclic` allocations plus four `.boxed()` ones. That construction, not
+/// parsing, was the dominant cost of parsing a file, and it is a *constant*: an empty file paid it
+/// in full. It is one per parse now, plus one per `${…}` hole.
+///
+/// So the grammar is built once per parse and threaded down as this handle. [`Boxed`] is an `Rc`
+/// internally, so a clone at a use site is a refcount bump instead of a fresh recursive build, and
+/// chumsky's `boxed()` never double-boxes. It stays per-parse rather than cached in a `static`:
+/// a chumsky parser is parameterized by the *input's* lifetime (`I: Input<'src>`, and `Rich<'src,
+/// …>` borrows for its error slices), so a built grammar cannot outlive the token buffer it was
+/// built against — and `Boxed` is `Rc`-backed, hence neither `Send` nor `Sync`. Sharing one
+/// instance across sites is behaviour-preserving because a combinator parser is a pure value:
+/// `boxed()` is type erasure only, and chumsky's errors carry expected-token sets, never parser
+/// identity.
+type TypeP<'src, I> = Boxed<'src, 'src, I, TypeRef, Extra<'src>>;
+
+/// A shared handle to the **full** expression grammar, for the same reason as [`TypeP`].
+///
+/// The expression grammar exists in two forms — full, and the control-flow *head* form that forbids
+/// a bare top-level struct literal ([`head_expr_parser`]) — but the head form's nested
+/// sub-expressions are the full grammar, so building the head used to build a second complete copy
+/// of it. The statement grammar has already built the full one by then, and it is built from the
+/// identical arguments, so the head takes that one as a handle instead. Two expression grammars per
+/// parse rather than three; sharing is behaviour-preserving for the reason given on [`TypeP`].
+type ExprP<'src, I> = Boxed<'src, 'src, I, Expr, Extra<'src>>;
+
 /// Everything the grammar closures need from the outside world: the source (to slice
 /// identifier/literal text by span) and a side-channel for code-carrying diagnostics.
 /// `Copy` so it can be freely captured by the many combinator closures.
@@ -2089,6 +2122,7 @@ where
 /// to the constant literal tree an attribute may carry.
 fn attribute_parser<'src, I, P>(
     ctx: Ctx<'src>,
+    type_p: TypeP<'src, I>,
     expr: P,
 ) -> impl Parser<'src, I, Attribute, Extra<'src>> + Clone
 where
@@ -2120,7 +2154,7 @@ where
         .ignore_then(just(T::LBracket))
         .ignore_then(dotted_name)
         .then(
-            attr_arg_parser(ctx, expr)
+            attr_arg_parser(ctx, type_p, expr)
                 .separated_by(just(T::Comma))
                 .allow_trailing()
                 .collect::<Vec<_>>()
@@ -2147,6 +2181,7 @@ where
 /// from outside it.
 fn attr_arg_parser<'src, I, P>(
     ctx: Ctx<'src>,
+    type_p: TypeP<'src, I>,
     expr: P,
 ) -> impl Parser<'src, I, DirectiveArg, Extra<'src>> + Clone
 where
@@ -2181,7 +2216,8 @@ where
     let generic_app = id
         .clone()
         .then(
-            type_parser(ctx)
+            type_p
+                .clone()
                 .separated_by(just(T::Comma))
                 .allow_trailing()
                 .at_least(1)
@@ -2245,6 +2281,7 @@ where
 /// Splitting that judgement across the two would put the rule in two places.
 fn params_parser<'src, I, P>(
     ctx: Ctx<'src>,
+    type_p: TypeP<'src, I>,
     expr: P,
     allow_defaults: bool,
 ) -> impl Parser<'src, I, Vec<Param>, Extra<'src>> + Clone
@@ -2257,11 +2294,11 @@ where
     } else {
         empty().to(None).boxed()
     };
-    let param = attribute_parser(ctx, expr)
+    let param = attribute_parser(ctx, type_p.clone(), expr)
         .repeated()
         .collect::<Vec<_>>()
         .then(ident_parser(ctx))
-        .then(just(T::Colon).ignore_then(type_parser(ctx)).or_not())
+        .then(just(T::Colon).ignore_then(type_p.clone()).or_not())
         .then(default)
         .map_with(
             move |(((attrs, (name, name_span)), ty), default), e| Param {
@@ -2299,6 +2336,7 @@ where
 /// and patterns are both positional.
 fn variant_fields_parser<'src, I, P>(
     ctx: Ctx<'src>,
+    type_p: TypeP<'src, I>,
     expr: P,
 ) -> impl Parser<'src, I, Vec<Param>, Extra<'src>> + Clone
 where
@@ -2309,10 +2347,10 @@ where
     // type and leave the `:` stranded.
     let named = ident_parser(ctx)
         .then_ignore(just(T::Colon))
-        .then(type_parser(ctx))
+        .then(type_p.clone())
         .map(|((name, name_span), ty)| (Some((name, name_span)), ty));
-    let positional = type_parser(ctx).map(|ty| (None, ty));
-    let field = attribute_parser(ctx, expr)
+    let positional = type_p.clone().map(|ty| (None, ty));
+    let field = attribute_parser(ctx, type_p.clone(), expr)
         .repeated()
         .collect::<Vec<_>>()
         .then(choice((named, positional)))
@@ -2354,7 +2392,10 @@ where
 }
 
 /// A `match` pattern. Exhaustiveness is unchecked in M0 (a checker concern, M1).
-fn pattern_parser<'src, I>(ctx: Ctx<'src>) -> impl Parser<'src, I, Pattern, Extra<'src>> + Clone
+fn pattern_parser<'src, I>(
+    ctx: Ctx<'src>,
+    type_p: TypeP<'src, I>,
+) -> impl Parser<'src, I, Pattern, Extra<'src>> + Clone
 where
     I: ValueInput<'src, Token = T, Span = SimpleSpan>,
 {
@@ -2437,7 +2478,7 @@ where
             });
         // `is T` — a type-pattern discriminating a `dyn`/union scrutinee.
         let is_type = just(T::IsKw)
-            .ignore_then(type_parser(ctx))
+            .ignore_then(type_p.clone())
             .map_with(move |ty, e| Pattern::IsType {
                 ty,
                 span: ctx.to_span(e.span()),
@@ -2489,13 +2530,14 @@ where
 /// holes), a freshly-built statement parser.
 fn expr_parser<'src, I, PS>(
     ctx: Ctx<'src>,
+    type_p: TypeP<'src, I>,
     stmt: PS,
 ) -> impl Parser<'src, I, Expr, Extra<'src>> + Clone
 where
     I: ValueInput<'src, Token = T, Span = SimpleSpan>,
     PS: Parser<'src, I, Stmt, Extra<'src>> + Clone + 'src,
 {
-    expr_with(ctx, stmt, true)
+    expr_with(ctx, type_p, stmt, true, None)
 }
 
 /// The **control-flow-head** expression (object-model slice 7b): the expression grammar with a bare
@@ -2503,15 +2545,20 @@ where
 /// condition is unambiguously the block — which is what lets the empty literal `T {}` be enabled
 /// everywhere else. Struct literals remain available inside parentheses/brackets/call-args within the
 /// head (those nest the *full* expression), so a struct literal in a condition is written `(T { … })`.
+///
+/// `full` is the caller's already-built full expression grammar, used for the head's nested
+/// sub-expressions — see [`ExprP`].
 fn head_expr_parser<'src, I, PS>(
     ctx: Ctx<'src>,
+    type_p: TypeP<'src, I>,
     stmt: PS,
+    full: ExprP<'src, I>,
 ) -> impl Parser<'src, I, Expr, Extra<'src>> + Clone
 where
     I: ValueInput<'src, Token = T, Span = SimpleSpan>,
     PS: Parser<'src, I, Stmt, Extra<'src>> + Clone + 'src,
 {
-    expr_with(ctx, stmt, false)
+    expr_with(ctx, type_p, stmt, false, Some(full))
 }
 
 /// The expression grammar, parameterized by whether a bare struct literal may appear at the top
@@ -2521,8 +2568,10 @@ where
 /// grammar (`sub`), so a parenthesized/bracketed struct literal is unaffected.
 fn expr_with<'src, I, PS>(
     ctx: Ctx<'src>,
+    type_p: TypeP<'src, I>,
     stmt: PS,
     allow_struct: bool,
+    full: Option<ExprP<'src, I>>,
 ) -> impl Parser<'src, I, Expr, Extra<'src>> + Clone
 where
     I: ValueInput<'src, Token = T, Span = SimpleSpan>,
@@ -2532,13 +2581,15 @@ where
         // Every *nested* sub-expression (a parenthesized expr, a call/index argument, a list/map/
         // literal element, a closure body, an interpolation hole) parses with the **full** grammar:
         // when `allow_struct` is already true this is just the recursive handle; when false (a head)
-        // it is a fresh full parser, so the struct-literal restriction applies only at the head's top
-        // level and a `(T { … })` inside the condition still parses. The fresh full parser reuses the
-        // same lazy `stmt` handle, so it does not rebuild the statement grammar.
+        // it is the caller's full parser ([`ExprP`]), so the struct-literal restriction applies only
+        // at the head's top level and a `(T { … })` inside the condition still parses. A caller that
+        // has no full grammar to hand (there is none today; the head is the only `false` case) still
+        // gets a correct one, built from the same lazy `stmt` handle so the statement grammar is
+        // never rebuilt.
         let sub = if allow_struct {
             expr.clone().boxed()
         } else {
-            expr_parser(ctx, stmt.clone()).boxed()
+            full.unwrap_or_else(|| expr_parser(ctx, type_p.clone(), stmt.clone()).boxed())
         };
         let id = ident_parser(ctx);
 
@@ -2820,8 +2871,8 @@ where
             .delimited_by(just(T::LBrace), just(T::RBrace))
             .map(ClosureBody::Block);
         let closure = just(T::FnKw)
-            .ignore_then(params_parser(ctx, sub.clone(), true))
-            .then(just(T::Colon).ignore_then(type_parser(ctx)).or_not())
+            .ignore_then(params_parser(ctx, type_p.clone(), sub.clone(), true))
+            .then(just(T::Colon).ignore_then(type_p.clone()).or_not())
             .then(choice((arrow_body, block_body)))
             .map_with(move |((params, ret), body), e| Expr::Closure {
                 params,
@@ -2864,7 +2915,7 @@ where
         // expression (evaluated after the pattern matches, with the pattern's bindings in
         // scope); `if` after a pattern is unambiguous — a pattern never continues with `if` —
         // and the guard expression stops at `=>` like any other expression operand.
-        let arm = pattern_parser(ctx)
+        let arm = pattern_parser(ctx, type_p.clone())
             .then(just(T::IfKw).ignore_then(sub.clone()).or_not())
             .then_ignore(just(T::FatArrow))
             .then(arm_body)
@@ -3040,7 +3091,7 @@ where
             just(kw)
                 .ignore_then(choice((
                     just(T::ColonColon)
-                        .ignore_then(type_parser(ctx).delimited_by(just(T::Lt), just(T::Gt)))
+                        .ignore_then(type_p.clone().delimited_by(just(T::Lt), just(T::Gt)))
                         .then_ignore(just(T::LParen))
                         .then_ignore(just(T::RParen))
                         .map(TypeOperand::Static),
@@ -3091,7 +3142,7 @@ where
         // identity function on its argument. That is what `ReflectShape::StaticType` records.
         let type_name = just(T::TypeNameKw)
             .ignore_then(just(T::ColonColon))
-            .ignore_then(type_parser(ctx).delimited_by(just(T::Lt), just(T::Gt)))
+            .ignore_then(type_p.clone().delimited_by(just(T::Lt), just(T::Gt)))
             .then_ignore(just(T::LParen))
             .then_ignore(just(T::RParen))
             .map_with(move |ty, e| Expr::Reflect {
@@ -3106,7 +3157,7 @@ where
         // rather than the name (`ReflectShape::StaticTypeWith`).
         let from_bytes = just(T::FromBytesKw)
             .ignore_then(just(T::ColonColon))
-            .ignore_then(type_parser(ctx).delimited_by(just(T::Lt), just(T::Gt)))
+            .ignore_then(type_p.clone().delimited_by(just(T::Lt), just(T::Gt)))
             .then(sub.clone().delimited_by(just(T::LParen), just(T::RParen)))
             .map_with(move |(ty, blob), e| Expr::Reflect {
                 which: ReflectKind::FromBytes,
@@ -3126,7 +3177,7 @@ where
         let channel = ident_parser(ctx)
             .filter(|(name, _)| name == "channel")
             .ignore_then(just(T::ColonColon))
-            .ignore_then(type_parser(ctx).delimited_by(just(T::Lt), just(T::Gt)))
+            .ignore_then(type_p.clone().delimited_by(just(T::Lt), just(T::Gt)))
             .then(sub.clone().delimited_by(just(T::LParen), just(T::RParen)))
             .map_with(move |(elem, capacity), e| Expr::Channel {
                 elem,
@@ -3158,7 +3209,7 @@ where
             .then_ignore(just(T::Dot))
             .then(ident_parser(ctx))
             .then_ignore(just(T::ColonColon))
-            .then(type_parser(ctx).delimited_by(just(T::Lt), just(T::Gt)))
+            .then(type_p.clone().delimited_by(just(T::Lt), just(T::Gt)))
             .then(
                 labelled_arg
                     .clone()
@@ -3193,7 +3244,8 @@ where
         let typed_fn_call = ident_parser(ctx)
             .then_ignore(just(T::ColonColon))
             .then(
-                type_parser(ctx)
+                type_p
+                    .clone()
                     .separated_by(just(T::Comma))
                     .at_least(1)
                     .allow_trailing()
@@ -3235,7 +3287,7 @@ where
         let roles_of = just(T::RolesOfKw)
             .ignore_then(choice((
                 just(T::ColonColon)
-                    .ignore_then(type_parser(ctx).delimited_by(just(T::Lt), just(T::Gt)))
+                    .ignore_then(type_p.clone().delimited_by(just(T::Lt), just(T::Gt)))
                     .then_ignore(just(T::LParen))
                     .then_ignore(just(T::RParen))
                     .map(|ty| ReflectOperand::Type(TypeOperand::Static(ty))),
@@ -3306,7 +3358,7 @@ where
         let construct = just(T::ConstructKw)
             .ignore_then(choice((
                 just(T::ColonColon)
-                    .ignore_then(type_parser(ctx).delimited_by(just(T::Lt), just(T::Gt)))
+                    .ignore_then(type_p.clone().delimited_by(just(T::Lt), just(T::Gt)))
                     .then(sub.clone().delimited_by(just(T::LParen), just(T::RParen)))
                     .map(|(ty, fields)| (TypeOperand::Static(ty), fields)),
                 sub.clone()
@@ -3417,7 +3469,7 @@ where
                 14,
                 just(T::Dot).ignore_then(choice((
                     just(T::AsKw)
-                        .ignore_then(type_parser(ctx).delimited_by(just(T::Lt), just(T::Gt)))
+                        .ignore_then(type_p.clone().delimited_by(just(T::Lt), just(T::Gt)))
                         .then_ignore(just(T::LParen))
                         .then_ignore(just(T::RParen))
                         .map(DotKeyword::As),
@@ -3444,7 +3496,7 @@ where
             // union separator, distinct from `||` (which stops the type and resumes as `Or`).
             postfix(
                 5,
-                just(T::IsKw).ignore_then(type_parser(ctx)),
+                just(T::IsKw).ignore_then(type_p.clone()),
                 move |operand, ty, e| Expr::TypeTest {
                     expr: Box::new(operand),
                     ty,
@@ -3511,7 +3563,8 @@ where
                         .then(
                             just(T::ColonColon)
                                 .ignore_then(
-                                    type_parser(ctx)
+                                    type_p
+                                        .clone()
                                         .separated_by(just(T::Comma))
                                         .at_least(1)
                                         .allow_trailing()
@@ -3524,7 +3577,8 @@ where
                         .map(|(name, turbo)| MemberPostfix::Dot(name, turbo)),
                     just(T::ColonColon)
                         .ignore_then(
-                            type_parser(ctx)
+                            type_p
+                                .clone()
                                 .separated_by(just(T::Comma))
                                 .at_least(1)
                                 .allow_trailing()
@@ -3542,7 +3596,8 @@ where
                                 .then(
                                     just(T::ColonColon)
                                         .ignore_then(
-                                            type_parser(ctx)
+                                            type_p
+                                                .clone()
                                                 .separated_by(just(T::Comma))
                                                 .at_least(1)
                                                 .allow_trailing()
@@ -3934,7 +3989,10 @@ where
 }
 
 /// The statement grammar (recursive: blocks contain statements).
-fn statement_parser<'src, I>(ctx: Ctx<'src>) -> impl Parser<'src, I, Stmt, Extra<'src>> + Clone
+fn statement_parser<'src, I>(
+    ctx: Ctx<'src>,
+    type_p: TypeP<'src, I>,
+) -> impl Parser<'src, I, Stmt, Extra<'src>> + Clone
 where
     I: ValueInput<'src, Token = T, Span = SimpleSpan>,
 {
@@ -3942,10 +4000,10 @@ where
         // Pass the lazy `stmt` handle into the expression grammar so a block-bodied closure can parse
         // statements through it — the mutual expr↔stmt recursion (object-model: real anonymous
         // functions) goes through this handle lazily, never rebuilding the statement grammar eagerly.
-        let expr = expr_parser(ctx, stmt.clone());
+        let expr = expr_parser(ctx, type_p.clone(), stmt.clone()).boxed();
         // The condition/iterable of a control-flow head uses the **restricted** expression grammar
         // (no bare top-level struct literal), so the `{` that follows is always the block (slice 7b).
-        let head_expr = head_expr_parser(ctx, stmt.clone());
+        let head_expr = head_expr_parser(ctx, type_p.clone(), stmt.clone(), expr.clone());
         let id = ident_parser(ctx);
         let block = recovering_list(stmt.clone()).delimited_by(just(T::LBrace), just(T::RBrace));
 
@@ -3959,7 +4017,7 @@ where
 
         let mut_binding = just(T::MutKw)
             .ignore_then(id.clone())
-            .then(just(T::Colon).ignore_then(type_parser(ctx)).or_not())
+            .then(just(T::Colon).ignore_then(type_p.clone()).or_not())
             .then_ignore(just(T::Eq))
             .then(expr.clone())
             .then_ignore(stmt_terminator(ctx))
@@ -4139,7 +4197,8 @@ where
             );
         let trait_bound = bound_path
             .then(
-                type_parser(ctx)
+                type_p
+                    .clone()
                     .separated_by(just(T::Comma))
                     .at_least(1)
                     .collect::<Vec<_>>()
@@ -4182,10 +4241,16 @@ where
         // `#[ Name ]` / `#[ Name(arg, arg) ]` — a data attribute in annotation position, yielding
         // the bare [`Attribute`]. Built by the shared [`attribute_parser`] so that this grammar and
         // the one a parameter list uses are the same grammar, not two that agree today.
-        let attr_decl = attribute_parser(ctx, expr.clone());
+        let attr_decl = attribute_parser(ctx, type_p.clone(), expr.clone());
         // The shared argument grammar, which the `@`-directive forms below also parse their
         // arguments with — same constant literal tree, one definition.
-        let attr_arg = attr_arg_parser(ctx, expr.clone());
+        let attr_arg = attr_arg_parser(ctx, type_p.clone(), expr.clone());
+        // The parameter-list grammar, built **once** and shared by every callable form below (`fn`,
+        // a trait-method signature, a class/enum method). All three want the identical grammar, and
+        // it is not a cheap one — it carries the shared attribute grammar and, through it, the
+        // attribute-argument fold. `Boxed` is an `Rc`, so a use site clones a handle (see
+        // [`TypeP`]) rather than rebuilding all of that per form.
+        let params = params_parser(ctx, type_p.clone(), expr.clone(), true).boxed();
 
         // `fn f(params) use (a, b): Ret { … }` — the optional **capture clause** on a named
         // function or method. A named fn is SEALED (its body sees params + statics only); each
@@ -4216,9 +4281,9 @@ where
             .then_ignore(just(T::FnKw))
             .then(id.clone())
             .then(type_params.clone())
-            .then(params_parser(ctx, expr.clone(), true))
+            .then(params.clone())
             .then(capture_clause.clone())
-            .then(just(T::Colon).ignore_then(type_parser(ctx)).or_not())
+            .then(just(T::Colon).ignore_then(type_p.clone()).or_not())
             .then(block.clone())
             .map_with(
                 move |(
@@ -4260,7 +4325,8 @@ where
             .collect::<Vec<_>>()
             .then(id.clone())
             .then(choice((
-                variant_fields_parser(ctx, expr.clone()).map(|fields| (fields, None)),
+                variant_fields_parser(ctx, type_p.clone(), expr.clone())
+                    .map(|fields| (fields, None)),
                 just(T::Eq)
                     .ignore_then(expr.clone())
                     .map(|value| (Vec::new(), Some(value))),
@@ -4290,7 +4356,7 @@ where
             .then(just(T::MutKw).or_not())
             .then(id.clone())
             .then_ignore(just(T::Colon))
-            .then(type_parser(ctx))
+            .then(type_p.clone())
             .then(just(T::Eq).ignore_then(expr.clone()).or_not())
             .map_with(
                 move |(((((attrs, pub_kw), mut_kw), (name, name_span)), ty), default), e| {
@@ -4366,9 +4432,9 @@ where
             // A method may declare its OWN type parameters (`fn pick<U>(...)`, generic methods
             // D3), composing with the enclosing class's (which stay in scope around it).
             .then(type_params.clone())
-            .then(params_parser(ctx, expr.clone(), true))
+            .then(params.clone())
             .then(capture_clause.clone())
-            .then(just(T::Colon).ignore_then(type_parser(ctx)).or_not())
+            .then(just(T::Colon).ignore_then(type_p.clone()).or_not())
             .then(block.clone())
             .map_with(
                 move |(
@@ -4431,7 +4497,8 @@ where
         // The body is just methods; they are flattened into the class's method table below.
         // A generic trait implements at an instantiation: `impl Cache<string> { … }` — the
         // arguments substitute through the trait's default methods (generic-trait UT5).
-        let trait_args = type_parser(ctx)
+        let trait_args = type_p
+            .clone()
             .separated_by(just(T::Comma))
             .at_least(1)
             .collect::<Vec<_>>()
@@ -4443,7 +4510,7 @@ where
         let assoc_binding = just(T::TypeKw)
             .ignore_then(id.clone())
             .then_ignore(just(T::Eq))
-            .then(type_parser(ctx))
+            .then(type_p.clone())
             .map(|((name, _name_span), ty)| (name, ty));
         // One member of an `impl` body: an associated-type binding or a method. The binding is tried
         // first so a leading `type` opens a binding, not a (malformed) method.
@@ -4492,7 +4559,7 @@ where
         let enum_decl = just(T::EnumKw)
             .ignore_then(id.clone())
             .then(type_params.clone())
-            .then(just(T::Colon).ignore_then(type_parser(ctx)).or_not())
+            .then(just(T::Colon).ignore_then(type_p.clone()).or_not())
             .then(
                 enum_member
                     // Absorb the woven `;` between members on separate lines (slice 7).
@@ -4588,8 +4655,8 @@ where
             // Parsed so the checker can reject it with a CLEAR error (trait method sets stay
             // monomorphic — a per-method `<U>` on a trait method is E0058, not a parse fumble).
             .then(type_params.clone())
-            .then(params_parser(ctx, expr.clone(), true))
-            .then(just(T::Colon).ignore_then(type_parser(ctx)).or_not())
+            .then(params.clone())
+            .then(just(T::Colon).ignore_then(type_p.clone()).or_not())
             .then(block.clone().or_not())
             .map_with(
                 move |((((((attrs, async_kw), name_pair), type_params), params), ret), body), e| {
@@ -4622,7 +4689,7 @@ where
         // provides a *default* an impl may omit. Referred to from a method signature as `Self::Name`.
         let assoc_type_decl = just(T::TypeKw)
             .ignore_then(id.clone())
-            .then(just(T::Eq).ignore_then(type_parser(ctx)).or_not())
+            .then(just(T::Eq).ignore_then(type_p.clone()).or_not())
             .map_with(move |((name, name_span), default), e| AssocTypeDecl {
                 name,
                 name_span,
@@ -4851,7 +4918,7 @@ where
         ));
         let assign_or_expr = expr
             .clone()
-            .then(just(T::Colon).ignore_then(type_parser(ctx)).or_not())
+            .then(just(T::Colon).ignore_then(type_p.clone()).or_not())
             .then(assign_op.then(expr.clone()).or_not())
             .then_ignore(stmt_terminator(ctx))
             .map_with(move |((lhs, ty), tail), e| {
@@ -5477,7 +5544,7 @@ where
         let reserved_binding = any()
             .filter(|tok: &T| tok.reserved_word().is_some())
             .map_with(|_, e| -> SimpleSpan { e.span() })
-            .then(just(T::Colon).ignore_then(type_parser(ctx)).or_not())
+            .then(just(T::Colon).ignore_then(type_p.clone()).or_not())
             .then_ignore(just(T::Eq))
             .then(expr.clone())
             .then_ignore(stmt_terminator(ctx))
@@ -5527,7 +5594,11 @@ fn program_parser<'src, I>(ctx: Ctx<'src>) -> impl Parser<'src, I, Vec<Stmt>, Ex
 where
     I: ValueInput<'src, Token = T, Span = SimpleSpan>,
 {
-    recovering_list(statement_parser(ctx)).then_ignore(end())
+    // The one type grammar for this parse. Every annotation site downstream clones this handle
+    // (an `Rc` bump) instead of rebuilding the doubly-recursive type grammar for itself — see
+    // [`TypeP`] for why that construction, not parsing, used to dominate the cost of a parse.
+    let type_p = type_parser(ctx).boxed();
+    recovering_list(statement_parser(ctx, type_p)).then_ignore(end())
 }
 
 // --- String interpolation ---------------------------------------------------------
