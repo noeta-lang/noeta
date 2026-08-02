@@ -1590,6 +1590,27 @@ impl Checker {
         args: &[Type],
         span: Span,
     ) -> Type {
+        // The variant's declared payload. Arity was never checked here, so `E.A(1, 2)` on a
+        // one-field variant type-checked and aborted with the runtime's `variant `E.A` takes 1
+        // field(s) but 2 were supplied` — a fact the declaration states outright.
+        if let Some(fields) = self
+            .symbols
+            .enums
+            .get(enum_name)
+            .and_then(|vs| vs.iter().find(|v| v.name == variant))
+            .map(|v| v.fields.clone())
+            && fields.len() != args.len()
+        {
+            self.error(
+                DiagnosticCode::TypeMismatch,
+                span,
+                format!(
+                    "variant `{enum_name}.{variant}` takes {} field(s) but {} were supplied",
+                    fields.len(),
+                    args.len()
+                ),
+            );
+        }
         let params = self
             .symbols
             .generic_types

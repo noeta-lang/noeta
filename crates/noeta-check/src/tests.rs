@@ -2891,6 +2891,24 @@ fn an_ordering_needs_two_operands_of_one_type() {
     assert!(codes("fn m(a: dyn, b: int): bool { return a > b }\necho \"ok\"\n").is_empty());
 }
 
+/// An enum variant takes the fields it declares.
+///
+/// `E.A(1, 2)` on a one-field variant type-checked and aborted with the runtime's `variant `E.A`
+/// takes 1 field(s) but 2 were supplied` — a fact the declaration states outright. Found by the
+/// runtime-rejection census.
+#[test]
+fn an_enum_variant_takes_the_fields_it_declares() {
+    assert_eq!(
+        codes("enum E {\n  A(int)\n  B\n}\nx = E.A(1, 2)\necho x\n"),
+        vec!["E0007"]
+    );
+    assert_eq!(
+        codes("enum E {\n  A(int)\n  B\n}\nx = E.A()\necho x\n"),
+        vec!["E0007"]
+    );
+    assert!(codes("enum E {\n  A(int)\n  B\n}\nx = E.A(1)\necho x\n").is_empty());
+}
+
 /// A scalar `match` with no catch-all is provably non-exhaustive.
 ///
 /// `match 5 { 1 => "a" }` ran and aborted with `no match arm matched the value 5`. E0011 stayed
