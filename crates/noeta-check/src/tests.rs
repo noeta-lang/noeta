@@ -2889,6 +2889,57 @@ fn an_ordering_needs_two_operands_of_one_type() {
     assert!(codes("fn m(a: dyn, b: int): bool { return a > b }\necho \"ok\"\n").is_empty());
 }
 
+/// An `if`/`while`/conditional condition must be a `bool`.
+///
+/// The `while` arm said outright that bool-ness was "enforced at runtime (`RequireCondBool`)".
+/// That is the right answer for a *gradual* condition and the wrong one for a concrete one. Found
+/// by the runtime-rejection census.
+#[test]
+fn a_condition_must_be_a_bool() {
+    // `if`/`while` bool-ness was documented as "enforced at runtime (`RequireCondBool`)". That is
+    // the right answer for a gradual condition and the wrong one for a concrete one: `if 1 {}` is
+    // ill-typed, and the checker was handing it to the runtime to reject.
+    assert_eq!(codes("if 1 { echo \"x\" }\n"), vec!["E0007"]);
+    assert_eq!(codes("if \"a\" { echo \"x\" }\n"), vec!["E0007"]);
+    assert_eq!(codes("while 1 { break }\n"), vec!["E0007"]);
+    // The expression conditional reaches the same fact through its `match` desugar, and reports
+    // once against the condition rather than once per invented `true`/`false` pattern.
+    assert_eq!(codes("x = if 1 then 2 else 3\necho x\n"), vec!["E0007"]);
+
+    assert!(codes("if true { echo \"x\" }\n").is_empty());
+    assert!(codes("mut n = 0\nwhile n < 3 { n += 1 }\necho n\n").is_empty());
+    assert!(codes("x = if true then 2 else 3\necho x\n").is_empty());
+    // A gradual condition still defers — that is what the runtime check is for.
+    assert!(codes("fn f(x: dyn): void {\n  if x { echo \"a\" }\n}\necho \"ok\"\n").is_empty());
+}
+
+/// A literal pattern must be able to equal the value it is matched against.
+///
+/// `match 5 { "a" => 1, _ => 2 }` ran: the string arm simply never matched, so it was dead code
+/// nobody named. The same gap is why `if 1 then 2 else 3` type-checked — it desugars to a `match`
+/// on `1` with `true`/`false` patterns. Found by the runtime-rejection census.
+#[test]
+fn a_literal_pattern_must_be_able_to_match() {
+    assert_eq!(
+        codes("x = 5\ny = match x { \"a\" => 1, _ => 2 }\necho y\n"),
+        vec!["E0007"]
+    );
+    assert_eq!(
+        codes("x = \"s\"\ny = match x { 1 => 1, _ => 2 }\necho y\n"),
+        vec!["E0007"]
+    );
+    // Same type, and the numeric lattice, stay clean.
+    assert!(codes("x = 5\ny = match x { 1 => \"a\", _ => \"b\" }\necho y\n").is_empty());
+    assert!(codes("x = 1.5\ny = match x { 1 => \"a\", _ => \"b\" }\necho y\n").is_empty());
+    // A gradual scrutinee may be anything at run time.
+    assert!(
+        codes(
+            "fn f(x: dyn): string {\n  return match x { 1 => \"a\", _ => \"b\" }\n}\necho \"ok\"\n"
+        )
+        .is_empty()
+    );
+}
+
 /// `&&` and `||` take bools, and nothing was checking it.
 ///
 /// The arm returned `Type::Bool` without looking at its operands, so `1 && true` type-checked and

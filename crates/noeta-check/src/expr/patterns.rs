@@ -52,7 +52,31 @@ impl Checker {
         value_used: bool,
         expected: Option<&Type>,
     ) -> Type {
-        let scrut = self.synth(scrutinee, env);
+        let mut scrut = self.synth(scrutinee, env);
+        // `if c then a else b` is a `match` on `c` with `true`/`false` arms by the time it reaches
+        // here, so a non-bool `c` would otherwise be reported once per arm as "this pattern is
+        // `bool`, which can never equal an `int`" — true, and useless, because the user wrote no
+        // pattern. Report it once, against the value, then carry on as though the scrutinee were
+        // the `bool` the shape demands: the arm bodies still check normally, and the pattern rule
+        // stays quiet about patterns nobody typed.
+        //
+        // The message says "condition" rather than "`if` condition" because this cannot tell the
+        // desugar from a hand-written `match x { true => …, false => … }` — `noeta-fmt` separates
+        // them by reading the source at the span, which the checker has no access to. "Condition"
+        // is accurate for both: either way the value is being tested for truth.
+        if Self::is_conditional_desugar(arms) && !scrut.defers_to_runtime() && scrut != Type::Bool {
+            self.error(
+                DiagnosticCode::TypeMismatch,
+                scrutinee.span(),
+                format!("condition must be a `bool`, found `{scrut}`"),
+            )
+            .help(
+                "whether written `if … then … else …` or as a `match` with `true`/`false` arms, \
+                 the tested value has to be a `bool`",
+            );
+            scrut = Type::Bool;
+        }
+        let scrut = scrut;
         self.check_exhaustive(&scrut, arms, span);
         // Flow-narrowing: an `is T` arm sees the scrutinee narrowed to `T`, but only when the
         // scrutinee is a bare identifier (there is then a name to re-type in the arm scope).
@@ -507,7 +531,67 @@ impl Checker {
         }
     }
 
+    /// Whether `arms` are the shape the parser emits for `if c then a else b`: exactly two
+    /// unguarded arms testing `true` then `false`. Nothing else in the language produces it, so
+    /// recognizing it is how a diagnostic can talk about the condition the user wrote rather than
+    /// the patterns the desugar invented. (`noeta-fmt` recognizes the same shape to print it back
+    /// as a conditional.)
+    fn is_conditional_desugar(arms: &[MatchArm]) -> bool {
+        matches!(
+            arms,
+            [
+                MatchArm {
+                    pattern: Pattern::Bool { value: true, .. },
+                    guard: None,
+                    ..
+                },
+                MatchArm {
+                    pattern: Pattern::Bool { value: false, .. },
+                    guard: None,
+                    ..
+                },
+            ]
+        )
+    }
+
+    /// A **literal** pattern must be able to equal the value it is matched against.
+    ///
+    /// `match 5 { "a" => … }` is not a type error the runtime ever reports — the arm simply never
+    /// matches, which makes it dead code the checker should have named. And the same fact reaches
+    /// much further than a stray arm: `if c then a else b` desugars to a `match` on `c` with
+    /// `true`/`false` patterns, so an unchecked literal pattern is exactly why `if 1 then 2 else 3`
+    /// type-checked and then aborted with `no match arm matched the value 1`.
+    ///
+    /// Only a *concretely* typed scrutinee is judged — a gradual one may be anything at run time —
+    /// and numerics are compared by kind rather than identity, so `match 1.5 { 1 => … }` stays
+    /// legal the way `1 > 2.5` does. Same shape as the E0065 impossible-type-test rule already
+    /// here: a comparison that can never hold is worth saying out loud.
+    fn check_literal_pattern(&mut self, pattern: &Pattern, scrut: &Type) {
+        let (lit, span) = match pattern {
+            Pattern::Int { span, .. } => (Type::Int, *span),
+            Pattern::Str { span, .. } => (Type::String, *span),
+            Pattern::Bool { span, .. } => (Type::Bool, *span),
+            _ => return,
+        };
+        if scrut.defers_to_runtime() || scrut.contains_unknown() {
+            return;
+        }
+        if lit.is_numeric() && scrut.is_numeric() {
+            return;
+        }
+        if self.assignable(&lit, scrut) || self.assignable(scrut, &lit) {
+            return;
+        }
+        self.error(
+            DiagnosticCode::TypeMismatch,
+            span,
+            format!("this pattern is `{lit}`, which can never equal a `{scrut}`"),
+        )
+        .help("match a pattern of the scrutinee's own type, or use `_` to catch the rest");
+    }
+
     pub(crate) fn bind_pattern(&mut self, pattern: &Pattern, ty: &Type, env: &mut Env) {
+        self.check_literal_pattern(pattern, ty);
         match pattern {
             Pattern::Wildcard { .. }
             | Pattern::Int { .. }
