@@ -845,6 +845,28 @@ impl Checker {
                         return ret;
                     }
                 }
+                // A local of a **concrete non-callable** type invoked as a function. The two
+                // callable shapes are handled above — a `Fn` value, and a user object providing
+                // `call` — so anything else that is neither gradual nor nominal cannot become
+                // callable later: `x = 5` then `x(1)` is the runtime's `int is not callable`, and
+                // the checker had the type all along. `Named` is excluded here rather than above
+                // because `synth_callable_object` already reports its own E0007 for a user type
+                // with no `call`, and a native one stays open.
+                if let Some(ty) = lookup(env, name.as_str())
+                    && !ty.defers_to_runtime()
+                    && !matches!(ty, Type::Fn { .. } | Type::Named(..) | Type::Param(_))
+                {
+                    let ty = ty.clone();
+                    self.error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!("`{name}` is a `{ty}`, which is not callable"),
+                    )
+                    .help(
+                        "only a function value, or a type providing a `call` method, can be called",
+                    );
+                    return Type::Unknown;
+                }
                 if let Some(sig) = self.symbols.functions.get(name.as_str()) {
                     let required = sig.required;
                     // Named arguments bind to the parameters they name, so normalize the written
@@ -941,6 +963,35 @@ impl Checker {
                 // first, so a payload-typed result (`some(fn…)`) sees the real closure type.
                 self.finalize_closure_args(&[], args, arg_exprs, env);
                 if let Some(t) = stdlib::prelude_return(name.as_str(), args) {
+                    // Polymorphic in the payload is not unconstrained: `some` takes exactly one
+                    // argument and `assert` takes a `bool`. Those were deferred with the rest, so
+                    // `assert(1)` and `some(1, 2)` aborted at run time with the VM's own complaint.
+                    if let Some((min, max, first)) = stdlib::prelude_signature(name.as_str()) {
+                        if args.len() < min || args.len() > max {
+                            let expected = if min == max {
+                                format!("{min}")
+                            } else {
+                                format!("{min} or {max}")
+                            };
+                            self.error(
+                                DiagnosticCode::TypeMismatch,
+                                span,
+                                format!(
+                                    "`{name}` expects {expected} argument(s), found {}",
+                                    args.len()
+                                ),
+                            );
+                        } else if let (Some(want), Some(got)) = (first, args.first())
+                            && !got.defers_to_runtime()
+                            && !self.assignable(got, &want)
+                        {
+                            self.error(
+                                DiagnosticCode::TypeMismatch,
+                                arg_exprs.first().map(|a| a.value.span()).unwrap_or(span),
+                                format!("`{name}` expects a `{want}`, found `{got}`"),
+                            );
+                        }
+                    }
                     return t;
                 }
                 // `S(…)` where `S` names a struct/class/enum the program declares. The language has
@@ -1088,6 +1139,22 @@ impl Checker {
                         self.check_args(&params, required, args, arg_exprs, span, name);
                     }
                     self.check_module_bounds(&qm, name, args, span);
+                    // A function the module does not have. `is_module_function` is documented as
+                    // "the single predicate the checker and both backends share … so all three
+                    // agree by construction" — the checker simply was not asking it here, so
+                    // `math.nosuchfn(1)` typed as `Unknown` and the *runtime* reported
+                    // `module `std.math` has no function `nosuchfn``. Asked after the argument
+                    // checks above so a real function with bad arguments still reports those.
+                    if !self.reg().is_module_function(&qm, name)
+                        && self.reg().find_typed_function(&qm, name).is_none()
+                    {
+                        self.error(
+                            DiagnosticCode::UnknownName,
+                            span,
+                            format!("module `{qm}` has no function `{name}`"),
+                        );
+                        return Type::Unknown;
+                    }
                     return stdlib::module_return(self.reg(), &qm, name, args)
                         .unwrap_or(Type::Unknown);
                 }
@@ -1523,6 +1590,27 @@ impl Checker {
         args: &[Type],
         span: Span,
     ) -> Type {
+        // The variant's declared payload. Arity was never checked here, so `E.A(1, 2)` on a
+        // one-field variant type-checked and aborted with the runtime's `variant `E.A` takes 1
+        // field(s) but 2 were supplied` — a fact the declaration states outright.
+        if let Some(fields) = self
+            .symbols
+            .enums
+            .get(enum_name)
+            .and_then(|vs| vs.iter().find(|v| v.name == variant))
+            .map(|v| v.fields.clone())
+            && fields.len() != args.len()
+        {
+            self.error(
+                DiagnosticCode::TypeMismatch,
+                span,
+                format!(
+                    "variant `{enum_name}.{variant}` takes {} field(s) but {} were supplied",
+                    fields.len(),
+                    args.len()
+                ),
+            );
+        }
         let params = self
             .symbols
             .generic_types

@@ -1850,6 +1850,28 @@ impl Checker {
         }
     }
 
+    /// An `if`/`while` condition must be a `bool`.
+    ///
+    /// Both backends enforce this at run time (`Op::RequireCondBool`), and that check is exactly
+    /// what a *gradual* condition needs — whether a `dyn` value is a bool is genuinely a runtime
+    /// question, and the backends agreeing on it is worth having. A **concretely** typed condition
+    /// is a different matter: `if 1 { … }` is ill-typed, the checker knows it, and handing it to
+    /// the runtime to reject is the check-vs-run divergence in miniature.
+    ///
+    /// So the runtime check stays as the backstop for the gradual case, and this makes the
+    /// concrete case static. Nothing that ran before stops running: a program reaching the runtime
+    /// check with a concrete non-bool condition always aborted there.
+    fn check_condition(&mut self, cond: &Expr, env: &mut Env, keyword: &str) {
+        let ty = self.synth(cond, env);
+        if !ty.defers_to_runtime() && ty != Type::Bool {
+            self.error(
+                DiagnosticCode::TypeMismatch,
+                cond.span(),
+                format!("`{keyword}` condition must be a `bool`, found `{ty}`"),
+            );
+        }
+    }
+
     fn check_block(&mut self, stmts: &[Stmt], env: &mut Env) {
         env.push(HashMap::new());
         self.bind_nested_fns(stmts, env);
@@ -2277,7 +2299,7 @@ impl Checker {
                 else_body,
                 ..
             } => {
-                self.synth(cond, env);
+                self.check_condition(cond, env, "if");
                 // Flow-narrowing: `if ident is T { … }` sees `ident` as `T` in the then-body —
                 // but only when the body never reassigns it (a write could invalidate the
                 // narrowing). The else-body keeps the declared type (negative narrowing is not
@@ -2315,6 +2337,7 @@ impl Checker {
                 if matches!(&iter_ty, Type::Named(n, _) if n == stdlib::ITERATOR) {
                     self.sites.for_stream_sites.insert(*span);
                 }
+                self.check_iterable(&iter_ty, iterable.span());
                 env.push(HashMap::new());
                 self.bind_for_pattern(pattern, &iter_ty, env);
                 self.coloring.loop_depth += 1;
@@ -2325,9 +2348,7 @@ impl Checker {
                 env.pop();
             }
             Stmt::While { cond, body, .. } => {
-                // Like `if`, the condition's bool-ness is enforced at runtime (`RequireCondBool`,
-                // identical on both backends); synth it for nested checks and check the body.
-                self.synth(cond, env);
+                self.check_condition(cond, env, "while");
                 self.coloring.loop_depth += 1;
                 self.check_block(body, env);
                 self.coloring.loop_depth -= 1;

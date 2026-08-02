@@ -2575,11 +2575,13 @@ fn match_that_is_not_provably_exhaustive_still_falls_through_e0048() {
         ),
         ["E0011", "E0048"]
     );
-    // An `int` scrutinee has an open domain and there is no `_`. E0011 stays silent (open domains
-    // are the runtime backstop's job) but the path to the end is real, so E0048 fires.
+    // An `int` scrutinee with no `_`. This used to be E0048 alone — E0011 stayed silent because an
+    // open domain "is the runtime backstop's job". It is not: enumerating the domain was never
+    // needed to know the answer, since no finite set of literal arms can cover `int`, so the match
+    // is *provably* non-exhaustive and E0011 now says so alongside the fall-through.
     assert_eq!(
         codes("fn f(n: int): int { match n { 1 => { return 1 }, 2 => { return 2 }, } }\n"),
-        ["E0048"]
+        ["E0011", "E0048"]
     );
     // Exhaustive, but one arm falls out of its own block instead of returning.
     assert_eq!(
@@ -2887,6 +2889,171 @@ fn an_ordering_needs_two_operands_of_one_type() {
         codes("fn m<T: Comparable>(a: T, b: T): bool { return a > b }\necho m(1, 2)\n").is_empty()
     );
     assert!(codes("fn m(a: dyn, b: int): bool { return a > b }\necho \"ok\"\n").is_empty());
+}
+
+/// An enum variant takes the fields it declares.
+///
+/// `E.A(1, 2)` on a one-field variant type-checked and aborted with the runtime's `variant `E.A`
+/// takes 1 field(s) but 2 were supplied` — a fact the declaration states outright. Found by the
+/// runtime-rejection census.
+#[test]
+fn an_enum_variant_takes_the_fields_it_declares() {
+    assert_eq!(
+        codes("enum E {\n  A(int)\n  B\n}\nx = E.A(1, 2)\necho x\n"),
+        vec!["E0007"]
+    );
+    assert_eq!(
+        codes("enum E {\n  A(int)\n  B\n}\nx = E.A()\necho x\n"),
+        vec!["E0007"]
+    );
+    assert!(codes("enum E {\n  A(int)\n  B\n}\nx = E.A(1)\necho x\n").is_empty());
+}
+
+/// A scalar `match` with no catch-all is provably non-exhaustive.
+///
+/// `match 5 { 1 => "a" }` ran and aborted with `no match arm matched the value 5`. E0011 stayed
+/// silent because a scalar's domain cannot be enumerated — but enumerating it was never needed to
+/// know the answer: no finite set of literal arms covers `int`, and the catch-all check already
+/// handles the arms that would save it. Found by the runtime-rejection census.
+#[test]
+fn a_scalar_match_needs_a_catch_all() {
+    assert_eq!(
+        codes("x = 5\ny = match x { 1 => \"a\" }\necho y\n"),
+        vec!["E0011"]
+    );
+    assert_eq!(
+        codes("x = \"s\"\ny = match x { \"s\" => 1 }\necho y\n"),
+        vec!["E0011"]
+    );
+    assert!(codes("x = 5\ny = match x { 1 => \"a\", _ => \"b\" }\necho y\n").is_empty());
+    // `bool` is the exception: two literal arms really do exhaust it, so it is enumerated like a
+    // two-case enum — which is also what keeps the `if … then … else` desugar clean.
+    assert!(codes("x = true\ny = match x { true => 1, false => 2 }\necho y\n").is_empty());
+    assert_eq!(
+        codes("x = true\ny = match x { true => 1 }\necho y\n"),
+        vec!["E0011"]
+    );
+    // A gradual scrutinee still defers.
+    assert!(
+        codes("fn f(x: dyn): string { return match x { 1 => \"a\", _ => \"b\" } }\necho \"ok\"\n")
+            .is_empty()
+    );
+}
+
+/// `assert` takes a `bool` and at most a message.
+///
+/// The prelude's arguments are unchecked because most of it is polymorphic — but `assert` is not,
+/// and `assert(1)` aborted with the VM's `assert expects a bool, found 1`. Found by the
+/// runtime-rejection census.
+#[test]
+fn assert_takes_a_bool_and_at_most_a_message() {
+    assert_eq!(codes("assert(1)\n"), vec!["E0007"]);
+    assert_eq!(codes("assert(\"a\")\n"), vec!["E0007"]);
+    assert_eq!(codes("assert(true, \"a\", \"b\")\n"), vec!["E0007"]);
+    assert!(codes("assert(true)\n").is_empty());
+    assert!(codes("assert(1 == 1, \"ok\")\n").is_empty());
+    assert!(codes("fn f(c: dyn): void { assert(c) }\necho \"ok\"\n").is_empty());
+    // The polymorphic constructors stay deliberately unchecked here — their wrong-arity call is a
+    // runtime error by design, so the direct and first-class-value spellings agree. See
+    // `stdlib::prelude_signature` and `poly_values/constructor_*_wrong_arity`.
+    assert!(codes("x = some(1)\necho x\n").is_empty());
+}
+
+/// A container is indexed by its own key type, and `for` iterates something iterable.
+///
+/// The receiver's indexability was checked (`42[0]` was already E0007) but the *index* expression's
+/// type was synthesized and discarded, so `xs["a"]` on a `List<int>` aborted with the runtime's
+/// `list index must be an int, found string`. `for x in 5` did the same. Found by the
+/// runtime-rejection census.
+#[test]
+fn indexing_and_iteration_are_typed() {
+    assert_eq!(codes("xs = [1, 2]\necho xs[\"a\"]\n"), vec!["E0007"]);
+    assert_eq!(codes("s = \"abc\"\necho s[\"a\"]\n"), vec!["E0007"]);
+    assert_eq!(codes("m = {\"k\": 1}\necho m[1]\n"), vec!["E0007"]);
+    assert_eq!(codes("for x in 5 { echo x }\n"), vec!["E0007"]);
+    assert_eq!(codes("for x in true { echo x }\n"), vec!["E0007"]);
+
+    assert!(codes("xs = [1, 2]\necho xs[0]\n").is_empty());
+    assert!(codes("m = {\"k\": 1}\necho m[\"k\"]\n").is_empty());
+    assert!(codes("for x in 0..5 { echo x }\n").is_empty());
+    assert!(codes("for x in [1, 2] { echo x }\n").is_empty());
+    assert!(codes("m = {\"k\": 1}\nfor v in m { echo v }\n").is_empty());
+    // Gradual sources defer on both counts.
+    assert!(
+        codes("fn f(xs: dyn, i: dyn): void {\n  echo xs[i]\n  for v in xs { echo v }\n}\necho \"ok\"\n")
+            .is_empty()
+    );
+}
+
+/// A concretely non-callable value is not callable, and a module does not gain functions.
+///
+/// `x = 5` then `x(1)` typed as `Unknown` and aborted with the runtime's `int is not callable`;
+/// `math.nosuchfn(1)` did the same via `module `std.math` has no function `nosuchfn``. The registry
+/// predicate for the second is documented as the one the checker and both backends share — the
+/// checker just was not asking it. Found by the runtime-rejection census.
+#[test]
+fn a_non_callable_value_and_an_absent_module_function_are_static_errors() {
+    assert_eq!(codes("x = 5\necho x(1)\n"), vec!["E0007"]);
+    assert_eq!(codes("s = \"a\"\necho s(1)\n"), vec!["E0007"]);
+    assert_eq!(
+        codes("use std.math\necho math.nosuchfn(1)\n"),
+        vec!["E0005"]
+    );
+    // Real callables and real module functions stay clean.
+    assert!(codes("f = fn(a: int): int => a\necho f(1)\n").is_empty());
+    assert!(codes("use std.math\necho math.sqrt(4.0)\n").is_empty());
+    assert!(codes("use std.io\nio.out(\"hi\")\n").is_empty());
+}
+
+/// An `if`/`while`/conditional condition must be a `bool`.
+///
+/// The `while` arm said outright that bool-ness was "enforced at runtime (`RequireCondBool`)".
+/// That is the right answer for a *gradual* condition and the wrong one for a concrete one. Found
+/// by the runtime-rejection census.
+#[test]
+fn a_condition_must_be_a_bool() {
+    // `if`/`while` bool-ness was documented as "enforced at runtime (`RequireCondBool`)". That is
+    // the right answer for a gradual condition and the wrong one for a concrete one: `if 1 {}` is
+    // ill-typed, and the checker was handing it to the runtime to reject.
+    assert_eq!(codes("if 1 { echo \"x\" }\n"), vec!["E0007"]);
+    assert_eq!(codes("if \"a\" { echo \"x\" }\n"), vec!["E0007"]);
+    assert_eq!(codes("while 1 { break }\n"), vec!["E0007"]);
+    // The expression conditional reaches the same fact through its `match` desugar, and reports
+    // once against the condition rather than once per invented `true`/`false` pattern.
+    assert_eq!(codes("x = if 1 then 2 else 3\necho x\n"), vec!["E0007"]);
+
+    assert!(codes("if true { echo \"x\" }\n").is_empty());
+    assert!(codes("mut n = 0\nwhile n < 3 { n += 1 }\necho n\n").is_empty());
+    assert!(codes("x = if true then 2 else 3\necho x\n").is_empty());
+    // A gradual condition still defers — that is what the runtime check is for.
+    assert!(codes("fn f(x: dyn): void {\n  if x { echo \"a\" }\n}\necho \"ok\"\n").is_empty());
+}
+
+/// A literal pattern must be able to equal the value it is matched against.
+///
+/// `match 5 { "a" => 1, _ => 2 }` ran: the string arm simply never matched, so it was dead code
+/// nobody named. The same gap is why `if 1 then 2 else 3` type-checked — it desugars to a `match`
+/// on `1` with `true`/`false` patterns. Found by the runtime-rejection census.
+#[test]
+fn a_literal_pattern_must_be_able_to_match() {
+    assert_eq!(
+        codes("x = 5\ny = match x { \"a\" => 1, _ => 2 }\necho y\n"),
+        vec!["E0007"]
+    );
+    assert_eq!(
+        codes("x = \"s\"\ny = match x { 1 => 1, _ => 2 }\necho y\n"),
+        vec!["E0007"]
+    );
+    // Same type, and the numeric lattice, stay clean.
+    assert!(codes("x = 5\ny = match x { 1 => \"a\", _ => \"b\" }\necho y\n").is_empty());
+    assert!(codes("x = 1.5\ny = match x { 1 => \"a\", _ => \"b\" }\necho y\n").is_empty());
+    // A gradual scrutinee may be anything at run time.
+    assert!(
+        codes(
+            "fn f(x: dyn): string {\n  return match x { 1 => \"a\", _ => \"b\" }\n}\necho \"ok\"\n"
+        )
+        .is_empty()
+    );
 }
 
 /// `&&` and `||` take bools, and nothing was checking it.

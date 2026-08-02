@@ -151,3 +151,20 @@ fn a_piped_closure_is_conservatively_parenthesized() {
         "xs = [1, 2]\nacc = xs |> (fn(n) => n)\necho acc\n",
     );
 }
+
+/// Two `?`s in a row must stay separated: `a??` re-lexes as the coalesce operator.
+///
+/// Both `?`s are postfix at binding power 14, so the precedence table correctly adds no
+/// parentheses — and the printed tokens then fuse into one different operator. That is a
+/// *token-adjacency* rule rather than a precedence one, and it is the first of its kind found here.
+/// `(a?)?` printed as `a??`, the safety gate refused the output, and the whole file became
+/// unformattable. Found by `tests/precedence_matrix.rs`.
+#[test]
+fn a_try_on_a_try_keeps_its_parentheses() {
+    preserved("x = (a?)?\n");
+    preserved("x = (a.b?)?\n");
+    preserved("x = ((a?)?)?\n");
+    // A single `?`, and a `?` followed by anything else, are unaffected.
+    formats_to("x = (a?)\n", "x = a?\n");
+    formats_to("x = (a?).b\n", "x = a?.b\n");
+}

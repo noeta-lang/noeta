@@ -52,7 +52,31 @@ impl Checker {
         value_used: bool,
         expected: Option<&Type>,
     ) -> Type {
-        let scrut = self.synth(scrutinee, env);
+        let mut scrut = self.synth(scrutinee, env);
+        // `if c then a else b` is a `match` on `c` with `true`/`false` arms by the time it reaches
+        // here, so a non-bool `c` would otherwise be reported once per arm as "this pattern is
+        // `bool`, which can never equal an `int`" — true, and useless, because the user wrote no
+        // pattern. Report it once, against the value, then carry on as though the scrutinee were
+        // the `bool` the shape demands: the arm bodies still check normally, and the pattern rule
+        // stays quiet about patterns nobody typed.
+        //
+        // The message says "condition" rather than "`if` condition" because this cannot tell the
+        // desugar from a hand-written `match x { true => …, false => … }` — `noeta-fmt` separates
+        // them by reading the source at the span, which the checker has no access to. "Condition"
+        // is accurate for both: either way the value is being tested for truth.
+        if Self::is_conditional_desugar(arms) && !scrut.defers_to_runtime() && scrut != Type::Bool {
+            self.error(
+                DiagnosticCode::TypeMismatch,
+                scrutinee.span(),
+                format!("condition must be a `bool`, found `{scrut}`"),
+            )
+            .help(
+                "whether written `if … then … else …` or as a `match` with `true`/`false` arms, \
+                 the tested value has to be a `bool`",
+            );
+            scrut = Type::Bool;
+        }
+        let scrut = scrut;
         self.check_exhaustive(&scrut, arms, span);
         // Flow-narrowing: an `is T` arm sees the scrutinee narrowed to `T`, but only when the
         // scrutinee is a bare identifier (there is then a name to re-type in the arm scope).
@@ -354,9 +378,29 @@ impl Checker {
             };
             return MatchCoverage::from_missing(cases, MatchDomain::Types);
         }
+        // A **scalar** scrutinee. Its domain cannot be enumerated, which is why this used to answer
+        // `Unknown` — but enumerating it was never necessary to know the answer: any finite set of
+        // literal arms leaves values uncovered, and the catch-all check above already returned
+        // `Total` for the arms that would save it. So a scalar `match` with no irrefutable arm is
+        // *provably* non-exhaustive, and saying so is the difference between E0011 while typing and
+        // the runtime's `no match arm matched the value 5`.
+        //
+        // `bool` is the exception that proves the rule: two literal arms really do exhaust it, so
+        // it goes through the variant-style count below rather than here.
+        if matches!(
+            scrut,
+            Type::Int | Type::IntN { .. } | Type::Float | Type::F32 | Type::F64 | Type::String
+        ) {
+            return MatchCoverage::Missing {
+                cases: vec![format!("the other values of `{scrut}`")],
+                domain: MatchDomain::Scalar,
+            };
+        }
         let all: Vec<String> = match scrut {
             Type::Result(..) => vec!["Ok".into(), "Err".into()],
             Type::Option(..) => vec!["some".into(), "none".into()],
+            // Two literal arms genuinely exhaust `bool`, so it is enumerable after all.
+            Type::Bool => vec!["true".into(), "false".into()],
             Type::Named(n, _) => match self.symbols.enums.get(n) {
                 Some(variants) => variants.iter().map(|v| v.name.clone()).collect(),
                 None => return MatchCoverage::Unknown,
@@ -368,6 +412,11 @@ impl Checker {
             .filter(|a| a.guard.is_none())
             .filter_map(|a| match &a.pattern {
                 Pattern::Variant { variant, .. } => Some(variant.as_str()),
+                // `bool` is enumerated like a two-case enum, so its literal arms are what cover
+                // it — `match b { true => …, false => … }` is exhaustive, and so is the
+                // `if … then … else` desugar that produces exactly those two arms.
+                Pattern::Bool { value: true, .. } => Some("true"),
+                Pattern::Bool { value: false, .. } => Some("false"),
                 // A bare payload-free variant covers its case exactly as the qualified spelling
                 // does — so a `match` naming every case bare is exhaustive with no `_`.
                 Pattern::Binding { name, .. } if !self.is_binding_pattern(scrut, name) => {
@@ -392,6 +441,9 @@ pub(crate) enum MatchDomain {
     Types,
     /// Enum-variant arms, including `Result`'s `Ok`/`Err` and `Option`'s `some`/`none`.
     Variants,
+    /// A scalar scrutinee (`int`, `float`, `string`, …): the domain is not enumerable, so the only
+    /// thing that can exhaust it is an irrefutable arm.
+    Scalar,
 }
 
 impl MatchDomain {
@@ -399,6 +451,9 @@ impl MatchDomain {
         match self {
             MatchDomain::Types => "add an `is T` arm for each missing type, or a `_` catch-all",
             MatchDomain::Variants => "add an arm for each missing case, or a `_` catch-all",
+            MatchDomain::Scalar => {
+                "a scalar has no enumerable set of cases — add a `_` catch-all arm"
+            }
         }
     }
 }
@@ -432,6 +487,33 @@ impl MatchCoverage {
 
 impl Checker {
     // ----- pattern binding -----
+
+    /// Whether a `for` can iterate a value of this type at all.
+    ///
+    /// The collections and `Iterator<T>` are the built-in sources; a nominal type may provide its
+    /// own `iter`, and a gradual one defers. Everything else is a scalar: `for x in 5` is the
+    /// runtime's `cannot iterate over int`, and nothing about it is dynamic.
+    fn is_iterable(&self, ty: &Type) -> bool {
+        match ty {
+            Type::List(_) | Type::Set(_) | Type::Map(..) => true,
+            // A range (`0..5`) synthesizes a list of its bound type; `Named` covers both a user
+            // type with an `iter` method and `Iterator<T>` itself.
+            Type::Named(..) | Type::Param(_) | Type::DynTrait(_) => true,
+            _ => ty.defers_to_runtime() || ty.contains_unknown(),
+        }
+    }
+
+    /// Report a `for` over something that cannot be iterated (E0007).
+    pub(crate) fn check_iterable(&mut self, iter_ty: &Type, span: Span) {
+        if !self.is_iterable(iter_ty) {
+            self.error(
+                DiagnosticCode::TypeMismatch,
+                span,
+                format!("cannot iterate over `{iter_ty}`"),
+            )
+            .help("`for` iterates a list, set, map, range, or a type providing `iter`");
+        }
+    }
 
     pub(crate) fn bind_for_pattern(&mut self, pattern: &ForPattern, iter_ty: &Type, env: &mut Env) {
         // The element type a `for` loop binds: a list/set's element, a map's **value** (iteration
@@ -507,7 +589,67 @@ impl Checker {
         }
     }
 
+    /// Whether `arms` are the shape the parser emits for `if c then a else b`: exactly two
+    /// unguarded arms testing `true` then `false`. Nothing else in the language produces it, so
+    /// recognizing it is how a diagnostic can talk about the condition the user wrote rather than
+    /// the patterns the desugar invented. (`noeta-fmt` recognizes the same shape to print it back
+    /// as a conditional.)
+    fn is_conditional_desugar(arms: &[MatchArm]) -> bool {
+        matches!(
+            arms,
+            [
+                MatchArm {
+                    pattern: Pattern::Bool { value: true, .. },
+                    guard: None,
+                    ..
+                },
+                MatchArm {
+                    pattern: Pattern::Bool { value: false, .. },
+                    guard: None,
+                    ..
+                },
+            ]
+        )
+    }
+
+    /// A **literal** pattern must be able to equal the value it is matched against.
+    ///
+    /// `match 5 { "a" => … }` is not a type error the runtime ever reports — the arm simply never
+    /// matches, which makes it dead code the checker should have named. And the same fact reaches
+    /// much further than a stray arm: `if c then a else b` desugars to a `match` on `c` with
+    /// `true`/`false` patterns, so an unchecked literal pattern is exactly why `if 1 then 2 else 3`
+    /// type-checked and then aborted with `no match arm matched the value 1`.
+    ///
+    /// Only a *concretely* typed scrutinee is judged — a gradual one may be anything at run time —
+    /// and numerics are compared by kind rather than identity, so `match 1.5 { 1 => … }` stays
+    /// legal the way `1 > 2.5` does. Same shape as the E0065 impossible-type-test rule already
+    /// here: a comparison that can never hold is worth saying out loud.
+    fn check_literal_pattern(&mut self, pattern: &Pattern, scrut: &Type) {
+        let (lit, span) = match pattern {
+            Pattern::Int { span, .. } => (Type::Int, *span),
+            Pattern::Str { span, .. } => (Type::String, *span),
+            Pattern::Bool { span, .. } => (Type::Bool, *span),
+            _ => return,
+        };
+        if scrut.defers_to_runtime() || scrut.contains_unknown() {
+            return;
+        }
+        if lit.is_numeric() && scrut.is_numeric() {
+            return;
+        }
+        if self.assignable(&lit, scrut) || self.assignable(scrut, &lit) {
+            return;
+        }
+        self.error(
+            DiagnosticCode::TypeMismatch,
+            span,
+            format!("this pattern is `{lit}`, which can never equal a `{scrut}`"),
+        )
+        .help("match a pattern of the scrutinee's own type, or use `_` to catch the rest");
+    }
+
     pub(crate) fn bind_pattern(&mut self, pattern: &Pattern, ty: &Type, env: &mut Env) {
+        self.check_literal_pattern(pattern, ty);
         match pattern {
             Pattern::Wildcard { .. }
             | Pattern::Int { .. }

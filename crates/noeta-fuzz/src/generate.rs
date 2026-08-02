@@ -40,25 +40,25 @@ use std::fmt::Write as _;
 ///
 /// Reading past the end yields `0` forever — see the module docs for why that terminates
 /// generation cleanly rather than truncating it.
-struct Entropy<'a> {
+pub(crate) struct Entropy<'a> {
     bytes: &'a [u8],
     pos: usize,
 }
 
 impl<'a> Entropy<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
+    pub(crate) fn new(bytes: &'a [u8]) -> Self {
         Entropy { bytes, pos: 0 }
     }
 
     /// The next byte, or `0` once the buffer is spent.
-    fn byte(&mut self) -> u8 {
+    pub(crate) fn byte(&mut self) -> u8 {
         let b = self.bytes.get(self.pos).copied().unwrap_or(0);
         self.pos = self.pos.saturating_add(1);
         b
     }
 
     /// A choice in `0..n`, biased to `0` on exhaustion. `n == 0` is treated as `1`.
-    fn below(&mut self, n: usize) -> usize {
+    pub(crate) fn below(&mut self, n: usize) -> usize {
         if n <= 1 {
             return 0;
         }
@@ -66,12 +66,12 @@ impl<'a> Entropy<'a> {
     }
 
     /// True with probability roughly `percent/100`; false once the buffer is spent.
-    fn chance(&mut self, percent: u8) -> bool {
+    pub(crate) fn chance(&mut self, percent: u8) -> bool {
         (self.byte() as u32) * 100 < (percent as u32) * 256
     }
 
     /// Whether the driver's bytes are spent, so generation should wind down.
-    fn spent(&self) -> bool {
+    pub(crate) fn spent(&self) -> bool {
         self.pos >= self.bytes.len()
     }
 }
