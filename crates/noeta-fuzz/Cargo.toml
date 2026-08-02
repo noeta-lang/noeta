@@ -31,6 +31,11 @@ noeta-value = { workspace = true }
 # make the two backends differ for a reason that is the harness's fault rather than the VM's.
 noeta-conformance = { workspace = true }
 
+[features]
+# Enable the tier-1 JIT and its differential over generated programs. Off by default: the rest of
+# the crate builds and sweeps without Cranelift.
+jit = ["noeta-vm/jit", "noeta-conformance/jit"]
+
 [dev-dependencies]
 proptest = { workspace = true }
 

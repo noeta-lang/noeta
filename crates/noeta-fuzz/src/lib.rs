@@ -28,6 +28,10 @@ pub mod bundle_target;
 pub mod census;
 pub mod fmt_target;
 pub mod generate;
+/// The tier-1 JIT differential. Feature-gated so the default build does not pull Cranelift —
+/// the same gating `noeta-conformance` uses for the corpus version of this oracle.
+#[cfg(feature = "jit")]
+pub mod jit_target;
 pub mod leak_target;
 pub mod run_target;
 
