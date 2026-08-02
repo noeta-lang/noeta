@@ -232,6 +232,54 @@ jobs:
           || gh api -X POST "/orgs/noeta-lang/actions/variables" \
             -f name=NOETA_VERSION -f value="$TAG" -f visibility=all
 
+  # Tell the para package repos to bump their toolchain pin. Their native crates pin these toolchain
+  # crates by tag, and their CI guards that pin against `NOETA_VERSION` — so the job above makes
+  # every one of them red until the pin follows. Each repo's `toolchain-pin.yml` rewrites its
+  # manifests, BUILDS itself against this release, and opens the result as a PR carrying the
+  # verdict. That build is the point: a release is exactly when a native package might stop
+  # compiling, and this is the only thing in the fleet that asks on a schedule.
+  #
+  # `needs: advance-ecosystem-version` is load-bearing and not just tidiness. The receiving repo's
+  # own CI resolves `NOETA_VERSION` from the org variable; dispatch before that variable moves and
+  # the PR arrives carrying the NEW pin while its checks install the OLD toolchain — the consistency
+  # guard then fails on a PR that is perfectly correct. Ordering it after removes the race.
+  #
+  # Fans out to ALL para repos, not only the four with pins: a repo with none no-ops and exits 0, so
+  # the workflow is one file everywhere and a package that later grows a native half is covered
+  # without anyone remembering to add it here.
+  notify-para:
+    name: Dispatch to the para repos
+    needs: [build, advance-ecosystem-version]
+    if: needs.build.outputs.is_prerelease != 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      # Every repo gets its dispatch even if one fails — a bad token for one should not silently
+      # leave the rest un-bumped.
+      fail-fast: false
+      matrix:
+        repo:
+          [
+            para-aether,
+            para-aether-db,
+            para-ai,
+            para-api,
+            para-cli,
+            para-db,
+            para-html,
+            para-p2p,
+          ]
+    steps:
+      - name: repository_dispatch release-published
+        env:
+          GH_TOKEN: ${{ secrets.SITE_DISPATCH_PAT }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          curl -fsSf -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/noeta-lang/${{ matrix.repo }}/dispatches" \
+            -d "{\"event_type\":\"release-published\",\"client_payload\":{\"tag\":\"$TAG\"}}"
+
   # Build the VS Code extension .vsix. Its version is NOT read from package.json — the git tag is
   # the single source of truth, so the extension always ships at the same version as the toolchain
   # (`vX.Y.Z` is stamped in at package time, never committed). This runs for EVERY tag, prereleases
