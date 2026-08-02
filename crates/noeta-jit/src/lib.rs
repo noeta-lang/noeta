@@ -1149,6 +1149,9 @@ impl Jit<JITModule> {
     /// Idempotent per window: a back-edge inside a window already compiled reuses that body, so a
     /// prototype ends up with one body per *distinct* hot loop and a nest collapses to one.
     pub fn compile_osr(&mut self, module: &Module, proto: usize, header: usize) -> Option<OsrBody> {
+        if ablated(ablate::REGION) {
+            return None; // the back-edge promotion falls back to the whole-prototype body
+        }
         if proto >= self.osr_compiled.len() {
             self.osr_compiled
                 .resize_with(module.protos.len().max(proto + 1), Vec::new);
@@ -1166,7 +1169,7 @@ impl Jit<JITModule> {
         }
         if !chunk.code[lo..=hi]
             .iter()
-            .any(|op| is_fast_op(op, &module.names))
+            .any(|op| is_fast_op(op, &chunk.consts, &module.names))
         {
             return None;
         }
@@ -1354,12 +1357,66 @@ fn fast_sig_for(
     sig
 }
 
+/// Dev-only **codegen ablation mask** (`NOETA_JIT_ABLATE`, decimal or `0x`-prefixed): each bit
+/// turns one *landed* codegen decision back off, so a measured regression can be attributed to a
+/// single decision without building one binary per variant. Unset — the default, and the only
+/// configuration any test, oracle, or gate ever runs — leaves every bit clear and the codegen
+/// exactly as it ships.
+///
+/// Every bit only ever makes native code *do less* (an op stops being compiled, or an already
+/// correct bail path is taken more often), so an ablated run stays observably identical; it is
+/// slower, not different. Read once per process ([`ablated`]), never on a hot path.
+pub mod ablate {
+    /// `Op::Stringify` leaves the leaf-op set (and with it `heap_aware`'s `writes_heap_reg`).
+    pub const STRINGIFY: u32 = 1 << 0;
+    /// `Op::BuildString` / `Op::ConcatInPlace` leave the leaf-op set.
+    pub const BUILD_STRING: u32 = 1 << 1;
+    /// A `LoadConst` of a **heap** constant stops being fast (the pre-arc immediate-only rule).
+    pub const HEAP_CONST: u32 = 1 << 2;
+    /// `Op::CallMethod` stops being fast for map-method names.
+    pub const CALL_METHOD: u32 = 1 << 3;
+    /// `heap_aware` reverts to the leaf-op test, ignoring heap constants and `CallMethod`.
+    pub const HEAP_AWARE: u32 = 1 << 4;
+    /// `TakeGlobal` bails on a heap occupant even in a `heap_aware` body.
+    pub const TAKE_GLOBAL: u32 = 1 << 5;
+    /// `StoreGlobal` bails on a heap *displaced* value even in a `heap_aware` body — i.e. it emits
+    /// no in-loop `release_value` call path.
+    pub const STORE_GLOBAL: u32 = 1 << 6;
+    /// Every bit above: the whole `cf9a2cb7a` leaf-op/globals arc turned back off.
+    pub const ALL: u32 = 0x7f;
+    /// Region-scoped (OSR-window) compilation off: a back-edge promotion compiles the whole
+    /// prototype again, as it did before `3891cb9d7`. Not part of [`ALL`].
+    pub const REGION: u32 = 1 << 7;
+}
+
+/// Whether the [`ablate`] bit is set in `NOETA_JIT_ABLATE` (parsed once per process; an
+/// unparseable value is 0).
+fn ablated(bit: u32) -> bool {
+    static MASK: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    let mask = *MASK.get_or_init(|| {
+        std::env::var("NOETA_JIT_ABLATE")
+            .ok()
+            .and_then(|s| {
+                let s = s.trim();
+                match s.strip_prefix("0x") {
+                    Some(hex) => u32::from_str_radix(hex, 16).ok(),
+                    None => s.parse::<u32>().ok(),
+                }
+            })
+            .unwrap_or(0)
+    });
+    mask & bit != 0
+}
+
 /// Whether a prototype is worth compiling: it has at least one op the JIT emits natively. Ops it
 /// doesn't (calls, heap ops, `Echo`, `Return`, `Halt`, …) are *bail points* — the body runs its
 /// compilable ops and hands back to the interpreter at the first one it can't (per-op bail). A
 /// prototype with no fast op at all gets a bail stub instead (nothing to gain).
 fn is_eligible(chunk: &noeta_bytecode::Chunk, names: &[String]) -> bool {
-    chunk.code.iter().any(|op| is_fast_op(op, names))
+    chunk
+        .code
+        .iter()
+        .any(|op| is_fast_op(op, &chunk.consts, names))
 }
 
 /// Whether [`emit_op`] compiles this op instance to native code (vs bailing to the interpreter at it).
@@ -1374,9 +1431,11 @@ fn is_eligible(chunk: &noeta_bytecode::Chunk, names: &[String]) -> bool {
 /// always-native `CallMethod` would make an object-method loop *look* tier-1-sustainable to
 /// [`worth_osr`] and then bail out of native code on every iteration, which is slower than
 /// interpreting it.
-fn is_fast_op(op: &Op, names: &[String]) -> bool {
+fn is_fast_op(op: &Op, consts: &[Const], names: &[String]) -> bool {
     match op {
-        Op::LoadConst { .. } => true,
+        Op::LoadConst { k, .. } => {
+            !ablated(ablate::HEAP_CONST) || const_immediate_bits(&consts[*k as usize]).is_some()
+        }
         Op::Move { .. } | Op::Drop { .. } => true,
         Op::Binary { op, .. } => supported_binary(*op),
         // S1 (Tier W): the sign-dependent fixed-width ops and the width wrap. Only the ops the
@@ -1401,9 +1460,12 @@ fn is_fast_op(op: &Op, names: &[String]) -> bool {
         // The map fast path (`m[k]`/`m[k] = v`/`m.get_or(k, d)`): the helper serves a map receiver
         // and bails on any other, so a same-named user method costs a bail — hence the static name
         // filter, which keeps an object-method loop out of tier 1 entirely.
-        Op::CallMethod { method, .. } => names
-            .get(method.0 as usize)
-            .is_some_and(|n| noeta_ext_abi::MapMethod::from_name(n).is_some()),
+        Op::CallMethod { method, .. } => {
+            !ablated(ablate::CALL_METHOD)
+                && names
+                    .get(method.0 as usize)
+                    .is_some_and(|n| noeta_ext_abi::MapMethod::from_name(n).is_some())
+        }
         op if is_leaf_heap_op(op) => true,
         _ => false,
     }
@@ -1417,6 +1479,14 @@ fn is_fast_op(op: &Op, names: &[String]) -> bool {
 /// `Op::CallMethod` is deliberately **not** here: it is a leaf op only for the map-method names
 /// [`is_fast_op`] admits, and `heap_aware` accounts for it separately ([`writes_heap_reg`]).
 fn is_leaf_heap_op(op: &Op) -> bool {
+    if ablated(ablate::STRINGIFY) && matches!(op, Op::Stringify { .. }) {
+        return false;
+    }
+    if ablated(ablate::BUILD_STRING)
+        && matches!(op, Op::BuildString { .. } | Op::ConcatInPlace { .. })
+    {
+        return false;
+    }
     matches!(
         op,
         Op::MakeRange { .. }
@@ -1444,6 +1514,9 @@ fn is_leaf_heap_op(op: &Op) -> bool {
 /// the map it moves into the destination) and a `LoadConst` of a heap constant (which, unlike the
 /// immediate form, allocates).
 fn writes_heap_reg(op: &Op, consts: &[Const]) -> bool {
+    if ablated(ablate::HEAP_AWARE) {
+        return is_leaf_heap_op(op);
+    }
     match op {
         Op::LoadConst { k, .. } => const_immediate_bits(&consts[*k as usize]).is_none(),
         Op::CallMethod { .. } => true,
@@ -1633,8 +1706,11 @@ fn osr_region(chunk: &noeta_bytecode::Chunk, header: usize) -> Option<(usize, us
 pub fn worth_osr(chunk: &noeta_bytecode::Chunk, names: &[String]) -> bool {
     let code = &chunk.code;
     code.iter().enumerate().any(|(pc, op)| {
-        backward_target(op, pc)
-            .is_some_and(|header| code[header..=pc].iter().all(|o| is_fast_op(o, names)))
+        backward_target(op, pc).is_some_and(|header| {
+            code[header..=pc]
+                .iter()
+                .all(|o| is_fast_op(o, &chunk.consts, names))
+        })
     })
 }
 
@@ -1653,7 +1729,7 @@ pub fn loop_bail_pcs(chunk: &noeta_bytecode::Chunk, names: &[String]) -> Vec<usi
             code[header..=back_edge]
                 .iter()
                 .enumerate()
-                .filter(|(_, o)| !is_fast_op(o, names))
+                .filter(|(_, o)| !is_fast_op(o, &chunk.consts, names))
                 .map(move |(i, _)| header + i)
                 .collect::<Vec<_>>()
         })
@@ -1714,7 +1790,7 @@ fn reachable_pcs_from(
         }
         seen[pc] = true;
         let op = &chunk.code[pc];
-        if !in_region(region, pc) || !is_fast_op(op, names) {
+        if !in_region(region, pc) || !is_fast_op(op, &chunk.consts, names) {
             continue; // a bail point (or the region's edge): no native successor
         }
         match op {
@@ -2379,7 +2455,7 @@ fn emit_op(
     op_blocks: &[Block],
 ) {
     cg.cur_pc = pc;
-    if !is_fast_op(op, names) {
+    if !is_fast_op(op, consts, names) {
         cg.sync_frame(pc);
         let here = cg.pc_const(pc);
         cg.ret_bail(here);
@@ -3037,11 +3113,12 @@ fn emit_load_global(cg: &mut Codegen, dst: Reg, g: u32, pc: usize, op_blocks: &[
 /// there. Elsewhere it bails (the immediate invariant makes the release a provable no-op, so the
 /// non-heap-aware body simply never needs the call).
 fn emit_store_global(cg: &mut Codegen, g: u32, src: Reg, pc: usize, op_blocks: &[Block]) {
+    let heap_native = cg.heap_aware && !ablated(ablate::STORE_GLOBAL);
     let old = cg.load_global(g);
     // Decide the bail BEFORE mutating anything: a bail hands control back to the interpreter, which
     // re-runs this op, so no register or slot may have changed yet. `is_pointer` is false for the
     // unbound sentinel, so this never catches the first-bind case.
-    if !cg.heap_aware {
+    if !heap_native {
         let heap = cg.is_pointer(old);
         let cont = cg.b.create_block();
         let bail = cg.b.create_block();
@@ -3071,7 +3148,7 @@ fn emit_store_global(cg: &mut Codegen, g: u32, src: Reg, pc: usize, op_blocks: &
     cg.b.ins().call(note, &[vm, gid]);
     cg.b.ins().jump(after, &[]);
     cg.b.switch_to_block(rebind_blk);
-    if cg.heap_aware {
+    if heap_native {
         // The displaced value's destructor fires here if this was its last reference — the
         // interpreter's `release_value`, through the same helper `Op::Drop` uses.
         cg.release_dropped_if_heap(old, true);
@@ -3095,7 +3172,7 @@ fn emit_take_global(cg: &mut Codegen, dst: Reg, g: u32, pc: usize, op_blocks: &[
     // accumulator (a map, a string) lives in a global, so `m[k] = v` / `s = s ~ x` in a loop reads
     // it through `TakeGlobal` every iteration — bailing here bailed the whole loop out of tier 1
     // on its *first* body op, however native the rest of it was.
-    let bail_cond = if cg.heap_aware {
+    let bail_cond = if cg.heap_aware && !ablated(ablate::TAKE_GLOBAL) {
         unbound
     } else {
         let heap = cg.is_pointer(old);
