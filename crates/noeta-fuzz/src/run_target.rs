@@ -11,11 +11,12 @@
 //!    program that parses and type-checks compiles to bytecode … so an `Err` here is an internal
 //!    invariant break"*. So `check` clean + `compile` refusing is a bug by the compiler's own
 //!    documentation.
-//! 2. **A checked program does not fail statically at run time.** This is the
-//!    [`check-vs-run divergence`] class the project has been closing one surface at a time: the
-//!    checker was lenient about a method it did not recognise, the program ran, and the *runtime*
-//!    produced E0005. Nothing underlines while you type and the failure only appears on Run, which
-//!    is the worst shape the bug can take.
+//! 2. **A checked program does not fail statically at run time.** The check-vs-run divergence
+//!    class, which the project has been closing one surface at a time (`closed_to_new_methods`
+//!    and `user_type_is_closed` in `noeta-check` are two of those surfaces): the checker was
+//!    lenient about a method it did not recognise, the program ran, and the *runtime* produced
+//!    E0005. Nothing underlines while you type and the failure only appears on Run, which is the
+//!    worst shape the bug can take.
 //! 3. **The two backends agree.** The conformance harness asserts this over a fixed corpus; this
 //!    asserts it over generated programs, so the VM meets shapes nobody wrote a fixture for.
 //!
@@ -40,7 +41,6 @@
 //! depth, so runaway recursion is a stack overflow, and a stack overflow aborts the process rather
 //! than failing a test. Termination here is structural, not a watchdog.
 //!
-//! [`check-vs-run divergence`]: https://noeta.dev
 //! [`GenOptions::terminating`]: crate::generate::GenOptions::terminating
 
 use noeta_backend::RunResult;
