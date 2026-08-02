@@ -810,7 +810,10 @@ fn source_text_tiers(
     src: SourceProgram,
 ) -> noeta_lexer::TextTiers {
     let renamed = workspace_renamed_text_tiers(db, ws);
-    let locals = workspace_packages(db, ws)
+    // The memoized map, not a rebuilt one: this runs once per source, and rebuilding an N-entry map
+    // each time is what made a whole-directory lex quadratic (see [`workspace_package_map`]).
+    let locals = workspace_package_map(db, ws)
+        .0
         .source_package(SourceId(src.id(db)))
         .and_then(|origin| renamed.0.get(origin));
     noeta_loader::widened_text_tiers(&global_text_tiers(db, ws), locals.into_iter().flatten())
@@ -1262,6 +1265,28 @@ pub fn workspace_editions(db: &dyn salsa::Database, ws: Workspace) -> noeta_lexe
 /// public for the same reason: a consumer re-checking a *derived* program (a tier-activated one,
 /// say) keeps the same `SourceId`s and so the same map.
 pub fn workspace_packages(db: &dyn salsa::Database, ws: Workspace) -> noeta_span::PackageMap {
+    workspace_package_map(db, ws).0.clone()
+}
+
+/// [`workspace_packages`]' memoized body — a newtype for the same [`salsa::Update`]/orphan reason as
+/// [`RenamedTextTiers`], backdating so re-deriving an identical map does not invalidate every lex.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct WorkspacePackageMap(noeta_span::PackageMap);
+
+backdating_update!(WorkspacePackageMap);
+
+/// The workspace package map, built **once per workspace** rather than once per consumer.
+///
+/// Memoized because [`source_text_tiers`] asks it which package one source belongs to, and
+/// `source_text_tiers` runs once per source ([`tokens_in`] is tracked per `(ws, src)`) — so an
+/// unmemoized rebuild made a whole-directory lex quadratic in the member count. Measured on a
+/// directory of N siblings: `PackageMap::set` plus its hashing and table growth was **37% of the
+/// whole `noeta check`** at N=384, and the run grew as ~480·N² instructions — one
+/// `HashMap<SourceId, PackageOrigin>` insert per *pair* of sources, which is exactly N rebuilds of
+/// an N-entry map. Nothing here depends on the entry, so one map per workspace is all that is ever
+/// needed.
+#[salsa::tracked(returns(ref))]
+fn workspace_package_map(db: &dyn salsa::Database, ws: Workspace) -> WorkspacePackageMap {
     let mut map = noeta_span::PackageMap::new();
     for src in ws.members(db).iter().copied() {
         map.set(SourceId(src.id(db)), noeta_span::PackageOrigin::Root);
@@ -1272,7 +1297,7 @@ pub fn workspace_packages(db: &dyn salsa::Database, ws: Workspace) -> noeta_span
             noeta_span::PackageOrigin::Dependency(dm.import_key(db).to_string()),
         );
     }
-    map
+    WorkspacePackageMap(map)
 }
 
 /// Type-check the program linked from `entry` — the workspace analogue of [`checked`], memoized
