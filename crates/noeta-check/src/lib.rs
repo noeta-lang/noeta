@@ -2337,6 +2337,7 @@ impl Checker {
                 if matches!(&iter_ty, Type::Named(n, _) if n == stdlib::ITERATOR) {
                     self.sites.for_stream_sites.insert(*span);
                 }
+                self.check_iterable(&iter_ty, iterable.span());
                 env.push(HashMap::new());
                 self.bind_for_pattern(pattern, &iter_ty, env);
                 self.coloring.loop_depth += 1;

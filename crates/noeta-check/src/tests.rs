@@ -2889,6 +2889,32 @@ fn an_ordering_needs_two_operands_of_one_type() {
     assert!(codes("fn m(a: dyn, b: int): bool { return a > b }\necho \"ok\"\n").is_empty());
 }
 
+/// A container is indexed by its own key type, and `for` iterates something iterable.
+///
+/// The receiver's indexability was checked (`42[0]` was already E0007) but the *index* expression's
+/// type was synthesized and discarded, so `xs["a"]` on a `List<int>` aborted with the runtime's
+/// `list index must be an int, found string`. `for x in 5` did the same. Found by the
+/// runtime-rejection census.
+#[test]
+fn indexing_and_iteration_are_typed() {
+    assert_eq!(codes("xs = [1, 2]\necho xs[\"a\"]\n"), vec!["E0007"]);
+    assert_eq!(codes("s = \"abc\"\necho s[\"a\"]\n"), vec!["E0007"]);
+    assert_eq!(codes("m = {\"k\": 1}\necho m[1]\n"), vec!["E0007"]);
+    assert_eq!(codes("for x in 5 { echo x }\n"), vec!["E0007"]);
+    assert_eq!(codes("for x in true { echo x }\n"), vec!["E0007"]);
+
+    assert!(codes("xs = [1, 2]\necho xs[0]\n").is_empty());
+    assert!(codes("m = {\"k\": 1}\necho m[\"k\"]\n").is_empty());
+    assert!(codes("for x in 0..5 { echo x }\n").is_empty());
+    assert!(codes("for x in [1, 2] { echo x }\n").is_empty());
+    assert!(codes("m = {\"k\": 1}\nfor v in m { echo v }\n").is_empty());
+    // Gradual sources defer on both counts.
+    assert!(
+        codes("fn f(xs: dyn, i: dyn): void {\n  echo xs[i]\n  for v in xs { echo v }\n}\necho \"ok\"\n")
+            .is_empty()
+    );
+}
+
 /// A concretely non-callable value is not callable, and a module does not gain functions.
 ///
 /// `x = 5` then `x(1)` typed as `Unknown` and aborted with the runtime's `int is not callable`;

@@ -1491,7 +1491,29 @@ impl Checker {
             } => {
                 // Index into the receiver: a list element, a map value, a string char, or `dyn`.
                 let recv = self.synth(receiver, env);
-                self.synth(index, env);
+                let idx = self.synth(index, env);
+                // What the receiver indexes *by*. The receiver's own indexability was already
+                // checked below; the index's type was synthesized and thrown away, so `xs["a"]`
+                // on a `List<int>` type-checked and aborted with the runtime's `list index must
+                // be an int, found string`. A `Named` receiver may implement its own `Index` and
+                // a gradual one defers, so neither says anything here.
+                let key = match &recv {
+                    Type::List(_) | Type::String | Type::Bytes => Some(Type::Int),
+                    Type::Map(k, _) => Some((**k).clone()),
+                    _ => None,
+                };
+                if let Some(key) = key
+                    && !idx.defers_to_runtime()
+                    && !key.contains_unknown()
+                    && !self.assignable(&idx, &key)
+                    && !(idx.is_numeric() && key.is_numeric())
+                {
+                    self.error(
+                        DiagnosticCode::TypeMismatch,
+                        index.span(),
+                        format!("`{recv}` is indexed by `{key}`, found `{idx}`"),
+                    );
+                }
                 // Note a list-typed index so a `list[i].field` member access can fuse (P-PACK 2.5+).
                 // Recorded here — where the receiver's type is already in hand — so `synth_member`
                 // need not re-synthesize the inner receiver.

@@ -457,6 +457,33 @@ impl MatchCoverage {
 impl Checker {
     // ----- pattern binding -----
 
+    /// Whether a `for` can iterate a value of this type at all.
+    ///
+    /// The collections and `Iterator<T>` are the built-in sources; a nominal type may provide its
+    /// own `iter`, and a gradual one defers. Everything else is a scalar: `for x in 5` is the
+    /// runtime's `cannot iterate over int`, and nothing about it is dynamic.
+    fn is_iterable(&self, ty: &Type) -> bool {
+        match ty {
+            Type::List(_) | Type::Set(_) | Type::Map(..) => true,
+            // A range (`0..5`) synthesizes a list of its bound type; `Named` covers both a user
+            // type with an `iter` method and `Iterator<T>` itself.
+            Type::Named(..) | Type::Param(_) | Type::DynTrait(_) => true,
+            _ => ty.defers_to_runtime() || ty.contains_unknown(),
+        }
+    }
+
+    /// Report a `for` over something that cannot be iterated (E0007).
+    pub(crate) fn check_iterable(&mut self, iter_ty: &Type, span: Span) {
+        if !self.is_iterable(iter_ty) {
+            self.error(
+                DiagnosticCode::TypeMismatch,
+                span,
+                format!("cannot iterate over `{iter_ty}`"),
+            )
+            .help("`for` iterates a list, set, map, range, or a type providing `iter`");
+        }
+    }
+
     pub(crate) fn bind_for_pattern(&mut self, pattern: &ForPattern, iter_ty: &Type, env: &mut Env) {
         // The element type a `for` loop binds: a list/set's element, a map's **value** (iteration
         // yields values, like the runtime), or an `Iterator<T>`'s element (Track I.2). Anything else
