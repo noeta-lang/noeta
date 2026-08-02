@@ -68,6 +68,7 @@ use noeta_span::{Source, SourceId};
 // width-driven groups (`wrap = true`) both lower onto it.
 mod config;
 mod doc;
+pub mod oracle;
 mod print;
 mod safety;
 mod trivia;
