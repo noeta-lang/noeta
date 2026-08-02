@@ -1151,12 +1151,28 @@ pub fn link_with_deps_appending(
         );
         sibling_programs = all_programs;
         broken = all_broken;
+        // Each re-parsed sibling takes its derived path afresh (the programs above are new; the
+        // ones the first pass wrote into were discarded with it). Per unit rather than in one call,
+        // because the entry's program already carries the namespace statement the first call
+        // inserted and handing it back would be read as a *declaration* (E0072).
+        //
+        // Nothing can be reported here, and that is a consequence rather than a hope: a deferred
+        // sibling is `ModulePath::Declared` by the deferral's own test, which `apply_derived_paths`
+        // skips outright, and every sibling that was NOT deferred already went through the
+        // whole-program call above — which returned early if it had anything to say. So a
+        // collision (E0073), an illegal segment (E0074) or a `namespace` declaration (E0072) has
+        // been reported already, and the program never reached this line.
         for (index, program) in &mut sibling_programs {
-            apply_derived_paths(vec![DerivedUnit {
+            let repeated = apply_derived_paths(vec![DerivedUnit {
                 source: &sources[*index],
                 path: &siblings[*index - 1].path,
                 program,
             }]);
+            debug_assert!(
+                repeated.is_empty(),
+                "re-deriving a sibling's path after the whole-program pass accepted it must be \
+                 silent; got {repeated:?}"
+            );
         }
         linked = link(&sibling_programs, &broken);
     }
