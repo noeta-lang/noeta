@@ -818,6 +818,7 @@ impl<'m> Vm<'m> {
         JitReport {
             native: stats.native,
             compiled: stats.compiled,
+            osr_windows: stats.osr_windows,
             compile_ns_total: stats.compile_ns_total,
             bails,
             declined,
@@ -868,6 +869,11 @@ pub struct JitReport {
     pub native: usize,
     /// Prototypes compiled at all (native + bail stubs).
     pub compiled: usize,
+    /// Region-scoped **OSR loop windows** compiled (P-OSRW) — bodies, not prototypes, so counted
+    /// beside `native` rather than inside it. A program that is one big top-level loop promotes
+    /// here and nowhere else: `native` and `compiled` both stay 0 while its loop runs native, so
+    /// anything asking "did tier 1 run?" must read this too.
+    pub osr_windows: usize,
     /// Total off-thread compile time, ns.
     pub compile_ns_total: u64,
     /// Bail histogram, most-frequent first.

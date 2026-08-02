@@ -272,10 +272,11 @@ fn render_jit_report(report: &JitReport, module: &Module, sources: &SourceMap) -
     let stubs = report.compiled.saturating_sub(report.native);
     let _ = writeln!(
         out,
-        "── JIT report ──\ntier 1: {} of {} compiled prototypes native ({} bail stubs), compile time {:.1} ms",
+        "── JIT report ──\ntier 1: {} of {} compiled prototypes native ({} bail stubs), {} OSR loop windows, compile time {:.1} ms",
         report.native,
         report.compiled,
         stubs,
+        report.osr_windows,
         report.compile_ns_total as f64 / 1e6,
     );
 
