@@ -196,7 +196,18 @@ ROWS=(
     "version|1.0|n/a||--version"
     "startup|1.0|n/a|0|run --no-cache @"
     "arith|1.0|declined|1199997|run --no-cache @"
-    "map|1.0|declined|449985000|run --no-cache @"
+    # `native` since the leaf-op seam took Stringify/BuildString/CallMethod (cf9a2cb7a): this loop
+    # used to decline tier 1 on every one of them and was pinned as an INTERPRETER row. It compiles
+    # now, and the -23.6% that came with the flip is why the row is here. Kept as the map row rather
+    # than re-shaped back into an interpreted one: what we care about is that map workloads keep
+    # reaching native code, and `arith` still covers the interpreter.
+    # 6.0 for the same reason `loop_jit` carries it, and it had to move WITH the engine: tier 1
+    # compiles on a background thread, so how many iterations run interpreted before native code
+    # installs depends on machine load — the row's floor itself moves. Measured right after the
+    # flip: 126.3M / 125.3M / 123.1M across three consecutive runs (2.6%), against the 1.0% band
+    # calibrated when this was a deterministic interpreter row. The sharp guard on a native row is
+    # the `native` expectation, not the number.
+    "map|6.0|native|449985000|run --no-cache @"
     "loop_jit|6.0|native|29999994|run --no-cache @"
 )
 
