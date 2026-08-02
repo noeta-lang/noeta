@@ -150,7 +150,10 @@ impl std::fmt::Display for Violation {
                 write!(f, "the backends disagreed — {detail}")
             }
             Violation::Panicked { where_ } => {
-                write!(f, "a stage panicked on a program the checker accepted: {where_}")
+                write!(
+                    f,
+                    "a stage panicked on a program the checker accepted: {where_}"
+                )
             }
         }
     }
@@ -169,10 +172,9 @@ pub fn class(v: &Violation) -> String {
         }
         // The panic's own location, which is what distinguishes two panics; the message around it
         // varies with the program.
-        Violation::Panicked { where_ } => format!(
-            "panic-{}",
-            where_.split_whitespace().next().unwrap_or("?")
-        ),
+        Violation::Panicked { where_ } => {
+            format!("panic-{}", where_.split_whitespace().next().unwrap_or("?"))
+        }
     }
 }
 
@@ -235,16 +237,19 @@ pub fn evaluate(src: &str) -> Result<Reach, Violation> {
 
     // Invariant 1. The same compile the salsa `bytecode` query performs — no isolates, no debug
     // info — so a refusal here is the one the ordinary pipeline would hit.
-    let module =
-        match noeta_compiler::compile_with_sites(&parsed.program, checked.sites.clone(), false, false)
-        {
-            Ok(module) => module,
-            Err(unsupported) => {
-                return Err(Violation::CompileRefusedCheckedProgram {
-                    detail: unsupported.to_string(),
-                });
-            }
-        };
+    let module = match noeta_compiler::compile_with_sites(
+        &parsed.program,
+        checked.sites.clone(),
+        false,
+        false,
+    ) {
+        Ok(module) => module,
+        Err(unsupported) => {
+            return Err(Violation::CompileRefusedCheckedProgram {
+                detail: unsupported.to_string(),
+            });
+        }
+    };
 
     let vm = noeta_vm::VmBackend::new().run_module(&module);
     let reference = noeta_conformance::reference::reference_run(&parsed.program, checked.sites);

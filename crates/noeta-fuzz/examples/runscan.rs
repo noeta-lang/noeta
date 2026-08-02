@@ -64,9 +64,11 @@ fn main() {
                     Ok(reach) => *histogram.entry(format!("{reach:?}")).or_default() += 1,
                     Err(v) => {
                         *histogram.entry("VIOLATION".to_string()).or_default() += 1;
-                        let entry = findings
-                            .entry(run_target::class(&v))
-                            .or_insert((0, nonce, v.to_string()));
+                        let entry = findings.entry(run_target::class(&v)).or_insert((
+                            0,
+                            nonce,
+                            v.to_string(),
+                        ));
                         entry.0 += 1;
                     }
                 }
@@ -76,10 +78,11 @@ fn main() {
             }
             println!("reach over {n} programs: {histogram:?}");
             println!("{dynamic} program(s) reached a dynamically-typed construct (want 0)");
-            let ran = histogram.get(&format!("{:?}", Reach::Ran)).copied().unwrap_or(0);
-            println!(
-                "{ran}/{n} ran, so that many programs actually exercised the invariants",
-            );
+            let ran = histogram
+                .get(&format!("{:?}", Reach::Ran))
+                .copied()
+                .unwrap_or(0);
+            println!("{ran}/{n} ran, so that many programs actually exercised the invariants",);
             if findings.is_empty() {
                 println!("no violations");
             }

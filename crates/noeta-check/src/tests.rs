@@ -2935,7 +2935,10 @@ fn two_declarations_of_one_name_in_a_file_collide() {
         codes("class Beta {\n  fn f(): void {}\n}\nclass Beta {\n}\n"),
         vec!["E0020"]
     );
-    assert_eq!(codes("struct S { n: int }\nstruct S { m: int }\n"), vec!["E0020"]);
+    assert_eq!(
+        codes("struct S { n: int }\nstruct S { m: int }\n"),
+        vec!["E0020"]
+    );
     assert_eq!(
         codes("fn g(): int { return 1 }\nfn g(): int { return 2 }\n"),
         vec!["E0020"]
@@ -2986,7 +2989,10 @@ fn a_for_tuple_pattern_needs_a_tuple_element() {
 /// by the `noeta-fuzz` execution oracle.
 #[test]
 fn a_declared_type_is_not_callable() {
-    assert_eq!(codes("struct S { n: int = 5 }\necho S().n\n"), vec!["E0007"]);
+    assert_eq!(
+        codes("struct S { n: int = 5 }\necho S().n\n"),
+        vec!["E0007"]
+    );
     assert_eq!(
         codes("struct S { n: int }\necho S(n: 5).n\n"),
         vec!["E0007"]
@@ -3017,10 +3023,16 @@ fn a_closure_body_still_sees_a_binding_declared_later() {
     assert!(codes("f = fn(): int => (fn(): int => g)()\ng = 1\necho f()\n").is_empty());
     // A closure *parameter default* is evaluated in the enclosing scope — which is now — so it is
     // outside the deferral and stays an error.
-    assert_eq!(codes("f = fn(x: int = g): int => x\ng = 1\necho f()\n"), vec!["E0005"]);
+    assert_eq!(
+        codes("f = fn(x: int = g): int => x\ng = 1\necho f()\n"),
+        vec!["E0005"]
+    );
     // And a sealed named-fn body sees no top-level binding at all, later or not (E0005 with the
     // `use (…)` hint) — unchanged by the deferral rule.
-    assert_eq!(codes("fn t(): int { return g }\ng = 1\necho t()\n"), vec!["E0005"]);
+    assert_eq!(
+        codes("fn t(): int { return g }\ng = 1\necho t()\n"),
+        vec!["E0005"]
+    );
 }
 
 #[test]

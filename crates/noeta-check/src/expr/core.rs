@@ -1159,9 +1159,7 @@ impl Checker {
             //
             // The payload stays `Unknown`, which is what keeps `[some(1), none]` unifying to
             // `List<?int>` and `x: ?T = none` absorbing at any `T`.
-            Expr::Ident { name, .. }
-                if name == "none" && lookup(env, name.as_str()).is_none() =>
-            {
+            Expr::Ident { name, .. } if name == "none" && lookup(env, name.as_str()).is_none() => {
                 Type::Option(Box::new(Type::Unknown))
             }
             Expr::Ident { name, span } => match lookup(env, name.as_str())

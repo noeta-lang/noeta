@@ -187,10 +187,7 @@ impl Checker {
                         self.error(
                             DiagnosticCode::TypeMismatch,
                             span,
-                            format!(
-                                "`{}` expects `bool` operands, found `{t}`",
-                                op.symbol()
-                            ),
+                            format!("`{}` expects `bool` operands, found `{t}`", op.symbol()),
                         );
                     }
                 }
@@ -315,9 +312,7 @@ impl Checker {
     /// side being assignable to the other, which is what carries `dyn`, holes, unions and a type
     /// parameter's instantiation without this having to enumerate them.
     fn orderable_together(&self, lt: &Type, rt: &Type) -> bool {
-        (lt.is_numeric() && rt.is_numeric())
-            || self.assignable(lt, rt)
-            || self.assignable(rt, lt)
+        (lt.is_numeric() && rt.is_numeric()) || self.assignable(lt, rt) || self.assignable(rt, lt)
     }
 
     pub(crate) fn report_operator_error(
