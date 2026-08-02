@@ -1292,6 +1292,20 @@ struct Coloring {
     /// A `spawn` is only valid when this is non-zero; otherwise it is an orphan task (E0041). Reset at a
     /// closure boundary (a closure is a fresh callable — a `concurrent` scope does not cross into it).
     concurrent_depth: u32,
+    /// The number of enclosing **closure bodies** around the expression being checked — the one
+    /// place where a reference to a top-level binding declared *later* is legitimate.
+    ///
+    /// Top-level statements run in textual order, so a name they mention must already be bound;
+    /// the environment says so and nothing may overrule it. A closure body is different: it is not
+    /// evaluated where it is written, it resolves globals as a live view of the top-level scope,
+    /// and `f = fn() => g` / `g = 1` / `echo f()` genuinely runs. That gap — *deferred* versus
+    /// *now* — is exactly what the hoisted-globals fallback in [`Checker::is_known_name`] keys on.
+    ///
+    /// A depth rather than a flag because closures nest, and it is reset to `0`… nowhere: a closure
+    /// inside a sealed named-fn body is already excluded by [`Coloring::in_sealed_body`], where top
+    /// level is out of scope for a different reason. A closure *parameter default* is deliberately
+    /// outside the count — it is evaluated in the enclosing scope, which is to say now.
+    closure_depth: u32,
     /// The number of enclosing `for`/`while` loops around the statement being checked. A `break`
     /// or `continue` is only valid when this is non-zero; otherwise it is `E0024`.
     loop_depth: usize,
@@ -1896,7 +1910,12 @@ impl Checker {
         // A `concurrent` scope likewise does not cross into a closure — a `spawn` inside a closure
         // passed to a builtin is an orphan (E0041), the same coloring rule.
         let saved_concurrent = std::mem::replace(&mut self.coloring.concurrent_depth, 0);
+        // Inside the body — and only the body — evaluation is deferred, so a top-level binding
+        // declared later is a legitimate reference. The parameter defaults validated above are
+        // outside this on purpose: they are evaluated in the enclosing scope.
+        self.coloring.closure_depth += 1;
         let result = self.closure_body_type_inner(body, expected, env);
+        self.coloring.closure_depth -= 1;
         self.coloring.concurrent_depth = saved_concurrent;
         self.coloring.current_async = saved_async;
         self.coloring.current_yield = saved_yield;

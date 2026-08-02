@@ -737,10 +737,18 @@ impl Checker {
             // Built-in namable types/enums (`Ordering`, `Type`, `Semantic`, iterator types, …)
             // are legitimate bare references — `Ordering.Less` names the prelude enum's variant.
             || PRELUDE_TYPES.contains(&name)
-            // A hoisted top-level global (top-level code may reference one declared later) — but
-            // NOT inside a sealed named-fn body, where top-level value bindings are out of scope
-            // unless `use (…)`-captured (captures are in the sealed env, caught by `lookup`).
-            || (!self.coloring.in_sealed_body
+            // A hoisted top-level global, referenced from a **closure body** — the one context
+            // whose evaluation is deferred past the top level's textual order, so the binding does
+            // exist by the time the body runs (`f = fn() => g`, `g = 1`, `f()`).
+            //
+            // The depth test is load-bearing. Without it the hoist also licensed references from
+            // top-level statements, which execute *now* — so `a = a` and `echo a` before `a = 1`
+            // type-checked and then died at run time with the E0005 the checker had in hand. That
+            // is the check-vs-run divergence in its worst shape: nothing underlines while typing.
+            // Not inside a sealed named-fn body either, where top-level value bindings are out of
+            // scope unless `use (…)`-captured (captures are in the sealed env, caught by `lookup`).
+            || (self.coloring.closure_depth > 0
+                && !self.coloring.in_sealed_body
                 && self.symbols.global_binding_names.contains(name))
             // A nested `fn`'s name is an item of its enclosing body — visible to recursion and
             // siblings even inside sealed bodies (a declaration, not captured value state).

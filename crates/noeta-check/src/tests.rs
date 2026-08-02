@@ -2817,6 +2817,42 @@ fn legitimate_forward_and_nested_references_stay_clean() {
     assert!(codes("echo Ordering.Less\n").is_empty());
 }
 
+/// The hoisted-globals fallback licenses a **deferred** reference, not an early one.
+///
+/// Top-level statements run in textual order, so a name one mentions has to be bound already. The
+/// hoist used to apply to them too, which let `a = a` type-check and then die at run time with the
+/// very E0005 the checker was holding — the check-vs-run divergence in its worst shape, since
+/// nothing underlines while you type. Found by the `noeta-fuzz` execution oracle.
+#[test]
+fn a_top_level_statement_does_not_see_a_binding_declared_later() {
+    // The self-referential initializer: `a` is not in scope until this statement finishes.
+    assert_eq!(codes("a = a\n"), vec!["E0005"]);
+    // Annotated, and through an operator — the same fact, reached differently.
+    assert_eq!(codes("mut right: string = right ?? none\n"), vec!["E0005"]);
+    assert_eq!(codes("b = a + 1\na = 1\n"), vec!["E0005"]);
+    // A plain statement before the binding.
+    assert_eq!(codes("echo a\na = 1\n"), vec!["E0005"]);
+    // Calling one, too: the callee path shares the gate.
+    assert_eq!(codes("f()\nf = fn(): int => 1\n"), vec!["E0005"]);
+}
+
+/// The other side of the same boundary: a **closure body** is evaluated where it is called, not
+/// where it is written, so it does see a global declared later — and this program really runs.
+/// Removing the hoist outright rather than scoping it to deferred positions would reject it.
+#[test]
+fn a_closure_body_still_sees_a_binding_declared_later() {
+    assert!(codes("f = fn(): int => g\ng = 1\necho f()\n").is_empty());
+    // Through a call, and from a nested closure.
+    assert!(codes("f = fn(): int => h()\nh = fn(): int => 1\necho f()\n").is_empty());
+    assert!(codes("f = fn(): int => (fn(): int => g)()\ng = 1\necho f()\n").is_empty());
+    // A closure *parameter default* is evaluated in the enclosing scope — which is now — so it is
+    // outside the deferral and stays an error.
+    assert_eq!(codes("f = fn(x: int = g): int => x\ng = 1\necho f()\n"), vec!["E0005"]);
+    // And a sealed named-fn body sees no top-level binding at all, later or not (E0005 with the
+    // `use (…)` hint) — unchanged by the deferral rule.
+    assert_eq!(codes("fn t(): int { return g }\ng = 1\necho t()\n"), vec!["E0005"]);
+}
+
 #[test]
 fn a_repl_session_defers_unknown_names_to_a_later_entry() {
     // A session is the ONE place an unknown name stays deferred — a later entry may define it.
