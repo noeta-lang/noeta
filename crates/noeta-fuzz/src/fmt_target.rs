@@ -11,6 +11,11 @@ use noeta_fmt::{
     oracle::{self, Verdict, Violation},
 };
 
+/// The base seed both the gate's sweep and the `triage` tool walk, so a seed reported by one
+/// reproduces in the other unchanged. Reproduction is the whole value of a deterministic sweep;
+/// two tools disagreeing on the base would quietly destroy it.
+pub const BASE_SEED: u64 = 0xF0217A;
+
 /// Derive a formatter configuration from `bytes`.
 ///
 /// Config is an input dimension in its own right: `wrap` alone switches the printer between

@@ -9,11 +9,8 @@
 use std::collections::BTreeMap;
 
 use noeta_fmt::oracle::{self, Verdict};
-use noeta_fuzz::fmt_target::{self, Class};
-
-/// The base seed the fuzz suite sweeps. Kept in sync with `tests/fmt.rs` so a seed reported by the
-/// test reproduces here unchanged.
-const BASE: u64 = 0xF0217A;
+// `BASE_SEED` is shared with `tests/fmt.rs`, so a seed reported by the test reproduces here.
+use noeta_fuzz::fmt_target::{self, BASE_SEED as BASE, Class};
 
 /// The formatter recurses to the nesting depth of its input; generated programs can exceed the
 /// default thread stack.
