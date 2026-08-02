@@ -690,7 +690,11 @@ fn parse_hole(ctx: Ctx<'_>, text: &str, abs_offset: u32) -> Expr {
     // allocation) whenever ample stack remains, so the common shallow-hole case pays nothing. This
     // is the hole-parse counterpart of the top-level [`crate::parse`]'s deep-nesting worker thread.
     stacker::maybe_grow(HOLE_STACK_RED_ZONE, HOLE_STACK_GROW, || {
-        let (expr, errs) = expr_parser(ctx, statement_parser(ctx))
+        // A hole re-enters the whole grammar, so it builds its own type handle to share across the
+        // sites inside it (see [`crate::TypeP`]) — the enclosing parse's handle cannot be reached
+        // from here: this runs from inside a `map_with` closure, several combinator layers down.
+        let type_p = crate::type_parser(ctx).boxed();
+        let (expr, errs) = expr_parser(ctx, type_p.clone(), statement_parser(ctx, type_p))
             .parse(input)
             .into_output_errors();
         for err in errs {
