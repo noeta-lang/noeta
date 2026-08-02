@@ -597,6 +597,22 @@ impl Printer<'_> {
             .is_some_and(|c| c.span.start >= start && c.span.start < end)
     }
 
+    /// Whether **any** pending comment falls in `[start, end)`.
+    ///
+    /// [`Self::holds_comment`] inspects only the comment under the cursor, which answers "does this
+    /// region open with a comment". Where the region of interest is not the next one the printer
+    /// will reach — the tail of an `else` block, past the nested `if` that occupies its head — the
+    /// scan has to look further ahead. Comments are in source order, so it stops at the first one
+    /// past `end`.
+    fn any_comment_in(&self, start: u32, end: u32) -> bool {
+        self.comments
+            .get(self.cursor.get()..)
+            .unwrap_or(&[])
+            .iter()
+            .take_while(|c| c.span.start < end)
+            .any(|c| c.span.start >= start)
+    }
+
     // ---- statements --------------------------------------------------------------------------
 
     /// A brace-delimited statement block: ` {` on the current line, body indented, `}` on its own
@@ -1028,7 +1044,14 @@ impl Printer<'_> {
                     span: nested_span,
                 },
             ] = else_body
-                && !self.holds_comment(else_start, nested_span.start)
+                // No comment may be stranded in either gap the inline form erases: between the
+                // `else` and the nested `if`, or between the end of that if-chain and the block's
+                // own closing brace. Comments *inside* the nested if are not at risk — its own
+                // blocks walk them — which is why the two gaps are tested rather than the whole
+                // else region, whose wider test would suppress the resugar for almost every
+                // commented branch.
+                && !self.any_comment_in(else_start, nested_span.start)
+                && !self.any_comment_in(nested_span.end, span.end)
             {
                 parts.push(self.if_stmt(
                     nested_cond,
@@ -1997,18 +2020,39 @@ impl Printer<'_> {
             }
         }
         chunks.reverse();
-        chunks
-            .iter()
-            .any(|c| {
-                matches!(
-                    c,
-                    Expr::Unary {
-                        op: noeta_ast::UnaryOp::Spread,
-                        ..
-                    }
-                )
-            })
-            .then_some(chunks)
+        // Every chunk must be one the desugar could have produced, or this is not a literal at all
+        // but a literal *concatenated with something else* — the two bottom out in the same
+        // synthetic empty list, so walking the `~` chain alone cannot tell them apart.
+        //
+        // `v = [...a] ~ c` was resugared to `[...a, c]`, and `v = [...a] ~ []` to `[...a]`, both of
+        // which drop a `Concat` node the author wrote; the safety gate caught the changed AST and
+        // refused to format the file. Two conditions restore the distinction:
+        //
+        // * a chunk is a `Spread` or a **non-empty** `List` — the desugar groups plain elements and
+        //   never emits an empty group, so an empty `List` chunk is an author's `~ []`, and an
+        //   `Ident` (or anything else) is an author's `~ c`;
+        // * at least one chunk is a `Spread`, as before, since that node is only ever produced here.
+        //
+        // `[...a] ~ [b]` stays accepted and prints as `[...a, b]` — those two spellings desugar to
+        // the *same* tree, so either is a faithful rendering of it.
+        let plausible_chunk = |c: &&Expr| match c {
+            Expr::Unary {
+                op: noeta_ast::UnaryOp::Spread,
+                ..
+            } => true,
+            Expr::List { items, .. } => !items.is_empty(),
+            _ => false,
+        };
+        let has_spread = chunks.iter().any(|c| {
+            matches!(
+                c,
+                Expr::Unary {
+                    op: noeta_ast::UnaryOp::Spread,
+                    ..
+                }
+            )
+        });
+        (has_spread && chunks.iter().all(plausible_chunk)).then_some(chunks)
     }
 
     /// Flatten a left-nested chain of **same-precedence** binary operators — `((a + b) - c) + d` →

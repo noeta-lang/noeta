@@ -147,3 +147,46 @@ fn authored_reflection_string_is_not_sugared() {
         "struct T {\n    a: int\n}\n\nspecs = field_specs_of(\"T\")\nv = construct(\"T\", [1])\nc = variants_of(\"T\")\n",
     );
 }
+
+// --- spread list literals ---
+//
+// `[...a, b]` desugars to `[] ~ ...a ~ [b]`, and the printer walks that `~` chain back to the
+// literal. The chain a *literal* produces is indistinguishable, by shape alone, from that literal
+// concatenated with something else — both bottom out in the same synthetic empty list — so the walk
+// also has to reject chunks the desugar could never have emitted. Found by `noeta-fuzz`.
+
+#[test]
+fn spread_list_round_trips() {
+    preserved("a = [1]\nv = [...a, 2]\necho v\n");
+    preserved("a = [1]\nv = [2, ...a]\necho v\n");
+    preserved("a = [1]\nb = [2]\nv = [...a, ...b]\necho v\n");
+}
+
+/// A spread list concatenated with an **empty** list keeps its `~ []`. The desugar groups plain
+/// elements and never emits an empty group, so an empty `List` chunk can only be an author's `~ []`
+/// — reading it as part of the literal printed `[...a]`, dropping a `Concat` node, and the safety
+/// gate refused to format the file.
+#[test]
+fn a_spread_list_concatenated_with_an_empty_list_is_not_sugared() {
+    preserved("a = [1]\nv = [...a] ~ []\necho v\n");
+}
+
+/// And concatenated with a non-list operand: an `Ident` chunk is likewise something the desugar
+/// could not have produced, so the `~ c` must survive.
+#[test]
+fn a_spread_list_concatenated_with_a_value_is_not_sugared() {
+    preserved("a = [1]\nc = [2]\nv = [...a] ~ c\necho v\n");
+}
+
+/// The genuinely ambiguous case, pinned deliberately: `[...a] ~ [b]` and `[...a, b]` desugar to the
+/// *same* tree, so printing the literal spelling is a faithful rendering of it, not a rewrite.
+#[test]
+fn a_spread_list_concatenated_with_a_list_literal_is_sugared() {
+    let out = format_source(
+        "resugar.noe",
+        "a = [1]\nv = [...a] ~ [2]\necho v\n",
+        &FmtConfig::default(),
+    )
+    .expect("formats");
+    assert_eq!(out, "a = [1]\nv = [...a, 2]\necho v\n");
+}

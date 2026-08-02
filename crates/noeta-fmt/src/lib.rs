@@ -2057,6 +2057,39 @@ if a {
         assert_eq!(out, "if a {\n    echo 1\n} else if b {\n    echo 2\n}\n");
     }
 
+    /// The other gap the inline `else if` erases: a comment *after* the nested if-chain but still
+    /// inside the else block. The first fix only guarded the head of the block, so this one still
+    /// escaped — one nesting level shallower than it was written.
+    #[test]
+    fn a_comment_after_the_nested_if_keeps_the_else_braces() {
+        let src = "\
+if a {
+    echo 1
+} else {
+    if b {
+        echo 2
+    }
+    // and that is all the cases
+}
+";
+        let out = fmt(src).unwrap();
+        assert_eq!(out, src, "fmt moved a comment out of an else block");
+        assert_eq!(fmt(&out).unwrap(), out, "and it is still idempotent");
+    }
+
+    /// A comment *inside* the nested `if` is not at risk — its own block walks it — so the resugar
+    /// must still collapse there. Without this, the guard would suppress `else if` for almost every
+    /// commented branch in the corpus.
+    #[test]
+    fn a_comment_inside_the_nested_if_still_collapses_to_else_if() {
+        let out = fmt("if a {\n    echo 1\n} else {\n    if b {\n        // inner\n        echo 2\n    }\n}\n")
+            .expect("formats");
+        assert_eq!(
+            out,
+            "if a {\n    echo 1\n} else if b {\n    // inner\n    echo 2\n}\n"
+        );
+    }
+
     /// Every operand of a width-wrapped binary chain is rendered in **source order**, because the
     /// comment cursor is monotone and never scans backwards.
     ///
