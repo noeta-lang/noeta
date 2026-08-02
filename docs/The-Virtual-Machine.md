@@ -91,6 +91,8 @@ This "claims verified at entries, maintained by native defs" contract is what le
 
 Promotion is a per-prototype counter: a prototype crossing `JIT_HOT_THRESHOLD` frame entries **or loop back-edges** is compiled. The back-edge trigger is **on-stack replacement (OSR)** — a long-running loop enters Tier 1 *at its loop header*, mid-frame, rather than only at the next call. Without it a top-level program that is one big loop (its `main` frame entered exactly once) would never get hot; with it, loop headers become native re-entry points, reusing the same mid-frame-entry machinery that re-enters a compiled caller after a call returns.
 
+**How you got hot decides what gets compiled.** A prototype that got hot at a *call* is compiled whole. A prototype that got hot at a *back-edge* is compiled to its **OSR window** — the loop's own extent, grown to cover every enclosing loop, with everything outside it left to the interpreter. That is not a shortcut, it is the point: Cranelift allocates registers over a whole function, so a script's cold prologue and tail otherwise compete with its hot loop for machine registers. Measured, teaching Tier 1 one more op *in a tail that runs once* made an unrelated hot loop spill a value out of a register and cost it 5%. Compiling the window alone removes that coupling, and both bodies coexist — a native re-entry is routed by whether its pc falls in a window — so nothing loses coverage.
+
 The whole tier-transition loop, in one picture:
 
 ```text

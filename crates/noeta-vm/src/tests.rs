@@ -1084,8 +1084,11 @@ fn jit_osr_top_level_loop_goes_native() {
     let module = compile_module(src);
     let interp = VmBackend::new().run_module(&module);
     let (jit, stats) = VmBackend::new().run_module_jit_hot_with_stats(&module);
+    // P-OSRW: a top-level loop promotes into a **region-scoped** body — the loop's own window —
+    // and the prototype's cold prologue/tail never needs the whole-prototype body at all, so
+    // `native` (which counts whole prototypes) may legitimately stay 0 here.
     assert!(
-        stats.native >= 1,
+        stats.native + stats.osr_windows >= 1,
         "the top-level loop must go native via OSR under hot-counter promotion, got {stats:?}"
     );
     assert_eq!(interp, jit, "OSR result must match the interpreter");
@@ -1107,7 +1110,7 @@ fn jit_osr_heap_body_matches_interpreter() {
     let interp = VmBackend::new().run_module(&module);
     let (jit, stats) = VmBackend::new().run_module_jit_hot_with_stats(&module);
     assert!(
-        stats.native >= 1,
+        stats.native + stats.osr_windows >= 1,
         "the heap-body top-level loop must go native via OSR, got {stats:?}"
     );
     assert_eq!(
@@ -1116,6 +1119,66 @@ fn jit_osr_heap_body_matches_interpreter() {
     );
     let expected: i64 = (0..100).sum();
     assert_eq!(jit.stdout, format!("{expected}\n"));
+}
+
+/// P-OSRW: a back-edge promotion compiles the loop's **window**, not the prototype. The window is
+/// seeded at whichever back-edge got hot first — here the *inner* loop's, which trips long before
+/// the outer one's — and must grow to the enclosing loop: a window covering only the inner loop
+/// would hand the frame back to the interpreter on every outer iteration, because the interpreter
+/// re-enters native code only at a frame `'reload` and a call-free outer loop has none.
+///
+/// So: exactly one window, no whole-prototype body at all (this prototype is entered once, so it
+/// never needs one), and the answer the interpreter gives.
+#[cfg(feature = "jit")]
+#[test]
+fn jit_osr_window_covers_the_whole_nest_and_not_the_tail() {
+    let src = "mut sum = 0\nmut r = 0\nwhile r < 40 {\n  mut j = 0\n  while j < 60 {\n    sum = sum + j\n    j = j + 1\n  }\n  r = r + 1\n}\necho sum\n";
+    let module = compile_module(src);
+    let interp = VmBackend::new().run_module(&module);
+    let (jit, stats) = VmBackend::new().run_module_jit_hot_with_stats(&module);
+    assert_eq!(
+        stats.osr_windows, 1,
+        "one window for the whole nest, not one per loop, got {stats:?}"
+    );
+    assert_eq!(
+        stats.native, 0,
+        "a top-level loop never needs the whole-prototype body, got {stats:?}"
+    );
+    assert_eq!(interp, jit, "the window body must match the interpreter");
+    let expected: i64 = 40 * (0..60).sum::<i64>();
+    assert_eq!(jit.stdout, format!("{expected}\n"));
+}
+
+/// P-OSRW: two *sequential* hot loops each get their own window. Escalating to the whole-prototype
+/// body after the first would hand the second loop back the register allocation the window exists
+/// to avoid (measured +4.6% instructions on this shape), so the prototype collects one body per
+/// distinct hot loop instead — and the second loop's back-edge must still promote, which the
+/// original "one OSR per prototype" rule would have refused.
+///
+/// The iteration counts are load-bearing, not decoration: promotion here is the production path,
+/// which compiles **off-thread**, so the second loop can only ask for its own window after the
+/// first request's response has landed. At a few hundred iterations both loops finish before a
+/// ~1 ms compile does and only one job is ever queued; a few million leaves three orders of
+/// magnitude of margin. The assertions below are one-sided for the same reason — what must hold is
+/// that a second window is *reachable* and that nothing escalated to a whole-prototype body.
+#[cfg(feature = "jit")]
+#[test]
+fn jit_osr_gives_each_sequential_hot_loop_its_own_window() {
+    let src = "mut a = 0\nmut i = 0\nwhile i < 3000000 {\n  a = a + i\n  i = i + 1\n}\nmut b = 0\nmut j = 0\nwhile j < 3000000 {\n  b = b + j * 2\n  j = j + 1\n}\necho a\necho b\n";
+    let module = compile_module(src);
+    let interp = VmBackend::new().run_module(&module);
+    let (jit, stats) = VmBackend::new().run_module_jit_hot_with_stats(&module);
+    assert!(
+        stats.osr_windows >= 2,
+        "each sequential hot loop gets its own window, got {stats:?}"
+    );
+    assert_eq!(
+        stats.native, 0,
+        "a second hot loop must not escalate to the whole-prototype body, got {stats:?}"
+    );
+    assert_eq!(interp, jit, "both window bodies must match the interpreter");
+    let a: i64 = (0..3_000_000).sum();
+    assert_eq!(jit.stdout, format!("{a}\n{}\n", a * 2));
 }
 
 /// Native calls (P-JIT J3): recursive `fib` — the callee closure loaded via a heap-aware

@@ -786,7 +786,11 @@ impl<'m> Vm<'m> {
                 jit_entries: Vec::new(),
                 jit_fast: Vec::new(),
                 #[cfg(feature = "jit")]
+                jit_osr_entries: Vec::new(),
+                #[cfg(feature = "jit")]
                 jit_requested: Vec::new(),
+                #[cfg(feature = "jit")]
+                jit_osr_inflight: Vec::new(),
                 #[cfg(feature = "jit")]
                 jit_osr_pending: Vec::new(),
                 #[cfg(feature = "jit")]
@@ -998,6 +1002,7 @@ impl<'m> Vm<'m> {
         if let Some(service) = self.tier1.jit_service.take() {
             self.tier1.jit_entries.clear();
             self.tier1.jit_fast.clear();
+            self.tier1.jit_osr_entries.clear();
             self.tier1.jit_final_stats = service.shutdown(self.tier1.jit_drain_at_exit);
         }
 

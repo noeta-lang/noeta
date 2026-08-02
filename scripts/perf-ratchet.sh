@@ -441,8 +441,14 @@ tier1_state() { # <bin> <verb> <rest...> -> prints "<native|declined|none>:<op o
         printf 'declined:%s' "$ops"
         return
     fi
-    compiled="$(printf '%s' "$out" | sed -n 's/^tier 1: \([0-9]*\) of .*/\1/p' | head -1)"
-    if [[ "${compiled:-0}" -gt 0 ]]; then printf 'native:'; else printf 'none:'; fi
+    # Two counts, and BOTH mean "tier 1 ran". A prototype promoted through a call is compiled
+    # whole and lands in the first; one promoted at a loop back-edge gets a region-scoped OSR
+    # window instead (a body, not a prototype) and lands in the second — with the first still at
+    # zero. A top-level program that is one big loop is exactly that case, so reading only the
+    # native count would report `none` for a row running entirely on native code.
+    native="$(printf '%s' "$out" | sed -n 's/^tier 1: \([0-9]*\) of .*/\1/p' | head -1)"
+    windows="$(printf '%s' "$out" | sed -n 's/^tier 1: .*, \([0-9]*\) OSR loop window.*/\1/p' | head -1)"
+    if (( ${native:-0} + ${windows:-0} > 0 )); then printf 'native:'; else printf 'none:'; fi
 }
 
 # ------------------------------------------------------------------------------------- the report

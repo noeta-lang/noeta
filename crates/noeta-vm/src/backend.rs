@@ -383,6 +383,7 @@ impl VmBackend {
             .map(|j| JitStats {
                 native: j.native_count(),
                 compiled: j.compiled_count(),
+                osr_windows: j.osr_window_count(),
                 compile_ns_total: j.compile_ns_total(),
                 compile_ns_max: j.compile_ns_max(),
                 breakdown: j.compile_breakdown(),
@@ -817,6 +818,7 @@ impl<'m> Vm<'m> {
         JitReport {
             native: stats.native,
             compiled: stats.compiled,
+            osr_windows: stats.osr_windows,
             compile_ns_total: stats.compile_ns_total,
             bails,
             declined,
@@ -833,6 +835,11 @@ impl<'m> Vm<'m> {
 pub struct JitStats {
     pub native: usize,
     pub compiled: usize,
+    /// How many **region-scoped OSR bodies** were compiled (P-OSRW) — loop windows, not
+    /// prototypes, so this is counted alongside `native` rather than inside it. A top-level loop
+    /// that promotes purely through a back-edge shows up here and nowhere else: its prototype may
+    /// never need the whole-prototype body at all.
+    pub osr_windows: usize,
     pub compile_ns_total: u64,
     pub compile_ns_max: u64,
     /// Where `compile_ns_total` goes + compiled volume (P-JCT C0).
@@ -862,6 +869,11 @@ pub struct JitReport {
     pub native: usize,
     /// Prototypes compiled at all (native + bail stubs).
     pub compiled: usize,
+    /// Region-scoped **OSR loop windows** compiled (P-OSRW) — bodies, not prototypes, so counted
+    /// beside `native` rather than inside it. A program that is one big top-level loop promotes
+    /// here and nowhere else: `native` and `compiled` both stay 0 while its loop runs native, so
+    /// anything asking "did tier 1 run?" must read this too.
+    pub osr_windows: usize,
     /// Total off-thread compile time, ns.
     pub compile_ns_total: u64,
     /// Bail histogram, most-frequent first.

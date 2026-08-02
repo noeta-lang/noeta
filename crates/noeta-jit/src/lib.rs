@@ -129,6 +129,12 @@ pub struct Jit<M: ClifModule = JITModule> {
     module: M,
     /// Finalized entry points, keyed by prototype index. `None` = not (yet) compiled → tier 0.
     compiled: Vec<Option<CompiledFn>>,
+    /// Finalized **region-scoped** (OSR-window) bodies, keyed by prototype index — see
+    /// [`OsrBody`] and [`Jit::compile_osr`]. Empty = no region body (never asked for, or the
+    /// prototype's hot region is the whole prototype, where the main body already is the window).
+    /// A prototype may collect one window per hot loop, up to [`MAX_OSR_WINDOWS`]; the windows of
+    /// one prototype are disjoint by construction (each is a union of overlapping loop extents).
+    osr_compiled: Vec<Vec<OsrBody>>,
     /// Fast-convention entry points (P-JSSA S4.1), keyed by prototype index: the type-erased
     /// pointer to the prototype's second, frameless-window body — signature
     /// `(vm, regs, base, globals, frames, regs_vec, arg0..argN) -> (outcome, value)`, one `i64`
@@ -337,6 +343,7 @@ impl<M: ClifModule> Jit<M> {
         Ok(Jit {
             module,
             compiled: Vec::new(),
+            osr_compiled: Vec::new(),
             fast_compiled: Vec::new(),
             layout,
             frame_template,
@@ -370,6 +377,15 @@ impl<M: ClifModule> Jit<M> {
     /// The finalized entry point for prototype `proto`, or `None` if it is not compiled (tier 0).
     pub fn get(&self, proto: usize) -> Option<CompiledFn> {
         self.compiled.get(proto).copied().flatten()
+    }
+
+    /// How many **region-scoped OSR bodies** this engine compiled, across every prototype
+    /// (P-OSRW). Deliberately separate from `native_count`, which counts *prototypes* compiled to
+    /// native code: a window is a second body for a prototype already counted (or, when a
+    /// prototype only ever OSRs, one never counted there at all), so folding the two would make
+    /// the JIT-coverage ratio `native/compiled` meaningless.
+    pub fn osr_window_count(&self) -> usize {
+        self.osr_compiled.iter().map(Vec::len).sum()
     }
 
     /// The fast-convention entry point for prototype `proto` (P-JSSA S4.1), or `None` if the
@@ -536,15 +552,24 @@ impl<M: ClifModule> Jit<M> {
         proto: usize,
         fast: bool,
         aot: bool,
+        region: Option<(usize, usize)>,
     ) -> Result<FuncId, String> {
         let chunk = &module.protos[proto];
         let n = chunk.code.len();
         // A fast body is entered only fresh at pc 0 (no seam resume, no OSR — the interpreter
-        // re-enters a deopted fast frame through the normal body).
+        // re-enters a deopted fast frame through the normal body), and is never region-scoped.
         let reachable = if fast {
-            reachable_pcs_from(chunk, vec![0], &module.names)
+            reachable_pcs_from(chunk, vec![0], &module.names, None)
         } else {
-            reachable_pcs(chunk, &module.names)
+            reachable_pcs_from(
+                chunk,
+                entry_pcs(chunk)
+                    .into_iter()
+                    .filter(|&pc| in_region(region, pc))
+                    .collect(),
+                &module.names,
+                region,
+            )
         };
 
         self.module.clear_context(&mut self.ctx);
@@ -745,8 +770,13 @@ impl<M: ClifModule> Jit<M> {
                 // to its block; any other value has no native entry, so bail (the interpreter runs
                 // that frame). The valid resume pcs are exactly `call_pc + 1` for each `Call` (the
                 // interpreter re-enters a frame only at pc 0 or just after a call returns).
-                let resume_targets: Vec<usize> =
-                    entry_pcs(chunk).into_iter().filter(|&p| p != 0).collect();
+                // A region-scoped body serves only the entries inside its window; anything else
+                // falls to `bad_entry` and the interpreter (which reaches the whole-prototype body
+                // through the VM's own routing).
+                let resume_targets: Vec<usize> = entry_pcs(chunk)
+                    .into_iter()
+                    .filter(|&p| p != 0 && in_region(region, p))
+                    .collect();
                 let guarded = cg.b.create_block();
                 let bad_entry = cg.b.create_block();
                 // Chain: entry_pc == 0 → guarded; == resume_pc_k → init_k → op_blocks[k]; else →
@@ -795,31 +825,37 @@ impl<M: ClifModule> Jit<M> {
                 // the body (the body's heap values then arise only from `LoadGlobal`/calls,
                 // which the heap-aware path refcounts).
                 cg.b.switch_to_block(guarded);
-                let init0 = cg.b.create_block();
-                let mut any_ptr: Option<ClValue> = None;
-                for p in 0..chunk.num_params {
-                    let v = cg.load_reg(p);
-                    let is_ptr = cg.is_pointer(v);
-                    any_ptr = Some(match any_ptr {
-                        None => is_ptr,
-                        Some(acc) => cg.b.ins().bor(acc, is_ptr),
-                    });
-                }
-                match any_ptr {
-                    Some(any) => {
-                        let bail0 = cg.b.create_block();
-                        cg.b.ins().brif(any, bail0, &[], init0, &[]);
-                        cg.b.switch_to_block(bail0);
-                        cg.b.ins().return_(&[cg.pool.zero]);
+                if !in_region(region, 0) {
+                    // A region-scoped body whose window starts past pc 0 has no fresh-frame entry
+                    // at all: hand the frame straight back (resume pc 0 = "interpret this frame").
+                    cg.b.ins().return_(&[cg.pool.zero]);
+                } else {
+                    let init0 = cg.b.create_block();
+                    let mut any_ptr: Option<ClValue> = None;
+                    for p in 0..chunk.num_params {
+                        let v = cg.load_reg(p);
+                        let is_ptr = cg.is_pointer(v);
+                        any_ptr = Some(match any_ptr {
+                            None => is_ptr,
+                            Some(acc) => cg.b.ins().bor(acc, is_ptr),
+                        });
                     }
-                    None => {
-                        cg.b.ins().jump(init0, &[]);
+                    match any_ptr {
+                        Some(any) => {
+                            let bail0 = cg.b.create_block();
+                            cg.b.ins().brif(any, bail0, &[], init0, &[]);
+                            cg.b.switch_to_block(bail0);
+                            cg.b.ins().return_(&[cg.pool.zero]);
+                        }
+                        None => {
+                            cg.b.ins().jump(init0, &[]);
+                        }
                     }
+                    cg.b.switch_to_block(init0);
+                    cg.load_ssa_vars();
+                    cg.init_raw_vars(0);
+                    cg.b.ins().jump(op_blocks[0], &[]);
                 }
-                cg.b.switch_to_block(init0);
-                cg.load_ssa_vars();
-                cg.init_raw_vars(0);
-                cg.b.ins().jump(op_blocks[0], &[]);
             } else {
                 // Fast-convention entry (P-JSSA S4.1): the window is reserved but UNINITIALIZED
                 // and the arguments arrive as machine arguments. Guard the argument *values* (no
@@ -885,6 +921,16 @@ impl<M: ClifModule> Jit<M> {
                     cg.ret_bail_isolated(pc);
                     continue;
                 }
+                // The region's edge (P-OSRW): a reachable pc outside a region-scoped body's window
+                // is a bail point exactly as an uncompilable op is — sync the window and hand the
+                // pc back. This is what keeps a cold tail out of the loop's register allocation.
+                if !in_region(region, pc) {
+                    cg.cur_pc = pc;
+                    cg.sync_frame(pc);
+                    let here = cg.pc_const(pc);
+                    cg.ret_bail(here);
+                    continue;
+                }
                 // The cancellation safepoint (isolate-cancel, JIT half): a loop header is entered
                 // once per iteration, so a poll here is the native analogue of the interpreter's
                 // taken-back-edge poll. Emitted only when the run carries a flag; otherwise
@@ -898,10 +944,13 @@ impl<M: ClifModule> Jit<M> {
             b.seal_all_blocks();
             b.finalize();
         }
-        let name = if fast {
-            fast_symbol(proto)
-        } else {
-            proto_symbol(proto)
+        let name = match (fast, region) {
+            (true, _) => fast_symbol(proto),
+            (false, None) => proto_symbol(proto),
+            // A region-scoped body is a second definition of the same prototype, so it needs its
+            // own symbol. Runtime-only (an AOT compile never region-scopes), so this name is not
+            // part of the linked-artifact contract `noeta_jit_abi`'s symbol helpers carry.
+            (false, Some((lo, hi))) => format!("{}_osr{lo}_{hi}", proto_symbol(proto)),
         };
         self.define_body(&name)
     }
@@ -937,6 +986,46 @@ impl AotManifest {
         self.protos.iter().filter(|e| e.native).count()
     }
 }
+
+/// A finalized **region-scoped OSR body** (P-OSRW): a second native body for one prototype whose
+/// compiled region is the closed pc window `[lo, hi]` of the hot loop a back-edge promotion entered
+/// at, everything outside it a bail.
+///
+/// Why it exists: Cranelift allocates registers over a *whole function*, so a prototype's cold
+/// prologue and tail compete with its hot loop for machine registers — measured, nativizing one op
+/// in the tail of a top-level script made the loop spill a value that had lived in `%r14`, costing
+/// ~5% on the loop. Compiling the window on its own removes the competition.
+///
+/// The window is also the routing key: the VM sends a native re-entry whose pc lies in `[lo, hi]`
+/// here and every other entry (a fresh frame, a post-call resume in the prologue or tail) to the
+/// whole-prototype body, so nothing loses tier-1 coverage. `lo`/`hi` are `u32` to match the
+/// bytecode's own pc width.
+#[derive(Debug, Clone, Copy)]
+pub struct OsrBody {
+    /// The finalized entry point — the ordinary [`CompiledFn`] ABI, entered with `entry_pc` set to
+    /// the loop header (or any other native entry inside the window).
+    pub entry: CompiledFn,
+    /// First pc of the window (inclusive).
+    pub lo: u32,
+    /// Last pc of the window (inclusive).
+    pub hi: u32,
+}
+
+impl OsrBody {
+    /// Whether a native re-entry at `pc` belongs to this body's window.
+    #[inline]
+    pub fn covers(&self, pc: usize) -> bool {
+        pc >= self.lo as usize && pc <= self.hi as usize
+    }
+}
+
+/// How many distinct loop windows one prototype may collect ([`Jit::compile_osr`]). Sequential hot
+/// loops each want their own tight body — escalating to the whole prototype after the first would
+/// hand the second loop back the very register allocation the window exists to avoid (measured
+/// +3.2% on two sequential hot loops) — but a prototype with a great many loops should not keep
+/// paying compiles either. Past this, `compile_osr` declines and the caller falls back to the
+/// whole-prototype body, which covers every loop at once.
+pub const MAX_OSR_WINDOWS: usize = 4;
 
 /// The runtime tier-1 compile error: **compilation declined — interpret instead** (audit-1
 /// finding 14). Deliberately zero-size: every runtime call site discards the reason and falls
@@ -1022,14 +1111,14 @@ impl Jit<JITModule> {
         // semantics, so the differential run under `NOETA_JIT_AOT=1` validates the AOT codegen.
         let aot = self.aot_bodies;
         let f = if is_eligible(chunk, &module.names) {
-            let main_id = self.emit_int_body(module, proto, false, aot)?;
+            let main_id = self.emit_int_body(module, proto, false, aot, None)?;
             let f = self.finalize_ptr(main_id)?;
             self.native_count += 1;
             // S4.1: also compile the fast-convention body where the prototype supports the
             // frameless-window contract; direct calls to it then skip the window fill, the
             // argument copy, and the helper-side return protocol.
             if fast_ok(chunk) {
-                let fast_id = self.emit_int_body(module, proto, true, aot)?;
+                let fast_id = self.emit_int_body(module, proto, true, aot, None)?;
                 let ff = self.finalize_ptr(fast_id)?;
                 self.fast_compiled[proto] = Some(ff as usize);
             }
@@ -1043,6 +1132,58 @@ impl Jit<JITModule> {
         self.compile_ns_total += ns;
         self.compile_ns_max = self.compile_ns_max.max(ns);
         Ok(f)
+    }
+
+    /// Compile the **region-scoped OSR body** for a back-edge-born promotion of `proto` that got
+    /// hot at loop header `header` (P-OSRW). The body's native region is the loop's own pc window
+    /// ([`osr_region`]); every pc outside it is a bail, so Cranelift allocates registers for the
+    /// loop instead of for the union of the loop and the prototype's cold prologue/tail.
+    ///
+    /// `None` — "no region body, use the whole-prototype one" — when:
+    ///
+    /// - `header` is not a loop header (nothing to scope to), or
+    /// - the window is the whole prototype, where a second body would be the same code, or
+    /// - the window holds no natively-compilable op (a bail-only body buys nothing), or
+    /// - the prototype already carries [`MAX_OSR_WINDOWS`] windows.
+    ///
+    /// Idempotent per window: a back-edge inside a window already compiled reuses that body, so a
+    /// prototype ends up with one body per *distinct* hot loop and a nest collapses to one.
+    pub fn compile_osr(&mut self, module: &Module, proto: usize, header: usize) -> Option<OsrBody> {
+        if proto >= self.osr_compiled.len() {
+            self.osr_compiled
+                .resize_with(module.protos.len().max(proto + 1), Vec::new);
+        }
+        if let Some(b) = self.osr_compiled[proto].iter().find(|b| b.covers(header)) {
+            return Some(*b);
+        }
+        if self.osr_compiled[proto].len() >= MAX_OSR_WINDOWS {
+            return None;
+        }
+        let chunk = &module.protos[proto];
+        let (lo, hi) = osr_region(chunk, header)?;
+        if lo == 0 && hi + 1 >= chunk.code.len() {
+            return None; // the window IS the prototype — the main body already is the region body
+        }
+        if !chunk.code[lo..=hi]
+            .iter()
+            .any(|op| is_fast_op(op, &module.names))
+        {
+            return None;
+        }
+        let compile_start = std::time::Instant::now();
+        let aot = self.aot_bodies;
+        let id = self
+            .emit_int_body(module, proto, false, aot, Some((lo, hi)))
+            .ok()?;
+        let entry = self.finalize_ptr(id).ok()?;
+        self.compile_ns_total += compile_start.elapsed().as_nanos() as u64;
+        let body = OsrBody {
+            entry,
+            lo: lo as u32,
+            hi: hi as u32,
+        };
+        self.osr_compiled[proto].push(body);
+        Some(body)
     }
 
     /// Finalize a defined `func_id` to its executable entry point — the JIT-only tail (relocations
@@ -1093,7 +1234,7 @@ impl Jit<ObjectModule> {
     pub fn compile_object(&mut self, module: &Module, proto: usize) -> Result<FuncId, String> {
         let chunk = &module.protos[proto];
         if is_eligible(chunk, &module.names) {
-            self.emit_int_body(module, proto, false, true)
+            self.emit_int_body(module, proto, false, true, None)
         } else {
             self.emit_bail_stub(proto)
         }
@@ -1121,9 +1262,9 @@ impl Jit<ObjectModule> {
         let mut fast_ids: Vec<Option<FuncId>> = vec![None; n];
         for (p, chunk) in module.protos.iter().enumerate() {
             let entry = if is_eligible(chunk, &module.names) {
-                main_ids[p] = Some(self.emit_int_body(module, p, false, true)?);
+                main_ids[p] = Some(self.emit_int_body(module, p, false, true, None)?);
                 let fast = if fast_ok(chunk) {
-                    fast_ids[p] = Some(self.emit_int_body(module, p, true, true)?);
+                    fast_ids[p] = Some(self.emit_int_body(module, p, true, true, None)?);
                     Some(fast_symbol(p))
                 } else {
                     None
@@ -1405,6 +1546,23 @@ fn backward_target(op: &Op, pc: usize) -> Option<usize> {
     (t <= pc).then_some(t)
 }
 
+/// Every loop header in this prototype (each backward branch's target, deduplicated and sorted) —
+/// the seeds a *forced* whole-module compile uses to also emit region-scoped bodies
+/// ([`Jit::compile_osr`]) so the JIT differential executes that codegen. Production seeds from the
+/// back-edge that actually got hot; the oracle has no hot counter, so it offers them all and lets
+/// `compile_osr` collapse a nest into one window and stop at [`MAX_OSR_WINDOWS`].
+pub fn loop_headers(chunk: &noeta_bytecode::Chunk) -> Vec<usize> {
+    let mut hs: Vec<usize> = chunk
+        .code
+        .iter()
+        .enumerate()
+        .filter_map(|(pc, op)| backward_target(op, pc))
+        .collect();
+    hs.sort_unstable();
+    hs.dedup();
+    hs
+}
+
 /// Whether this prototype has any OSR (loop-header) entry point — a backward branch (J5). Such a
 /// prototype is compiled `heap_aware` unconditionally: OSR enters mid-frame with whatever the
 /// interpreter left in the registers (a heap value may be live), so every store must be
@@ -1415,6 +1573,54 @@ fn has_osr_entry(chunk: &noeta_bytecode::Chunk) -> bool {
         .iter()
         .enumerate()
         .any(|(pc, op)| backward_target(op, pc).is_some())
+}
+
+/// The **OSR window** for a back-edge-born compile that entered at `header`: the pc interval a
+/// region-scoped body compiles natively, everything outside it a bail (P-OSRW).
+///
+/// The window is the union of every loop whose `[header, back_edge]` extent overlaps it, grown to
+/// a fixpoint. Seeded at `[header, header]`, that absorbs the loop `header` heads *and every loop
+/// enclosing it* — which is the point: OSR fires at whichever back-edge got hot first, usually the
+/// **innermost** loop of a nest, and a window covering only that loop would bail out of native code
+/// on every outer iteration (the interpreter re-enters native only at a frame `'reload`, and a
+/// call-free outer loop has none). Sibling loops before or after the window do not overlap it and
+/// stay out. Because every absorbed extent contains `header`, the union is always an interval.
+///
+/// Extents are the same `[header, back_edge]` over-approximation [`worth_osr`] scans with, so a
+/// window is native-sustainable exactly where that gate says the loop is.
+///
+/// `None` when `header` is not a loop header (no back edge targets it) — there is no window to
+/// scope to.
+fn osr_region(chunk: &noeta_bytecode::Chunk, header: usize) -> Option<(usize, usize)> {
+    let extents: Vec<(usize, usize)> = chunk
+        .code
+        .iter()
+        .enumerate()
+        .filter_map(|(pc, op)| backward_target(op, pc).map(|h| (h, pc)))
+        .collect();
+    if !extents.iter().any(|&(h, _)| h == header) {
+        return None;
+    }
+    let (mut lo, mut hi) = (header, header);
+    loop {
+        let mut grew = false;
+        for &(h, b) in &extents {
+            // Overlap test on closed intervals; absorb the whole extent when it touches the window.
+            if h <= hi && b >= lo {
+                if h < lo {
+                    lo = h;
+                    grew = true;
+                }
+                if b > hi {
+                    hi = b;
+                    grew = true;
+                }
+            }
+        }
+        if !grew {
+            return Some((lo, hi));
+        }
+    }
 }
 
 /// Whether OSR-compiling this prototype is worthwhile: it has at least one loop whose body native
@@ -1480,18 +1686,24 @@ pub fn worth_compiling(chunk: &noeta_bytecode::Chunk, names: &[String]) -> bool 
 /// set of a top-level script whose hot loop is `while i < 2000 { sum = sum + xs[i] }`, and the loop
 /// slowed ~5% (a register that had lived in `%r14` started spilling to the stack every iteration).
 /// The same program with the loop moved into its own `fn` is unaffected — the small prototype's
-/// allocation does not change. So the cost is confined to one-big-prototype top-level scripts, and
-/// the structural fix is region-scoped (OSR-window) compilation rather than whole-prototype
-/// compilation; nativizing more ops without that will keep trading against it.
-fn reachable_pcs(chunk: &noeta_bytecode::Chunk, names: &[String]) -> Vec<bool> {
-    reachable_pcs_from(chunk, entry_pcs(chunk), names)
-}
-
-/// [`reachable_pcs`] seeded from an explicit entry set (the fast body's is just `{0}`).
+/// allocation does not change.
+///
+/// That is what the **region-scoped OSR body** ([`Jit::compile_osr`], [`osr_region`]) exists to
+/// fix: a back-edge-born compile emits a second body whose native region is the loop's own pc
+/// window, so Cranelift allocates registers for the loop rather than for the union of the loop and
+/// a cold tail the OSR entry will never reach. The whole-prototype body still serves the pc-0 and
+/// post-call entries, so nothing loses coverage.
+///
+/// `entries` seeds the walk (the whole-prototype body's is [`entry_pcs`]; a fast body's is just
+/// `{0}`; a region body's is [`entry_pcs`] confined to its window). `region`, when set, is the
+/// closed pc interval a region-scoped body compiles: a pc outside it is terminal exactly as a
+/// non-fast op is — native code bails there, so its block gets the ordinary sync-and-return-pc
+/// treatment and nothing beyond it is emitted.
 fn reachable_pcs_from(
     chunk: &noeta_bytecode::Chunk,
     entries: Vec<usize>,
     names: &[String],
+    region: Option<(usize, usize)>,
 ) -> Vec<bool> {
     let n = chunk.code.len();
     let mut seen = vec![false; n];
@@ -1502,8 +1714,8 @@ fn reachable_pcs_from(
         }
         seen[pc] = true;
         let op = &chunk.code[pc];
-        if !is_fast_op(op, names) {
-            continue; // a bail point: no native successor
+        if !in_region(region, pc) || !is_fast_op(op, names) {
+            continue; // a bail point (or the region's edge): no native successor
         }
         match op {
             // A native `Call`/`CallGlobal` continues at `pc + 1` on the direct/fast path
@@ -1524,6 +1736,15 @@ fn reachable_pcs_from(
         }
     }
     seen
+}
+
+/// Whether `pc` is inside a region-scoped body's native window. `None` — a whole-prototype body —
+/// admits every pc.
+fn in_region(region: Option<(usize, usize)>, pc: usize) -> bool {
+    match region {
+        None => true,
+        Some((lo, hi)) => pc >= lo && pc <= hi,
+    }
 }
 
 /// P-JCT C3: the fixed NaN-box/outcome constants every body needs, materialized **once in the
@@ -3459,6 +3680,88 @@ mod tests {
         c.num_params = num_params;
         c.num_registers = num_registers;
         c
+    }
+
+    /// A `Jump` back to `target` — the shape every loop's back edge has.
+    fn back(target: u32) -> Op {
+        Op::Jump { target }
+    }
+
+    /// P-OSRW: a single loop's window is its own extent, and nothing around it.
+    #[test]
+    fn osr_window_is_the_loop_extent() {
+        // 0..3 prologue, loop header 4, back edge 7, 8..9 tail.
+        let mut code = vec![Op::Halt; 10];
+        code[7] = back(4);
+        let c = chunk(code, vec![], 0, 1);
+        assert_eq!(osr_region(&c, 4), Some((4, 7)));
+    }
+
+    /// P-OSRW: OSR fires at whichever back-edge got hot first — usually the INNERMOST loop of a
+    /// nest — and the window must still be the outermost enclosing loop. A window covering only
+    /// the inner loop would bail on every outer iteration: the interpreter re-enters native code
+    /// only at a frame `'reload`, and a call-free outer loop has none.
+    #[test]
+    fn osr_window_grows_to_the_enclosing_loop() {
+        // outer header 2 .. back edge 12; inner header 5 .. back edge 9.
+        let mut code = vec![Op::Halt; 14];
+        code[9] = back(5);
+        code[12] = back(2);
+        let c = chunk(code, vec![], 0, 1);
+        assert_eq!(
+            osr_region(&c, 5),
+            Some((2, 12)),
+            "an inner-loop OSR compiles the whole nest"
+        );
+        assert_eq!(osr_region(&c, 2), Some((2, 12)));
+    }
+
+    /// P-OSRW: a sibling loop that does not overlap the window stays out of it — the whole point
+    /// is to keep code the hot loop never reaches out of its register allocation.
+    #[test]
+    fn osr_window_excludes_a_sibling_loop() {
+        // loop A: header 1, back edge 4. loop B: header 8, back edge 11.
+        let mut code = vec![Op::Halt; 14];
+        code[4] = back(1);
+        code[11] = back(8);
+        let c = chunk(code, vec![], 0, 1);
+        assert_eq!(osr_region(&c, 1), Some((1, 4)));
+        assert_eq!(osr_region(&c, 8), Some((8, 11)));
+    }
+
+    /// P-OSRW: a pc no back edge targets is not a loop header, so there is no window to scope to.
+    #[test]
+    fn osr_window_needs_a_real_loop_header() {
+        let mut code = vec![Op::Halt; 6];
+        code[4] = back(2);
+        let c = chunk(code, vec![], 0, 1);
+        assert_eq!(osr_region(&c, 3), None);
+    }
+
+    /// P-OSRW: the region confines native reachability. A fast op *after* the window is reachable
+    /// in the whole-prototype walk and terminal in the region walk — that difference is exactly
+    /// what keeps a cold tail out of the loop's Cranelift function.
+    #[test]
+    fn region_reachability_stops_at_the_window_edge() {
+        // 0: load k0   1: jump 0 is a back edge → window [0, 1]. 2..3 are a fast tail.
+        let code = vec![
+            Op::LoadConst { dst: 0, k: 0 },
+            back(0),
+            Op::LoadConst { dst: 0, k: 0 },
+            Op::Halt,
+        ];
+        let c = chunk(code, vec![Const::Int(1)], 0, 1);
+        let names: Vec<String> = Vec::new();
+        // Without a region the tail is unreachable here anyway (nothing branches to it), so seed
+        // the walk at pc 2 to show the region — not the seed — is what stops it.
+        let whole = reachable_pcs_from(&c, vec![0, 2], &names, None);
+        assert!(whole[2] && whole[3], "the tail compiles in a whole body");
+        let scoped = reachable_pcs_from(&c, vec![0, 2], &names, Some((0, 1)));
+        assert!(scoped[0] && scoped[1], "the window itself compiles");
+        assert!(
+            !scoped[3],
+            "nothing past the window's edge is emitted natively"
+        );
     }
 
     /// P-AOT L3.0: the *same* codegen the runtime JIT uses now targets a `cranelift_object`

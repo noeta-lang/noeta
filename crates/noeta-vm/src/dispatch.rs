@@ -302,7 +302,7 @@ impl<'m> Vm<'m> {
                         let _osr_t = $target as usize;
                         if _osr_t <= pc
                             && (self.tier1.jit.is_some() || self.tier1.jit_service.is_some())
-                            && self.jit_osr_backedge(proto)
+                            && self.jit_osr_backedge(proto, _osr_t)
                         {
                             frames[top].pc = _osr_t;
                             continue 'reload;
