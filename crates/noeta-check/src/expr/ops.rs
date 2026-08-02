@@ -178,7 +178,24 @@ impl Checker {
                 self.warn_container_compare(op, &lt, &rt, span);
                 Type::Bool
             }
-            BinaryOp::And | BinaryOp::Or => Type::Bool,
+            // `&&`/`||` take bools on both sides — no trait, no coercion, and the runtime says so
+            // outright (``&&` expects a bool on the left, found int`). Nothing checked it, so
+            // `1 && true` type-checked and aborted. A `dyn`/hole defers as everywhere else.
+            BinaryOp::And | BinaryOp::Or => {
+                for t in [&lt, &rt] {
+                    if !t.defers_to_runtime() && *t != Type::Bool {
+                        self.error(
+                            DiagnosticCode::TypeMismatch,
+                            span,
+                            format!(
+                                "`{}` expects `bool` operands, found `{t}`",
+                                op.symbol()
+                            ),
+                        );
+                    }
+                }
+                Type::Bool
+            }
             // `===`/`!==` ask reference identity (*same instance*), meaningful only for the
             // reference kind `class`. A definitely-value operand (scalar, collection, struct/enum,
             // tuple, fn) has no identity → E0034; a `dyn`/hole or class (or a union of them) defers.

@@ -2889,6 +2889,22 @@ fn an_ordering_needs_two_operands_of_one_type() {
     assert!(codes("fn m(a: dyn, b: int): bool { return a > b }\necho \"ok\"\n").is_empty());
 }
 
+/// `&&` and `||` take bools, and nothing was checking it.
+///
+/// The arm returned `Type::Bool` without looking at its operands, so `1 && true` type-checked and
+/// aborted with the runtime's ``&&` expects a bool on the left, found int`. Found by the
+/// `noeta-fuzz` execution oracle.
+#[test]
+fn the_logical_operators_take_bools() {
+    assert_eq!(codes("echo 1 && true\n"), vec!["E0007"]);
+    assert_eq!(codes("echo 1.5 || true\n"), vec!["E0007"]);
+    assert_eq!(codes("echo \"a\" || false\n"), vec!["E0007"]);
+    assert!(codes("echo true && false\n").is_empty());
+    assert!(codes("xs = [1]\necho xs.len() > 0 && xs[0] == 1\n").is_empty());
+    // A `dyn` operand defers, as everywhere else.
+    assert!(codes("fn f(x: dyn): bool { return x || true }\necho \"ok\"\n").is_empty());
+}
+
 /// A function value and a tuple have no members to add, so a missing one is knowable now.
 ///
 /// Neither is a record, class, or enum, so `impl Trait for` cannot name it (E0013) — the same
