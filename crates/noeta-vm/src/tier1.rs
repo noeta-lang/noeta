@@ -917,11 +917,12 @@ impl<'m> Vm<'m> {
                     // P-OSRW oracle coverage. Production emits a region-scoped body only for the
                     // back-edge that actually got hot, and the forced sweep above compiles every
                     // prototype up front — so under the oracle no back-edge ever promotes and that
-                    // codegen would run in the differential exactly never. Emit one per
-                    // loop-bearing prototype (seeded at its first loop header) and let the routing
-                    // do the rest: every mid-frame re-entry landing inside a window then executes
-                    // the region body, and the corpus compares its results and its refcounts like
-                    // any other native code. Forced-JIT only — an ordinary run is untouched.
+                    // codegen would run in the differential exactly never. Offer every loop header
+                    // instead and let `compile_osr` collapse a nest into one window and stop at
+                    // its budget; the entry-pc routing does the rest, so every mid-frame re-entry
+                    // landing inside a window executes the region body and the corpus compares its
+                    // results and its refcounts like any other native code. Forced-JIT only — an
+                    // ordinary run is untouched.
                     for p in 0..self.module.protos.len() {
                         for header in noeta_jit::loop_headers(&self.module.protos[p]) {
                             if let Some(body) = jit.compile_osr(self.module, p, header) {
