@@ -851,6 +851,15 @@ impl Value {
     }
 
     /// The number of elements, if this is a list.
+    ///
+    /// `#[inline(always)]`, not a hint: this is the bounds check on `Op::Index`/`Op::ListGet`, so
+    /// in a tier-1 loop it runs once per indexed element, and out of line it costs ~14 instructions
+    /// for a payload load and a length read. It is a `Copy` receiver over a tagged word — the
+    /// inlined form folds into the caller's existing pointer test — but it sits behind a
+    /// cross-crate call from `jit_run_leaf_op`, a caller big enough that the inliner's budget
+    /// decides by accident: it was inlined until `cf9a2cb7a` grew that seam, and the 3.7% it then
+    /// cost the list-index loop is exactly this call. Forcing it takes the decision away.
+    #[inline(always)]
     pub fn list_len(self) -> Option<usize> {
         if self.is_pointer() {
             heap::with_payload(self, |p| match p {
