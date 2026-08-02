@@ -564,6 +564,13 @@ extern "C" fn jit_after_call(
 /// returns the op's own pc, so the interpreter re-runs it. Every early return happens **before** any
 /// register write, so a re-run in the interpreter starts from clean state.
 ///
+/// The one op that can *fail* here rather than bail is `Op::CallMethod`: its map routes go through
+/// the shared `map_update_in_place` / `call_builtin_method`, which record their diagnostic on the
+/// VM as they raise. A re-run would record it twice, so that arm returns `OUTCOME_ABORTED` and the
+/// abort unwinds exactly as it would have in tier 0. (It is also the one arm that writes a register
+/// — the consumed receiver — before a possible failure, for the same reason: the interpreter's arm
+/// clears it at the same point, and there is no re-run to protect.)
+///
 /// # Safety
 /// `vm`/`regs_vec` must be the live pointers the tier-1 ABI passed.
 #[cfg(feature = "jit-rt")]
@@ -583,6 +590,105 @@ extern "C" fn jit_run_leaf_op(
     let module = vm.module;
     let bail = pc as i64;
     match &module.protos[proto as usize].code[pc as usize] {
+        // A heap constant (a string, a native module/fn, a method handle, an out-of-immediate-range
+        // int): the immediate forms are materialized natively by the codegen and never reach here,
+        // so this is exactly the boxing case — one shared `materialize`, no failure path. Making it
+        // native is what lets a string-building loop (`s = s ~ "x"`) sustain tier 1 at all.
+        Op::LoadConst { dst, k } => {
+            let v = materialize(&module.protos[proto as usize].consts[*k as usize]);
+            set_reg(regs, base, *dst, v);
+            noeta_jit_abi::OUTCOME_CONTINUE
+        }
+        Op::Stringify { dst, src, span: _ } => {
+            let v = regs[base + *src as usize];
+            // A user object/enum may light up `Display` — its `to_string` runs bytecode, which
+            // pushes a frame. Bail on **every** object/enum (a conservative superset of the
+            // interpreter's `method_proto` test: one without `to_string` merely re-runs in tier 0).
+            if v.is_object() || v.is_enum() {
+                return bail;
+            }
+            set_reg(regs, base, *dst, stringify_passthrough(v));
+            noeta_jit_abi::OUTCOME_CONTINUE
+        }
+        Op::BuildString { dst, parts } => {
+            // No bail path — the fused interpolation never dispatches (its holes were
+            // `Stringify`-ed already) and never fails.
+            let built = build_string(parts, &module.protos[proto as usize].consts, regs, base);
+            set_reg(regs, base, *dst, built);
+            noeta_jit_abi::OUTCOME_CONTINUE
+        }
+        Op::ConcatInPlace {
+            dst,
+            lhs,
+            rhs,
+            span: _,
+        } => {
+            // No bail path. `lhs` is consumed: clear its register *without* releasing (a direct
+            // overwrite, not `set_reg`) so the shared helper's refcount tests still count the
+            // accumulator's reference — the interpreter arm's exact sequence.
+            let l = regs[base + *lhs as usize];
+            let r = regs[base + *rhs as usize];
+            regs[base + *lhs as usize] = Value::unit();
+            let result = concat_in_place(l, r);
+            set_reg(regs, base, *dst, result);
+            noeta_jit_abi::OUTCOME_CONTINUE
+        }
+        Op::CallMethod {
+            dst,
+            recv,
+            method,
+            args,
+            type_args,
+            span,
+            cache: _,
+            reuse,
+            consume_key,
+            supplied: _,
+        } => {
+            let v = regs[base + *recv as usize];
+            let hk = v.heap_kind();
+            // Only a **map** receiver is native here. Every other receiver class either pushes a
+            // frame (an object/enum user method, a `Display`/`Index` protocol, a dyn field call) or
+            // routes through a per-site cache the leaf ABI has no access to (extern/native module) —
+            // and `is_fast_op` has already restricted this op to map-method *names*, so a
+            // same-named user method simply bails here. A forwarding generic's hidden type-argument
+            // slots never occur on a map method; bail defensively if one ever does.
+            if hk != Some(HeapKind::Map) || !type_args.regs().is_empty() {
+                return bail;
+            }
+            let name = module.name(*method);
+            let arg_values = ArgBuf::collect(args, regs, base);
+            // The interpreter's two map routes, in its order — same functions, same arguments.
+            // An error is *not* a bail: the shared call has already recorded the diagnostic on the
+            // VM, so re-running it in tier 0 would record it twice. Propagate the abort instead.
+            let outcome = if *reuse
+                && let Some(map_method) = noeta_stdlib::MapMethod::from_name(name)
+                && matches!(
+                    map_method,
+                    noeta_stdlib::MapMethod::Set | noeta_stdlib::MapMethod::Remove
+                ) {
+                // Consume the receiver exactly as the interpreter does (a direct overwrite, so the
+                // refcount below still counts the accumulator's reference and `dst == recv` is safe).
+                regs[base + *recv as usize] = Value::unit();
+                vm.map_update_in_place(
+                    v,
+                    map_method,
+                    name,
+                    arg_values.as_slice(),
+                    *consume_key,
+                    *span,
+                )
+            } else {
+                vm.call_builtin_method(v, hk, name, arg_values.as_slice(), *span)
+            };
+            match outcome {
+                Ok(result) => {
+                    set_reg(regs, base, *dst, result);
+                    noeta_jit_abi::OUTCOME_CONTINUE
+                }
+                Err(Abort) => noeta_jit_abi::OUTCOME_ABORTED,
+            }
+        }
         Op::MakeRange {
             dst,
             start,
@@ -1065,7 +1171,9 @@ impl<'m> Vm<'m> {
         }
         // A prototype dominated by a bailing loop bounces tier-0↔tier-1 every iteration, slower than
         // the interpreter — decline it once (the oracle's `force_jit` compiles everything anyway).
-        if !self.tier1.force_jit && !noeta_jit::worth_compiling(&self.module.protos[proto]) {
+        if !self.tier1.force_jit
+            && !noeta_jit::worth_compiling(&self.module.protos[proto], &self.module.names)
+        {
             if proto >= self.tier1.jit_declined.len() {
                 self.tier1.jit_declined.resize(proto + 1, false);
             }
@@ -1199,7 +1307,9 @@ impl<'m> Vm<'m> {
         if !(self.tier1.force_jit || self.tier1.jit_counters[proto] >= JIT_HOT_THRESHOLD) {
             return false;
         }
-        if !self.tier1.force_jit && !noeta_jit::worth_osr(&self.module.protos[proto]) {
+        if !self.tier1.force_jit
+            && !noeta_jit::worth_osr(&self.module.protos[proto], &self.module.names)
+        {
             // A heap-op-dominated loop: native would bounce tier-0↔tier-1 every iteration, slower than
             // the interpreter. Decline OSR for this prototype, once and for good.
             if proto >= self.tier1.jit_declined.len() {

@@ -808,7 +808,7 @@ impl<'m> Vm<'m> {
             .filter(|(_, d)| **d)
             .map(|(i, _)| JitDeclinedLoop {
                 proto: i as u32,
-                bail_pcs: noeta_jit::loop_bail_pcs(&self.module.protos[i])
+                bail_pcs: noeta_jit::loop_bail_pcs(&self.module.protos[i], &self.module.names)
                     .into_iter()
                     .map(|pc| pc as u32)
                     .collect(),

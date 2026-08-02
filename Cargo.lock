@@ -2808,6 +2808,7 @@ dependencies = [
  "noeta-ast",
  "noeta-bytecode",
  "noeta-compiler",
+ "noeta-ext-abi",
  "noeta-jit-abi",
  "noeta-lexer",
  "noeta-parser",
