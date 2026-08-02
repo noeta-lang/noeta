@@ -2836,6 +2836,33 @@ fn a_top_level_statement_does_not_see_a_binding_declared_later() {
     assert_eq!(codes("f()\nf = fn(): int => 1\n"), vec!["E0005"]);
 }
 
+/// A `for (a, b) in …` pattern needs the *element* to be a tuple with a position per name.
+///
+/// The misses used to bind a hole, so `for (a, b) in [1, 2, 3]` type-checked and then aborted with
+/// the VM's `tuple index `0` is out of range for int` — a purely static fact, reported at run time.
+/// Found by the `noeta-fuzz` execution oracle.
+#[test]
+fn a_for_tuple_pattern_needs_a_tuple_element() {
+    assert_eq!(codes("for (a, b) in [1, 2, 3] {\n}\n"), vec!["E0007"]);
+    // A map iterates its VALUES, so a pair pattern over one is the same mistake.
+    assert_eq!(
+        codes("m = {\"k\": 1}\nfor (a, b) in m {\n  echo a\n}\n"),
+        vec!["E0007"]
+    );
+    // A tuple that is too short for the pattern — the runtime's "index out of range for tuple".
+    assert_eq!(
+        codes("for (a, b, c) in [(1, 2)] {\n  echo a\n}\n"),
+        vec!["E0007"]
+    );
+    // Binding a PREFIX of a longer tuple is legal and stays clean, as does the canonical form.
+    assert!(codes("for (a, b) in [(1, 2, 3)] {\n  echo a\n}\n").is_empty());
+    assert!(codes("for (i, x) in [\"a\", \"b\"].enumerate() {\n  echo x\n}\n").is_empty());
+    // A `dyn` source is the documented deferral: not known to be a tuple is not known not to be.
+    assert!(
+        codes("fn g(xs: dyn): void {\n  for (a, b) in xs { echo a }\n}\necho \"ok\"\n").is_empty()
+    );
+}
+
 /// A declared type is not callable, and saying so is the checker's job.
 ///
 /// `S(n: 5)` used to type-check — a type name as a callee was deferred to the runtime — and the
