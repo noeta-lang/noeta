@@ -2021,6 +2021,86 @@ struct Marker {
         assert_eq!(fmt(&out).unwrap(), out, "and it is still idempotent");
     }
 
+    /// A comment between an `else` and the `if` it wraps keeps the braces open.
+    ///
+    /// The same failure as [`a_comment_alone_in_a_body_keeps_the_body_open`], one construct along.
+    /// `else_body` is `Option<Vec<Stmt>>`, so `else if c { … }` and `else { if c { … } }` are the
+    /// *same tree*; the printer emits the inline `else if` spelling for both. But the inline path
+    /// emits no block, so there is no region for the comment interleave to walk, and a comment the
+    /// author wrote above the nested `if` stayed pending until the enclosing scope drained it — at
+    /// the end of the file. Falling back to the braced spelling when such a comment exists costs
+    /// nothing (the tree is identical, so the safety gate sees no change) and keeps the note where
+    /// it was written. Found by `noeta-fuzz`.
+    #[test]
+    fn a_comment_between_else_and_its_if_keeps_the_braces() {
+        let src = "\
+if a {
+    echo 1
+} else {
+    // why the nested case is handled separately
+    if b {
+        echo 2
+    }
+}
+";
+        let out = fmt(src).unwrap();
+        assert_eq!(out, src, "fmt moved a comment out of an else block");
+        assert_eq!(fmt(&out).unwrap(), out, "and it is still idempotent");
+    }
+
+    /// With no comment in the way, the `else { if … }` spelling still collapses to `else if …` —
+    /// the counter-case that keeps the fix above from disabling the resugar outright.
+    #[test]
+    fn an_uncommented_else_block_still_collapses_to_else_if() {
+        let out = fmt("if a {\n    echo 1\n} else {\n    if b {\n        echo 2\n    }\n}\n")
+            .expect("formats");
+        assert_eq!(out, "if a {\n    echo 1\n} else if b {\n    echo 2\n}\n");
+    }
+
+    /// Every operand of a width-wrapped binary chain is rendered in **source order**, because the
+    /// comment cursor is monotone and never scans backwards.
+    ///
+    /// The `wrap = true` arm rendered the tail operands before the head, which parked the cursor on
+    /// a comment belonging to the head. `interleave_comments` only ever inspects `comments[cursor]`,
+    /// so the tail operand's own region saw a comment positioned *before* it, rejected it as out of
+    /// region, and emitted nothing — the second closure body printed as `{}` and its comment was
+    /// flushed at end of file. Found by `noeta-fuzz`; the corpus contains no file that puts a
+    /// comment inside each side of a wrapped binary operator.
+    #[test]
+    fn both_sides_of_a_wrapped_binary_keep_their_comments() {
+        let src = "\
+v = each(fn(i) {
+    // left
+}) + map(fn(k) {
+    // right
+})
+";
+        let config = FmtConfig {
+            wrap: true,
+            line_width: 60,
+            ..FmtConfig::default()
+        };
+        let out = format_source("t.noe", src, &config).expect("formats");
+        assert!(
+            out.contains("// left") && out.contains("// right"),
+            "a comment was dropped: {out}"
+        );
+        // Neither comment may escape to the top level: both stay indented inside their closure.
+        for line in out.lines() {
+            if line.contains("//") {
+                assert!(
+                    line.starts_with(' ') || line.starts_with('\t'),
+                    "a comment escaped its closure body: {out}"
+                );
+            }
+        }
+        assert_eq!(
+            format_source("t.noe", &out, &config).expect("re-formats"),
+            out,
+            "and it is still idempotent"
+        );
+    }
+
     /// A `@<tier>` block the author **braced** keeps its braces, and its comments stay inside them.
     ///
     /// A one-`fn` block used to collapse to the annotation form (`@test fn …`). That is not a

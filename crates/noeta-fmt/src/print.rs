@@ -1011,16 +1011,31 @@ impl Printer<'_> {
             // here, and blank-line detection measures from the right place).
             let else_start = else_kw.unwrap_or(then_close);
             // `else if` — the else body is a single nested `If`; print it inline (no extra braces).
+            //
+            // Unless the author wrote a comment between the `else` and that `if`. The inline path
+            // emits no block, so there is no region for `interleave_comments` to walk and the
+            // comment stays pending until the *enclosing* scope drains it — which put a note
+            // explaining the nested branch at the end of the file. Falling back to the braced form
+            // keeps it exactly where it was written, and costs nothing: `else_body` is
+            // `Option<Vec<Stmt>>`, so `else if c { … }` and `else { if c { … } }` are the same tree
+            // and the safety gate sees no difference. Same failure shape as the empty-body case
+            // `holds_comment` was introduced for.
             if let [
                 Stmt::If {
-                    cond,
-                    then_body,
-                    else_body,
-                    span,
+                    cond: nested_cond,
+                    then_body: nested_then,
+                    else_body: nested_else,
+                    span: nested_span,
                 },
             ] = else_body
+                && !self.holds_comment(else_start, nested_span.start)
             {
-                parts.push(self.if_stmt(cond, then_body, else_body.as_deref(), *span)?);
+                parts.push(self.if_stmt(
+                    nested_cond,
+                    nested_then,
+                    nested_else.as_deref(),
+                    *nested_span,
+                )?);
             } else {
                 parts.push(self.block(else_body, else_start, span.end)?);
             }
@@ -2373,17 +2388,22 @@ impl Printer<'_> {
             {
                 let p = binop_prec(*op);
                 let (head, rest) = self.flatten_binary(*op, lhs, rhs);
+                // The head is rendered **first**, before the tail operands, because the comment
+                // cursor is monotone: it walks `self.comments` in source order and never scans
+                // backwards. Rendering the tail first parked the cursor on a comment belonging to
+                // the head, and `interleave_comments` only ever inspects `comments[cursor]` — so a
+                // tail operand's own region found a comment positioned *before* it, rejected it as
+                // out of region, and emitted nothing at all. `a(fn() { /* x */ }) + b(fn() { /* y */ })`
+                // printed the second closure body as `{}` and flushed `y` at end of file.
+                // See `if_then_else_form`, which documents the same constraint for its branches.
+                let head_doc = self.operand(head, p, false)?;
                 let mut tail = Vec::new();
                 for (o, operand) in rest {
                     tail.push(Doc::line());
                     tail.push(Doc::text(format!("{} ", o.symbol())));
                     tail.push(self.operand(operand, p, true)?);
                 }
-                Doc::concat([
-                    self.operand(head, p, false)?,
-                    Doc::concat(tail).nest(self.indent_step()),
-                ])
-                .group()
+                Doc::concat([head_doc, Doc::concat(tail).nest(self.indent_step())]).group()
             }
             Expr::Binary { op, lhs, rhs, .. } => {
                 let p = binop_prec(*op);
@@ -2418,17 +2438,17 @@ impl Printer<'_> {
                 // Width-driven: flatten the whole `a |> b |> c` chain into one group so it lays out
                 // flat when it fits and one stage per line (indented) when it does not.
                 let (head, stages) = flatten_pipeline(left, right);
+                // Head first, for the same reason as the binary arm above: the comment cursor is
+                // monotone, so every operand must be rendered in source order or a later stage's
+                // region silently emits none of its comments.
+                let head_doc = self.operand(head, 1, false)?;
                 let mut tail = Vec::new();
                 for s in stages {
                     tail.push(Doc::line());
                     tail.push(Doc::text("|> "));
                     tail.push(self.operand(s, 1, true)?);
                 }
-                Doc::concat([
-                    self.operand(head, 1, false)?,
-                    Doc::concat(tail).nest(self.indent_step()),
-                ])
-                .group()
+                Doc::concat([head_doc, Doc::concat(tail).nest(self.indent_step())]).group()
             }
             Expr::Pipeline { left, right, .. } => {
                 // Source-directed: break at the operator only where the author did.
