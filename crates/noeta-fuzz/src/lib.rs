@@ -34,6 +34,7 @@ pub mod generate;
 pub mod jit_target;
 pub mod leak_target;
 pub mod run_target;
+pub mod typed;
 
 use noeta_span::{Source, SourceId};
 
