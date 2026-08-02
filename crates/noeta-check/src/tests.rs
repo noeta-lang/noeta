@@ -2889,6 +2889,25 @@ fn an_ordering_needs_two_operands_of_one_type() {
     assert!(codes("fn m(a: dyn, b: int): bool { return a > b }\necho \"ok\"\n").is_empty());
 }
 
+/// `assert` takes a `bool` and at most a message.
+///
+/// The prelude's arguments are unchecked because most of it is polymorphic — but `assert` is not,
+/// and `assert(1)` aborted with the VM's `assert expects a bool, found 1`. Found by the
+/// runtime-rejection census.
+#[test]
+fn assert_takes_a_bool_and_at_most_a_message() {
+    assert_eq!(codes("assert(1)\n"), vec!["E0007"]);
+    assert_eq!(codes("assert(\"a\")\n"), vec!["E0007"]);
+    assert_eq!(codes("assert(true, \"a\", \"b\")\n"), vec!["E0007"]);
+    assert!(codes("assert(true)\n").is_empty());
+    assert!(codes("assert(1 == 1, \"ok\")\n").is_empty());
+    assert!(codes("fn f(c: dyn): void { assert(c) }\necho \"ok\"\n").is_empty());
+    // The polymorphic constructors stay deliberately unchecked here — their wrong-arity call is a
+    // runtime error by design, so the direct and first-class-value spellings agree. See
+    // `stdlib::prelude_signature` and `poly_values/constructor_*_wrong_arity`.
+    assert!(codes("x = some(1)\necho x\n").is_empty());
+}
+
 /// A container is indexed by its own key type, and `for` iterates something iterable.
 ///
 /// The receiver's indexability was checked (`42[0]` was already E0007) but the *index* expression's

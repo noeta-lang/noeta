@@ -963,6 +963,35 @@ impl Checker {
                 // first, so a payload-typed result (`some(fn…)`) sees the real closure type.
                 self.finalize_closure_args(&[], args, arg_exprs, env);
                 if let Some(t) = stdlib::prelude_return(name.as_str(), args) {
+                    // Polymorphic in the payload is not unconstrained: `some` takes exactly one
+                    // argument and `assert` takes a `bool`. Those were deferred with the rest, so
+                    // `assert(1)` and `some(1, 2)` aborted at run time with the VM's own complaint.
+                    if let Some((min, max, first)) = stdlib::prelude_signature(name.as_str()) {
+                        if args.len() < min || args.len() > max {
+                            let expected = if min == max {
+                                format!("{min}")
+                            } else {
+                                format!("{min} or {max}")
+                            };
+                            self.error(
+                                DiagnosticCode::TypeMismatch,
+                                span,
+                                format!(
+                                    "`{name}` expects {expected} argument(s), found {}",
+                                    args.len()
+                                ),
+                            );
+                        } else if let (Some(want), Some(got)) = (first, args.first())
+                            && !got.defers_to_runtime()
+                            && !self.assignable(got, &want)
+                        {
+                            self.error(
+                                DiagnosticCode::TypeMismatch,
+                                arg_exprs.first().map(|a| a.value.span()).unwrap_or(span),
+                                format!("`{name}` expects a `{want}`, found `{got}`"),
+                            );
+                        }
+                    }
                     return t;
                 }
                 // `S(…)` where `S` names a struct/class/enum the program declares. The language has

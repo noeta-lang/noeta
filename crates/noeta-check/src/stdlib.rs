@@ -1045,6 +1045,29 @@ pub(super) fn prelude_return(name: &str, args: &[Type]) -> Option<Type> {
     })
 }
 
+/// The **argument shape** of a prelude function that has one: `(minimum, maximum, first-parameter
+/// type)`, where `None` for the type means "anything".
+///
+/// Most of the prelude is genuinely polymorphic — `Ok`/`Err`/`some` take whatever they wrap and
+/// `panic` displays whatever it is given — which is why the call path checks none of them. But
+/// "polymorphic in the payload" is not "unconstrained": `assert` takes a `bool` and at most a
+/// message, and that was left to the runtime, so `assert(1)` type-checked and then aborted with the
+/// VM's own `assert expects a bool, found 1`.
+///
+/// **Only `assert` is here, deliberately.** The polymorphic constructors' arity is a *runtime*
+/// error on purpose, pinned twice in the corpus with the reasoning spelled out
+/// (`poly_values/constructor_direct_wrong_arity`, `…_value_wrong_arity`): a call through a
+/// first-class constructor value (`f = Err; f()`) cannot be checked statically — `f` is a deferred
+/// binding — so the direct spelling was made to match it rather than have the two diverge. Adding
+/// `Ok`/`Err`/`some` here re-opens exactly that divergence. It may well be the better trade, but it
+/// is a language decision rather than a missing gate.
+pub(super) fn prelude_signature(name: &str) -> Option<(usize, usize, Option<Type>)> {
+    Some(match name {
+        "assert" => (1, 2, Some(Type::Bool)),
+        _ => return None,
+    })
+}
+
 /// The result type of indexing `receiver[_]`, or `None` if the receiver is not indexable.
 pub(super) fn index_return(receiver: &Type) -> Option<Type> {
     Some(match receiver {
