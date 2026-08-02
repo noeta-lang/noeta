@@ -30,7 +30,7 @@ use noeta_vm::{RunOptions, Tiering, VmBackend};
 use crate::run_target::Reach;
 
 /// The base seed this target's sweeps walk.
-pub const BASE_SEED: u64 = 0x71E_1;
+pub const BASE_SEED: u64 = 0x71E1;
 
 /// A disagreement between the interpreter and forced tier-1.
 #[derive(Debug, Clone)]
