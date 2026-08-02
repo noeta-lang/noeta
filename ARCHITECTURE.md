@@ -44,7 +44,7 @@ Dependency edges form a strict DAG (no back-edges): `noeta-span` is depended on 
 |---|---|
 | `noeta-span` | `Span`, `SourceId`, `SourceMap`, offset ↔ line:col (shared vocabulary). |
 | `noeta-diagnostics` | The one error catalog (`DiagnosticCode`, stable `E0xxx`) + the single `ariadne` renderer. |
-| `noeta-ast` | AST node types (pure data, every node carries a `Span`) + `SyntaxKind` + reflection/pretty helpers. |
+| `noeta-ast` | AST node types (pure data, every node carries a `Span`) + `SyntaxKind` + reflection/pretty helpers. `native_reflect` is reflection's other half: the ONE seam that answers for a declaration living in the extension registry rather than the AST, resolved lazily on a lookup miss instead of materialized into every artifact. |
 | `noeta-lexer` | source `&str` + `SourceId` → token stream + lex diagnostics (logos). |
 | `noeta-parser` | token stream → `(Ast, Vec<Diagnostic>)` (chumsky). |
 
