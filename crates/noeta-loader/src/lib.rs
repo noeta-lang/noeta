@@ -2878,9 +2878,30 @@ fn link_core(
         }
     }
 
-    // Merged declarations, then dependency std-imports, then the entry's own statements.
-    let mut stmts = imported;
-    stmts.append(&mut dep_retained);
+    // **Merged statements land in their own module's source order.** The closure discovers them in
+    // reachability order — an importer reaches `reader`, which captures `x`, whose initializer needs
+    // `base` — so `base = 7` was appended *after* the `x = base + 1` that reads it. A declaration
+    // does not care (they are hoisted), but a top-level binding is a statement that *runs*, and the
+    // merged program ran the module's bindings inside out: E0005 "cannot find `base`", reported
+    // against a module line that is correct where it was written, for a program the module's own
+    // file checks and runs clean. Restoring source order is exactly the module's own semantics, and
+    // it is the only ordering constraint there is: a binding of one module can never name a binding
+    // of another (a binding has no qualified identity, so no `use` can reach one), which leaves
+    // cross-module order free — sorted by source id so it is deterministic rather than arbitrary,
+    // which the compiled program's prototype indices and reflection registry depend on.
+    imported.sort_by_key(|stmt| (stmt.span().source, stmt.span().start));
+
+    // Dependency std-imports, then the merged declarations, then the entry's own statements.
+    //
+    // The retained `use`s come **first** for the same reason the merge is now ordered: they bind the
+    // handles a merged statement can *run* against. A module's `use std.math` was appended after the
+    // declarations it was retained for, so a merged binding whose initializer called through it
+    // (`x = math.round(1.5)`) reached the handle before the `use` bound it — E0005 "cannot find
+    // `std.math`", again against a module line that is correct where it is written. A `use` binds a
+    // handle and runs nothing, so hoisting the whole group above the merged statements costs
+    // nothing and is what every one of them expects.
+    let mut stmts = dep_retained;
+    stmts.append(&mut imported);
     stmts.append(&mut entry_stmts);
     Ok(Linkage {
         program: Program {
@@ -6260,6 +6281,115 @@ mod tests {
         assert!(
             has_fn(&linked, "seed"),
             "and the binding's own initializer keeps expanding the closure"
+        );
+    }
+
+    /// The position of a binding among the merged statements, for the ordering assertions below.
+    fn binding_at(linked: &Linked, name: &str) -> usize {
+        linked
+            .program
+            .stmts
+            .iter()
+            .position(|s| matches!(s, Stmt::Binding { name: n, .. } if n == name))
+            .unwrap_or_else(|| panic!("`{name}` is not in the merged program"))
+    }
+
+    /// A merged binding *runs*, so it has to run in its own module's order. The closure discovers
+    /// them inside out — the import reaches `reader`, `reader` captures `x`, and only `x`'s
+    /// initializer names `base` — so appending in discovery order put `base = 7` after the
+    /// `x = base + 1` that reads it. The module links, and then fails with E0005 "cannot find
+    /// `base`" against a line that is correct where it was written.
+    #[test]
+    fn merged_bindings_keep_their_modules_source_order() {
+        let sibling = module(
+            "lib.noe",
+            "namespace app.lib;\n\
+             base = 7;\n\
+             x = base + 1;\n\
+             pub fn reader() use (x): int { return x; }\n",
+        );
+        let entry = "use app.lib.reader;\nn = reader();\necho n;\n";
+        let linked = link(
+            "main.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            std::slice::from_ref(&sibling),
+        )
+        .expect("links");
+        assert!(
+            has_binding(&linked, "base"),
+            "the binding a merged binding's initializer names travels too: {:?}",
+            linked.program.stmts
+        );
+        assert!(
+            binding_at(&linked, "base") < binding_at(&linked, "x"),
+            "`base = 7` has to run before the `x = base + 1` that reads it: {:?}",
+            linked.program.stmts
+        );
+    }
+
+    /// The same ordering rule down a chain of three, reached through an attribute root rather than
+    /// an import — the discovery order there is the reverse of the source order at every step, so a
+    /// merge that appends in discovery order gets every pair wrong.
+    #[test]
+    fn a_chain_of_merged_bindings_keeps_its_source_order() {
+        let sibling = module(
+            "lib.noe",
+            "namespace app.lib;\n\
+             @attribute\n\
+             struct Route { path: string }\n\
+             conn = 1;\n\
+             todos = conn + 1;\n\
+             live = todos + 1;\n\
+             fn api() use (live): int { return live; }\n\
+             #[Route(\"/api\")]\n\
+             fn index(): int { return api(); }\n",
+        );
+        let linked = link(
+            "main.noe",
+            "echo 1;\n",
+            noeta_lexer::Edition::DEFAULT,
+            std::slice::from_ref(&sibling),
+        )
+        .expect("links");
+        assert!(
+            binding_at(&linked, "conn") < binding_at(&linked, "todos")
+                && binding_at(&linked, "todos") < binding_at(&linked, "live"),
+            "the whole chain runs in source order: {:?}",
+            linked.program.stmts
+        );
+    }
+
+    /// The other half of the same ordering fault: a merged binding runs against the handles its
+    /// module's own `use` binds, and the retained imports were appended *after* the statements they
+    /// were retained for — so `x = math.round(1.5)` reached `math` before the `use std.math` that
+    /// binds it, and E0005 named `std.math` against a line that is correct where it is written.
+    #[test]
+    fn a_retained_import_is_bound_before_the_merged_binding_that_runs_against_it() {
+        let sibling = module(
+            "lib.noe",
+            "namespace app.lib;\n\
+             use std.math\n\
+             x = math.round(1.5);\n\
+             pub fn reader() use (x): int { return x; }\n",
+        );
+        let linked = link(
+            "main.noe",
+            "use app.lib.reader;\necho reader();\n",
+            noeta_lexer::Edition::DEFAULT,
+            std::slice::from_ref(&sibling),
+        )
+        .expect("links");
+        let first_use = linked
+            .program
+            .stmts
+            .iter()
+            .position(|s| matches!(s, Stmt::Use { .. }))
+            .expect("the sibling's `use std.math` is retained");
+        assert!(
+            first_use < binding_at(&linked, "x"),
+            "the retained `use` binds its handle before the merged binding runs: {:?}",
+            linked.program.stmts
         );
     }
 

@@ -1,0 +1,24 @@
+// A merged module binding RUNS, so it has to run in its own module's order.
+//
+// Importing `all()` drags in the binding it captures (`live`), whose initializer names `rows`, whose
+// initializer names `conn` — a chain the linker discovers from the outside in. Appending each one as
+// it was discovered put the merged statements in exactly the reverse of the order `Store.noe`
+// declares them, so `rows = "${conn}:rows"` ran before `conn` existed: E0005 "cannot find `conn` in
+// this scope", reported against a `Store.noe` line that is correct where it is written, for a file
+// that checks and runs clean on its own.
+//
+// The linker now merges a module's statements in that module's source order, which is the only
+// ordering constraint there is — a binding of one module can never name a binding of another,
+// because a binding has no qualified identity for a `use` to reach.
+//
+// The same fault had a second half: `Store.noe`'s own `use std.math` was retained *after* the
+// statements retained for it, so `live`'s `math.round(…)` reached the handle before the `use` bound
+// it. The retained imports are hoisted above the merged statements now.
+//
+// A directory case on purpose: the harness runs a single-file case straight from source text with
+// no loader, so nothing is ever merged into a bare `.noe`.
+// expect: stdout "conn:rows:live:1"
+// expect: exit 0
+use App.Store.all
+
+echo all()
