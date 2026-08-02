@@ -20,6 +20,19 @@ enum InvokeTarget {
     Free(Value),
 }
 
+/// How a [`Vm::cold_op`] arm left the dispatch loop — the three exits the arms already had,
+/// named so an outlined arm can express them across a function boundary.
+enum ColdStep {
+    /// Keep interpreting this frame at the given `pc` (an arm that ran to completion; almost
+    /// always `pc + 1`, and an arm that jumps sets its own target).
+    Next(usize),
+    /// Control transferred to a different frame — re-derive the register window (`continue
+    /// 'reload`).
+    Reload,
+    /// The bottom frame produced a value; `dispatch_inner` returns it.
+    Done(Value),
+}
+
 impl<'m> Vm<'m> {
     /// Run a frame stack until its bottom frame returns (`Return`) or the program/function
     /// halts (an implicit unit return). Returns the produced value, which the caller owns.
@@ -298,140 +311,21 @@ impl<'m> Vm<'m> {
                 };
             }
             loop {
-                // Profiler seam (`noeta profile`): before each instruction, let the attached profiler
-                // observe the live stack (it diffs frame depth to detect call enter/exit, or samples
-                // when a tick is pending). `None` on every non-profile run — one predicted branch. The
-                // frame's `pc` is synced first so the view resolves the right current line. It never
-                // pauses, so unlike the debugger it needs no take/restore: it borrows only the frame
-                // stack + registers (dispatch params, not `self`) and `module` (a local reference).
-                let strand = self.sched.current_strand;
-                if let Some(prof) = self.profiler.as_mut() {
-                    frames[top].pc = pc;
-                    let view = DebugView {
-                        module,
-                        frames: &frames[..],
-                        regs: &regs[..],
-                        globals: &self.persist.globals,
-                        strand,
-                    };
-                    prof.before_op(&view);
+                // Tooling seams (`noeta profile` / `noeta dap`), OUTLINED (perf/outline-cold).
+                //
+                // Both consults happen before every instruction and both are `None` on every
+                // ordinary run, so what is left in the hot loop is exactly the two predicted
+                // branches they always were. Their *bodies* — a `DebugView` over the whole live
+                // stack, the pause state machine, watch/console evaluation, and the strand read
+                // they both wanted — used to sit inline and hold live state across the op match,
+                // which every arm then paid for in its register allocation. They are now `#[cold]`
+                // `#[inline(never)]` calls; the semantics, the ordering (profiler first, then
+                // debugger), and the pc sync inside each are unchanged.
+                if self.profiler.is_some() {
+                    self.profile_before_op(module, frames, regs, top, pc);
                 }
-                // Debugger seam (`noeta dap`): before each instruction, let the attached debugger map
-                // `(proto, pc)` to a source line and pause if a breakpoint/step/entry condition holds.
-                // `None` on every non-debug run — one predicted branch. The frame's `pc` is synced
-                // first so a paused stack trace reads the instruction about to run. `Terminate` (a
-                // disconnect while paused) unwinds cleanly, releasing the stack like any abort.
                 if self.debugger.is_some() {
-                    frames[top].pc = pc;
-                    // Hold the debugger *out* of `self` for the whole pause. This frees `&mut self` so a
-                    // watch expression that calls a function can actually run it (`debug_eval_request`
-                    // re-enters the VM), and it auto-disarms that nested run's own debug consults —
-                    // `self.debugger` is `None` while paused, so evaluating `f(x)` never breaks inside
-                    // `f`. The debugger is restored before we resume normal dispatch.
-                    let mut dbg = self.debugger.take().unwrap();
-                    loop {
-                        let action = {
-                            let view = DebugView {
-                                module,
-                                frames: &frames[..],
-                                regs: &regs[..],
-                                globals: &self.persist.globals,
-                                strand,
-                            };
-                            dbg.before_op(proto as u32, pc, &view)
-                        };
-                        match action {
-                            DebugAction::Continue => {
-                                // The program resumes (continue or a landed step): the observed
-                                // state may change before the next stop, so advance the generation
-                                // and invalidate every memoized watch result (watch-memoization).
-                                self.bump_stop_generation();
-                                break;
-                            }
-                            DebugAction::Terminate => {
-                                self.debugger = Some(dbg);
-                                return Err(Abort);
-                            }
-                            // A watch/console evaluate that needs the VM (a call). Run it here with
-                            // `&mut self`, reply, then loop: `before_op` re-enters its wait silently.
-                            DebugAction::Evaluate(req) => {
-                                let DebugEvalRequest {
-                                    program,
-                                    text,
-                                    frame,
-                                    scope,
-                                    kind,
-                                    reply,
-                                } = req;
-                                // Every evaluate compiles through the adopted session (T5): full
-                                // language for a watch/console, and for a hover the same engine
-                                // gated to the read-only surface (T6) — one evaluator, not two. The
-                                // `kind` also drives watch-memoization (cache reuse + generation
-                                // bumping) inside `debug_eval_fragment`.
-                                let outcome = if self.debug_session.is_some() {
-                                    self.debug_eval_fragment(
-                                        &program,
-                                        frame,
-                                        &scope,
-                                        kind,
-                                        &text,
-                                        &frames[..],
-                                        &regs[..],
-                                    )
-                                } else {
-                                    DebugEvalOutcome::Error(
-                                        "this debug run has no console session — evaluate needs a \
-                                         session launch"
-                                            .to_string(),
-                                    )
-                                };
-                                let _ = reply.send(outcome);
-                            }
-                            // A Variables-panel edit (U1): evaluate the replacement value as a
-                            // console fragment and write the frame's register in place.
-                            DebugAction::SetVariable(req) => {
-                                let DebugSetRequest {
-                                    name,
-                                    value,
-                                    frame,
-                                    scope,
-                                    reply,
-                                } = req;
-                                let outcome = if self.debug_session.is_some() {
-                                    self.debug_set_variable(
-                                        &name,
-                                        &value,
-                                        frame,
-                                        &scope,
-                                        &frames[..],
-                                        &mut regs[..],
-                                    )
-                                } else {
-                                    DebugEvalOutcome::Error(
-                                        "this debug run has no console session — setVariable needs \
-                                         a session launch"
-                                            .to_string(),
-                                    )
-                                };
-                                // Refresh the adapter-visible snapshot with the just-written
-                                // register BEFORE unblocking the client, so a `variables`/
-                                // `stackTrace` racing in behind this response reads the new value
-                                // rather than the stale pause-time capture.
-                                {
-                                    let view = DebugView {
-                                        module,
-                                        frames: &frames[..],
-                                        regs: &regs[..],
-                                        globals: &self.persist.globals,
-                                        strand,
-                                    };
-                                    dbg.after_side_effect(&view);
-                                }
-                                let _ = reply.send(outcome);
-                            }
-                        }
-                    }
-                    self.debugger = Some(dbg);
+                    self.debug_before_op(module, frames, regs, top, proto, pc)?;
                 }
                 // Every prototype ends with `Halt`, so `pc` never runs off the end — index directly
                 // instead of the `.get()` guard the pre-S3 loop used. A call keeps `fbase` on the
@@ -554,29 +448,6 @@ impl<'m> Vm<'m> {
                         set_reg(regs, fbase, *dst, result);
                         pc += 1;
                     }
-                    Op::MakeClosure {
-                        dst,
-                        proto,
-                        captures,
-                    } => {
-                        // Gather one cell per capture (from a celled local register, or one of this
-                        // frame's own upvalues — forwarding a capture down a level), retaining each
-                        // into the new closure, which owns its upvalue cells.
-                        let mut upvalues = Vec::with_capacity(captures.len());
-                        for capture in captures.iter() {
-                            let cell = match capture {
-                                CaptureFrom::Local(reg) => regs[fbase + *reg as usize],
-                                CaptureFrom::Upvalue(index) => {
-                                    frames[top].upvalues[*index as usize]
-                                }
-                            };
-                            retain(cell);
-                            upvalues.push(cell);
-                        }
-                        let v = Value::closure(*proto, upvalues);
-                        set_reg(regs, fbase, *dst, v);
-                        pc += 1;
-                    }
                     Op::MakeCell { dst, src } => {
                         // Box the value into a fresh cell, which owns one reference to it.
                         let v = regs[fbase + *src as usize];
@@ -607,596 +478,16 @@ impl<'m> Vm<'m> {
                         frames[top].upvalues[*index as usize].cell_set(v);
                         pc += 1;
                     }
-                    Op::LoadNativeFn { dst, func } => {
-                        set_reg(regs, fbase, *dst, Value::native_fn(*func));
-                        pc += 1;
-                    }
-                    Op::BindMethod { dst, recv, method } => {
-                        // A bound method handle (`value.method`, EX.2b): capture one retained
-                        // reference to the receiver.
-                        let recv_val = regs[fbase + *recv as usize];
-                        retain(recv_val);
-                        let handle = Value::bound_method(recv_val, module.name(*method));
-                        set_reg(regs, fbase, *dst, handle);
-                        pc += 1;
-                    }
-                    Op::MakeList {
-                        dst,
-                        items,
-                        reflect,
-                    } => {
-                        let mut elements = Vec::with_capacity(items.len());
-                        for &r in items.iter() {
-                            let v = regs[fbase + r as usize];
-                            retain(v);
-                            elements.push(v);
-                        }
-                        let list = Value::list(elements);
-                        // Stamp the checker-resolved element type onto the list (R1) so `type_of` recovers
-                        // it after a `dyn` launder. A cheap `Rc` clone of the shared load-time entry; the
-                        // tag lives beside the payload, invisible to value semantics.
-                        if let Some(idx) = reflect {
-                            list.set_reflect(Some(Rc::clone(
-                                &self.persist.type_reprs[*idx as usize],
-                            )));
-                        }
-                        set_reg(regs, fbase, *dst, list);
-                        pc += 1;
-                    }
                     // A `List<packed>` literal (P-PACK 2.4): pack each element into a flat raw-primitive
                     // buffer (no boxed objects, no retains — the words are copied), then the element
                     // temporaries are released by the following compiler-emitted drops, exactly as for
                     // `MakeList`'s consumed operands. If any element fails to pack (a shape the schema
                     // does not expect — not reachable for a well-typed marked site), fall back to a boxed
                     // list that retains each element, staying consistent with those drops.
-                    Op::PackedListNew { dst, schema } => {
-                        // Allocate the empty flat buffer the following `PackedListPush` chain fills
-                        // (P-PACK 2.5 streaming construction).
-                        let schema = self.persist.packed_schemas[*schema as usize];
-                        let list = Value::packed_list(schema, Vec::new());
-                        set_reg(regs, fbase, *dst, list);
-                        pc += 1;
-                    }
-                    Op::FromBytes {
-                        dst,
-                        src,
-                        schema,
-                        validate,
-                        span,
-                    } => {
-                        // Deserialize a `bytes` buffer into a flat `List<T>` (P-PACK 4.4): wrap the raw
-                        // bytes as a packed list of the interned schema — the inverse of `to_bytes`.
-                        let blob = regs[fbase + *src as usize];
-                        let Some(bytes) = blob.bytes_data() else {
-                            return Err(self.error(
-                                DiagnosticCode::TypeMismatch,
-                                *span,
-                                format!(
-                                    "`from_bytes` expects a `bytes` value, found {}",
-                                    blob.type_name()
-                                ),
-                            ));
-                        };
-                        let schema = self.persist.packed_schemas[*schema as usize];
-                        if schema.byte_size == 0 || bytes.len() % schema.byte_size != 0 {
-                            return Err(self.error(
-                            DiagnosticCode::TypeMismatch,
-                            *span,
-                            format!(
-                                "`from_bytes` buffer of {} bytes is not a whole number of {}-byte elements",
-                                bytes.len(),
-                                schema.byte_size
-                            ),
-                        ));
-                        }
-                        let list = Value::packed_list(schema, bytes);
-                        // Validation arc: `from_bytes` is an abort door — run each decoded element's
-                        // `validate()` (materialized boxed for the re-entry, then consumed) and abort
-                        // at `[i]` on the first rejection, consistent with a length/shape mismatch.
-                        if *validate {
-                            let n = list.list_len().unwrap_or(0);
-                            for i in 0..n {
-                                let element = list.packed_get(i); // owned (rc 1), consumed below
-                                if let Some(message) = self.validate_message(element, *span)? {
-                                    release(list);
-                                    return Err(self.error(
-                                        DiagnosticCode::TypeMismatch,
-                                        *span,
-                                        format!("from_bytes: [{i}]: {message}"),
-                                    ));
-                                }
-                            }
-                        }
-                        set_reg(regs, fbase, *dst, list);
-                        pc += 1;
-                    }
-                    Op::TypedModuleCall {
-                        dst,
-                        module: mod_id,
-                        func: func_id,
-                        args,
-                        recipe,
-                        dynamic,
-                        span,
-                    } => {
-                        // Resolve the interned module/func names (`module` is the outer loop-local
-                        // `&Module`, so bind the op's ids under different names to avoid shadowing it).
-                        let mod_name = module.name(*mod_id);
-                        let func = module.name(*func_id);
-                        // The recipe: baked at the call site, or (poly-values F2b) resolved
-                        // per-instantiation through the forwarding fn's hidden slot register — an
-                        // index into the module's type-argument table. Mirrors the tree-walker.
-                        let dynamic_recipe = dynamic.and_then(|slot| {
-                            let idx = regs[fbase + slot as usize].as_int().unwrap_or(-1);
-                            module
-                                .type_args
-                                .get(idx.max(0) as usize)
-                                .and_then(|e| e.recipe.clone().map(Box::new))
-                        });
-                        let recipe = match dynamic {
-                            Some(_) => &dynamic_recipe,
-                            None => recipe,
-                        };
-                        // The recipe is required; its absence was already reported by the checker.
-                        let Some(recipe) = recipe else {
-                            return Err(self.error(
-                                DiagnosticCode::TypeMismatch,
-                                *span,
-                                format!(
-                                    "`{mod_name}.{func}::<T>(...)` has no resolved result type"
-                                ),
-                            ));
-                        };
-                        // Route through the registry's call-site-typed seam: the module's
-                        // `typed_dispatch`, threaded the recipe, builds the whole `NativeOut` tree
-                        // (already carrying its declared wrapper — `Ok`/`Err` for a `Result` shape,
-                        // `Some`/`None` for `Option`), which materializes to a value of `T`. No
-                        // function name is special-cased — `json.parse`/`try_parse` are registered
-                        // like any extension's call-site-typed functions.
-                        let reg = self.reg();
-                        let Some(ext_mod) = reg
-                            .find_module(mod_name)
-                            .filter(|_| reg.find_typed_function(mod_name, func).is_some())
-                        else {
-                            return Err(self.error(
-                                DiagnosticCode::UnknownName,
-                                *span,
-                                format!(
-                                    "`{mod_name}.{func}::<T>(...)` is not a call-site-typed native function"
-                                ),
-                            ));
-                        };
-                        let Some(typed_dispatch) = ext_mod.typed_dispatch else {
-                            return Err(self.error(
-                                DiagnosticCode::UnknownName,
-                                *span,
-                                format!(
-                                    "`{mod_name}.{func}::<T>(...)` is not a call-site-typed native function"
-                                ),
-                            ));
-                        };
-                        // A reflective module (`json`) marshals its arguments deeply; every other
-                        // uses the cheap shallow projection — the same decision the plain module
-                        // dispatch makes.
-                        let nargs: Vec<noeta_stdlib::NativeValue> = args
-                            .iter()
-                            .map(|r| {
-                                let v = regs[fbase + *r as usize];
-                                if ext_mod.deep_marshal {
-                                    v.to_native_deep()
-                                } else {
-                                    marshal_native_arg(v, reg)
-                                }
-                            })
-                            .collect();
-                        match typed_dispatch(func, &mut *self.persist.host, &nargs, recipe) {
-                            Ok(out) => {
-                                // The aborting door (`json.parse::<T>`): a validation rejection that
-                                // reaches the top (not recovered by a `Result` wrapper) aborts with
-                                // the same path-precise message the abort door uses for shape
-                                // failures. `json.try_parse::<T>` wraps its result in `Ok`/`Err`, so
-                                // its rejections are recovered inside `materialize_recipe` and never
-                                // reach here.
-                                let mut path = String::new();
-                                match self.materialize_recipe(out, &mut path, *span)? {
-                                    MatOut::Value(v) => set_reg(regs, fbase, *dst, v),
-                                    MatOut::Rejected(e) => {
-                                        return Err(
-                                            self.std_dispatch_error(e.into_std_error(), *span)
-                                        );
-                                    }
-                                }
-                            }
-                            Err(error) => return Err(self.std_dispatch_error(error, *span)),
-                        }
-                        pc += 1;
-                    }
-                    Op::TypedMethodCall {
-                        dst,
-                        recv,
-                        method: method_id,
-                        args,
-                        recipe,
-                        dynamic,
-                        span,
-                    } => {
-                        // The extern-METHOD twin of `TypedModuleCall` above (http arc H8), step for
-                        // step — the only differences are that the receiver's own runtime identity
-                        // selects the type (no module lookup) and the dispatch takes the receiver.
-                        // Mirrors the tree-walker, so the two backends agree by construction.
-                        let method = module.name(*method_id);
-                        let dynamic_recipe = dynamic.and_then(|slot| {
-                            let idx = regs[fbase + slot as usize].as_int().unwrap_or(-1);
-                            module
-                                .type_args
-                                .get(idx.max(0) as usize)
-                                .and_then(|e| e.recipe.clone().map(Box::new))
-                        });
-                        let recipe = match dynamic {
-                            Some(_) => &dynamic_recipe,
-                            None => recipe,
-                        };
-                        let Some(recipe) = recipe else {
-                            return Err(self.error(
-                                DiagnosticCode::TypeMismatch,
-                                *span,
-                                format!("`{method}::<T>(...)` has no resolved result type"),
-                            ));
-                        };
-                        let receiver = regs[fbase + *recv as usize];
-                        if receiver.heap_kind() != Some(HeapKind::Extern) {
-                            return Err(self.error(
-                                DiagnosticCode::TypeMismatch,
-                                *span,
-                                format!("`{method}::<T>(...)` needs a native receiver"),
-                            ));
-                        }
-                        let deep = receiver.with_extern(|e| {
-                            self.reg()
-                                .find_type_qualified(e.type_identity())
-                                .is_some_and(|t| t.deep_marshal)
-                        });
-                        let reg = self.reg();
-                        let nargs: Vec<noeta_stdlib::NativeValue> = args
-                            .iter()
-                            .map(|r| {
-                                let v = regs[fbase + *r as usize];
-                                if deep {
-                                    v.to_native_deep()
-                                } else {
-                                    marshal_native_arg(v, reg)
-                                }
-                            })
-                            .collect();
-                        let host = &mut *self.persist.host;
-                        let out = receiver.with_extern_mut(|e| {
-                            reg.dispatch_typed_method(e, method, host, &nargs, recipe)
-                        });
-                        match out {
-                            Ok(out) => {
-                                let mut path = String::new();
-                                match self.materialize_recipe(out, &mut path, *span)? {
-                                    MatOut::Value(v) => set_reg(regs, fbase, *dst, v),
-                                    MatOut::Rejected(e) => {
-                                        return Err(
-                                            self.std_dispatch_error(e.into_std_error(), *span)
-                                        );
-                                    }
-                                }
-                            }
-                            Err(error) => return Err(self.std_dispatch_error(error, *span)),
-                        }
-                        pc += 1;
-                    }
-                    Op::DecodeTyped {
-                        dst,
-                        name,
-                        text,
-                        ok_shape,
-                        err_shape,
-                        span,
-                    } => {
-                        // The router-facing runtime decode (L2.2 DI). Fully recoverable: an unknown
-                        // type name, a non-string operand, or a malformed body all land as
-                        // `Result.Err` wrapping a path-carrying `JsonError` (the same error story
-                        // as `json.try_parse::<T>`). Mirrors the recoverable `try_parse` branch
-                        // above, but the recipe is looked up by runtime type name rather than
-                        // baked at the call site.
-                        let err = |vm: &Self, error: noeta_stdlib::json::JsonError| {
-                            Value::enum_value(
-                                vm.persist.shapes[*err_shape as usize],
-                                vec![Value::extern_value(noeta_stdlib::ExternBox::new(error))],
-                            )
-                        };
-                        let name_val = regs[fbase + *name as usize].as_string();
-                        let text_val = regs[fbase + *text as usize].as_string();
-                        let (Some(type_name), Some(text)) = (name_val, text_val) else {
-                            return Err(self.error(
-                                DiagnosticCode::TypeMismatch,
-                                *span,
-                                "`json.decode_typed` expects two `string` arguments".to_string(),
-                            ));
-                        };
-                        // Clone the recipe out of `self` first: materializing it re-enters the VM
-                        // (`&mut self`) to run any `Validate::validate`, which cannot coexist with a
-                        // borrow of `self.deserialize_recipes`.
-                        let recipe = self.deserialize_recipes.get(&type_name).cloned();
-                        let value = match recipe {
-                            None => err(
-                                self,
-                                noeta_stdlib::json::JsonError::unknown_type(&type_name),
-                            ),
-                            Some(recipe) => {
-                                match noeta_stdlib::json::try_parse_typed(&text, &recipe) {
-                                    // The recoverable router door: a validation rejection is
-                                    // threaded into the `Result.Err(JsonError)`, exactly like a
-                                    // shape failure.
-                                    Ok(out) => {
-                                        let mut path = String::new();
-                                        match self.materialize_recipe(out, &mut path, *span)? {
-                                            MatOut::Value(v) => Value::enum_value(
-                                                self.persist.shapes[*ok_shape as usize],
-                                                vec![v],
-                                            ),
-                                            MatOut::Rejected(e) => err(self, e),
-                                        }
-                                    }
-                                    Err(error) => err(self, error),
-                                }
-                            }
-                        };
-                        set_reg(regs, fbase, *dst, value);
-                        pc += 1;
-                    }
-                    Op::TraitMethod {
-                        dst,
-                        recv,
-                        trait_name: trait_id,
-                        method: method_id,
-                        args,
-                        span,
-                    } => {
-                        // A trait default-body call (ExtBundle→ExtTrait convergence, slice 2): the
-                        // (trait, method) route was baked at compile time — straight to the trait's
-                        // shared ctx dispatch, receiver as slot 0. Values are copied out of the
-                        // registers first (borrowed by the ctx seed; the seam owns the refcount).
-                        let trait_qname = module.name(*trait_id);
-                        let method_name = module.name(*method_id);
-                        let recv_value = regs[fbase + *recv as usize];
-                        let mut arg_values = Vec::with_capacity(args.len());
-                        for r in args.iter() {
-                            arg_values.push(regs[fbase + *r as usize]);
-                        }
-                        let result = self.call_trait_method(
-                            trait_qname,
-                            method_name,
-                            recv_value,
-                            &arg_values,
-                            *span,
-                        )?;
-                        set_reg(regs, fbase, *dst, result);
-                        pc += 1;
-                    }
-                    Op::PackedListPush {
-                        dst, list, value, ..
-                    } => {
-                        let acc = regs[fbase + *list as usize];
-                        let element = regs[fbase + *value as usize];
-                        // `list` is the streaming accumulator — a uniquely-owned temp. Clear its register
-                        // to `unit` *without* releasing (a direct overwrite, like `ConcatInPlace`), so the
-                        // single owning reference transfers into `result` and a `dst == list` store is
-                        // safe. `value` is left in its register for the compiler-emitted `Drop` to free.
-                        regs[fbase + *list as usize] = Value::unit();
-                        let result = if acc.is_packed_list() {
-                            if acc.packed_push(element) {
-                                // Element primitives copied into the buffer (not retained) — the buffer
-                                // extended in place; the `Drop` of `value` frees the element object.
-                                acc
-                            } else {
-                                // Defensive demote (a checked `@packed` type never mismatches): materialize
-                                // the packed buffer to an owned boxed list, release the packed accumulator,
-                                // then push the (retained) element so the boxed list owns one reference.
-                                let boxed = acc.realize_list();
-                                release(acc);
-                                retain(element);
-                                boxed.list_push(element);
-                                boxed
-                            }
-                        } else {
-                            // Already boxed (a prior demote): push the retained element in place.
-                            retain(element);
-                            acc.list_push(element);
-                            acc
-                        };
-                        set_reg(regs, fbase, *dst, result);
-                        pc += 1;
-                    }
                     // A tuple builds exactly like a list (object-model slice 4): retain each element into
                     // the aggregate, which owns one reference to each.
-                    Op::MakeTuple { dst, items } => {
-                        let tuple = make_tuple(items, regs, fbase);
-                        set_reg(regs, fbase, *dst, tuple);
-                        pc += 1;
-                    }
                     // Positional projection `receiver.N`: read the Nth element of the tuple, retaining it
                     // into `dst`. The index is in range by construction (the checker verified it).
-                    Op::TupleIndex {
-                        dst,
-                        receiver,
-                        index,
-                        span,
-                    } => {
-                        let v = regs[fbase + *receiver as usize];
-                        let Some(element) = tuple_element_retained(v, *index as usize) else {
-                            return Err(self.error(
-                                DiagnosticCode::TypeMismatch,
-                                *span,
-                                format!(
-                                    "tuple index `{index}` is out of range for {}",
-                                    v.type_name()
-                                ),
-                            ));
-                        };
-                        set_reg(regs, fbase, *dst, element);
-                        pc += 1;
-                    }
-                    Op::MakeRange {
-                        dst,
-                        start,
-                        end,
-                        inclusive,
-                        span,
-                    } => {
-                        let lo = regs[fbase + *start as usize];
-                        let hi = regs[fbase + *end as usize];
-                        match make_range_list(lo, hi, *inclusive) {
-                            Some(list) => {
-                                set_reg(regs, fbase, *dst, list);
-                                pc += 1;
-                            }
-                            None => {
-                                return Err(self.error(
-                                    DiagnosticCode::TypeMismatch,
-                                    *span,
-                                    format!(
-                                        "range bounds must be ints, found {} and {}",
-                                        lo.type_name(),
-                                        hi.type_name()
-                                    ),
-                                ));
-                            }
-                        }
-                    }
-                    Op::MakeMap {
-                        dst,
-                        entries,
-                        reflect,
-                    } => {
-                        let mut map: Vec<(noeta_stdlib::MapKey, Value)> =
-                            Vec::with_capacity(entries.len());
-                        for (key_reg, value_reg) in entries.iter() {
-                            // Validated by the preceding `RequireMapKey`: a string (its P-SSO
-                            // compact clone), a key-capable packed struct (a content snapshot,
-                            // P-PKEY), or a key-capable extern value (a boxed snapshot).
-                            let key_value = regs[fbase + *key_reg as usize];
-                            let key = match key_value.as_compact_string() {
-                                Some(s) => noeta_stdlib::MapKey::Str(s),
-                                None => match key_value.as_int() {
-                                    Some(i) => noeta_stdlib::MapKey::Int(i),
-                                    None => match key_value.packed_map_key() {
-                                        Some(k) => k,
-                                        None => key_value.with_extern(|e| {
-                                            noeta_stdlib::MapKey::Extern(noeta_stdlib::ExternBox(
-                                                e.clone_box(),
-                                            ))
-                                        }),
-                                    },
-                                },
-                            };
-                            let value = regs[fbase + *value_reg as usize];
-                            retain(value);
-                            // A duplicate key keeps the later value (M0 `BTreeMap` semantics); the
-                            // displaced value loses its owner, so release it.
-                            if let Some(pos) = map.iter().position(|(k, _)| *k == key) {
-                                let (_, old) = map.remove(pos);
-                                release(old);
-                            }
-                            map.push((key, value));
-                        }
-                        let map = Value::map_keyed(map);
-                        // Stamp the checker-resolved `Map(K, V)` type onto the map (R1) so `type_of`
-                        // recovers it after a `dyn` launder — the same node-tag path `MakeList` uses.
-                        if let Some(idx) = reflect {
-                            map.set_reflect(Some(Rc::clone(
-                                &self.persist.type_reprs[*idx as usize],
-                            )));
-                        }
-                        set_reg(regs, fbase, *dst, map);
-                        pc += 1;
-                    }
-                    Op::RequireMapKey { reg, span } => {
-                        let v = regs[fbase + *reg as usize];
-                        let ok = v.is_string()
-                            // P-PKEY S4: ints key maps (`float` stays excluded — NaN).
-                            || v.as_int().is_some()
-                            || (v.is_extern()
-                                && v.with_extern(noeta_stdlib::map_key::extern_key_capable))
-                            // P-PKEY: a key-capable `@packed` struct keys a map by content.
-                            || v.shape().is_some_and(|s| s.key_capable);
-                        if !ok {
-                            let error = noeta_stdlib::map_key::map_key_error(v.type_name());
-                            return Err(self.error(
-                                DiagnosticCode::TypeMismatch,
-                                *span,
-                                error.message,
-                            ));
-                        }
-                        pc += 1;
-                    }
-                    Op::IterSnapshot { dst, src, span } => {
-                        let v = regs[fbase + *src as usize];
-                        // A user object lights up the `Iterable` trait: `for x in o` iterates the list
-                        // its `iter` method returns. The method runs bytecode, so it is pushed as a
-                        // call frame; its returned value becomes the snapshot (the following `ListLen`
-                        // raises E0007 if it was not a list). Matches the tree-walker's `exec_for`.
-                        if v.is_object()
-                            && let Some(proto) = self.method_proto(&v.shape().unwrap().name, "iter")
-                        {
-                            let callee_chunk = &module.protos[proto as usize];
-                            if callee_chunk.num_params != 1 {
-                                return Err(self.error(
-                                    DiagnosticCode::TypeMismatch,
-                                    *span,
-                                    format!(
-                                        "this method takes {} argument(s) but 0 were supplied",
-                                        callee_chunk.num_params - 1
-                                    ),
-                                ));
-                            }
-                            self.push_callee_frame(
-                                frames,
-                                regs,
-                                top,
-                                proto,
-                                Some(v),
-                                &[],
-                                // A protocol method is reached by its fixed name, so there is no
-                                // instantiation to carry; the guard aborts rather than misbind if
-                                // one is ever declared generic.
-                                &[],
-                                *dst,
-                                RetTransform::None,
-                                pc + 1,
-                                // A fixed-arity protocol call — no labels reach it.
-                                None,
-                                *span,
-                            )?;
-                            continue 'reload;
-                        }
-                        // The member-handle iterator (coroutines Track-I trigger): a user object
-                        // with no `iter` but a callable `next` member — a method, or a
-                        // closure-valued field — drains into a materialized snapshot list,
-                        // exactly like the tree-walker.
-                        if v.is_object() && self.has_user_next(v) {
-                            let list = self.drain_next_object(v, *span)?;
-                            set_reg(regs, fbase, *dst, list);
-                            pc += 1;
-                            continue;
-                        }
-                        // Snapshot the elements to iterate: a packed list materializes into an owned
-                        // boxed snapshot (so `ListLen`/`ListGet` never see the flat form); a list's
-                        // elements, a set's canonical elements, or a map's values in sorted-key order
-                        // are each retained so the loop owns them independently.
-                        let Some(snapshot) = iter_snapshot_value(v) else {
-                            return Err(self.error(
-                                DiagnosticCode::TypeMismatch,
-                                *span,
-                                format!("cannot iterate over {}", v.type_name()),
-                            ));
-                        };
-                        set_reg(regs, fbase, *dst, snapshot);
-                        pc += 1;
-                    }
                     Op::ListLen { dst, src, span } => {
                         // After `IterSnapshot`, `src` is a list for the list/map paths; the only way it
                         // is not is an `Iterable::iter` that returned a non-list, reported here (E0007),
@@ -2046,237 +1337,6 @@ impl<'m> Vm<'m> {
                             }
                         }
                     }
-                    Op::MakeStruct {
-                        dst,
-                        shape,
-                        named,
-                        spread,
-                        reflect,
-                        span,
-                    } => {
-                        let shape = self.persist.shapes[*shape as usize];
-                        let mut slots: Vec<Option<Value>> = vec![None; shape.fields.len()];
-                        // `...base` fills declared slots the base provides; named initializers then
-                        // override. A slot left unset by both is a missing-field error (E0009).
-                        if let Some(base_reg) = spread {
-                            let base = regs[fbase + *base_reg as usize];
-                            for (i, field) in shape.fields.iter().enumerate() {
-                                if let Some(value) = base.field(field) {
-                                    retain(value);
-                                    slots[i] = Some(value);
-                                }
-                            }
-                        }
-                        for (slot, reg) in named.iter() {
-                            let value = regs[fbase + *reg as usize];
-                            retain(value);
-                            if let Some(old) = slots[*slot as usize].replace(value) {
-                                release(old);
-                            }
-                        }
-                        // A slot still unset after spread + named is filled from its field default
-                        // (slice 5), run in global scope (empty upvalues — a default resolves globals
-                        // only). A slot with neither a value nor a default violates the
-                        // full-initialization guarantee (E0009).
-                        let mut missing: Vec<String> = Vec::new();
-                        for i in 0..shape.fields.len() {
-                            if slots[i].is_some() {
-                                continue;
-                            }
-                            let field = shape.fields[i].clone();
-                            if let Some(&proto) = self
-                                .field_defaults
-                                .get(&(shape.name.clone(), field.clone()))
-                            {
-                                match self.run_thunk(proto, &[]) {
-                                    Ok(value) => slots[i] = Some(value),
-                                    Err(abort) => {
-                                        for slot in slots.into_iter().flatten() {
-                                            release(slot);
-                                        }
-                                        return Err(abort);
-                                    }
-                                }
-                            } else {
-                                missing.push(field);
-                            }
-                        }
-                        if !missing.is_empty() {
-                            for slot in slots.into_iter().flatten() {
-                                release(slot);
-                            }
-                            let list = missing
-                                .iter()
-                                .map(|name| format!("`{name}`"))
-                                .collect::<Vec<_>>()
-                                .join(", ");
-                            return Err(self.error(
-                            DiagnosticCode::MissingField,
-                            *span,
-                            format!(
-                                "missing field(s) {list} in `{}` literal — every field must be set",
-                                shape.name
-                            ),
-                        ));
-                        }
-                        let slots = slots.into_iter().map(Option::unwrap).collect();
-                        let object = Value::object(shape, slots);
-                        // Stamp the reflected type onto a generic instantiation (R2) so `type_of` recovers
-                        // its type arguments after a `dyn` launder. The object's type is invariant under
-                        // field mutation, so — unlike the collection tags — it is never cleared.
-                        if let Some(idx) = reflect {
-                            object.set_reflect(Some(Rc::clone(
-                                &self.persist.type_reprs[*idx as usize],
-                            )));
-                        }
-                        set_reg(regs, fbase, *dst, object);
-                        pc += 1;
-                    }
-                    Op::MakeStructInPlace {
-                        dst,
-                        shape,
-                        named,
-                        base,
-                        check,
-                        reflect,
-                        span,
-                    } => {
-                        let shape = self.persist.shapes[*shape as usize];
-                        // The base is consumed: take its single reference out of the register without
-                        // releasing (a direct overwrite, mirroring `ConcatInPlace`), so the refcount
-                        // below still counts the accumulator's reference and a `dst == base` store is
-                        // safe (the old occupant is now `unit`).
-                        let base_val = regs[fbase + *base as usize];
-                        regs[fbase + *base as usize] = Value::unit();
-                        let same_shape =
-                            base_val.object_shape_ptr() == Some(std::ptr::from_ref::<Shape>(shape));
-                        let reuse = match check {
-                            ReuseCheck::Static => {
-                                // The linearity analysis proved sole ownership, so the **refcount** check
-                                // is elided — this is the compile-time-hoisted uniqueness path. The debug
-                                // assertion documents (and, in debug builds, guards) that invariant; a
-                                // failure means the analysis is wrong. The shape is still guarded (a
-                                // well-typed self-update always matches, but a mismatch must fall back to
-                                // copy rather than corrupt the object at the wrong slot layout).
-                                debug_assert!(
-                                    base_val.is_uniquely_owned(),
-                                    "static record reuse requires a uniquely-owned base"
-                                );
-                                same_shape
-                            }
-                            ReuseCheck::Runtime => same_shape && base_val.is_uniquely_owned(),
-                        };
-                        if reuse {
-                            // Reuse the allocation: overwrite only the changed slots. Every unchanged
-                            // field keeps base's reference, which transfers into the result — base *is*
-                            // the result. The displaced old field value is routed through `release_value`
-                            // (not a plain free) so its `destruct` fires at the right time — matching the
-                            // copy-and-destroy baseline, which would destroy the old base and its fields
-                            // (spec §4/§5). The reuse pass guarantees `base`'s own type has no destructor,
-                            // so reuse never skips a container destructor.
-                            for (slot, reg) in named.iter() {
-                                let v = regs[fbase + *reg as usize];
-                                let old = base_val.replace_slot(*slot as usize, v);
-                                self.release_value(old);
-                            }
-                            // Reuse keeps the base node's existing reflected type (R2): a self-update
-                            // rebuilds a value of the same (generic) type, so the base's tag already carries
-                            // it — matching the tree-walker's reuse path, which keeps the accumulator's tag.
-                            set_reg(regs, fbase, *dst, base_val);
-                            pc += 1;
-                        } else {
-                            // Aliased or a different shape: build a fresh object exactly like
-                            // `MakeStruct` (spreading base's fields), then release the consumed base.
-                            let mut slots: Vec<Option<Value>> = vec![None; shape.fields.len()];
-                            for (i, field) in shape.fields.iter().enumerate() {
-                                if let Some(value) = base_val.field(field) {
-                                    retain(value);
-                                    slots[i] = Some(value);
-                                }
-                            }
-                            for (slot, reg) in named.iter() {
-                                let value = regs[fbase + *reg as usize];
-                                retain(value);
-                                if let Some(old) = slots[*slot as usize].replace(value) {
-                                    release(old);
-                                }
-                            }
-                            let missing: Vec<&str> = shape
-                                .fields
-                                .iter()
-                                .zip(&slots)
-                                .filter(|(_, slot)| slot.is_none())
-                                .map(|(name, _)| name.as_str())
-                                .collect();
-                            if !missing.is_empty() {
-                                for slot in slots.into_iter().flatten() {
-                                    release(slot);
-                                }
-                                release(base_val);
-                                let list = missing
-                                    .iter()
-                                    .map(|name| format!("`{name}`"))
-                                    .collect::<Vec<_>>()
-                                    .join(", ");
-                                return Err(self.error(
-                                DiagnosticCode::MissingField,
-                                *span,
-                                format!(
-                                    "missing field(s) {list} in `{}` literal — every field must be set",
-                                    shape.name
-                                ),
-                            ));
-                            }
-                            let slots = slots.into_iter().map(Option::unwrap).collect();
-                            release(base_val);
-                            let object = Value::object(shape, slots);
-                            if let Some(idx) = reflect {
-                                object.set_reflect(Some(Rc::clone(
-                                    &self.persist.type_reprs[*idx as usize],
-                                )));
-                            }
-                            set_reg(regs, fbase, *dst, object);
-                            pc += 1;
-                        }
-                    }
-                    Op::MakeOpaque {
-                        dst,
-                        type_name,
-                        keys,
-                        spread,
-                    } => {
-                        // An opaque object's shape is built from its (spread ∪ named) keys in sorted
-                        // order, so its display matches the tree-walker's `BTreeMap` field bag.
-                        let mut bag: BTreeMap<String, Value> = BTreeMap::new();
-                        if let Some(base_reg) = spread
-                            && let Some(base) = regs[fbase + *base_reg as usize].shape()
-                        {
-                            let base_val = regs[fbase + *base_reg as usize];
-                            for (i, field) in base.fields.iter().enumerate() {
-                                let value = base_val.slots().unwrap()[i];
-                                retain(value);
-                                if let Some(old) = bag.insert(field.clone(), value) {
-                                    release(old);
-                                }
-                            }
-                        }
-                        for (key, reg) in keys.iter() {
-                            let value = regs[fbase + *reg as usize];
-                            retain(value);
-                            if let Some(old) = bag.insert(module.name(*key).to_string(), value) {
-                                release(old);
-                            }
-                        }
-                        let fields: Vec<String> = bag.keys().cloned().collect();
-                        let slots: Vec<Value> = bag.into_values().collect();
-                        let shape = noeta_object::intern_shape(Shape::object(
-                            ShapeKind::Opaque,
-                            module.name(*type_name).to_string(),
-                            fields,
-                        ));
-                        set_reg(regs, fbase, *dst, Value::object(shape, slots));
-                        pc += 1;
-                    }
                     Op::MakeEnum {
                         dst,
                         shape,
@@ -2300,71 +1360,6 @@ impl<'m> Vm<'m> {
                             )));
                         }
                         set_reg(regs, fbase, *dst, value);
-                        pc += 1;
-                    }
-                    Op::EnumFromStr {
-                        dst,
-                        arg,
-                        enum_name,
-                        cases,
-                        some_shape,
-                        none_shape,
-                        panic,
-                        span,
-                    } => {
-                        let enum_name = module.name(*enum_name);
-                        let value = regs[fbase + *arg as usize];
-                        let Some(probe) = crate::values::wire_probe(value) else {
-                            let kind = if *panic { "from" } else { "try_from" };
-                            return Err(self.error(
-                                DiagnosticCode::TypeMismatch,
-                                *span,
-                                format!(
-                                    "`{enum_name}.{kind}` expects a string or a backing value, \
-                                     found {}",
-                                    value.type_name()
-                                ),
-                            ));
-                        };
-                        // Backing first, then case name — the shared rule the tree-walker also runs,
-                        // over the case names and backings baked in at compile time.
-                        let names: Vec<&str> = cases
-                            .iter()
-                            .map(|(name, _, _)| module.name(*name))
-                            .collect();
-                        let probe_cases: Vec<(&str, Option<&noeta_ast::AttrValue>)> = names
-                            .iter()
-                            .zip(cases.iter())
-                            .map(|(name, (_, backing, _))| (*name, backing.as_ref()))
-                            .collect();
-                        let matched = noeta_ast::reflect::variant_for_wire(&probe_cases, &probe)
-                            .map(|i| &cases[i]);
-                        let result = match matched {
-                            Some((_, _, shape_idx)) => {
-                                // Build the payload-free case; its single reference transfers onward.
-                                let shape = self.persist.shapes[*shape_idx as usize];
-                                let case = Value::enum_value(shape, Vec::new());
-                                if *panic {
-                                    case
-                                } else {
-                                    let some = self.persist.shapes[*some_shape as usize];
-                                    Value::enum_value(some, vec![case])
-                                }
-                            }
-                            None if *panic => {
-                                let shown = value.display();
-                                return Err(self.error(
-                                    DiagnosticCode::Panic,
-                                    *span,
-                                    format!("panic: `{enum_name}` has no case `{shown}`"),
-                                ));
-                            }
-                            None => {
-                                let none = self.persist.shapes[*none_shape as usize];
-                                Value::enum_value(none, Vec::new())
-                            }
-                        };
-                        set_reg(regs, fbase, *dst, result);
                         pc += 1;
                     }
                     Op::LoadField {
@@ -2452,107 +1447,6 @@ impl<'m> Vm<'m> {
                         }
                         pc += 1;
                     }
-                    Op::Panic { msg, span } => {
-                        let message = regs[fbase + *msg as usize].display();
-                        return Err(self.error(
-                            DiagnosticCode::Panic,
-                            *span,
-                            format!("panic: {message}"),
-                        ));
-                    }
-                    Op::TryUnwrap {
-                        dst,
-                        src,
-                        on_error,
-                        span,
-                    } => {
-                        let v = regs[fbase + *src as usize];
-                        match try_classify(v) {
-                            Some(TryOutcome::Success(inner)) => {
-                                retain(inner);
-                                set_reg(regs, fbase, *dst, inner);
-                                pc += 1;
-                            }
-                            // `Err(_)`/`none`: early-return the whole value from this frame, exactly
-                            // as `Op::Return` does (the M0 `Unwind::Return`).
-                            Some(TryOutcome::Empty) => {
-                                // An `Err` propagating out of the outermost run's BOTTOM frame is
-                                // top-level code: there is no caller to hand it to, and no declared
-                                // return type the checker could have rejected the `?` against (E0012
-                                // covers every declared return). Unwinding here used to end the
-                                // program *quietly at exit 0* — a `client.get(url)?` transport
-                                // failure was completely invisible and CI went green on a broken
-                                // program. Abort with the error's own message instead (E0069); the
-                                // teardown in `Vm::run` reclaims this frame, exactly as `Op::Panic`'s
-                                // does. The tree-walker's `eval_try_ir` mirrors this on an empty
-                                // `call_sites`, so the differential holds. `none` is untouched: an
-                                // absence reaching the top is not a failure.
-                                if self.run_depth == 1
-                                    && frames.len() == 1
-                                    && let Some(payload) = crate::values::result_err_payload(v)
-                                {
-                                    let message = self.unhandled_error_message(payload, *span)?;
-                                    self.out
-                                        .diagnostics
-                                        .push(Diagnostic::unhandled_error(*span, &message));
-                                    return Err(Abort);
-                                }
-                                retain(v);
-                                // Drop the frame locals this `?` abandons before unwinding (Phase 4.2c) —
-                                // destructor-relevant ones fire `destruct`, in the drop pass's order. Each
-                                // is cleared to `unit`, so the teardown release below never double-frees.
-                                for (reg, relevant) in on_error.iter() {
-                                    let dv = std::mem::replace(
-                                        &mut regs[fbase + *reg as usize],
-                                        Value::unit(),
-                                    );
-                                    if *relevant {
-                                        self.release_value(dv);
-                                    } else {
-                                        release(dv);
-                                    }
-                                }
-                                let finished = frames.pop().unwrap();
-                                let n =
-                                    module.protos[finished.proto as usize].num_registers as usize;
-                                for i in 0..n {
-                                    release(regs[finished.base + i]);
-                                }
-                                for u in &finished.upvalues {
-                                    release(*u);
-                                }
-                                regs.truncate(finished.base);
-                                // Apply the frame's return transform on every exit path, for the same
-                                // reason `Op::Return` does (a short-circuiting `?` is an early return);
-                                // release the original if the transform replaced it.
-                                let (out, replaced) = finished.ret_transform.apply(v);
-                                if replaced {
-                                    release(v);
-                                }
-                                match frames.last() {
-                                    Some(caller) => {
-                                        let idx = caller.base + finished.ret_dst as usize;
-                                        let old = regs[idx];
-                                        regs[idx] = out;
-                                        release(old);
-                                    }
-                                    None => return Ok(out),
-                                }
-                                // `?` short-circuits like an early return — re-derive the caller's window.
-                                continue 'reload;
-                            }
-                            None => {
-                                return Err(self.error(
-                                    DiagnosticCode::TypeMismatch,
-                                    *span,
-                                    format!(
-                                        "`?` expects a `Result` or `Option`, found {}",
-                                        v.type_name()
-                                    ),
-                                ));
-                            }
-                        }
-                    }
                     Op::Coalesce {
                         dst,
                         src,
@@ -2616,642 +1510,21 @@ impl<'m> Vm<'m> {
                         set_reg(regs, fbase, *dst, result);
                         pc += 1;
                     }
-                    Op::MakeGen { dst, src } => {
-                        // Wrap the step closure into a generator iterator (Track G.1b). `iter_gen` retains
-                        // its own reference to the closure; the source register's reference is released by
-                        // the register's normal end-of-life (exactly as `Op::Narrow` retains its payload).
-                        let step = regs[fbase + *src as usize];
-                        let result = Value::iter_gen(step);
-                        set_reg(regs, fbase, *dst, result);
-                        pc += 1;
-                    }
-                    Op::MakeFuture { dst, src } => {
-                        // Wrap the lazy thunk closure into a future (Track A.1). `make_future` retains its
-                        // own reference to the closure; the source register's reference is released by the
-                        // register's normal end-of-life (like `Op::MakeGen`).
-                        let thunk = regs[fbase + *src as usize];
-                        let result = Value::make_future(thunk);
-                        set_reg(regs, fbase, *dst, result);
-                        pc += 1;
-                    }
-                    Op::RunFuture { dst, src, span } => {
-                        // Drive an awaited future to completion (Track A.2/A.3 top-level). See
-                        // `drive_future`: poll; on pending advance the clock and re-poll; it borrows the
-                        // future and returns an owned result. `.await` **consumes** the future (a spent
-                        // future cannot be awaited again — a second await already deadlocks), so take it
-                        // out of the source register and release it destructor-aware here, at its last
-                        // reference: a destructor-bearing local captured in the async fn's state (held in
-                        // the future's step-closure cells) runs now rather than being lost.
-                        let future =
-                            std::mem::replace(&mut regs[fbase + *src as usize], Value::unit());
-                        // Release before propagating an abort: the register was already emptied, so
-                        // the frame teardown can no longer see the future — skipping this on the
-                        // error path (e.g. a detected async deadlock) orphans it (the refcount
-                        // anomaly the strengthened leak oracle catches). `drive_future` borrows.
-                        // The consumed future rides `transient_roots` across the drive: with its
-                        // register emptied, only this Rust local owns it, and a mid-drive safepoint
-                        // collection must still see it as a root.
-                        self.transient_roots.push(future);
-                        let value = self.drive_future(future, *span, Some((frames, regs)));
-                        self.transient_roots.pop();
-                        self.release_value(future);
-                        let value = value?;
-                        set_reg(regs, fbase, *dst, value);
-                        pc += 1;
-                    }
-                    Op::PollFuture { dst, src, span } => {
-                        // Poll a future once (Track A.3 state machine): `some(v)` if ready, `none` if
-                        // pending. The source register keeps owning the future.
-                        let future = regs[fbase + *src as usize];
-                        let result = match self.poll_once(future, *span)? {
-                            Poll::Ready(value) => make_some(value),
-                            // A cancelled handle awaited inside an `async fn` body would otherwise
-                            // suspend forever on a `none`; fail loudly (Track A.8, E0056) instead —
-                            // the same contract top-level `.await` (`drive_future`) enforces.
-                            // A real isolate that honored its cancellation request (isolate-cancel)
-                            // reads exactly like the cancelled handle below: the awaited work will
-                            // never produce a value, so `.await` is the wrong tool for it.
-                            Poll::Cancelled => {
-                                return Err(self.error(
-                                    DiagnosticCode::AwaitCancelled,
-                                    *span,
-                                    "cannot await a cancelled task; use `.join()` to observe the \
-                                     cancelled outcome"
-                                        .to_string(),
-                                ));
-                            }
-                            Poll::Pending if self.handle_cancelled(future) => {
-                                return Err(self.error(
-                                    DiagnosticCode::AwaitCancelled,
-                                    *span,
-                                    "cannot await a cancelled task; use `.join()` to observe the \
-                                     cancelled outcome"
-                                        .to_string(),
-                                ));
-                            }
-                            Poll::Pending => make_none(),
-                        };
-                        set_reg(regs, fbase, *dst, result);
-                        pc += 1;
-                    }
-                    Op::LoadPending { dst } => {
-                        // The async pending sentinel (Track A.3) — what a step returns when it suspends.
-                        set_reg(regs, fbase, *dst, Value::pending());
-                        pc += 1;
-                    }
-                    Op::ScopeBegin => {
-                        // Open a structured-concurrency scope (Track A.3b): a fresh, empty task list
-                        // (A.7 tombstone model — `open_scope` pushes both `scopes` and `scope_closed`).
-                        self.open_scope();
-                        pc += 1;
-                    }
-                    Op::ScopeBeginValue { dst, .. } => {
-                        // Open a scope and yield its index (Track A.7): the value form of `ScopeBegin`,
-                        // used by the async desugar's split `concurrent { }` to thread the index to its
-                        // join poll-state. Mirrors `noeta-eval`'s `Rvalue::ScopeBegin`.
-                        let idx = self.open_scope() as i64;
-                        set_reg(regs, fbase, *dst, Value::int(idx));
-                        pc += 1;
-                    }
-                    Op::ScopeReady { dst, src, span } => {
-                        // Whether every task in the scope at index `src` has completed or been cancelled
-                        // (Track A.7) — the boolean the split `concurrent { }`'s join poll-state tests
-                        // each poll. A stale/out-of-range index reads ready (defensive; unreachable for a
-                        // clean program). Mirrors `noeta-eval`'s `Rvalue::ScopeReady`.
-                        let Some(idx) = regs[fbase + *src as usize].as_int() else {
-                            return Err(self.error(
-                                DiagnosticCode::TypeMismatch,
-                                *span,
-                                "internal: scope_ready expects a scope index".to_string(),
-                            ));
-                        };
-                        let ready =
-                            self.sched.scopes.get(idx as usize).is_none_or(|s| {
-                                s.iter().all(|t| t.result.is_some() || t.cancelled)
-                            });
-                        set_reg(regs, fbase, *dst, Value::bool(ready));
-                        pc += 1;
-                    }
-                    Op::Spawn { dst, src, .. } => {
-                        // Register the future as a task in the current scope (retaining the scope's own
-                        // reference), yielding a handle that references it by `(scope, task)`. A `spawn`
-                        // outside any scope is E0041 at check, so `self.scopes` is non-empty here.
-                        let future = regs[fbase + *src as usize];
-                        let handle = if self.sched.scopes.is_empty() {
-                            retain(future);
-                            future
-                        } else {
-                            retain(future);
-                            // Senders captured in the spawned future are producer holds (isolates
-                            // I.4c auto-close); count them onto their channels for the task's life.
-                            let holds = Self::collect_producer_channels(future);
-                            for &cid in &holds {
-                                self.add_producer_hold(cid);
-                            }
-                            let scope_idx = self.innermost_open();
-                            let task_idx = self.sched.scopes[scope_idx].len();
-                            // The child inherits a snapshot of the spawner's task-local context
-                            // (T5a): a task spawned inside `with_span` parents its spans there.
-                            let context = self.sched.ctx_current.clone();
-                            let strand = self.sched.current_strand;
-                            self.sched.scopes[scope_idx].push(Task {
-                                future,
-                                result: None,
-                                cancelled: false,
-                                polling: false,
-                                context,
-                                holds,
-                                strand,
-                                isolate_strand: None,
-                            });
-                            Value::make_handle(
-                                ScopeId::from_index(scope_idx),
-                                TaskId::from_index(task_idx),
-                            )
-                        };
-                        set_reg(regs, fbase, *dst, handle);
-                        pc += 1;
-                    }
-                    Op::SpawnIsolate {
-                        dst,
-                        callee,
-                        args,
-                        span,
-                    } => {
-                        // `isolate f(args)` (I.4b). Only the CLI's real (VM) path emits this op; the
-                        // differential/salsa sandbox lowers `isolate` to `Call`+`Spawn`, so it is never
-                        // reached in-oracle. Runs on a real OS thread when the VM is parallel and no
-                        // argument ships a channel; otherwise falls back to a cooperative task (so a
-                        // non-parallel VM — `@test`/`bench` — and channel-shipping isolates never regress).
-                        let callee_val = regs[fbase + *callee as usize];
-                        let arg_vals = ArgBuf::collect(args, regs, fbase);
-                        let handle = self.spawn_isolate(callee_val, arg_vals.as_slice(), *span)?;
-                        set_reg(regs, fbase, *dst, handle);
-                        pc += 1;
-                    }
-                    Op::ScopeEnd { span } => {
-                        // Join the scope (drive every task to completion), then close the innermost scope
-                        // and release the tasks' owned futures and results (close_scope: producer holds
-                        // I.4c + destructor-aware future release). The synchronous (non-flattened) path
-                        // is strictly LIFO, so the innermost scope is this one.
-                        self.join_scope(*span, Some((frames, regs)))?;
-                        let si = self.innermost_open();
-                        self.close_scope(si);
-                        pc += 1;
-                    }
-                    Op::ScopeEndAt { src, span } => {
-                        // Close the (already-drained) scope at index `src` (Track A.7): release its tasks
-                        // (destructor-aware) and tombstone the slot. Closes by index — not innermost — so
-                        // a sibling task's still-open scope above it survives. The join happened at the
-                        // `ScopeReady` poll-state, so there is nothing to drive. Mirrors `noeta-eval`'s
-                        // `Rvalue::ScopeEndAt`.
-                        let Some(idx) = regs[fbase + *src as usize].as_int() else {
-                            return Err(self.error(
-                                DiagnosticCode::TypeMismatch,
-                                *span,
-                                "internal: scope_end expects a scope index".to_string(),
-                            ));
-                        };
-                        if (idx as usize) < self.sched.scopes.len() {
-                            self.close_scope(idx as usize);
-                        }
-                        pc += 1;
-                    }
-                    Op::MakeChannel {
-                        dst,
-                        capacity,
-                        span,
-                    } => {
-                        // Create a bounded channel and yield its `(Sender, Receiver)` endpoint tuple
-                        // (isolates I.1). The message type is checker-only; only the capacity reaches here.
-                        let cap = regs[fbase + *capacity as usize];
-                        let Some(cap) = cap.as_int() else {
-                            return Err(self.error(
-                                DiagnosticCode::TypeMismatch,
-                                *span,
-                                format!(
-                                    "`channel` expects an int capacity, found {}",
-                                    cap.type_name()
-                                ),
-                            ));
-                        };
-                        if cap < 0 {
-                            return Err(self.error(
-                                DiagnosticCode::Panic,
-                                *span,
-                                format!("`channel` capacity must be non-negative, found {cap}"),
-                            ));
-                        }
-                        let id = ChannelId::from_index(self.persist.channels.len());
-                        // In a parallel VM (real isolates, I.4c) a channel is a *shared* cross-thread queue
-                        // from birth, so shipping an endpoint into a worker shares one queue; the sandbox
-                        // (and any non-parallel VM) uses the cooperative in-VM `Local` FIFO, unchanged.
-                        let channel = if self.isolates.parallel_isolates {
-                            Channel::Shared(isolate::ChannelCore::new(cap as usize))
-                        } else {
-                            Channel::Local {
-                                buffer: std::collections::VecDeque::new(),
-                                capacity: cap as usize,
-                                closed: false,
-                                producers: 0,
-                            }
-                        };
-                        self.persist.channels.push(channel);
-                        // The two endpoints are fresh (refcount 1); `Value::tuple` takes ownership of
-                        // exactly those references, so no extra retain is needed.
-                        let tuple =
-                            Value::tuple(vec![Value::make_sender(id), Value::make_receiver(id)]);
-                        set_reg(regs, fbase, *dst, tuple);
-                        pc += 1;
-                    }
-                    Op::AttributesOf { dst, src } => {
-                        // The manifest is name-keyed: the register holds the attribute type's name,
-                        // folded from a written turbofish or read off a per-instantiation channel by
-                        // the preceding `TypeArgName`/`TypeSlotName` — the same string either way.
-                        let name = regs[fbase + *src as usize].as_string().unwrap_or_default();
-                        let result = self.materialize_attributes(&name);
-                        set_reg(regs, fbase, *dst, result);
-                        pc += 1;
-                    }
-                    Op::RolesOf { dst, src } => {
-                        // The optional scope arrives the same way; `None` is the unscoped query.
-                        let filter = src
-                            .map(|src| regs[fbase + src as usize].as_string().unwrap_or_default());
-                        let result = self.materialize_roles(filter.as_deref());
-                        set_reg(regs, fbase, *dst, result);
-                        pc += 1;
-                    }
-                    Op::ParamsOf { dst, src } => {
-                        // The runtime target string names a fn or method; materialize its params.
-                        let target = regs[fbase + *src as usize].as_string().unwrap_or_default();
-                        let result = self.materialize_params(&target);
-                        set_reg(regs, fbase, *dst, result);
-                        pc += 1;
-                    }
-                    Op::ReturnsOf { dst, src } => {
-                        // The runtime target string names a fn or method; materialize its return.
-                        let target = regs[fbase + *src as usize].as_string().unwrap_or_default();
-                        let result = self.materialize_returns(&target);
-                        set_reg(regs, fbase, *dst, result);
-                        pc += 1;
-                    }
-                    Op::FieldSpecsOf { dst, src } => {
-                        // The runtime name string names a declared type; materialize its field schema.
-                        let name = regs[fbase + *src as usize].as_string().unwrap_or_default();
-                        let result = self.materialize_field_specs(&name);
-                        set_reg(regs, fbase, *dst, result);
-                        pc += 1;
-                    }
-                    Op::VariantsOf { dst, src } => {
-                        // The runtime name string names a declared type; materialize its variant
-                        // schema (empty unless it is an enum).
-                        let name = regs[fbase + *src as usize].as_string().unwrap_or_default();
-                        let result = self.materialize_variant_specs(&name);
-                        set_reg(regs, fbase, *dst, result);
-                        pc += 1;
-                    }
-                    Op::Construct {
-                        dst,
-                        name,
-                        fields,
-                        ok_shape,
-                        err_shape,
-                        span,
-                    } => {
-                        let name_val = regs[fbase + *name as usize];
-                        let fields_val = regs[fbase + *fields as usize];
-                        let result = self.construct_dynamic(
-                            name_val, fields_val, *ok_shape, *err_shape, *span,
-                        )?;
-                        set_reg(regs, fbase, *dst, result);
-                        pc += 1;
-                    }
-                    Op::TypeOf { dst, src } => {
-                        let repr = vm_type_repr(&regs[fbase + *src as usize]);
-                        let result = build_type_value(&repr);
-                        set_reg(regs, fbase, *dst, result);
-                        pc += 1;
-                    }
                     // `type_name::<T>()` over the enclosing generic type's parameter: read
                     // argument `index` off the receiver's reflected type tag.
-                    Op::TypeArgName {
-                        dst,
-                        src,
-                        index,
-                        names,
-                        span,
-                    } => {
-                        let repr = vm_type_repr(&regs[fbase + *src as usize]);
-                        let Some(name) = repr.type_arg_name(*index as usize) else {
-                            return Err(self.error(
-                                DiagnosticCode::InvalidTypeArguments,
-                                *span,
-                                noeta_ast::reflect::missing_type_arg_message(&names.0, &names.1),
-                            ));
-                        };
-                        let result = Value::string(&name);
-                        set_reg(regs, fbase, *dst, result);
-                        pc += 1;
-                    }
                     // The fn-side twin: a FORWARDED `type_name::<T>()` reads the qualified name
                     // off the hidden slot's type-argument entry. Mirrors the tree-walker, and
                     // mirrors the dynamic `AttributesOf` arm — same slot, entry and field.
-                    Op::TypeSlotName { dst, src, span } => {
-                        let idx = regs[fbase + *src as usize].as_int().unwrap_or(-1);
-                        let Some(entry) = module.type_args.get(idx.max(0) as usize) else {
-                            return Err(self.error(
-                                DiagnosticCode::TypeMismatch,
-                                *span,
-                                "corrupt hidden type-argument slot".to_string(),
-                            ));
-                        };
-                        let result = Value::string(&entry.name);
-                        set_reg(regs, fbase, *dst, result);
-                        pc += 1;
-                    }
-                    Op::FieldsOf { dst, src } => {
-                        let result = self.materialize_fields(regs[fbase + *src as usize]);
-                        set_reg(regs, fbase, *dst, result);
-                        pc += 1;
-                    }
-                    Op::TraitsOf { dst, src } => {
-                        let result = self.materialize_traits(regs[fbase + *src as usize]);
-                        set_reg(regs, fbase, *dst, result);
-                        pc += 1;
-                    }
                     // Stamp a fresh constructor's instantiation onto its result (generic
                     // constructor reflection). The value was just returned by a call the checker
                     // proved builds it fresh, so writing the tag in place is unobservable to any
                     // other reference — there is none.
-                    Op::Retag { reg, repr } => {
-                        regs[fbase + *reg as usize]
-                            .set_reflect(Some(Rc::clone(&self.persist.type_reprs[*repr as usize])));
-                        pc += 1;
-                    }
                     // The same stamp with the tag named at run time (generic-in-generic
                     // construction): the hidden type-argument slot in `slot` indexes the module's
                     // `type_args`, whose parallel `type_arg_reprs` entry is the interned tag. The
                     // reference backend resolves the identical index in the identical table, which is
                     // what makes the two agree; a corrupt slot or an entry with no reflection
                     // projection leaves the value untagged (the head-only fallback), never guesses.
-                    Op::RetagDynamic { reg, slot } => {
-                        let idx = regs[fbase + *slot as usize].as_int().unwrap_or(-1);
-                        if idx >= 0
-                            && let Some(Some(repr)) =
-                                module.type_arg_reprs.get(idx as usize).copied()
-                        {
-                            regs[fbase + *reg as usize].set_reflect(Some(Rc::clone(
-                                &self.persist.type_reprs[repr as usize],
-                            )));
-                        }
-                        pc += 1;
-                    }
-                    Op::TypeOfStatic { dst, repr } => {
-                        let result = build_type_value(repr);
-                        set_reg(regs, fbase, *dst, result);
-                        pc += 1;
-                    }
-                    Op::TypeValue { dst, name } => {
-                        // A bare type name used as a value (an `invoke` receiver) materializes as the
-                        // reflection `Type` ADT — the one representation of "a type as a value", shared
-                        // with `type_of` and stored type-refs. `Op::Invoke` resolves it back to the
-                        // named type via `reflection_type_name`.
-                        // No type arguments: the op carries a single name index because the surface
-                        // form it lowers from is a bare identifier in receiver position
-                        // (`invoke(Foo, …)`), which cannot spell a generic application.
-                        let value = build_type_value(
-                            &module.reflection.type_ref_repr(module.name(*name), &[]),
-                        );
-                        set_reg(regs, fbase, *dst, value);
-                        pc += 1;
-                    }
-                    Op::Invoke {
-                        dst,
-                        recv,
-                        name,
-                        args,
-                        ok_shape,
-                        err_shape,
-                        span,
-                    } => {
-                        let recv_val = recv.map(|r| regs[fbase + r as usize]);
-                        let name_val = regs[fbase + *name as usize];
-                        let args_val = regs[fbase + *args as usize];
-                        // A packed args list (P-PACK 2.4) is materialized to a temporary boxed list for
-                        // the duration of the dispatch, then released after the call frame is built (its
-                        // elements retained into it). `arg_items` below borrows from this temporary.
-                        let mut args_to_release: Option<Value> = None;
-                        // A **named** `Map<string, dyn>` args operand (the same shape `Op::Construct`
-                        // takes) is projected to its `(name, value)` pairs here and bound to
-                        // parameters once the callee is known. The values share the map's references
-                        // exactly as `construct_dynamic`'s do, so there is no temporary to release;
-                        // a non-string key is dropped, as it is there.
-                        let named: Option<Vec<(String, Value)>> = args_val.is_map().then(|| {
-                            let keys = args_val.map_keys().expect("checked is_map");
-                            let vals = args_val.map_values().expect("checked is_map");
-                            keys.iter()
-                                .zip(vals)
-                                .filter_map(|(k, v)| match k {
-                                    noeta_stdlib::MapKey::Str(s) => {
-                                        Some((s.as_str().to_owned(), v))
-                                    }
-                                    _ => None,
-                                })
-                                .collect()
-                        });
-                        // Resolve the dispatch by name: either a prototype to call (`Ok`) or a reason it
-                        // failed (`Err(msg)` → `Result.Err`). Every resolution failure — non-string name,
-                        // args that are neither a list nor a map, a non-invokable receiver, an unknown
-                        // name, an arity mismatch, an unknown or missing parameter in the named form —
-                        // is a runtime `Err`, never an abort (only a panic *inside* the called body
-                        // aborts).
-                        let outcome: Result<(InvokeTarget, Vec<Value>, Option<u64>), String> = 'resolve: {
-                            let Some(method) = name_val.as_string() else {
-                                break 'resolve Err(format!(
-                                    "invoke name must be a string, found {}",
-                                    name_val.type_name()
-                                ));
-                            };
-                            if named.is_none() && !args_val.is_list() {
-                                break 'resolve Err(format!(
-                                    "invoke args must be a list or a map, found {}",
-                                    args_val.type_name()
-                                ));
-                            }
-                            // A packed positional list is materialized to a temporary boxed list for
-                            // the duration of the dispatch; the named form reads the map directly.
-                            let arg_items: Vec<Value> = if named.is_some() {
-                                Vec::new()
-                            } else {
-                                let args_list = args_val.realize_list();
-                                args_to_release = Some(args_list);
-                                args_list.list_items().expect("checked is_list")
-                            };
-                            // No receiver: the free-function form. The name resolves against the
-                            // module's global slot table and nothing else — the same binding
-                            // `Op::CallGlobal` reads for a statically-known top-level `fn`, which is
-                            // what makes the two-argument form pair with `params_of("name")`. A
-                            // global that is absent, unbound, or holds a non-closure is one and the
-                            // same miss (see `free_fn_miss_message`).
-                            let Some(recv_val) = recv_val else {
-                                let callee = self
-                                    .global_slots
-                                    .get(&*method)
-                                    .map(|slot| self.persist.globals[*slot as usize])
-                                    .filter(|v| !v.is_unbound() && v.as_closure().is_some());
-                                let Some(callee) = callee else {
-                                    break 'resolve Err(free_fn_miss_message(&method));
-                                };
-                                // A free fn reserves no `self` register, so its declared arity is
-                                // the parameter count itself — unlike the method path below — less
-                                // a forwarding generic's hidden type-argument slots, which are not
-                                // part of the surface signature the reflection artifact describes.
-                                // Counting them would report an arity the source never wrote;
-                                // `invoke` supplies no instantiation, so the CALL is what refuses
-                                // (see `Vm::no_instantiation`), and it must be reached to do so.
-                                let chunk =
-                                    &module.protos[callee.as_closure().expect("filtered") as usize];
-                                let total = chunk.num_params as usize - chunk.hidden as usize;
-                                break 'resolve match bind_invoke_args(
-                                    &module.reflection,
-                                    &method,
-                                    "function",
-                                    total,
-                                    chunk.defaults.len(),
-                                    arg_items,
-                                    named.as_deref(),
-                                ) {
-                                    Ok((args, supplied)) => {
-                                        Ok((InvokeTarget::Free(callee), args, supplied))
-                                    }
-                                    Err(message) => Err(message),
-                                };
-                            };
-                            // A type handle dispatches an associated function (no receiver); an object
-                            // dispatches an instance method (receiver in register 0). A reflection `Type`
-                            // value (a stored type-ref) names the type for an associated call too.
-                            let (type_name, is_assoc) = if recv_val.is_object() {
-                                (recv_val.shape().unwrap().name.clone(), false)
-                            } else if let Some(tn) = reflection_type_name(recv_val) {
-                                (tn, true)
-                            } else {
-                                break 'resolve Err(format!(
-                                    "cannot invoke on a value of type `{}`",
-                                    recv_val.type_name()
-                                ));
-                            };
-                            let kind = if is_assoc {
-                                "associated function"
-                            } else {
-                                "method"
-                            };
-                            let Some(proto) = self.method_proto(&type_name, &method) else {
-                                break 'resolve Err(format!(
-                                    "type `{type_name}` has no {kind} `{method}`"
-                                ));
-                            };
-                            // The prototype reserves register 0 for `self` (unit for an associated
-                            // call), so its declared arity is one more than the supplied args; trailing
-                            // defaults widen the accepted range, exactly as `Op::CallMethod`.
-                            let callee_chunk = &module.protos[proto as usize];
-                            // `invoke` reckons arity over the VALUE parameters — a forwarding
-                            // generic's hidden slots are not part of the surface signature the
-                            // reflection artifact describes. It supplies none, so the push itself
-                            // aborts; reporting an arity the source never wrote first would only
-                            // mislead.
-                            let total =
-                                callee_chunk.num_params as usize - 1 - callee_chunk.hidden as usize;
-                            let (args, supplied) = match bind_invoke_args(
-                                &module.reflection,
-                                &format!("{type_name}.{method}"),
-                                kind,
-                                total,
-                                callee_chunk.defaults.len(),
-                                arg_items,
-                                named.as_deref(),
-                            ) {
-                                Ok(bound) => bound,
-                                Err(message) => break 'resolve Err(message),
-                            };
-                            Ok((InvokeTarget::Proto { proto, is_assoc }, args, supplied))
-                        };
-                        match outcome {
-                            Err(message) => {
-                                let shape = self.persist.shapes[*err_shape as usize];
-                                let err = Value::enum_value(shape, vec![Value::string(&message)]);
-                                set_reg(regs, fbase, *dst, err);
-                                pc += 1;
-                            }
-                            // A free function has no receiver register and no `self` slot, so it
-                            // cannot ride `push_callee_frame` (which reserves register 0). It runs
-                            // through the ordinary first-class-callee path instead — the same
-                            // re-entry `map`/`filter` use — which carries the closure's upvalues and
-                            // fills its defaults. Arity was pre-checked above, so `call_value`'s own
-                            // (aborting) arity guard is unreachable and a soft `Err` is preserved.
-                            Ok((InvokeTarget::Free(callee), arg_items, supplied)) => {
-                                // `call_value_masked` consumes owned arguments; the list (or, in the
-                                // named form, the map) still owns these.
-                                let owned: Vec<Value> = arg_items
-                                    .iter()
-                                    .map(|&a| {
-                                        retain(a);
-                                        a
-                                    })
-                                    .collect();
-                                if let Some(list) = args_to_release.take() {
-                                    list.release();
-                                }
-                                let result =
-                                    self.call_value_masked(callee, owned, *span, supplied)?;
-                                let ok = self.persist.shapes[*ok_shape as usize];
-                                set_reg(regs, fbase, *dst, Value::enum_value(ok, vec![result]));
-                                pc += 1;
-                            }
-                            Ok((InvokeTarget::Proto { proto, is_assoc }, arg_items, supplied)) => {
-                                // An associated call leaves register 0 as unit (no receiver); an instance
-                                // call places the retained receiver there. The result is wrapped in
-                                // `Result.Ok` as it lands in the caller, so the invocation yields a
-                                // `Result` whichever way the body returns.
-                                // An instance dispatch always resolved through a receiver, so the
-                                // flatten never discards one: `is_assoc` is false only on the
-                                // `recv_val.is_object()` arm.
-                                let recv = (!is_assoc).then_some(recv_val).flatten();
-                                let ok = self.persist.shapes[*ok_shape as usize];
-                                self.push_callee_frame(
-                                    frames,
-                                    regs,
-                                    top,
-                                    proto,
-                                    recv,
-                                    &arg_items,
-                                    // `invoke` is name-keyed with no static callee type, so it
-                                    // carries no instantiation: a forwarding generic reached this
-                                    // way aborts rather than bind a value argument into a type slot.
-                                    &[],
-                                    *dst,
-                                    RetTransform::WrapOk(ok),
-                                    pc + 1,
-                                    // The prototype reserves register 0 for `self`, so every
-                                    // declared parameter's bit moves up by one — the same shift the
-                                    // compiler applies to a statically-named method call.
-                                    supplied.map(|m| (m << 1) | 1),
-                                    *span,
-                                )?;
-                                // Release the temporary boxed args list before transferring (its
-                                // elements were already retained into the call frame above); `take`
-                                // leaves the after-match release for the non-transferring `Err` path.
-                                if let Some(list) = args_to_release.take() {
-                                    list.release();
-                                }
-                                continue 'reload;
-                            }
-                        }
-                        // Release the temporary boxed args list (if the args were materialized from a
-                        // packed list); its elements were retained into the call frame above.
-                        if let Some(list) = args_to_release {
-                            list.release();
-                        }
-                    }
                     Op::MatchInt { src, value, fail } => {
                         if regs[fbase + *src as usize].as_int() == Some(*value) {
                             pc += 1;
@@ -3351,32 +1624,6 @@ impl<'m> Vm<'m> {
                             }
                             Err(e) => return Err(self.error(e.code, *span, e.text)),
                         }
-                    }
-                    Op::MaskWidth {
-                        dst,
-                        src,
-                        signed,
-                        bits,
-                    } => {
-                        // Reduce an erased fixed-width integer (an `int` value) into its declared width
-                        // (Tier W). Total — the shared helper runs identically in the tree-walker. A
-                        // non-int (only if the checker's IntN guarantee broke) passes through unchanged.
-                        //
-                        // Ownership: a masked result is a *fresh* value from `Value::int` — already
-                        // owning its one reference if it heap-boxes (a `u64` past the immediate range),
-                        // so it must NOT be retained again (the refcount-anomaly oracle catches the
-                        // over-count as a leak). Only the pass-through borrows from the src register
-                        // and needs the retain for its new owner.
-                        let v = regs[fbase + *src as usize];
-                        let masked = match v.as_int() {
-                            Some(n) => Value::int(noeta_stdlib::mask_to_width(n, *signed, *bits)),
-                            None => {
-                                retain(v);
-                                v
-                            }
-                        };
-                        set_reg(regs, fbase, *dst, masked);
-                        pc += 1;
                     }
                     Op::Binary {
                         op,
@@ -3488,48 +1735,6 @@ impl<'m> Vm<'m> {
                                 Err(e) => return Err(self.error(e.code, *span, e.text)),
                             }
                         }
-                    }
-                    Op::WideInt {
-                        op,
-                        dst,
-                        a,
-                        b,
-                        signed,
-                        bits,
-                        span,
-                    } => {
-                        // Sign-dependent fixed-width op (Tier W3): `/ % < <= > >=` on erased-int operands,
-                        // read as `signed`/unsigned `bits`-wide. No trait dispatch (ints only).
-                        let left = regs[fbase + *a as usize];
-                        let right = regs[fbase + *b as usize];
-                        match apply_binary_wide(*op, left, right, *signed, *bits) {
-                            Ok(v) => {
-                                set_reg(regs, fbase, *dst, v);
-                                pc += 1;
-                            }
-                            Err(e) => return Err(self.error(e.code, *span, e.text)),
-                        }
-                    }
-                    Op::WidthIntMethod {
-                        dst,
-                        recv,
-                        method,
-                        arg,
-                        bits,
-                        ..
-                    } => {
-                        // Width-exact bit intrinsic (Tier W5): compute within `bits`, not the erased i64.
-                        // The checker guarantees an integer receiver and (for `rotate_*`) an integer arg.
-                        let recv_int = regs[fbase + *recv as usize].as_int().unwrap_or(0);
-                        let amount = match arg {
-                            Some(r) => regs[fbase + *r as usize].as_int().unwrap_or(0),
-                            None => 0,
-                        };
-                        let value = Value::int(noeta_stdlib::int_method_width(
-                            recv_int, *method, amount, *bits,
-                        ));
-                        set_reg(regs, fbase, *dst, value);
-                        pc += 1;
                     }
                     Op::RequireBool {
                         reg,
@@ -3662,12 +1867,6 @@ impl<'m> Vm<'m> {
                         set_reg(regs, fbase, *dst, built);
                         pc += 1;
                     }
-                    Op::Raise { idx } => {
-                        self.out
-                            .diagnostics
-                            .push(chunk.diagnostics[*idx as usize].clone());
-                        return Err(Abort);
-                    }
                     Op::Call {
                         dst,
                         callee,
@@ -3767,9 +1966,1963 @@ impl<'m> Vm<'m> {
                         // Control returns to the caller (or a re-entry frame) — re-derive its window.
                         continue 'reload;
                     }
+                    // --- The cold arms (outlined; perf/outline-cold) ------------------------------
+                    //
+                    // Every op below is RARE — reflection, tier/typed native calls, coroutine and
+                    // isolate ops, aggregate construction, the packed-width helpers, `?`, `panic`.
+                    // Their bodies live in [`Vm::cold_op`] (`#[cold] #[inline(never)]`), moved
+                    // VERBATIM: same opcode set, same semantics, same order. Nothing about the
+                    // program changes — what changes is that their live state no longer takes part
+                    // in THIS function's register allocation. That is the whole point: a match arm
+                    // that needs many simultaneous values raises the spill/reload traffic every
+                    // *other* arm pays on entry and exit, so ~90 rare arms were taxing the dozen hot
+                    // ones (arithmetic, compare, jump, move, load/store) on every instruction.
+                    //
+                    // Listing the patterns explicitly rather than `_` keeps the exhaustiveness check
+                    // here: a new `Op` still fails to compile in the dispatch loop, which is where
+                    // the decision "is this hot?" belongs.
+                    Op::MakeClosure { .. }
+                    | Op::LoadNativeFn { .. }
+                    | Op::BindMethod { .. }
+                    | Op::MakeList { .. }
+                    | Op::PackedListNew { .. }
+                    | Op::FromBytes { .. }
+                    | Op::TypedModuleCall { .. }
+                    | Op::TypedMethodCall { .. }
+                    | Op::DecodeTyped { .. }
+                    | Op::TraitMethod { .. }
+                    | Op::PackedListPush { .. }
+                    | Op::MakeTuple { .. }
+                    | Op::TupleIndex { .. }
+                    | Op::MakeRange { .. }
+                    | Op::MakeMap { .. }
+                    | Op::RequireMapKey { .. }
+                    | Op::IterSnapshot { .. }
+                    | Op::MakeStruct { .. }
+                    | Op::MakeStructInPlace { .. }
+                    | Op::MakeOpaque { .. }
+                    | Op::EnumFromStr { .. }
+                    | Op::Panic { .. }
+                    | Op::TryUnwrap { .. }
+                    | Op::MakeGen { .. }
+                    | Op::MakeFuture { .. }
+                    | Op::RunFuture { .. }
+                    | Op::PollFuture { .. }
+                    | Op::LoadPending { .. }
+                    | Op::ScopeBegin
+                    | Op::ScopeBeginValue { .. }
+                    | Op::ScopeReady { .. }
+                    | Op::Spawn { .. }
+                    | Op::SpawnIsolate { .. }
+                    | Op::ScopeEnd { .. }
+                    | Op::ScopeEndAt { .. }
+                    | Op::MakeChannel { .. }
+                    | Op::AttributesOf { .. }
+                    | Op::RolesOf { .. }
+                    | Op::ParamsOf { .. }
+                    | Op::ReturnsOf { .. }
+                    | Op::FieldSpecsOf { .. }
+                    | Op::VariantsOf { .. }
+                    | Op::Construct { .. }
+                    | Op::TypeOf { .. }
+                    | Op::TypeArgName { .. }
+                    | Op::TypeSlotName { .. }
+                    | Op::FieldsOf { .. }
+                    | Op::TraitsOf { .. }
+                    | Op::Retag { .. }
+                    | Op::RetagDynamic { .. }
+                    | Op::TypeOfStatic { .. }
+                    | Op::TypeValue { .. }
+                    | Op::Invoke { .. }
+                    | Op::MaskWidth { .. }
+                    | Op::WideInt { .. }
+                    | Op::WidthIntMethod { .. }
+                    | Op::Raise { .. } => {
+                        match self.cold_op(op, frames, regs, module, chunk, fbase, top, pc)? {
+                            ColdStep::Next(next) => pc = next,
+                            ColdStep::Reload => continue 'reload,
+                            ColdStep::Done(v) => return Ok(v),
+                        }
+                    }
                 }
             }
         }
+    }
+
+    /// The profiler's per-instruction consult (`noeta profile`), outlined out of the dispatch loop
+    /// — see the call site. `None` on every non-profile run, so this is never entered there; the
+    /// body is the one that used to be inline, verbatim.
+    #[cold]
+    #[inline(never)]
+    fn profile_before_op(
+        &mut self,
+        module: &'m Module,
+        frames: &mut [Frame],
+        regs: &[Value],
+        top: usize,
+        pc: usize,
+    ) {
+        let strand = self.sched.current_strand;
+        if let Some(prof) = self.profiler.as_mut() {
+            frames[top].pc = pc;
+            let view = DebugView {
+                module,
+                frames: &frames[..],
+                regs,
+                globals: &self.persist.globals,
+                strand,
+            };
+            prof.before_op(&view);
+        }
+    }
+
+    /// The debugger's per-instruction consult (`noeta dap`), outlined out of the dispatch loop —
+    /// see the call site. `None` on every non-debug run, so this is never entered there; the body
+    /// is the one that used to be inline, verbatim, including holding the debugger *out* of `self`
+    /// for the whole pause so a watch expression can re-enter the VM.
+    #[cold]
+    #[inline(never)]
+    fn debug_before_op(
+        &mut self,
+        module: &'m Module,
+        frames: &mut [Frame],
+        regs: &mut [Value],
+        top: usize,
+        proto: usize,
+        pc: usize,
+    ) -> Result<(), Abort> {
+        let strand = self.sched.current_strand;
+        frames[top].pc = pc;
+        // Hold the debugger *out* of `self` for the whole pause. This frees `&mut self` so a
+        // watch expression that calls a function can actually run it (`debug_eval_request`
+        // re-enters the VM), and it auto-disarms that nested run's own debug consults —
+        // `self.debugger` is `None` while paused, so evaluating `f(x)` never breaks inside
+        // `f`. The debugger is restored before we resume normal dispatch.
+        let mut dbg = self.debugger.take().unwrap();
+        loop {
+            let action = {
+                let view = DebugView {
+                    module,
+                    frames: &frames[..],
+                    regs: &regs[..],
+                    globals: &self.persist.globals,
+                    strand,
+                };
+                dbg.before_op(proto as u32, pc, &view)
+            };
+            match action {
+                DebugAction::Continue => {
+                    // The program resumes (continue or a landed step): the observed
+                    // state may change before the next stop, so advance the generation
+                    // and invalidate every memoized watch result (watch-memoization).
+                    self.bump_stop_generation();
+                    break;
+                }
+                DebugAction::Terminate => {
+                    self.debugger = Some(dbg);
+                    return Err(Abort);
+                }
+                // A watch/console evaluate that needs the VM (a call). Run it here with
+                // `&mut self`, reply, then loop: `before_op` re-enters its wait silently.
+                DebugAction::Evaluate(req) => {
+                    let DebugEvalRequest {
+                        program,
+                        text,
+                        frame,
+                        scope,
+                        kind,
+                        reply,
+                    } = req;
+                    // Every evaluate compiles through the adopted session (T5): full
+                    // language for a watch/console, and for a hover the same engine
+                    // gated to the read-only surface (T6) — one evaluator, not two. The
+                    // `kind` also drives watch-memoization (cache reuse + generation
+                    // bumping) inside `debug_eval_fragment`.
+                    let outcome = if self.debug_session.is_some() {
+                        self.debug_eval_fragment(
+                            &program,
+                            frame,
+                            &scope,
+                            kind,
+                            &text,
+                            &frames[..],
+                            &regs[..],
+                        )
+                    } else {
+                        DebugEvalOutcome::Error(
+                            "this debug run has no console session — evaluate needs a \
+                                     session launch"
+                                .to_string(),
+                        )
+                    };
+                    let _ = reply.send(outcome);
+                }
+                // A Variables-panel edit (U1): evaluate the replacement value as a
+                // console fragment and write the frame's register in place.
+                DebugAction::SetVariable(req) => {
+                    let DebugSetRequest {
+                        name,
+                        value,
+                        frame,
+                        scope,
+                        reply,
+                    } = req;
+                    let outcome = if self.debug_session.is_some() {
+                        self.debug_set_variable(
+                            &name,
+                            &value,
+                            frame,
+                            &scope,
+                            &frames[..],
+                            &mut regs[..],
+                        )
+                    } else {
+                        DebugEvalOutcome::Error(
+                            "this debug run has no console session — setVariable needs \
+                                     a session launch"
+                                .to_string(),
+                        )
+                    };
+                    // Refresh the adapter-visible snapshot with the just-written
+                    // register BEFORE unblocking the client, so a `variables`/
+                    // `stackTrace` racing in behind this response reads the new value
+                    // rather than the stale pause-time capture.
+                    {
+                        let view = DebugView {
+                            module,
+                            frames: &frames[..],
+                            regs: &regs[..],
+                            globals: &self.persist.globals,
+                            strand,
+                        };
+                        dbg.after_side_effect(&view);
+                    }
+                    let _ = reply.send(outcome);
+                }
+            }
+        }
+        self.debugger = Some(dbg);
+        Ok(())
+    }
+
+    /// The **cold half of the op match** (perf/outline-cold): every rare opcode's body, moved
+    /// verbatim out of [`Vm::dispatch_inner`].
+    ///
+    /// WHY THIS EXISTS. `dispatch_inner` is one function holding the whole ~104-arm match, and a
+    /// register allocator works over the *whole* function: the more simultaneously-live values ANY
+    /// arm needs, the more spill/reload traffic EVERY arm pays around it — including the dozen hot
+    /// ones the interpreter's speed is made of (arithmetic, compare, jump, register move,
+    /// local/global load-store). Reflection, typed native calls, coroutine/isolate ops, aggregate
+    /// construction, the packed-width helpers, `?` and `panic` are none of them rare-but-fat, and
+    /// together they were more than half the match's code. Marking them `#[cold]` +
+    /// `#[inline(never)]` takes their live state out of the hot loop's allocation problem for the
+    /// price of one call on the ops nobody measures.
+    ///
+    /// NOTHING ELSE CHANGES. Same opcodes, same semantics, same relative order, same diagnostics;
+    /// the arms are byte-identical apart from how they spell their two exits (see [`ColdStep`]).
+    /// The shared leaf-op seam is untouched: these arms still call the same `#[inline(always)]`
+    /// free functions (`make_range_list`, `iter_snapshot_value`, `make_tuple`,
+    /// `tuple_element_retained`, …) that tier-1's `jit_run_leaf_op` calls — one behavior, one
+    /// implementation, two callers, exactly as before.
+    ///
+    /// The arms' exits are spelled as they were in the loop, mechanically re-targeted:
+    /// `pc += 1;` falling out of the arm ⟶ [`ColdStep::Next`]; `continue;` ⟶ `break 'arm`
+    /// (same meaning: this arm is done, take the `pc` it set); `continue 'reload;` ⟶
+    /// [`ColdStep::Reload`]; a bottom-frame `return Ok(v)` ⟶ [`ColdStep::Done`].
+    #[cold]
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn cold_op(
+        &mut self,
+        op: &'m Op,
+        frames: &mut Vec<Frame>,
+        regs: &mut Vec<Value>,
+        module: &'m Module,
+        chunk: &'m Chunk,
+        fbase: usize,
+        top: usize,
+        mut pc: usize,
+    ) -> Result<ColdStep, Abort> {
+        'arm: {
+            match op {
+                Op::MakeClosure {
+                    dst,
+                    proto,
+                    captures,
+                } => {
+                    // Gather one cell per capture (from a celled local register, or one of this
+                    // frame's own upvalues — forwarding a capture down a level), retaining each
+                    // into the new closure, which owns its upvalue cells.
+                    let mut upvalues = Vec::with_capacity(captures.len());
+                    for capture in captures.iter() {
+                        let cell = match capture {
+                            CaptureFrom::Local(reg) => regs[fbase + *reg as usize],
+                            CaptureFrom::Upvalue(index) => frames[top].upvalues[*index as usize],
+                        };
+                        retain(cell);
+                        upvalues.push(cell);
+                    }
+                    let v = Value::closure(*proto, upvalues);
+                    set_reg(regs, fbase, *dst, v);
+                    pc += 1;
+                }
+                Op::LoadNativeFn { dst, func } => {
+                    set_reg(regs, fbase, *dst, Value::native_fn(*func));
+                    pc += 1;
+                }
+                Op::BindMethod { dst, recv, method } => {
+                    // A bound method handle (`value.method`, EX.2b): capture one retained
+                    // reference to the receiver.
+                    let recv_val = regs[fbase + *recv as usize];
+                    retain(recv_val);
+                    let handle = Value::bound_method(recv_val, module.name(*method));
+                    set_reg(regs, fbase, *dst, handle);
+                    pc += 1;
+                }
+                Op::MakeList {
+                    dst,
+                    items,
+                    reflect,
+                } => {
+                    let mut elements = Vec::with_capacity(items.len());
+                    for &r in items.iter() {
+                        let v = regs[fbase + r as usize];
+                        retain(v);
+                        elements.push(v);
+                    }
+                    let list = Value::list(elements);
+                    // Stamp the checker-resolved element type onto the list (R1) so `type_of` recovers
+                    // it after a `dyn` launder. A cheap `Rc` clone of the shared load-time entry; the
+                    // tag lives beside the payload, invisible to value semantics.
+                    if let Some(idx) = reflect {
+                        list.set_reflect(Some(Rc::clone(&self.persist.type_reprs[*idx as usize])));
+                    }
+                    set_reg(regs, fbase, *dst, list);
+                    pc += 1;
+                }
+                Op::PackedListNew { dst, schema } => {
+                    // Allocate the empty flat buffer the following `PackedListPush` chain fills
+                    // (P-PACK 2.5 streaming construction).
+                    let schema = self.persist.packed_schemas[*schema as usize];
+                    let list = Value::packed_list(schema, Vec::new());
+                    set_reg(regs, fbase, *dst, list);
+                    pc += 1;
+                }
+                Op::FromBytes {
+                    dst,
+                    src,
+                    schema,
+                    validate,
+                    span,
+                } => {
+                    // Deserialize a `bytes` buffer into a flat `List<T>` (P-PACK 4.4): wrap the raw
+                    // bytes as a packed list of the interned schema — the inverse of `to_bytes`.
+                    let blob = regs[fbase + *src as usize];
+                    let Some(bytes) = blob.bytes_data() else {
+                        return Err(self.error(
+                            DiagnosticCode::TypeMismatch,
+                            *span,
+                            format!(
+                                "`from_bytes` expects a `bytes` value, found {}",
+                                blob.type_name()
+                            ),
+                        ));
+                    };
+                    let schema = self.persist.packed_schemas[*schema as usize];
+                    if schema.byte_size == 0 || bytes.len() % schema.byte_size != 0 {
+                        return Err(self.error(
+                    DiagnosticCode::TypeMismatch,
+                    *span,
+                    format!(
+                        "`from_bytes` buffer of {} bytes is not a whole number of {}-byte elements",
+                        bytes.len(),
+                        schema.byte_size
+                    ),
+                ));
+                    }
+                    let list = Value::packed_list(schema, bytes);
+                    // Validation arc: `from_bytes` is an abort door — run each decoded element's
+                    // `validate()` (materialized boxed for the re-entry, then consumed) and abort
+                    // at `[i]` on the first rejection, consistent with a length/shape mismatch.
+                    if *validate {
+                        let n = list.list_len().unwrap_or(0);
+                        for i in 0..n {
+                            let element = list.packed_get(i); // owned (rc 1), consumed below
+                            if let Some(message) = self.validate_message(element, *span)? {
+                                release(list);
+                                return Err(self.error(
+                                    DiagnosticCode::TypeMismatch,
+                                    *span,
+                                    format!("from_bytes: [{i}]: {message}"),
+                                ));
+                            }
+                        }
+                    }
+                    set_reg(regs, fbase, *dst, list);
+                    pc += 1;
+                }
+                Op::TypedModuleCall {
+                    dst,
+                    module: mod_id,
+                    func: func_id,
+                    args,
+                    recipe,
+                    dynamic,
+                    span,
+                } => {
+                    // Resolve the interned module/func names (`module` is the outer loop-local
+                    // `&Module`, so bind the op's ids under different names to avoid shadowing it).
+                    let mod_name = module.name(*mod_id);
+                    let func = module.name(*func_id);
+                    // The recipe: baked at the call site, or (poly-values F2b) resolved
+                    // per-instantiation through the forwarding fn's hidden slot register — an
+                    // index into the module's type-argument table. Mirrors the tree-walker.
+                    let dynamic_recipe = dynamic.and_then(|slot| {
+                        let idx = regs[fbase + slot as usize].as_int().unwrap_or(-1);
+                        module
+                            .type_args
+                            .get(idx.max(0) as usize)
+                            .and_then(|e| e.recipe.clone().map(Box::new))
+                    });
+                    let recipe = match dynamic {
+                        Some(_) => &dynamic_recipe,
+                        None => recipe,
+                    };
+                    // The recipe is required; its absence was already reported by the checker.
+                    let Some(recipe) = recipe else {
+                        return Err(self.error(
+                            DiagnosticCode::TypeMismatch,
+                            *span,
+                            format!("`{mod_name}.{func}::<T>(...)` has no resolved result type"),
+                        ));
+                    };
+                    // Route through the registry's call-site-typed seam: the module's
+                    // `typed_dispatch`, threaded the recipe, builds the whole `NativeOut` tree
+                    // (already carrying its declared wrapper — `Ok`/`Err` for a `Result` shape,
+                    // `Some`/`None` for `Option`), which materializes to a value of `T`. No
+                    // function name is special-cased — `json.parse`/`try_parse` are registered
+                    // like any extension's call-site-typed functions.
+                    let reg = self.reg();
+                    let Some(ext_mod) = reg
+                        .find_module(mod_name)
+                        .filter(|_| reg.find_typed_function(mod_name, func).is_some())
+                    else {
+                        return Err(self.error(
+                        DiagnosticCode::UnknownName,
+                        *span,
+                        format!(
+                            "`{mod_name}.{func}::<T>(...)` is not a call-site-typed native function"
+                        ),
+                    ));
+                    };
+                    let Some(typed_dispatch) = ext_mod.typed_dispatch else {
+                        return Err(self.error(
+                        DiagnosticCode::UnknownName,
+                        *span,
+                        format!(
+                            "`{mod_name}.{func}::<T>(...)` is not a call-site-typed native function"
+                        ),
+                    ));
+                    };
+                    // A reflective module (`json`) marshals its arguments deeply; every other
+                    // uses the cheap shallow projection — the same decision the plain module
+                    // dispatch makes.
+                    let nargs: Vec<noeta_stdlib::NativeValue> = args
+                        .iter()
+                        .map(|r| {
+                            let v = regs[fbase + *r as usize];
+                            if ext_mod.deep_marshal {
+                                v.to_native_deep()
+                            } else {
+                                marshal_native_arg(v, reg)
+                            }
+                        })
+                        .collect();
+                    match typed_dispatch(func, &mut *self.persist.host, &nargs, recipe) {
+                        Ok(out) => {
+                            // The aborting door (`json.parse::<T>`): a validation rejection that
+                            // reaches the top (not recovered by a `Result` wrapper) aborts with
+                            // the same path-precise message the abort door uses for shape
+                            // failures. `json.try_parse::<T>` wraps its result in `Ok`/`Err`, so
+                            // its rejections are recovered inside `materialize_recipe` and never
+                            // reach here.
+                            let mut path = String::new();
+                            match self.materialize_recipe(out, &mut path, *span)? {
+                                MatOut::Value(v) => set_reg(regs, fbase, *dst, v),
+                                MatOut::Rejected(e) => {
+                                    return Err(self.std_dispatch_error(e.into_std_error(), *span));
+                                }
+                            }
+                        }
+                        Err(error) => return Err(self.std_dispatch_error(error, *span)),
+                    }
+                    pc += 1;
+                }
+                Op::TypedMethodCall {
+                    dst,
+                    recv,
+                    method: method_id,
+                    args,
+                    recipe,
+                    dynamic,
+                    span,
+                } => {
+                    // The extern-METHOD twin of `TypedModuleCall` above (http arc H8), step for
+                    // step — the only differences are that the receiver's own runtime identity
+                    // selects the type (no module lookup) and the dispatch takes the receiver.
+                    // Mirrors the tree-walker, so the two backends agree by construction.
+                    let method = module.name(*method_id);
+                    let dynamic_recipe = dynamic.and_then(|slot| {
+                        let idx = regs[fbase + slot as usize].as_int().unwrap_or(-1);
+                        module
+                            .type_args
+                            .get(idx.max(0) as usize)
+                            .and_then(|e| e.recipe.clone().map(Box::new))
+                    });
+                    let recipe = match dynamic {
+                        Some(_) => &dynamic_recipe,
+                        None => recipe,
+                    };
+                    let Some(recipe) = recipe else {
+                        return Err(self.error(
+                            DiagnosticCode::TypeMismatch,
+                            *span,
+                            format!("`{method}::<T>(...)` has no resolved result type"),
+                        ));
+                    };
+                    let receiver = regs[fbase + *recv as usize];
+                    if receiver.heap_kind() != Some(HeapKind::Extern) {
+                        return Err(self.error(
+                            DiagnosticCode::TypeMismatch,
+                            *span,
+                            format!("`{method}::<T>(...)` needs a native receiver"),
+                        ));
+                    }
+                    let deep = receiver.with_extern(|e| {
+                        self.reg()
+                            .find_type_qualified(e.type_identity())
+                            .is_some_and(|t| t.deep_marshal)
+                    });
+                    let reg = self.reg();
+                    let nargs: Vec<noeta_stdlib::NativeValue> = args
+                        .iter()
+                        .map(|r| {
+                            let v = regs[fbase + *r as usize];
+                            if deep {
+                                v.to_native_deep()
+                            } else {
+                                marshal_native_arg(v, reg)
+                            }
+                        })
+                        .collect();
+                    let host = &mut *self.persist.host;
+                    let out = receiver.with_extern_mut(|e| {
+                        reg.dispatch_typed_method(e, method, host, &nargs, recipe)
+                    });
+                    match out {
+                        Ok(out) => {
+                            let mut path = String::new();
+                            match self.materialize_recipe(out, &mut path, *span)? {
+                                MatOut::Value(v) => set_reg(regs, fbase, *dst, v),
+                                MatOut::Rejected(e) => {
+                                    return Err(self.std_dispatch_error(e.into_std_error(), *span));
+                                }
+                            }
+                        }
+                        Err(error) => return Err(self.std_dispatch_error(error, *span)),
+                    }
+                    pc += 1;
+                }
+                Op::DecodeTyped {
+                    dst,
+                    name,
+                    text,
+                    ok_shape,
+                    err_shape,
+                    span,
+                } => {
+                    // The router-facing runtime decode (L2.2 DI). Fully recoverable: an unknown
+                    // type name, a non-string operand, or a malformed body all land as
+                    // `Result.Err` wrapping a path-carrying `JsonError` (the same error story
+                    // as `json.try_parse::<T>`). Mirrors the recoverable `try_parse` branch
+                    // above, but the recipe is looked up by runtime type name rather than
+                    // baked at the call site.
+                    let err = |vm: &Self, error: noeta_stdlib::json::JsonError| {
+                        Value::enum_value(
+                            vm.persist.shapes[*err_shape as usize],
+                            vec![Value::extern_value(noeta_stdlib::ExternBox::new(error))],
+                        )
+                    };
+                    let name_val = regs[fbase + *name as usize].as_string();
+                    let text_val = regs[fbase + *text as usize].as_string();
+                    let (Some(type_name), Some(text)) = (name_val, text_val) else {
+                        return Err(self.error(
+                            DiagnosticCode::TypeMismatch,
+                            *span,
+                            "`json.decode_typed` expects two `string` arguments".to_string(),
+                        ));
+                    };
+                    // Clone the recipe out of `self` first: materializing it re-enters the VM
+                    // (`&mut self`) to run any `Validate::validate`, which cannot coexist with a
+                    // borrow of `self.deserialize_recipes`.
+                    let recipe = self.deserialize_recipes.get(&type_name).cloned();
+                    let value = match recipe {
+                        None => err(
+                            self,
+                            noeta_stdlib::json::JsonError::unknown_type(&type_name),
+                        ),
+                        Some(recipe) => {
+                            match noeta_stdlib::json::try_parse_typed(&text, &recipe) {
+                                // The recoverable router door: a validation rejection is
+                                // threaded into the `Result.Err(JsonError)`, exactly like a
+                                // shape failure.
+                                Ok(out) => {
+                                    let mut path = String::new();
+                                    match self.materialize_recipe(out, &mut path, *span)? {
+                                        MatOut::Value(v) => Value::enum_value(
+                                            self.persist.shapes[*ok_shape as usize],
+                                            vec![v],
+                                        ),
+                                        MatOut::Rejected(e) => err(self, e),
+                                    }
+                                }
+                                Err(error) => err(self, error),
+                            }
+                        }
+                    };
+                    set_reg(regs, fbase, *dst, value);
+                    pc += 1;
+                }
+                Op::TraitMethod {
+                    dst,
+                    recv,
+                    trait_name: trait_id,
+                    method: method_id,
+                    args,
+                    span,
+                } => {
+                    // A trait default-body call (ExtBundle→ExtTrait convergence, slice 2): the
+                    // (trait, method) route was baked at compile time — straight to the trait's
+                    // shared ctx dispatch, receiver as slot 0. Values are copied out of the
+                    // registers first (borrowed by the ctx seed; the seam owns the refcount).
+                    let trait_qname = module.name(*trait_id);
+                    let method_name = module.name(*method_id);
+                    let recv_value = regs[fbase + *recv as usize];
+                    let mut arg_values = Vec::with_capacity(args.len());
+                    for r in args.iter() {
+                        arg_values.push(regs[fbase + *r as usize]);
+                    }
+                    let result = self.call_trait_method(
+                        trait_qname,
+                        method_name,
+                        recv_value,
+                        &arg_values,
+                        *span,
+                    )?;
+                    set_reg(regs, fbase, *dst, result);
+                    pc += 1;
+                }
+                Op::PackedListPush {
+                    dst, list, value, ..
+                } => {
+                    let acc = regs[fbase + *list as usize];
+                    let element = regs[fbase + *value as usize];
+                    // `list` is the streaming accumulator — a uniquely-owned temp. Clear its register
+                    // to `unit` *without* releasing (a direct overwrite, like `ConcatInPlace`), so the
+                    // single owning reference transfers into `result` and a `dst == list` store is
+                    // safe. `value` is left in its register for the compiler-emitted `Drop` to free.
+                    regs[fbase + *list as usize] = Value::unit();
+                    let result = if acc.is_packed_list() {
+                        if acc.packed_push(element) {
+                            // Element primitives copied into the buffer (not retained) — the buffer
+                            // extended in place; the `Drop` of `value` frees the element object.
+                            acc
+                        } else {
+                            // Defensive demote (a checked `@packed` type never mismatches): materialize
+                            // the packed buffer to an owned boxed list, release the packed accumulator,
+                            // then push the (retained) element so the boxed list owns one reference.
+                            let boxed = acc.realize_list();
+                            release(acc);
+                            retain(element);
+                            boxed.list_push(element);
+                            boxed
+                        }
+                    } else {
+                        // Already boxed (a prior demote): push the retained element in place.
+                        retain(element);
+                        acc.list_push(element);
+                        acc
+                    };
+                    set_reg(regs, fbase, *dst, result);
+                    pc += 1;
+                }
+                Op::MakeTuple { dst, items } => {
+                    let tuple = make_tuple(items, regs, fbase);
+                    set_reg(regs, fbase, *dst, tuple);
+                    pc += 1;
+                }
+                Op::TupleIndex {
+                    dst,
+                    receiver,
+                    index,
+                    span,
+                } => {
+                    let v = regs[fbase + *receiver as usize];
+                    let Some(element) = tuple_element_retained(v, *index as usize) else {
+                        return Err(self.error(
+                            DiagnosticCode::TypeMismatch,
+                            *span,
+                            format!(
+                                "tuple index `{index}` is out of range for {}",
+                                v.type_name()
+                            ),
+                        ));
+                    };
+                    set_reg(regs, fbase, *dst, element);
+                    pc += 1;
+                }
+                Op::MakeRange {
+                    dst,
+                    start,
+                    end,
+                    inclusive,
+                    span,
+                } => {
+                    let lo = regs[fbase + *start as usize];
+                    let hi = regs[fbase + *end as usize];
+                    match make_range_list(lo, hi, *inclusive) {
+                        Some(list) => {
+                            set_reg(regs, fbase, *dst, list);
+                            pc += 1;
+                        }
+                        None => {
+                            return Err(self.error(
+                                DiagnosticCode::TypeMismatch,
+                                *span,
+                                format!(
+                                    "range bounds must be ints, found {} and {}",
+                                    lo.type_name(),
+                                    hi.type_name()
+                                ),
+                            ));
+                        }
+                    }
+                }
+                Op::MakeMap {
+                    dst,
+                    entries,
+                    reflect,
+                } => {
+                    let mut map: Vec<(noeta_stdlib::MapKey, Value)> =
+                        Vec::with_capacity(entries.len());
+                    for (key_reg, value_reg) in entries.iter() {
+                        // Validated by the preceding `RequireMapKey`: a string (its P-SSO
+                        // compact clone), a key-capable packed struct (a content snapshot,
+                        // P-PKEY), or a key-capable extern value (a boxed snapshot).
+                        let key_value = regs[fbase + *key_reg as usize];
+                        let key = match key_value.as_compact_string() {
+                            Some(s) => noeta_stdlib::MapKey::Str(s),
+                            None => match key_value.as_int() {
+                                Some(i) => noeta_stdlib::MapKey::Int(i),
+                                None => match key_value.packed_map_key() {
+                                    Some(k) => k,
+                                    None => key_value.with_extern(|e| {
+                                        noeta_stdlib::MapKey::Extern(noeta_stdlib::ExternBox(
+                                            e.clone_box(),
+                                        ))
+                                    }),
+                                },
+                            },
+                        };
+                        let value = regs[fbase + *value_reg as usize];
+                        retain(value);
+                        // A duplicate key keeps the later value (M0 `BTreeMap` semantics); the
+                        // displaced value loses its owner, so release it.
+                        if let Some(pos) = map.iter().position(|(k, _)| *k == key) {
+                            let (_, old) = map.remove(pos);
+                            release(old);
+                        }
+                        map.push((key, value));
+                    }
+                    let map = Value::map_keyed(map);
+                    // Stamp the checker-resolved `Map(K, V)` type onto the map (R1) so `type_of`
+                    // recovers it after a `dyn` launder — the same node-tag path `MakeList` uses.
+                    if let Some(idx) = reflect {
+                        map.set_reflect(Some(Rc::clone(&self.persist.type_reprs[*idx as usize])));
+                    }
+                    set_reg(regs, fbase, *dst, map);
+                    pc += 1;
+                }
+                Op::RequireMapKey { reg, span } => {
+                    let v = regs[fbase + *reg as usize];
+                    let ok = v.is_string()
+                    // P-PKEY S4: ints key maps (`float` stays excluded — NaN).
+                    || v.as_int().is_some()
+                    || (v.is_extern()
+                        && v.with_extern(noeta_stdlib::map_key::extern_key_capable))
+                    // P-PKEY: a key-capable `@packed` struct keys a map by content.
+                    || v.shape().is_some_and(|s| s.key_capable);
+                    if !ok {
+                        let error = noeta_stdlib::map_key::map_key_error(v.type_name());
+                        return Err(self.error(DiagnosticCode::TypeMismatch, *span, error.message));
+                    }
+                    pc += 1;
+                }
+                Op::IterSnapshot { dst, src, span } => {
+                    let v = regs[fbase + *src as usize];
+                    // A user object lights up the `Iterable` trait: `for x in o` iterates the list
+                    // its `iter` method returns. The method runs bytecode, so it is pushed as a
+                    // call frame; its returned value becomes the snapshot (the following `ListLen`
+                    // raises E0007 if it was not a list). Matches the tree-walker's `exec_for`.
+                    if v.is_object()
+                        && let Some(proto) = self.method_proto(&v.shape().unwrap().name, "iter")
+                    {
+                        let callee_chunk = &module.protos[proto as usize];
+                        if callee_chunk.num_params != 1 {
+                            return Err(self.error(
+                                DiagnosticCode::TypeMismatch,
+                                *span,
+                                format!(
+                                    "this method takes {} argument(s) but 0 were supplied",
+                                    callee_chunk.num_params - 1
+                                ),
+                            ));
+                        }
+                        self.push_callee_frame(
+                            frames,
+                            regs,
+                            top,
+                            proto,
+                            Some(v),
+                            &[],
+                            // A protocol method is reached by its fixed name, so there is no
+                            // instantiation to carry; the guard aborts rather than misbind if
+                            // one is ever declared generic.
+                            &[],
+                            *dst,
+                            RetTransform::None,
+                            pc + 1,
+                            // A fixed-arity protocol call — no labels reach it.
+                            None,
+                            *span,
+                        )?;
+                        return Ok(ColdStep::Reload);
+                    }
+                    // The member-handle iterator (coroutines Track-I trigger): a user object
+                    // with no `iter` but a callable `next` member — a method, or a
+                    // closure-valued field — drains into a materialized snapshot list,
+                    // exactly like the tree-walker.
+                    if v.is_object() && self.has_user_next(v) {
+                        let list = self.drain_next_object(v, *span)?;
+                        set_reg(regs, fbase, *dst, list);
+                        pc += 1;
+                        break 'arm;
+                    }
+                    // Snapshot the elements to iterate: a packed list materializes into an owned
+                    // boxed snapshot (so `ListLen`/`ListGet` never see the flat form); a list's
+                    // elements, a set's canonical elements, or a map's values in sorted-key order
+                    // are each retained so the loop owns them independently.
+                    let Some(snapshot) = iter_snapshot_value(v) else {
+                        return Err(self.error(
+                            DiagnosticCode::TypeMismatch,
+                            *span,
+                            format!("cannot iterate over {}", v.type_name()),
+                        ));
+                    };
+                    set_reg(regs, fbase, *dst, snapshot);
+                    pc += 1;
+                }
+                Op::MakeStruct {
+                    dst,
+                    shape,
+                    named,
+                    spread,
+                    reflect,
+                    span,
+                } => {
+                    let shape = self.persist.shapes[*shape as usize];
+                    let mut slots: Vec<Option<Value>> = vec![None; shape.fields.len()];
+                    // `...base` fills declared slots the base provides; named initializers then
+                    // override. A slot left unset by both is a missing-field error (E0009).
+                    if let Some(base_reg) = spread {
+                        let base = regs[fbase + *base_reg as usize];
+                        for (i, field) in shape.fields.iter().enumerate() {
+                            if let Some(value) = base.field(field) {
+                                retain(value);
+                                slots[i] = Some(value);
+                            }
+                        }
+                    }
+                    for (slot, reg) in named.iter() {
+                        let value = regs[fbase + *reg as usize];
+                        retain(value);
+                        if let Some(old) = slots[*slot as usize].replace(value) {
+                            release(old);
+                        }
+                    }
+                    // A slot still unset after spread + named is filled from its field default
+                    // (slice 5), run in global scope (empty upvalues — a default resolves globals
+                    // only). A slot with neither a value nor a default violates the
+                    // full-initialization guarantee (E0009).
+                    let mut missing: Vec<String> = Vec::new();
+                    for i in 0..shape.fields.len() {
+                        if slots[i].is_some() {
+                            continue;
+                        }
+                        let field = shape.fields[i].clone();
+                        if let Some(&proto) = self
+                            .field_defaults
+                            .get(&(shape.name.clone(), field.clone()))
+                        {
+                            match self.run_thunk(proto, &[]) {
+                                Ok(value) => slots[i] = Some(value),
+                                Err(abort) => {
+                                    for slot in slots.into_iter().flatten() {
+                                        release(slot);
+                                    }
+                                    return Err(abort);
+                                }
+                            }
+                        } else {
+                            missing.push(field);
+                        }
+                    }
+                    if !missing.is_empty() {
+                        for slot in slots.into_iter().flatten() {
+                            release(slot);
+                        }
+                        let list = missing
+                            .iter()
+                            .map(|name| format!("`{name}`"))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        return Err(self.error(
+                            DiagnosticCode::MissingField,
+                            *span,
+                            format!(
+                                "missing field(s) {list} in `{}` literal — every field must be set",
+                                shape.name
+                            ),
+                        ));
+                    }
+                    let slots = slots.into_iter().map(Option::unwrap).collect();
+                    let object = Value::object(shape, slots);
+                    // Stamp the reflected type onto a generic instantiation (R2) so `type_of` recovers
+                    // its type arguments after a `dyn` launder. The object's type is invariant under
+                    // field mutation, so — unlike the collection tags — it is never cleared.
+                    if let Some(idx) = reflect {
+                        object
+                            .set_reflect(Some(Rc::clone(&self.persist.type_reprs[*idx as usize])));
+                    }
+                    set_reg(regs, fbase, *dst, object);
+                    pc += 1;
+                }
+                Op::MakeStructInPlace {
+                    dst,
+                    shape,
+                    named,
+                    base,
+                    check,
+                    reflect,
+                    span,
+                } => {
+                    let shape = self.persist.shapes[*shape as usize];
+                    // The base is consumed: take its single reference out of the register without
+                    // releasing (a direct overwrite, mirroring `ConcatInPlace`), so the refcount
+                    // below still counts the accumulator's reference and a `dst == base` store is
+                    // safe (the old occupant is now `unit`).
+                    let base_val = regs[fbase + *base as usize];
+                    regs[fbase + *base as usize] = Value::unit();
+                    let same_shape =
+                        base_val.object_shape_ptr() == Some(std::ptr::from_ref::<Shape>(shape));
+                    let reuse = match check {
+                        ReuseCheck::Static => {
+                            // The linearity analysis proved sole ownership, so the **refcount** check
+                            // is elided — this is the compile-time-hoisted uniqueness path. The debug
+                            // assertion documents (and, in debug builds, guards) that invariant; a
+                            // failure means the analysis is wrong. The shape is still guarded (a
+                            // well-typed self-update always matches, but a mismatch must fall back to
+                            // copy rather than corrupt the object at the wrong slot layout).
+                            debug_assert!(
+                                base_val.is_uniquely_owned(),
+                                "static record reuse requires a uniquely-owned base"
+                            );
+                            same_shape
+                        }
+                        ReuseCheck::Runtime => same_shape && base_val.is_uniquely_owned(),
+                    };
+                    if reuse {
+                        // Reuse the allocation: overwrite only the changed slots. Every unchanged
+                        // field keeps base's reference, which transfers into the result — base *is*
+                        // the result. The displaced old field value is routed through `release_value`
+                        // (not a plain free) so its `destruct` fires at the right time — matching the
+                        // copy-and-destroy baseline, which would destroy the old base and its fields
+                        // (spec §4/§5). The reuse pass guarantees `base`'s own type has no destructor,
+                        // so reuse never skips a container destructor.
+                        for (slot, reg) in named.iter() {
+                            let v = regs[fbase + *reg as usize];
+                            let old = base_val.replace_slot(*slot as usize, v);
+                            self.release_value(old);
+                        }
+                        // Reuse keeps the base node's existing reflected type (R2): a self-update
+                        // rebuilds a value of the same (generic) type, so the base's tag already carries
+                        // it — matching the tree-walker's reuse path, which keeps the accumulator's tag.
+                        set_reg(regs, fbase, *dst, base_val);
+                        pc += 1;
+                    } else {
+                        // Aliased or a different shape: build a fresh object exactly like
+                        // `MakeStruct` (spreading base's fields), then release the consumed base.
+                        let mut slots: Vec<Option<Value>> = vec![None; shape.fields.len()];
+                        for (i, field) in shape.fields.iter().enumerate() {
+                            if let Some(value) = base_val.field(field) {
+                                retain(value);
+                                slots[i] = Some(value);
+                            }
+                        }
+                        for (slot, reg) in named.iter() {
+                            let value = regs[fbase + *reg as usize];
+                            retain(value);
+                            if let Some(old) = slots[*slot as usize].replace(value) {
+                                release(old);
+                            }
+                        }
+                        let missing: Vec<&str> = shape
+                            .fields
+                            .iter()
+                            .zip(&slots)
+                            .filter(|(_, slot)| slot.is_none())
+                            .map(|(name, _)| name.as_str())
+                            .collect();
+                        if !missing.is_empty() {
+                            for slot in slots.into_iter().flatten() {
+                                release(slot);
+                            }
+                            release(base_val);
+                            let list = missing
+                                .iter()
+                                .map(|name| format!("`{name}`"))
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            return Err(self.error(
+                        DiagnosticCode::MissingField,
+                        *span,
+                        format!(
+                            "missing field(s) {list} in `{}` literal — every field must be set",
+                            shape.name
+                        ),
+                    ));
+                        }
+                        let slots = slots.into_iter().map(Option::unwrap).collect();
+                        release(base_val);
+                        let object = Value::object(shape, slots);
+                        if let Some(idx) = reflect {
+                            object.set_reflect(Some(Rc::clone(
+                                &self.persist.type_reprs[*idx as usize],
+                            )));
+                        }
+                        set_reg(regs, fbase, *dst, object);
+                        pc += 1;
+                    }
+                }
+                Op::MakeOpaque {
+                    dst,
+                    type_name,
+                    keys,
+                    spread,
+                } => {
+                    // An opaque object's shape is built from its (spread ∪ named) keys in sorted
+                    // order, so its display matches the tree-walker's `BTreeMap` field bag.
+                    let mut bag: BTreeMap<String, Value> = BTreeMap::new();
+                    if let Some(base_reg) = spread
+                        && let Some(base) = regs[fbase + *base_reg as usize].shape()
+                    {
+                        let base_val = regs[fbase + *base_reg as usize];
+                        for (i, field) in base.fields.iter().enumerate() {
+                            let value = base_val.slots().unwrap()[i];
+                            retain(value);
+                            if let Some(old) = bag.insert(field.clone(), value) {
+                                release(old);
+                            }
+                        }
+                    }
+                    for (key, reg) in keys.iter() {
+                        let value = regs[fbase + *reg as usize];
+                        retain(value);
+                        if let Some(old) = bag.insert(module.name(*key).to_string(), value) {
+                            release(old);
+                        }
+                    }
+                    let fields: Vec<String> = bag.keys().cloned().collect();
+                    let slots: Vec<Value> = bag.into_values().collect();
+                    let shape = noeta_object::intern_shape(Shape::object(
+                        ShapeKind::Opaque,
+                        module.name(*type_name).to_string(),
+                        fields,
+                    ));
+                    set_reg(regs, fbase, *dst, Value::object(shape, slots));
+                    pc += 1;
+                }
+                Op::EnumFromStr {
+                    dst,
+                    arg,
+                    enum_name,
+                    cases,
+                    some_shape,
+                    none_shape,
+                    panic,
+                    span,
+                } => {
+                    let enum_name = module.name(*enum_name);
+                    let value = regs[fbase + *arg as usize];
+                    let Some(probe) = crate::values::wire_probe(value) else {
+                        let kind = if *panic { "from" } else { "try_from" };
+                        return Err(self.error(
+                            DiagnosticCode::TypeMismatch,
+                            *span,
+                            format!(
+                                "`{enum_name}.{kind}` expects a string or a backing value, \
+                             found {}",
+                                value.type_name()
+                            ),
+                        ));
+                    };
+                    // Backing first, then case name — the shared rule the tree-walker also runs,
+                    // over the case names and backings baked in at compile time.
+                    let names: Vec<&str> = cases
+                        .iter()
+                        .map(|(name, _, _)| module.name(*name))
+                        .collect();
+                    let probe_cases: Vec<(&str, Option<&noeta_ast::AttrValue>)> = names
+                        .iter()
+                        .zip(cases.iter())
+                        .map(|(name, (_, backing, _))| (*name, backing.as_ref()))
+                        .collect();
+                    let matched = noeta_ast::reflect::variant_for_wire(&probe_cases, &probe)
+                        .map(|i| &cases[i]);
+                    let result = match matched {
+                        Some((_, _, shape_idx)) => {
+                            // Build the payload-free case; its single reference transfers onward.
+                            let shape = self.persist.shapes[*shape_idx as usize];
+                            let case = Value::enum_value(shape, Vec::new());
+                            if *panic {
+                                case
+                            } else {
+                                let some = self.persist.shapes[*some_shape as usize];
+                                Value::enum_value(some, vec![case])
+                            }
+                        }
+                        None if *panic => {
+                            let shown = value.display();
+                            return Err(self.error(
+                                DiagnosticCode::Panic,
+                                *span,
+                                format!("panic: `{enum_name}` has no case `{shown}`"),
+                            ));
+                        }
+                        None => {
+                            let none = self.persist.shapes[*none_shape as usize];
+                            Value::enum_value(none, Vec::new())
+                        }
+                    };
+                    set_reg(regs, fbase, *dst, result);
+                    pc += 1;
+                }
+                Op::Panic { msg, span } => {
+                    let message = regs[fbase + *msg as usize].display();
+                    return Err(self.error(
+                        DiagnosticCode::Panic,
+                        *span,
+                        format!("panic: {message}"),
+                    ));
+                }
+                Op::TryUnwrap {
+                    dst,
+                    src,
+                    on_error,
+                    span,
+                } => {
+                    let v = regs[fbase + *src as usize];
+                    match try_classify(v) {
+                        Some(TryOutcome::Success(inner)) => {
+                            retain(inner);
+                            set_reg(regs, fbase, *dst, inner);
+                            pc += 1;
+                        }
+                        // `Err(_)`/`none`: early-return the whole value from this frame, exactly
+                        // as `Op::Return` does (the M0 `Unwind::Return`).
+                        Some(TryOutcome::Empty) => {
+                            // An `Err` propagating out of the outermost run's BOTTOM frame is
+                            // top-level code: there is no caller to hand it to, and no declared
+                            // return type the checker could have rejected the `?` against (E0012
+                            // covers every declared return). Unwinding here used to end the
+                            // program *quietly at exit 0* — a `client.get(url)?` transport
+                            // failure was completely invisible and CI went green on a broken
+                            // program. Abort with the error's own message instead (E0069); the
+                            // teardown in `Vm::run` reclaims this frame, exactly as `Op::Panic`'s
+                            // does. The tree-walker's `eval_try_ir` mirrors this on an empty
+                            // `call_sites`, so the differential holds. `none` is untouched: an
+                            // absence reaching the top is not a failure.
+                            if self.run_depth == 1
+                                && frames.len() == 1
+                                && let Some(payload) = crate::values::result_err_payload(v)
+                            {
+                                let message = self.unhandled_error_message(payload, *span)?;
+                                self.out
+                                    .diagnostics
+                                    .push(Diagnostic::unhandled_error(*span, &message));
+                                return Err(Abort);
+                            }
+                            retain(v);
+                            // Drop the frame locals this `?` abandons before unwinding (Phase 4.2c) —
+                            // destructor-relevant ones fire `destruct`, in the drop pass's order. Each
+                            // is cleared to `unit`, so the teardown release below never double-frees.
+                            for (reg, relevant) in on_error.iter() {
+                                let dv = std::mem::replace(
+                                    &mut regs[fbase + *reg as usize],
+                                    Value::unit(),
+                                );
+                                if *relevant {
+                                    self.release_value(dv);
+                                } else {
+                                    release(dv);
+                                }
+                            }
+                            let finished = frames.pop().unwrap();
+                            let n = module.protos[finished.proto as usize].num_registers as usize;
+                            for i in 0..n {
+                                release(regs[finished.base + i]);
+                            }
+                            for u in &finished.upvalues {
+                                release(*u);
+                            }
+                            regs.truncate(finished.base);
+                            // Apply the frame's return transform on every exit path, for the same
+                            // reason `Op::Return` does (a short-circuiting `?` is an early return);
+                            // release the original if the transform replaced it.
+                            let (out, replaced) = finished.ret_transform.apply(v);
+                            if replaced {
+                                release(v);
+                            }
+                            match frames.last() {
+                                Some(caller) => {
+                                    let idx = caller.base + finished.ret_dst as usize;
+                                    let old = regs[idx];
+                                    regs[idx] = out;
+                                    release(old);
+                                }
+                                None => return Ok(ColdStep::Done(out)),
+                            }
+                            // `?` short-circuits like an early return — re-derive the caller's window.
+                            return Ok(ColdStep::Reload);
+                        }
+                        None => {
+                            return Err(self.error(
+                                DiagnosticCode::TypeMismatch,
+                                *span,
+                                format!(
+                                    "`?` expects a `Result` or `Option`, found {}",
+                                    v.type_name()
+                                ),
+                            ));
+                        }
+                    }
+                }
+                Op::MakeGen { dst, src } => {
+                    // Wrap the step closure into a generator iterator (Track G.1b). `iter_gen` retains
+                    // its own reference to the closure; the source register's reference is released by
+                    // the register's normal end-of-life (exactly as `Op::Narrow` retains its payload).
+                    let step = regs[fbase + *src as usize];
+                    let result = Value::iter_gen(step);
+                    set_reg(regs, fbase, *dst, result);
+                    pc += 1;
+                }
+                Op::MakeFuture { dst, src } => {
+                    // Wrap the lazy thunk closure into a future (Track A.1). `make_future` retains its
+                    // own reference to the closure; the source register's reference is released by the
+                    // register's normal end-of-life (like `Op::MakeGen`).
+                    let thunk = regs[fbase + *src as usize];
+                    let result = Value::make_future(thunk);
+                    set_reg(regs, fbase, *dst, result);
+                    pc += 1;
+                }
+                Op::RunFuture { dst, src, span } => {
+                    // Drive an awaited future to completion (Track A.2/A.3 top-level). See
+                    // `drive_future`: poll; on pending advance the clock and re-poll; it borrows the
+                    // future and returns an owned result. `.await` **consumes** the future (a spent
+                    // future cannot be awaited again — a second await already deadlocks), so take it
+                    // out of the source register and release it destructor-aware here, at its last
+                    // reference: a destructor-bearing local captured in the async fn's state (held in
+                    // the future's step-closure cells) runs now rather than being lost.
+                    let future = std::mem::replace(&mut regs[fbase + *src as usize], Value::unit());
+                    // Release before propagating an abort: the register was already emptied, so
+                    // the frame teardown can no longer see the future — skipping this on the
+                    // error path (e.g. a detected async deadlock) orphans it (the refcount
+                    // anomaly the strengthened leak oracle catches). `drive_future` borrows.
+                    // The consumed future rides `transient_roots` across the drive: with its
+                    // register emptied, only this Rust local owns it, and a mid-drive safepoint
+                    // collection must still see it as a root.
+                    self.transient_roots.push(future);
+                    let value = self.drive_future(future, *span, Some((frames, regs)));
+                    self.transient_roots.pop();
+                    self.release_value(future);
+                    let value = value?;
+                    set_reg(regs, fbase, *dst, value);
+                    pc += 1;
+                }
+                Op::PollFuture { dst, src, span } => {
+                    // Poll a future once (Track A.3 state machine): `some(v)` if ready, `none` if
+                    // pending. The source register keeps owning the future.
+                    let future = regs[fbase + *src as usize];
+                    let result = match self.poll_once(future, *span)? {
+                        Poll::Ready(value) => make_some(value),
+                        // A cancelled handle awaited inside an `async fn` body would otherwise
+                        // suspend forever on a `none`; fail loudly (Track A.8, E0056) instead —
+                        // the same contract top-level `.await` (`drive_future`) enforces.
+                        // A real isolate that honored its cancellation request (isolate-cancel)
+                        // reads exactly like the cancelled handle below: the awaited work will
+                        // never produce a value, so `.await` is the wrong tool for it.
+                        Poll::Cancelled => {
+                            return Err(self.error(
+                                DiagnosticCode::AwaitCancelled,
+                                *span,
+                                "cannot await a cancelled task; use `.join()` to observe the \
+                             cancelled outcome"
+                                    .to_string(),
+                            ));
+                        }
+                        Poll::Pending if self.handle_cancelled(future) => {
+                            return Err(self.error(
+                                DiagnosticCode::AwaitCancelled,
+                                *span,
+                                "cannot await a cancelled task; use `.join()` to observe the \
+                             cancelled outcome"
+                                    .to_string(),
+                            ));
+                        }
+                        Poll::Pending => make_none(),
+                    };
+                    set_reg(regs, fbase, *dst, result);
+                    pc += 1;
+                }
+                Op::LoadPending { dst } => {
+                    // The async pending sentinel (Track A.3) — what a step returns when it suspends.
+                    set_reg(regs, fbase, *dst, Value::pending());
+                    pc += 1;
+                }
+                Op::ScopeBegin => {
+                    // Open a structured-concurrency scope (Track A.3b): a fresh, empty task list
+                    // (A.7 tombstone model — `open_scope` pushes both `scopes` and `scope_closed`).
+                    self.open_scope();
+                    pc += 1;
+                }
+                Op::ScopeBeginValue { dst, .. } => {
+                    // Open a scope and yield its index (Track A.7): the value form of `ScopeBegin`,
+                    // used by the async desugar's split `concurrent { }` to thread the index to its
+                    // join poll-state. Mirrors `noeta-eval`'s `Rvalue::ScopeBegin`.
+                    let idx = self.open_scope() as i64;
+                    set_reg(regs, fbase, *dst, Value::int(idx));
+                    pc += 1;
+                }
+                Op::ScopeReady { dst, src, span } => {
+                    // Whether every task in the scope at index `src` has completed or been cancelled
+                    // (Track A.7) — the boolean the split `concurrent { }`'s join poll-state tests
+                    // each poll. A stale/out-of-range index reads ready (defensive; unreachable for a
+                    // clean program). Mirrors `noeta-eval`'s `Rvalue::ScopeReady`.
+                    let Some(idx) = regs[fbase + *src as usize].as_int() else {
+                        return Err(self.error(
+                            DiagnosticCode::TypeMismatch,
+                            *span,
+                            "internal: scope_ready expects a scope index".to_string(),
+                        ));
+                    };
+                    let ready = self
+                        .sched
+                        .scopes
+                        .get(idx as usize)
+                        .is_none_or(|s| s.iter().all(|t| t.result.is_some() || t.cancelled));
+                    set_reg(regs, fbase, *dst, Value::bool(ready));
+                    pc += 1;
+                }
+                Op::Spawn { dst, src, .. } => {
+                    // Register the future as a task in the current scope (retaining the scope's own
+                    // reference), yielding a handle that references it by `(scope, task)`. A `spawn`
+                    // outside any scope is E0041 at check, so `self.scopes` is non-empty here.
+                    let future = regs[fbase + *src as usize];
+                    let handle = if self.sched.scopes.is_empty() {
+                        retain(future);
+                        future
+                    } else {
+                        retain(future);
+                        // Senders captured in the spawned future are producer holds (isolates
+                        // I.4c auto-close); count them onto their channels for the task's life.
+                        let holds = Self::collect_producer_channels(future);
+                        for &cid in &holds {
+                            self.add_producer_hold(cid);
+                        }
+                        let scope_idx = self.innermost_open();
+                        let task_idx = self.sched.scopes[scope_idx].len();
+                        // The child inherits a snapshot of the spawner's task-local context
+                        // (T5a): a task spawned inside `with_span` parents its spans there.
+                        let context = self.sched.ctx_current.clone();
+                        let strand = self.sched.current_strand;
+                        self.sched.scopes[scope_idx].push(Task {
+                            future,
+                            result: None,
+                            cancelled: false,
+                            polling: false,
+                            context,
+                            holds,
+                            strand,
+                            isolate_strand: None,
+                        });
+                        Value::make_handle(
+                            ScopeId::from_index(scope_idx),
+                            TaskId::from_index(task_idx),
+                        )
+                    };
+                    set_reg(regs, fbase, *dst, handle);
+                    pc += 1;
+                }
+                Op::SpawnIsolate {
+                    dst,
+                    callee,
+                    args,
+                    span,
+                } => {
+                    // `isolate f(args)` (I.4b). Only the CLI's real (VM) path emits this op; the
+                    // differential/salsa sandbox lowers `isolate` to `Call`+`Spawn`, so it is never
+                    // reached in-oracle. Runs on a real OS thread when the VM is parallel and no
+                    // argument ships a channel; otherwise falls back to a cooperative task (so a
+                    // non-parallel VM — `@test`/`bench` — and channel-shipping isolates never regress).
+                    let callee_val = regs[fbase + *callee as usize];
+                    let arg_vals = ArgBuf::collect(args, regs, fbase);
+                    let handle = self.spawn_isolate(callee_val, arg_vals.as_slice(), *span)?;
+                    set_reg(regs, fbase, *dst, handle);
+                    pc += 1;
+                }
+                Op::ScopeEnd { span } => {
+                    // Join the scope (drive every task to completion), then close the innermost scope
+                    // and release the tasks' owned futures and results (close_scope: producer holds
+                    // I.4c + destructor-aware future release). The synchronous (non-flattened) path
+                    // is strictly LIFO, so the innermost scope is this one.
+                    self.join_scope(*span, Some((frames, regs)))?;
+                    let si = self.innermost_open();
+                    self.close_scope(si);
+                    pc += 1;
+                }
+                Op::ScopeEndAt { src, span } => {
+                    // Close the (already-drained) scope at index `src` (Track A.7): release its tasks
+                    // (destructor-aware) and tombstone the slot. Closes by index — not innermost — so
+                    // a sibling task's still-open scope above it survives. The join happened at the
+                    // `ScopeReady` poll-state, so there is nothing to drive. Mirrors `noeta-eval`'s
+                    // `Rvalue::ScopeEndAt`.
+                    let Some(idx) = regs[fbase + *src as usize].as_int() else {
+                        return Err(self.error(
+                            DiagnosticCode::TypeMismatch,
+                            *span,
+                            "internal: scope_end expects a scope index".to_string(),
+                        ));
+                    };
+                    if (idx as usize) < self.sched.scopes.len() {
+                        self.close_scope(idx as usize);
+                    }
+                    pc += 1;
+                }
+                Op::MakeChannel {
+                    dst,
+                    capacity,
+                    span,
+                } => {
+                    // Create a bounded channel and yield its `(Sender, Receiver)` endpoint tuple
+                    // (isolates I.1). The message type is checker-only; only the capacity reaches here.
+                    let cap = regs[fbase + *capacity as usize];
+                    let Some(cap) = cap.as_int() else {
+                        return Err(self.error(
+                            DiagnosticCode::TypeMismatch,
+                            *span,
+                            format!(
+                                "`channel` expects an int capacity, found {}",
+                                cap.type_name()
+                            ),
+                        ));
+                    };
+                    if cap < 0 {
+                        return Err(self.error(
+                            DiagnosticCode::Panic,
+                            *span,
+                            format!("`channel` capacity must be non-negative, found {cap}"),
+                        ));
+                    }
+                    let id = ChannelId::from_index(self.persist.channels.len());
+                    // In a parallel VM (real isolates, I.4c) a channel is a *shared* cross-thread queue
+                    // from birth, so shipping an endpoint into a worker shares one queue; the sandbox
+                    // (and any non-parallel VM) uses the cooperative in-VM `Local` FIFO, unchanged.
+                    let channel = if self.isolates.parallel_isolates {
+                        Channel::Shared(isolate::ChannelCore::new(cap as usize))
+                    } else {
+                        Channel::Local {
+                            buffer: std::collections::VecDeque::new(),
+                            capacity: cap as usize,
+                            closed: false,
+                            producers: 0,
+                        }
+                    };
+                    self.persist.channels.push(channel);
+                    // The two endpoints are fresh (refcount 1); `Value::tuple` takes ownership of
+                    // exactly those references, so no extra retain is needed.
+                    let tuple =
+                        Value::tuple(vec![Value::make_sender(id), Value::make_receiver(id)]);
+                    set_reg(regs, fbase, *dst, tuple);
+                    pc += 1;
+                }
+                Op::AttributesOf { dst, src } => {
+                    // The manifest is name-keyed: the register holds the attribute type's name,
+                    // folded from a written turbofish or read off a per-instantiation channel by
+                    // the preceding `TypeArgName`/`TypeSlotName` — the same string either way.
+                    let name = regs[fbase + *src as usize].as_string().unwrap_or_default();
+                    let result = self.materialize_attributes(&name);
+                    set_reg(regs, fbase, *dst, result);
+                    pc += 1;
+                }
+                Op::RolesOf { dst, src } => {
+                    // The optional scope arrives the same way; `None` is the unscoped query.
+                    let filter =
+                        src.map(|src| regs[fbase + src as usize].as_string().unwrap_or_default());
+                    let result = self.materialize_roles(filter.as_deref());
+                    set_reg(regs, fbase, *dst, result);
+                    pc += 1;
+                }
+                Op::ParamsOf { dst, src } => {
+                    // The runtime target string names a fn or method; materialize its params.
+                    let target = regs[fbase + *src as usize].as_string().unwrap_or_default();
+                    let result = self.materialize_params(&target);
+                    set_reg(regs, fbase, *dst, result);
+                    pc += 1;
+                }
+                Op::ReturnsOf { dst, src } => {
+                    // The runtime target string names a fn or method; materialize its return.
+                    let target = regs[fbase + *src as usize].as_string().unwrap_or_default();
+                    let result = self.materialize_returns(&target);
+                    set_reg(regs, fbase, *dst, result);
+                    pc += 1;
+                }
+                Op::FieldSpecsOf { dst, src } => {
+                    // The runtime name string names a declared type; materialize its field schema.
+                    let name = regs[fbase + *src as usize].as_string().unwrap_or_default();
+                    let result = self.materialize_field_specs(&name);
+                    set_reg(regs, fbase, *dst, result);
+                    pc += 1;
+                }
+                Op::VariantsOf { dst, src } => {
+                    // The runtime name string names a declared type; materialize its variant
+                    // schema (empty unless it is an enum).
+                    let name = regs[fbase + *src as usize].as_string().unwrap_or_default();
+                    let result = self.materialize_variant_specs(&name);
+                    set_reg(regs, fbase, *dst, result);
+                    pc += 1;
+                }
+                Op::Construct {
+                    dst,
+                    name,
+                    fields,
+                    ok_shape,
+                    err_shape,
+                    span,
+                } => {
+                    let name_val = regs[fbase + *name as usize];
+                    let fields_val = regs[fbase + *fields as usize];
+                    let result =
+                        self.construct_dynamic(name_val, fields_val, *ok_shape, *err_shape, *span)?;
+                    set_reg(regs, fbase, *dst, result);
+                    pc += 1;
+                }
+                Op::TypeOf { dst, src } => {
+                    let repr = vm_type_repr(&regs[fbase + *src as usize]);
+                    let result = build_type_value(&repr);
+                    set_reg(regs, fbase, *dst, result);
+                    pc += 1;
+                }
+                Op::TypeArgName {
+                    dst,
+                    src,
+                    index,
+                    names,
+                    span,
+                } => {
+                    let repr = vm_type_repr(&regs[fbase + *src as usize]);
+                    let Some(name) = repr.type_arg_name(*index as usize) else {
+                        return Err(self.error(
+                            DiagnosticCode::InvalidTypeArguments,
+                            *span,
+                            noeta_ast::reflect::missing_type_arg_message(&names.0, &names.1),
+                        ));
+                    };
+                    let result = Value::string(&name);
+                    set_reg(regs, fbase, *dst, result);
+                    pc += 1;
+                }
+                Op::TypeSlotName { dst, src, span } => {
+                    let idx = regs[fbase + *src as usize].as_int().unwrap_or(-1);
+                    let Some(entry) = module.type_args.get(idx.max(0) as usize) else {
+                        return Err(self.error(
+                            DiagnosticCode::TypeMismatch,
+                            *span,
+                            "corrupt hidden type-argument slot".to_string(),
+                        ));
+                    };
+                    let result = Value::string(&entry.name);
+                    set_reg(regs, fbase, *dst, result);
+                    pc += 1;
+                }
+                Op::FieldsOf { dst, src } => {
+                    let result = self.materialize_fields(regs[fbase + *src as usize]);
+                    set_reg(regs, fbase, *dst, result);
+                    pc += 1;
+                }
+                Op::TraitsOf { dst, src } => {
+                    let result = self.materialize_traits(regs[fbase + *src as usize]);
+                    set_reg(regs, fbase, *dst, result);
+                    pc += 1;
+                }
+                Op::Retag { reg, repr } => {
+                    regs[fbase + *reg as usize]
+                        .set_reflect(Some(Rc::clone(&self.persist.type_reprs[*repr as usize])));
+                    pc += 1;
+                }
+                Op::RetagDynamic { reg, slot } => {
+                    let idx = regs[fbase + *slot as usize].as_int().unwrap_or(-1);
+                    if idx >= 0
+                        && let Some(Some(repr)) = module.type_arg_reprs.get(idx as usize).copied()
+                    {
+                        regs[fbase + *reg as usize]
+                            .set_reflect(Some(Rc::clone(&self.persist.type_reprs[repr as usize])));
+                    }
+                    pc += 1;
+                }
+                Op::TypeOfStatic { dst, repr } => {
+                    let result = build_type_value(repr);
+                    set_reg(regs, fbase, *dst, result);
+                    pc += 1;
+                }
+                Op::TypeValue { dst, name } => {
+                    // A bare type name used as a value (an `invoke` receiver) materializes as the
+                    // reflection `Type` ADT — the one representation of "a type as a value", shared
+                    // with `type_of` and stored type-refs. `Op::Invoke` resolves it back to the
+                    // named type via `reflection_type_name`.
+                    // No type arguments: the op carries a single name index because the surface
+                    // form it lowers from is a bare identifier in receiver position
+                    // (`invoke(Foo, …)`), which cannot spell a generic application.
+                    let value =
+                        build_type_value(&module.reflection.type_ref_repr(module.name(*name), &[]));
+                    set_reg(regs, fbase, *dst, value);
+                    pc += 1;
+                }
+                Op::Invoke {
+                    dst,
+                    recv,
+                    name,
+                    args,
+                    ok_shape,
+                    err_shape,
+                    span,
+                } => {
+                    let recv_val = recv.map(|r| regs[fbase + r as usize]);
+                    let name_val = regs[fbase + *name as usize];
+                    let args_val = regs[fbase + *args as usize];
+                    // A packed args list (P-PACK 2.4) is materialized to a temporary boxed list for
+                    // the duration of the dispatch, then released after the call frame is built (its
+                    // elements retained into it). `arg_items` below borrows from this temporary.
+                    let mut args_to_release: Option<Value> = None;
+                    // A **named** `Map<string, dyn>` args operand (the same shape `Op::Construct`
+                    // takes) is projected to its `(name, value)` pairs here and bound to
+                    // parameters once the callee is known. The values share the map's references
+                    // exactly as `construct_dynamic`'s do, so there is no temporary to release;
+                    // a non-string key is dropped, as it is there.
+                    let named: Option<Vec<(String, Value)>> = args_val.is_map().then(|| {
+                        let keys = args_val.map_keys().expect("checked is_map");
+                        let vals = args_val.map_values().expect("checked is_map");
+                        keys.iter()
+                            .zip(vals)
+                            .filter_map(|(k, v)| match k {
+                                noeta_stdlib::MapKey::Str(s) => Some((s.as_str().to_owned(), v)),
+                                _ => None,
+                            })
+                            .collect()
+                    });
+                    // Resolve the dispatch by name: either a prototype to call (`Ok`) or a reason it
+                    // failed (`Err(msg)` → `Result.Err`). Every resolution failure — non-string name,
+                    // args that are neither a list nor a map, a non-invokable receiver, an unknown
+                    // name, an arity mismatch, an unknown or missing parameter in the named form —
+                    // is a runtime `Err`, never an abort (only a panic *inside* the called body
+                    // aborts).
+                    let outcome: Result<(InvokeTarget, Vec<Value>, Option<u64>), String> = 'resolve: {
+                        let Some(method) = name_val.as_string() else {
+                            break 'resolve Err(format!(
+                                "invoke name must be a string, found {}",
+                                name_val.type_name()
+                            ));
+                        };
+                        if named.is_none() && !args_val.is_list() {
+                            break 'resolve Err(format!(
+                                "invoke args must be a list or a map, found {}",
+                                args_val.type_name()
+                            ));
+                        }
+                        // A packed positional list is materialized to a temporary boxed list for
+                        // the duration of the dispatch; the named form reads the map directly.
+                        let arg_items: Vec<Value> = if named.is_some() {
+                            Vec::new()
+                        } else {
+                            let args_list = args_val.realize_list();
+                            args_to_release = Some(args_list);
+                            args_list.list_items().expect("checked is_list")
+                        };
+                        // No receiver: the free-function form. The name resolves against the
+                        // module's global slot table and nothing else — the same binding
+                        // `Op::CallGlobal` reads for a statically-known top-level `fn`, which is
+                        // what makes the two-argument form pair with `params_of("name")`. A
+                        // global that is absent, unbound, or holds a non-closure is one and the
+                        // same miss (see `free_fn_miss_message`).
+                        let Some(recv_val) = recv_val else {
+                            let callee = self
+                                .global_slots
+                                .get(&*method)
+                                .map(|slot| self.persist.globals[*slot as usize])
+                                .filter(|v| !v.is_unbound() && v.as_closure().is_some());
+                            let Some(callee) = callee else {
+                                break 'resolve Err(free_fn_miss_message(&method));
+                            };
+                            // A free fn reserves no `self` register, so its declared arity is
+                            // the parameter count itself — unlike the method path below — less
+                            // a forwarding generic's hidden type-argument slots, which are not
+                            // part of the surface signature the reflection artifact describes.
+                            // Counting them would report an arity the source never wrote;
+                            // `invoke` supplies no instantiation, so the CALL is what refuses
+                            // (see `Vm::no_instantiation`), and it must be reached to do so.
+                            let chunk =
+                                &module.protos[callee.as_closure().expect("filtered") as usize];
+                            let total = chunk.num_params as usize - chunk.hidden as usize;
+                            break 'resolve match bind_invoke_args(
+                                &module.reflection,
+                                &method,
+                                "function",
+                                total,
+                                chunk.defaults.len(),
+                                arg_items,
+                                named.as_deref(),
+                            ) {
+                                Ok((args, supplied)) => {
+                                    Ok((InvokeTarget::Free(callee), args, supplied))
+                                }
+                                Err(message) => Err(message),
+                            };
+                        };
+                        // A type handle dispatches an associated function (no receiver); an object
+                        // dispatches an instance method (receiver in register 0). A reflection `Type`
+                        // value (a stored type-ref) names the type for an associated call too.
+                        let (type_name, is_assoc) = if recv_val.is_object() {
+                            (recv_val.shape().unwrap().name.clone(), false)
+                        } else if let Some(tn) = reflection_type_name(recv_val) {
+                            (tn, true)
+                        } else {
+                            break 'resolve Err(format!(
+                                "cannot invoke on a value of type `{}`",
+                                recv_val.type_name()
+                            ));
+                        };
+                        let kind = if is_assoc {
+                            "associated function"
+                        } else {
+                            "method"
+                        };
+                        let Some(proto) = self.method_proto(&type_name, &method) else {
+                            break 'resolve Err(format!(
+                                "type `{type_name}` has no {kind} `{method}`"
+                            ));
+                        };
+                        // The prototype reserves register 0 for `self` (unit for an associated
+                        // call), so its declared arity is one more than the supplied args; trailing
+                        // defaults widen the accepted range, exactly as `Op::CallMethod`.
+                        let callee_chunk = &module.protos[proto as usize];
+                        // `invoke` reckons arity over the VALUE parameters — a forwarding
+                        // generic's hidden slots are not part of the surface signature the
+                        // reflection artifact describes. It supplies none, so the push itself
+                        // aborts; reporting an arity the source never wrote first would only
+                        // mislead.
+                        let total =
+                            callee_chunk.num_params as usize - 1 - callee_chunk.hidden as usize;
+                        let (args, supplied) = match bind_invoke_args(
+                            &module.reflection,
+                            &format!("{type_name}.{method}"),
+                            kind,
+                            total,
+                            callee_chunk.defaults.len(),
+                            arg_items,
+                            named.as_deref(),
+                        ) {
+                            Ok(bound) => bound,
+                            Err(message) => break 'resolve Err(message),
+                        };
+                        Ok((InvokeTarget::Proto { proto, is_assoc }, args, supplied))
+                    };
+                    match outcome {
+                        Err(message) => {
+                            let shape = self.persist.shapes[*err_shape as usize];
+                            let err = Value::enum_value(shape, vec![Value::string(&message)]);
+                            set_reg(regs, fbase, *dst, err);
+                            pc += 1;
+                        }
+                        // A free function has no receiver register and no `self` slot, so it
+                        // cannot ride `push_callee_frame` (which reserves register 0). It runs
+                        // through the ordinary first-class-callee path instead — the same
+                        // re-entry `map`/`filter` use — which carries the closure's upvalues and
+                        // fills its defaults. Arity was pre-checked above, so `call_value`'s own
+                        // (aborting) arity guard is unreachable and a soft `Err` is preserved.
+                        Ok((InvokeTarget::Free(callee), arg_items, supplied)) => {
+                            // `call_value_masked` consumes owned arguments; the list (or, in the
+                            // named form, the map) still owns these.
+                            let owned: Vec<Value> = arg_items
+                                .iter()
+                                .map(|&a| {
+                                    retain(a);
+                                    a
+                                })
+                                .collect();
+                            if let Some(list) = args_to_release.take() {
+                                list.release();
+                            }
+                            let result = self.call_value_masked(callee, owned, *span, supplied)?;
+                            let ok = self.persist.shapes[*ok_shape as usize];
+                            set_reg(regs, fbase, *dst, Value::enum_value(ok, vec![result]));
+                            pc += 1;
+                        }
+                        Ok((InvokeTarget::Proto { proto, is_assoc }, arg_items, supplied)) => {
+                            // An associated call leaves register 0 as unit (no receiver); an instance
+                            // call places the retained receiver there. The result is wrapped in
+                            // `Result.Ok` as it lands in the caller, so the invocation yields a
+                            // `Result` whichever way the body returns.
+                            // An instance dispatch always resolved through a receiver, so the
+                            // flatten never discards one: `is_assoc` is false only on the
+                            // `recv_val.is_object()` arm.
+                            let recv = (!is_assoc).then_some(recv_val).flatten();
+                            let ok = self.persist.shapes[*ok_shape as usize];
+                            self.push_callee_frame(
+                                frames,
+                                regs,
+                                top,
+                                proto,
+                                recv,
+                                &arg_items,
+                                // `invoke` is name-keyed with no static callee type, so it
+                                // carries no instantiation: a forwarding generic reached this
+                                // way aborts rather than bind a value argument into a type slot.
+                                &[],
+                                *dst,
+                                RetTransform::WrapOk(ok),
+                                pc + 1,
+                                // The prototype reserves register 0 for `self`, so every
+                                // declared parameter's bit moves up by one — the same shift the
+                                // compiler applies to a statically-named method call.
+                                supplied.map(|m| (m << 1) | 1),
+                                *span,
+                            )?;
+                            // Release the temporary boxed args list before transferring (its
+                            // elements were already retained into the call frame above); `take`
+                            // leaves the after-match release for the non-transferring `Err` path.
+                            if let Some(list) = args_to_release.take() {
+                                list.release();
+                            }
+                            return Ok(ColdStep::Reload);
+                        }
+                    }
+                    // Release the temporary boxed args list (if the args were materialized from a
+                    // packed list); its elements were retained into the call frame above.
+                    if let Some(list) = args_to_release {
+                        list.release();
+                    }
+                }
+                Op::MaskWidth {
+                    dst,
+                    src,
+                    signed,
+                    bits,
+                } => {
+                    // Reduce an erased fixed-width integer (an `int` value) into its declared width
+                    // (Tier W). Total — the shared helper runs identically in the tree-walker. A
+                    // non-int (only if the checker's IntN guarantee broke) passes through unchanged.
+                    //
+                    // Ownership: a masked result is a *fresh* value from `Value::int` — already
+                    // owning its one reference if it heap-boxes (a `u64` past the immediate range),
+                    // so it must NOT be retained again (the refcount-anomaly oracle catches the
+                    // over-count as a leak). Only the pass-through borrows from the src register
+                    // and needs the retain for its new owner.
+                    let v = regs[fbase + *src as usize];
+                    let masked = match v.as_int() {
+                        Some(n) => Value::int(noeta_stdlib::mask_to_width(n, *signed, *bits)),
+                        None => {
+                            retain(v);
+                            v
+                        }
+                    };
+                    set_reg(regs, fbase, *dst, masked);
+                    pc += 1;
+                }
+                Op::WideInt {
+                    op,
+                    dst,
+                    a,
+                    b,
+                    signed,
+                    bits,
+                    span,
+                } => {
+                    // Sign-dependent fixed-width op (Tier W3): `/ % < <= > >=` on erased-int operands,
+                    // read as `signed`/unsigned `bits`-wide. No trait dispatch (ints only).
+                    let left = regs[fbase + *a as usize];
+                    let right = regs[fbase + *b as usize];
+                    match apply_binary_wide(*op, left, right, *signed, *bits) {
+                        Ok(v) => {
+                            set_reg(regs, fbase, *dst, v);
+                            pc += 1;
+                        }
+                        Err(e) => return Err(self.error(e.code, *span, e.text)),
+                    }
+                }
+                Op::WidthIntMethod {
+                    dst,
+                    recv,
+                    method,
+                    arg,
+                    bits,
+                    ..
+                } => {
+                    // Width-exact bit intrinsic (Tier W5): compute within `bits`, not the erased i64.
+                    // The checker guarantees an integer receiver and (for `rotate_*`) an integer arg.
+                    let recv_int = regs[fbase + *recv as usize].as_int().unwrap_or(0);
+                    let amount = match arg {
+                        Some(r) => regs[fbase + *r as usize].as_int().unwrap_or(0),
+                        None => 0,
+                    };
+                    let value = Value::int(noeta_stdlib::int_method_width(
+                        recv_int, *method, amount, *bits,
+                    ));
+                    set_reg(regs, fbase, *dst, value);
+                    pc += 1;
+                }
+                Op::Raise { idx } => {
+                    self.out
+                        .diagnostics
+                        .push(chunk.diagnostics[*idx as usize].clone());
+                    return Err(Abort);
+                }
+                // Unreachable by construction: `dispatch_inner` routes exactly the patterns
+                // listed above here, and it still matches `Op` exhaustively, so a newly added
+                // opcode fails to compile *there* — where the hot/cold decision belongs — rather
+                // than falling through to this arm.
+                _ => unreachable!("cold_op reached with an op the dispatch loop handles inline"),
+            }
+        }
+        Ok(ColdStep::Next(pc))
     }
 
     /// The shared callee-frame-push choreography (audit-1 finding 6): reserve the callee's
