@@ -26,6 +26,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashSet;
+use std::mem::ManuallyDrop;
 
 use chumsky::input::ValueInput;
 use chumsky::pratt::{infix, left, postfix, prefix};
@@ -156,6 +157,102 @@ type TypeP<'src, I> = Boxed<'src, 'src, I, TypeRef, Extra<'src>>;
 /// parse rather than three; sharing is behaviour-preserving for the reason given on [`TypeP`].
 type ExprP<'src, I> = Boxed<'src, 'src, I, Expr, Extra<'src>>;
 
+/// Project a woven token pair into the `(token, span)` pair chumsky's [`Input::map`] wants.
+///
+/// A named `fn` rather than the equivalent closure for one reason: a closure's type has no name, so
+/// a grammar built over an input mapped by one cannot be *written down* — and the `${…}` hole
+/// grammar has to be, to live in [`Holes::grammar`] across the holes that share it. Only the hole
+/// input uses it; the whole-file input keeps its closure, whose mapper inlines into the per-token
+/// path a whole file walks.
+fn hole_tok(pair: &(T, SimpleSpan)) -> (&T, &SimpleSpan) {
+    (&pair.0, &pair.1)
+}
+
+/// The input one `${…}` interpolation hole is parsed over: the hole's own re-lexed, semicolon-woven
+/// token slice, allocated in [`Holes::tokens`] so every hole's slice shares the *parse's* lifetime
+/// — which is what makes this a single named type, and hence the hole grammar cacheable.
+type HoleInput<'src> =
+    chumsky::input::MappedInput<T, SimpleSpan, &'src [(T, SimpleSpan)], HoleTokMap<'src>>;
+
+/// [`hole_tok`] as a function *pointer* — the nameable form [`HoleInput`] is parameterized by.
+pub(crate) type HoleTokMap<'src> = fn(&'src (T, SimpleSpan)) -> (&'src T, &'src SimpleSpan);
+
+/// The one `${…}` hole grammar built per parse — [`ExprP`] at the hole input type.
+type HoleP<'src> = Boxed<'src, 'src, HoleInput<'src>, Expr, Extra<'src>>;
+
+/// Everything a `${…}` interpolation hole needs: **one** grammar shared by every hole in the parse,
+/// the token buffers that grammar's input type borrows, and the lexing settings a hole is re-lexed
+/// under.
+///
+/// A hole re-enters the whole grammar (`literals::parse_hole`), so before this it built a complete
+/// statement+expression+type grammar *per hole* — the same construction cost [`TypeP`] removed from
+/// annotation sites, still paid once per `${…}`, and measured at ~79k instructions each (a hole
+/// costs ~2.5% of an entire empty-file `check`). It cannot be hoisted by threading a handle the way
+/// [`TypeP`] is: `parse_hole` runs from inside a `map_with` closure several combinator layers below
+/// the enclosing parser, which is mid-parse and already borrowed.
+///
+/// So it is built lazily on the first hole and cached here for the rest. The blocker was purely
+/// typing: a chumsky parser is parameterized by its *input's* lifetime, and each hole's woven token
+/// buffer used to be a local of `parse_hole`, so no two holes' grammars had the same type. Allocate
+/// those buffers in [`Self::tokens`] instead — an arena living as long as the parse — and every
+/// hole's input is one type ([`HoleInput`]), so one grammar serves them all.
+///
+/// Still strictly per-parse, and thread-safety never arises for the reason given on [`TypeP`]:
+/// nothing here outlives the `parse_in` that built it, and `Boxed` is `Rc`-backed anyway.
+///
+/// The edition and tier set live here rather than in [`Ctx`] because re-lexing a hole is the only
+/// thing that reads them, and [`Ctx`] is copied into every one of the grammar's closures — one
+/// pointer to this is cheaper there than two fields nothing else consults.
+pub(crate) struct Holes<'src> {
+    /// The language [`Edition`] the file is written against — its own package's edition when parsed
+    /// through the pipeline, the default for a plain [`parse`]. A `${…}` hole is re-lexed on its own
+    /// text slice under this edition, so a nested tier body inside a hole tokenizes exactly as the
+    /// enclosing file does. Currently one edition exists, so it does not yet change the grammar; it
+    /// is the seam future edition-gated parsing will consult.
+    edition: Edition,
+    /// The verbatim-body tier set the file was lexed with (`doc` plus any declared/extension text or
+    /// expression tiers). A hole is re-lexed on its own text slice, so it needs the same set —
+    /// otherwise a **nested** `@html { … }` inside a hole (an inline loop body,
+    /// `${xs.map(fn(x) => @html { … })}`) would not capture its body verbatim.
+    text_tiers: &'src noeta_lexer::TextTiers,
+    /// Every hole's woven token slice, kept alive for the whole parse (see the type note above).
+    /// Bounded by the source: one entry per token of every `${…}` body in the file. Borrowed rather
+    /// than owned so this struct itself stays drop-glue-free — see [`Self::grammar`].
+    tokens: &'src typed_arena::Arena<(T, SimpleSpan)>,
+    /// The hole grammar, built on first use. `None` until a file's first `${…}` — a file with no
+    /// interpolation pays nothing at all.
+    ///
+    /// `ManuallyDrop` because the grammar's own closures capture the [`Ctx`] that reaches this cell,
+    /// so the parse holds a `&'src Holes<'src>` — a self-referential borrow, which dropck rejects
+    /// for any type whose drop glue could touch `'src`. Opting out of drop glue is exact here rather
+    /// than a leak waiting to happen: the cell owns nothing but the grammar handle, and
+    /// [`Holes::release`] drops that handle explicitly once the parse is over, after which the
+    /// struct owns no heap at all.
+    grammar: ManuallyDrop<RefCell<Option<HoleP<'src>>>>,
+}
+
+impl<'src> Holes<'src> {
+    /// Hole storage over `tokens`, with no grammar built yet.
+    fn new(
+        edition: Edition,
+        text_tiers: &'src noeta_lexer::TextTiers,
+        tokens: &'src typed_arena::Arena<(T, SimpleSpan)>,
+    ) -> Holes<'src> {
+        Holes {
+            edition,
+            text_tiers,
+            tokens,
+            grammar: ManuallyDrop::new(RefCell::new(None)),
+        }
+    }
+
+    /// Drop the built grammar. Called once the parse is over; the grammar's closures capture the
+    /// `Ctx` that points back here, so this is what breaks that reference and frees the graph.
+    fn release(&self) {
+        *self.grammar.borrow_mut() = None;
+    }
+}
+
 /// Everything the grammar closures need from the outside world: the source (to slice
 /// identifier/literal text by span) and a side-channel for code-carrying diagnostics.
 /// `Copy` so it can be freely captured by the many combinator closures.
@@ -181,17 +278,11 @@ pub(crate) struct Ctx<'src> {
     /// not statement-ending (e.g. a generic-close `>`). Hard boundaries are *additionally*
     /// materialized as zero-width `;` in the parse input (see [`weave_hard_semicolons`]).
     soft_terminators: &'src HashSet<u32>,
-    /// The language [`Edition`] the file is written against — its own package's edition when parsed
-    /// through the pipeline, the default for a plain [`parse`]. A `${…}` hole is re-lexed on its own
-    /// text slice ([`parse_hole`]) under this edition, so a nested tier body inside a hole tokenizes
-    /// exactly as the enclosing file does. Currently one edition exists, so it does not yet change
-    /// the grammar; it is the seam future edition-gated parsing will consult.
-    edition: Edition,
-    /// The verbatim-body tier set the file was lexed with (`doc` plus any declared/extension text
-    /// or expression tiers). A `${…}` hole is re-lexed on its own text slice ([`parse_hole`]), so
-    /// it needs the same set — otherwise a **nested** `@html { … }` inside a hole (an inline loop
-    /// body, `${xs.map(fn(x) => @html { … })}`) would not capture its body verbatim.
-    text_tiers: &'src noeta_lexer::TextTiers,
+    /// Everything a `${…}` interpolation hole needs — the one hole grammar every hole shares, the
+    /// arena its inputs are allocated in, and the edition/tier set it is re-lexed under. Behind one
+    /// pointer because nothing outside hole parsing reads any of it, and this struct is copied into
+    /// every closure of the grammar. See [`Holes`].
+    holes: &'src Holes<'src>,
 }
 
 impl Ctx<'_> {
@@ -1630,6 +1721,11 @@ fn parse_inner(
     text_tiers: &noeta_lexer::TextTiers,
 ) -> Parsed {
     let diags = RefCell::new(Vec::new());
+    // The parse's `${…}` hole storage — both empty, and left empty for a file with no interpolation.
+    // The arena is its own local because its type carries no lifetime: that is what lets `Holes`
+    // (which does carry one, and is reached through a self-referential borrow) stay drop-glue-free.
+    let hole_tokens = typed_arena::Arena::new();
+    let holes = Holes::new(edition, text_tiers, &hole_tokens);
     // The single statement-termination scan (audit-3 Finding 7): the parser owns both halves of
     // the decision — every boundary offset is a soft terminator ([`newline_terminator`]), and each
     // *hard* boundary is materialized as a zero-width `;` in the parse input so no construct can
@@ -1640,8 +1736,7 @@ fn parse_inner(
         source,
         diags: &diags,
         soft_terminators: &soft_terminators,
-        edition,
-        text_tiers,
+        holes: &holes,
     };
     let len = source.text().len();
     let toks = weave_hard_semicolons(tokens, &boundaries, 0);
@@ -1649,6 +1744,8 @@ fn parse_inner(
     let input = toks.as_slice().map(eoi, |(t, s)| (t, s));
 
     let (stmts, errs) = program_parser(ctx).parse(input).into_output_errors();
+    // The parse is over, so nothing will reach the hole grammar again; drop it (see [`Holes`]).
+    holes.release();
 
     // Convert structural errors to owned diagnostics first: this releases the borrow of
     // `diags` (held via `ctx` through the `Rich` errors' lifetime) before `into_inner`.

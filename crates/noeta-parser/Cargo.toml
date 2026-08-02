@@ -18,6 +18,9 @@ noeta-lexer = { workspace = true }
 noeta-ext-abi = { workspace = true }
 chumsky = { workspace = true }
 stacker = { workspace = true }
+# One arena per parse holding every `${…}` hole's token buffer, so all of them share the parse's
+# lifetime and one hole grammar can serve them all (see `Holes` in `lib.rs`).
+typed-arena = { workspace = true }
 
 [dev-dependencies]
 insta = { workspace = true }

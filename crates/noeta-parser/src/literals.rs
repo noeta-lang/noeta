@@ -10,12 +10,12 @@ use std::str::CharIndices;
 use chumsky::prelude::*;
 use noeta_ast::{Expr, StrPart};
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
-use noeta_lexer::lex_in;
+use noeta_lexer::{TokenKind as T, lex_in};
 use noeta_span::{Source, SourceId, Span};
 
 // A `${…}` interpolation hole is itself an expression, so `parse_hole` re-enters the grammar.
 // `literals` is a descendant module, so it can name these otherwise-private grammar items.
-use crate::{Ctx, expr_parser, rich_to_diag, statement_parser};
+use crate::{Ctx, HoleTokMap, expr_parser, rich_to_diag, statement_parser};
 
 /// Find the byte offset of the `}` that closes a hole opened at `start`, tracking brace
 /// depth so nested braces (e.g. a map literal inside the hole) are handled. A nested string
@@ -661,14 +661,20 @@ fn parse_hole(ctx: Ctx<'_>, text: &str, abs_offset: u32) -> Expr {
     let temp = Source::new(SourceId::FIRST, "<interp>", text);
     // Re-lex the hole with the file's tier set, so a nested `@html { … }` inside the hole (an
     // inline loop body) captures its verbatim body just as it would at the top level.
-    let lexed = lex_in(&temp, ctx.edition, ctx.text_tiers);
+    let lexed = lex_in(&temp, ctx.holes.edition, ctx.holes.text_tiers);
     // Materialize the hole's own hard newline boundaries as zero-width `;`, exactly as the whole-file
     // parse does (`weave_hard_semicolons`). The hole's *soft* boundaries are hole-local and are not
     // added to the enclosing `Ctx::soft_terminators` — statements inside a hole's closure bodies
     // terminate via hard boundaries only, as they always have (the enclosing file's soft set never
     // contains offsets interior to the tier body's verbatim token).
     let boundaries = noeta_lexer::newline_boundaries(&temp, &lexed.tokens);
-    let toks = crate::weave_hard_semicolons(&lexed.tokens, &boundaries, abs_offset);
+    // Allocated in the parse's hole arena rather than a local, so this hole's input has the *parse's*
+    // lifetime — which is what lets every hole share one grammar (see [`crate::Holes`]).
+    let toks: &[(T, SimpleSpan)] = ctx.holes.tokens.alloc_extend(crate::weave_hard_semicolons(
+        &lexed.tokens,
+        &boundaries,
+        abs_offset,
+    ));
     for mut diag in lexed.diagnostics {
         // The hole was lexed on a throwaway source; rebase its offsets and re-tag them to the
         // real enclosing source so the diagnostic renders against the right file.
@@ -678,25 +684,37 @@ fn parse_hole(ctx: Ctx<'_>, text: &str, abs_offset: u32) -> Expr {
 
     let end_off = abs_offset as usize + text.len();
     let eoi: SimpleSpan = (end_off..end_off).into();
-    let input = toks.as_slice().map(eoi, |(t, s)| (t, s));
+    let input = toks.map(eoi, crate::hole_tok as HoleTokMap<'_>);
     // An interpolation hole is a standalone expression; build it over a real statement parser so a
     // block-bodied closure inside a hole still parses (its block uses that statement grammar).
     //
     // This re-enters the **whole** grammar *deep* in the enclosing parse: the string literal that
-    // holds the hole is itself parsed several blocks in (a fn body, a tier block, …), so the giant
-    // grammar-combinator graph is (re)constructed on a stack already partly consumed. On a small
-    // caller stack — a ~2 MiB test thread — that construction alone can exhaust the remainder, so
-    // grow onto a fresh segment when the red zone is not free. `maybe_grow` is a no-op (no
-    // allocation) whenever ample stack remains, so the common shallow-hole case pays nothing. This
-    // is the hole-parse counterpart of the top-level [`crate::parse`]'s deep-nesting worker thread.
+    // holds the hole is itself parsed several blocks in (a fn body, a tier block, …), so on the
+    // parse's first hole the giant grammar-combinator graph is constructed on a stack already partly
+    // consumed. On a small caller stack — a ~2 MiB test thread — that construction alone can exhaust
+    // the remainder, so grow onto a fresh segment when the red zone is not free. `maybe_grow` is a
+    // no-op (no allocation) whenever ample stack remains, so the common shallow-hole case pays
+    // nothing. This is the hole-parse counterpart of the top-level [`crate::parse`]'s deep-nesting
+    // worker thread; it still wraps the parse itself, which recurses through nested holes.
     stacker::maybe_grow(HOLE_STACK_RED_ZONE, HOLE_STACK_GROW, || {
-        // A hole re-enters the whole grammar, so it builds its own type handle to share across the
-        // sites inside it (see [`crate::TypeP`]) — the enclosing parse's handle cannot be reached
-        // from here: this runs from inside a `map_with` closure, several combinator layers down.
-        let type_p = crate::type_parser(ctx).boxed();
-        let (expr, errs) = expr_parser(ctx, type_p.clone(), statement_parser(ctx, type_p))
-            .parse(input)
-            .into_output_errors();
+        // The parse's one hole grammar, built on the first `${…}` and shared by every later one —
+        // including a hole nested inside this one, which re-enters here mid-parse and finds it
+        // built. A combinator parser is a pure value (chumsky keeps all parse state in the input
+        // handle), so re-entering the same grammar on a different input is exactly what building a
+        // second copy of it did, minus the construction. See [`crate::Holes`].
+        let cached = ctx.holes.grammar.borrow().clone();
+        let grammar = match cached {
+            Some(g) => g,
+            None => {
+                let type_p = crate::type_parser(ctx).boxed();
+                let g = expr_parser(ctx, type_p.clone(), statement_parser(ctx, type_p)).boxed();
+                // Built outside the borrow above: construction never re-enters `parse_hole` (only a
+                // *parse* reaches a string literal), but the cell is not held across it regardless.
+                *ctx.holes.grammar.borrow_mut() = Some(g.clone());
+                g
+            }
+        };
+        let (expr, errs) = grammar.parse(input).into_output_errors();
         for err in errs {
             ctx.diags.borrow_mut().push(rich_to_diag(ctx, err));
         }
