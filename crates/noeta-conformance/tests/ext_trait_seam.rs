@@ -263,7 +263,7 @@ fn mode_dispatch(
 /// A native **struct** `Badge` — a value-kind fielded object behind a `dyn Widget` (Slice C). It
 /// advertises **two** traits through one `ExtStruct::traits` list: the native `Widget` (routed to the
 /// native-`ExtTrait` channel `seed_ext_traits`) AND the **built-in** `Comparable` (routed to
-/// `seed_native_builtin_traits`, which `record_trait_impls` filters to). The mixed list proves the
+/// `Checker::has_builtin_trait`, which filters the declared list to the closed `BuiltinTrait` set). The mixed list proves the
 /// two channels split a single `traits` declaration cleanly, and `Comparable` is the latent-bug-fix
 /// proof: before Slice C the built-in seeding walked `types()` only, so a struct/class/enum declaring
 /// a built-in trait satisfied *nothing*; now a `T: Comparable` bound accepts a `Badge`.
@@ -581,8 +581,9 @@ echo bg.describe()
 
 // Built-in-trait latent-bug fix (Slice C): `Badge` also declares the BUILT-IN `Comparable` in its
 // mixed `traits` list. Before Slice C the built-in seeding walked `types()` only, so this struct
-// satisfied NOTHING and the `<T: Comparable>` bound below was E0025. Now `seed_native_builtin_traits`
-// records it, so the bound accepts `Badge` — observable as this program checking + running clean.
+// satisfied NOTHING and the `<T: Comparable>` bound below was E0025. Now `Checker::has_builtin_trait`
+// answers over every native kind, so the bound accepts `Badge` — observable as this program
+// checking + running clean.
 fn ranked<T: Comparable>(x: T): string {
     return "ranked"
 }

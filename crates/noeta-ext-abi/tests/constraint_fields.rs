@@ -106,6 +106,10 @@ const CHECK_PRELUDE: &str = "crates/noeta-check/src/prelude.rs";
 const EVAL_LIB: &str = "crates/noeta-eval/src/lib.rs";
 const CHECK_TRAITS: &str = "crates/noeta-check/src/traits.rs";
 const CHECK_TIERS: &str = "crates/noeta-check/src/tiers.rs";
+/// The lazy **native-reflection** seam: the one place a registry declaration becomes reflection
+/// data, moved out of `noeta-check::tiers` when it stopped being materialized eagerly into every
+/// compiled artifact.
+const AST_NATIVE_REFLECT: &str = "crates/noeta-ast/src/native_reflect.rs";
 const REGISTRY: &str = "crates/noeta-ext-abi/src/registry.rs";
 const STDLIB_JSON: &str = "crates/noeta-stdlib/src/json.rs";
 const VM_NATIVE_CTX: &str = "crates/noeta-vm/src/native_ctx.rs";
@@ -295,7 +299,7 @@ const TABLE: &[Row] = &[
         Constraint(
             Anchor(
                 "crates/noeta-check/src/prelude.rs",
-                "fn seed_native_builtin_traits(",
+                "fn native_declares_builtin_trait(",
             ),
             Anchor("crates/noeta-check/src/tests.rs", "Comparable"),
         ),
@@ -371,7 +375,7 @@ const TABLE: &[Row] = &[
     // of `ExtType::traits` / `ExtFielded::traits`, uniform across every native kind. A native-trait
     // name is recorded by `seed_ext_traits` into `user_trait_impls[qualified][trait]` so a native
     // enum value coerces to `dyn Trait` and its trait-method call dispatches to native code
-    // (`call_native_enum_method`); a built-in name is filtered off to `seed_native_builtin_traits`.
+    // (`call_native_enum_method`); a built-in name is answered on the lookup by `Checker::has_builtin_trait`.
     // No shipped extension declares a native enum with traits, so the `ext_trait_seam` dynamic-
     // dispatch test (a native `Mode` enum behind `dyn Widget`) is the only exerciser.
     Row(
@@ -748,7 +752,7 @@ const TABLE: &[Row] = &[
         "ExtAttrField",
         "default",
         Constraint(
-            Anchor(CHECK_TIERS, "AttrFieldDefault::"),
+            Anchor(AST_NATIVE_REFLECT, "AttrFieldDefault::"),
             Anchor("tests/conformance/tiers/test_attrs_strip.noe", "expect:"),
         ),
     ),
@@ -760,7 +764,7 @@ const TABLE: &[Row] = &[
     Row(
         "ExtAttribute",
         "fields",
-        Data(Anchor(CHECK_TIERS, "ext_attributes()")),
+        Data(Anchor(AST_NATIVE_REFLECT, "ext_attributes()")),
     ),
     // The attribute's namespace is its qualified identity's prefix: it projects through the one
     // `nominal_types` stream as a Struct-kind nominal, which is what makes `use std.test.{Skip}`
