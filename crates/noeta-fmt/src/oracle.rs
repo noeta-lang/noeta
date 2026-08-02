@@ -19,6 +19,15 @@
 //! corpus (real programs, one fixed layout each); the `noeta-fuzz` crate runs it over generated
 //! programs (unbounded shapes, randomized layout and config). Same contract, two input sources — so
 //! a property proved on the corpus cannot silently weaken for the fuzzer.
+//!
+//! # Known blind spot
+//!
+//! Both comment properties read trivia from `lex_with_trivia`, and a string is a single token — so a
+//! comment written inside a `${…}` interpolation hole is invisible here. The printer drops such a
+//! comment outright, and *this oracle reports the file clean*, because the multiset it compares is
+//! empty on both sides. The loss is observable only through idempotence, and only indirectly. See
+//! `a_comment_inside_an_interpolation_hole_survives` (ignored) in `lib.rs`; closing it requires
+//! collecting hole comments in the lexer, after which the properties here cover them with no change.
 
 use crate::{FmtConfig, FmtError, format_source};
 

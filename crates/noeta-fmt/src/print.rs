@@ -351,11 +351,22 @@ impl Printer<'_> {
     }
 
     /// If the next comment sits on the same source line as `end` (a trailing `// …` after a
-    /// statement), take it; otherwise leave it for the next node's leading set.
-    fn take_trailing(&self, end: u32) -> Option<&Comment> {
+    /// statement) **and inside `region_end`**, take it; otherwise leave it for the next node's
+    /// leading set.
+    ///
+    /// The upper bound matters for the same reason it does in the leading scan: "same line" is not
+    /// "same region" when a construct is written inline. Every statement of
+    /// `b = "x ${fn(c) { echo a }} y" // note` is on one line, so the closure body's last item
+    /// claimed a comment written after the whole assignment and printed it *inside* the
+    /// interpolation hole. That is already a relocation, and the next format pass then dropped it
+    /// outright — comments inside a hole are not collected as trivia, so nothing re-emitted it.
+    fn take_trailing(&self, end: u32, region_end: u32) -> Option<&Comment> {
         let i = self.cursor.get();
         let c = self.comments.get(i)?;
-        if c.span.start >= end && !self.broke_between(end, c.span.start) {
+        if c.span.start >= end
+            && c.span.start < region_end
+            && !self.broke_between(end, c.span.start)
+        {
             self.cursor.set(i + 1);
             Some(c)
         } else {
@@ -416,7 +427,7 @@ impl Printer<'_> {
                 let blank = !lines.is_empty() && self.blank_between(last_end, span.start);
                 let mut doc = render_item(it)?;
                 last_end = span.end;
-                if let Some(tc) = self.take_trailing(span.end) {
+                if let Some(tc) = self.take_trailing(span.end, region_end) {
                     doc = Doc::concat([doc, Doc::text(" "), self.comment_doc(tc)]);
                     last_end = tc.span.end;
                 }

@@ -2090,6 +2090,46 @@ if a {
         );
     }
 
+    /// A trailing comment is claimed by the region it is *in*, not merely by the line it shares.
+    ///
+    /// `take_trailing` was bounded below but not above, so on a fully inline statement —
+    /// `b = "x ${fn(c) { echo a }} y" // note`, where everything is on one line — the closure body's
+    /// last item claimed a comment written after the whole assignment and printed it inside the
+    /// interpolation hole. Formatting again then dropped it outright, because comments inside a hole
+    /// are not collected as trivia and nothing re-emitted them; that lost fixed point is how the
+    /// fuzzer surfaced this. The leading scan already bounded its region on both sides for the same
+    /// reason.
+    #[test]
+    fn a_trailing_comment_is_not_pulled_into_an_interpolation_hole() {
+        let out = fmt("b = \"x ${fn(c) { echo a; }} y\" // note\n").expect("formats");
+        assert!(
+            out.ends_with("// note\n"),
+            "the comment was pulled inside the hole: {out}"
+        );
+        assert_eq!(fmt(&out).unwrap(), out, "and it is still idempotent");
+    }
+
+    /// **Known defect, not yet fixed:** a comment written *inside* a `${…}` interpolation hole is
+    /// silently deleted.
+    ///
+    /// A string is one lexer token, so a hole's contents are re-lexed separately by the parser and
+    /// their comments never reach `Lexed::comments`. The printer therefore has nothing to emit, and
+    /// — because the same blindness applies to `oracle::comment_texts` — the completeness property
+    /// cannot see the loss either. It surfaced only via idempotence, and only once the printer had
+    /// wrongly moved a comment *into* a hole (fixed above).
+    ///
+    /// Fixing it means re-lexing holes with trivia and threading the offset-corrected comments back
+    /// into the enclosing `Lexed`, which touches the parser's cached hole grammar and the lexer's
+    /// trivia contract. Recorded as an ignored test so the behavior is pinned and visible rather
+    /// than rediscovered: `cargo test -p noeta-fmt -- --ignored`.
+    #[test]
+    #[ignore = "known defect: hole comments are not collected as trivia; needs a lexer change"]
+    fn a_comment_inside_an_interpolation_hole_survives() {
+        let src = "b = \"x ${fn(c) {\n    // kept?\n    echo a\n}} y\"\n";
+        let out = fmt(src).expect("formats");
+        assert!(out.contains("// kept?"), "the comment was deleted: {out}");
+    }
+
     /// Every operand of a width-wrapped binary chain is rendered in **source order**, because the
     /// comment cursor is monotone and never scans backwards.
     ///
