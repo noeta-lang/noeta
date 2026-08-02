@@ -737,10 +737,18 @@ impl Checker {
             // Built-in namable types/enums (`Ordering`, `Type`, `Semantic`, iterator types, …)
             // are legitimate bare references — `Ordering.Less` names the prelude enum's variant.
             || PRELUDE_TYPES.contains(&name)
-            // A hoisted top-level global (top-level code may reference one declared later) — but
-            // NOT inside a sealed named-fn body, where top-level value bindings are out of scope
-            // unless `use (…)`-captured (captures are in the sealed env, caught by `lookup`).
-            || (!self.coloring.in_sealed_body
+            // A hoisted top-level global, referenced from a **closure body** — the one context
+            // whose evaluation is deferred past the top level's textual order, so the binding does
+            // exist by the time the body runs (`f = fn() => g`, `g = 1`, `f()`).
+            //
+            // The depth test is load-bearing. Without it the hoist also licensed references from
+            // top-level statements, which execute *now* — so `a = a` and `echo a` before `a = 1`
+            // type-checked and then died at run time with the E0005 the checker had in hand. That
+            // is the check-vs-run divergence in its worst shape: nothing underlines while typing.
+            // Not inside a sealed named-fn body either, where top-level value bindings are out of
+            // scope unless `use (…)`-captured (captures are in the sealed env, caught by `lookup`).
+            || (self.coloring.closure_depth > 0
+                && !self.coloring.in_sealed_body
                 && self.symbols.global_binding_names.contains(name))
             // A nested `fn`'s name is an item of its enclosing body — visible to recursion and
             // siblings even inside sealed bodies (a declaration, not captured value state).
@@ -935,10 +943,36 @@ impl Checker {
                 if let Some(t) = stdlib::prelude_return(name.as_str(), args) {
                     return t;
                 }
+                // `S(…)` where `S` names a struct/class/enum the program declares. The language has
+                // no call-form construction: a record is built with a literal (`S { … }`) and an
+                // associated function is called on the type (`S.new(…)`). Deferring it to the
+                // runtime meant the *first* report was `cannot find `S` in this scope` — which
+                // blames the type rather than the call form, so it reads as a missing import.
+                //
+                // Same closed-world reasoning, and the same diagnostic, as the `Type.assoc(…)`
+                // case below: for a type the program itself declares, "this is not one of its
+                // forms" is knowable now. The exclusions ride on `user_type_is_closed` — a native
+                // type's members live in the extension registry, and a shadowing binding means the
+                // name is a value here, not a type.
+                if lookup(env, name.as_str()).is_none()
+                    && user_type_is_closed(self, &Type::Named(name.to_string(), Vec::new()))
+                {
+                    let shown = Type::Named(name.to_string(), Vec::new());
+                    self.error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!("type `{shown}` is not callable"),
+                    )
+                    .help(format!(
+                        "build one with a literal (`{shown} {{ … }}`), or call an associated \
+                         function on the type (`{shown}.new(…)`)"
+                    ));
+                    return Type::Unknown;
+                }
                 // Not a user fn, import, or prelude free function. A local (a closure value) or a
-                // module/type name called here stays deferred to the runtime (a local closure's
-                // args are not statically checked, unchanged); a name that resolves to *nothing*
-                // is a genuinely undefined callee — a static `E0005` (F1), so a typo is caught at
+                // module name called here stays deferred to the runtime (a local closure's args
+                // are not statically checked, unchanged); a name that resolves to *nothing* is a
+                // genuinely undefined callee — a static `E0005` (F1), so a typo is caught at
                 // check time instead of failing at runtime. A session defers (a later entry may
                 // define it).
                 if !self.config.session_mode && !self.is_known_name(name.as_str(), env) {
@@ -2057,6 +2091,12 @@ pub(crate) fn closed_to_new_methods(ty: &Type) -> bool {
             | Type::Set(_)
             | Type::Option(_)
             | Type::Result(_, _)
+            // Structural, and closed for the same reason the scalars are: an `impl` names a
+            // record/class/enum, and neither of these is one, so nothing can add a member after the
+            // fact. Their absence let `f.len()` on a closure and `t.nope()` on a tuple type-check
+            // and then abort with the runtime's "no method `len` on function".
+            | Type::Fn { .. }
+            | Type::Tuple(_)
     )
 }
 

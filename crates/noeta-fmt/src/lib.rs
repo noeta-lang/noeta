@@ -68,6 +68,7 @@ use noeta_span::{Source, SourceId};
 // width-driven groups (`wrap = true`) both lower onto it.
 mod config;
 mod doc;
+pub mod oracle;
 mod print;
 mod safety;
 mod trivia;
@@ -2018,6 +2019,190 @@ struct Marker {
         let out = fmt(src).unwrap();
         assert_eq!(out, src, "fmt moved a comment out of an empty body");
         assert_eq!(fmt(&out).unwrap(), out, "and it is still idempotent");
+    }
+
+    /// A comment between an `else` and the `if` it wraps keeps the braces open.
+    ///
+    /// The same failure as [`a_comment_alone_in_a_body_keeps_the_body_open`], one construct along.
+    /// `else_body` is `Option<Vec<Stmt>>`, so `else if c { … }` and `else { if c { … } }` are the
+    /// *same tree*; the printer emits the inline `else if` spelling for both. But the inline path
+    /// emits no block, so there is no region for the comment interleave to walk, and a comment the
+    /// author wrote above the nested `if` stayed pending until the enclosing scope drained it — at
+    /// the end of the file. Falling back to the braced spelling when such a comment exists costs
+    /// nothing (the tree is identical, so the safety gate sees no change) and keeps the note where
+    /// it was written. Found by `noeta-fuzz`.
+    #[test]
+    fn a_comment_between_else_and_its_if_keeps_the_braces() {
+        let src = "\
+if a {
+    echo 1
+} else {
+    // why the nested case is handled separately
+    if b {
+        echo 2
+    }
+}
+";
+        let out = fmt(src).unwrap();
+        assert_eq!(out, src, "fmt moved a comment out of an else block");
+        assert_eq!(fmt(&out).unwrap(), out, "and it is still idempotent");
+    }
+
+    /// With no comment in the way, the `else { if … }` spelling still collapses to `else if …` —
+    /// the counter-case that keeps the fix above from disabling the resugar outright.
+    #[test]
+    fn an_uncommented_else_block_still_collapses_to_else_if() {
+        let out = fmt("if a {\n    echo 1\n} else {\n    if b {\n        echo 2\n    }\n}\n")
+            .expect("formats");
+        assert_eq!(out, "if a {\n    echo 1\n} else if b {\n    echo 2\n}\n");
+    }
+
+    /// The other gap the inline `else if` erases: a comment *after* the nested if-chain but still
+    /// inside the else block. The first fix only guarded the head of the block, so this one still
+    /// escaped — one nesting level shallower than it was written.
+    #[test]
+    fn a_comment_after_the_nested_if_keeps_the_else_braces() {
+        let src = "\
+if a {
+    echo 1
+} else {
+    if b {
+        echo 2
+    }
+    // and that is all the cases
+}
+";
+        let out = fmt(src).unwrap();
+        assert_eq!(out, src, "fmt moved a comment out of an else block");
+        assert_eq!(fmt(&out).unwrap(), out, "and it is still idempotent");
+    }
+
+    /// A comment *inside* the nested `if` is not at risk — its own block walks it — so the resugar
+    /// must still collapse there. Without this, the guard would suppress `else if` for almost every
+    /// commented branch in the corpus.
+    #[test]
+    fn a_comment_inside_the_nested_if_still_collapses_to_else_if() {
+        let out = fmt("if a {\n    echo 1\n} else {\n    if b {\n        // inner\n        echo 2\n    }\n}\n")
+            .expect("formats");
+        assert_eq!(
+            out,
+            "if a {\n    echo 1\n} else if b {\n    // inner\n    echo 2\n}\n"
+        );
+    }
+
+    /// A trailing comment is claimed by the region it is *in*, not merely by the line it shares.
+    ///
+    /// `take_trailing` was bounded below but not above, so on a fully inline statement —
+    /// `b = "x ${fn(c) { echo a }} y" // note`, where everything is on one line — the closure body's
+    /// last item claimed a comment written after the whole assignment and printed it inside the
+    /// interpolation hole. Formatting again then dropped it outright, because comments inside a hole
+    /// are not collected as trivia and nothing re-emitted them; that lost fixed point is how the
+    /// fuzzer surfaced this. The leading scan already bounded its region on both sides for the same
+    /// reason.
+    #[test]
+    fn a_trailing_comment_is_not_pulled_into_an_interpolation_hole() {
+        let out = fmt("b = \"x ${fn(c) { echo a; }} y\" // note\n").expect("formats");
+        assert!(
+            out.ends_with("// note\n"),
+            "the comment was pulled inside the hole: {out}"
+        );
+        assert_eq!(fmt(&out).unwrap(), out, "and it is still idempotent");
+    }
+
+    /// A comment in an `else` branch stays in the `else` branch — including inside a `${…}` hole.
+    ///
+    /// `else_between` locates the `else` dividing an `if`'s two blocks by searching the printer's
+    /// token list, and a string is a single token, so inside a hole there was no `ElseKw` to find.
+    /// Finding none, the then-block's region widened to the whole statement — and an *empty* then
+    /// branch then swallowed the **else** branch's comment and printed it in the wrong branch,
+    /// attached to the opposite condition. Outside a hole the same input has always been correct,
+    /// which is what made this invisible: the defect needed the keyword to be unlexed.
+    ///
+    /// Uncovered by fixing hole-comment collection — the comment had to become visible before it
+    /// could be seen going to the wrong place.
+    #[test]
+    fn a_comment_in_an_else_branch_stays_there_inside_a_hole() {
+        let src = "v = \"${fn(c) {\n    if a {} else if b {\n        /* note */\n    }\n}} x\"\n";
+        let out = fmt(src).expect("formats");
+        let else_at = out.find("else").expect("else survives");
+        let comment_at = out.find("/* note */").expect("comment survives");
+        assert!(
+            comment_at > else_at,
+            "the comment moved out of the else branch: {out}"
+        );
+        assert_eq!(fmt(&out).unwrap(), out, "and it is still idempotent");
+    }
+
+    /// A comment written *inside* a `${…}` interpolation hole survives, in place.
+    ///
+    /// A string is one lexer token, so a hole's contents used to reach no trivia consumer at all:
+    /// the printer had nothing to emit and deleted the comment, and — the same blindness — the
+    /// completeness oracle could not see the loss and called such files clean. It surfaced only
+    /// through idempotence. `lex_with_trivia` now re-lexes each hole and rebases its comments onto
+    /// the enclosing source.
+    ///
+    /// Both halves of a hole are covered: a comment inside a *block* within the hole is walked by
+    /// that block's own region, while one in the gap around the expression belongs to no region and
+    /// is emitted by `hole_gap_comments`.
+    #[test]
+    fn a_comment_inside_an_interpolation_hole_survives() {
+        for src in [
+            // Inside a block within the hole — the shape the fuzzer found.
+            "b = \"x ${fn(c) {\n    // kept\n    echo a\n}} y\"\n",
+            // In the gap before the expression, both comment forms.
+            "b = \"x ${ // kept\n  a} y\"\n",
+            "b = \"x ${/* kept */ a} y\"\n",
+            // And after it.
+            "b = \"x ${a /* kept */} y\"\n",
+        ] {
+            let out = fmt(src).expect("formats");
+            assert!(out.contains("kept"), "the comment was deleted: {out}");
+            assert_eq!(fmt(&out).unwrap(), out, "and it is still idempotent: {out}");
+        }
+    }
+
+    /// Every operand of a width-wrapped binary chain is rendered in **source order**, because the
+    /// comment cursor is monotone and never scans backwards.
+    ///
+    /// The `wrap = true` arm rendered the tail operands before the head, which parked the cursor on
+    /// a comment belonging to the head. `interleave_comments` only ever inspects `comments[cursor]`,
+    /// so the tail operand's own region saw a comment positioned *before* it, rejected it as out of
+    /// region, and emitted nothing — the second closure body printed as `{}` and its comment was
+    /// flushed at end of file. Found by `noeta-fuzz`; the corpus contains no file that puts a
+    /// comment inside each side of a wrapped binary operator.
+    #[test]
+    fn both_sides_of_a_wrapped_binary_keep_their_comments() {
+        let src = "\
+v = each(fn(i) {
+    // left
+}) + map(fn(k) {
+    // right
+})
+";
+        let config = FmtConfig {
+            wrap: true,
+            line_width: 60,
+            ..FmtConfig::default()
+        };
+        let out = format_source("t.noe", src, &config).expect("formats");
+        assert!(
+            out.contains("// left") && out.contains("// right"),
+            "a comment was dropped: {out}"
+        );
+        // Neither comment may escape to the top level: both stay indented inside their closure.
+        for line in out.lines() {
+            if line.contains("//") {
+                assert!(
+                    line.starts_with(' ') || line.starts_with('\t'),
+                    "a comment escaped its closure body: {out}"
+                );
+            }
+        }
+        assert_eq!(
+            format_source("t.noe", &out, &config).expect("re-formats"),
+            out,
+            "and it is still idempotent"
+        );
     }
 
     /// A `@<tier>` block the author **braced** keeps its braces, and its comments stay inside them.

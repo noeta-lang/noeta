@@ -1149,6 +1149,19 @@ impl Checker {
                 ));
                 Type::Unknown
             }
+            // A bare `none` in a position with no `Option` expectation to absorb (the check-mode arm
+            // above handles that one) is still an `Option` — with an unfilled payload, but an
+            // `Option`. It used to synthesize a plain hole, and a hole subsumes into *anything*: so
+            // `q: int = none`, `f(none)` against a declared `int`, and `P { n: none }` on an `int`
+            // field all type-checked and then aborted with `cannot apply `+` to enum and int`. The
+            // language has no implicit wrapping — `q: ?int = 1` is rejected — so `none` standing in
+            // for an `int` was never going to work at run time.
+            //
+            // The payload stays `Unknown`, which is what keeps `[some(1), none]` unifying to
+            // `List<?int>` and `x: ?T = none` absorbing at any `T`.
+            Expr::Ident { name, .. } if name == "none" && lookup(env, name.as_str()).is_none() => {
+                Type::Option(Box::new(Type::Unknown))
+            }
             Expr::Ident { name, span } => match lookup(env, name.as_str())
                 .cloned()
                 // A bare user-function reference is a first-class value of its **full** signature

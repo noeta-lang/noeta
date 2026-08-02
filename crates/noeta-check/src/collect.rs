@@ -287,6 +287,21 @@ impl Checker {
         // (`desk.tools.find_order`), and what a binding could collide with is the last segment, which
         // is how the source spells it. Recorded after the imports pass so a declaration's own word
         // wins over an import's for the same name.
+        // Two top-level declarations under one name (E0020). The registration below is a map
+        // insert, so the second silently replaces the first — and then the compiler looks up a
+        // method of the *first* class in the second's now-empty table and panics on the missing
+        // key. The name is also simply ambiguous: nothing downstream can say which declaration a
+        // reference meant.
+        //
+        // Scoped to a single **source**, which is what makes this rule right rather than merely
+        // strict. Two declarations in one file are unambiguously a mistake. Two in different files
+        // are not this pass's business: the loader qualifies a package module's declarations and
+        // has its own E0020 for the cases that do collide, and a REPL session legitimately
+        // *redeclares* a type at a later prompt — each entry is its own source, and the session
+        // oracle holds a whole-program re-check of the accumulated entries to the same verdict.
+        //
+        // Keyed on the FULL name rather than the local spelling for the same reason.
+        let mut declared: HashMap<(&str, noeta_span::SourceId), Span> = HashMap::new();
         for stmt in &program.stmts {
             let (name, span, what) = match stmt {
                 Stmt::Fn(d) => (d.name.as_str(), d.span, "a top-level function"),
@@ -297,6 +312,15 @@ impl Checker {
             };
             let local = name.rsplit('.').next().unwrap_or(name).to_string();
             self.note_static(span, &local, what);
+            if let Some(first) = declared.insert((name, span.source), span) {
+                self.error(
+                    DiagnosticCode::NameCollision,
+                    span,
+                    format!("`{local}` is already declared in this module"),
+                )
+                .label(first, "the first declaration is here")
+                .help("rename one of them — a reference to the name is otherwise ambiguous");
+            }
         }
         for stmt in &program.stmts {
             match stmt {

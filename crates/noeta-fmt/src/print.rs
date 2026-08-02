@@ -317,23 +317,57 @@ struct Printer<'a> {
 }
 
 /// The `(start, kind)` of every non-`;` token in `source`, in order — the lookup behind
-/// [`Printer::layout_terminates`]. Explicit `;` are dropped so a search finds the next *content*
-/// token, and the natural token order keeps the vec sorted by `start` for a partition search.
+/// [`Printer::layout_terminates`] and [`Printer::else_between`]. Explicit `;` are dropped so a
+/// search finds the next *content* token, and the natural token order keeps the vec sorted by
+/// `start` for a partition search.
+///
+/// **`${…}` hole contents are spliced in.** A string is a single token, so without this the interior
+/// of a hole is invisible to every lookup built on this vec — and one of them decides a region
+/// boundary. `else_between` locates the `else` dividing an `if`'s two blocks; finding none, the
+/// then-block's region was widened to the whole statement, so an *empty* then-branch swallowed the
+/// **else** branch's comment and printed it in the wrong branch. Only inside a hole, because only
+/// there was the keyword unlexed. Hole braces balance within the hole, so nothing outside shifts.
 fn code_tokens(
     source: &str,
     edition: noeta_lexer::Edition,
     text_tiers: &noeta_lexer::TextTiers,
 ) -> Vec<(u32, TokenKind)> {
-    noeta_lexer::lex_in(
+    let mut out = Vec::new();
+    push_code_tokens(source, 0, edition, text_tiers, &mut out);
+    out
+}
+
+/// Append `source`'s tokens (rebased by `offset`) to `out`, recursing into every interpolation hole.
+fn push_code_tokens(
+    source: &str,
+    offset: u32,
+    edition: noeta_lexer::Edition,
+    text_tiers: &noeta_lexer::TextTiers,
+    out: &mut Vec<(u32, TokenKind)>,
+) {
+    let lexed = noeta_lexer::lex_in(
         &Source::new(SourceId(0), "<fmt>", source),
         edition,
         text_tiers,
-    )
-    .tokens
-    .iter()
-    .filter(|t| t.kind != TokenKind::Semicolon)
-    .map(|t| (t.span.start, t.kind))
-    .collect()
+    );
+    for t in &lexed.tokens {
+        if t.kind != TokenKind::Semicolon {
+            out.push((t.span.start + offset, t.kind));
+        }
+        if !matches!(t.kind, TokenKind::StringLit | TokenKind::TemplateStr) {
+            continue;
+        }
+        let open = t.span.start as usize;
+        let Some(quote) = source.get(open..).and_then(|s| s.chars().next()) else {
+            continue;
+        };
+        for (hole_start, hole_end) in noeta_lexer::interpolation_holes(source, open, quote) {
+            if let Some(inner) = source.get(hole_start..hole_end) {
+                // Recurses for a hole containing a string with holes of its own.
+                push_code_tokens(inner, offset + hole_start as u32, edition, text_tiers, out);
+            }
+        }
+    }
 }
 
 impl Printer<'_> {
@@ -351,11 +385,22 @@ impl Printer<'_> {
     }
 
     /// If the next comment sits on the same source line as `end` (a trailing `// …` after a
-    /// statement), take it; otherwise leave it for the next node's leading set.
-    fn take_trailing(&self, end: u32) -> Option<&Comment> {
+    /// statement) **and inside `region_end`**, take it; otherwise leave it for the next node's
+    /// leading set.
+    ///
+    /// The upper bound matters for the same reason it does in the leading scan: "same line" is not
+    /// "same region" when a construct is written inline. Every statement of
+    /// `b = "x ${fn(c) { echo a }} y" // note` is on one line, so the closure body's last item
+    /// claimed a comment written after the whole assignment and printed it *inside* the
+    /// interpolation hole. That is already a relocation, and the next format pass then dropped it
+    /// outright — comments inside a hole are not collected as trivia, so nothing re-emitted it.
+    fn take_trailing(&self, end: u32, region_end: u32) -> Option<&Comment> {
         let i = self.cursor.get();
         let c = self.comments.get(i)?;
-        if c.span.start >= end && !self.broke_between(end, c.span.start) {
+        if c.span.start >= end
+            && c.span.start < region_end
+            && !self.broke_between(end, c.span.start)
+        {
             self.cursor.set(i + 1);
             Some(c)
         } else {
@@ -416,7 +461,7 @@ impl Printer<'_> {
                 let blank = !lines.is_empty() && self.blank_between(last_end, span.start);
                 let mut doc = render_item(it)?;
                 last_end = span.end;
-                if let Some(tc) = self.take_trailing(span.end) {
+                if let Some(tc) = self.take_trailing(span.end, region_end) {
                     doc = Doc::concat([doc, Doc::text(" "), self.comment_doc(tc)]);
                     last_end = tc.span.end;
                 }
@@ -595,6 +640,22 @@ impl Printer<'_> {
         self.comments
             .get(self.cursor.get())
             .is_some_and(|c| c.span.start >= start && c.span.start < end)
+    }
+
+    /// Whether **any** pending comment falls in `[start, end)`.
+    ///
+    /// [`Self::holds_comment`] inspects only the comment under the cursor, which answers "does this
+    /// region open with a comment". Where the region of interest is not the next one the printer
+    /// will reach — the tail of an `else` block, past the nested `if` that occupies its head — the
+    /// scan has to look further ahead. Comments are in source order, so it stops at the first one
+    /// past `end`.
+    fn any_comment_in(&self, start: u32, end: u32) -> bool {
+        self.comments
+            .get(self.cursor.get()..)
+            .unwrap_or(&[])
+            .iter()
+            .take_while(|c| c.span.start < end)
+            .any(|c| c.span.start >= start)
     }
 
     // ---- statements --------------------------------------------------------------------------
@@ -1011,16 +1072,38 @@ impl Printer<'_> {
             // here, and blank-line detection measures from the right place).
             let else_start = else_kw.unwrap_or(then_close);
             // `else if` — the else body is a single nested `If`; print it inline (no extra braces).
+            //
+            // Unless the author wrote a comment between the `else` and that `if`. The inline path
+            // emits no block, so there is no region for `interleave_comments` to walk and the
+            // comment stays pending until the *enclosing* scope drains it — which put a note
+            // explaining the nested branch at the end of the file. Falling back to the braced form
+            // keeps it exactly where it was written, and costs nothing: `else_body` is
+            // `Option<Vec<Stmt>>`, so `else if c { … }` and `else { if c { … } }` are the same tree
+            // and the safety gate sees no difference. Same failure shape as the empty-body case
+            // `holds_comment` was introduced for.
             if let [
                 Stmt::If {
-                    cond,
-                    then_body,
-                    else_body,
-                    span,
+                    cond: nested_cond,
+                    then_body: nested_then,
+                    else_body: nested_else,
+                    span: nested_span,
                 },
             ] = else_body
+                // No comment may be stranded in either gap the inline form erases: between the
+                // `else` and the nested `if`, or between the end of that if-chain and the block's
+                // own closing brace. Comments *inside* the nested if are not at risk — its own
+                // blocks walk them — which is why the two gaps are tested rather than the whole
+                // else region, whose wider test would suppress the resugar for almost every
+                // commented branch.
+                && !self.any_comment_in(else_start, nested_span.start)
+                && !self.any_comment_in(nested_span.end, span.end)
             {
-                parts.push(self.if_stmt(cond, then_body, else_body.as_deref(), *span)?);
+                parts.push(self.if_stmt(
+                    nested_cond,
+                    nested_then,
+                    nested_else.as_deref(),
+                    *nested_span,
+                )?);
             } else {
                 parts.push(self.block(else_body, else_start, span.end)?);
             }
@@ -1917,7 +2000,17 @@ impl Printer<'_> {
     /// marks the right operand of a left-associative operator (which needs parentheses at equal
     /// precedence). Inserts the minimum parentheses that preserve the parse.
     fn operand(&self, e: &Expr, parent_prec: u8, is_right: bool) -> Result<Doc, FmtError> {
-        let cp = prec(e);
+        // A `match` that will print back as `if c then a else b` is not the self-delimiting node
+        // `prec` takes every `Expr::Match` to be: the resugared form's `else` branch has no closing
+        // delimiter and runs to the end of the enclosing expression, so `(if c then 1 else 2) + 3`
+        // would print as `if c then 1 else 2 + 3` — a conditional whose else-branch is `2 + 3`.
+        // Binding power 0 parenthesizes it in every operand position; see the `Expr::Closure` arm of
+        // `prec` for the same shape and the same reasoning. A *literal* `match` is genuinely
+        // brace-delimited and keeps the maximal power.
+        let cp = match e {
+            Expr::Match { arms, span, .. } if self.is_conditional_desugar(arms, *span) => 0,
+            _ => prec(e),
+        };
         let need_parens = cp < parent_prec || (cp == parent_prec && is_right);
         let doc = self.expr(e)?;
         Ok(if need_parens {
@@ -1972,18 +2065,39 @@ impl Printer<'_> {
             }
         }
         chunks.reverse();
-        chunks
-            .iter()
-            .any(|c| {
-                matches!(
-                    c,
-                    Expr::Unary {
-                        op: noeta_ast::UnaryOp::Spread,
-                        ..
-                    }
-                )
-            })
-            .then_some(chunks)
+        // Every chunk must be one the desugar could have produced, or this is not a literal at all
+        // but a literal *concatenated with something else* — the two bottom out in the same
+        // synthetic empty list, so walking the `~` chain alone cannot tell them apart.
+        //
+        // `v = [...a] ~ c` was resugared to `[...a, c]`, and `v = [...a] ~ []` to `[...a]`, both of
+        // which drop a `Concat` node the author wrote; the safety gate caught the changed AST and
+        // refused to format the file. Two conditions restore the distinction:
+        //
+        // * a chunk is a `Spread` or a **non-empty** `List` — the desugar groups plain elements and
+        //   never emits an empty group, so an empty `List` chunk is an author's `~ []`, and an
+        //   `Ident` (or anything else) is an author's `~ c`;
+        // * at least one chunk is a `Spread`, as before, since that node is only ever produced here.
+        //
+        // `[...a] ~ [b]` stays accepted and prints as `[...a, b]` — those two spellings desugar to
+        // the *same* tree, so either is a faithful rendering of it.
+        let plausible_chunk = |c: &&Expr| match c {
+            Expr::Unary {
+                op: noeta_ast::UnaryOp::Spread,
+                ..
+            } => true,
+            Expr::List { items, .. } => !items.is_empty(),
+            _ => false,
+        };
+        let has_spread = chunks.iter().any(|c| {
+            matches!(
+                c,
+                Expr::Unary {
+                    op: noeta_ast::UnaryOp::Spread,
+                    ..
+                }
+            )
+        });
+        (has_spread && chunks.iter().all(plausible_chunk)).then_some(chunks)
     }
 
     /// Flatten a left-nested chain of **same-precedence** binary operators — `((a + b) - c) + d` →
@@ -2363,17 +2477,22 @@ impl Printer<'_> {
             {
                 let p = binop_prec(*op);
                 let (head, rest) = self.flatten_binary(*op, lhs, rhs);
+                // The head is rendered **first**, before the tail operands, because the comment
+                // cursor is monotone: it walks `self.comments` in source order and never scans
+                // backwards. Rendering the tail first parked the cursor on a comment belonging to
+                // the head, and `interleave_comments` only ever inspects `comments[cursor]` — so a
+                // tail operand's own region found a comment positioned *before* it, rejected it as
+                // out of region, and emitted nothing at all. `a(fn() { /* x */ }) + b(fn() { /* y */ })`
+                // printed the second closure body as `{}` and flushed `y` at end of file.
+                // See `if_then_else_form`, which documents the same constraint for its branches.
+                let head_doc = self.operand(head, p, false)?;
                 let mut tail = Vec::new();
                 for (o, operand) in rest {
                     tail.push(Doc::line());
                     tail.push(Doc::text(format!("{} ", o.symbol())));
                     tail.push(self.operand(operand, p, true)?);
                 }
-                Doc::concat([
-                    self.operand(head, p, false)?,
-                    Doc::concat(tail).nest(self.indent_step()),
-                ])
-                .group()
+                Doc::concat([head_doc, Doc::concat(tail).nest(self.indent_step())]).group()
             }
             Expr::Binary { op, lhs, rhs, .. } => {
                 let p = binop_prec(*op);
@@ -2408,17 +2527,17 @@ impl Printer<'_> {
                 // Width-driven: flatten the whole `a |> b |> c` chain into one group so it lays out
                 // flat when it fits and one stage per line (indented) when it does not.
                 let (head, stages) = flatten_pipeline(left, right);
+                // Head first, for the same reason as the binary arm above: the comment cursor is
+                // monotone, so every operand must be rendered in source order or a later stage's
+                // region silently emits none of its comments.
+                let head_doc = self.operand(head, 1, false)?;
                 let mut tail = Vec::new();
                 for s in stages {
                     tail.push(Doc::line());
                     tail.push(Doc::text("|> "));
                     tail.push(self.operand(s, 1, true)?);
                 }
-                Doc::concat([
-                    self.operand(head, 1, false)?,
-                    Doc::concat(tail).nest(self.indent_step()),
-                ])
-                .group()
+                Doc::concat([head_doc, Doc::concat(tail).nest(self.indent_step())]).group()
             }
             Expr::Pipeline { left, right, .. } => {
                 // Source-directed: break at the operator only where the author did.
@@ -2518,7 +2637,7 @@ impl Printer<'_> {
             ]),
             Expr::Interp { parts, span } => match self.backtick_verbatim(*span) {
                 Some(doc) => doc,
-                None => self.interp(parts)?,
+                None => self.interp(parts, *span)?,
             },
             Expr::Closure {
                 params,
@@ -3032,7 +3151,7 @@ impl Printer<'_> {
         }
     }
 
-    fn interp(&self, parts: &[StrPart]) -> Result<Doc, FmtError> {
+    fn interp(&self, parts: &[StrPart], span: Span) -> Result<Doc, FmtError> {
         let mut s = String::from("\"");
         let mut docs: Vec<Doc> = Vec::new();
         let flush = |s: &mut String, docs: &mut Vec<Doc>| {
@@ -3040,13 +3159,35 @@ impl Printer<'_> {
                 docs.push(Doc::text(std::mem::take(s)));
             }
         };
+        // A hole's *expression* carries its comments through its own regions (a block body walks
+        // them), but a comment in the gap around that expression — `${ // why \n x }` — belongs to
+        // no region at all, so the bounds have to come from the same scanner the lexer used.
+        let quote = self.source[span.start as usize..]
+            .chars()
+            .next()
+            .unwrap_or('"');
+        let holes = noeta_lexer::interpolation_holes(self.source, span.start as usize, quote);
+        let mut hole_idx = 0usize;
         for part in parts {
             match part {
                 StrPart::Literal(lit) => s.push_str(&escape(lit)),
                 StrPart::Hole(expr) => {
+                    let bounds = holes.get(hole_idx).copied();
+                    hole_idx += 1;
                     s.push_str("${");
                     flush(&mut s, &mut docs);
-                    docs.push(self.expr(expr)?);
+                    if let Some((hole_start, hole_end)) = bounds {
+                        self.hole_gap_comments(
+                            &mut docs,
+                            hole_start as u32,
+                            expr.span().start,
+                            true,
+                        );
+                        docs.push(self.expr(expr)?);
+                        self.hole_gap_comments(&mut docs, expr.span().end, hole_end as u32, false);
+                    } else {
+                        docs.push(self.expr(expr)?);
+                    }
                     s.push('}');
                 }
             }
@@ -3054,6 +3195,43 @@ impl Printer<'_> {
         s.push('"');
         flush(&mut s, &mut docs);
         Ok(Doc::concat(docs))
+    }
+
+    /// Emit the pending comments in `[start, end)` — one side of the gap around a `${…}` hole's
+    /// expression. `leading` selects which side, which decides where the separator goes.
+    ///
+    /// A `//` comment cannot share a line with what follows it, so it is followed by a hard break;
+    /// a `/* … */` only needs a space. Inside a tier-body hole (`force_flat`) no newline may be
+    /// emitted at all, so the comment is left pending for the enclosing scope — the same concession
+    /// [`Self::dot_link`] makes there, and for the same reason.
+    fn hole_gap_comments(&self, docs: &mut Vec<Doc>, start: u32, end: u32, leading: bool) {
+        if self.force_flat.get() {
+            return;
+        }
+        while let Some(c) = self
+            .comments
+            .get(self.cursor.get())
+            .filter(|c| c.span.start >= start && c.span.start < end)
+            .filter(|c| self.comment_marker(c).is_none())
+        {
+            let doc = self.comment_doc(c);
+            let breaks = c.kind == noeta_lexer::CommentKind::Line;
+            if leading {
+                docs.push(doc);
+                docs.push(if breaks {
+                    Doc::hardline()
+                } else {
+                    Doc::text(" ")
+                });
+            } else {
+                docs.push(Doc::text(" "));
+                docs.push(doc);
+                if breaks {
+                    docs.push(Doc::hardline());
+                }
+            }
+            self.cursor.set(self.cursor.get() + 1);
+        }
     }
 
     /// An anonymous closure. `span` is the whole `fn(…) { … }` expression, and it is what lets a
@@ -3107,11 +3285,7 @@ impl Printer<'_> {
         arms: &[MatchArm],
         span: Span,
     ) -> Result<Option<Doc>, FmtError> {
-        if arms.len() != 2 || !self.source_starts_with_if(span) {
-            return Ok(None);
-        }
-        // The desugar never produces guarded arms; a guard means a literal (guarded) `match`.
-        if arms.iter().any(|a| a.guard.is_some()) {
+        if !self.is_conditional_desugar(arms, span) {
             return Ok(None);
         }
         // `cond_end` is the byte the condition's source ends at — the start of the ` then ` gap. The
@@ -3207,6 +3381,34 @@ impl Printer<'_> {
     /// Whether the source at `span.start` begins with the `if` keyword as a whole token — so an
     /// identifier like `iffy` is not mistaken for it. Used to tell a desugared conditional from a
     /// literal `match` (both are `Expr::Match`), relying on fmt seeing only freshly parsed source.
+    /// Whether this `match` node is the parser's `if … then … else` desugar — i.e. whether
+    /// [`Self::if_then_else_form`] will reconstruct the surface conditional rather than printing a
+    /// literal `match`.
+    ///
+    /// Split out because two callers need the same answer for different reasons: the printer, to
+    /// choose the form, and [`Self::operand`], to decide parentheses. The two forms have opposite
+    /// delimiting behavior — `match x { … }` closes with a brace, while `if c then a else b` has an
+    /// `else` branch that runs to the end of the enclosing expression — so a single shared
+    /// predicate is what keeps the paren decision from disagreeing with the form actually printed.
+    fn is_conditional_desugar(&self, arms: &[MatchArm], span: Span) -> bool {
+        arms.len() == 2
+            && self.source_starts_with_if(span)
+            // The desugar never produces guarded arms; a guard means a literal (guarded) `match`.
+            && arms.iter().all(|a| a.guard.is_none())
+            && matches!(
+                (&arms[0].pattern, &arms[1].pattern),
+                (
+                    Pattern::Bool { value: true, .. },
+                    Pattern::Bool { value: false, .. }
+                ) | (Pattern::IsType { .. }, Pattern::Wildcard { .. })
+            )
+            // A block arm cannot be the parser's if-then-else desugar.
+            && matches!(
+                (&arms[0].body, &arms[1].body),
+                (ClosureBody::Expr(_), ClosureBody::Expr(_))
+            )
+    }
+
     fn source_starts_with_if(&self, span: Span) -> bool {
         self.source
             .get(span.start as usize..)
@@ -3741,6 +3943,24 @@ fn prec(e: &Expr) -> u8 {
         // Because this only ever LOWERS the reported binding power, it can add parentheses that
         // preserve a parse and can never remove ones that were holding one together.
         Expr::TypeTest { .. } => 5,
+        // An **arrow** closure, `fn(x) => body`. Its body is an expression with no closing
+        // delimiter, so it extends as far to the right as the grammar allows: printing
+        // `(fn() => 1) + 3` without the parentheses yields `fn() => 1 + 3`, a closure whose body is
+        // `1 + 3`. Different AST, different meaning, and — before this — a safety-gate refusal on
+        // every file containing the shape.
+        //
+        // Reporting 0 (below every operator, `|>` at 1 included) parenthesizes it in every operand
+        // position. That is one pair of parentheses more than strictly necessary where nothing
+        // follows the closure — `x |> (fn(y) => y)` — which is the same trade the `is` case above
+        // makes, and for the same reason: lowering a binding power can only ever add parentheses
+        // that preserve a parse, never remove ones that were holding one together.
+        //
+        // A **block**-bodied closure, `fn(x) { … }`, is genuinely self-delimiting — it ends at its
+        // `}` — so it keeps the maximal binding power the fallthrough gives it.
+        Expr::Closure {
+            body: ClosureBody::Expr(..),
+            ..
+        } => 0,
         // Postfix-position forms (bind tightest among operators).
         Expr::Call { .. }
         | Expr::Member { .. }

@@ -2720,6 +2720,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "noeta-fuzz"
+version = "0.4.1"
+dependencies = [
+ "noeta-backend",
+ "noeta-bundle",
+ "noeta-bytecode",
+ "noeta-check",
+ "noeta-compiler",
+ "noeta-conformance",
+ "noeta-diagnostics",
+ "noeta-fmt",
+ "noeta-lexer",
+ "noeta-parser",
+ "noeta-span",
+ "noeta-stdlib",
+ "noeta-vm",
+ "proptest",
+]
+
+[[package]]
 name = "noeta-gc"
 version = "0.4.1"
 dependencies = [

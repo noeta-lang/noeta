@@ -456,7 +456,44 @@ impl Checker {
             // `for (a, b, …) in …` destructures each iterated **tuple** element positionally
             // (object-model slice 4b — `.enumerate()` yields `(int, T)` tuples). Each name binds to
             // its element type when the element is a known tuple, else `dyn`.
-            ForPattern::Tuple { names, .. } => {
+            ForPattern::Tuple { names, span } => {
+                // The destructure is only possible if the element really is a tuple with a
+                // position for every name. When the element type is *resolved* the checker can
+                // settle that here, and it has to: binding the misses to a hole let
+                // `for (a, b) in [1, 2, 3]` type-check and then abort at run time with
+                // "tuple index `0` is out of range for int" — a static fact reported by the VM.
+                //
+                // A hole stays silent. An element type the checker could not resolve (a `dyn` or
+                // gradual source) is the documented deferral, and "not known to be a tuple" is not
+                // "known not to be one". Extra tuple elements are fine — the pattern may bind a
+                // prefix — so only a *shortfall* is an error.
+                let positions = match &elem {
+                    Type::Tuple(els) => Some(els.len()),
+                    Type::Unknown => None,
+                    _ if elem.contains_unknown() => None,
+                    _ => Some(0),
+                };
+                if let Some(have) = positions
+                    && have < names.len()
+                {
+                    let detail = if have == 0 {
+                        format!("each element is `{elem}`, which is not a tuple")
+                    } else {
+                        format!("each element is `{elem}`, which has {have}")
+                    };
+                    self.error(
+                        DiagnosticCode::TypeMismatch,
+                        *span,
+                        format!(
+                            "this pattern destructures {} tuple positions, but {detail}",
+                            names.len()
+                        ),
+                    )
+                    .help(
+                        "iterate the values directly (`for x in …`), or produce tuples first \
+                         (e.g. `for (i, x) in xs.enumerate()`)",
+                    );
+                }
                 for (i, (name, name_span)) in names.iter().enumerate() {
                     self.check_reserved_name(name, *name_span);
                     self.check_shadow(name, *name_span, env, crate::ShadowScopes::All);

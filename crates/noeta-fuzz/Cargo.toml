@@ -1,0 +1,35 @@
+[package]
+name = "noeta-fuzz"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+noeta-bundle = { workspace = true }
+noeta-bytecode = { workspace = true }
+noeta-compiler = { workspace = true }
+noeta-lexer = { workspace = true }
+noeta-parser = { workspace = true }
+noeta-span = { workspace = true }
+noeta-fmt = { workspace = true }
+# Linked for its side effect: noeta-stdlib registers the std extension set at load time, and the
+# compiler panics on its first front-end lookup if no registry is installed in the process.
+noeta-stdlib = { workspace = true }
+noeta-check = { workspace = true }
+noeta-backend = { workspace = true }
+noeta-diagnostics = { workspace = true }
+noeta-vm = { workspace = true }
+# The reference (Core-IR interpreter) side of the backend differential. Taken from the conformance
+# harness rather than re-derived here on purpose: `reference_run` threads the checker's site bundle,
+# the drop pass and the reuse pass in one specific order, and a second copy of that recipe would
+# make the two backends differ for a reason that is the harness's fault rather than the VM's.
+noeta-conformance = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[lints]
+workspace = true

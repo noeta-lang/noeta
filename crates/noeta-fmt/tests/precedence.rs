@@ -64,3 +64,90 @@ fn a_type_test_under_a_logical_operator_needs_no_parentheses() {
 fn a_tighter_operand_of_a_type_test_is_not_re_parenthesized() {
     preserved("a = 1\nb = 2\nflag = (a + b) is int\necho flag\n");
 }
+
+// --- an arrow closure's body is greedy, so it is not self-delimiting ---
+//
+// Found by `noeta-fuzz`, which generates parenthesized closures in operand positions the corpus
+// never contained. The printer's table filed every `Expr::Closure` under "atoms and self-delimiting
+// forms never need parentheses as an operand" — true of `fn(x) { … }`, false of `fn(x) => …`, whose
+// body runs to the end of the expression.
+
+/// The regression. Without the parentheses this reads back as `fn() => (1 + 3)` — a closure with a
+/// different body, not an addition — so they are load-bearing.
+#[test]
+fn an_arrow_closure_operand_keeps_its_parentheses() {
+    preserved("acc = (fn() => 1) + 3\necho acc\n");
+}
+
+/// The same shape as a receiver: `.` binds at 14, so dropping these would make `1.len()` the
+/// closure's body.
+#[test]
+fn an_arrow_closure_receiver_keeps_its_parentheses() {
+    preserved("acc = (fn(x) => x).len()\necho acc\n");
+}
+
+/// A **block**-bodied closure genuinely is self-delimiting — it ends at its `}` — so it must not be
+/// parenthesized. This is the counter-case that makes the fix a fix rather than a blanket
+/// parenthesization of every closure.
+#[test]
+fn a_block_closure_operand_is_not_parenthesized() {
+    preserved("acc = fn(x) {\n    return 1\n} + 3\necho acc\n");
+}
+
+/// Nor is a closure parenthesized where it is not an operand at all — a binding's right-hand side
+/// and a call argument are both positions where nothing can follow the body.
+#[test]
+fn a_closure_outside_an_operand_position_is_not_parenthesized() {
+    preserved("acc = fn(x) => x + 1\necho acc\n");
+    preserved("xs = [1, 2]\nacc = xs.map(fn(n) => n * 2)\necho acc\n");
+}
+
+// --- `if … then … else` is a resugared `match`, and its `else` branch is greedy ---
+//
+// Also found by `noeta-fuzz`. The parser lowers the conditional *expression* to a two-arm `match`,
+// which `prec` correctly treats as brace-delimited — but the printer resugars it back to the surface
+// `if … then … else`, which is not. The paren decision has to follow the form actually printed, so
+// both now consult one shared predicate (`is_conditional_desugar`).
+
+/// The regression. Without the parentheses this reads back as `if a then 1 else (2 + 3)` — the
+/// addition moves inside the else-branch.
+#[test]
+fn a_conditional_operand_keeps_its_parentheses() {
+    preserved("a = true\nacc = (if a then 1 else 2) + 3\necho acc\n");
+}
+
+/// The same shape as a receiver.
+#[test]
+fn a_conditional_receiver_keeps_its_parentheses() {
+    preserved("a = true\nacc = (if a then 1 else 2).to_string()\necho acc\n");
+}
+
+/// The counter-case that makes this precise rather than a blanket parenthesization of every
+/// `Expr::Match`: a **literal** `match` is genuinely brace-delimited, so it needs no parentheses as
+/// an operand — even when its arms happen to have the `true`/`false` shape the desugar produces.
+/// What distinguishes them is whether the node's source starts at `if`, which is exactly what the
+/// shared predicate tests.
+#[test]
+fn a_literal_match_operand_is_not_parenthesized() {
+    preserved("a = true\nacc = match a { true => 1, false => 2 } + 3\necho acc\n");
+}
+
+/// And a conditional outside an operand position keeps its plain surface form.
+#[test]
+fn a_conditional_outside_an_operand_position_is_not_parenthesized() {
+    preserved("a = true\nacc = if a then 1 else 2\necho acc\n");
+    preserved("d: dyn = 42\nacc = if d is int then 1 else 2\necho acc\n");
+}
+
+/// The one place the fix parenthesizes more than strictly necessary: as the *last* operand of a
+/// pipeline nothing follows the closure, so the parentheses are redundant — but "is anything to my
+/// right?" is not decidable from binding power alone, and the alternative (a precedence high enough
+/// to drop them here) would drop them on the *left* of `??` too, where they hold the parse together.
+/// Pinned so the behavior is a decision on record rather than a surprise.
+#[test]
+fn a_piped_closure_is_conservatively_parenthesized() {
+    formats_to(
+        "xs = [1, 2]\nacc = xs |> fn(n) => n\necho acc\n",
+        "xs = [1, 2]\nacc = xs |> (fn(n) => n)\necho acc\n",
+    );
+}

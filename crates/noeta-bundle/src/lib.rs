@@ -353,11 +353,25 @@ fn obfuscate(encoded: &[u8]) -> Vec<u8> {
     compressed
 }
 
-/// Reverse [`obfuscate`]: de-scramble then inflate. `Err` on a corrupt/foreign payload.
+/// The largest module payload [`deobfuscate`] will inflate to, in bytes.
+///
+/// Deflate amplifies: a payload of a few kilobytes can expand without bound, so an unbounded
+/// inflate turns a corrupt or hostile bundle into an out-of-memory abort rather than a rejection.
+/// That matters here because a bundle is read on paths with no supervision to speak of — the
+/// startup cache reads one on *every* run, and the wasm runner loads one at the edge.
+///
+/// 256 MiB is about two orders of magnitude above any real module (they run to kilobytes and low
+/// megabytes: bytecode, shapes, and a method table), so nothing that legitimately builds can reach
+/// it, while a bomb is refused with the same [`BundleError::Decode`] any other bad payload gets.
+const MAX_INFLATED: usize = 256 * 1024 * 1024;
+
+/// Reverse [`obfuscate`]: de-scramble then inflate, refusing a payload that expands past
+/// [`MAX_INFLATED`]. `Err` on a corrupt/foreign payload.
 fn deobfuscate(payload: &[u8]) -> Result<Vec<u8>, BundleError> {
     let mut buf = payload.to_vec();
     scramble(&mut buf); // XOR is its own inverse
-    miniz_oxide::inflate::decompress_to_vec(&buf).map_err(|_| BundleError::Decode)
+    miniz_oxide::inflate::decompress_to_vec_with_limit(&buf, MAX_INFLATED)
+        .map_err(|_| BundleError::Decode)
 }
 
 /// XOR `buf` in place with a SplitMix64 keystream seeded from [`SCRAMBLE_SEED`] — its own inverse.
@@ -530,6 +544,40 @@ mod tests {
         assert!(stapled_len(&runtime[runtime.len() - TRAILER_LEN..]).is_none());
         // Too short to even hold a trailer.
         assert!(extract_stapled(b"tiny").is_none());
+    }
+
+    /// A payload that inflates past [`MAX_INFLATED`] is rejected, not allocated.
+    ///
+    /// Deflate amplifies enormously on repetitive input — the bundle built here is a few kilobytes
+    /// and would expand to 512 MiB — and the inflate used to be unbounded, so a corrupt or hostile
+    /// `.noeb` was an out-of-memory abort rather than an error return. On the paths that read one
+    /// (the startup cache, every run; the wasm runner, at the edge) that is a crash with no
+    /// diagnosis. Found while fuzzing the container: the readers were total over every corruption
+    /// tried, but totality says nothing about how much memory the answer costs.
+    #[test]
+    fn a_decompression_bomb_is_refused_rather_than_allocated() {
+        // Twice the cap, of the most compressible thing there is.
+        let bomb = vec![0u8; MAX_INFLATED * 2];
+        let blob = {
+            let rt = RUNTIME_VERSION.as_bytes();
+            let mut out = Vec::new();
+            out.extend_from_slice(MAGIC);
+            out.push(FORMAT_VERSION);
+            out.push(FLAG_COMPRESSED);
+            out.push(rt.len() as u8);
+            out.extend_from_slice(rt);
+            out.extend_from_slice(&obfuscate(&bomb));
+            out
+        };
+        // The whole bundle is tiny — that is the point of a bomb.
+        assert!(
+            blob.len() < 1024 * 1024,
+            "the bomb did not compress, so this test is not testing what it says"
+        );
+        assert!(
+            matches!(read(&blob), Err(BundleError::Decode)),
+            "an over-large payload must be refused like any other bad one"
+        );
     }
 
     #[test]

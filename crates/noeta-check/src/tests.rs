@@ -2817,6 +2817,224 @@ fn legitimate_forward_and_nested_references_stay_clean() {
     assert!(codes("echo Ordering.Less\n").is_empty());
 }
 
+/// The hoisted-globals fallback licenses a **deferred** reference, not an early one.
+///
+/// Top-level statements run in textual order, so a name one mentions has to be bound already. The
+/// hoist used to apply to them too, which let `a = a` type-check and then die at run time with the
+/// very E0005 the checker was holding — the check-vs-run divergence in its worst shape, since
+/// nothing underlines while you type. Found by the `noeta-fuzz` execution oracle.
+#[test]
+fn a_top_level_statement_does_not_see_a_binding_declared_later() {
+    // The self-referential initializer: `a` is not in scope until this statement finishes.
+    assert_eq!(codes("a = a\n"), vec!["E0005"]);
+    // Annotated, and through an operator — the same fact, reached differently.
+    assert_eq!(codes("mut right: string = right\n"), vec!["E0005"]);
+    assert_eq!(codes("b = a + 1\na = 1\n"), vec!["E0005"]);
+    // A plain statement before the binding.
+    assert_eq!(codes("echo a\na = 1\n"), vec!["E0005"]);
+    // Calling one, too: the callee path shares the gate.
+    assert_eq!(codes("f()\nf = fn(): int => 1\n"), vec!["E0005"]);
+}
+
+/// `none` is an `Option`, not a value of whatever type is expected.
+///
+/// A bare `none` outside an `Option` expectation synthesized a plain hole, and a hole subsumes into
+/// anything — so `q: int = none`, `f(none)` against a declared `int`, and an `int` struct field
+/// initialized to `none` all type-checked and then aborted with `cannot apply `+` to enum and int`.
+/// That is a soundness hole, not a lenient diagnostic: the language has no implicit wrapping (`q:
+/// ?int = 1` is rejected), so `none` standing in for an `int` was never going to run. Found by the
+/// `noeta-fuzz` execution oracle.
+#[test]
+fn none_does_not_stand_in_for_a_non_option_type() {
+    assert_eq!(codes("q: int = none\n"), vec!["E0007"]);
+    assert_eq!(
+        codes("fn f(n: int): int { return n + 1 }\necho f(none)\n"),
+        vec!["E0007"]
+    );
+    assert_eq!(
+        codes("struct P { n: int }\necho P { n: none }.n\n"),
+        vec!["E0007"]
+    );
+    // A list literal mixing a value with `none` is heterogeneous, and was silently inferring
+    // `List<int>` with a `none` sitting inside it.
+    assert_eq!(codes("xs = [1, none]\necho xs\n"), vec!["E0007"]);
+
+    // Every position where `none` really is an `Option` stays clean — the payload hole is what
+    // makes it absorb any `T`.
+    assert!(codes("q: ?int = none\necho q\n").is_empty());
+    assert!(codes("xs = [some(1), none]\necho xs\n").is_empty());
+    assert!(codes("fn f(n: ?int): int { return 1 }\necho f(none)\n").is_empty());
+    assert!(codes("struct P { n: ?int }\necho P { n: none }\n").is_empty());
+    assert!(codes("fn f(): ?int { return none }\necho f()\n").is_empty());
+}
+
+/// An ordering compares two values of ONE ordered type.
+///
+/// Both operands satisfying `Comparable` was the whole test, so `1 > false` — where `int` and
+/// `bool` each order fine on their own — type-checked and then aborted with the runtime's
+/// `cannot apply `>` to int and bool`. Found by the `noeta-fuzz` execution oracle.
+#[test]
+fn an_ordering_needs_two_operands_of_one_type() {
+    assert_eq!(codes("echo 1 > false\n"), vec!["E0007"]);
+    assert_eq!(codes("echo 1 > \"a\"\n"), vec!["E0007"]);
+    assert_eq!(codes("echo \"a\" <= 2\n"), vec!["E0007"]);
+    // Same type on both sides, and the numeric widening lattice the runtime performs, stay clean.
+    assert!(codes("echo true > false\n").is_empty());
+    assert!(codes("echo \"a\" > \"b\"\n").is_empty());
+    assert!(codes("echo 1 > 2.5\n").is_empty());
+    // A bounded type parameter compared with itself, and a `dyn` operand, both stay clean.
+    assert!(
+        codes("fn m<T: Comparable>(a: T, b: T): bool { return a > b }\necho m(1, 2)\n").is_empty()
+    );
+    assert!(codes("fn m(a: dyn, b: int): bool { return a > b }\necho \"ok\"\n").is_empty());
+}
+
+/// `&&` and `||` take bools, and nothing was checking it.
+///
+/// The arm returned `Type::Bool` without looking at its operands, so `1 && true` type-checked and
+/// aborted with the runtime's ``&&` expects a bool on the left, found int`. Found by the
+/// `noeta-fuzz` execution oracle.
+#[test]
+fn the_logical_operators_take_bools() {
+    assert_eq!(codes("echo 1 && true\n"), vec!["E0007"]);
+    assert_eq!(codes("echo 1.5 || true\n"), vec!["E0007"]);
+    assert_eq!(codes("echo \"a\" || false\n"), vec!["E0007"]);
+    assert!(codes("echo true && false\n").is_empty());
+    assert!(codes("xs = [1]\necho xs.len() > 0 && xs[0] == 1\n").is_empty());
+    // A `dyn` operand defers, as everywhere else.
+    assert!(codes("fn f(x: dyn): bool { return x || true }\necho \"ok\"\n").is_empty());
+}
+
+/// A function value and a tuple have no members to add, so a missing one is knowable now.
+///
+/// Neither is a record, class, or enum, so `impl Trait for` cannot name it (E0013) — the same
+/// argument that closes `string` and `List`. Both were missing from the closed set, so `f.len()`
+/// on a closure and `t.nope()` on a tuple deferred to the runtime's E0005. Found by the
+/// `noeta-fuzz` execution oracle.
+#[test]
+fn a_function_value_and_a_tuple_are_closed_to_new_methods() {
+    assert_eq!(
+        codes("f = fn(x: int): int => x\necho f.nope()\n"),
+        vec!["E0007"]
+    );
+    assert_eq!(codes("t = (1, 2)\necho t.nope()\n"), vec!["E0007"]);
+    // Calling the function, and indexing the tuple, are unaffected.
+    assert!(codes("f = fn(x: int): int => x\necho f(3)\n").is_empty());
+    assert!(codes("t = (1, 2)\necho t.0\n").is_empty());
+}
+
+/// Two top-level declarations under one name in one file collide (E0020).
+///
+/// The symbol tables are maps, so the second registration silently replaced the first — and the
+/// compiler then looked up a method of the *first* class in the second's now-empty table and
+/// panicked with `no entry found for key` on a program the checker had called clean. Found by the
+/// `noeta-fuzz` execution oracle.
+#[test]
+fn two_declarations_of_one_name_in_a_file_collide() {
+    assert_eq!(
+        codes("class Beta {\n  fn f(): void {}\n}\nclass Beta {\n}\n"),
+        vec!["E0020"]
+    );
+    assert_eq!(
+        codes("struct S { n: int }\nstruct S { m: int }\n"),
+        vec!["E0020"]
+    );
+    assert_eq!(
+        codes("fn g(): int { return 1 }\nfn g(): int { return 2 }\n"),
+        vec!["E0020"]
+    );
+    assert_eq!(codes("enum E { A }\nenum E { B }\n"), vec!["E0020"]);
+    // Across kinds, too — a type and a function cannot share a name either.
+    assert_eq!(
+        codes("struct S { n: int }\nfn S(): int { return 1 }\n"),
+        vec!["E0020"]
+    );
+    // One declaration each stays clean.
+    assert!(codes("struct S { n: int }\nclass C { n: int }\nenum E { A }\n").is_empty());
+}
+
+/// A `for (a, b) in …` pattern needs the *element* to be a tuple with a position per name.
+///
+/// The misses used to bind a hole, so `for (a, b) in [1, 2, 3]` type-checked and then aborted with
+/// the VM's `tuple index `0` is out of range for int` — a purely static fact, reported at run time.
+/// Found by the `noeta-fuzz` execution oracle.
+#[test]
+fn a_for_tuple_pattern_needs_a_tuple_element() {
+    assert_eq!(codes("for (a, b) in [1, 2, 3] {\n}\n"), vec!["E0007"]);
+    // A map iterates its VALUES, so a pair pattern over one is the same mistake.
+    assert_eq!(
+        codes("m = {\"k\": 1}\nfor (a, b) in m {\n  echo a\n}\n"),
+        vec!["E0007"]
+    );
+    // A tuple that is too short for the pattern — the runtime's "index out of range for tuple".
+    assert_eq!(
+        codes("for (a, b, c) in [(1, 2)] {\n  echo a\n}\n"),
+        vec!["E0007"]
+    );
+    // Binding a PREFIX of a longer tuple is legal and stays clean, as does the canonical form.
+    assert!(codes("for (a, b) in [(1, 2, 3)] {\n  echo a\n}\n").is_empty());
+    assert!(codes("for (i, x) in [\"a\", \"b\"].enumerate() {\n  echo x\n}\n").is_empty());
+    // A `dyn` source is the documented deferral: not known to be a tuple is not known not to be.
+    assert!(
+        codes("fn g(xs: dyn): void {\n  for (a, b) in xs { echo a }\n}\necho \"ok\"\n").is_empty()
+    );
+}
+
+/// A declared type is not callable, and saying so is the checker's job.
+///
+/// `S(n: 5)` used to type-check — a type name as a callee was deferred to the runtime — and the
+/// first report was the runtime's `cannot find `S` in this scope`, which blames the type rather
+/// than the call form and so reads as a missing import. The language builds a record with a literal
+/// and reaches an associated function through the type; neither is a call on the bare name. Found
+/// by the `noeta-fuzz` execution oracle.
+#[test]
+fn a_declared_type_is_not_callable() {
+    assert_eq!(
+        codes("struct S { n: int = 5 }\necho S().n\n"),
+        vec!["E0007"]
+    );
+    assert_eq!(
+        codes("struct S { n: int }\necho S(n: 5).n\n"),
+        vec!["E0007"]
+    );
+    assert_eq!(codes("class C { n: int = 1 }\necho C().n\n"), vec!["E0007"]);
+    // The forms that ARE construction stay clean.
+    assert!(codes("struct S { n: int }\necho S { n: 5 }.n\n").is_empty());
+    assert!(
+        codes(
+            "struct S {\n  \
+               pub n: int\n  \
+               fn make(): S { return S { n: 1 } }\n\
+             }\n\
+             echo S.make().n\n"
+        )
+        .is_empty()
+    );
+}
+
+/// The other side of the same boundary: a **closure body** is evaluated where it is called, not
+/// where it is written, so it does see a global declared later — and this program really runs.
+/// Removing the hoist outright rather than scoping it to deferred positions would reject it.
+#[test]
+fn a_closure_body_still_sees_a_binding_declared_later() {
+    assert!(codes("f = fn(): int => g\ng = 1\necho f()\n").is_empty());
+    // Through a call, and from a nested closure.
+    assert!(codes("f = fn(): int => h()\nh = fn(): int => 1\necho f()\n").is_empty());
+    assert!(codes("f = fn(): int => (fn(): int => g)()\ng = 1\necho f()\n").is_empty());
+    // A closure *parameter default* is evaluated in the enclosing scope — which is now — so it is
+    // outside the deferral and stays an error.
+    assert_eq!(
+        codes("f = fn(x: int = g): int => x\ng = 1\necho f()\n"),
+        vec!["E0005"]
+    );
+    // And a sealed named-fn body sees no top-level binding at all, later or not (E0005 with the
+    // `use (…)` hint) — unchanged by the deferral rule.
+    assert_eq!(
+        codes("fn t(): int { return g }\ng = 1\necho t()\n"),
+        vec!["E0005"]
+    );
+}
+
 #[test]
 fn a_repl_session_defers_unknown_names_to_a_later_entry() {
     // A session is the ONE place an unknown name stays deferred — a later entry may define it.

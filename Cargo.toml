@@ -95,6 +95,9 @@ noeta-dap = { path = "crates/noeta-dap" }
 noeta-prof = { path = "crates/noeta-prof" }
 # Tooling: the `noeta fmt` canonical source formatter (lex+trivia → parse → AST → Doc → text)
 noeta-fmt = { path = "crates/noeta-fmt" }
+# Test-only structured input generation: `&[u8]` → a syntactically valid Noeta program, driving the
+# formatter's oracle today and (by design) any later checker/VM/backend differential.
+noeta-fuzz = { path = "crates/noeta-fuzz" }
 # Package manager (package-manager P2): manifest + transitive resolver + git/store/lock + registry
 # index. A library (not in the CLI binary) so `noeta-lsp`/`noeta-db` can resolve dependencies too.
 noeta-pm = { path = "crates/noeta-pm" }
