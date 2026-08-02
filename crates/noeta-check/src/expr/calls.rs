@@ -2091,6 +2091,12 @@ pub(crate) fn closed_to_new_methods(ty: &Type) -> bool {
             | Type::Set(_)
             | Type::Option(_)
             | Type::Result(_, _)
+            // Structural, and closed for the same reason the scalars are: an `impl` names a
+            // record/class/enum, and neither of these is one, so nothing can add a member after the
+            // fact. Their absence let `f.len()` on a closure and `t.nope()` on a tuple type-check
+            // and then abort with the runtime's "no method `len` on function".
+            | Type::Fn { .. }
+            | Type::Tuple(_)
     )
 }
 

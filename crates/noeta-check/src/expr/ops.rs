@@ -162,6 +162,12 @@ impl Checker {
                     || !self.operand_satisfies_operator(&rt, BuiltinTrait::Comparable)
                 {
                     self.report_operator_error(op, &lt, &rt, Some(BuiltinTrait::Comparable), span);
+                } else if !self.orderable_together(&lt, &rt) {
+                    // Both `Comparable` is not the same as comparable *to each other*. `int` and
+                    // `bool` each order fine on their own, and `1 > false` orders nothing — the
+                    // runtime says so with "cannot apply `>` to int and bool", which is a static
+                    // fact the checker had. No trait is named here because none is missing.
+                    self.report_operator_error(op, &lt, &rt, None, span);
                 }
                 Type::Bool
             }
@@ -285,6 +291,18 @@ impl Checker {
     /// Report a trait-backed operator applied to an unsupported operand: an unbounded type parameter
     /// is `E0025` (a missing bound, fixable at the declaration); any other concrete mismatch is
     /// `E0007` (the same "cannot apply" the runtime raised). Reported once for the operator.
+    /// Whether two `Comparable` operands order against **each other**.
+    ///
+    /// An ordering compares two values of one ordered type. The admitted mismatches are exactly the
+    /// ones the runtime performs or defers: the numeric widening lattice (`1 > 2.5`), and either
+    /// side being assignable to the other, which is what carries `dyn`, holes, unions and a type
+    /// parameter's instantiation without this having to enumerate them.
+    fn orderable_together(&self, lt: &Type, rt: &Type) -> bool {
+        (lt.is_numeric() && rt.is_numeric())
+            || self.assignable(lt, rt)
+            || self.assignable(rt, lt)
+    }
+
     pub(crate) fn report_operator_error(
         &mut self,
         op: BinaryOp,

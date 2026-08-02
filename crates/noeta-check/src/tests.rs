@@ -2836,6 +2836,45 @@ fn a_top_level_statement_does_not_see_a_binding_declared_later() {
     assert_eq!(codes("f()\nf = fn(): int => 1\n"), vec!["E0005"]);
 }
 
+/// An ordering compares two values of ONE ordered type.
+///
+/// Both operands satisfying `Comparable` was the whole test, so `1 > false` — where `int` and
+/// `bool` each order fine on their own — type-checked and then aborted with the runtime's
+/// `cannot apply `>` to int and bool`. Found by the `noeta-fuzz` execution oracle.
+#[test]
+fn an_ordering_needs_two_operands_of_one_type() {
+    assert_eq!(codes("echo 1 > false\n"), vec!["E0007"]);
+    assert_eq!(codes("echo 1 > \"a\"\n"), vec!["E0007"]);
+    assert_eq!(codes("echo \"a\" <= 2\n"), vec!["E0007"]);
+    // Same type on both sides, and the numeric widening lattice the runtime performs, stay clean.
+    assert!(codes("echo true > false\n").is_empty());
+    assert!(codes("echo \"a\" > \"b\"\n").is_empty());
+    assert!(codes("echo 1 > 2.5\n").is_empty());
+    // A bounded type parameter compared with itself, and a `dyn` operand, both stay clean.
+    assert!(
+        codes("fn m<T: Comparable>(a: T, b: T): bool { return a > b }\necho m(1, 2)\n").is_empty()
+    );
+    assert!(codes("fn m(a: dyn, b: int): bool { return a > b }\necho \"ok\"\n").is_empty());
+}
+
+/// A function value and a tuple have no members to add, so a missing one is knowable now.
+///
+/// Neither is a record, class, or enum, so `impl Trait for` cannot name it (E0013) — the same
+/// argument that closes `string` and `List`. Both were missing from the closed set, so `f.len()`
+/// on a closure and `t.nope()` on a tuple deferred to the runtime's E0005. Found by the
+/// `noeta-fuzz` execution oracle.
+#[test]
+fn a_function_value_and_a_tuple_are_closed_to_new_methods() {
+    assert_eq!(
+        codes("f = fn(x: int): int => x\necho f.nope()\n"),
+        vec!["E0007"]
+    );
+    assert_eq!(codes("t = (1, 2)\necho t.nope()\n"), vec!["E0007"]);
+    // Calling the function, and indexing the tuple, are unaffected.
+    assert!(codes("f = fn(x: int): int => x\necho f(3)\n").is_empty());
+    assert!(codes("t = (1, 2)\necho t.0\n").is_empty());
+}
+
 /// Two top-level declarations under one name in one file collide (E0020).
 ///
 /// The symbol tables are maps, so the second registration silently replaced the first — and the
