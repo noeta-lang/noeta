@@ -43,6 +43,12 @@ fn main() {
             let (_, config) = fmt_target::case(BASE, seed);
             let src = std::io::read_to_string(std::io::stdin()).expect("read stdin");
             println!("[{}]", fmt_target::describe(&config));
+            if args.iter().any(|a| a == "--out") {
+                match noeta_fmt::format_source("stdin.noe", &src, &config) {
+                    Ok(out) => println!("--- formatted ---\n{out}--- end ---"),
+                    Err(e) => println!("--- format failed: {e}"),
+                }
+            }
             match oracle::check("stdin.noe", &src, &config) {
                 Ok(v) => println!("{v:?}"),
                 Err(v) => println!("{v}"),

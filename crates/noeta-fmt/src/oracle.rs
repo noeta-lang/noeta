@@ -157,37 +157,87 @@ fn comment_texts(src: &str) -> Vec<String> {
     texts
 }
 
-/// Every comment of `src` in **source order**, with the **brace depth** it sits at.
+/// The **block depth** after each code token of `lexed`, as `(token start, depth)` in source order.
 ///
 /// Depth is counted over **code tokens**, so braces inside string literals, interpolations' text
 /// halves, verbatim tier bodies (`@doc { … }`) and the comments themselves never count — only real
 /// block delimiters do. `.{` is one *fused* token (grouped imports `use a.{b}` and target-typed
 /// `.{ … }` literals share the slot), so it counts as an opener in its own right: reading only
 /// `LBrace` would leave its `}` unmatched and shift every later comment by one.
+///
+/// # `else if` opens a block that has no brace
+///
+/// What is being measured is the depth of the **AST's** block structure, which is not quite the
+/// depth of the source's brace characters. `Stmt::If` holds `else_body: Option<Vec<Stmt>>`, so
+/// `else if b { … }` and `else { if b { … } }` parse to exactly the same tree — a one-statement
+/// else-block containing an `if` — and the printer emits the `else if` spelling for both. That is
+/// canonical rendering of an indistinguishable AST, not a rewrite, so a comment inside the branch
+/// legitimately loses one *brace* while staying at the same *block* depth.
+///
+/// Counting braces alone reported that as a moved comment, which was a false positive on the
+/// oracle's side rather than a printer bug. So an `else` immediately followed by `if` contributes a
+/// virtual level for the extent of that chain, and the two spellings measure identically. This is
+/// the same move `safety::ast_equal_modulo_spans` makes for import order: normalize away a
+/// transformation the formatter is *entitled* to make, so that everything else stays caught.
+fn block_depths(lexed: &noeta_lexer::Lexed) -> Vec<(u32, i32)> {
+    let mut marks = Vec::with_capacity(lexed.tokens.len());
+    let mut real = 0i32;
+    // The real depths at which a brace-less `else if` block was opened; each pops when the brace
+    // depth falls back to it.
+    let mut virtual_levels: Vec<i32> = Vec::new();
+    for (i, t) in lexed.tokens.iter().enumerate() {
+        match t.kind {
+            noeta_lexer::TokenKind::LBrace | noeta_lexer::TokenKind::DotLBrace => real += 1,
+            noeta_lexer::TokenKind::RBrace => {
+                real -= 1;
+                // A virtual level spans the whole `else if` **chain**, not just the `if`'s own
+                // braces: in `else if b { … } else { … }` the trailing `else` is part of the same
+                // nested statement, so the level must survive the brace that closes `b`'s block.
+                // Popping eagerly there measured the final `else` one level too shallow.
+                let chain_continues = lexed
+                    .tokens
+                    .get(i + 1)
+                    .is_some_and(|n| n.kind == noeta_lexer::TokenKind::ElseKw);
+                if !chain_continues {
+                    while virtual_levels.last().is_some_and(|&d| real <= d) {
+                        virtual_levels.pop();
+                    }
+                }
+            }
+            noeta_lexer::TokenKind::ElseKw
+                if lexed
+                    .tokens
+                    .get(i + 1)
+                    .is_some_and(|n| n.kind == noeta_lexer::TokenKind::IfKw) =>
+            {
+                virtual_levels.push(real);
+            }
+            _ => {}
+        }
+        marks.push((
+            t.span.start,
+            real + i32::try_from(virtual_levels.len()).unwrap_or(0),
+        ));
+    }
+    marks
+}
+
+/// Every comment of `src` in **source order**, with the block depth it sits at (see
+/// [`block_depths`]) and the code token that follows it.
 fn comments(src: &str) -> Vec<CommentAt> {
     let source = noeta_span::Source::new(noeta_span::SourceId(0), "oracle", src);
     let lexed = noeta_lexer::lex_with_trivia(&source);
-    // (offset, delta) for every brace token, in source order.
-    let braces: Vec<(u32, i32)> = lexed
-        .tokens
-        .iter()
-        .filter_map(|t| match t.kind {
-            noeta_lexer::TokenKind::LBrace | noeta_lexer::TokenKind::DotLBrace => {
-                Some((t.span.start, 1))
-            }
-            noeta_lexer::TokenKind::RBrace => Some((t.span.start, -1)),
-            _ => None,
-        })
-        .collect();
+    let marks = block_depths(&lexed);
     let mut out = Vec::with_capacity(lexed.comments.len());
-    let mut brace_idx = 0usize;
+    let mut mark_idx = 0usize;
     let mut depth = 0i32;
     let mut tok_idx = 0usize;
     for c in &lexed.comments {
         let (start, end) = (c.span.start as usize, c.span.end as usize);
-        while brace_idx < braces.len() && braces[brace_idx].0 < c.span.start {
-            depth += braces[brace_idx].1;
-            brace_idx += 1;
+        // The depth left by the last code token before the comment.
+        while mark_idx < marks.len() && marks[mark_idx].0 < c.span.start {
+            depth = marks[mark_idx].1;
+            mark_idx += 1;
         }
         // The first code token that begins at or after the comment's end. Tokens are in source
         // order and so are the comments, so the scan is one shared pass.
