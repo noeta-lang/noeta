@@ -2657,7 +2657,22 @@ impl Printer<'_> {
             Expr::Object(obj) => self.object(obj)?,
             // `?` is not a dot-link: it does not continue a line, so a break before it would end the
             // statement and change the parse. It always trails its receiver.
-            Expr::Try { expr, .. } => Doc::concat([self.receiver(expr)?, Doc::text("?")]),
+            //
+            // A `?` **directly on a `?`** is the one case the binding-power table cannot decide:
+            // both are postfix at 14, so `operand` correctly adds no parentheses — and the two
+            // tokens then fuse into `??`, which re-lexes as the coalesce operator. `(a?)?` printed
+            // as `a??`, the safety gate refused it, and the whole file became unformattable. This
+            // is a *token-adjacency* rule, not a precedence one: the parentheses are what keeps the
+            // two `?`s from becoming one operator.
+            Expr::Try { expr, .. } => {
+                let inner = self.receiver(expr)?;
+                let inner = if matches!(expr.as_ref(), Expr::Try { .. }) {
+                    Doc::concat([Doc::text("("), inner, Doc::text(")")])
+                } else {
+                    inner
+                };
+                Doc::concat([inner, Doc::text("?")])
+            }
             Expr::Await { expr, .. } => Doc::concat([self.receiver(expr)?, Doc::text(".await")]),
             Expr::Spawn {
                 future, isolate, ..
