@@ -1021,11 +1021,24 @@ pub fn run_cli(
     // A binding's local name may not shadow a built-in: the core CLI verbs and std's own commands
     // are reserved (both are already registered). A shadow is a manifest error, not a silent
     // override.
-    let reserved: std::collections::HashSet<String> = <Cli as clap::CommandFactory>::command()
-        .get_subcommands()
-        .map(|c| c.get_name().to_string())
-        .chain(trusted_commands.iter().map(|(name, _)| name.to_string()))
-        .collect();
+    //
+    // Built only when there IS a binding to check. `reserved` is read nowhere but the loop below,
+    // and materializing it costs a whole clap command tree — the derive's `augment_subcommands`
+    // walk over every subcommand and every one of its args, allocating an `Arg` per flag and a
+    // `String` per help line. The stock binary (and every composed toolchain without a
+    // `[trust.commands]` table) passes no bindings, so that tree was being built, walked for its
+    // names, and dropped on **every** invocation — a second, entirely redundant copy of the tree
+    // the dispatch below builds for real. Measured on `noeta --version`: 2.509 M → 2.295 M
+    // instructions retired, 8.5% of process startup, for a set nothing then read.
+    let reserved: std::collections::HashSet<String> = if command_bindings.is_empty() {
+        std::collections::HashSet::new()
+    } else {
+        <Cli as clap::CommandFactory>::command()
+            .get_subcommands()
+            .map(|c| c.get_name().to_string())
+            .chain(trusted_commands.iter().map(|(name, _)| name.to_string()))
+            .collect()
+    };
     for binding in command_bindings {
         let Some(ext) = binding
             .units
@@ -1062,6 +1075,10 @@ pub fn run_cli(
     // commands (`noeta serve --watch`); the clap arg added below exists purely so `--help` and
     // `--watch`'s error messages know the flag.
     if let Some(code) = watch::maybe_watch() {
+        return code;
+    }
+    // The bare `noeta run <file>` shortcut, dispatched without building the clap tree at all.
+    if let Some(code) = try_plain_run(&trusted_commands) {
         return code;
     }
     // Extension-contributed subcommands (higher-order-abi H6): augment the derive-built CLI with
@@ -1430,6 +1447,45 @@ pub fn run_cli(
 /// attributes travel on the root fns, and the runner reads them with `attributes_of::<Config>()`.
 /// Returns `None` when this is not a tier invocation — no file argument, an unloadable file, or a
 /// name the program does not declare — so the caller falls through to the external-binary probe.
+/// `noeta run <file>` — the toolchain's most-issued command — dispatched **without building the
+/// clap command tree**.
+///
+/// The derive-built tree is every subcommand and every one of its flags materialized as
+/// `Command`/`Arg` objects carrying their help text: allocated, walked, and dropped on every
+/// invocation. Measured at ~215 k instructions retired (the identical saving that deleting one
+/// redundant `command()` call above bought), which is ~9% of process startup — and a plain `run`
+/// reads none of it, because it has no flags to parse.
+///
+/// The recognized shape is exact: argv is precisely `["noeta", "run", <path>]` — three arguments,
+/// the verb `run`, and a `<path>` that does not begin with `-`. Every `Run` field is a bare
+/// `Vec`/`Option`/`bool` with no `#[arg(default_value)]`, so the values clap's derive would have
+/// produced for that argv are exactly "empty, `None`, `false`" — which is what this passes.
+///
+/// **Everything else falls through to clap untouched**, so `--help`, `--version`, every error
+/// message, `--watch`, `--tier`, `-- <program args>`, the bare-file/shebang shortcut and the
+/// declared-tier dispatch all keep their existing behaviour byte for byte. It also declines when an
+/// extension has contributed a command named `run` (which the clap tree would have to arbitrate),
+/// so a composed toolchain can never take this path and get a different answer.
+fn try_plain_run(
+    trusted: &[(&'static str, &'static noeta_stdlib::ExtCommand)],
+) -> Option<ExitCode> {
+    let mut argv = std::env::args_os();
+    argv.next()?; // argv[0]
+    let verb = argv.next()?;
+    let file = argv.next()?;
+    if argv.next().is_some() || verb != "run" {
+        return None;
+    }
+    // A leading `-` is a flag (or the `--` separator): clap has real work to do.
+    if file.as_encoded_bytes().first() == Some(&b'-') {
+        return None;
+    }
+    if trusted.iter().any(|(name, _)| *name == "run") {
+        return None;
+    }
+    Some(cmd_run(&PathBuf::from(file), &[], &None, false, false, &[]))
+}
+
 /// The **bare-file run** shortcut: `noeta <path>` where `<path>` is an existing `.noe`/`.noeb` file
 /// runs it — the same as `noeta run <path>` — forwarding any trailing arguments to the program.
 /// This is what makes a `#!/usr/bin/env noeta` shebang work: the kernel invokes `noeta <script> …`,
