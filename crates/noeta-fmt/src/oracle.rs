@@ -180,6 +180,44 @@ fn comment_texts(src: &str) -> Vec<String> {
 /// the same move `safety::ast_equal_modulo_spans` makes for import order: normalize away a
 /// transformation the formatter is *entitled* to make, so that everything else stays caught.
 fn block_depths(lexed: &noeta_lexer::Lexed) -> Vec<(u32, i32)> {
+    /// Whether the `if` at `if_idx` is the **statement** form (`if cond { … }`) rather than the
+    /// **expression** conditional (`if cond then a else b`).
+    ///
+    /// Only the statement form has a block, so only it earns a virtual level. The two are told
+    /// apart by whichever comes first at the top nesting level: a `then`, or the `{` that opens the
+    /// body. A set literal in the condition (`if #{1}.len() > 0 then …`) would otherwise be mistaken
+    /// for that body, because `#{` lexes as `Hash` + `LBrace` rather than one fused token, so an
+    /// `LBrace` preceded by `Hash` nests like any other bracket instead of ending the scan. A bare
+    /// map literal cannot appear here unparenthesized — the printer parenthesizes a brace-headed
+    /// condition precisely because it would be misread as the block.
+    fn opens_a_block(tokens: &[noeta_lexer::Token], if_idx: usize) -> bool {
+        use noeta_lexer::TokenKind as K;
+        let mut nesting = 0i32;
+        for (j, t) in tokens.iter().enumerate().skip(if_idx + 1) {
+            match t.kind {
+                K::ThenKw if nesting == 0 => return false,
+                K::LBrace
+                    if nesting == 0
+                        && tokens
+                            .get(j.wrapping_sub(1))
+                            .is_some_and(|p| p.kind == K::Hash) =>
+                {
+                    nesting += 1;
+                }
+                K::LBrace if nesting == 0 => return true,
+                K::LParen | K::LBracket | K::LBrace | K::DotLBrace => nesting += 1,
+                K::RParen | K::RBracket | K::RBrace => {
+                    nesting -= 1;
+                    if nesting < 0 {
+                        return false; // ran out of the enclosing construct without finding either
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
     let mut marks = Vec::with_capacity(lexed.tokens.len());
     let mut real = 0i32;
     // The real depths at which a brace-less `else if` block was opened; each pops when the brace
@@ -208,7 +246,8 @@ fn block_depths(lexed: &noeta_lexer::Lexed) -> Vec<(u32, i32)> {
                 if lexed
                     .tokens
                     .get(i + 1)
-                    .is_some_and(|n| n.kind == noeta_lexer::TokenKind::IfKw) =>
+                    .is_some_and(|n| n.kind == noeta_lexer::TokenKind::IfKw)
+                    && opens_a_block(&lexed.tokens, i + 1) =>
             {
                 virtual_levels.push(real);
             }
