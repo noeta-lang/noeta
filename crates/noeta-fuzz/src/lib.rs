@@ -25,6 +25,7 @@
 //! grammar fails that test rather than quietly hollowing out the suite.
 
 pub mod bundle_target;
+pub mod census;
 pub mod fmt_target;
 pub mod generate;
 pub mod run_target;

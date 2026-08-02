@@ -1,0 +1,103 @@
+# The runtime's static-class rejection reasons, derived from `noeta-vm` / `noeta-eval` /
+# `noeta-value` by `noeta_fuzz::census::reasons`. One line per distinct reason:
+# <DiagnosticCode>\t<message template, format holes collapsed to `{}`>.
+#
+# This is an INVENTORY, not a verdict list. Each line is a way the runtime can refuse
+# a program on grounds the checker might have settled instead; the census exists so
+# that a NEW one cannot appear without someone asking whether a checked program can
+# reach it. Roughly forty have been probed by hand so far — nine were divergences and
+# are now static errors in `noeta-check` — and the rest are recorded, not cleared.
+#
+# Regenerate with:
+#   cargo run --release -p noeta-fuzz --example censusdump > crates/noeta-fuzz/census.txt
+ImmutableAssignment	cannot assign to `{}`, which is immutable
+ImmutableField	native enum method `{}` returned an in-place mutation, but an enum `{}` is an immutable value type — return a new value instead
+ImmutableField	native method `{}` cannot write immutable field `{}` of class `{}`
+ImmutableField	native struct method `{}` returned an in-place mutation, but a struct `{}` is a value type — return a new value instead
+InvalidPackedType	`from_bytes` requires a packable element type — a `@packed` struct or a sub-8-byte fixed-width numeric (`i32`/`u8`/`f32`, …)
+InvalidTypeArguments	<anonymous>
+MissingField	missing field(s) {} in `{}` literal — every field must be set
+TypeMismatch	`??` expects a `Result` or `Option` on the left, found {}
+TypeMismatch	`?` expects a `Result` or `Option`, found {}
+TypeMismatch	`Ok` takes 0 or 1 argument(s) but {} were supplied
+TypeMismatch	`assert` expects 1 or 2 arguments, found {}
+TypeMismatch	`assert` expects a bool, found {}
+TypeMismatch	`channel` expects an int capacity, found {}
+TypeMismatch	`filter` expects a list, found {}
+TypeMismatch	`filter` predicate must return a bool, found {}
+TypeMismatch	`from_bytes` buffer of {} bytes is not a whole number of {}-byte elements
+TypeMismatch	`from_bytes` expects a `bytes` value, found {}
+TypeMismatch	`if` condition must be a bool, found {}
+TypeMismatch	`int.{}` expects an integer argument, found {}
+TypeMismatch	`iter` must return a list, found {}
+TypeMismatch	`json.decode_typed` expects two `string` arguments
+TypeMismatch	`len` expects a list, map, or string, found {}
+TypeMismatch	`map` expects a list, found {}
+TypeMismatch	`sum` expects a list, found {}
+TypeMismatch	`sum` expects numeric elements, found {}
+TypeMismatch	`to_bytes` expects a packed list (a `List` of `@packed` structs)
+TypeMismatch	`while` condition must be a bool, found {}
+TypeMismatch	`{}.{}::<T>(...)` has no resolved result type
+TypeMismatch	`{}.{}` expects a string or a backing value, found {}
+TypeMismatch	`{}.{}` takes one argument
+TypeMismatch	`{}::<T>(...)` has no resolved result type
+TypeMismatch	`{}::<T>(...)` needs a native receiver
+TypeMismatch	`{}` expects a bool on the left, found {}
+TypeMismatch	`{}` expects a bool on the right, found {}
+TypeMismatch	`{}` expects a bool on the {}, found {}
+TypeMismatch	`{}` expects a list of numbers, found an element of type {}
+TypeMismatch	`{}` expects a list, found {}
+TypeMismatch	`{}` expects a numeric argument
+TypeMismatch	`{}` is a {}, not a record or class type
+TypeMismatch	`{}` takes {} argument(s) but {} were supplied
+TypeMismatch	associated function
+TypeMismatch	bytes index must be an int, found {}
+TypeMismatch	cannot apply tuple index `.{}` to {}
+TypeMismatch	cannot compare {} and {}
+TypeMismatch	cannot index a value of type {}
+TypeMismatch	cannot iterate over {}
+TypeMismatch	corrupt hidden type-argument slot
+TypeMismatch	destructuring `({})` expects a {}-tuple, found {}
+TypeMismatch	from_bytes: [{}]: {}
+TypeMismatch	function
+TypeMismatch	hover stays read-only — evaluating this expression would run code (use a watch or the debug console)
+TypeMismatch	internal: $scope_end expects a scope index
+TypeMismatch	internal: $scope_ready expects a scope index
+TypeMismatch	internal: scope_end expects a scope index
+TypeMismatch	internal: scope_ready expects a scope index
+TypeMismatch	iterator `next` must return an option, found {}
+TypeMismatch	list index must be an int, found {}
+TypeMismatch	map index must be a string, found {}
+TypeMismatch	method
+TypeMismatch	method `compare` takes 1 argument but {} were supplied
+TypeMismatch	method `iter` takes no arguments
+TypeMismatch	method `to_bytes` takes no arguments
+TypeMismatch	method `{}` takes no arguments
+TypeMismatch	method handle `{}.{}` needs a receiver argument
+TypeMismatch	no match arm matched the value {}
+TypeMismatch	packed-list push onto a non-list value `{}`
+TypeMismatch	range bounds must be ints, found {} and {}
+TypeMismatch	spread `..` expects an object, found {}
+TypeMismatch	string index must be an int, found {}
+TypeMismatch	this method takes {} argument(s) but 0 were supplied
+TypeMismatch	this method takes {} argument(s) but 1 were supplied
+TypeMismatch	tuple index `{}` is out of range for a {}-tuple
+TypeMismatch	tuple index `{}` is out of range for {}
+TypeMismatch	value-position block has no tail expression (lowering bug)
+TypeMismatch	variant `{}.{}` takes {} field(s) but {} were supplied
+TypeMismatch	{} is not callable
+UnknownName	`{}.{}::<T>(...)` is not a call-site-typed native function
+UnknownName	cannot assign field `{}` on {}
+UnknownName	cannot find `{}` in this scope
+UnknownName	cannot find type `{}` for method handle `{}.{}`
+UnknownName	cannot find type `{}` in this scope
+UnknownName	enum `{}` has no variant `{}`
+UnknownName	native method `{}` writes unknown field `{}` of class `{}`
+UnknownName	no field `{}` on {}
+UnknownName	no method `{}` on {}
+UnknownName	no native enum method `{}`
+UnknownName	no native fielded-type method `{}`
+UnknownName	type `{}` has no associated function `{}`
+UnknownName	type `{}` has no field `{}`
+UnknownName	type `{}` has no method `get`
+UnknownName	type `{}` has no method `{}`
