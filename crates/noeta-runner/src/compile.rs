@@ -13,16 +13,6 @@ use noeta_diagnostics::{Diagnostic, has_errors, render, render_mapped};
 use noeta_pm::manifest;
 use noeta_span::{Source, SourceMap};
 
-/// TEMPORARY diagnostic probe (perf/startup-lazy): exit the process at a named pipeline phase so
-/// `perf stat -e instructions:u` attributes the fixed startup cost to a phase exactly, rather than
-/// through a lossy sampling profile. Removed before the branch lands.
-#[doc(hidden)]
-pub fn phase_stop(phase: &str) {
-    if std::env::var("NOETA_PHASE_STOP").as_deref() == Ok(phase) {
-        std::process::exit(0);
-    }
-}
-
 /// A resolved startup-cache slot: an open cache, the content key for this program, and the workspace
 /// `SourceMap` (so a cache hit renders diagnostics against real source without re-parsing).
 struct CacheSlot {
@@ -283,9 +273,7 @@ pub fn load_project(file: &Path, facts: &FrontFacts) -> Result<Loaded, CompileFa
     // link the std units (audit-6 F2) — the assembling driver seeds. A composed binary's earlier
     // explicit `install` wins; after any install this is a no-op.
     noeta_stdlib::registry::default_seeded();
-    phase_stop("seeded");
     let linked = load_linked(file, facts)?;
-    phase_stop("linked");
     let sources = linked.sources;
     let provenance = linked.provenance;
     // Activation inlines each `@<tier> { … }` block; with no active tiers the program runs as-is and
@@ -405,13 +393,10 @@ pub fn compile_whole_file_with(
     no_cache: bool,
     reused: Option<ResolvedFront>,
 ) -> Result<Compiled, CompileFailure> {
-    phase_stop("enter");
     let facts = resolve_front_with(file, tiers, target, reused)?;
-    phase_stop("front");
 
     // Startup cache (M3): on a hit, return the cached module — load/check/compile all skipped.
     let cache = open_startup_cache(file, &facts, no_cache);
-    phase_stop("cachekey");
     if let Some(slot) = &cache
         && let Some(blob) = slot.cache.load(&slot.key)
         && let Ok(module) = noeta_bundle::read(&blob)
@@ -427,9 +412,7 @@ pub fn compile_whole_file_with(
 
     // Miss: load → link → activate → check → compile.
     let loaded = load_project(file, &facts)?;
-    phase_stop("load");
     let checked = loaded.check();
-    phase_stop("check");
     // Errors block the compile; warnings do not — they ride out on `Compiled::warnings`. A
     // well-formed program must still produce a module (and run), or every advisory lint would be a
     // hard stop.
@@ -447,7 +430,6 @@ pub fn compile_whole_file_with(
         // internal compile failure exactly like a type error.
         Err(u) => return Err(CompileFailure::from_unsupported(&loaded.sources, &u)),
     };
-    phase_stop("compile");
     let sources = loaded.sources;
 
     // Populate the cache, best-effort, then bound its size (oldest-first eviction). Both run only on

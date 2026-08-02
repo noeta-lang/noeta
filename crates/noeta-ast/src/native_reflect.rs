@@ -402,10 +402,7 @@ fn sig_type_to_repr(sig: &noeta_ext_abi::registry::SigType) -> TypeRepr {
 /// A name the registry does not resolve keeps its bare spelling (the synthesized `Future` wrapper, a
 /// third-party name registered elsewhere): inventing a namespace for it would fabricate an identity,
 /// which is the failure this resolution exists to prevent.
-fn nominal_to_repr(
-    name: &str,
-    args: Vec<TypeRepr>,
-) -> TypeRepr {
+fn nominal_to_repr(name: &str, args: Vec<TypeRepr>) -> TypeRepr {
     use TypeRepr;
     use noeta_ext_abi::NominalType;
     use noeta_ext_abi::registry as ext;
@@ -429,10 +426,7 @@ fn nominal_to_repr(
 /// `.noe` parameter carrying a default. Its *type* is the wrapped inner type, not an `Option<…>` —
 /// `sig_type_to_repr` already unwraps it, and reporting the marker as the value type would describe
 /// a parameter the callee never sees.
-fn ext_fn_record(
-    target: String,
-    f: &noeta_ext_abi::registry::ExtFn,
-) -> ParamRecord {
+fn ext_fn_record(target: String, f: &noeta_ext_abi::registry::ExtFn) -> ParamRecord {
     use noeta_ext_abi::registry as ext;
     let params = f
         .params

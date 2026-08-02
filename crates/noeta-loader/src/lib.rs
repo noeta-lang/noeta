@@ -36,14 +36,6 @@ pub use derive::{
 };
 pub use expand::ExpandedSource;
 
-/// TEMPORARY diagnostic probe (perf/startup-lazy) — see `noeta_runner::compile::phase_stop`.
-#[doc(hidden)]
-pub fn phase_stop(phase: &str) {
-    if std::env::var("NOETA_PHASE_STOP").as_deref() == Ok(phase) {
-        std::process::exit(0);
-    }
-}
-
 /// A loaded, linked program ready to type-check and run.
 #[derive(Debug)]
 pub struct Linked {
@@ -765,7 +757,6 @@ pub fn link(
     // The deps-free path has no manifest and so no `[tiers]`/`[directives]` bindings — an empty
     // `PackageUses` means [`lex_program`] contributes no per-package renamed text tiers (only a
     // file's own `@tier(…, text)` declarations, which its per-file scan discovers regardless).
-    crate::phase_stop("sibscan");
     let (lexeds, text_tiers) = lex_program(
         &sources,
         &editions,
@@ -773,7 +764,6 @@ pub fn link(
         &noeta_span::PackageUses::new(),
     );
 
-    crate::phase_stop("lexed");
     // Entry + siblings parse under the root package's edition (deps-free: no dependency packages,
     // so no other editions are in play). `link_with_deps` is the twin that also links dependencies,
     // each under its own edition.
@@ -834,7 +824,6 @@ pub fn link(
                 program,
             }),
     );
-    crate::phase_stop("parsed");
     let path_diagnostics = apply_derived_paths(units);
     if !path_diagnostics.is_empty() {
         return Err(path_diagnostics);
@@ -849,7 +838,6 @@ pub fn link(
         attribute_to_spans(&mut d, &sources);
         d
     })?;
-    crate::phase_stop("linkparsed");
     let reads = expand_into(
         &mut program,
         &source_maps,
@@ -858,7 +846,6 @@ pub fn link(
         root_edition,
         &text_tiers,
     )?;
-    crate::phase_stop("expanded");
     Ok(Linked {
         program,
         entry,
@@ -1048,9 +1035,7 @@ pub fn link_with_deps_appending(
             next_id += 1;
         }
     }
-    crate::phase_stop("d-sources");
     let (lexeds, text_tiers) = lex_program(&sources, &editions, &packages, package_uses);
-    crate::phase_stop("d-lexed");
 
     // The entry parses under the root package's edition.
     let mut entry_parsed =
@@ -1089,7 +1074,6 @@ pub fn link_with_deps_appending(
         true,
     );
 
-    crate::phase_stop("d-sibparsed");
     // Parse + re-root each dependency package's modules under *that package's* edition (the sources
     // continue past the siblings in the same package order they were assembled above).
     let (mut dep_programs, broken_deps) =
@@ -1135,7 +1119,6 @@ pub fn link_with_deps_appending(
     if !path_diagnostics.is_empty() {
         return Err(path_diagnostics);
     }
-    crate::phase_stop("d-derived");
 
     let dep_refs: Vec<&Program> = dep_programs.iter().map(|(_, p)| p).collect();
     let native_roots = native_dep_roots(deps);
@@ -1184,7 +1167,6 @@ pub fn link_with_deps_appending(
         attribute_to_spans(&mut d, &sources);
         d
     })?;
-    crate::phase_stop("linkparsed");
     let reads = expand_into(
         &mut program,
         &source_maps,
@@ -1193,7 +1175,6 @@ pub fn link_with_deps_appending(
         root_edition,
         &text_tiers,
     )?;
-    crate::phase_stop("expanded");
     Ok(Linked {
         program,
         entry,
@@ -4479,7 +4460,8 @@ mod tests {
     /// drops a diagnostic is not a saving.
     #[test]
     fn a_deferred_sibling_that_does_not_parse_is_still_named_on_an_unresolved_import() {
-        let entry = "namespace App.Orders;\nuse App.Models.User;\npub fn make(): ?User { return none; }\n";
+        let entry =
+            "namespace App.Orders;\nuse App.Models.User;\npub fn make(): ?User { return none; }\n";
         // No `namespace` line and no derived path: inert by the deferral's test, and broken.
         let sibling = module("models.noe", "pub struct User { let ] = ; }\n");
         let errors = link_with_deps(

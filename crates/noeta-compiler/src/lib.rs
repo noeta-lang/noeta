@@ -242,14 +242,6 @@ impl std::fmt::Debug for CompileOptions {
     }
 }
 
-/// TEMPORARY diagnostic probe (perf/startup-lazy) — see `noeta_runner::compile::phase_stop`.
-#[doc(hidden)]
-pub fn phase_stop(phase: &str) {
-    if std::env::var("NOETA_PHASE_STOP").as_deref() == Ok(phase) {
-        std::process::exit(0);
-    }
-}
-
 /// Compile a whole program to a [`Module`], or report the first unsupported construct.
 ///
 /// Three passes: (1) register every top-level type so forward references resolve and shapes
@@ -800,10 +792,8 @@ impl SessionCompiler {
         // meant the checker accepted `@derive(<session recipe>)` — it reads the session registry —
         // while the hoist synthesized nothing, and `compile_methods` then panicked on the missing
         // prototype ("no entry found for key").
-        phase_stop("install-enter");
         let hoisted = noeta_ir::hoist_impl_methods_with_registry(program, Some(self.mc.registry));
         let hoisted: &Program = hoisted.as_ref().unwrap_or(program);
-        phase_stop("hoist");
 
         // `type_args` / `type_arg_reprs` — MergeByContent, and it happens before anything lowers.
         // The tables are index-addressed by LIVE runtime values, so they may only grow, and a
@@ -858,12 +848,10 @@ impl SessionCompiler {
             // left the run path with nothing to render.
             span: Some(u.span),
         })?;
-        phase_stop("lower");
         // `facts` — MergeByKey. What this program adds joins the accumulation, for the *next*
         // install to lower against.
         self.facts
             .absorb(noeta_ir::ProgramFacts::of(hoisted, self.mc.registry));
-        phase_stop("facts");
         // The precise-RC drop-insertion pass (Phase 3) annotates the IR with `DropVar`s at last-use
         // death points; they lower to plain releases (prompt reclamation, no destructor), so this is
         // behavior-neutral — it reclaims a local's value at its last use instead of at frame
@@ -882,7 +870,6 @@ impl SessionCompiler {
         // being swapped INTO, not in the fragment, and reusing there would silently stop running a
         // destructor the cold start runs.
         let ir = noeta_ir_passes::thread_reuse(&ir, &self.facts.own_destructors);
-        phase_stop("passes");
 
         // ── the tables (each exactly once; policies in `TABLE_POLICIES`) ────────────────────
         // `type_of_sites` — MergeByKey. The checker's full-fidelity map, span-keyed by this
@@ -924,11 +911,8 @@ impl SessionCompiler {
         // lowered from the IR. All additive: map/set inserts, and `register_types` reserves *new*
         // protos at the current end.
         self.mc.register_globals(hoisted);
-        phase_stop("globals");
         self.mc.register_types(hoisted);
-        phase_stop("regtypes");
         self.mc.compile_methods(&ir)?;
-        phase_stop("methods");
 
         // `protos[0]` — the one in-place write. The top-level statements become the entry chunk,
         // replacing the previous install's now-dead `main` (no live value references proto 0).
@@ -986,17 +970,13 @@ impl SessionCompiler {
         // the surface AST (`noeta_eval`'s `run_ir_traced`), so hoisting first would give a swapped
         // program method records a cold one does not have. `accumulate` is latest-wins, so a query
         // on a type declared by an earlier install still resolves.
-        phase_stop("packed");
         let native_roles = self.mc.registry.native_roles();
-        phase_stop("roles");
         let native_traits = noeta_ir::native_trait_impls(self.mc.registry);
-        phase_stop("nativetraits");
         self.reflection.accumulate(noeta_ast::reflect::build(
             program,
             &native_roles,
             &native_traits,
         ));
-        phase_stop("reflectbuild");
         // The installed extensions' own declarations are NOT embedded here. An artifact used to be
         // seeded with a materialized copy of the whole registry (`extend_reflection`), which cost
         // 1.83M instructions per `noeta run` — a third of a one-line program's whole process — for
@@ -1004,7 +984,6 @@ impl SessionCompiler {
         // `ReflectionInfo`'s lookups resolve a native declaration lazily instead
         // (`noeta_ast::native_reflect`), so the answers are unchanged and only the ones a program
         // actually asks for are ever built.
-        phase_stop("extendreflect");
 
         // `destruct_reachable` — Derived. PRECISE from the checker's fixpoint when there is a
         // bundle; otherwise the conservative over-approximation to *all* declared type names, so

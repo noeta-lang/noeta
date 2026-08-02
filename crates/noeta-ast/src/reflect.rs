@@ -3300,7 +3300,10 @@ fn build_prelude_structs() -> Vec<PreludeStruct> {
 
 /// The prelude struct of this name, or `None` when the name is not one.
 pub fn prelude_struct(name: &str) -> Option<PreludeStruct> {
-    prelude_struct_table().iter().find(|s| s.name == name).cloned()
+    prelude_struct_table()
+        .iter()
+        .find(|s| s.name == name)
+        .cloned()
 }
 
 /// The fields of the prelude struct `name`, in slot order — the lookup every materialization site
