@@ -30,6 +30,17 @@ noeta-value = { workspace = true }
 # the drop pass and the reuse pass in one specific order, and a second copy of that recipe would
 # make the two backends differ for a reason that is the harness's fault rather than the VM's.
 noeta-conformance = { workspace = true }
+# The two front-ends the project differential holds against each other, and nothing between them.
+# `noeta-ide` is the CHECK side — `project_check` is the one entry `noeta check`, the LSP's
+# `workspace/diagnostic` and the MCP `check` tool all go through, and it links the salsa workspace
+# (`noeta-db`) rather than the loader's directory reader. `noeta-runner` is the RUN side — the L2
+# compile front-end `noeta run` itself calls. Depending on both is the whole point: the oracle exists
+# because every other target in this crate drives the run side only.
+noeta-ide = { workspace = true }
+noeta-runner = { workspace = true }
+# A generated project is a real package on disk, so the differential needs the package root the two
+# front-ends each derive their file set from.
+noeta-pm = { workspace = true }
 
 [features]
 # Enable the tier-1 JIT and its differential over generated programs. Off by default: the rest of
@@ -38,6 +49,10 @@ jit = ["noeta-vm/jit", "noeta-conformance/jit"]
 
 [dev-dependencies]
 proptest = { workspace = true }
+# The project differential materializes each generated program as a real package layout on disk, and
+# a fixture path built from a fixed name is shared by every concurrently-running test binary on the
+# machine — see the crate's own docs for the class of failure that produces.
+noeta-test-temp = { workspace = true }
 
 [lints]
 workspace = true

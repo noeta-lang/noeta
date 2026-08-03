@@ -33,6 +33,10 @@ pub mod generate;
 #[cfg(feature = "jit")]
 pub mod jit_target;
 pub mod leak_target;
+/// The check-vs-run differential over generated **projects** — the one target that drives
+/// `noeta_ide::project_check` (and therefore the salsa workspace the LSP and the MCP `check` tool
+/// read) rather than the loader front-end every other target here shares.
+pub mod project_target;
 pub mod run_target;
 pub mod typed;
 
