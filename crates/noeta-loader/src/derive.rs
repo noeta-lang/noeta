@@ -111,6 +111,41 @@ impl PackageRoot {
         }
         path.strip_prefix(&self.dir).ok()
     }
+
+    /// Whether `path` sits inside one of this package's [**data directories**](Self::data_dirs) —
+    /// i.e. whether it is a *program the driver runs* rather than a module of the package.
+    pub fn holds_program(&self, path: &Path) -> bool {
+        self.relative(path)
+            .is_some_and(|relative| self.data_dirs.iter().any(|dir| relative.starts_with(dir)))
+    }
+
+    /// **The module path a file's location derives** under this root — the one answer every surface
+    /// asks for, so none of them can disagree about which module a file is.
+    ///
+    /// Two locations derive nothing ([`ModulePath::Declared`], the file's own declaration standing):
+    ///
+    /// * a file **outside** this root ([`relative`](Self::relative) — there is no honest path to
+    ///   derive out of the machine's directory layout);
+    /// * a file in a **data directory** ([`holds_program`](Self::holds_program)) — a migration/seed
+    ///   is a program named for *when* it runs (`20260719000002_more_users.noe`), a stem no `use`
+    ///   could ever spell. The package walk already prunes those directories
+    ///   ([`read_package_modules`]), so deriving a path for one anywhere else is a surface deciding
+    ///   on its own that a program is a module, and reporting E0074 against a file whose name is
+    ///   exactly right for what it is.
+    ///
+    /// That second case is why this is a method rather than a line at each call site: it lived in
+    /// the loader's entry path only, so `noeta run migrations/…` was fixed while `noeta check .` —
+    /// which derives through the editor's own copy, shared with the LSP and the MCP `check` tool —
+    /// still refused every project wired for `noeta migrate`.
+    pub fn module_path(&self, path: &Path) -> ModulePath {
+        if self.holds_program(path) {
+            return ModulePath::Declared;
+        }
+        self.relative(path)
+            .map_or(ModulePath::Declared, |relative| {
+                derive_module_path(&self.prefix, relative)
+            })
+    }
 }
 
 /// A module's path, as far as the *filesystem* can say.
@@ -486,5 +521,45 @@ mod tests {
             vec![&ModulePath::Derived(prefix(&["para", "p2p", "surface"]))],
             "only the package's own `.noe` is a module; no fixture under the nested crate"
         );
+    }
+
+    #[test]
+    fn a_data_directory_program_derives_no_module_path() {
+        // The rule the package walk applies by pruning, stated for a *single file* — which is how
+        // every surface that does not walk (an entry, an editor member, `noeta check`'s per-file
+        // sweep) has to ask it. A migration is named for when it runs, so deriving a path from its
+        // stem yields E0074 against a file whose name is exactly right for what it is.
+        let root = PackageRoot::new("/pkg", prefix(&["app"]));
+
+        assert_eq!(
+            root.module_path(Path::new("/pkg/migrations/20260719000002_more_users.noe")),
+            ModulePath::Declared
+        );
+        assert_eq!(
+            root.module_path(Path::new("/pkg/seeds/20260719000002_more_users.noe")),
+            ModulePath::Declared
+        );
+        // An ordinary module still derives, and so does a file whose *name* merely starts with a
+        // data directory's — the rule is about the directory, not a string prefix.
+        assert_eq!(
+            root.module_path(Path::new("/pkg/src/human.noe")),
+            ModulePath::Derived(prefix(&["app", "human"]))
+        );
+        assert_eq!(
+            root.module_path(Path::new("/pkg/migrations_helper.noe")),
+            ModulePath::Derived(prefix(&["app", "migrations_helper"]))
+        );
+        // A package that moved its data directories is honored through the manifest, and one that
+        // declared none keeps the defaults above.
+        let moved = PackageRoot::new("/pkg", prefix(&["app"]))
+            .with_data_dirs(vec!["db/changes".to_string()]);
+        assert_eq!(
+            moved.module_path(Path::new("/pkg/db/changes/20260719000002_x.noe")),
+            ModulePath::Declared
+        );
+        assert!(matches!(
+            moved.module_path(Path::new("/pkg/migrations/20260719000002_x.noe")),
+            ModulePath::Illegal { .. }
+        ));
     }
 }

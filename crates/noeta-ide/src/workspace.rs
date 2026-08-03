@@ -648,6 +648,14 @@ pub(crate) fn disk_noe_uris(dir: &Path) -> Vec<String> {
 /// the package (namespace-derivation arc). `Declared` for a file in no package, and for a URI that is
 /// not a local path at all: with no package there is no prefix, so the file's own `namespace`
 /// declaration stands, exactly as before derivation.
+///
+/// The derivation itself is [`PackageRoot::module_path`] — the loader's own, not a second spelling
+/// of it. This used to inline the two lines it is made of and so lacked its data-directory rule: a
+/// `migrations/`/`seeds/` program is not a module, and deriving a path from its timestamped stem
+/// made `noeta check` (and the LSP, and the MCP `check` tool, which share this) report E0074 against
+/// every project wired for `noeta migrate` — while `noeta run` on the same file was fine.
+///
+/// [`PackageRoot::module_path`]: noeta_loader::PackageRoot::module_path
 fn derived_path_of_uri(uri: &str) -> noeta_loader::ModulePath {
     let Some(path) = uri_to_path(uri) else {
         return noeta_loader::ModulePath::Declared;
@@ -655,10 +663,7 @@ fn derived_path_of_uri(uri: &str) -> noeta_loader::ModulePath {
     let Some(root) = noeta_pm::sources::package_root(&path) else {
         return noeta_loader::ModulePath::Declared;
     };
-    root.relative(&path)
-        .map_or(noeta_loader::ModulePath::Declared, |relative| {
-            noeta_loader::derive_module_path(&root.prefix, relative)
-        })
+    root.module_path(&path)
 }
 
 pub(crate) fn uri_to_path(uri: &str) -> Option<PathBuf> {
