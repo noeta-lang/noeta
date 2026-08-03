@@ -12,6 +12,12 @@
 //! The reuse discipline is the finding-9 contract, unchanged by the move: an input is never
 //! abandoned just because a sibling appeared or vanished — its id/text are updated in place, and
 //! only genuinely new files get new inputs, so downstream memoization survives file-set churn.
+//!
+//! What is `pub` here is what a consumer outside this crate actually calls: [`sync`], the
+//! [`WorkspaceCache`] it returns, the [`SourceRef`]/[`SourceKind`] view over that cache, and the
+//! URI helpers. The resolution intermediates (`ResolvedDeps`) and the bookkeeping `sync` keeps
+//! between refreshes (tombstones, the resolved target, the degraded-dependency note) are
+//! `pub(crate)` — see the crate doc on why that line is worth holding.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -150,7 +156,7 @@ pub struct WorkspaceCache {
     /// genuinely-new file reuses a tombstone instead of minting a fresh input, bounding the salsa
     /// input table by the directory's *concurrent* `.noe` high-water mark rather than the total ever
     /// created/deleted across a session.
-    pub tombstones: Vec<SourceProgram>,
+    pub(crate) tombstones: Vec<SourceProgram>,
     /// The build **target** the dependency modules above were resolved for — `noeta check
     /// --target dev`'s target, `None` for the global set every other consumer wants.
     ///
@@ -158,7 +164,7 @@ pub struct WorkspaceCache {
     /// set", and the target is the *other* half of what makes a resolution current: re-syncing the
     /// same files for a different target must re-resolve, or the second answer would be the first
     /// one's dependency graph under the second one's name.
-    pub target: Option<String>,
+    pub(crate) target: Option<String>,
     /// A **surfaced** dependency-resolution failure (audit-5 #7): a hard `noeta-pm` failure —
     /// a trust refusal, a version conflict, a broken manifest, a lockfile drift — recorded here
     /// so the consumer reports the real cause instead of silently degrading to "no dependencies"
@@ -172,7 +178,7 @@ pub struct WorkspaceCache {
     /// but a **batch** project check must not answer "no dependencies" as though it had resolved
     /// them, so [`crate::project_check`] reports it. `None` when the resolve succeeded or when there
     /// was no manifest to resolve (a lone file has no dependencies to lose).
-    pub dep_degraded: Option<noeta_pm::PmError>,
+    pub(crate) dep_degraded: Option<noeta_pm::PmError>,
     /// The native packages this directory's program needs whose extensions **this editor process
     /// does not carry** ([`noeta_pm::composed::uncomposed`]). Non-empty means the workspace cannot
     /// be linked at all — the namespaces those packages register are absent — so every file in it
@@ -255,11 +261,11 @@ impl WorkspaceCache {
 
     /// Every source this workspace maps, in [`SourceId`] order — so `nth` element IS `SourceId(n)`.
     /// What the `SourceId`-indexed text vectors the call graph consumes are built from.
-    pub fn sources(&self) -> impl Iterator<Item = SourceRef<'_>> {
+    pub(crate) fn sources(&self) -> impl Iterator<Item = SourceRef<'_>> {
         self.sources_with(&[])
     }
 
-    /// [`Self::sources`] continued through one link's expansions, still in [`SourceId`] order — so a
+    /// `sources` continued through one link's expansions, still in [`SourceId`] order — so a
     /// span in generated code indexes the id-keyed vectors built from this exactly as one in a
     /// hand-written file does.
     pub fn sources_with<'a>(
@@ -305,30 +311,30 @@ impl WorkspaceCache {
 /// [`DepModule`] inputs the `Workspace` links, plus — parallel-indexed — each module's URI and
 /// salsa input so a cross-package definition span maps back to its file.
 #[derive(Debug, Default)]
-pub struct ResolvedDeps {
-    pub modules: Vec<DepModule>,
-    pub uris: Vec<String>,
-    pub programs: Vec<SourceProgram>,
+pub(crate) struct ResolvedDeps {
+    pub(crate) modules: Vec<DepModule>,
+    pub(crate) uris: Vec<String>,
+    pub(crate) programs: Vec<SourceProgram>,
     /// The whole program's per-package `@name` resolution tables (`[directives]`/`[tiers]`), from the
     /// same query-path graph resolve that produced the modules. Threaded onto the [`Workspace`] input
     /// so the editor lexes a package's renamed text tiers verbatim (per-package tier-naming arc, 3g).
-    pub package_uses: noeta_span::PackageUses,
+    pub(crate) package_uses: noeta_span::PackageUses,
     /// A hard resolution failure worth the user's attention (see [`WorkspaceCache::dep_error`]).
-    pub error: Option<noeta_pm::PmError>,
+    pub(crate) error: Option<noeta_pm::PmError>,
     /// A routine failure that was degraded past (see [`WorkspaceCache::dep_degraded`]).
-    pub degraded: Option<noeta_pm::PmError>,
+    pub(crate) degraded: Option<noeta_pm::PmError>,
     /// The declared native-package roots of a **successfully resolved** graph — what makes the link
     /// strict about foreign import roots (see [`Workspace::native_roots`]). `None` whenever the
     /// resolve did not happen or did not succeed, which is what keeps a scratch buffer lenient.
-    pub native_roots: NativeRoots,
+    pub(crate) native_roots: NativeRoots,
     /// The native packages this process cannot link (see [`WorkspaceCache::uncomposed`]) — read off
     /// the same resolve that produced the modules, so it costs a vector scan.
-    pub uncomposed: Vec<String>,
+    pub(crate) uncomposed: Vec<String>,
     /// Previously-resolved dependency sources that vanished from this resolution (finding a): their
     /// resident content is reclaimed by the caller via [`noeta_db::release_source`]. Not pooled —
     /// dependency inputs carry a [`DepModule`] wrapper, so the member tombstone pool cannot reuse
     /// them; the reuse-by-URI path already bounds the common dependency-churn case.
-    pub deleted: Vec<SourceProgram>,
+    pub(crate) deleted: Vec<SourceProgram>,
 }
 
 /// Build or update a workspace from the ordered `(uri, text)` member list, reusing `existing`'s

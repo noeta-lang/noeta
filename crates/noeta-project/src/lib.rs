@@ -46,6 +46,33 @@
 //!   underneath it: members, dependency modules and per-package editions built from an ordered
 //!   `(uri, text)` list, with live inputs reused in place across refreshes.
 //!
+//! # The public surface is the consumed surface
+//!
+//! [`workspace`] is public because the editor genuinely builds on it: [`sync`](workspace::sync)
+//! and the [`WorkspaceCache`](workspace::WorkspaceCache) it returns are the construction
+//! `noeta-ide` overlays unsaved buffers onto — that sharing is *why* check and run agree — plus
+//! the [`SourceRef`](workspace::SourceRef)/[`SourceKind`](workspace::SourceKind) view over it and
+//! the URI helpers ([`uri_to_path`](workspace::uri_to_path),
+//! [`path_to_uri`](workspace::path_to_uri), [`project_root`](workspace::project_root),
+//! [`workspace_key`](workspace::workspace_key), [`edition_of_uri`](workspace::edition_of_uri),
+//! [`disk_noe_uris`](workspace::disk_noe_uris)), which exist so no consumer decodes a `file:` URI
+//! twice.
+//!
+//! Everything else is `pub(crate)` and belongs there: dependency resolution's `ResolvedDeps`, and
+//! the tombstone/target bookkeeping `sync` keeps between refreshes. Those are how the construction
+//! works, not what it offers, and a consumer that reaches one has pinned an internal invariant
+//! rather than an interface — which is exactly the shape the six divergences had. Widen this
+//! surface only for something a consumer cannot express through the accessors, and prefer adding
+//! the accessor.
+//!
+//! One thing on that line is already leaning the wrong way and is recorded rather than blessed:
+//! `WorkspaceCache`'s `source_uris`/`programs`/`dep_*` vectors are read *directly*, index by index,
+//! at about thirty sites in `noeta-ide` — including one that indexes `programs` by a `SourceId`'s
+//! raw `.0`. That is the range convention [`SourceKind`](workspace::SourceKind) was introduced to
+//! retire, in the crate that owns the invariant's other half. The fields stay `pub` because those
+//! call sites exist; the direction of travel is `source`/`find_member`/`sources_with`, and a new
+//! call site should use them.
+//!
 //! # What is deliberately NOT here
 //!
 //! Anything that needs a cursor. Completion, hover, signature help, inlay hints, semantic tokens,
