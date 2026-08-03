@@ -41,7 +41,7 @@ fn main() {
             // Per-layout accepted/rejected counts. Which layouts can reach `Accepted` at all is the
             // fact a reader needs: a layout that is structurally always refused (an unspellable
             // module name) proves the agreement only on the refusing side.
-            let mut table: BTreeMap<String, (u32, u32, u32)> = BTreeMap::new();
+            let mut table: BTreeMap<String, (u32, u32)> = BTreeMap::new();
             let mut findings: BTreeMap<String, (u32, u32, String)> = BTreeMap::new();
             let mut tiers = 0u32;
             for nonce in 0..n {
@@ -57,7 +57,6 @@ fn main() {
                         match evaluated.reach {
                             Reach::Accepted => row.0 += 1,
                             Reach::Rejected => row.1 += 1,
-                            Reach::OpenDivergence => row.2 += 1,
                         }
                     }
                     Err(violation) => {
@@ -73,22 +72,17 @@ fn main() {
                     eprintln!("  … {} of {n}", nonce + 1);
                 }
             }
-            println!("reach over {n} projects (layout: accepted / rejected / open-divergence)");
+            println!("reach over {n} projects (layout: accepted / rejected)");
             let mut accepted = 0u32;
             let mut rejected = 0u32;
-            let mut open = 0u32;
             for layout in target::LAYOUTS {
                 let key = format!("{layout:?}");
-                let (a, r, o) = table.get(&key).copied().unwrap_or((0, 0, 0));
+                let (a, r) = table.get(&key).copied().unwrap_or((0, 0));
                 accepted += a;
                 rejected += r;
-                open += o;
-                println!("  {key:<20} {a:>5} / {r:>5} / {o:>5}");
+                println!("  {key:<20} {a:>5} / {r:>5}");
             }
-            println!(
-                "  {:<20} {accepted:>5} / {rejected:>5} / {open:>5}",
-                "TOTAL"
-            );
+            println!("  {:<20} {accepted:>5} / {rejected:>5}", "TOTAL");
             println!("{tiers} project(s) swept a code-tier shape (want 0)");
             if findings.is_empty() {
                 println!("no violations");
