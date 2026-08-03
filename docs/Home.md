@@ -61,7 +61,6 @@ Learn the language from zero.
 - [Getting Started](Getting-Started)
 - [Language Tour](Language-Tour)
 - [Conventions](Conventions) — how the ecosystem names things, and which of those names the compiler actually enforces
-- [Package Quickstart](Quickstart-Packages)
 - [Using Packages](Using-Packages)
 
 ### Bundled tools
