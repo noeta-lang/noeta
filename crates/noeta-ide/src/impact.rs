@@ -47,6 +47,7 @@ use std::path::{Path, PathBuf};
 
 use noeta_compiler::hotswap::SwapDiff;
 use noeta_project::workspace::{self, WorkspaceCache, disk_noe_uris, path_to_uri, uri_to_path};
+use noeta_span::SourceId;
 use salsa::Setter as _;
 
 use crate::callgraph::{self, Callee};
@@ -335,7 +336,7 @@ impl ImpactSession {
         session
             .cache
             .as_ref()
-            .is_some_and(|c| c.source_uris.contains(&session.entry_uri))
+            .is_some_and(|c| c.find_member(&session.entry_uri).is_some())
             .then_some(session)
     }
 
@@ -362,13 +363,18 @@ impl ImpactSession {
         let Some(cache) = &self.cache else {
             return Vec::new();
         };
-        let Some(entry_index) = cache.source_uris.iter().position(|u| *u == self.entry_uri) else {
+        // The entry must be a **member** — a dependency module's URI deliberately does not resolve
+        // here, and the link is driven from the directory's own file.
+        let Some(entry) = cache
+            .find_member(&self.entry_uri)
+            .and_then(|(_, src)| src.input())
+        else {
             return Vec::new();
         };
         // Cheap when nothing changed — salsa memoizes the link. Reads survive even a failed link
         // (an `@openapi` whose spec is missing still reported the path), which is what lets creating
         // that spec re-trigger the watcher.
-        let link = noeta_db::linked_from(&self.db, cache.workspace, cache.programs[entry_index]);
+        let link = noeta_db::linked_from(&self.db, cache.workspace, entry);
         link.reads
             .iter()
             .map(|r| {
@@ -414,14 +420,20 @@ impl ImpactSession {
         let mut now = disk_noe_uris(&self.dir);
         now.sort();
         now.dedup();
-        if now != cache.source_uris {
+        if !cache
+            .members()
+            .map(|(_, src)| src.uri)
+            .eq(now.iter().map(String::as_str))
+        {
             return Impact::All {
                 reason: "the project's module set changed".into(),
             };
         }
 
-        // Attribute every changed path to a member, and read its current text.
-        let mut edited: Vec<(usize, String)> = Vec::new(); // (member index, new text)
+        // Attribute every changed path to a member, and read its current text. Keyed by the
+        // member's `SourceId` — the workspace's own name for it — not by a position in a table
+        // whose meaning depends on which table it came from.
+        let mut edited: Vec<(SourceId, String)> = Vec::new(); // (member id, new text)
         let mut seen = BTreeSet::new();
         for path in changed {
             let canon = path.canonicalize().unwrap_or_else(|_| path.clone());
@@ -438,7 +450,7 @@ impl ImpactSession {
                 };
             }
             let uri = path_to_uri(&canon);
-            let Some(index) = cache.source_uris.iter().position(|u| *u == uri) else {
+            let Some((source, _)) = cache.find_member(&uri) else {
                 return Impact::All {
                     reason: format!(
                         "a change outside the project's modules ({})",
@@ -446,7 +458,7 @@ impl ImpactSession {
                     ),
                 };
             };
-            if !seen.insert(index) {
+            if !seen.insert(source) {
                 continue;
             }
             let Some(text) = uri_to_path(&uri).and_then(|p| std::fs::read_to_string(p).ok()) else {
@@ -454,15 +466,16 @@ impl ImpactSession {
                     reason: format!("cannot read {}", canon.display()),
                 };
             };
-            edited.push((index, text));
+            edited.push((source, text));
         }
 
         // Push the new texts into the salsa inputs first (unchanged members backdate), so the
         // link, the check, and the workspace tier set below all see the post-edit project.
-        for (index, text) in &edited {
-            cache.programs[*index]
-                .set_text(&mut self.db)
-                .to(text.clone());
+        for (source, text) in &edited {
+            let Some(program) = cache.source(*source).and_then(|src| src.input()) else {
+                continue;
+            };
+            program.set_text(&mut self.db).to(text.clone());
         }
         let cache = self.cache.as_ref().expect("present: checked above");
 
@@ -474,11 +487,16 @@ impl ImpactSession {
         );
         let mut seeds: BTreeSet<String> = BTreeSet::new();
         let mut members: BTreeSet<String> = BTreeSet::new();
-        for (index, new_text) in &edited {
-            let uri = &cache.source_uris[*index];
+        for (source, new_text) in &edited {
+            // Resolved through the one id→source lookup: `edited` carries ids the workspace
+            // named, so the URI, the input and the edition below all come from the same source.
+            let Some(src) = cache.source(*source) else {
+                continue;
+            };
+            let uri = src.uri;
             let file = uri_to_path(uri)
                 .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-                .unwrap_or_else(|| uri.clone());
+                .unwrap_or_else(|| uri.to_string());
             let Some(old_text) = self.baselines.get(uri) else {
                 return Impact::All {
                     reason: format!("{file}: no baseline to diff against"),
@@ -487,7 +505,9 @@ impl ImpactSession {
             if old_text == new_text {
                 continue; // an event without a byte change (editors touch files)
             }
-            let edition = *cache.programs[*index].edition(&self.db);
+            let Some(edition) = src.input().map(|program| *program.edition(&self.db)) else {
+                continue;
+            };
             match diff_file(old_text, new_text, edition, &tier_set) {
                 FileDiff::All(reason) => {
                     return Impact::All {
@@ -515,12 +535,14 @@ impl ImpactSession {
 
         // The linked program — what the runner executes — then tiers, check, graph, closure.
         // The entry was a member at construction, but a deletion + rebaseline can remove it.
-        let Some(entry_index) = cache.source_uris.iter().position(|u| *u == self.entry_uri) else {
+        let Some(entry_program) = cache
+            .find_member(&self.entry_uri)
+            .and_then(|(_, src)| src.input())
+        else {
             return Impact::All {
                 reason: "the entry left the project".into(),
             };
         };
-        let entry_program = cache.programs[entry_index];
         let link = noeta_db::linked_from(&self.db, cache.workspace, entry_program);
         let linked = match &link.program {
             Ok(program) => program,

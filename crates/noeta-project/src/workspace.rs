@@ -18,6 +18,14 @@
 //! URI helpers. The resolution intermediates (`ResolvedDeps`) and the bookkeeping `sync` keeps
 //! between refreshes (tombstones, the resolved target, the degraded-dependency note) are
 //! `pub(crate)` — see the crate doc on why that line is worth holding.
+//!
+//! The **id-keyed tables themselves** (`source_uris`, `programs`, `dep_uris`, `dep_programs`,
+//! `dep_modules`) are `pub(crate)` for the same reason [`SourceKind`] exists: an outside consumer
+//! reading them index by index is re-deriving the range convention that once attributed a span to
+//! the wrong file, and no amount of documenting the invariant stops the next site from open-coding
+//! it. Everything outside addresses a source by *category* instead — [`WorkspaceCache::source`],
+//! [`WorkspaceCache::members`], [`WorkspaceCache::deps`], [`WorkspaceCache::find_member`],
+//! [`WorkspaceCache::find_dep`] — so the id layout has no callers beyond this file.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -32,6 +40,11 @@ use salsa::Setter as _;
 /// `programs.len()` meant a member, anything above meant a dependency, and the caller subtracted.
 /// That rule was open-coded at nine sites, and when it drifted it did not crash — it attributed a
 /// span to the WRONG FILE. Naming the category makes the decision explicit at each site.
+///
+/// Naming it was not enough on its own: the tables stayed `pub`, and the editor grew a second crop
+/// of sites reading them index by index (including a test that treated a raw `SourceId.0` as a
+/// member index). They are `pub(crate)` now, so the convention has no way back out of this file —
+/// the category accessors are the only surface a consumer can reach.
 ///
 /// The **third** category, [`SourceKind::Expansion`], is why the predicate discipline exists: call
 /// sites ask [`SourceRef::is_member`] rather than matching every arm, so the variant slotted in
@@ -136,19 +149,19 @@ pub struct WorkspaceCache {
     /// file it belongs to, for cross-file diagnostics and navigation. Members only — the reuse
     /// fast-path compares this against a fresh directory scan; dependency modules live in
     /// `dep_uris`/`dep_programs`.
-    pub source_uris: Vec<String>,
+    pub(crate) source_uris: Vec<String>,
     /// Per `SourceId`: the salsa input, for in-place text updates.
-    pub programs: Vec<SourceProgram>,
+    pub(crate) programs: Vec<SourceProgram>,
     /// Dependency-package modules (package-manager P2.1c); their [`SourceId`]s continue past the
     /// members, per [`first_dep_id`]. Kept apart from `source_uris`/`programs` so the per-keystroke
     /// reuse check and text-update loop stay over members only, while cross-package navigation still
     /// maps a dependency span back to its file. **Address these through [`WorkspaceCache::source`]
     /// / [`WorkspaceCache::dep_source_id`]**, never by open-coding the id offset.
-    pub dep_uris: Vec<String>,
-    pub dep_programs: Vec<SourceProgram>,
+    pub(crate) dep_uris: Vec<String>,
+    pub(crate) dep_programs: Vec<SourceProgram>,
     /// The [`DepModule`] inputs backing `workspace.dep_modules`, kept so a file-set rescan can
     /// reuse them by URI instead of abandoning them (finding 9).
-    pub dep_modules: Vec<DepModule>,
+    pub(crate) dep_modules: Vec<DepModule>,
     /// **Tombstoned member inputs** — [`SourceProgram`]s whose files were deleted (audit F9 residual
     /// a). salsa 0.27 cannot free an input slot, so rather than abandon them (leaking the slot *and*
     /// their downstream memos), a deleted member is emptied via [`noeta_db::release_source`] — text
@@ -274,6 +287,33 @@ impl WorkspaceCache {
     ) -> impl Iterator<Item = SourceRef<'a>> {
         (0..self.first_expansion_id() as usize + expansions.len())
             .filter_map(move |i| self.source_with(SourceId(i as u32), expansions))
+    }
+
+    /// The workspace's **members**, each with the [`SourceId`] it carries, in id order — the
+    /// category-named form of "walk the member table". Yields no dependency module and no
+    /// expansion, so a consumer that means *the directory's own files* (the docs corpus, the
+    /// impact diff, the entry choice) says so instead of indexing `programs` and relying on the
+    /// range convention to have kept members first.
+    ///
+    /// The id is the iterator's, not the salsa input's: it comes from the same layout
+    /// [`Self::source`] resolves through, so a member's id here and the id a span carries cannot
+    /// disagree.
+    pub fn members(&self) -> impl Iterator<Item = (SourceId, SourceRef<'_>)> {
+        (0..first_dep_id(self.programs.len()))
+            .filter_map(move |i| Some((SourceId(i), self.source(SourceId(i))?)))
+    }
+
+    /// The resolved **dependency modules**, each with the [`SourceId`] it carries and the
+    /// [`DepModule`] input that says which package it came from, in id order. The counterpart of
+    /// [`Self::members`] for the other file-backed category, and the only way to read a dependency
+    /// module's import key alongside its source without re-deriving the id offset: the id comes
+    /// from [`Self::dep_source_id`], and the three parallel tables are zipped here once rather
+    /// than at every consumer.
+    pub fn deps(&self) -> impl Iterator<Item = (SourceId, SourceRef<'_>, DepModule)> {
+        (0..self.dep_programs.len()).filter_map(move |i| {
+            let id = self.dep_source_id(i)?;
+            Some((id, self.source(id)?, *self.dep_modules.get(i)?))
+        })
     }
 
     /// The workspace **member** at `uri`, with the [`SourceId`] it carries. `None` if `uri` is not a
@@ -908,6 +948,55 @@ mod tests {
                 "dep:///d0",
                 "dep:///d1"
             ]
+        );
+    }
+
+    /// The two **category walks** the consumers use instead of the id-keyed tables: `members()`
+    /// yields exactly the members with the ids they carry, and `deps()` yields exactly the
+    /// dependency modules with ids continuing past them — each paired with **its own** `DepModule`.
+    ///
+    /// That last pairing is the one worth pinning. `dep_uris`, `dep_programs` and `dep_modules` are
+    /// three separate vectors that only agree because `resolve_dep_modules` pushes them in
+    /// lockstep, and the docs corpus used to index all three with the same `i` at three different
+    /// sites — the shape that, if the vectors ever diverged, would label one dependency's code with
+    /// another's import root and file name. Asserting `module.src(db)` IS the yielded source makes
+    /// the pairing a checked property rather than a convention.
+    #[test]
+    fn members_and_deps_walk_their_own_category_with_their_own_ids() {
+        let mut db = LangDatabase::default();
+        let cache = cache_with(
+            &mut db,
+            &["file:///w/a.noe", "file:///w/b.noe"],
+            &["dep:///d0", "dep:///d1"],
+        );
+
+        let members: Vec<(SourceId, &str)> = cache
+            .members()
+            .map(|(id, src)| {
+                assert!(src.is_member(), "members() must yield only members");
+                (id, src.uri)
+            })
+            .collect();
+        assert_eq!(
+            members,
+            vec![
+                (SourceId(0), "file:///w/a.noe"),
+                (SourceId(1), "file:///w/b.noe"),
+            ]
+        );
+
+        let deps: Vec<(SourceId, &str)> = cache
+            .deps()
+            .map(|(id, src, module)| {
+                assert_eq!(src.kind, SourceKind::Dependency);
+                // The `DepModule` handed out beside a source is that source's own.
+                assert_eq!(module.src(&db), src.input().unwrap());
+                (id, src.uri)
+            })
+            .collect();
+        assert_eq!(
+            deps,
+            vec![(SourceId(2), "dep:///d0"), (SourceId(3), "dep:///d1")]
         );
     }
 
