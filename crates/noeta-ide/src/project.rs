@@ -445,7 +445,6 @@ fn pool_name(cache: &WorkspaceCache) -> String {
     cache.source_uris.first().cloned().unwrap_or_default()
 }
 
-
 /// **One entry, every shape.** The single call every surface's per-entry answer goes through.
 fn sweep_entry(
     db: &LangDatabase,

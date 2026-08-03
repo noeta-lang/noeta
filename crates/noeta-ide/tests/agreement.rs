@@ -5,10 +5,10 @@
 //! A surface that answers "is this file clean" differently from the compiler is wrong in exactly one
 //! direction that matters — *quietly* clean — and each of these was quiet.
 //!
-//! The last group is row 8, and it moves the axis: since row 5, `noeta check` **is** the editor's
-//! engine, so the two answers that can disagree are the salsa graph (`noeta check`, the LSP) and the
-//! batch loader (`noeta run`, `noeta build`, `noeta test`). [`both_surfaces`] asks both about one
-//! project on disk, and the tier fixtures below insist they say the same thing.
+//! The **third** group is row 8, and it moves the axis: since row 5, `noeta check` **is** the
+//! editor's engine, so the two answers that can disagree are the salsa graph (`noeta check`, the
+//! LSP) and the batch loader (`noeta run`, `noeta build`, `noeta test`). [`both_surfaces`] asks both
+//! about one project on disk, and the tier fixtures below insist they say the same thing.
 //!
 //! The **last** group moves the axis again. The tier fixtures are about how one file's *text* is
 //! read; those three are about **which files are in the program at all** — the dependency selection
@@ -409,8 +409,7 @@ fn a_target_scoped_dependency_links_for_the_editor_and_the_loader_alike() {
 
     let (salsa, loader) = both_surfaces_for(&app, &entry, Some("dev"));
     assert_eq!(
-        salsa,
-        loader,
+        salsa, loader,
         "`--target dev` disagrees about `[targets.dev.dependencies]`: `noeta check` says \
          {salsa:?}, the loader (`noeta run --target dev`) says {loader:?}"
     );
@@ -586,8 +585,7 @@ fn a_derived_path_collision_in_a_pruned_subtree_is_reported_by_both_surfaces() {
          {loader:?}"
     );
     assert_eq!(
-        salsa,
-        loader,
+        salsa, loader,
         "`noeta check` reports a clean tree that `noeta run` refuses: check says {salsa:?}, the \
          loader says {loader:?}"
     );

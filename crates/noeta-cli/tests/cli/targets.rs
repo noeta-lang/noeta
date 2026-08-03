@@ -198,3 +198,70 @@ fn check_resolves_a_target_against_the_directory_it_is_given() {
         .success()
         .stderr(predicate::str::contains("no `noeta.toml`").not());
 }
+
+/// **A `--target`'s `[targets.<t>.dependencies]` is in the checked program, not only the run one.**
+///
+/// `--target` selects two things: which tiers are live, and which *dependencies* are resolved
+/// (`[targets.dev.dependencies]` layered onto the globals — dev-deps D2). `noeta check` carried the
+/// first half and dropped the second, resolving the global set however the target was spelled, so a
+/// dev-only dependency was absent from the checker's program and every import of it was an E0019 on
+/// a project `noeta run --target dev` compiles and runs.
+///
+/// The control at the bottom is what makes this test about *targets*: with no `--target` the
+/// dependency really is out of the program, and both surfaces say so.
+#[test]
+fn check_resolves_a_targets_own_dependencies() {
+    let base = temp_root().join("noeta_cli_test_check_target_deps");
+    let _ = std::fs::remove_dir_all(&base);
+    for (path, text) in [
+        (
+            "app/noeta.toml",
+            "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+             [targets.dev.dependencies]\ndevtools = { path = \"../devlib\" }\n",
+        ),
+        ("app/main.noe", "use devtools.api.marker\necho marker()\n"),
+        (
+            "devlib/noeta.toml",
+            "[package]\nname = \"acme/devtools\"\nversion = \"1.0.0\"\n",
+        ),
+        (
+            "devlib/api.noe",
+            "pub fn marker(): string { return \"dev tooling linked\" }\n",
+        ),
+    ] {
+        let full = base.join(path);
+        std::fs::create_dir_all(full.parent().expect("a parent")).expect("create dirs");
+        std::fs::write(&full, text).expect("write fixture");
+    }
+    let app = base.join("app");
+
+    lang()
+        .current_dir(&app)
+        .args(["run", "--target", "dev", "main.noe"])
+        .assert()
+        .success()
+        .stdout("dev tooling linked\n");
+
+    lang()
+        .current_dir(&app)
+        .args(["check", "--target", "dev", "main.noe"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("E0019").not());
+
+    // The control: `devtools` is declared ONLY under `[targets.dev]`, so the default program does
+    // not have it — and neither surface pretends otherwise.
+    lang()
+        .current_dir(&app)
+        .args(["run", "main.noe"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("E0019"));
+
+    lang()
+        .current_dir(&app)
+        .args(["check", "main.noe"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("E0019"));
+}
