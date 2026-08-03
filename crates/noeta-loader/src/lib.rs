@@ -6522,6 +6522,54 @@ mod tests {
         );
     }
 
+    /// A **nested** `fn` is sealed, so it cannot see the capture its enclosing `fn` holds — which
+    /// means it may name a parameter (or a local, a `for` variable, a match binding) after a module
+    /// binding, and be right to. Nothing about scope distinguishes that name from the module's own,
+    /// so the merge α-renames binders in lockstep with references: the local stays the local, under
+    /// a longer name, and the merged program means what the module's own file means.
+    #[test]
+    fn a_nested_fn_may_name_a_local_after_a_module_binding() {
+        let sibling = module(
+            "lib.noe",
+            "namespace app.lib;\n\
+             conn = \"module\";\n\
+             pub fn outer() use (conn): string {\n\
+               fn inner(conn: string): string { return conn }\n\
+               return \"${inner(\"local\")}/${conn}\"\n\
+             }\n",
+        );
+        let linked = link(
+            "main.noe",
+            "use app.lib.outer;\nconn = \"entry\";\necho outer();\n",
+            noeta_lexer::Edition::DEFAULT,
+            std::slice::from_ref(&sibling),
+        )
+        .expect("links");
+        let Some(Stmt::Fn(outer)) = linked
+            .program
+            .stmts
+            .iter()
+            .find(|s| matches!(s, Stmt::Fn(f) if leaf(f.name.as_str()) == "outer"))
+        else {
+            panic!("`outer` merged")
+        };
+        let Some(Stmt::Fn(inner)) = outer.body.first() else {
+            panic!(
+                "the nested `fn` is `outer`'s first statement: {:?}",
+                outer.body
+            )
+        };
+        assert_eq!(
+            inner.params[0].name, "app.lib.conn",
+            "the nested parameter is renamed with the references to it, not left behind"
+        );
+        assert!(
+            matches!(&inner.body[0], Stmt::Return { value: Some(Expr::Ident { name, .. }), .. } if name == "app.lib.conn"),
+            "so its body still reads the parameter: {:?}",
+            inner.body
+        );
+    }
+
     /// Two **different** dependency packages, each holding private state of the same obvious name.
     /// Nothing stops that: a local import key is the consumer's choice, and two consumers may key
     /// different packages the same — the package manager is what makes the *prefixes* unique

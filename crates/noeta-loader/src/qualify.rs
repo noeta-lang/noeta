@@ -350,13 +350,13 @@ pub fn qualify_stmt_scoped(
 /// A write to a captured `mut` global (`count = count + 1`) parses as a binding statement and is
 /// rewritten with everything else, so a capture stays the live view of the global it always was.
 ///
-/// The one shape neither rule settles is a **nested named `fn`**: it is sealed too, so it may name a
-/// local after a binding of the module it sits in, and it is reachable only through arbitrary
-/// expression nesting, which this pass does not track. Such a local is rewritten as if it were the
-/// global — and *that* is caught downstream rather than here, because a sealed body reaching a
-/// global it did not capture is E0005. The residue is therefore a confusing error, never a silent
-/// one; making it a clear error needs the walk to track `fn` boundaries, which is a bigger change
-/// than the shape justifies.
+/// The shape neither rule settles is a **nested named `fn`**: it is sealed too, so it cannot see the
+/// enclosing capture and may therefore name a parameter, a local, a `for` variable or a match
+/// binding after a binding of the module it sits in — legal, and invisible to any rule about what is
+/// in scope. It needs no rule. Every **binder** position is visited ([`NameKind::Binder`]), so such
+/// a name is α-renamed in lockstep with the references to it: it stays the local it was, under a
+/// longer name, and the merged program means exactly what the module's own file means. That is why
+/// this pass needs no notion of `fn` boundaries beyond the capture scopes above.
 pub fn qualify_module_bindings(stmt: &mut Stmt, bindings: &QMap) {
     if bindings.is_empty() {
         return;
@@ -1074,12 +1074,23 @@ fn walk_stmt(stmt: &mut Stmt, visit: &mut NameVisitor) {
             }
         }
         Stmt::For {
-            // A `for` binder introduces value names, never type references.
-            pattern: _,
+            // A `for` binder introduces value names, never type references — but it is still a
+            // binder, and a merged module α-renames the names it binds (see `q_param`).
+            pattern,
             iterable,
             body,
             span: _,
         } => {
+            match pattern {
+                noeta_ast::ForPattern::Single { name, name_span } => {
+                    q_binder(name, *name_span, visit);
+                }
+                noeta_ast::ForPattern::Tuple { names, span: _ } => {
+                    for (name, name_span) in names {
+                        q_binder(name, *name_span, visit);
+                    }
+                }
+            }
             q_expr(iterable, visit);
             q_body(body, visit);
         }
@@ -1308,6 +1319,11 @@ fn q_type_params(params: &mut [TypeParam], visit: &mut NameVisitor) {
 }
 
 fn q_param(p: &mut Param, visit: &mut NameVisitor) {
+    // A parameter's own name is a binder, visited for the same reason `Stmt::Binding`'s is: when a
+    // module is merged, a name it binds inside a NESTED sealed `fn` — which cannot see the module
+    // binding it happens to spell, so it is a local and always was — is α-renamed in lockstep with
+    // the references to it, and stays the local it was.
+    q_binder(&mut p.name, p.name_span, visit);
     q_opt_typeref(&mut p.ty, visit);
     if let Some(d) = &mut p.default {
         q_expr(d, visit);
@@ -1856,9 +1872,10 @@ fn q_pattern(p: &mut Pattern, visit: &mut NameVisitor) {
         Pattern::Tuple { elements, span: _ } => {
             elements.iter_mut().for_each(|e| q_pattern(e, visit))
         }
-        // A pattern binding introduces a value name; the literals carry no name at all.
+        // A pattern binding introduces a value name — a binder, like a parameter's; the literals
+        // carry no name at all.
+        Pattern::Binding { name, span } => q_binder(name, *span, visit),
         Pattern::Wildcard { span: _ }
-        | Pattern::Binding { name: _, span: _ }
         | Pattern::Int { value: _, span: _ }
         | Pattern::Str { value: _, span: _ }
         | Pattern::Bool { value: _, span: _ } => {}
