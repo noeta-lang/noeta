@@ -182,6 +182,23 @@ impl ModulePath {
             _ => None,
         }
     }
+
+    /// Whether the file's **location said nothing** about its module path — the one variant
+    /// [`apply_derived_paths`] passes over untouched.
+    ///
+    /// This is the test a caller asking *"does this workspace need the derivation pass at all?"*
+    /// has to use, and it is a method because asking it the other way round is a bug that already
+    /// happened: the salsa linker gated the pass on `derived().is_some()`, and an
+    /// [`Illegal`](Self::Illegal) path is not a derived one. A workspace whose every member either
+    /// derived nothing or derived something illegal therefore skipped the pass entirely, so
+    /// `noeta check` — and the LSP and the MCP `check` tool, which share it — accepted a file
+    /// `noeta run` refuses with E0074. Both non-`Declared` variants carry work: one a path to
+    /// write and collide, the other a refusal to report.
+    ///
+    /// [`apply_derived_paths`]: super::apply_derived_paths
+    pub fn is_declared(&self) -> bool {
+        matches!(self, ModulePath::Declared)
+    }
 }
 
 /// Derive the module path of the file at `relative` (a path **relative to the package root**) under

@@ -904,12 +904,21 @@ pub fn linked_from(db: &dyn salsa::Database, ws: Workspace, entry: SourceProgram
     // (the path becomes the module's `namespace`), and salsa's parsed ASTs are shared and immutable —
     // so those programs are cloned. A workspace with no package derives nothing and clones nothing,
     // which is every lone script and every conformance case.
+    //
+    // The test is `!is_declared()` and not `derived().is_some()`, because the pass this gates does
+    // not only *write* paths — it also refuses the ones the filesystem cannot spell (E0074), and an
+    // illegal path is not a derived one. Gating on `derived()` meant a workspace whose every member
+    // was `Declared` or `Illegal` skipped the pass, so `noeta check` (and the LSP, and the MCP
+    // `check` tool) accepted a package whose only module is `my-utils.noe` while `noeta run` on that
+    // same file reported it. Any legally-derived sibling — or any dependency, every one of whose
+    // modules derives — flipped the flag and hid the divergence, which is why it survived: the
+    // guard test for the data-directory rule has a `src/main.noe` beside the illegal file.
     let derives = ws
         .members(db)
         .iter()
         .copied()
         .chain(ws.dep_modules(db).iter().map(|dm| dm.src(db)))
-        .any(|m| m.module_path(db).0.derived().is_some());
+        .any(|m| !m.module_path(db).0.is_declared());
     let mut module_owned: Vec<(SourceProgram, Program)> = Vec::new();
     let mut module_programs: Vec<&Program> = Vec::new();
     for &m in ws.members(db) {
