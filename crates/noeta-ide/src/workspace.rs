@@ -151,6 +151,14 @@ pub(crate) struct WorkspaceCache {
     /// input table by the directory's *concurrent* `.noe` high-water mark rather than the total ever
     /// created/deleted across a session.
     pub(crate) tombstones: Vec<SourceProgram>,
+    /// The build **target** the dependency modules above were resolved for — `noeta check
+    /// --target dev`'s target, `None` for the global set every other consumer wants.
+    ///
+    /// Cached rather than merely passed because the no-op fast path keys on "is this the same file
+    /// set", and the target is the *other* half of what makes a resolution current: re-syncing the
+    /// same files for a different target must re-resolve, or the second answer would be the first
+    /// one's dependency graph under the second one's name.
+    pub(crate) target: Option<String>,
     /// A **surfaced** dependency-resolution failure (audit-5 #7): a hard `noeta-pm` failure —
     /// a trust refusal, a version conflict, a broken manifest, a lockfile drift — recorded here
     /// so the consumer reports the real cause instead of silently degrading to "no dependencies"
@@ -331,18 +339,28 @@ pub(crate) struct ResolvedDeps {
 /// (id/text re-pointed, only genuinely new files get new inputs) and re-resolves dependencies;
 /// a first build mints everything. The [`Workspace`] input itself is likewise updated in place
 /// once created, so `(workspace, entry)`-keyed query memoization survives the refresh.
+///
+/// `target` selects the **dependency set**: `Some(t)` layers `[targets.<t>.dependencies]` onto the
+/// globals exactly as `noeta run --target t` does, `None` is the global set. It is part of what
+/// makes a cached resolution current, hence the fast-path guard below.
 pub(crate) fn sync(
     db: &mut LangDatabase,
     existing: Option<WorkspaceCache>,
     sources: Vec<(String, String)>,
+    target: Option<&str>,
 ) -> Option<WorkspaceCache> {
     if sources.is_empty() {
         return None;
     }
     let uris: Vec<String> = sources.iter().map(|(u, _)| u.clone()).collect();
 
-    // File set unchanged → update each member's text in place (salsa backdates unchanged ones).
-    if let Some(cache) = existing.as_ref().filter(|cache| cache.source_uris == uris) {
+    // File set unchanged **and the same target** → update each member's text in place (salsa
+    // backdates unchanged ones). A changed target is a changed dependency set even over identical
+    // files, so it falls through to the re-resolving path below.
+    if let Some(cache) = existing
+        .as_ref()
+        .filter(|cache| cache.source_uris == uris && cache.target.as_deref() == target)
+    {
         for (program, (_, text)) in cache.programs.iter().zip(&sources) {
             program.set_text(db).to(text.clone());
         }
@@ -409,7 +427,13 @@ pub(crate) fn sync(
     // dep module as a `DepModule` input (SourceIds continue past the members), so cross-package
     // `use <dep-key>.…` resolves exactly as the CLI resolves it. Every member of one directory
     // shares one manifest, so one resolution serves them all.
-    let mut deps = resolve_dep_modules(db, existing.as_ref(), &uris, first_dep_id(programs.len()));
+    let mut deps = resolve_dep_modules(
+        db,
+        existing.as_ref(),
+        &uris,
+        first_dep_id(programs.len()),
+        target,
+    );
     // Dependency sources whose modules vanished from the resolution (finding a): reclaimed below.
     let deleted_deps = std::mem::take(&mut deps.deleted);
     let mut cache = match existing {
@@ -435,6 +459,7 @@ pub(crate) fn sync(
             cache.dep_degraded = deps.degraded;
             cache.uncomposed = deps.uncomposed;
             cache.tombstones = pool;
+            cache.target = target.map(str::to_string);
             cache
         }
         None => WorkspaceCache {
@@ -454,6 +479,7 @@ pub(crate) fn sync(
             dep_degraded: deps.degraded,
             uncomposed: deps.uncomposed,
             tombstones: pool,
+            target: target.map(str::to_string),
         },
     };
     // Now that the `Workspace` input carries the new member set, reclaim the deleted members'
@@ -486,6 +512,7 @@ fn resolve_dep_modules(
     previous: Option<&WorkspaceCache>,
     member_uris: &[String],
     first_id: u32,
+    target: Option<&str>,
 ) -> ResolvedDeps {
     let mut deps = ResolvedDeps::default();
     let Some(entry_path) = member_uris.first().and_then(|uri| uri_to_path(uri)) else {
@@ -494,7 +521,11 @@ fn resolve_dep_modules(
     // The query-path graph resolve (no lockfile refresh — opening a file must not rewrite
     // `noeta.lock`): it yields both the dependency packages AND the per-package `@name` tables
     // (`package_uses`), so a renamed text tier lexes verbatim in the editor exactly as under the CLI.
-    let graph = match noeta_pm::graph::resolve_graph_query(&entry_path) {
+    //
+    // …and for `target`'s dependency set, which is the *selection* half of what a `--target` means.
+    // Selecting and writing are separate axes: `resolve_graph_for` would give this the same
+    // selection and rewrite `noeta.lock` with it, which no query-shaped caller may do.
+    let graph = match noeta_pm::graph::resolve_graph_query_for(&entry_path, target) {
         Ok(graph) => graph,
         // Not a project / environmental: the quiet degrade IS the right behavior (formatting and
         // single-file analysis must not nag about a flaky network).
@@ -787,6 +818,7 @@ mod tests {
             dep_programs,
             dep_modules,
             tombstones: Vec::new(),
+            target: None,
             dep_error: None,
             dep_degraded: None,
             uncomposed: Vec::new(),
@@ -970,6 +1002,7 @@ mod tests {
                 member("file:///w/b.noe", "W.B", "b"),
                 member("file:///w/c.noe", "W.C", "c"),
             ],
+            None,
         )
         .expect("built the initial workspace");
         assert_eq!(s0.programs.len(), 3);
@@ -983,6 +1016,7 @@ mod tests {
                 member("file:///w/a.noe", "W.A", "a"),
                 member("file:///w/c.noe", "W.C", "c"),
             ],
+            None,
         )
         .expect("rebuilt after deletion");
         assert_eq!(s1.programs.len(), 2);
@@ -1006,6 +1040,7 @@ mod tests {
                 member("file:///w/c.noe", "W.C", "c"),
                 member("file:///w/d.noe", "W.D", "d"),
             ],
+            None,
         )
         .expect("rebuilt after add");
         assert_eq!(s2.programs.len(), 3);
@@ -1034,6 +1069,7 @@ mod tests {
                 member("file:///w/a.noe", "W.A", "a"),
                 member("file:///w/b.noe", "W.B", "b"),
             ],
+            None,
         )
         .unwrap();
         // Delete b → one tombstone parked.
@@ -1041,13 +1077,14 @@ mod tests {
             &mut db,
             Some(s0),
             vec![member("file:///w/a.noe", "W.A", "a")],
+            None,
         )
         .unwrap();
         assert_eq!(s1.tombstones.len(), 1);
         // A keystroke edit of a.noe (same file set) — text re-pointed, pool untouched.
         let mut a_edited = member("file:///w/a.noe", "W.A", "a");
         a_edited.1.push_str("pub fn a2(): int { return 2 }\n");
-        let s2 = sync(&mut db, Some(s1), vec![a_edited]).unwrap();
+        let s2 = sync(&mut db, Some(s1), vec![a_edited], None).unwrap();
         assert_eq!(
             s2.tombstones.len(),
             1,

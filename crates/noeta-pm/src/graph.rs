@@ -328,7 +328,23 @@ pub fn resolve_graph(entry: &Path) -> Result<ResolvedGraph, PmError> {
 /// silently re-pin versions) because a file was opened or formatted. Same selection, same trust
 /// enforcement; only the write is skipped.
 pub fn resolve_graph_query(entry: &Path) -> Result<ResolvedGraph, PmError> {
-    resolve_graph_impl(entry, None, LockRefresh::Skip)
+    resolve_graph_query_for(entry, None)
+}
+
+/// [`resolve_graph_query`] for a build **target** — the query-shaped counterpart of
+/// [`resolve_graph_for`], and the one `noeta check --target T` needs.
+///
+/// The two axes are independent and both matter here: *which* dependency set is selected (the
+/// target's, layered onto the globals) and *whether the resolve writes* (it must not). A checker
+/// that reached for `resolve_graph_for` to get the first would acquire the second with it and
+/// rewrite `noeta.lock` because someone asked whether their code compiles; one that stayed on
+/// `resolve_graph_query` reported unresolved imports for every dev-only dependency. This is the
+/// combination — the target's selection, no lockfile write.
+pub fn resolve_graph_query_for(
+    entry: &Path,
+    target: Option<&str>,
+) -> Result<ResolvedGraph, PmError> {
+    resolve_graph_impl(entry, target, LockRefresh::Skip)
 }
 
 /// As [`resolve_graph`], but resolving the graph for a specific build **target** (dev-deps arc): the

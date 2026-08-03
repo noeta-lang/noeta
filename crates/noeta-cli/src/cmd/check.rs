@@ -102,7 +102,17 @@ pub(crate) fn cmd_check(
         }
     }
 
-    let checked = project_check(path, &ProjectCheckOptions::new().with_tiers(active));
+    // The target travels whole: its live *tiers* select which shapes are checked, and the target
+    // itself selects the **dependency set** — `[targets.<name>.dependencies]` layered onto the
+    // globals, exactly as `noeta run --target` layers them. Passing only the first half checked a
+    // dev-target build against the default target's dependencies and reported E0019 against every
+    // import of a dev-only dependency on a project `noeta run --target dev` compiles and runs.
+    let checked = project_check(
+        path,
+        &ProjectCheckOptions::new()
+            .with_tiers(active)
+            .with_target(target.as_deref()),
+    );
     if checked.files_checked == 0 {
         eprintln!("noeta: no `.noe` files found under `{}`", path.display());
         return ExitCode::from(2);

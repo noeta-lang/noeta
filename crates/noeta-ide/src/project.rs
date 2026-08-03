@@ -305,8 +305,20 @@ fn sweep_pool(
     options: &ProjectCheckOptions,
     fold: &mut Fold,
 ) {
+    // Requested entries the pool walk did not yield — a `tools/` beside a `Cargo.toml`, a
+    // `target/`, a dot-directory. They are still files *of* the package, and the loader links them
+    // as such (see `outside_the_pool`), so each needs the pool's members beside it: keep a copy of
+    // the sources for them. Only when there is such an entry, which is the rare case.
+    let members: BTreeSet<&str> = sources.iter().map(|(uri, _)| uri.as_str()).collect();
+    let outside: Vec<String> = entry_uris
+        .iter()
+        .filter(|uri| !members.contains(uri.as_str()))
+        .cloned()
+        .collect();
+    let pool_sources = (!outside.is_empty()).then(|| sources.clone());
+
     let mut db = LangDatabase::default();
-    let Some(cache) = workspace::sync(&mut db, None, sources) else {
+    let Some(cache) = workspace::sync(&mut db, None, sources, options.target.as_deref()) else {
         // No readable member at all: every requested entry is unreachable.
         for uri in entry_uris {
             fold.problems.push(format!("cannot read {}", display(uri)));
@@ -335,18 +347,90 @@ fn sweep_pool(
     } else {
         entry_uris
     };
+    let mut missed: Vec<&String> = Vec::new();
     for uri in entry_uris {
         match cache.find_member(uri).and_then(|(_, m)| m.input()) {
             Some(program) => sweep_entry(&db, &cache, &map, program, options, fold),
-            // A requested entry the pool scan did not yield — an unreadable file, or one its
-            // parent hid. It links alone, exactly as the pool scan degrades for it.
-            None => check_lone(uri, options, fold),
+            // A requested entry the pool scan did not yield: it links against the pool from
+            // *outside* it, which is what the loader does for the same file.
+            None => missed.push(uri),
         }
     }
     // The database is dropped here with the pool. Deliberately NOT `release_all`: that exists so a
     // long-lived editor session can reclaim a *closed* directory's memos while keeping the salsa
     // input slots, and it pays for a full recompute per source to do it. Dropping the whole
     // database frees the same memory for free.
+    drop(db);
+    if !missed.is_empty() {
+        outside_the_pool(pool_sources.unwrap_or_default(), &missed, options, fold);
+    }
+}
+
+/// **Entries the pool walk pruned**, each linked against the pool's members — the answer
+/// `noeta_loader::read_siblings` gives the same file.
+///
+/// A package's walk prunes whole subtrees ([`noeta_loader::is_outside_package`]): a nested cargo
+/// crate, a dot-directory, `target/`, a nested package. The loader applies that rule only to the
+/// directories it *descends into*, never to the **entry** it was handed — so `noeta run
+/// app/tools/probe.noe` gives `probe.noe` every module of `app`, wherever `tools/` sits in that
+/// classification. The salsa surface looked the entry up among the walked members, missed, and
+/// checked it as a **one-member** workspace: E0019 for imports the loader resolves, and — worse —
+/// silence where two files derive one module path, because a lone link has nothing to collide
+/// against. `noeta check` reported a clean tree that `noeta run` refuses outright.
+///
+/// The repair is this side, not a prune of the check walk. Pruning would have made `check` stop
+/// *claiming* to cover these files, which ends the contradiction by dropping the coverage: the
+/// silent E0073 would then be a gap nobody reports rather than an agreement. Linking the entry the
+/// way the loader links it makes both surfaces answer the same question, which is the property this
+/// whole test binary exists to hold.
+///
+/// One database for all of them, re-synced per entry: they share the pool's sources, so
+/// [`workspace::sync`]'s reuse-by-URI keeps the members' inputs and swaps only the entry. They do
+/// **not** share a workspace — two pruned siblings are not each other's modules under the loader
+/// either, since neither is in the walk that produced the other's pool.
+fn outside_the_pool(
+    pool: Vec<(String, String)>,
+    entry_uris: &[&String],
+    options: &ProjectCheckOptions,
+    fold: &mut Fold,
+) {
+    let mut db = LangDatabase::default();
+    let mut cache: Option<WorkspaceCache> = None;
+    for uri in entry_uris {
+        // A URI with no path is an inline buffer, which is a member of its own pool by
+        // construction and never lands here; there is nothing to read for it.
+        let Some(path) = uri_to_path(uri) else {
+            continue;
+        };
+        let text = match options.overlay.get(&path) {
+            Some(text) => text.clone(),
+            None => match std::fs::read_to_string(&path) {
+                Ok(text) => text,
+                // One unreadable file never aborts the run.
+                Err(err) => {
+                    fold.problems
+                        .push(format!("cannot read {}: {err}", path.display()));
+                    continue;
+                }
+            },
+        };
+        let mut sources = pool.clone();
+        sources.push(((*uri).clone(), text));
+        // The pool's own sort order, extended: `SourceId` assignment follows the member list, and
+        // every consumer of a pool agrees on sorted-by-URI.
+        sources.sort_by(|(a, _), (b, _)| a.cmp(b));
+        cache = workspace::sync(&mut db, cache.take(), sources, options.target.as_deref());
+        let Some(cache) = cache.as_ref() else {
+            continue;
+        };
+        // Unlike the pool sweep this does **not** stop on a dependency failure: the pool it was
+        // built from already resolved (that check ran before this function was reached), so a
+        // failure here would be about the entry alone and is reported by its own diagnostics.
+        let map = Arc::new(source_map_of(&db, cache, &[]));
+        if let Some(program) = cache.find_member(uri).and_then(|(_, m)| m.input()) {
+            sweep_entry(&db, cache, &map, program, options, fold);
+        }
+    }
 }
 
 /// How a member URI is named in an operational message — its path, or the URI itself for a source
@@ -361,32 +445,6 @@ fn pool_name(cache: &WorkspaceCache) -> String {
     cache.source_uris.first().cloned().unwrap_or_default()
 }
 
-/// A requested entry the pool could not offer: read it and check it as a single-member pool, or
-/// report that it cannot be read. One unreadable file never aborts the run.
-fn check_lone(uri: &str, options: &ProjectCheckOptions, fold: &mut Fold) {
-    let Some(path) = uri_to_path(uri) else {
-        return;
-    };
-    let text = match options.overlay.get(&path) {
-        Some(text) => text.clone(),
-        None => match std::fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(err) => {
-                fold.problems
-                    .push(format!("cannot read {}: {err}", path.display()));
-                return;
-            }
-        },
-    };
-    let mut db = LangDatabase::default();
-    let Some(cache) = workspace::sync(&mut db, None, vec![(uri.to_string(), text)]) else {
-        return;
-    };
-    let map = Arc::new(source_map_of(&db, &cache, &[]));
-    if let Some(program) = cache.programs.first().copied() {
-        sweep_entry(&db, &cache, &map, program, options, fold);
-    }
-}
 
 /// **One entry, every shape.** The single call every surface's per-entry answer goes through.
 fn sweep_entry(
