@@ -1,0 +1,14 @@
+// A module whose top-level state is built up in steps — the ordinary shape of a module that opens a
+// connection and derives a repository and a query from it. Each binding reads the one above it, so
+// the module means nothing except in this order, and the last one also reaches the standard library
+// through this file's own `use`.
+
+use std.math
+
+conn = "conn"
+rows = "${conn}:rows"
+live = "${rows}:live:${math.round(1.4)}"
+
+pub fn all() use (live): string {
+    return live
+}

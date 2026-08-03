@@ -165,7 +165,14 @@ const TABLE: &[Row] = &[
     Row(
         "Stmt::Binding",
         "name",
-        Unqualified("a value binding in the merged program's one flat scope; `x = …` stays `x`"),
+        Unqualified(
+            "a value binding, not a declaration: `x = …` under a `namespace` is still `x` to a \
+             reader of that module, and the qualifier leaves it alone. The walk does *visit* it, as \
+             `NameKind::Binder` — a kind this rewriter and the reference collector both refuse — so \
+             that the one pass with a different question can ask it: `qualify_module_bindings` \
+             gives a MERGED module's global its qualified identity (`conn` → `App.Store.conn`), \
+             which is what keeps it from colliding with the consumer's own `conn`",
+        ),
     ),
     Row(
         "Stmt::Destructure",

@@ -152,6 +152,13 @@ enum NameKind {
     /// kind the local-binding suppression applies to, because module aliases are lowercase and
     /// collide with ordinary locals.
     ValueChain,
+    /// The name a **value binding** introduces (`x = …`, a destructure target). Not a reference and
+    /// not a qualifiable declaration, so the two original clients ignore it: the collector drops it
+    /// and the declaration rewriter refuses it. It is visited for the one pass that has to rewrite a
+    /// definition — [`qualify_module_bindings`], which gives a merged module's globals their
+    /// qualified identity. Written back only when the visitor reports a hit, so a client that
+    /// ignores this kind leaves the AST byte-identical.
+    Binder,
 }
 
 /// Rewrite every named type inside a [`TypeRef`], recursively — so `List<User>`, `?User`,
@@ -261,6 +268,11 @@ pub fn qualify_stmt_scoped(
     let mut bound = bound_value_names(stmt);
     bound.extend(outer_bound.iter().cloned());
     walk_stmt(stmt, &mut |name, kind, span| {
+        // A binding's own name is not a declaration: `x = …` in a namespaced module is still `x`
+        // there. Only the linker's merge renames one, and it does that through its own pass.
+        if kind == NameKind::Binder {
+            return false;
+        }
         let shadowed = name
             .as_str()
             .split('.')
@@ -306,6 +318,240 @@ pub fn qualify_stmt_scoped(
     });
 }
 
+/// Rewrite a merged module's own **top-level value bindings** to their qualified identity — the
+/// value-binding twin of [`qualify_stmt`], and what keeps a module's globals its own once its
+/// statements are flattened into someone else's program.
+///
+/// A declaration merges under a qualified identity, so two modules exporting a `User` coexist. A
+/// binding did not: it kept its short name in the one flat scope, so a module that merged
+/// `conn = connect()` collided with whatever else in the program happened to bind `conn` — the
+/// entry's own binding, or another module's. Nothing adjudicated that. The later statement simply
+/// assigned to the earlier one's slot, and the module's private global silently took a value from
+/// code that had never heard of it (or, both immutable, the program failed with `cannot assign to
+/// conn, which is immutable` pointing at a line whose author bound a name they own). `bindings`
+/// maps this module's binding names to their qualified identities (`conn` → `App.Store.conn`, plus
+/// identity entries so a second application is a no-op), and this rewrites, in one merged statement:
+/// the binding's own name, every `use (…)` capture that names one, and every reference to one.
+///
+/// **Which references, exactly** — the rule is precise rather than approximate, and it is the
+/// no-shadowing rule (E0059) that makes it so:
+///
+/// * In a module's **top-level code** every module binding is in scope, and nothing may rebind one:
+///   a `for` variable, a closure parameter, a local — all E0059. So every occurrence of one of these
+///   names *is* that binding, and a blanket rewrite is exact.
+/// * A named `fn` is **sealed**: its body reaches a module binding only through `use (…)`, and
+///   nothing inside may shadow a capture (E0059 for a parameter or a closure parameter, E0006 for a
+///   local). So inside a `fn` the renameable set is exactly its captures — which is why a `fn` is
+///   entered as its own scope here instead of riding the enclosing blanket rewrite. That distinction
+///   is load-bearing: a module may legitimately hold both a binding `conn` and a `fn f(conn: Conn)`
+///   that never captures it, and rewriting *that* `conn` would silently redirect a parameter to a
+///   global.
+///
+/// A write to a captured `mut` global (`count = count + 1`) parses as a binding statement and is
+/// rewritten with everything else, so a capture stays the live view of the global it always was.
+///
+/// The shape neither rule settles is a **nested named `fn`**: it is sealed too, so it cannot see the
+/// enclosing capture and may therefore name a parameter, a local, a `for` variable or a match
+/// binding after a binding of the module it sits in — legal, and invisible to any rule about what is
+/// in scope. It needs no rule. Every **binder** position is visited ([`NameKind::Binder`]), so such
+/// a name is α-renamed in lockstep with the references to it: it stays the local it was, under a
+/// longer name, and the merged program means exactly what the module's own file means. That is why
+/// this pass needs no notion of `fn` boundaries beyond the capture scopes above.
+pub fn qualify_module_bindings(stmt: &mut Stmt, bindings: &QMap) {
+    if bindings.is_empty() {
+        return;
+    }
+    match stmt {
+        // A declaration's interior is sealed: the only way in is a capture clause, so each `fn`
+        // (free or method) is qualified against its own captures and nothing else is touched. The
+        // exception is a declaration's **module-scope** parts — a field default, a `destruct` block
+        // — which are module-scope code and take the module-scope rule (see [`module_scope_names`]).
+        Stmt::Fn(decl) => qualify_captures(decl, bindings),
+        Stmt::Class(decl) => {
+            for m in methods_of(&mut decl.methods, &mut decl.impls) {
+                qualify_captures(m, bindings);
+            }
+            walk_module_scope(stmt, &mut binding_rewriter(bindings));
+        }
+        Stmt::Struct(decl) => {
+            for m in methods_of(&mut decl.methods, &mut decl.impls) {
+                qualify_captures(m, bindings);
+            }
+            walk_module_scope(stmt, &mut binding_rewriter(bindings));
+        }
+        Stmt::Enum(decl) => {
+            for m in methods_of(&mut decl.methods, &mut decl.impls) {
+                qualify_captures(m, bindings);
+            }
+        }
+        Stmt::Impl(decl) => {
+            for m in &mut decl.methods {
+                qualify_captures(m, bindings);
+            }
+        }
+        // A trait declares signatures, and a `namespace`/`use` names no value: none of them can
+        // reach a module binding.
+        Stmt::Trait(_)
+        | Stmt::Namespace { path: _, span: _ }
+        | Stmt::Use {
+            path: _,
+            names: _,
+            span: _,
+        } => {}
+        // A tier block's items are spliced to top level when the tier is live, so each is qualified
+        // as the top-level statement it becomes — not as one blanket walk, which would rewrite the
+        // interior of a `fn` the block declares.
+        Stmt::TierBlock {
+            tier: _,
+            tier_span: _,
+            args: _,
+            items,
+            doc_text: _,
+            attached: _,
+            span: _,
+        } => {
+            for item in items {
+                qualify_module_bindings(item, bindings);
+            }
+        }
+        // The module's top-level code, where every one of these names is in scope and nothing may
+        // rebind one: the definition, and every reference to any of them, is this module's.
+        _ => walk_stmt(stmt, &mut binding_rewriter(bindings)),
+    }
+}
+
+/// The names a declaration's **module-scope** code references — the seed the linker needs to carry
+/// the module bindings such a declaration depends on.
+///
+/// Almost everything inside a declaration is sealed: a method body reaches a module binding only
+/// through `use (…)`, and so does a parameter default. Two things are not. A field's default and a
+/// `destruct` block are evaluated in the module's own scope, so they name a module binding directly,
+/// with no capture clause to declare it — and a consumer that merges the declaration without them
+/// gets E0005 against a line of the module that is correct where it is written.
+///
+/// **Free** names only: whatever those expressions bind themselves is subtracted, because merging a
+/// binding is not inert — it runs its initializer in the consumer's program (see `merge_one_dep`).
+pub fn module_scope_names(stmt: &Stmt) -> BTreeSet<String> {
+    let mut referenced = BTreeSet::new();
+    let mut scratch = stmt.clone();
+    walk_module_scope(&mut scratch, &mut |name, kind, _span| {
+        if kind != NameKind::Binder {
+            referenced.insert(name.to_string());
+        }
+        false
+    });
+    let mut bound = HashSet::new();
+    bound_in_module_scope(stmt, &mut bound);
+    referenced
+        .into_iter()
+        .filter(|n| !bound.contains(n))
+        .collect()
+}
+
+/// Apply `visit` to the **module-scope** parts of a declaration — see [`module_scope_names`] for
+/// which those are and why. Every other declaration kind has none.
+fn walk_module_scope(stmt: &mut Stmt, visit: &mut NameVisitor) {
+    match stmt {
+        Stmt::Class(decl) => {
+            for f in &mut decl.fields {
+                if let Some(default) = &mut f.default {
+                    q_expr(default, visit);
+                }
+            }
+            if let Some(body) = &mut decl.destructor {
+                q_body(body, visit);
+            }
+        }
+        Stmt::Struct(decl) => {
+            for f in &mut decl.fields {
+                if let Some(default) = &mut f.default {
+                    q_expr(default, visit);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The value names a declaration's module-scope parts bind themselves — the subtrahend of
+/// [`module_scope_names`].
+fn bound_in_module_scope(stmt: &Stmt, names: &mut HashSet<String>) {
+    match stmt {
+        Stmt::Class(decl) => {
+            for f in &decl.fields {
+                if let Some(default) = &f.default {
+                    bound_in_expr(default, names);
+                }
+            }
+            for s in decl.destructor.iter().flatten() {
+                bound_in_stmt(s, names);
+            }
+        }
+        Stmt::Struct(decl) => {
+            for f in &decl.fields {
+                if let Some(default) = &f.default {
+                    bound_in_expr(default, names);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A declaration's own methods followed by its `impl` blocks' — the two places a capture clause can
+/// sit inside a type declaration.
+fn methods_of<'a>(
+    methods: &'a mut [FnDecl],
+    impls: &'a mut [ImplBlock],
+) -> impl Iterator<Item = &'a mut FnDecl> {
+    methods
+        .iter_mut()
+        .chain(impls.iter_mut().flat_map(|b| b.methods.iter_mut()))
+}
+
+/// One `fn`'s capture scope: rewrite the captures that name a module binding, then rewrite that
+/// `fn`'s interior against exactly those names. A `fn` that captures none of them is left alone —
+/// whatever it calls its parameters and locals is its own business, and a sealed body cannot mean
+/// this module's globals by them.
+fn qualify_captures(decl: &mut FnDecl, bindings: &QMap) {
+    let mut captured = QMap::new();
+    for (name, _) in &mut decl.captures {
+        let Some(qualified) = bindings.get(name.as_str()) else {
+            continue;
+        };
+        captured.insert(name.clone(), qualified.clone());
+        // The identity entry keeps the interior rewrite idempotent, as it does for declarations.
+        captured.insert(qualified.clone(), qualified.clone());
+        *name = qualified.clone();
+    }
+    if captured.is_empty() {
+        return;
+    }
+    q_fn(decl, &mut binding_rewriter(&captured));
+}
+
+/// The [`NameVisitor`] that rewrites a merged module's binding names through `bindings` — a
+/// definition ([`NameKind::Binder`], which includes a write to a captured `mut` global) and every
+/// reference alike. A type position is never a value binding; a dotted chain (`conn.execute(…)`)
+/// misses the map and recurses into its receiver, which is the bare identifier this rewrites.
+fn binding_rewriter(
+    bindings: &QMap,
+) -> impl FnMut(&mut Name, NameKind, Option<noeta_span::Span>) -> bool {
+    move |name, kind, _span| {
+        if kind == NameKind::Type {
+            return false;
+        }
+        let Some(qualified) = bindings.get(name.as_str()) else {
+            return false;
+        };
+        let hit = name.as_str() != qualified;
+        if hit {
+            name.qualify_to(qualified.clone());
+        }
+        hit
+    }
+}
+
 /// Every namespace-qualifiable NAME a statement **references** — the read-only twin of
 /// [`qualify_stmt`], collected through the same walk so the two cannot drift. Includes the
 /// declaration's own name (a harmless superset for the linker, which intersects the result with a
@@ -325,8 +571,12 @@ pub fn referenced_names(stmt: &Stmt) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
     // The walk needs `&mut` (it is shared with the rewriter); clone so the source is untouched.
     let mut scratch = stmt.clone();
-    walk_stmt(&mut scratch, &mut |name, _kind, _span| {
-        names.insert(name.to_string());
+    walk_stmt(&mut scratch, &mut |name, kind, _span| {
+        // A *reference* collector: a binder is a definition, and counting one would seed the merge
+        // with names the statement introduces rather than needs.
+        if kind != NameKind::Binder {
+            names.insert(name.to_string());
+        }
         // Never a "match": the collector has no QMap, so the member-chain collapse stays inert
         // and the walk keeps its shape (the collected dotted candidates are a harmless superset).
         false
@@ -779,23 +1029,32 @@ fn walk_stmt(stmt: &mut Stmt, visit: &mut NameVisitor) {
         } => q_expr(value, visit),
         Stmt::Binding {
             mut_decl: _,
-            // A binding's own name is a **value** binding in the flat merged scope, never a
-            // qualifiable declaration — `x = …` inside `namespace app` stays `x`.
-            name: _,
-            name_span: _,
+            // A binding's own name is a **value** binding, never a qualifiable declaration — `x = …`
+            // inside `namespace app` is not `app.x` to a reader of that module. It is visited as a
+            // [`NameKind::Binder`] all the same, because the merged program is a different scope
+            // from the module: `qualify_module_bindings` rewrites the definition there, and this is
+            // the position it rewrites. The other clients ignore the kind, so nothing else moves.
+            name,
+            name_span,
             ty,
             value,
             span: _,
         } => {
+            q_binder(name, *name_span, visit);
             q_opt_typeref(ty, visit);
             q_expr(value, visit);
         }
         Stmt::Destructure {
             mut_decl: _,
-            targets: _,
+            targets,
             value,
             span: _,
-        } => q_expr(value, visit),
+        } => {
+            for (name, name_span) in targets {
+                q_binder(name, *name_span, visit);
+            }
+            q_expr(value, visit);
+        }
         Stmt::Return { value, span: _ } => {
             if let Some(inner) = value {
                 q_expr(inner, visit);
@@ -815,12 +1074,23 @@ fn walk_stmt(stmt: &mut Stmt, visit: &mut NameVisitor) {
             }
         }
         Stmt::For {
-            // A `for` binder introduces value names, never type references.
-            pattern: _,
+            // A `for` binder introduces value names, never type references — but it is still a
+            // binder, and a merged module α-renames the names it binds (see `q_param`).
+            pattern,
             iterable,
             body,
             span: _,
         } => {
+            match pattern {
+                noeta_ast::ForPattern::Single { name, name_span } => {
+                    q_binder(name, *name_span, visit);
+                }
+                noeta_ast::ForPattern::Tuple { names, span: _ } => {
+                    for (name, name_span) in names {
+                        q_binder(name, *name_span, visit);
+                    }
+                }
+            }
             q_expr(iterable, visit);
             q_body(body, visit);
         }
@@ -990,6 +1260,16 @@ fn q_decorators(d: &mut noeta_ast::Decorators, visit: &mut NameVisitor) {
     //   there, that is a new declared argument kind, not a silent rewrite of every hook's strings.
 }
 
+/// Visit the name a value binding **introduces**. A binder is a plain `String` in the AST rather
+/// than a [`Name`], so it is visited through a scratch `Name` and written back only on a hit — a
+/// visitor that ignores [`NameKind::Binder`] leaves the statement untouched.
+fn q_binder(name: &mut String, span: noeta_span::Span, visit: &mut NameVisitor) {
+    let mut binder = Name::written(name.clone());
+    if visit(&mut binder, NameKind::Binder, Some(span)) {
+        *name = binder.as_str().to_string();
+    }
+}
+
 /// Walk a block of statements.
 fn q_body(body: &mut [Stmt], visit: &mut NameVisitor) {
     for s in body {
@@ -1039,6 +1319,11 @@ fn q_type_params(params: &mut [TypeParam], visit: &mut NameVisitor) {
 }
 
 fn q_param(p: &mut Param, visit: &mut NameVisitor) {
+    // A parameter's own name is a binder, visited for the same reason `Stmt::Binding`'s is: when a
+    // module is merged, a name it binds inside a NESTED sealed `fn` — which cannot see the module
+    // binding it happens to spell, so it is a local and always was — is α-renamed in lockstep with
+    // the references to it, and stays the local it was.
+    q_binder(&mut p.name, p.name_span, visit);
     q_opt_typeref(&mut p.ty, visit);
     if let Some(d) = &mut p.default {
         q_expr(d, visit);
@@ -1587,9 +1872,10 @@ fn q_pattern(p: &mut Pattern, visit: &mut NameVisitor) {
         Pattern::Tuple { elements, span: _ } => {
             elements.iter_mut().for_each(|e| q_pattern(e, visit))
         }
-        // A pattern binding introduces a value name; the literals carry no name at all.
+        // A pattern binding introduces a value name — a binder, like a parameter's; the literals
+        // carry no name at all.
+        Pattern::Binding { name, span } => q_binder(name, *span, visit),
         Pattern::Wildcard { span: _ }
-        | Pattern::Binding { name: _, span: _ }
         | Pattern::Int { value: _, span: _ }
         | Pattern::Str { value: _, span: _ }
         | Pattern::Bool { value: _, span: _ } => {}
