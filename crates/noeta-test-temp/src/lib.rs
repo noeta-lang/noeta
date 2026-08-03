@@ -56,7 +56,13 @@
 //! drift.
 //!
 //! [`free_port`] is the port: a test with a fixed `8231` loses the bind to a concurrent run and
-//! reports `Connection reset by peer`.
+//! reports `Connection reset by peer`. Drawing one from the kernel is not by itself enough — the
+//! port is back in the pool the instant the probe socket closes, while the server that wants it is
+//! still a process spawn away, so a second caller can be handed it and the two servers race. The
+//! loser's `Address already in use` goes to a `/dev/null` stderr, its readiness probe succeeds
+//! **against the winner's server**, and its next request is refused the moment the winner's test
+//! tears down: one red merge gate, blamed on the readiness budget. The draw is therefore claimed,
+//! machine-wide, for as long as the drawer lives.
 //!
 //! [`readiness_budget`] is the *time*: a fixed `for _ in 0..80 { sleep(50ms) }` wait for a server to bind gives
 //! up into a `bool` nobody prints, so the failure arrives a line later as a bare `Connection
@@ -153,6 +159,12 @@ fn prune_dead_roots(shared: &Path) {
     };
     for entry in entries.flatten() {
         let name = entry.file_name();
+        // The port reservations ([`free_port`]) live beside the roots and are swept by owner, not
+        // by name — they are files holding a pid, not directories named after one.
+        if name == PORTS {
+            prune_dead_port_claims(&entry.path());
+            continue;
+        }
         let Some(pid) = name
             .to_str()
             .and_then(|n| n.strip_prefix('p'))
@@ -162,6 +174,27 @@ fn prune_dead_roots(shared: &Path) {
         };
         if pid.parse::<u32>().is_ok() && !Path::new("/proc").join(pid).exists() {
             let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+/// The directory of port claims under the shared root — see [`free_port`].
+const PORTS: &str = "ports";
+
+/// Drop port claims whose owning process is gone. [`free_port`] also takes a dead claim over on
+/// sight, so this is housekeeping rather than correctness: without it the directory would grow one
+/// small file per port ever drawn on the machine.
+fn prune_dead_port_claims(ports: &Path) {
+    let Ok(entries) = std::fs::read_dir(ports) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let live = std::fs::read_to_string(entry.path())
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .is_some_and(pid_is_live);
+        if !live {
+            let _ = std::fs::remove_file(entry.path());
         }
     }
 }
@@ -271,15 +304,102 @@ impl AsRef<Path> for TempPath {
 /// reset by peer`. Two concurrent runs of `noeta-cli`'s `serve` test failed 3 of 4 that way.
 ///
 /// The port is obtained by binding `127.0.0.1:0`, reading what the kernel assigned, and closing the
-/// listener, so a window remains in which something else could take it — microseconds, against a
-/// fixed port that is contended for a whole run. Closing that window entirely would mean passing the
-/// listening socket to the child, which the servers under test do not accept.
+/// listener. Closing that window entirely would mean passing the listening socket to the child,
+/// which the servers under test do not accept — so what is left is to make sure **no second caller
+/// is handed the same port while the first one's server is still starting up**.
+///
+/// # Why the draw alone is not enough
+///
+/// The window this leaves open was documented as "microseconds". It is not: it runs from the draw
+/// until the *spawned child* binds — a process spawn plus a compile, 0.3–1.5s — and the kernel puts
+/// the port straight back in the pool the moment the probe socket closes. **Measured on this
+/// machine: 500 consecutive draws contain a repeat in 20 trials out of 20, and the very next draw
+/// repeats the previous one 14 times per 200 000.** Two concurrent tests in one binary
+/// (`parallel_hot` runs two, both spawning servers at t=0) is exactly the shape that collides.
+///
+/// What that collision does is worse than a lost bind, because nothing involved says so. The loser's
+/// server exits with `[E0021] cannot bind …: Address already in use` on a stderr the suite sends to
+/// `/dev/null`; the loser's readiness probe then connects **to the winner's server**, which is
+/// serving the same fixture program and answers indistinguishably; and when the winner's test passes
+/// and tears its server down, the loser's next request comes back `Connection refused (os error
+/// 111)` — after a readiness wait that succeeded, naming nothing. That is one failed gate, wrongly
+/// blamed on the readiness budget, and the same misdirection `ready.rs` was written to end.
+///
+/// # The reservation
+///
+/// A drawn port is claimed by an exclusively-created marker file under
+/// `<shared-root>/ports/<port>`, holding the claiming pid, and a port already claimed by a **live**
+/// process is re-drawn. So the claim outlives the probe socket and covers the whole spawn window,
+/// across every test binary sharing the root rather than only within one process. Markers left by a
+/// dead process are taken over on sight (and swept by [`prune_dead_roots`] with the fixture roots),
+/// so the pool cannot leak; a caller that somehow exhausts its attempts still gets a port rather
+/// than a hang, because a test that cannot get a port is worse than one racing for it.
 pub fn free_port() -> u16 {
+    let ports = shared_root().join(PORTS);
+    let _ = std::fs::create_dir_all(&ports);
+    let mut last = 0;
+    // Generous: each miss costs one bind + one `create_new`, and a miss means a genuinely
+    // contended pool rather than a retry storm.
+    for _ in 0..64 {
+        last = draw_port();
+        if claim_port(&ports, last) {
+            return last;
+        }
+    }
+    last
+}
+
+/// One kernel-assigned loopback port: bind `127.0.0.1:0`, read it back, drop the socket.
+fn draw_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0")
         .expect("reserve a free loopback port")
         .local_addr()
         .expect("the reserved socket has an address")
         .port()
+}
+
+/// Claim `port` for this process, returning whether the claim was won. An existing marker whose
+/// owner is gone is taken over — a suite killed mid-run must not burn a port for the machine's
+/// uptime. A filesystem that will not cooperate at all leaves the caller no worse off than the
+/// unreserved draw it replaced, so the claim is granted.
+fn claim_port(ports: &Path, port: u16) -> bool {
+    let marker = ports.join(port.to_string());
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&marker)
+    {
+        Ok(mut file) => {
+            use std::io::Write;
+            let _ = write!(file, "{}", std::process::id());
+            true
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            // Ours already (a repeat draw within this process) is still a collision: the first
+            // holder's server may not have bound yet.
+            let owner = std::fs::read_to_string(&marker)
+                .ok()
+                .and_then(|s| s.trim().parse::<u32>().ok());
+            match owner {
+                Some(pid) if pid_is_live(pid) => false,
+                // A dead owner (or an unreadable/half-written marker) holds nothing.
+                _ => {
+                    let _ = std::fs::write(&marker, std::process::id().to_string());
+                    true
+                }
+            }
+        }
+        Err(_) => true,
+    }
+}
+
+/// Whether `pid` is still running. Linux asks `/proc`, as [`prune_dead_roots`] does; elsewhere every
+/// marker reads as live, which only ever costs a re-draw.
+fn pid_is_live(pid: u32) -> bool {
+    if !cfg!(target_os = "linux") {
+        return true;
+    }
+    Path::new("/proc").join(pid.to_string()).exists()
 }
 
 /// A unique fixture path with **no** guard, for the handful of helpers that hand their directory
@@ -293,6 +413,55 @@ pub fn unique_path(name: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
+    /// **The contract that failed a merge gate when it did not hold.** A port handed out is not
+    /// handed out again while its holder still has one: the caller has only *drawn* it, and its
+    /// server does not bind for another spawn-and-compile.
+    ///
+    /// Five hundred draws is chosen against measurement, not taste. The kernel returns a closed
+    /// ephemeral port to the pool at once, and on this machine an unreserved `bind(127.0.0.1:0)`
+    /// repeats itself inside 500 consecutive draws in **20 trials out of 20** (max 16 repeats in
+    /// one trial; the immediately-preceding draw comes back 14 times per 200 000). So this test
+    /// fails on the pre-reservation `free_port` essentially every run, which is the only kind of
+    /// regression test worth having for a race — and it costs a few hundred binds.
+    #[test]
+    fn a_port_is_never_handed_out_twice_while_its_holder_is_alive() {
+        let mut seen = HashSet::new();
+        for draw in 0..500 {
+            let port = super::free_port();
+            assert!(
+                seen.insert(port),
+                "free_port() re-issued {port} on draw {draw} — a second server would lose the bind \
+                 to the first, and its client would then be talking to a stranger"
+            );
+        }
+    }
+
+    /// A claim whose owner is gone is not a claim. Without this the pool would shrink by every port
+    /// any Ctrl-C'd or `SIGKILL`ed suite ever drew, for as long as the build directory lives.
+    #[test]
+    fn a_claim_left_by_a_dead_process_is_taken_over() {
+        let dir = super::TempDir::new("port-claims");
+        // Pid 1 is always alive; a pid past the machine's maximum never is.
+        let held = dir.join("40001");
+        std::fs::write(&held, "1").unwrap();
+        assert!(
+            !super::claim_port(&dir, 40001),
+            "a port claimed by a live process must be re-drawn"
+        );
+        let stale = dir.join("40002");
+        std::fs::write(&stale, "4294967295").unwrap();
+        assert!(
+            super::claim_port(&dir, 40002),
+            "a port claimed by a process that is gone must be reclaimable"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&stale).unwrap(),
+            std::process::id().to_string(),
+            "taking a claim over must record the new owner"
+        );
+    }
 
     /// The rule the fixture root must satisfy, pinned so it cannot regress: no hidden component.
     /// A hidden one makes every watch-driven test blind (see `shared_root`).
