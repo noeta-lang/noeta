@@ -18,7 +18,7 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::Duration;
 
 /// A scratch directory for one fixture program, private to this process and this call.
@@ -105,21 +105,21 @@ fn fetch(req: Request): Response {
     // checkout and every concurrent run of this test on the machine, and the server that loses the
     // bind dies where the client sees only a reset connection.
     let port = noeta_test_temp::free_port();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_noeta"))
-        .args([
+    // The server's output goes to a file this test can quote rather than to `/dev/null` — see
+    // `noeta_test_temp::ServerLog`, and the three investigations that line cost.
+    let log = noeta_test_temp::ServerLog::new("live-stream");
+    let mut child = log
+        .spawn(Command::new(env!("CARGO_BIN_EXE_noeta")).args([
             "serve",
             program.to_str().unwrap(),
             "--port",
             &port.to_string(),
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
+        ]))
         .expect("spawn `noeta serve`");
     let addr = format!("127.0.0.1:{port}");
 
     let outcome = (|| -> Result<(), String> {
-        noeta_test_temp::wait_until_listening_or_child_exits(&mut child, &addr)?;
+        noeta_test_temp::wait_until_listening_or_child_exits(&mut child, &addr, &log)?;
         let mut stream = TcpStream::connect(&addr).map_err(|e| e.to_string())?;
         stream
             .write_all(b"GET /events HTTP/1.1\r\nHost: x\r\nAccept: text/event-stream\r\n\r\n")
@@ -162,7 +162,7 @@ fn fetch(req: Request): Response {
     let _ = child.kill();
     let _ = child.wait();
     let _ = std::fs::remove_dir_all(&dir);
-    outcome.expect("the served event stream");
+    outcome.unwrap_or_else(|e| panic!("{}", log.explain(format!("the served event stream: {e}"))));
 }
 
 /// `client.stream` reads a real body **incrementally**: the server below writes the SSE body in

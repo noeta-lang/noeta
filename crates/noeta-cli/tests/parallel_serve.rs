@@ -7,7 +7,7 @@
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 /// A handler that reports which OS thread served it, so the test can observe more than one worker
 /// doing work (true multi-core, not one thread taking everything).
@@ -43,23 +43,24 @@ fn parallel_workers_share_the_listener_and_drain_together() {
     // checkout and every concurrent run of this test on the machine, and the server that loses the
     // bind dies where the client sees only a reset connection.
     let port = noeta_test_temp::free_port();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_noeta"))
-        .args([
+    // The fleet's output goes to a file this test can quote rather than to `/dev/null` — see
+    // `noeta_test_temp::ServerLog`. With four workers there are four voices in it, which is
+    // precisely why it is a file: one shared, append-only description keeps them in write order.
+    let log = noeta_test_temp::ServerLog::new("parallel-serve");
+    let mut child = log
+        .spawn(Command::new(env!("CARGO_BIN_EXE_noeta")).args([
             "serve",
             app_path.to_str().unwrap(),
             "--port",
             &port.to_string(),
             "--parallel",
             "4",
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
+        ]))
         .expect("spawn `noeta serve --parallel 4`");
     let addr = format!("127.0.0.1:{port}");
 
     let outcome = (|| -> Result<(), String> {
-        noeta_test_temp::wait_until_listening_or_child_exits(&mut child, &addr)?;
+        noeta_test_temp::wait_until_listening_or_child_exits(&mut child, &addr, &log)?;
 
         // Fire 8 concurrent slow (200ms) requests. With a single worker they would serialize into
         // ~200ms each on one core; 4 workers handle them in parallel. We only assert correctness
@@ -92,7 +93,8 @@ fn parallel_workers_share_the_listener_and_drain_together() {
     let _ = child.kill();
     let _ = child.wait();
     let _ = std::fs::remove_dir_all(&dir);
-    outcome.expect("parallel serve round trip");
+    outcome
+        .unwrap_or_else(|e| panic!("{}", log.explain(format!("parallel serve round trip: {e}"))));
 }
 
 #[test]
