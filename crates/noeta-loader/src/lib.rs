@@ -6522,6 +6522,56 @@ mod tests {
         );
     }
 
+    /// Two **different** dependency packages, each holding private state of the same obvious name.
+    /// Nothing stops that: a local import key is the consumer's choice, and two consumers may key
+    /// different packages the same — the package manager is what makes the *prefixes* unique
+    /// (`beta` and `beta_2` when a key collides with another package's own root). The identity a
+    /// binding takes is that prefix, so uniqueness at the package layer is uniqueness here, and the
+    /// two `conn`s are two globals rather than one slot two packages write to.
+    #[test]
+    fn two_dependency_packages_may_each_hold_a_binding_of_the_same_name() {
+        let dep = |prefix: &str, root: &str, value: &str| DepPackage {
+            prefix: vec![prefix.to_string()],
+            root: root.to_string(),
+            modules: vec![module(
+                "tags.noe",
+                &format!(
+                    "namespace {root}.tags;\n\
+                     conn = \"{value}\";\n\
+                     pub fn tag() use (conn): string {{ return conn; }}\n"
+                ),
+            )],
+            dep_renames: Default::default(),
+            native: false,
+            edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
+        };
+        let entry = "use one.tags.tag as tag_one;\nuse two.tags.tag as tag_two;\nconn = \"mine\";\necho \"${tag_one()} ${tag_two()} ${conn}\";\n";
+        let linked = link_with_deps(
+            "main.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            &[],
+            &[dep("one", "alpha", "alpha"), dep("two", "beta", "beta")],
+        )
+        .expect("two packages' same-named bindings coexist");
+        assert!(
+            has_binding(&linked, "one.tags.conn"),
+            "{:?}",
+            linked.program.stmts
+        );
+        assert!(
+            has_binding(&linked, "two.tags.conn"),
+            "{:?}",
+            linked.program.stmts
+        );
+        assert!(
+            has_binding(&linked, "conn"),
+            "and the entry's own is a third: {:?}",
+            linked.program.stmts
+        );
+    }
+
     /// A `fn` that does **not** capture a module binding may name a parameter after one: it is
     /// sealed, so inside it that name is the parameter and always was. The rewrite is per capture
     /// scope for exactly this reason — a blanket rename of the module's statements would redirect
