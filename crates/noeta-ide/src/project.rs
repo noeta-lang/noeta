@@ -72,6 +72,7 @@ use crate::workspace::{self, WorkspaceCache, disk_noe_uris, path_to_uri, uri_to_
 pub struct ProjectCheckOptions {
     selection: Vec<String>,
     overlay: BTreeMap<PathBuf, String>,
+    target: Option<String>,
 }
 
 impl ProjectCheckOptions {
@@ -86,6 +87,21 @@ impl ProjectCheckOptions {
     /// per-tier sweep then covers whatever the selection left out.
     pub fn with_tiers(mut self, tiers: impl IntoIterator<Item = String>) -> ProjectCheckOptions {
         self.selection = tiers.into_iter().collect();
+        self
+    }
+
+    /// The **build target** the check is about — `noeta check --target dev`.
+    ///
+    /// A target is not only a tier selection ([`Self::with_tiers`] carries that half): it is also a
+    /// *dependency* selection, because `[targets.<name>.dependencies]` layers onto the globals. The
+    /// two halves must travel together — a check that activated a target's tiers while resolving the
+    /// global dependency set reported E0019 against every import of a dev-only dependency on a
+    /// project `noeta run --target dev` compiles.
+    ///
+    /// `None` (the default) is the global dependency set, which is what a surface with no target
+    /// concept — the LSP, the MCP `check` tool — asks for.
+    pub fn with_target(mut self, target: Option<&str>) -> ProjectCheckOptions {
+        self.target = target.map(str::to_string);
         self
     }
 
