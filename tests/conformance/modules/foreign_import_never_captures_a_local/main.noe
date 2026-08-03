@@ -1,0 +1,25 @@
+// A `use` is scoped to the file that writes it — it must never capture a binding in a *different*
+// module of the merged program. Here the entry imports the native module `std.args` and the sibling
+// `desk.tools` binds `args` as a parameter, a local, and a match-pattern binding; both meanings
+// coexist, each in its own file.
+//
+// Before the fix this case did not run at all: three E0005s ("module `std.args` has no function
+// `len`" / "`trim`") fired inside `tools.noe`, a file that never imported `std.args`. The bug was
+// found in a real application, where the leaking `use` sat in the *application's* entry and the
+// captured bindings sat in a *dependency package* — source the application's author could not edit
+// and whose author could not have known.
+//
+// The last line keeps the import genuinely live, so the handle is still bound while checking this
+// file and the case cannot pass by the import being pruned: `args.all()` reports the program path
+// as its first element, so it is never empty.
+// expect: stdout "3"
+// expect: stdout "7"
+// expect: stdout "true"
+// expect: exit 0
+
+use std.args;
+use desk.tools.{Part, describe, weigh};
+
+echo describe("  abc  ");
+echo weigh(Part.ToolCall(id: "c1", name: "abc", args: "wxyz"));
+echo args.all().len() > 0;
