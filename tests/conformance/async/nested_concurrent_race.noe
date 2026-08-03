@@ -1,14 +1,20 @@
 // Track A.7 + A.8 — a `race` inside a spawned task's own `concurrent` block. `nested()` is spawned in
-// the outer scope; its inner `concurrent` races three workers. `y` (sleep 1) wins at t=1; `x`/`z` are
+// the outer scope; its inner `concurrent` races three workers. `y` (sleep 20) wins at t=20; `x`/`z` are
 // cancelled cooperatively (their "end" never prints). Cancellation must work across the suspension point
 // the inner join now is: the losers are marked cancelled and the inner scope closes by its captured index
 // (a `race` loser is reclaimed at the scope close exactly as a normal join), then `nested()` completes and
 // the outer await observes the winner. Deterministic (ties break by list order); both backends agree.
+//
+// The gaps are 20ms apart rather than 1ms because this asserts an ORDER between sleeps, and a 1ms
+// margin is not one a loaded machine can be relied on to honour: on a slow CI runner the 3ms worker
+// won and the AOT differential reported a backend divergence that was really a scheduling artifact.
+// 20ms is still far below the 20s case timeout, and the semantics are unchanged — `y` wins by
+// construction either way.
 // expect: stdout "x start"
 // expect: stdout "y start"
 // expect: stdout "z start"
 // expect: stdout "y end"
-// expect: stdout "winner=1"
+// expect: stdout "winner=20"
 // expect: exit 0
 use std.task.{sleep, race}
 async fn work(name: string, ms: int): int {
@@ -20,7 +26,7 @@ async fn work(name: string, ms: int): int {
 async fn nested(): int {
     mut w = 0
     concurrent {
-        rs = [spawn work("x", 3), spawn work("y", 1), spawn work("z", 2)]
+        rs = [spawn work("x", 60), spawn work("y", 20), spawn work("z", 40)]
         w = race(rs)
     }
     return w
