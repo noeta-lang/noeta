@@ -512,14 +512,20 @@ enum Command {
         target: GrammarTarget,
     },
     /// Add a dependency to the nearest `noeta.toml` and refresh `noeta.lock` (package-manager P2.4).
-    /// Exactly one source must be given: `--path`, `--git` (with `--tag`), or `--version` (registry).
-    /// The manifest edit preserves your formatting and comments; the dependency is then resolved so
-    /// the lockfile is updated (a git source is fetched now, so a typo'd URL/tag fails fast).
+    /// `noeta add company/pkg` needs no source: the registry is asked for the package's **current
+    /// version** and a caret requirement for it is written (`0.2.0` → `^0.2`), so nothing has to
+    /// hard-code a version that goes stale. A prerelease or a yanked release is never selected that
+    /// way. To say it yourself, give exactly one source instead: `--path`, `--git` (with `--tag`),
+    /// or `--version` (registry). The manifest edit preserves your formatting and comments; the
+    /// dependency is then resolved so the lockfile is updated (a git source is fetched now, so a
+    /// typo'd URL/tag fails fast).
     Add {
         /// The import root you will `use` the dependency under (an identifier): `use <key>.…`.
-        /// Optional: when omitted it is derived from the package's own root segment — the `package`
-        /// half of a `--package company/pkg`, or the `[package]` name of a `--path` dependency.
-        /// (A `--git` source with no derivable identity still needs an explicit key.)
+        /// A value containing `/` is instead read as the **package identity** — `noeta add
+        /// para/cli` is `--package para/cli` with the key derived. Optional: when omitted the key
+        /// is derived from the package's own root segment — the `package` half of a `--package
+        /// company/pkg`, or the `[package]` name of a `--path` dependency. (A `--git` source with
+        /// no derivable identity still needs an explicit key.)
         key: Option<String>,
         /// A local path dependency (relative to the manifest).
         #[arg(long)]
@@ -530,7 +536,8 @@ enum Command {
         /// The git tag (a released version) to pin — used with `--git`.
         #[arg(long)]
         tag: Option<String>,
-        /// A registry SemVer requirement, e.g. `^1.2` (registry resolution lands in P2.5).
+        /// A registry SemVer requirement, e.g. `^1.2`. Optional: with a package identity and no
+        /// source at all, `add` resolves the registry's current version and writes the caret for it.
         #[arg(long)]
         version: Option<String>,
         /// The package identity `company/package`, decoupled from the import-root key (like
