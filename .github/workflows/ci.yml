@@ -184,6 +184,20 @@ jobs:
         working-directory: site
         run: pnpm install --frozen-lockfile
 
+      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: lang
+      # The site generates its `Diagnostics.md` by running `noeta explain --all --format json`, and
+      # several hand-written pages link into it. With no binary that sync skips with a warning, the
+      # page is never built, and those links read as dead — so the gate needs a binary to be about
+      # anchors rather than about a missing page. Built from THIS checkout rather than downloaded
+      # from the last release, so a commit that adds a diagnostic AND links to it is covered.
+      # Debug and Cranelift-free: `explain` just prints a catalog, so optimizing it buys nothing.
+      - name: Build noeta (for the generated diagnostics reference)
+        working-directory: lang
+        run: cargo build -p noeta-cli --no-default-features --locked
+
       - name: Build the site against THIS checkout's docs/
         working-directory: site
         # NOETA_DOCS_LOCAL / NOETA_GRAMMAR_LOCAL point both syncs at the commit under test instead
@@ -193,6 +207,7 @@ jobs:
         env:
           NOETA_DOCS_LOCAL: ${{ github.workspace }}/lang/docs
           NOETA_GRAMMAR_LOCAL: ${{ github.workspace }}/lang/editors/vscode-noeta/syntaxes
+          NOETA_BIN: ${{ github.workspace }}/lang/target/debug/noeta
         run: |
           pnpm run prebuild
           pnpm exec astro build
