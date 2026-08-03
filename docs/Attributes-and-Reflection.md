@@ -104,8 +104,8 @@ With that settled, the question you have picks the surface:
 | What fields does this *type* declare, with their types and defaults? | [`field_specs_of`](#field_specs_oft-listfieldspec--field_specs_ofname-listfieldspec) | Declared types, precise. Ask with `variants_of`. |
 | What cases does this enum declare? | [`variants_of`](#variants_oft-listvariantspec--variants_ofname-listvariantspec) | The enum half of the same query. |
 | What does this callable take, and return? | [`params_of`](#params_ofname-listparaminfo) / [`returns_of`](#returns_ofname-type) | Declared types — there is no value to test. |
-| Which declarations carry `#[Route]`? | [`attributes_of::<Route>()`](#attributes_oft-listattributedt) | Whole-program, `use`-independent. |
-| Which declarations carry an architectural role? | [`roles_of()`](#roles_of-listrolebinding--roles_ofroleenum-listrolebinding) | The compile-time `(declaration, role)` index. |
+| Which declarations carry `#[Route]`? | [`attributes_of::<Route>()`](#attributes_oft-listattributedt--attributes_ofname-listattributeddyn) | Whole-program, `use`-independent. |
+| Which declarations carry an architectural role? | [`roles_of()`](#roles_of-listrolebinding--roles_ofroleenum-listrolebinding--roles_ofname-listrolebinding) | The compile-time `(declaration, role)` index. |
 | Build a value of a type I hold only as a name | [`construct`](#constructtfields-resultdyn-string--constructname-fields-resultdyn-string) | The reflective **struct literal** — [it is not `new`](#construct-is-the-reflective-literal-not-your-constructor). |
 | Call something whose name arrived as *data* | [`invoke`](#invokerecv-name-args-resultdyn-dyn--invokename-args-resultdyn-dyn) | The one consumer of the names the rest produce. |
 | Rebuild a `List<T>` of a `@packed` type from a `bytes` blob | [`from_bytes::<T>(blob)`](Fixed-Width-Integers#bytes--serialize-a-packed-list) | A typed decode, not a query. Documented with packed types. |
