@@ -246,7 +246,7 @@ impl DocumentStore {
         let known = self
             .workspaces
             .get(&workspace_key(uri))
-            .is_some_and(|cache| cache.source_uris.iter().any(|u| u == uri));
+            .is_some_and(|cache| cache.find_member(uri).is_some());
         if known {
             self.propagate(uri);
         } else {
@@ -1016,11 +1016,14 @@ impl DocumentStore {
     ) -> Option<String> {
         let key = path.first()?;
         let db = &self.db;
-        for (i, sp) in cache.dep_programs.iter().enumerate() {
-            if cache.dep_modules.get(i)?.import_key(db) != key.as_str() {
+        for (_, src, module) in cache.deps() {
+            if module.import_key(db) != key.as_str() {
                 continue;
             }
-            let ast = noeta_db::ast(db, *sp);
+            let Some(input) = src.input() else {
+                continue;
+            };
+            let ast = noeta_db::ast(db, input);
             let program = &ast.0.program;
             let span = program.stmts.iter().find_map(|s| match s {
                 noeta_ast::Stmt::Fn(d) if d.name == leaf => Some(d.name_span),
@@ -1998,7 +2001,11 @@ impl DocumentStore {
         // up explicitly — see `WorkspaceCache::find_dep`).
         self.workspaces.values().find_map(|cache| {
             let (source, _) = cache.find_dep(uri)?;
-            let entry = self.entry_for(cache, cache.programs[0]);
+            // The fallback entry is the workspace's FIRST MEMBER — a category, not `programs[0]`:
+            // the link is driven from a file of the directory, never from the dependency module
+            // the request is about.
+            let first_member = cache.members().next()?.1.input()?;
+            let entry = self.entry_for(cache, first_member);
             Some((cache, entry, source))
         })
     }
@@ -2008,11 +2015,9 @@ impl DocumentStore {
     /// if none is — unreachable in practice, since a cache exists only while a member is open.
     fn entry_for(&self, cache: &WorkspaceCache, fallback: SourceProgram) -> SourceProgram {
         cache
-            .source_uris
-            .iter()
-            .zip(&cache.programs)
-            .find(|(u, _)| self.buffers.contains_key(*u))
-            .map(|(_, program)| *program)
+            .members()
+            .find(|(_, src)| self.buffers.contains_key(src.uri))
+            .and_then(|(_, src)| src.input())
             .unwrap_or(fallback)
     }
 
@@ -2374,9 +2379,9 @@ impl DocumentStore {
         let (uri, range) = self.locate(cache, span, Encoding::Utf8)?;
         let line = range.start.line + 1;
         let entry_dir = cache
-            .source_uris
-            .first()
-            .and_then(|entry| uri_to_path(entry))
+            .members()
+            .next()
+            .and_then(|(_, src)| uri_to_path(src.uri))
             .and_then(|p| p.parent().map(Path::to_path_buf));
         let path = match uri_to_path(&uri) {
             Some(p) => match entry_dir
@@ -2521,14 +2526,15 @@ impl DocumentStore {
                 // current file never imports is still a source file worth documenting — never
                 // just one entry's import closure (which hid `hotpath.noe` next to `main.noe`).
                 let member_asts: Vec<_> = cache
-                    .programs
-                    .iter()
-                    .map(|sp| (*sp, noeta_db::ast_in(db, cache.workspace, *sp)))
+                    .members()
+                    .filter_map(|(id, src)| {
+                        Some((id, noeta_db::ast_in(db, cache.workspace, src.input()?)))
+                    })
                     .collect();
                 let members: Vec<docs::MemberDoc> = member_asts
                     .iter()
-                    .map(|(sp, ast)| docs::MemberDoc {
-                        source: SourceId(sp.id(db)),
+                    .map(|(id, ast)| docs::MemberDoc {
+                        source: *id,
                         program: &ast.0.program,
                     })
                     .collect();
@@ -2536,26 +2542,28 @@ impl DocumentStore {
                 // module is a separate salsa input, so the deps corpus must walk its AST
                 // directly. Filtered to direct manifest keys (never shadow deps).
                 let direct = env.direct_source_dep_keys();
+                // One walk of the dependency category yields each module's id, its URI and the
+                // `DepModule` it came from together — the three were separate parallel tables
+                // indexed by the same `i` at three sites, which is the shape that drifts.
                 let dep_asts: Vec<_> = cache
-                    .dep_programs
-                    .iter()
-                    .map(|sp| noeta_db::ast(db, *sp))
+                    .deps()
+                    .filter_map(|(id, src, module)| {
+                        // A dep module's import key is its consumer-facing import root (what the
+                        // manifest names); `root` is the package's own namespace segment.
+                        let root = module.import_key(db).to_string();
+                        let module_name = basename(src.uri);
+                        Some((id, root, module_name, noeta_db::ast(db, src.input()?)))
+                    })
                     .collect();
                 let mut deps = Vec::new();
-                for (i, ast) in dep_asts.iter().enumerate() {
-                    // A dep module's import key is its consumer-facing import root (what the
-                    // manifest names); `root` is the package's own namespace segment.
-                    let root = cache.dep_modules[i].import_key(db).to_string();
-                    if !direct.contains(&root) {
+                for (source, root, module_name, ast) in &dep_asts {
+                    if !direct.contains(root) {
                         continue;
                     }
-                    let Some(source) = cache.dep_source_id(i) else {
-                        continue;
-                    };
                     deps.push(docs::DepDoc {
-                        root,
-                        module_name: basename(&cache.dep_uris[i]),
-                        source,
+                        root: root.clone(),
+                        module_name: module_name.clone(),
+                        source: *source,
                         program: &ast.0.program,
                     });
                 }
@@ -2615,14 +2623,13 @@ impl DocumentStore {
         // its member's SourceId, and the member's own AST preserves those spans, so the lookup
         // lands on the same node the tree shows.
         let member_asts: Vec<_> = cache
-            .programs
-            .iter()
-            .map(|sp| (*sp, noeta_db::ast_in(db, cache.workspace, *sp)))
+            .members()
+            .filter_map(|(id, src)| Some((id, noeta_db::ast_in(db, cache.workspace, src.input()?))))
             .collect();
         let members: Vec<docs::MemberDoc> = member_asts
             .iter()
-            .map(|(sp, ast)| docs::MemberDoc {
-                source: SourceId(sp.id(db)),
+            .map(|(id, ast)| docs::MemberDoc {
+                source: *id,
                 program: &ast.0.program,
             })
             .collect();
@@ -2940,9 +2947,9 @@ impl StoreDocEnv<'_> {
     /// resolution.
     fn entry_path(&self) -> Option<PathBuf> {
         self.cache
-            .source_uris
-            .first()
-            .and_then(|uri| uri_to_path(uri))
+            .members()
+            .next()
+            .and_then(|(_, src)| uri_to_path(src.uri))
     }
 
     /// Load the workspace's `noeta.toml`, if one exists at or above the entry directory.
@@ -2978,9 +2985,8 @@ impl StoreDocEnv<'_> {
     fn source_dep_roots(&self) -> Vec<String> {
         let mut roots: Vec<String> = self
             .cache
-            .dep_modules
-            .iter()
-            .map(|d| d.import_key(&self.store.db).to_string())
+            .deps()
+            .map(|(_, _, module)| module.import_key(&self.store.db).to_string())
             .collect();
         roots.sort();
         roots.dedup();
@@ -3751,6 +3757,13 @@ mod tests {
             .doc_cache(uri)
             .expect("document is a member of an open workspace")
             .1
+    }
+
+    /// A workspace's **member** salsa inputs, in [`SourceId`] order — the reuse assertions'
+    /// identity fingerprint. Named through [`WorkspaceCache::members`] rather than read off the
+    /// member table, so a test cannot assert over a category it did not mean.
+    fn member_inputs(cache: &WorkspaceCache) -> Vec<SourceProgram> {
+        cache.members().filter_map(|(_, src)| src.input()).collect()
     }
 
     #[test]
@@ -4916,16 +4929,16 @@ mod tests {
         );
         // Capture the input handles, then edit — the fast path must set text in place, not rebuild.
         let key = workspace_key(&entry_uri);
-        let before = store.workspaces[&key].programs.clone();
+        let before = member_inputs(&store.workspaces[&key]);
 
         store.change(
             &entry_uri,
             "use App.Models.User;\nu = User { id: 2 }".to_string(),
         );
 
-        let after = &store.workspaces[&key].programs;
+        let after = member_inputs(&store.workspaces[&key]);
         assert_eq!(
-            &before, after,
+            before, after,
             "change must reuse the same salsa inputs (no rebuild/rescan)"
         );
         assert_eq!(
@@ -4969,8 +4982,12 @@ mod tests {
         assert!(std::ptr::eq(cache_a, cache_b), "same shared cache");
         assert_ne!(alpha_id, beta_id, "distinct stable SourceIds");
         // The input representing alpha inside beta's view IS alpha's own input (no copy).
+        // Resolved through the id→source lookup, not by treating the raw `SourceId` as a member
+        // index: `alpha_id` is a workspace-wide id, and only the lookup knows which category it
+        // names. Reaching through `.0` is the open-coded range rule this arc retired.
         assert_eq!(
-            cache_b.programs[alpha_id.0 as usize], alpha,
+            cache_b.source(alpha_id).and_then(|src| src.input()),
+            Some(alpha),
             "one SourceProgram input per file, shared across documents"
         );
 
@@ -4981,7 +4998,7 @@ mod tests {
         // Editing beta: no inputs are created or replaced, and alpha's workspace-aware parse is
         // untouched (the memoized value is identical) — the per-file work is shared, not copied.
         let workspace = cache_a.workspace;
-        let programs_before = cache_a.programs.clone();
+        let programs_before = member_inputs(cache_a);
         let alpha_ast_before =
             noeta_db::ast_in(&store.db, workspace, alpha) as *const noeta_db::Ast;
         store.change(
@@ -4990,7 +5007,8 @@ mod tests {
         );
         let (cache_after, _, _) = store.doc_cache(&alpha_uri).expect("alpha still resolves");
         assert_eq!(
-            cache_after.programs, programs_before,
+            member_inputs(cache_after),
+            programs_before,
             "an edit must not create or duplicate inputs"
         );
         assert_eq!(
