@@ -1,0 +1,35 @@
+[package]
+name = "noeta-project"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# The project model: "which files are this program, and is it clean". `project_check` — the one
+# answer `noeta check`, the LSP's `workspace/diagnostic` and the MCP `check` tool all give — plus the
+# shared disk-backed salsa workspace construction underneath it. Extracted from `noeta-ide`: a batch
+# checker must not depend on an editor crate to answer whether a project compiles.
+
+[dependencies]
+noeta-span = { workspace = true }
+noeta-diagnostics = { workspace = true }
+# The salsa graph this crate drives: `Workspace`/`SourceProgram` inputs in, `entry_diagnostics` out.
+noeta-db = { workspace = true }
+# The project model's owner. Module paths, package roots, entry pools and sibling discovery are
+# ANSWERED here, never re-derived — see the crate doc on why that rule exists.
+noeta-loader = { workspace = true }
+# Dependency resolution and manifest discovery (package-manager P2.1c): which packages a target
+# selects is pm's answer, so the editor, the CLI and the MCP tool all select the same set.
+noeta-pm = { workspace = true }
+# Per-package edition detection for a URI.
+noeta-lexer = { workspace = true }
+# For the `Setter` trait — the salsa-generated `set_text` on `SourceProgram` needs it in scope.
+salsa = { workspace = true }
+
+[dev-dependencies]
+# The unit tests build real workspaces, which resolve `std` — the registry has to be seeded.
+noeta-stdlib = { workspace = true }
+
+[lints]
+workspace = true

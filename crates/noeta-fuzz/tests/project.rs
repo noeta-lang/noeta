@@ -4,7 +4,7 @@
 //! # The gap this closes
 //!
 //! `noeta check` does not share a front-end with `noeta run`. It goes through
-//! `noeta_ide::project_check` — the same entry the LSP's `workspace/diagnostic` and the MCP `check`
+//! `noeta_project::project_check` — the same entry the LSP's `workspace/diagnostic` and the MCP `check`
 //! tool use — which drives the **salsa** workspace (`noeta-db`); `run` goes through the loader's
 //! compile front-end. Every other oracle in this crate (`run`, `typed`, `jit`, `leaks`, `bundle`,
 //! `fmt`) drives the second one only, so the first had no sweep at all.
@@ -32,7 +32,7 @@
 //! [`NONCES`] is what runs in the gate, not the limit of the technique:
 //! `cargo run --release -p noeta-fuzz --example projectscan -- scan 20000` runs the identical
 //! oracle over as many projects as you care to wait for, and is what should be run after touching
-//! `noeta-ide`, `noeta-db`, the loader's package walk, or module-path derivation. The first 36-
+//! `noeta-project`, `noeta-db`, the loader's package walk, or module-path derivation. The first 36-
 //! project probe this target ever ran found a live divergence — `noeta check` reporting every entry
 //! of a migrations-only package unreadable — which was carried here as an argued exception until
 //! `noeta-ide` was fixed, at which point the exception's own from-below assertion failed and it was

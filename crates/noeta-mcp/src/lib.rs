@@ -1193,7 +1193,7 @@ impl ResolvedWorkspace {
 /// Turn a `check`-style `source`/`file` pair into the workspace the salsa `Workspace` is built
 /// from. Inline `source` is a lone entry with no dependencies; a `file` pulls in its sibling
 /// modules **and resolves its `noeta.toml` dependency graph**, exactly as the LSP does
-/// (`noeta_ide::workspace`) and for the same reason: without the dependency packages, a program
+/// (`noeta_project::workspace`) and for the same reason: without the dependency packages, a program
 /// that imports one is analyzed as a program whose imports do not exist. That made `check` report
 /// an E0019/E0029 on code `noeta run` compiles cleanly, and made `reflect` miss every role a
 /// dependency's `@role`-bearing attribute confers — the attribute *application* sits in the entry,
@@ -1285,7 +1285,7 @@ pub(crate) fn resolve_workspace(
 /// **project directory** — and resolve the diagnostics into the canonical `JsonDiagnostic` form
 /// (the same one `noeta check --format json` emits).
 ///
-/// This is a thin adapter over [`noeta_ide::project_check`], the one function `noeta check` and the
+/// This is a thin adapter over [`noeta_project::project_check`], the one function `noeta check` and the
 /// editor's `workspace/diagnostic` also call. It used to be its own walk: one salsa workspace built
 /// from the requested file, checked from its **first member** and nowhere else, so a library module
 /// no entry imported was never type-checked and a directory could not be asked about at all. The
@@ -1296,12 +1296,12 @@ pub(crate) fn resolve_workspace(
 /// checker sees it, so a `@test` body's type error is reported here exactly as the CLI reports it,
 /// with `tiers_checked` naming what was looked inside.
 pub fn run_check(args: &CheckArgs) -> Result<CheckOutput, ErrorData> {
-    let options = noeta_ide::ProjectCheckOptions::new();
+    let options = noeta_project::ProjectCheckOptions::new();
     let checked = match (&args.source, &args.file) {
         // Inline source is one in-memory member of a one-member pool — a different **entry set**,
         // through the same engine, so it gets the same shapes and the same dedup a file gets.
         (Some(text), None) => {
-            noeta_ide::check_sources(vec![(INLINE_NAME.to_string(), text.clone())], &options)
+            noeta_project::check_sources(vec![(INLINE_NAME.to_string(), text.clone())], &options)
         }
         (None, Some(path)) => {
             let path = Path::new(path);
@@ -1311,7 +1311,7 @@ pub fn run_check(args: &CheckArgs) -> Result<CheckOutput, ErrorData> {
                     None,
                 ));
             }
-            noeta_ide::project_check(path, &options)
+            noeta_project::project_check(path, &options)
         }
         (Some(_), Some(_)) => {
             return Err(ErrorData::invalid_params(

@@ -35,7 +35,14 @@ noeta-bundle = { workspace = true }
 noeta-cache = { workspace = true }
 noeta-check = { workspace = true }
 noeta-loader = { workspace = true }
-# Also the impact engine (server-hmr W3): `noeta test/bench --watch` reruns only impacted decls.
+# `noeta check` — and the directory walk `test`/`bench`/`doc`/`expand` share with it. The one
+# implementation the LSP's `workspace/diagnostic` and the MCP `check` tool also call, so the three
+# surfaces cannot disagree about what "clean" means.
+noeta-project = { workspace = true }
+# The EDITOR engine, which the check path no longer goes through. What is still wanted from it is
+# the docs browser (`guide`/`docs` — `noeta init`'s guide pages and `noeta doc`), the `api` census
+# behind `noeta doc`'s stdlib generator, and the impact engine (server-hmr W3) `noeta test/bench
+# --watch` narrows reruns with.
 noeta-ide = { workspace = true }
 noeta-host-real = { workspace = true }
 # The shared app-execution core (dev-deps D3): `run`/`--exe` delegate to it so the CLI and the

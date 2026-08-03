@@ -12,6 +12,8 @@ rust-version.workspace = true
 
 [dependencies]
 noeta-ide = { workspace = true }
+# `workspace/diagnostic` answers with `project_check` — the same function `noeta check` calls.
+noeta-project = { workspace = true }
 noeta-diagnostics = { workspace = true }
 # For `SERVER_STACK_SIZE` only: the parser owns the deepest recursion a server thread runs, so it
 # owns the stack size those threads need (tokio's 2 MiB default is below it in a debug build).

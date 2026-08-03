@@ -625,7 +625,7 @@ pub fn workspace(
 ///
 /// `package_uses` is the whole program's per-package `@name` resolution tables
 /// (`[directives]`/`[tiers]`), resolved on the query path (`noeta_pm::graph::resolve_graph_query`)
-/// exactly as the editor's `noeta_ide::workspace::sync` does — so a renamed text tier
+/// exactly as `noeta_project::workspace::sync` does — so a renamed text tier
 /// (`[tiers] docs = "std:doc"`) lexes verbatim through this path, not only the editor's. A caller
 /// with no manifest bindings (an inline source, a synthetic filesystem-only dependency graph) passes
 /// an empty [`PackageUses`](noeta_span::PackageUses), which is behavior-identical to before this

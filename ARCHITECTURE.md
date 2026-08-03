@@ -93,6 +93,7 @@ Dependency edges form a strict DAG (no back-edges): `noeta-span` is depended on 
 |---|---|
 | `noeta-loader` | Multi-file module loading + linking: walks the package, derives each module's path from where its file sits (`derive.rs`; E0072/E0073/E0074), resolves `use` to module declarations honoring `pub`, merges into one `Program`. |
 | `noeta-db` | The salsa 0.27 query graph tying the pipeline together (`Workspace`/`linked`/`checked`/`bytecode`). |
+| `noeta-project` | The **project model**: `project_check` — the one answer `noeta check`, the LSP's `workspace/diagnostic` and the MCP `check` tool all give — plus the entry/pool decomposition and the shared disk-backed salsa `Workspace` construction underneath it. Extracted from `noeta-ide` so a batch checker does not depend on an editor crate; its standing rule is to **delegate** project-model questions (module paths, package roots, dependency selection, sibling pools) to `noeta-loader`/`noeta-pm` rather than re-derive them — six `check`-vs-`run` divergences came from doing otherwise. |
 | `noeta-cache` | Default-on bytecode cache (`~/.cache/noeta/*.noeb`, build-identity-keyed): the `compile_whole_file` seam for run/dump/build. |
 | `noeta-conformance` | The dev-only harness: `// expect:` corpus runner, `--differential` oracle, JSON output, partial runs. |
 | `noeta-alloc-probe` | Test-only global-allocator probe for heap-residency assertions. |
@@ -102,7 +103,7 @@ Dependency edges form a strict DAG (no back-edges): `noeta-span` is depended on 
 ### Editor, agent & dev tooling
 | Crate | Role |
 |---|---|
-| `noeta-ide` | Shared IDE engine (hover, go-to-def, outline, references, call/role graph) over the salsa db, reused by both the LSP and the MCP server. |
+| `noeta-ide` | Shared IDE engine (hover, go-to-def, outline, references, call/role graph) over the salsa db, reused by both the LSP and the MCP server. Everything here needs a cursor or a buffer; the project model it used to contain is `noeta-project`. |
 | `noeta-lsp` | `noeta lsp`: tower-lsp language server (diagnostics/hover/def/refs/rename/completion/semantic-tokens/inlay-hints/formatting). |
 | `noeta-dap` | `noeta dap`: debug adapter driving the production VM (breakpoints/stepping/scopes/variables) via a per-op debug hook. |
 | `noeta-mcp` | `noeta mcp`: agent-native MCP server serving the reflection manifest + ~27 tools over stdio. |

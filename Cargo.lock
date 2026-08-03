@@ -2529,6 +2529,7 @@ dependencies = [
  "noeta-parser",
  "noeta-pm",
  "noeta-prof",
+ "noeta-project",
  "noeta-runner",
  "noeta-span",
  "noeta-stdlib",
@@ -2732,10 +2733,10 @@ dependencies = [
  "noeta-diagnostics",
  "noeta-eval",
  "noeta-fmt",
- "noeta-ide",
  "noeta-lexer",
  "noeta-parser",
  "noeta-pm",
+ "noeta-project",
  "noeta-runner",
  "noeta-span",
  "noeta-stdlib",
@@ -2788,6 +2789,7 @@ dependencies = [
  "noeta-loader",
  "noeta-parser",
  "noeta-pm",
+ "noeta-project",
  "noeta-span",
  "noeta-stdlib",
  "noeta-test-temp",
@@ -2884,6 +2886,7 @@ dependencies = [
  "noeta-diagnostics",
  "noeta-ide",
  "noeta-parser",
+ "noeta-project",
  "noeta-stdlib",
  "serde",
  "serde_json",
@@ -2909,6 +2912,7 @@ dependencies = [
  "noeta-loader",
  "noeta-parser",
  "noeta-pm",
+ "noeta-project",
  "noeta-runner",
  "noeta-span",
  "noeta-stdlib",
@@ -3018,6 +3022,20 @@ dependencies = [
  "noeta-test-temp",
  "noeta-vm",
  "serde_json",
+]
+
+[[package]]
+name = "noeta-project"
+version = "0.4.4"
+dependencies = [
+ "noeta-db",
+ "noeta-diagnostics",
+ "noeta-lexer",
+ "noeta-loader",
+ "noeta-pm",
+ "noeta-span",
+ "noeta-stdlib",
+ "salsa",
 ]
 
 [[package]]

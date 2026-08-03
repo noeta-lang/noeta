@@ -83,6 +83,11 @@ noeta-reactive = { path = "crates/noeta-reactive" }
 # noeta-ext-abi (NativeCtx/Retained) + noeta-reactive (NodeId). Neither engine internals nor consumer
 # node types cross it.
 noeta-reactive-abi = { path = "crates/noeta-reactive-abi" }
+# The project model: `project_check` — the one answer `noeta check`, the LSP's `workspace/diagnostic`
+# and the MCP `check` tool all give — over the shared disk-backed salsa workspace construction.
+# Editor-free by construction: a batch checker must not depend on an editor crate to answer whether
+# a project compiles.
+noeta-project = { path = "crates/noeta-project" }
 # M2 editor tooling: the shared IDE engine (MCP M5) — DocumentStore + resolve/completion/signature/
 # symbols over the noeta-db salsa graph, wire-protocol-free so `noeta lsp` and `noeta mcp` both
 # adapt over the one implementation.

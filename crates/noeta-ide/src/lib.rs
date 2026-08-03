@@ -31,6 +31,17 @@
 //! field-compatible with their LSP counterparts but owned here, so `noeta lsp` (JSON-RPC) and
 //! `noeta mcp` (MCP tools) are both thin adapters over this one implementation and can never
 //! drift.
+//!
+//! # What is NOT here any more
+//!
+//! The **project model** — [`project_check`], the entry/pool decomposition, and the disk-backed
+//! [`Workspace`] construction the [`DocumentStore`] overlays its buffers onto — lives in
+//! [`noeta_project`]. It grew here, and that was the mistake: `noeta check` is the product's core
+//! verb and it should not have to depend on completion, inlay hints and an embedded language-guide
+//! corpus to answer "does this project compile". The sharing was always right — one
+//! implementation behind `noeta check`, `workspace/diagnostic` and the MCP `check` tool — only its
+//! address was wrong. Both modules are re-exported here at the paths they had ([`project`],
+//! [`workspace`]) so editor-side callers are unaffected.
 
 pub mod api;
 pub mod callgraph;
@@ -41,14 +52,18 @@ pub mod highlight;
 pub mod impact;
 pub mod inlay;
 pub mod offsets;
-pub mod project;
 pub mod resolve;
 pub mod sample;
 pub mod semtokens;
 pub mod signature;
 pub mod symbols;
 pub mod trace;
-mod workspace;
+
+/// The **project model**, which lives in [`noeta_project`] — `noeta check` must not depend on an
+/// editor crate to answer whether a project compiles. Re-exported at the paths it has always had so
+/// editor-side callers keep working; new batch-shaped callers should depend on `noeta-project`
+/// directly.
+pub use noeta_project::{project, workspace};
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -71,7 +86,7 @@ pub fn uri_path(uri: &str) -> Option<PathBuf> {
     uri_to_path(uri)
 }
 
-pub use project::{
+pub use noeta_project::{
     ProjectCheck, ProjectCheckOptions, ProjectDiagnostic, check_sources, project_check,
 };
 pub use semtokens::SemanticToken;

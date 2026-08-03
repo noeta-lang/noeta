@@ -1270,7 +1270,7 @@ pub(crate) fn cmd_audit(path: &std::path::Path) -> ExitCode {
     //
     // Two *failures* to distinguish here, because "could not verify" is not "verified clean" (audit
     // row 4a). A [`PmError::Network`]/`Io` is transient and environmental — an offline CI box, a 502 —
-    // and degrades to a note, exactly as the IDE's resolve does (`noeta-ide/src/workspace.rs`) and as
+    // and degrades to a note, exactly as the IDE's resolve does (`noeta-project/src/workspace.rs`) and as
     // this whole section's best-effort contract says. A [`PmError::Trust`] is a signature that did not
     // verify, a head that does not attest to the served advisories, a log leaf that does not match, or
     // a 200 whose body is not the shape `test_data/wire` pins (a cross-repo protocol drift, which is
