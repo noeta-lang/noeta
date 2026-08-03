@@ -34,14 +34,19 @@
 //!
 //! # What is NOT here any more
 //!
-//! The **project model** — [`project_check`], the entry/pool decomposition, and the disk-backed
-//! [`Workspace`] construction the [`DocumentStore`] overlays its buffers onto — lives in
-//! [`noeta_project`]. It grew here, and that was the mistake: `noeta check` is the product's core
-//! verb and it should not have to depend on completion, inlay hints and an embedded language-guide
-//! corpus to answer "does this project compile". The sharing was always right — one
-//! implementation behind `noeta check`, `workspace/diagnostic` and the MCP `check` tool — only its
-//! address was wrong. Both modules are re-exported here at the paths they had ([`project`],
-//! [`workspace`]) so editor-side callers are unaffected.
+//! The **project model** — [`project_check`](noeta_project::project_check), the entry/pool
+//! decomposition, and the disk-backed [`Workspace`] construction the [`DocumentStore`] overlays its
+//! buffers onto — lives in [`noeta_project`]. It grew here, and that was the mistake: `noeta check`
+//! is the product's core verb and it should not have to depend on completion, inlay hints and an
+//! embedded language-guide corpus to answer "does this project compile". The sharing was always
+//! right — one implementation behind `noeta check`, `workspace/diagnostic` and the MCP `check`
+//! tool — only its address was wrong.
+//!
+//! It is **not re-exported here**, deliberately. This crate consumes `noeta-project` like any other
+//! consumer does, by name: the extraction is only worth what the boundary is worth, and a
+//! `pub use noeta_project::{project, workspace}` sitting here would let the coupling grow back
+//! invisibly — an editor-side caller could still reach the whole project model through the editor
+//! crate and never notice it had. Depend on `noeta-project` and say `noeta_project::…`.
 
 pub mod api;
 pub mod callgraph;
@@ -59,12 +64,6 @@ pub mod signature;
 pub mod symbols;
 pub mod trace;
 
-/// The **project model**, which lives in [`noeta_project`] — `noeta check` must not depend on an
-/// editor crate to answer whether a project compiles. Re-exported at the paths it has always had so
-/// editor-side callers keep working; new batch-shaped callers should depend on `noeta-project`
-/// directly.
-pub use noeta_project::{project, workspace};
-
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -74,8 +73,8 @@ use noeta_lexer::TokenKind;
 use noeta_span::{SourceId, Span};
 use salsa::Setter;
 
-use crate::workspace::{
-    WorkspaceCache, disk_noe_uris, edition_of_uri, project_root, uri_to_path, workspace_key,
+use noeta_project::workspace::{
+    self, WorkspaceCache, disk_noe_uris, edition_of_uri, project_root, uri_to_path, workspace_key,
 };
 
 pub use offsets::{Encoding, LineIndex, Position, Range};
@@ -86,9 +85,6 @@ pub fn uri_path(uri: &str) -> Option<PathBuf> {
     uri_to_path(uri)
 }
 
-pub use noeta_project::{
-    ProjectCheck, ProjectCheckOptions, ProjectDiagnostic, check_sources, project_check,
-};
 pub use semtokens::SemanticToken;
 pub use symbols::{DocumentSymbol, SymbolKind};
 
@@ -298,7 +294,8 @@ impl DocumentStore {
     }
 
     /// **The whole project's diagnostics** — the editor's answer to `noeta check`, over
-    /// [`project_check`](crate::project_check) with the unsaved buffers overlaid on the disk scan.
+    /// [`project_check`](noeta_project::project_check) with the unsaved buffers overlaid on the
+    /// disk scan.
     ///
     /// Every `.noe` file under `root` is checked as its own entry, in every shape it can be built
     /// in — the same walk, the same tier sweep and the same dedup the CLI runs, because it is the
@@ -311,14 +308,14 @@ impl DocumentStore {
     /// its own databases, for the pull the client makes when it wants the project view
     /// (`workspace/diagnostic`). The two split on *which entries*, never on which shapes: the narrow
     /// one calls [`noeta_db::entry_diagnostics`] and so does this one.
-    pub fn project_check(&self, root: &Path) -> crate::ProjectCheck {
+    pub fn project_check(&self, root: &Path) -> noeta_project::ProjectCheck {
         let overlay = self
             .buffers
             .iter()
             .filter_map(|(uri, text)| uri_to_path(uri).map(|path| (path, text.clone())));
-        crate::project_check(
+        noeta_project::project_check(
             root,
-            &crate::ProjectCheckOptions::new().with_overlay(overlay),
+            &noeta_project::ProjectCheckOptions::new().with_overlay(overlay),
         )
     }
 
@@ -527,7 +524,7 @@ impl DocumentStore {
     /// before the checker sees it, so the shipping-shape query alone showed the file as clean while
     /// `noeta check` failed on it — the compiler/editor disagreement this whole surface exists to
     /// end. The shapes come from [`noeta_db::entry_diagnostics`], the *same* function
-    /// [`project_check`](crate::project_check) calls for every entry of a project and the MCP
+    /// [`project_check`](noeta_project::project_check) calls for every entry of a project and the MCP
     /// `check` tool calls for the file it was handed. This surface differs from those in **which
     /// entries** it sweeps — one open document, not a project — and in nothing else, which is what
     /// keeps "is this file clean" one answer with three callers.
@@ -3734,7 +3731,7 @@ fn splices_a_type(insert: &str, text: &str, offset: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workspace::path_to_uri;
+    use noeta_project::workspace::path_to_uri;
 
     /// A fresh store with the process-global std registry seeded first. Every IDE feature that runs
     /// the checker resolves stdlib names (`abs`, `math.sqrt`, …) through the extension registry, so

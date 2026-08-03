@@ -13,7 +13,7 @@
 //! - [`impact_of_edit`] — the single-file query (one source, no project context), unchanged.
 //! - [`ImpactSession`] — the whole-project engine the watch loop drives: a salsa
 //!   [`Workspace`](noeta_db::Workspace) over the entry's directory (built by
-//!   [`crate::workspace::sync`], the same construction the editor uses), per-file baselines,
+//!   [`noeta_project::workspace::sync`], the same construction the editor uses), per-file baselines,
 //!   and a call graph over the **linked** program — so an edit to an imported module narrows
 //!   to the entry tests that transitively reach it, instead of degrading to a full rerun.
 //!   Between edits only the changed file's salsa input moves; every other member's parse
@@ -46,10 +46,10 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use noeta_compiler::hotswap::SwapDiff;
+use noeta_project::workspace::{self, WorkspaceCache, disk_noe_uris, path_to_uri, uri_to_path};
 use salsa::Setter as _;
 
 use crate::callgraph::{self, Callee};
-use crate::workspace::{self, WorkspaceCache, disk_noe_uris, path_to_uri, uri_to_path};
 
 /// The engine's answer for one edit.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -44,7 +44,7 @@ fn agreeing_diagnostics(app: &Path, entry: &Path, tier: &str) -> Vec<String> {
 }
 
 /// **Both answers about one project**, as sorted, deduplicated diagnostic codes: first the salsa
-/// surface (`noeta check` and the LSP, `noeta_ide::project_check`), then the batch loader every
+/// surface (`noeta check` and the LSP, `noeta_project::project_check`), then the batch loader every
 /// *executing* verb goes through (`noeta_loader::load_with_deps`, over the same resolved graph).
 ///
 /// This is the corpus case row 8 asked for. The two lex a project's `@name { … }` bodies through
@@ -60,11 +60,11 @@ fn both_surfaces(app: &Path, entry: &Path) -> (Vec<String>, Vec<String>) {
 /// ([`noeta_pm::graph`]), so a target-scoped `[targets.<t>.dependencies]` must be in both programs
 /// or in neither; `None` is the global set every other fixture here asks about.
 fn both_surfaces_for(app: &Path, entry: &Path, target: Option<&str>) -> (Vec<String>, Vec<String>) {
-    let mut options = noeta_ide::ProjectCheckOptions::new();
+    let mut options = noeta_project::ProjectCheckOptions::new();
     if let Some(target) = target {
         options = options.with_target(Some(target));
     }
-    let checked = noeta_ide::project_check(app, &options);
+    let checked = noeta_project::project_check(app, &options);
     assert!(
         checked.problems.is_empty(),
         "the fixture must resolve — an operational failure is not an answer: {:?}",
