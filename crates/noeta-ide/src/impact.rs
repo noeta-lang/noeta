@@ -369,10 +369,12 @@ impl ImpactSession {
         link.reads
             .iter()
             .map(|r| {
-                // A read is resolved against the hook's `source_dir`, which in the editor's link is
-                // the source's *URI* (`file://…`), not a plain path — because the salsa workspace
-                // names its members by URI. Fold it back to a filesystem path so it can be compared
-                // to the canonical paths `notify` reports, then canonicalize.
+                // A read is whatever string the hook reported, and a hook is free to report an
+                // absolute path, a relative one, or (an editor-hosted extension may) a URI. The
+                // `source_dir` a hook resolves against is now a filesystem path on every surface
+                // (`Source::file_path`), so this is no longer a workaround for the workspace naming
+                // its members by URI — it is tolerance for the hook's own spelling. Fold, then
+                // canonicalize, so it compares against the paths `notify` reports.
                 let p = if r.starts_with("file://") {
                     uri_to_path(r).unwrap_or_else(|| PathBuf::from(r))
                 } else {

@@ -662,9 +662,10 @@ fn derived_path_of_uri(uri: &str) -> noeta_loader::ModulePath {
 }
 
 pub(crate) fn uri_to_path(uri: &str) -> Option<PathBuf> {
-    let rest = uri.strip_prefix("file://")?;
-    // `file:///abs` → `/abs`; a leading host (`file://host/p`) is not expected for local files.
-    Some(PathBuf::from(rest))
+    // Delegated, not re-implemented: the loader has to fold the same URI back to a path when it
+    // builds `DirectiveCtx::source_dir` (a workspace member's *name* is this URI), and two decoders
+    // that disagree is how that seam broke in the first place. One decoder, in `noeta-span`.
+    noeta_span::file_uri_path(uri)
 }
 
 /// The shared-workspace key of a document: its **directory** (`dir:<path>`) for a `file:` URI —
