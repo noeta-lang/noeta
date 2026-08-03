@@ -73,8 +73,21 @@ pub(crate) fn cmd_check(
     // The active tier set — resolved once and applied to every file — is the union of a `--target`'s
     // live tiers (from `noeta.toml`) and any explicit `--tier` flags, exactly as `cmd_run` resolves
     // it. A bad target fails fast before any file is read.
+    //
+    // `resolve_active_tiers` takes an **entry file** and searches from that file's parent, which is
+    // where `noeta run`'s copy of this resolution starts. `check`'s `PATH` is a file *or a
+    // directory*, and a directory is already the place to search from — passing it straight through
+    // searched its PARENT and walked right past the manifest sitting inside it, so
+    // `noeta check --target dev app` failed with "no `noeta.toml` found at or above ``" on the very
+    // project `noeta run --target dev app/main.noe` compiles. Naming a file inside the directory
+    // makes the two questions the same question.
+    let anchor = if path.is_dir() {
+        path.join(manifest::MANIFEST_NAME)
+    } else {
+        path.to_path_buf()
+    };
     let mut active: Vec<String> = match target {
-        Some(name) => match manifest::resolve_active_tiers(path, name) {
+        Some(name) => match manifest::resolve_active_tiers(&anchor, name) {
             Ok(tiers) => tiers,
             Err(err) => {
                 eprintln!("noeta: {err}");
