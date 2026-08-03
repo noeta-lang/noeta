@@ -216,8 +216,17 @@ pub(crate) fn acquire_claim_proof(audience: &str) -> Result<registry::ClaimProof
     Ok(registry::ClaimProof::GithubToken(token))
 }
 
-/// `noeta add [key] (--path|--git+--tag|--version) [--package company/pkg]` — add a dependency to
-/// the nearest `noeta.toml`, then resolve so `noeta.lock` reflects it (package-manager P2.4d).
+/// `noeta add [key|company/pkg] [--path|--git+--tag|--version] [--package company/pkg]` — add a
+/// dependency to the nearest `noeta.toml`, then resolve so `noeta.lock` reflects it
+/// (package-manager P2.4d).
+///
+/// A source is **optional** for a registry dependency: given an identity and no `--path`/`--git`/
+/// `--version`, `add` asks the registry for the package's current version and writes a caret
+/// requirement for it — `noeta add para/cli` on a 0.2.0 package writes `{ version = "^0.2",
+/// package = "para/cli" }`. That is what `cargo add` and `npm install` do, and it is what keeps a
+/// tutorial from hard-coding a version that goes stale the moment the package ships a minor.
+/// Auto-selection never lands on a prerelease or a yanked release (see
+/// [`registry::latest_selectable`]); an explicit `--version` still says exactly what it says.
 ///
 /// `--package` applies to **every** source form. A `--version` dependency resolves by it. A
 /// `--path`/`--git` dependency is already selected by its source, so there it is written into the
@@ -239,6 +248,26 @@ pub(crate) fn cmd_add(
     version: Option<&str>,
     package: Option<&str>,
 ) -> ExitCode {
+    // A positional carrying a `/` is a **package identity**, not an import-root key: a key is an
+    // identifier (it becomes `use <key>.…`), so a slash cannot occur in one — `noeta add para/cli`
+    // is unambiguous, and today it fails with "must be an identifier". Reading it as `--package`
+    // gives the registry form its shortest spelling, which is the one docs and READMEs want.
+    let (key, package) = match key {
+        Some(k) if k.contains('/') => match package {
+            Some(p) if p != k => {
+                eprintln!(
+                    "noeta: `{k}` and `--package {p}` name different packages — a positional with a \
+                     `/` IS the package identity, so give it once (`noeta add {p}`, or `noeta add \
+                     <key> --package {p}` to bind it under a different import root)"
+                );
+                return ExitCode::from(2);
+            }
+            // The key is then derived from the identity, exactly as with a bare `--package`.
+            _ => (None, Some(k)),
+        },
+        other => (other, package),
+    };
+
     // `--package` names a `company/package` identity, and it is meaningful on every source form: it
     // is what a `--version` dependency *resolves by*, and on a `--path`/`--git` dependency it is a
     // claim about the tree the source points at, written into the entry and checked at resolve time.
@@ -263,12 +292,14 @@ pub(crate) fn cmd_add(
         None => String::new(),
     };
 
-    // Exactly one source form.
+    // At most one source form — and none at all is the *latest-resolving* registry form, which
+    // needs the project's `[registries]` routing and so cannot be spelled until the manifest is
+    // located below.
     let value_toml = match (path, git, version) {
-        (Some(p), None, None) => format!(
+        (Some(p), None, None) => Some(format!(
             "{{ path = {}{package_field} }}",
             toml_string(&p.display().to_string())
-        ),
+        )),
         (None, Some(url), None) => {
             let Some(tag) = tag else {
                 eprintln!(
@@ -276,21 +307,29 @@ pub(crate) fn cmd_add(
                 );
                 return ExitCode::from(2);
             };
-            format!(
+            Some(format!(
                 "{{ git = {}, tag = {}{package_field} }}",
                 toml_string(url),
                 toml_string(tag)
-            )
+            ))
         }
-        (None, None, Some(req)) => match &package_name {
+        (None, None, Some(req)) => Some(match &package_name {
             // A registry dependency resolves only with its identity, so fold `--package` into the
             // table form; without it, keep the bare shorthand (it errors at resolve, pointing here).
             Some(_) => format!("{{ version = {}{package_field} }}", toml_string(req)),
             None => toml_string(req),
-        },
+        }),
+        // No source: a registry dependency whose version `add` looks up (filled in below). Only an
+        // identity makes that possible — without one there is nothing to ask the registry about.
         (None, None, None) => {
-            eprintln!("noeta: give a source — `--path`, `--git` (+ `--tag`), or `--version`");
-            return ExitCode::from(2);
+            if package_name.is_none() {
+                eprintln!(
+                    "noeta: name a registry package (`noeta add company/pkg`) or give a source — \
+                     `--path`, `--git` (+ `--tag`), or `--version`"
+                );
+                return ExitCode::from(2);
+            }
+            None
         }
         _ => {
             eprintln!("noeta: give exactly one source — `--path`, `--git`, or `--version`");
@@ -309,6 +348,25 @@ pub(crate) fn cmd_add(
     let manifest_dir = manifest_path
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."));
+
+    // The latest-resolving form: no source was given, so look the package's current version up in
+    // the registry that owns its scope and write a caret requirement for it. Done here, before the
+    // manifest is edited, so a lookup failure leaves `noeta.toml` untouched.
+    let value_toml = match value_toml {
+        Some(toml) => toml,
+        None => {
+            let name = package_name
+                .as_ref()
+                .expect("the sourceless form is only reachable with a package identity");
+            match latest_requirement(&manifest_path, name) {
+                Ok(req) => {
+                    println!("resolved `{name}` to {req} (the registry's current version)");
+                    format!("{{ version = {}{package_field} }}", toml_string(&req))
+                }
+                Err(code) => return code,
+            }
+        }
+    };
 
     // A `--path` dependency's own declared identity, read straight from the tree it points at. It
     // answers two questions at once: whether a `--package` claim about that tree is true, and what
@@ -436,6 +494,74 @@ pub(crate) fn cmd_add(
         Err(err) => {
             eprintln!("noeta: added `{binding_key}`, but resolving it failed: {err}");
             ExitCode::from(1)
+        }
+    }
+}
+
+/// The requirement `noeta add company/pkg` writes when no source was given: ask the registry that
+/// owns the package's scope for its current version, and spell a caret at that version's
+/// compatibility boundary (`0.2.0` → `^0.2`). `Err` is the exit code to return — every failure is
+/// reported here, before the manifest is touched, so a lookup that cannot answer leaves
+/// `noeta.toml` exactly as it was.
+///
+/// The scope's registry is the same one a resolve would use: a `[registries]` mapping in the
+/// project manifest if it routes this scope, else the environment default chain. Looking it up
+/// through the project's own routing is what keeps a private scope's version lookup off the public
+/// registry.
+fn latest_requirement(
+    manifest_path: &std::path::Path,
+    name: &manifest::PackageName,
+) -> Result<String, ExitCode> {
+    let identity = name.to_string();
+    // The root manifest's `[registries]` routing. A manifest we cannot parse is not fatal here —
+    // `add_dependency` re-reads it and reports the parse failure properly — so fall back to the
+    // environment default rather than inventing a second diagnostic for it.
+    let registries = manifest::load(manifest_path)
+        .map(|m| m.registries().clone())
+        .unwrap_or_default();
+    let source = registries.source_for(&name.company);
+    let index = registry::open_source(source).map_err(|err| {
+        eprintln!(
+            "noeta: cannot open the registry to look up `{identity}`: {err}\n  \
+             pass `--version <req>` to add it without a lookup"
+        );
+        ExitCode::from(1)
+    })?;
+    let releases = index.releases(&identity).map_err(|err| {
+        eprintln!(
+            "noeta: cannot reach the registry to resolve the latest `{identity}`: {err}\n  \
+             check your connection, then retry — or pass `--version <req>` to add it without a \
+             lookup"
+        );
+        ExitCode::from(1)
+    })?;
+    match registry::latest_selectable(&releases) {
+        Ok(release) => Ok(registry::caret_requirement(&release.version)),
+        Err(registry::NoLatest::UnknownPackage) => {
+            eprintln!(
+                "noeta: the registry has no package `{identity}` — check the spelling (a package \
+                 is `company/package`), or map `{}` to the registry that serves it under \
+                 `[registries]`",
+                name.company
+            );
+            Err(ExitCode::from(1))
+        }
+        Err(registry::NoLatest::OnlyPrereleases(highest)) => {
+            eprintln!(
+                "noeta: `{identity}` has published only prereleases (the highest is {highest}), \
+                 and `add` never selects one on its own — depend on it deliberately with \
+                 `--version {highest}`"
+            );
+            Err(ExitCode::from(1))
+        }
+        Err(registry::NoLatest::AllYanked) => {
+            eprintln!(
+                "noeta: every published version of `{identity}` is yanked — a yanked release keeps \
+                 an existing pin resolving but is never newly selected, so there is nothing to \
+                 add. Wait for a fixed release, or pin a yanked one deliberately with \
+                 `--version =<x.y.z>`"
+            );
+            Err(ExitCode::from(1))
         }
     }
 }

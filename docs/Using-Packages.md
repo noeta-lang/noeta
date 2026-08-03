@@ -44,14 +44,17 @@ Dependencies live in the manifest's `[dependencies]` table, and `noeta add` make
 We will use `para/cli`, the command-line framework:
 
 ```sh
-noeta add para --version "^0.2" --package para/cli
+noeta add para --package para/cli
 ```
 
 ```
+resolved `para/cli` to ^0.2 (the registry's current version)
 added `para` to …/hello-cli/noeta.toml
 ```
 
-The first argument (`para`) is the **import root** — the name you write after `use` — and `--package` is the **registry identity**. They are separate so that several packages of one scope can sit under one import root. The manifest now contains:
+No version is written by hand. With no source given, `noeta add` asks the registry what the package's current version is and writes a caret requirement for it, so the command in a tutorial does not go stale when the package ships a minor. A **prerelease** or a **yanked** release is never picked that way; to depend on one deliberately, say the version yourself with `--version`.
+
+The first argument (`para`) is the **import root** — the name you write after `use` — and `--package` is the **registry identity**. They are separate so that several packages of one scope can sit under one import root. (Shorter still, `noeta add para/cli` takes the identity as the positional and derives the import root from it — that binds the package under `cli`, so you would write `use cli.…`. We want `para` here, so we name it.) The manifest now contains:
 
 ```toml
 [dependencies]

@@ -2191,6 +2191,280 @@ fn noeta_add_edits_the_manifest_and_resolves() {
         .stdout("42\n");
 }
 
+// --- `noeta add` with no source: resolve the registry's current version -------------------------
+
+/// A local registry serving `acme/greet` at the given `(version, tag)` pairs, all pointing at one
+/// tagged repo. Returns `(registry dir, repo dir)`. Hand-written index entries (the `LocalIndex`
+/// TOML format, as the PubGrub end-to-end test does) rather than `noeta publish` runs, because the
+/// point of these tests is *which* of several published versions gets picked — including a
+/// prerelease, which a publish of the working tree cannot conveniently interleave.
+fn greet_registry(base: &std::path::Path, versions: &[(&str, &str)]) -> (PathBuf, PathBuf) {
+    let repo = base.join("greet_repo");
+    let reg = base.join("registry");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::create_dir_all(&reg).unwrap();
+    git_in(&["init", "-q"], &repo);
+    std::fs::write(
+        repo.join("hello.noe"),
+        "pub fn greeting(): string { return \"hello from the latest release\"; }\n",
+    )
+    .unwrap();
+    let mut entry = String::new();
+    for (version, tag) in versions {
+        commit_version(
+            &repo,
+            tag,
+            &format!("[package]\nname = \"acme/greet\"\nversion = \"{version}\"\n"),
+        );
+        entry.push_str(&format!(
+            "[[version]]\nversion = \"{version}\"\nurl = \"{}\"\ntag = \"{tag}\"\nsha = \"{}\"\n",
+            repo.display(),
+            git_sha(&repo, tag)
+        ));
+    }
+    std::fs::write(reg.join("acme__greet.toml"), entry).unwrap();
+    (reg, repo)
+}
+
+/// An empty app project under `base`, with an entry module that imports the dependency by its own
+/// root (`greet`, from `acme/greet`).
+fn add_target_app(base: &std::path::Path) -> PathBuf {
+    let app = base.join("app");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::write(
+        app.join("noeta.toml"),
+        "# my app\n[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app.join("main.noe"),
+        "use greet.hello.greeting;\necho greeting();\n",
+    )
+    .unwrap();
+    app
+}
+
+/// `noeta add company/pkg` with **no source at all** looks the package's current version up in the
+/// registry and writes a caret requirement for it — the `cargo add`/`npm install` behaviour, and
+/// what keeps a tutorial from hard-coding a version that goes stale. Before this landed, the same
+/// invocation failed with "give a source — `--path`, `--git` (+ `--tag`), or `--version`".
+///
+/// The requirement must **round-trip**: the resolve `add` runs immediately afterwards has to select
+/// the very version the lookup picked, which the lock proves.
+#[test]
+fn noeta_add_with_no_source_resolves_the_registrys_current_version() {
+    if !git_available() {
+        return;
+    }
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_add_latest");
+    let _ = std::fs::remove_dir_all(&base);
+    let (reg, _repo) = greet_registry(&base, &[("0.1.0", "v0.1.0"), ("0.2.0", "v0.2.0")]);
+    let app = add_target_app(&base);
+
+    lang()
+        .current_dir(&app)
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .args(["add", "acme/greet"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("resolved `acme/greet` to ^0.2"));
+
+    let manifest = std::fs::read_to_string(app.join("noeta.toml")).unwrap();
+    assert!(
+        manifest.contains("greet = { version = \"^0.2\", package = \"acme/greet\" }"),
+        "caret requirement for the current version written: {manifest}"
+    );
+    assert!(
+        manifest.contains("# my app"),
+        "the format-preserving edit still preserves comments: {manifest}"
+    );
+    // Round-trip: what was written resolves back to exactly the version that was picked.
+    let lock = std::fs::read_to_string(app.join("noeta.lock")).expect("lock written");
+    assert!(
+        lock.contains("version = \"0.2.0\""),
+        "`^0.2` resolved back to 0.2.0: {lock}"
+    );
+
+    // And the dependency really is usable under the derived import root.
+    lang()
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .arg("run")
+        .arg(app.join("main.noe"))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("hello from the latest release"));
+}
+
+/// The same resolution through the `--package` spelling, with an explicit import-root key — the
+/// form the package guide teaches (`noeta add para --package para/cli`). `KEY` is optional either
+/// way, so `noeta add --package acme/greet` must work too.
+#[test]
+fn noeta_add_resolves_the_latest_through_the_package_flag_with_or_without_a_key() {
+    if !git_available() {
+        return;
+    }
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_add_latest_pkgflag");
+    let _ = std::fs::remove_dir_all(&base);
+    let (reg, _repo) = greet_registry(&base, &[("1.4.0", "v1.4.0"), ("1.5.3", "v1.5.3")]);
+
+    // An explicit key: the entry binds the package under `acme`, and `^1.5` drops the patch.
+    let keyed = base.join("keyed");
+    std::fs::create_dir_all(&keyed).unwrap();
+    std::fs::write(
+        keyed.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    lang()
+        .current_dir(&keyed)
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .args(["add", "acme", "--package", "acme/greet"])
+        .assert()
+        .success();
+    assert!(
+        std::fs::read_to_string(keyed.join("noeta.toml"))
+            .unwrap()
+            .contains("acme = { version = \"^1.5\", package = \"acme/greet\" }"),
+        "explicit key + resolved caret"
+    );
+
+    // No key at all: derived from the package's own root segment, same resolution.
+    let derived = base.join("derived");
+    std::fs::create_dir_all(&derived).unwrap();
+    std::fs::write(
+        derived.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    lang()
+        .current_dir(&derived)
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .args(["add", "--package", "acme/greet"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("using import root `greet`"));
+    assert!(
+        std::fs::read_to_string(derived.join("noeta.toml"))
+            .unwrap()
+            .contains("greet = { version = \"^1.5\", package = \"acme/greet\" }"),
+        "derived key + resolved caret"
+    );
+}
+
+/// Auto-selection never lands on a prerelease — the same policy `noeta upgrade` applies to the
+/// toolchain. With `0.3.0-rc.1` published above `0.2.0`, `add` must still pick `0.2.0` (a plain
+/// `max` over SemVer order would take the release candidate, which sorts above `0.2.0`).
+#[test]
+fn noeta_add_never_auto_selects_a_prerelease() {
+    if !git_available() {
+        return;
+    }
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_add_latest_prerelease");
+    let _ = std::fs::remove_dir_all(&base);
+    let (reg, _repo) = greet_registry(
+        &base,
+        &[
+            ("0.2.0", "v0.2.0"),
+            ("0.3.0-rc.1", "v0.3.0-rc.1"),
+            ("0.3.0-rc.2", "v0.3.0-rc.2"),
+        ],
+    );
+    let app = add_target_app(&base);
+
+    lang()
+        .current_dir(&app)
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .args(["add", "acme/greet"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("resolved `acme/greet` to ^0.2"));
+    assert!(
+        std::fs::read_to_string(app.join("noeta.toml"))
+            .unwrap()
+            .contains("version = \"^0.2\""),
+        "the release candidate is not what a bare `add` selects"
+    );
+
+    // A package that has ONLY prereleases has nothing `add` may pick: it says so, names the version
+    // an author would have to opt into by hand, and leaves the manifest untouched.
+    let pre_only = base.join("pre_only");
+    std::fs::create_dir_all(&pre_only).unwrap();
+    let manifest_before = "[package]\nname = \"acme/app2\"\nversion = \"0.1.0\"\n";
+    std::fs::write(pre_only.join("noeta.toml"), manifest_before).unwrap();
+    std::fs::write(
+        reg.join("acme__fresh.toml"),
+        "[[version]]\nversion = \"1.0.0-alpha.1\"\nurl = \"x\"\ntag = \"v1.0.0-alpha.1\"\nsha = \"0\"\n",
+    )
+    .unwrap();
+    lang()
+        .current_dir(&pre_only)
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .args(["add", "acme/fresh"])
+        .assert()
+        .code(1)
+        .stderr(
+            predicate::str::contains("published only prereleases")
+                .and(predicate::str::contains("--version 1.0.0-alpha.1")),
+        );
+    assert_eq!(
+        std::fs::read_to_string(pre_only.join("noeta.toml")).unwrap(),
+        manifest_before,
+        "a lookup that cannot answer leaves the manifest untouched"
+    );
+}
+
+/// The lookup's failure modes each say what to do, and none of them edits the manifest: an unknown
+/// package, and no identity to look anything up by.
+#[test]
+fn noeta_add_latest_reports_a_lookup_it_cannot_answer() {
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_add_latest_failures");
+    let _ = std::fs::remove_dir_all(&base);
+    let reg = base.join("registry");
+    std::fs::create_dir_all(&reg).unwrap();
+    let app = base.join("app");
+    std::fs::create_dir_all(&app).unwrap();
+    let manifest_before = "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n";
+    std::fs::write(app.join("noeta.toml"), manifest_before).unwrap();
+
+    // Unknown package: the index serves no releases for that identity.
+    lang()
+        .current_dir(&app)
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .args(["add", "acme/absent"])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains(
+            "the registry has no package `acme/absent`",
+        ));
+
+    // No identity and no source: there is nothing to look up, and the message names both ways out.
+    lang()
+        .current_dir(&app)
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .args(["add", "somekey"])
+        .assert()
+        .code(2)
+        .stderr(
+            predicate::str::contains("name a registry package (`noeta add company/pkg`)")
+                .and(predicate::str::contains("or give a source")),
+        );
+
+    // A positional identity and a contradicting `--package` are the same argument given twice.
+    lang()
+        .current_dir(&app)
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .args(["add", "acme/greet", "--package", "acme/other"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("name different packages"));
+
+    assert_eq!(
+        std::fs::read_to_string(app.join("noeta.toml")).unwrap(),
+        manifest_before,
+        "no failing lookup touched the manifest"
+    );
+}
+
 #[test]
 fn noeta_update_rewrites_the_lock() {
     if !git_available() {

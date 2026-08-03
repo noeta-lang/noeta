@@ -230,6 +230,71 @@ pub fn resolve_coords(
         })
 }
 
+/// Why a package has no version `noeta add` could pick for it — the three ways
+/// [`latest_selectable`] can come up empty, kept apart so the caller can say which one happened
+/// instead of collapsing all of them into "not found".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NoLatest {
+    /// The index serves no releases at all for this identity: an unknown (or misspelled) package.
+    UnknownPackage,
+    /// Every published version is a **prerelease**. `add` never selects one — the same policy
+    /// `noeta upgrade` applies to the toolchain — so there is nothing to pick. Carries the highest
+    /// prerelease, so the caller can name the version an author would have to opt into by hand.
+    OnlyPrereleases(Version),
+    /// Every published version is **yanked**. A yanked release still resolves for an existing pin
+    /// (Go's model), but is never *newly* selected, so there is nothing to add.
+    AllYanked,
+}
+
+/// The release `noeta add` (and any other "just give me the current one" caller) should pick: the
+/// **highest published version that is newly selectable** — never yanked, never a prerelease.
+///
+/// Both exclusions are the same policy the rest of the toolchain already applies at selection sites:
+/// a yanked release is served so an existing pin keeps resolving but is never newly chosen, and a
+/// prerelease is something an author opts into explicitly (`noeta upgrade` refuses prerelease
+/// toolchains for the same reason). Auto-selection must never be the thing that lands either one in
+/// a manifest.
+pub fn latest_selectable(releases: &[Release]) -> Result<&Release, NoLatest> {
+    if releases.is_empty() {
+        return Err(NoLatest::UnknownPackage);
+    }
+    let live: Vec<&Release> = releases.iter().filter(|r| !r.yanked).collect();
+    if live.is_empty() {
+        return Err(NoLatest::AllYanked);
+    }
+    live.iter()
+        .filter(|r| r.version.pre.is_empty())
+        .max_by(|a, b| a.version.cmp(&b.version))
+        .copied()
+        .ok_or_else(|| {
+            let highest = live
+                .iter()
+                .max_by(|a, b| a.version.cmp(&b.version))
+                .expect("live is non-empty");
+            NoLatest::OnlyPrereleases(highest.version.clone())
+        })
+}
+
+/// The SemVer requirement to *write into a manifest* for a version that was just resolved as "the
+/// latest" — a **caret at the compatibility boundary**, which is what the ecosystem's manifests
+/// already say (`{ version = "^0.2", package = "para/cli" }`).
+///
+/// The precision is chosen so the requirement admits exactly the future releases that promise to
+/// keep working: `^<major>.<minor>` for anything from `0.1.0` up (`1.5.3` → `^1.5`, `0.2.0` →
+/// `^0.2`), and `^0.0.<patch>` in the `0.0.x` range, where SemVer gives *every* patch leave to
+/// break and a bare `^0.0` would therefore be a promise the versions do not make. Patch is dropped
+/// otherwise on purpose: pinning `^1.5.3` would refuse `1.5.2` for a sibling dependency that needs
+/// it, for no compatibility gain.
+///
+/// The requirement always matches the version it was derived from — see the round-trip test.
+pub fn caret_requirement(version: &Version) -> String {
+    if version.major == 0 && version.minor == 0 {
+        format!("^0.0.{}", version.patch)
+    } else {
+        format!("^{}.{}", version.major, version.minor)
+    }
+}
+
 /// A file-backed [`Index`] (package-manager P2.5): one TOML file per package under a directory, used
 /// offline and in tests. Located at `NOETA_REGISTRY_DIR` if set, else `<cache>/registry`. The hosted
 /// registry replaces this with an HTTP client of the same [`Index`] shape.
@@ -2209,6 +2274,113 @@ mod tests {
             resolve_coords(&index, "guzzle/http", &VersionReq::parse("^1.0").unwrap()).unwrap();
         assert_eq!(version, Version::new(1, 4, 0)); // highest in ^1
         assert_eq!(c.tag, "v1.4.0");
+    }
+
+    /// A version with a prerelease suffix, for the latest-selection tests.
+    fn prerelease(v: &str, tag: &str) -> Release {
+        let mut r = release(0, 0, 0, tag);
+        r.version = Version::parse(v).unwrap();
+        r
+    }
+
+    #[test]
+    fn latest_selectable_picks_the_highest_release_release() {
+        let releases = vec![
+            release(0, 1, 0, "v0.1.0"),
+            release(0, 2, 0, "v0.2.0"),
+            release(0, 1, 9, "v0.1.9"),
+        ];
+        assert_eq!(
+            latest_selectable(&releases).unwrap().version,
+            Version::new(0, 2, 0)
+        );
+    }
+
+    #[test]
+    fn latest_selectable_never_lands_on_a_prerelease_or_a_yank() {
+        // A prerelease ranks ABOVE the highest release in SemVer order for the *next* version, so
+        // an unfiltered `max` would pick `0.3.0-rc.1` here. `add` must not put that in a manifest.
+        let releases = vec![
+            release(0, 2, 0, "v0.2.0"),
+            prerelease("0.3.0-rc.1", "v0.3.0-rc.1"),
+        ];
+        assert_eq!(
+            latest_selectable(&releases).unwrap().version,
+            Version::new(0, 2, 0)
+        );
+
+        // A yanked release is served (an existing pin keeps resolving) but never newly selected.
+        let mut yanked = release(0, 3, 0, "v0.3.0");
+        yanked.yanked = true;
+        let releases = vec![release(0, 2, 0, "v0.2.0"), yanked];
+        assert_eq!(
+            latest_selectable(&releases).unwrap().version,
+            Version::new(0, 2, 0)
+        );
+    }
+
+    #[test]
+    fn latest_selectable_distinguishes_its_three_empty_cases() {
+        assert_eq!(latest_selectable(&[]), Err(NoLatest::UnknownPackage));
+
+        // Only prereleases: reported with the highest one, so the caller can name what an author
+        // would have to ask for explicitly.
+        let pres = vec![
+            prerelease("1.0.0-alpha.1", "v1.0.0-alpha.1"),
+            prerelease("1.0.0-beta.2", "v1.0.0-beta.2"),
+        ];
+        assert_eq!(
+            latest_selectable(&pres),
+            Err(NoLatest::OnlyPrereleases(
+                Version::parse("1.0.0-beta.2").unwrap()
+            ))
+        );
+
+        let mut yanked = release(1, 0, 0, "v1.0.0");
+        yanked.yanked = true;
+        assert_eq!(latest_selectable(&[yanked]), Err(NoLatest::AllYanked));
+    }
+
+    #[test]
+    fn a_caret_requirement_round_trips_to_the_version_it_came_from() {
+        // The spelling, and the property that makes it correct: whatever `add` writes, the resolver
+        // must select the very version it was derived from — checked through BOTH the `semver`
+        // matcher and the PubGrub range conversion the graph actually solves with.
+        let cases = [
+            ("0.2.0", "^0.2"),
+            ("0.2.7", "^0.2"),
+            ("0.3.0", "^0.3"),
+            ("0.4.0", "^0.4"),
+            ("1.0.0", "^1.0"),
+            ("1.5.3", "^1.5"),
+            ("2.11.0", "^2.11"),
+            // The 0.0.x range: every patch may break, so the caret keeps the patch.
+            ("0.0.1", "^0.0.1"),
+            ("0.0.12", "^0.0.12"),
+        ];
+        for (version, expected) in cases {
+            let v = Version::parse(version).unwrap();
+            let req_text = caret_requirement(&v);
+            assert_eq!(req_text, expected, "spelling for {version}");
+            let req = VersionReq::parse(&req_text).expect("a parseable requirement");
+            assert!(req.matches(&v), "`{req_text}` must match {version}");
+            assert!(
+                crate::resolve::req_to_ranges(&req).contains(&v),
+                "`{req_text}` must contain {version} in the resolver's own range algebra"
+            );
+        }
+    }
+
+    #[test]
+    fn a_caret_requirement_excludes_the_next_breaking_version() {
+        let req = VersionReq::parse(&caret_requirement(&Version::new(0, 2, 0))).unwrap();
+        assert!(req.matches(&Version::new(0, 2, 9)));
+        assert!(!req.matches(&Version::new(0, 3, 0)));
+        let req = VersionReq::parse(&caret_requirement(&Version::new(1, 5, 3))).unwrap();
+        assert!(req.matches(&Version::new(1, 9, 0)));
+        assert!(!req.matches(&Version::new(2, 0, 0)));
+        let req = VersionReq::parse(&caret_requirement(&Version::new(0, 0, 3))).unwrap();
+        assert!(!req.matches(&Version::new(0, 0, 4)));
     }
 
     #[test]
