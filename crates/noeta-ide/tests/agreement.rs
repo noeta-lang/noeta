@@ -5,10 +5,17 @@
 //! A surface that answers "is this file clean" differently from the compiler is wrong in exactly one
 //! direction that matters — *quietly* clean — and each of these was quiet.
 //!
-//! The last group is row 8, and it moves the axis: since row 5, `noeta check` **is** the editor's
-//! engine, so the two answers that can disagree are the salsa graph (`noeta check`, the LSP) and the
-//! batch loader (`noeta run`, `noeta build`, `noeta test`). [`both_surfaces`] asks both about one
-//! project on disk, and the tier fixtures below insist they say the same thing.
+//! The **third** group is row 8, and it moves the axis: since row 5, `noeta check` **is** the
+//! editor's engine, so the two answers that can disagree are the salsa graph (`noeta check`, the
+//! LSP) and the batch loader (`noeta run`, `noeta build`, `noeta test`). [`both_surfaces`] asks both
+//! about one project on disk, and the tier fixtures below insist they say the same thing.
+//!
+//! The **last** group moves the axis again. The tier fixtures are about how one file's *text* is
+//! read; those three are about **which files are in the program at all** — the dependency selection
+//! a `--target` makes, and the module pool an entry links against. A census of every question the
+//! two front ends both answer turned them up, and one of them
+//! ([`a_derived_path_collision_in_a_pruned_subtree_is_reported_by_both_surfaces`]) is the shape that
+//! matters most: `noeta check` exiting 0 on a tree `noeta run` refuses outright.
 //!
 //! Its own test binary because the fixtures are real directories on disk.
 
@@ -45,7 +52,19 @@ fn agreeing_diagnostics(app: &Path, entry: &Path, tier: &str) -> Vec<String> {
 /// `PackageMap` on the other — and only the *resolution* between them is shared code, so a fixture
 /// that puts a real manifest through both is what proves the seam holds.
 fn both_surfaces(app: &Path, entry: &Path) -> (Vec<String>, Vec<String>) {
-    let checked = noeta_ide::project_check(app, &noeta_ide::ProjectCheckOptions::new());
+    both_surfaces_for(app, entry, None)
+}
+
+/// [`both_surfaces`] for one **build target** — the `--target` both `noeta check` and `noeta run`
+/// take. The two resolve the root's dependency set through the same `noeta-pm` selection
+/// ([`noeta_pm::graph`]), so a target-scoped `[targets.<t>.dependencies]` must be in both programs
+/// or in neither; `None` is the global set every other fixture here asks about.
+fn both_surfaces_for(app: &Path, entry: &Path, target: Option<&str>) -> (Vec<String>, Vec<String>) {
+    let mut options = noeta_ide::ProjectCheckOptions::new();
+    if let Some(target) = target {
+        options = options.with_target(Some(target));
+    }
+    let checked = noeta_ide::project_check(app, &options);
     assert!(
         checked.problems.is_empty(),
         "the fixture must resolve — an operational failure is not an answer: {:?}",
@@ -57,7 +76,14 @@ fn both_surfaces(app: &Path, entry: &Path) -> (Vec<String>, Vec<String>) {
         .map(|d| d.diagnostic.code.code().to_string())
         .collect();
 
-    let graph = noeta_pm::graph::resolve_graph_query(entry).expect("the fixture's graph resolves");
+    // The loader half is spelled exactly as an *executing* verb spells it: `noeta run --target T`
+    // reaches its dependency set through `manifest::dependency_selection_for`, which is
+    // `resolve_graph_for`. With no target this is the query resolve every other fixture uses.
+    let graph = match target {
+        Some(_) => noeta_pm::graph::resolve_graph_for(entry, target),
+        None => noeta_pm::graph::resolve_graph_query(entry),
+    }
+    .expect("the fixture's graph resolves");
     let linked = noeta_loader::load_with_deps(
         entry,
         noeta_pm::manifest::root_edition(entry),
@@ -354,6 +380,214 @@ fn a_binding_onto_a_dependency_code_tier_is_not_captured_by_a_natives_name() {
     assert!(
         diags.contains(&"E0002".to_string()),
         "the bound tier is a CODE tier, so its body is code — and this body is not: {diags:?}"
+    );
+    drop(root);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The dependency-set and module-pool halves of the same question: *which files are in this
+// program at all*. Everything above is about how one file's text is read; these three are about
+// whether the two surfaces are even looking at the same set of files. They were found by a census
+// of every question `noeta-ide` (check/LSP/MCP) and `noeta-loader` (run/build/test) both answer.
+// ---------------------------------------------------------------------------------------------
+
+/// **`noeta check --target T` could not see `[targets.T.dependencies]`.**
+///
+/// `noeta run --target dev` resolves the root's dependency set through
+/// [`noeta_pm::manifest::dependency_selection_for`], which layers the target's own
+/// `[targets.dev.dependencies]` onto the globals. The salsa surface resolved the **global** set
+/// unconditionally — `ProjectCheckOptions` carried the target's live *tiers* but not the target
+/// itself, so there was nothing to pass — and reported E0019 against every import of a dev-only
+/// dependency on a project `noeta run --target dev` compiles and runs.
+///
+/// The lock refresh stays skipped on the check path (opening or checking a project must not rewrite
+/// `noeta.lock`); only the *selection* is now the target's.
+#[test]
+fn a_target_scoped_dependency_links_for_the_editor_and_the_loader_alike() {
+    seed();
+    let (root, app, entry) = target_dep_project("agreement-target-dep");
+
+    let (salsa, loader) = both_surfaces_for(&app, &entry, Some("dev"));
+    assert_eq!(
+        salsa, loader,
+        "`--target dev` disagrees about `[targets.dev.dependencies]`: `noeta check` says \
+         {salsa:?}, the loader (`noeta run --target dev`) says {loader:?}"
+    );
+    assert!(
+        salsa.is_empty(),
+        "the dev-only dependency is in the `--target dev` program on both surfaces: {salsa:?}"
+    );
+    drop(root);
+}
+
+/// **The control for the fixture above**, and the proof it is not vacuous: the *same* project with
+/// no target at all. `devtools` is declared only under `[targets.dev]`, so the global selection does
+/// not contain it and both surfaces must say so. A fixture whose dependency was in the global set
+/// would pass the test above without the target ever being read.
+#[test]
+fn the_same_dependency_is_absent_without_the_target() {
+    seed();
+    let (root, app, entry) = target_dep_project("agreement-target-dep-control");
+
+    let (salsa, loader) = both_surfaces(&app, &entry);
+    assert_eq!(
+        salsa, loader,
+        "with no target both surfaces resolve the global dependency set: `noeta check` says \
+         {salsa:?}, the loader says {loader:?}"
+    );
+    assert!(
+        salsa.contains(&"E0019".to_string()),
+        "`devtools` is declared only under `[targets.dev]`, so it is not in the default program — \
+         if this is clean the fixture proves nothing about targets: {salsa:?}"
+    );
+    drop(root);
+}
+
+/// An app whose only dependency is **target-scoped**, plus the library it names. Returns the temp
+/// root (kept alive by the caller), the app directory and its entry.
+fn target_dep_project(name: &str) -> (noeta_test_temp::TempDir, PathBuf, PathBuf) {
+    let root = noeta_test_temp::TempDir::new(name);
+    let app = root.join("app");
+    let lib = root.join("devlib");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::create_dir_all(&lib).unwrap();
+    std::fs::write(
+        app.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+         [targets.dev.dependencies]\ndevtools = { path = \"../devlib\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app.join("main.noe"),
+        "use devtools.api.marker\necho marker()\n",
+    )
+    .unwrap();
+    std::fs::write(
+        lib.join("noeta.toml"),
+        "[package]\nname = \"acme/devtools\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        lib.join("api.noe"),
+        "pub fn marker(): string { return \"dev tooling linked\" }\n",
+    )
+    .unwrap();
+    let entry = app.join("main.noe");
+    (root, app, entry)
+}
+
+/// **An entry inside a pruned subtree linked against nothing.**
+///
+/// `read_siblings` applies [`noeta_loader::is_outside_package`] only to the subdirectories it
+/// *descends into*, never to the entry itself, so `noeta run app/tools/probe.noe` gives that file
+/// the whole package's modules however the package walk classifies the directory it sits in. The
+/// salsa surface looked the entry up in the package walk's output — which had pruned it, because
+/// `tools/` holds a `Cargo.toml` — missed, and fell back to checking it as a **one-member
+/// workspace**: E0019 for an import `noeta run` resolves.
+///
+/// A pruned entry now links against its package's pool on both paths.
+#[test]
+fn an_entry_in_a_pruned_subtree_links_against_its_package() {
+    seed();
+    let root = noeta_test_temp::TempDir::new("agreement-pruned-entry");
+    let app = root.join("app");
+    let tools = app.join("tools");
+    std::fs::create_dir_all(&tools).unwrap();
+    std::fs::write(
+        app.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app.join("lib.noe"),
+        "pub fn helper(): string { return \"from the package\" }\n",
+    )
+    .unwrap();
+    // What prunes `tools/` from the package walk: a nested Rust crate. (`target/`, a dot-directory
+    // and a nested `noeta.toml` do the same — this is the one that reads as ordinary source.)
+    std::fs::write(
+        tools.join("Cargo.toml"),
+        "[package]\nname = \"probe-engine\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    let entry = tools.join("probe.noe");
+    std::fs::write(&entry, "use app.lib.helper\necho helper()\n").unwrap();
+
+    // Non-vacuity: the walk really does prune the entry, which is the whole precondition.
+    let package_root = noeta_pm::sources::package_root(&entry).expect("the fixture is a package");
+    let walked: Vec<String> = noeta_loader::read_package_modules(&package_root)
+        .into_iter()
+        .map(|m| m.name)
+        .collect();
+    assert!(
+        !walked.iter().any(|n| n.ends_with("probe.noe")),
+        "the package walk must prune `tools/`, or this fixture tests nothing: {walked:?}"
+    );
+
+    let (salsa, loader) = both_surfaces(&app, &entry);
+    assert_eq!(
+        salsa,
+        loader,
+        "`{}` disagrees about what it links against: `noeta check` says {salsa:?}, the loader \
+         (`noeta run`) says {loader:?}",
+        entry.display()
+    );
+    assert!(
+        salsa.is_empty(),
+        "the entry is a file of the package and sees its modules: {salsa:?}"
+    );
+    drop(root);
+}
+
+/// **The same fault in its silent direction, which is the serious one.**
+///
+/// Two files derive the module path `app.tools.probe` — `src/tools/probe.noe`, a walked member, and
+/// `tools/probe.noe`, pruned by a nested `Cargo.toml`. `noeta run tools/probe.noe` links the pruned
+/// entry beside the walked one and refuses the program: E0073. `noeta check .` linked the pruned
+/// entry **alone**, so the whole-program derivation pass had nothing to collide against and reported
+/// a clean tree — exit 0 for a program `run` will not build.
+///
+/// This is the shape nothing else catches: not a diagnostic the two surfaces spell differently, but
+/// one surface reporting *nothing at all*.
+#[test]
+fn a_derived_path_collision_in_a_pruned_subtree_is_reported_by_both_surfaces() {
+    seed();
+    let root = noeta_test_temp::TempDir::new("agreement-pruned-collision");
+    let app = root.join("app");
+    let walked = app.join("src").join("tools");
+    let pruned = app.join("tools");
+    std::fs::create_dir_all(&walked).unwrap();
+    std::fs::create_dir_all(&pruned).unwrap();
+    std::fs::write(
+        app.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    // `src/` is a layout convention, not a segment: this derives `app.tools.probe`.
+    std::fs::write(
+        walked.join("probe.noe"),
+        "pub fn walked(): int { return 1 }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        pruned.join("Cargo.toml"),
+        "[package]\nname = \"probe-engine\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    // …and so does this one, from the other side of the prune.
+    let entry = pruned.join("probe.noe");
+    std::fs::write(&entry, "pub fn shadow(): int { return 2 }\n").unwrap();
+
+    let (salsa, loader) = both_surfaces(&app, &entry);
+    assert!(
+        loader.contains(&"E0073".to_string()),
+        "the fixture must really collide under the loader, or the assertion below is vacuous: \
+         {loader:?}"
+    );
+    assert_eq!(
+        salsa, loader,
+        "`noeta check` reports a clean tree that `noeta run` refuses: check says {salsa:?}, the \
+         loader says {loader:?}"
     );
     drop(root);
 }

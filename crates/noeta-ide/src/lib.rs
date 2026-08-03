@@ -444,7 +444,9 @@ impl DocumentStore {
     fn refresh_workspace(&mut self, key: &str) {
         let sources = self.discover_sources(key);
         let existing = self.workspaces.remove(key);
-        if let Some(cache) = workspace::sync(&mut self.db, existing, sources) {
+        // No target: an editor session has no `--target`, so it sees the global dependency set —
+        // the same one an untargeted `noeta check` resolves.
+        if let Some(cache) = workspace::sync(&mut self.db, existing, sources, None) {
             self.workspaces.insert(key.to_string(), cache);
         }
     }

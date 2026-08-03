@@ -346,7 +346,10 @@ impl ImpactSession {
     pub fn rebaseline(&mut self) {
         let sources = self.scan();
         self.baselines = sources.iter().cloned().collect();
-        self.cache = workspace::sync(&mut self.db, self.cache.take(), sources);
+        // No target: watch mode re-baselines against the project's default dependency set, the
+        // same one `noeta test --watch` narrows over. A `--target`-aware watch would thread it
+        // here exactly as `project_check` does.
+        self.cache = workspace::sync(&mut self.db, self.cache.take(), sources, None);
         self.reads = self.baseline_reads();
     }
 

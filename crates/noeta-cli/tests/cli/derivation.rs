@@ -455,3 +455,99 @@ fn a_lone_script_outside_a_package_keeps_its_declared_namespaces() {
         .success()
         .stdout(predicate::str::contains("loose"));
 }
+
+/// **A `.noe` file in a subtree the package walk prunes is still a file of the package**, and both
+/// surfaces must treat it as one.
+///
+/// The walk prunes a directory holding a `Cargo.toml` (a native package keeps its engine crates in
+/// its tree, whose `tests/`/`examples/` hold `.noe` *inputs*, not modules). The **entry** is never
+/// asked that question — `read_siblings` prunes only the directories it descends into — so
+/// `noeta run app/tools/probe.noe` gives `probe.noe` every module of `app`. `noeta check` looked the
+/// entry up among the walked members, missed it, and checked it as a lone file: E0019 for an import
+/// `run` resolves.
+#[test]
+fn a_pruned_entry_sees_its_package_on_both_surfaces() {
+    let base = tree(
+        "pruned_entry",
+        &[
+            (
+                "app/noeta.toml",
+                "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n",
+            ),
+            (
+                "app/lib.noe",
+                "pub fn helper(): string { return \"from the package\" }\n",
+            ),
+            (
+                "app/tools/Cargo.toml",
+                "[package]\nname = \"probe-engine\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            ),
+            ("app/tools/probe.noe", "use app.lib.helper\necho helper()\n"),
+        ],
+    );
+    let app = base.join("app");
+
+    lang()
+        .current_dir(&app)
+        .args(["run", "tools/probe.noe"])
+        .assert()
+        .success()
+        .stdout("from the package\n");
+
+    lang()
+        .current_dir(&app)
+        .args(["check", "tools/probe.noe"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("E0019").not());
+}
+
+/// **The same fault in the direction that is not an error message but a missing one.**
+///
+/// `src/tools/probe.noe` and `tools/probe.noe` both derive `app.tools.probe`, across the prune.
+/// `noeta run` links the pruned entry beside the walked one and refuses the program (E0073).
+/// `noeta check .` linked the pruned entry ALONE — nothing to collide against — and reported "0
+/// error(s)" with exit 0 for a tree `run` will not build. A checker that exits 0 where the compiler
+/// exits 1 is the one failure shape no other test in this suite catches.
+#[test]
+fn a_derived_path_collision_across_a_prune_fails_check_as_it_fails_run() {
+    let base = tree(
+        "pruned_collision",
+        &[
+            (
+                "app/noeta.toml",
+                "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n",
+            ),
+            // `src/` is a layout convention, not a segment: this is `app.tools.probe`.
+            (
+                "app/src/tools/probe.noe",
+                "pub fn walked(): int { return 1 }\n",
+            ),
+            (
+                "app/tools/Cargo.toml",
+                "[package]\nname = \"probe-engine\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            ),
+            // …and so is this, from the other side of the prune.
+            ("app/tools/probe.noe", "pub fn shadow(): int { return 2 }\n"),
+        ],
+    );
+    let app = base.join("app");
+
+    lang()
+        .current_dir(&app)
+        .args(["run", "tools/probe.noe"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("E0073"));
+
+    lang()
+        .current_dir(&app)
+        .args(["check", "."])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("E0073"))
+        .stderr(predicate::str::contains(
+            "two files derive the module path `app.tools.probe`",
+        ));
+}
