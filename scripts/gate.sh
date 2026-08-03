@@ -368,8 +368,9 @@ has_target() {
 #   fmt + clippy  (tier 1, --quick)  — the two lints that have twice landed a red `main`, and the
 #                                     cheapest things that can. Fast enough for the inner loop.
 #   test/docs/jit (tier 2, default)  — the oracles: conformance, eval↔VM differential, leak, the
-#                                     doc samples, the JIT's own differential, and the `#[ignore]`d
-#                                     real-socket end-to-end suites (hot reload, LiveView, drain).
+#                                     check-vs-run project differential, the doc samples, the JIT's
+#                                     own differential, and the `#[ignore]`d real-socket end-to-end
+#                                     suites (hot reload, LiveView, drain).
 #                                     This is the set a merge to `main` must clear.
 #   perf          (tier 2, default)  — the instructions-retired ratchet: startup, the interpreter
 #                                     dispatch loop, a map workload, and whether tier 1 still
