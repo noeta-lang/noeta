@@ -1,7 +1,7 @@
 //! **The two front-ends, held against each other over generated *projects*.**
 //!
 //! `noeta check` and `noeta run` do not share a front-end. `check` goes through
-//! [`noeta_ide::project_check`] — the one entry the LSP's `workspace/diagnostic` and the MCP
+//! [`noeta_project::project_check`] — the one entry the LSP's `workspace/diagnostic` and the MCP
 //! `check` tool also call — which walks the tree, groups files by module pool, and drives the
 //! **salsa** workspace (`noeta-db`). `run` goes through [`noeta_runner::compile`], the loader's
 //! directory reader. Two implementations of "which files are this program, what are their module
@@ -235,7 +235,7 @@ pub fn materialize(root: &Path, seed: u64, nonce: u32) -> Layout {
 
 /// Every `.noe` file under `root`, sorted — the entry set both sides are asked about.
 ///
-/// A **second implementation** of `noeta_ide::project::noe_files`, deliberately: that walk is part
+/// A **second implementation** of `noeta_project::project::noe_files`, deliberately: that walk is part
 /// of the check side, and a check that quietly stops visiting a file would otherwise look like
 /// agreement. Same rule (recursive, dotted directories skipped), independently written, so a drift
 /// in either walk shows up as the run side being asked about a file the check side never saw.
@@ -305,7 +305,7 @@ pub struct ProjectOutcome {
     pub tiers_checked: Vec<String>,
 }
 
-/// **The check side**: [`noeta_ide::project_check`], the one entry `noeta check`, the LSP's
+/// **The check side**: [`noeta_project::project_check`], the one entry `noeta check`, the LSP's
 /// `workspace/diagnostic` and the MCP `check` tool share.
 ///
 /// Operational `problems` — a file that could not be read, a dependency graph that would not
@@ -315,8 +315,8 @@ pub struct ProjectOutcome {
 /// silently gave up from reading as agreement with a run that succeeded.
 pub fn check_project(root: &Path) -> ProjectOutcome {
     noeta_conformance::ensure_std_registry();
-    let options = noeta_ide::ProjectCheckOptions::new();
-    let outcome = noeta_ide::project_check(root, &options);
+    let options = noeta_project::ProjectCheckOptions::new();
+    let outcome = noeta_project::project_check(root, &options);
     let mut complaints: Vec<String> = outcome.problems.clone();
     complaints.extend(
         outcome

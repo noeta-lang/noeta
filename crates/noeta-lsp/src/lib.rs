@@ -1054,7 +1054,7 @@ impl LanguageServer for Backend {
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 // Pull diagnostics (LSP 3.17), *both* halves. `textDocument/diagnostic` answers for
                 // one open document off the incremental graph; `workspace/diagnostic` answers for
-                // the whole project through `noeta_ide::project_check` — the same function `noeta
+                // the whole project through `noeta_project::project_check` — the same function `noeta
                 // check` prints, so a file the editor has never opened is reported exactly as the
                 // command line reports it. `inter_file_dependencies` is true because editing one
                 // module changes what its importers see, which is what tells the client to re-pull
@@ -1554,7 +1554,7 @@ impl LanguageServer for Backend {
                     }
                     // A clean file must report an *empty* set, or the client keeps showing the
                     // diagnostics it was last told about.
-                    for path in noeta_ide::project::noe_files(root) {
+                    for path in noeta_project::project::noe_files(root) {
                         by_file
                             .entry(format!("file://{}", path.display()))
                             .or_default();

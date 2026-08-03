@@ -5,15 +5,15 @@ use std::io::{self, Write};
 use std::process::ExitCode;
 
 use noeta_diagnostics::render_mapped;
-use noeta_ide::{ProjectCheckOptions, project_check};
 use noeta_pm::manifest;
+use noeta_project::{ProjectCheckOptions, project_check};
 
 use crate::{OutputFormat, compose};
 
-// The project walk itself lives in `noeta-ide`, because `noeta check`, the editor and the MCP
+// The project walk itself lives in `noeta-project`, because `noeta check`, the editor and the MCP
 // `check` tool must answer "is this project clean" with one function rather than three. These are
 // the pieces of it the CLI's *other* directory commands (`test`, `bench`, `doc`, `expand`) share.
-pub(crate) use noeta_ide::project::{entry_pool, noe_files, pool_modules};
+pub(crate) use noeta_project::project::{entry_pool, noe_files, pool_modules};
 
 /// The `--format json` report: the whole outcome of a `noeta check` run in one serializable object.
 #[derive(serde::Serialize)]
@@ -36,7 +36,7 @@ pub(crate) struct CheckReport {
 /// error. This is `cmd_run`'s front half — load → (activate tiers) → `check_all` — stopping before
 /// `execute_real_host`, so it has no side effects.
 ///
-/// **This command is a printer.** The check itself is [`noeta_ide::project_check`], which the LSP's
+/// **This command is a printer.** The check itself is [`noeta_project::project_check`], which the LSP's
 /// `workspace/diagnostic` and the MCP `check` tool also call: the three surfaces used to walk,
 /// activate and sweep in three places and disagreed about what "clean" meant — this one was the
 /// only one that swept the tier bodies at all. What is left here is argument resolution, rendering

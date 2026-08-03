@@ -21,6 +21,11 @@ noeta-lexer = { workspace = true }
 noeta-builtins = { workspace = true }
 noeta-diagnostics = { workspace = true }
 noeta-db = { workspace = true }
+# The project model — `project_check` and the shared salsa workspace construction. It used to live
+# here; it does not any more, because `noeta check` must not pull an editor crate. The editor
+# *consumes* it: the DocumentStore overlays unsaved buffers on the same construction the batch
+# checker feeds straight through, so the two can never disagree about what a project is.
+noeta-project = { workspace = true }
 # `ExpandedSource` — the generated sources a link produced, which the addressing layer resolves spans
 # through and the diagnostics view re-blames on the directive that produced them.
 noeta-loader = { workspace = true }

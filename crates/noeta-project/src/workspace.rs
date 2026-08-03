@@ -2,9 +2,9 @@
 //! salsa [`Workspace`] input — members, dependency modules, per-package editions — from an
 //! ordered `(uri, text)` member list, reusing the live inputs in place across refreshes.
 //!
-//! Extracted from the [`DocumentStore`](crate::DocumentStore) so every disk-shaped consumer
+//! Extracted from the editor's `noeta_ide::DocumentStore` so every disk-shaped consumer
 //! drives ONE construction path: the editor session overlays its open buffers on top of the
-//! directory scan, the watch-mode impact engine ([`crate::impact`]) has no buffers and feeds the
+//! directory scan, the watch-mode impact engine (`noeta_ide::impact`) has no buffers and feeds the
 //! scan straight through — and neither re-implements dependency resolution or input reuse. The
 //! store remains the buffer/cancellation/revision owner; this module owns only "sources in →
 //! live salsa inputs out".
@@ -32,7 +32,7 @@ use salsa::Setter as _;
 /// without a nine-site sweep and the sites that must exclude non-members excluded it by
 /// construction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SourceKind {
+pub enum SourceKind {
     /// A workspace member: a `.noe` file of the directory the user has open.
     Member,
     /// A module of a resolved dependency package (package-manager P2.1c).
@@ -67,15 +67,15 @@ fn first_dep_id(member_count: usize) -> u32 {
 /// owner is the `linked_from` memo that generated the text (see [`noeta_db::LinkedProgram`]); it has
 /// no file and no input to read through, so the text is borrowed straight out of that memo.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct SourceRef<'a> {
-    pub(crate) kind: SourceKind,
+pub struct SourceRef<'a> {
+    pub kind: SourceKind,
     /// How this source is addressed: a `file:` URI for a member or a dependency module. For an
     /// [`SourceKind::Expansion`] it is the generated source's **display name**
     /// (`PetStore ⟨@openapi "petstore.yaml"⟩`) and **not openable** — showing generated code in the
     /// editor needs a virtual-document scheme, which is a separate arc. A site that turns this into
     /// something the editor navigates to must therefore keep to members and dependencies (which is
     /// what resolving through [`WorkspaceCache::source`], with no expansions, gives it).
-    pub(crate) uri: &'a str,
+    pub uri: &'a str,
     body: SourceBody<'a>,
 }
 
@@ -93,14 +93,14 @@ impl<'a> SourceRef<'a> {
     /// Whether this source is a workspace **member** (as opposed to any non-member category — a
     /// dependency module or an expansion). The question the exclusion sites actually ask, phrased so
     /// a new category is excluded by default rather than silently included.
-    pub(crate) fn is_member(&self) -> bool {
+    pub fn is_member(&self) -> bool {
         matches!(self.kind, SourceKind::Member)
     }
 
     /// The salsa input behind this source, or `None` for an [`SourceKind::Expansion`] — which has
     /// none, and deliberately: minting an input per expansion would leak a slot per expansion ever
     /// produced (salsa 0.27 cannot delete an input; see [`noeta_db::release_source`]).
-    pub(crate) fn input(&self) -> Option<SourceProgram> {
+    pub fn input(&self) -> Option<SourceProgram> {
         match self.body {
             SourceBody::Input(program) => Some(program),
             SourceBody::Generated(_) => None,
@@ -109,7 +109,7 @@ impl<'a> SourceRef<'a> {
 
     /// This source's text, read through salsa for a file-backed source and borrowed out of the
     /// generating memo for an expansion. Both borrows live as long as the db borrow.
-    pub(crate) fn text(self, db: &'a dyn salsa::Database) -> &'a str {
+    pub fn text(self, db: &'a dyn salsa::Database) -> &'a str {
         match self.body {
             SourceBody::Input(program) => program.text(db).as_str(),
             SourceBody::Generated(text) => text,
@@ -124,25 +124,25 @@ impl<'a> SourceRef<'a> {
 /// change; a file-*set* change **reuses** the existing inputs by URI (text/id updated, only
 /// genuinely new files get new inputs — the finding-9 input-growth fix).
 #[derive(Debug, Clone)]
-pub(crate) struct WorkspaceCache {
-    pub(crate) workspace: Workspace,
+pub struct WorkspaceCache {
+    pub workspace: Workspace,
     /// Per `SourceId`: the member's URI, sorted by path. Maps a merged-program span back to the
     /// file it belongs to, for cross-file diagnostics and navigation. Members only — the reuse
     /// fast-path compares this against a fresh directory scan; dependency modules live in
     /// `dep_uris`/`dep_programs`.
-    pub(crate) source_uris: Vec<String>,
+    pub source_uris: Vec<String>,
     /// Per `SourceId`: the salsa input, for in-place text updates.
-    pub(crate) programs: Vec<SourceProgram>,
+    pub programs: Vec<SourceProgram>,
     /// Dependency-package modules (package-manager P2.1c); their [`SourceId`]s continue past the
     /// members, per [`first_dep_id`]. Kept apart from `source_uris`/`programs` so the per-keystroke
     /// reuse check and text-update loop stay over members only, while cross-package navigation still
     /// maps a dependency span back to its file. **Address these through [`WorkspaceCache::source`]
     /// / [`WorkspaceCache::dep_source_id`]**, never by open-coding the id offset.
-    pub(crate) dep_uris: Vec<String>,
-    pub(crate) dep_programs: Vec<SourceProgram>,
+    pub dep_uris: Vec<String>,
+    pub dep_programs: Vec<SourceProgram>,
     /// The [`DepModule`] inputs backing `workspace.dep_modules`, kept so a file-set rescan can
     /// reuse them by URI instead of abandoning them (finding 9).
-    pub(crate) dep_modules: Vec<DepModule>,
+    pub dep_modules: Vec<DepModule>,
     /// **Tombstoned member inputs** — [`SourceProgram`]s whose files were deleted (audit F9 residual
     /// a). salsa 0.27 cannot free an input slot, so rather than abandon them (leaking the slot *and*
     /// their downstream memos), a deleted member is emptied via [`noeta_db::release_source`] — text
@@ -150,7 +150,7 @@ pub(crate) struct WorkspaceCache {
     /// genuinely-new file reuses a tombstone instead of minting a fresh input, bounding the salsa
     /// input table by the directory's *concurrent* `.noe` high-water mark rather than the total ever
     /// created/deleted across a session.
-    pub(crate) tombstones: Vec<SourceProgram>,
+    pub tombstones: Vec<SourceProgram>,
     /// The build **target** the dependency modules above were resolved for — `noeta check
     /// --target dev`'s target, `None` for the global set every other consumer wants.
     ///
@@ -158,33 +158,33 @@ pub(crate) struct WorkspaceCache {
     /// set", and the target is the *other* half of what makes a resolution current: re-syncing the
     /// same files for a different target must re-resolve, or the second answer would be the first
     /// one's dependency graph under the second one's name.
-    pub(crate) target: Option<String>,
+    pub target: Option<String>,
     /// A **surfaced** dependency-resolution failure (audit-5 #7): a hard `noeta-pm` failure —
     /// a trust refusal, a version conflict, a broken manifest, a lockfile drift — recorded here
     /// so the consumer reports the real cause instead of silently degrading to "no dependencies"
     /// (which showed up only as inexplicable unknown-import errors). `None` when resolution
     /// succeeded or failed for a routine reason (no manifest, network/IO), where the quiet
     /// degrade is the right behavior.
-    pub(crate) dep_error: Option<noeta_pm::PmError>,
+    pub dep_error: Option<noeta_pm::PmError>,
     /// The **routine** failure that was quietly degraded past — a network or filesystem hiccup that
     /// left the workspace with no dependencies. The editor deliberately ignores it (a flaky network
     /// must not nag while you type, and the unresolved imports it causes are already underlined),
     /// but a **batch** project check must not answer "no dependencies" as though it had resolved
     /// them, so [`crate::project_check`] reports it. `None` when the resolve succeeded or when there
     /// was no manifest to resolve (a lone file has no dependencies to lose).
-    pub(crate) dep_degraded: Option<noeta_pm::PmError>,
+    pub dep_degraded: Option<noeta_pm::PmError>,
     /// The native packages this directory's program needs whose extensions **this editor process
     /// does not carry** ([`noeta_pm::composed::uncomposed`]). Non-empty means the workspace cannot
     /// be linked at all — the namespaces those packages register are absent — so every file in it
     /// would light up with unresolved-import errors for code `noeta check` compiles cleanly. The
-    /// consumer reports the one real cause instead (see [`crate::DocumentStore::diagnostics`]).
+    /// consumer reports the one real cause instead (see `noeta_ide::DocumentStore::diagnostics`).
     /// Empty for every pure-Noeta project and inside a composed toolchain that carries them.
-    pub(crate) uncomposed: Vec<String>,
+    pub uncomposed: Vec<String>,
 }
 
 impl WorkspaceCache {
     /// The [`SourceId`] of the `index`-th dependency module, or `None` if there is no such module.
-    pub(crate) fn dep_source_id(&self, index: usize) -> Option<SourceId> {
+    pub fn dep_source_id(&self, index: usize) -> Option<SourceId> {
         (index < self.dep_programs.len())
             .then(|| SourceId(first_dep_id(self.programs.len()) + index as u32))
     }
@@ -208,7 +208,7 @@ impl WorkspaceCache {
     /// This one is not merely the `expansions = &[]` convenience it is written as: a site that turns
     /// a resolved source into a location the editor opens **must** use it, because an expansion has
     /// no openable URI.
-    pub(crate) fn source(&self, id: SourceId) -> Option<SourceRef<'_>> {
+    pub fn source(&self, id: SourceId) -> Option<SourceRef<'_>> {
         self.source_with(id, &[])
     }
 
@@ -222,7 +222,7 @@ impl WorkspaceCache {
     /// id to whichever entry happened to fill it — precisely the wrong-file failure naming the
     /// categories was introduced to end. A caller therefore passes the expansions of the link the
     /// span came from, or none.
-    pub(crate) fn source_with<'a>(
+    pub fn source_with<'a>(
         &'a self,
         id: SourceId,
         expansions: &'a [noeta_loader::ExpandedSource],
@@ -255,14 +255,14 @@ impl WorkspaceCache {
 
     /// Every source this workspace maps, in [`SourceId`] order — so `nth` element IS `SourceId(n)`.
     /// What the `SourceId`-indexed text vectors the call graph consumes are built from.
-    pub(crate) fn sources(&self) -> impl Iterator<Item = SourceRef<'_>> {
+    pub fn sources(&self) -> impl Iterator<Item = SourceRef<'_>> {
         self.sources_with(&[])
     }
 
     /// [`Self::sources`] continued through one link's expansions, still in [`SourceId`] order — so a
     /// span in generated code indexes the id-keyed vectors built from this exactly as one in a
     /// hand-written file does.
-    pub(crate) fn sources_with<'a>(
+    pub fn sources_with<'a>(
         &'a self,
         expansions: &'a [noeta_loader::ExpandedSource],
     ) -> impl Iterator<Item = SourceRef<'a>> {
@@ -272,7 +272,7 @@ impl WorkspaceCache {
 
     /// The workspace **member** at `uri`, with the [`SourceId`] it carries. `None` if `uri` is not a
     /// member — a dependency module's URI deliberately does NOT resolve here.
-    pub(crate) fn find_member(&self, uri: &str) -> Option<(SourceId, SourceRef<'_>)> {
+    pub fn find_member(&self, uri: &str) -> Option<(SourceId, SourceRef<'_>)> {
         let idx = self.source_uris.iter().position(|u| u == uri)?;
         let id = SourceId(idx as u32);
         Some((id, self.source(id)?))
@@ -280,7 +280,7 @@ impl WorkspaceCache {
 
     /// The **dependency module** at `uri`, with the [`SourceId`] it carries. `None` if no resolved
     /// dependency module has that URI.
-    pub(crate) fn find_dep(&self, uri: &str) -> Option<(SourceId, SourceRef<'_>)> {
+    pub fn find_dep(&self, uri: &str) -> Option<(SourceId, SourceRef<'_>)> {
         let idx = self.dep_uris.iter().position(|u| u == uri)?;
         let id = self.dep_source_id(idx)?;
         Some((id, self.source(id)?))
@@ -291,7 +291,7 @@ impl WorkspaceCache {
     /// [`noeta_db::release_source`] releases each member and dependency source's text and overwrites
     /// its fat downstream memos with empty-program equivalents, so a closed directory stops holding
     /// its whole analysis resident. (Already-emptied tombstones are skipped — they hold nothing.)
-    pub(crate) fn release_all(&self, db: &mut LangDatabase) {
+    pub fn release_all(&self, db: &mut LangDatabase) {
         let ws = self.workspace;
         // Members and dependency modules only — `sources()` yields no expansion (they belong to a
         // link, not to the workspace), and an expansion has no input to release in any case.
@@ -305,30 +305,30 @@ impl WorkspaceCache {
 /// [`DepModule`] inputs the `Workspace` links, plus — parallel-indexed — each module's URI and
 /// salsa input so a cross-package definition span maps back to its file.
 #[derive(Debug, Default)]
-pub(crate) struct ResolvedDeps {
-    pub(crate) modules: Vec<DepModule>,
-    pub(crate) uris: Vec<String>,
-    pub(crate) programs: Vec<SourceProgram>,
+pub struct ResolvedDeps {
+    pub modules: Vec<DepModule>,
+    pub uris: Vec<String>,
+    pub programs: Vec<SourceProgram>,
     /// The whole program's per-package `@name` resolution tables (`[directives]`/`[tiers]`), from the
     /// same query-path graph resolve that produced the modules. Threaded onto the [`Workspace`] input
     /// so the editor lexes a package's renamed text tiers verbatim (per-package tier-naming arc, 3g).
-    pub(crate) package_uses: noeta_span::PackageUses,
+    pub package_uses: noeta_span::PackageUses,
     /// A hard resolution failure worth the user's attention (see [`WorkspaceCache::dep_error`]).
-    pub(crate) error: Option<noeta_pm::PmError>,
+    pub error: Option<noeta_pm::PmError>,
     /// A routine failure that was degraded past (see [`WorkspaceCache::dep_degraded`]).
-    pub(crate) degraded: Option<noeta_pm::PmError>,
+    pub degraded: Option<noeta_pm::PmError>,
     /// The declared native-package roots of a **successfully resolved** graph — what makes the link
     /// strict about foreign import roots (see [`Workspace::native_roots`]). `None` whenever the
     /// resolve did not happen or did not succeed, which is what keeps a scratch buffer lenient.
-    pub(crate) native_roots: NativeRoots,
+    pub native_roots: NativeRoots,
     /// The native packages this process cannot link (see [`WorkspaceCache::uncomposed`]) — read off
     /// the same resolve that produced the modules, so it costs a vector scan.
-    pub(crate) uncomposed: Vec<String>,
+    pub uncomposed: Vec<String>,
     /// Previously-resolved dependency sources that vanished from this resolution (finding a): their
     /// resident content is reclaimed by the caller via [`noeta_db::release_source`]. Not pooled —
     /// dependency inputs carry a [`DepModule`] wrapper, so the member tombstone pool cannot reuse
     /// them; the reuse-by-URI path already bounds the common dependency-churn case.
-    pub(crate) deleted: Vec<SourceProgram>,
+    pub deleted: Vec<SourceProgram>,
 }
 
 /// Build or update a workspace from the ordered `(uri, text)` member list, reusing `existing`'s
@@ -343,7 +343,7 @@ pub(crate) struct ResolvedDeps {
 /// `target` selects the **dependency set**: `Some(t)` layers `[targets.<t>.dependencies]` onto the
 /// globals exactly as `noeta run --target t` does, `None` is the global set. It is part of what
 /// makes a cached resolution current, hence the fast-path guard below.
-pub(crate) fn sync(
+pub fn sync(
     db: &mut LangDatabase,
     existing: Option<WorkspaceCache>,
     sources: Vec<(String, String)>,
@@ -633,7 +633,7 @@ fn resolve_dep_modules(
 /// The directory's on-disk `.noe` member URIs (unsorted — the caller owns ordering, because the
 /// editor overlays open buffers before the sort). A directory that cannot be read is an empty
 /// member set, not an error: the consumer degrades exactly as for an empty directory.
-pub(crate) fn disk_noe_uris(dir: &Path) -> Vec<String> {
+pub fn disk_noe_uris(dir: &Path) -> Vec<String> {
     // A directory inside a **package** contributes the whole package, walked as the compiler walks
     // it — otherwise the editor would analyze `src/main.noe` against an empty sibling pool while
     // `noeta run` links `src/deep/nested.noe` beside it, and report an unresolved import on a
@@ -697,7 +697,7 @@ fn derived_path_of_uri(uri: &str) -> noeta_loader::ModulePath {
     root.module_path(&path)
 }
 
-pub(crate) fn uri_to_path(uri: &str) -> Option<PathBuf> {
+pub fn uri_to_path(uri: &str) -> Option<PathBuf> {
     // Delegated, not re-implemented: the loader has to fold the same URI back to a path when it
     // builds `DirectiveCtx::source_dir` (a workspace member's *name* is this URI), and two decoders
     // that disagree is how that seam broke in the first place. One decoder, in `noeta-span`.
@@ -707,7 +707,7 @@ pub(crate) fn uri_to_path(uri: &str) -> Option<PathBuf> {
 /// The shared-workspace key of a document: its **directory** (`dir:<path>`) for a `file:` URI —
 /// every document in one directory shares one [`WorkspaceCache`] — or the URI itself
 /// (`lone:<uri>`) for a directory-less document (`untitled:` …), which forms a lone workspace.
-pub(crate) fn workspace_key(uri: &str) -> String {
+pub fn workspace_key(uri: &str) -> String {
     match uri_to_path(uri).and_then(|p| p.parent().map(Path::to_path_buf)) {
         Some(dir) => format!("dir:{}", dir.display()),
         None => format!("lone:{uri}"),
@@ -719,7 +719,7 @@ pub(crate) fn workspace_key(uri: &str) -> String {
 /// [`Edition::DEFAULT`](noeta_lexer::Edition::DEFAULT) for a directory-less document (e.g.
 /// `untitled:`) or a manifest-less file, so formatting/analysis of a lone buffer is unchanged. The
 /// formatter and (later) analysis run under this so a future edition's grammar is parsed correctly.
-pub(crate) fn edition_of_uri(uri: &str) -> noeta_lexer::Edition {
+pub fn edition_of_uri(uri: &str) -> noeta_lexer::Edition {
     uri_to_path(uri)
         .map(|p| noeta_pm::manifest::root_edition(&p))
         .unwrap_or_default()
@@ -729,7 +729,7 @@ pub(crate) fn edition_of_uri(uri: &str) -> noeta_lexer::Edition {
 /// a command *in their project* has to name. Falls back to the document's own directory when it is
 /// in no package (which cannot happen on the path that uses this: a project with a native
 /// dependency has a manifest by construction), and to `.` for a directory-less URI.
-pub(crate) fn project_root(uri: &str) -> std::path::PathBuf {
+pub fn project_root(uri: &str) -> std::path::PathBuf {
     let Some(path) = uri_to_path(uri) else {
         return std::path::PathBuf::from(".");
     };
@@ -740,7 +740,7 @@ pub(crate) fn project_root(uri: &str) -> std::path::PathBuf {
 }
 
 /// The `file:` URI for a filesystem path — the inverse of [`uri_to_path`] for the paths it produces.
-pub(crate) fn path_to_uri(path: &Path) -> String {
+pub fn path_to_uri(path: &Path) -> String {
     format!("file://{}", path.display())
 }
 

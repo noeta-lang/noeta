@@ -31,12 +31,13 @@ noeta-value = { workspace = true }
 # make the two backends differ for a reason that is the harness's fault rather than the VM's.
 noeta-conformance = { workspace = true }
 # The two front-ends the project differential holds against each other, and nothing between them.
-# `noeta-ide` is the CHECK side — `project_check` is the one entry `noeta check`, the LSP's
+# `noeta-project` is the CHECK side — `project_check` is the one entry `noeta check`, the LSP's
 # `workspace/diagnostic` and the MCP `check` tool all go through, and it links the salsa workspace
 # (`noeta-db`) rather than the loader's directory reader. `noeta-runner` is the RUN side — the L2
 # compile front-end `noeta run` itself calls. Depending on both is the whole point: the oracle exists
-# because every other target in this crate drives the run side only.
-noeta-ide = { workspace = true }
+# because every other target in this crate drives the run side only. (`noeta-ide` used to stand in
+# for the check side; the oracle never wanted the editor, only the project model it contained.)
+noeta-project = { workspace = true }
 noeta-runner = { workspace = true }
 # A generated project is a real package on disk, so the differential needs the package root the two
 # front-ends each derive their file set from.
