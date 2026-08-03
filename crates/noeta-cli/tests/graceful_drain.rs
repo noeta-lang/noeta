@@ -6,7 +6,7 @@
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::Duration;
 
 fn app() -> &'static str {
@@ -42,24 +42,24 @@ fn sigint_drains_in_flight_requests_and_host_binds_local_only() {
     // checkout and every concurrent run of this test on the machine, and the server that loses the
     // bind dies where the client sees only a reset connection.
     let port = noeta_test_temp::free_port();
+    // The server's output goes to a file this test can quote rather than to `/dev/null` — see
+    // `noeta_test_temp::ServerLog`, and the three investigations that line cost.
+    let log = noeta_test_temp::ServerLog::new("drain");
     // --host 127.0.0.1 binds local-only (S0): the loopback connect must work.
-    let mut child = Command::new(env!("CARGO_BIN_EXE_noeta"))
-        .args([
+    let mut child = log
+        .spawn(Command::new(env!("CARGO_BIN_EXE_noeta")).args([
             "serve",
             app_path.to_str().unwrap(),
             "--port",
             &port.to_string(),
             "--host",
             "127.0.0.1",
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
+        ]))
         .expect("spawn `noeta serve`");
     let addr = format!("127.0.0.1:{port}");
 
     let outcome = (|| -> Result<(), String> {
-        noeta_test_temp::wait_until_listening_or_child_exits(&mut child, &addr)?;
+        noeta_test_temp::wait_until_listening_or_child_exits(&mut child, &addr, &log)?;
         // Start a slow (400ms) request, give it time to arrive at the handler…
         let inflight = slow_request(addr.clone());
         std::thread::sleep(Duration::from_millis(150));
@@ -85,5 +85,8 @@ fn sigint_drains_in_flight_requests_and_host_binds_local_only() {
     let _ = child.kill();
     let _ = child.wait();
     let _ = std::fs::remove_dir_all(&dir);
-    outcome.expect("graceful drain round trip");
+    // Every failure path quotes the server, not only the readiness wait: a drain that never closes
+    // the listener is exactly the case where the server is still talking.
+    outcome
+        .unwrap_or_else(|e| panic!("{}", log.explain(format!("graceful drain round trip: {e}"))));
 }

@@ -9,7 +9,7 @@
 
 mod common;
 
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use common::{get, ws_connect, ws_recv, ws_send};
 
@@ -22,21 +22,21 @@ fn the_liveview_example_pushes_snapshot_and_patches_to_a_real_client() {
     // checkout and every concurrent run of this test on the machine, and the server that loses the
     // bind dies where the client sees only a reset connection.
     let port = noeta_test_temp::free_port();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_noeta"))
-        .args([
+    // The server's output goes to a file this test can quote rather than to `/dev/null` — see
+    // `noeta_test_temp::ServerLog`, and the three investigations that line cost.
+    let log = noeta_test_temp::ServerLog::new("live-serve");
+    let mut child = log
+        .spawn(Command::new(env!("CARGO_BIN_EXE_noeta")).args([
             "serve",
             example.to_str().unwrap(),
             "--port",
             &port.to_string(),
-        ])
-        .stderr(Stdio::null())
-        .stdout(Stdio::null())
-        .spawn()
+        ]))
         .expect("spawn `noeta serve`");
     let addr = format!("127.0.0.1:{port}");
 
     let outcome = (|| -> Result<(), String> {
-        noeta_test_temp::wait_until_listening_or_child_exits(&mut child, &addr)?;
+        noeta_test_temp::wait_until_listening_or_child_exits(&mut child, &addr, &log)?;
 
         // Plain HTTP: the page carries the bindings and loads the shim; the shim is served
         // source-intact from /live.js.
@@ -88,5 +88,5 @@ fn the_liveview_example_pushes_snapshot_and_patches_to_a_real_client() {
 
     let _ = child.kill();
     let _ = child.wait();
-    outcome.expect("liveview end-to-end");
+    outcome.unwrap_or_else(|e| panic!("{}", log.explain(format!("liveview end-to-end: {e}"))));
 }

@@ -64,6 +64,15 @@
 //! tears down: one red merge gate, blamed on the readiness budget. The draw is therefore claimed,
 //! machine-wide, for as long as the drawer lives.
 //!
+//! [`ServerLog`] is what the server *said*, and it is the one that would have shortened all three
+//! of the incidents above. Every suite spawned its server with `.stderr(Stdio::null())`, so a
+//! server that could not start — an `E0005` on the fixture program, an `E0021` on a lost bind, a
+//! panic — printed the reason and the reason went nowhere; what the test reported was a readiness
+//! timeout or a bare `Connection refused`. The log is a file the child writes directly (never a
+//! pipe: these servers outrun a 64 KiB buffer under `--watch`, and a suite that deadlocks reading
+//! one is worse off than a suite that says nothing), and it is quoted **only into failure
+//! messages** — a green run prints not one line of it.
+//!
 //! [`readiness_budget`] is the *time*: a fixed `for _ in 0..80 { sleep(50ms) }` wait for a server to bind gives
 //! up into a `bool` nobody prints, so the failure arrives a line later as a bare `Connection
 //! refused` naming neither the budget nor the elapsed time — which is how a merge gate came to be
@@ -71,8 +80,10 @@
 //! across eight suites disagreed on the budget and on what a timeout even said. See
 //! [`wait_until_listening_or_child_exits`] and [`wait_until_closed`].
 
+mod capture;
 mod ready;
 
+pub use capture::ServerLog;
 pub use ready::{
     BUDGET_ENV, readiness_budget, settle_closed, wait_until_closed, wait_until_listening,
     wait_until_listening_or_child_exits,

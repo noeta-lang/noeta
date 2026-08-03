@@ -10,7 +10,7 @@
 
 mod common;
 
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use common::{ws_connect, ws_recv, ws_send};
 
@@ -64,22 +64,28 @@ fn a_live_client_gets_reload_on_swap_and_error_on_red_check() {
     // checkout and every concurrent run of this test on the machine, and the server that loses the
     // bind dies where the client sees only a reset connection.
     let port = noeta_test_temp::free_port();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_noeta"))
-        .args([
-            "serve",
-            "--watch",
-            app_path.to_str().unwrap(),
-            "--port",
-            &port.to_string(),
-        ])
-        .current_dir(&dir)
-        .stderr(Stdio::null())
-        .spawn()
+    // The watch wrapper's output goes to a file this test can quote rather than to `/dev/null`.
+    // This suite is one of the two that sat red on `main` for weeks over an `E0005` printed there
+    // (`noeta_test_temp::ServerLog`) — and it is also the one that deliberately drives the server
+    // into a RED CHECK, so its log is where that diagnostic goes.
+    let log = noeta_test_temp::ServerLog::new("hot-live");
+    let mut child = log
+        .spawn(
+            Command::new(env!("CARGO_BIN_EXE_noeta"))
+                .args([
+                    "serve",
+                    "--watch",
+                    app_path.to_str().unwrap(),
+                    "--port",
+                    &port.to_string(),
+                ])
+                .current_dir(&dir),
+        )
         .expect("spawn `noeta serve --watch`");
     let addr = format!("127.0.0.1:{port}");
 
     let outcome = (|| -> Result<(), String> {
-        noeta_test_temp::wait_until_listening_or_child_exits(&mut child, &addr)?;
+        noeta_test_temp::wait_until_listening_or_child_exits(&mut child, &addr, &log)?;
 
         // A live session builds up signal state.
         let mut ws = ws_connect(&addr, "/ws")?;
@@ -146,5 +152,10 @@ fn a_live_client_gets_reload_on_swap_and_error_on_red_check() {
     let _ = std::fs::write(dir.join("teardown.noe"), "// trigger child exit\n");
     noeta_test_temp::settle_closed(&addr);
     let _ = std::fs::remove_dir_all(&dir);
-    outcome.expect("liveview hot-reload round trip");
+    outcome.unwrap_or_else(|e| {
+        panic!(
+            "{}",
+            log.explain(format!("liveview hot-reload round trip: {e}"))
+        )
+    });
 }

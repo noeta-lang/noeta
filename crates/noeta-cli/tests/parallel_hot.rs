@@ -8,7 +8,7 @@
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::Duration;
 
 fn app(tag: &str) -> String {
@@ -44,25 +44,29 @@ fn an_edit_broadcasts_to_every_worker() {
     // checkout and every concurrent run of this test on the machine, and the server that loses the
     // bind dies where the client sees only a reset connection.
     let port = noeta_test_temp::free_port();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_noeta"))
-        .args([
-            "serve",
-            "--watch",
-            app_path.to_str().unwrap(),
-            "--port",
-            &port.to_string(),
-            "--parallel",
-            "3",
-        ])
-        .current_dir(&dir)
-        .stderr(Stdio::null())
-        .stdout(Stdio::null())
-        .spawn()
+    // Three workers behind a watch wrapper, all writing to one file this test can quote — rather
+    // than to `/dev/null`, which is how a lost bind in this very suite came to be reported as a
+    // bare `Connection refused` and blamed on the readiness budget (`noeta_test_temp::ServerLog`).
+    let log = noeta_test_temp::ServerLog::new("parallel-hot");
+    let mut child = log
+        .spawn(
+            Command::new(env!("CARGO_BIN_EXE_noeta"))
+                .args([
+                    "serve",
+                    "--watch",
+                    app_path.to_str().unwrap(),
+                    "--port",
+                    &port.to_string(),
+                    "--parallel",
+                    "3",
+                ])
+                .current_dir(&dir),
+        )
         .expect("spawn `noeta serve --parallel 3 --watch`");
     let addr = format!("127.0.0.1:{port}");
 
     let outcome = (|| -> Result<(), String> {
-        noeta_test_temp::wait_until_listening_or_child_exits(&mut child, &addr)?;
+        noeta_test_temp::wait_until_listening_or_child_exits(&mut child, &addr, &log)?;
         // Many requests hit different workers; all serve v1.
         for _ in 0..12 {
             let r = get(&addr)?;
@@ -99,7 +103,12 @@ fn an_edit_broadcasts_to_every_worker() {
     let _ = child.kill();
     let _ = child.wait();
     let _ = std::fs::remove_dir_all(&dir);
-    outcome.expect("parallel hot broadcast round trip");
+    outcome.unwrap_or_else(|e| {
+        panic!(
+            "{}",
+            log.explain(format!("parallel hot broadcast round trip: {e}"))
+        )
+    });
 }
 
 /// How long an idle swap gets, with **no traffic at all**, before the one request that must already
@@ -154,17 +163,18 @@ fn idle_swap_round_trip(parallel: Option<usize>) -> Result<Swap, String> {
         args.push("--parallel".into());
         args.push(workers.to_string());
     }
-    let mut child = Command::new(env!("CARGO_BIN_EXE_noeta"))
-        .args(&args)
-        .current_dir(&dir)
-        .stderr(Stdio::null())
-        .stdout(Stdio::null())
-        .spawn()
+    let log = noeta_test_temp::ServerLog::new("hot-install-idle");
+    let mut child = log
+        .spawn(
+            Command::new(env!("CARGO_BIN_EXE_noeta"))
+                .args(&args)
+                .current_dir(&dir),
+        )
         .expect("spawn `noeta serve --watch`");
     let addr = format!("127.0.0.1:{port}");
 
     let outcome = (|| -> Result<Swap, String> {
-        noeta_test_temp::wait_until_listening_or_child_exits(&mut child, &addr)?;
+        noeta_test_temp::wait_until_listening_or_child_exits(&mut child, &addr, &log)?;
         let mut before = Vec::new();
         for _ in 0..fan {
             before.push(get(&addr)?);
@@ -207,7 +217,9 @@ fn idle_swap_round_trip(parallel: Option<usize>) -> Result<Swap, String> {
     let _ = std::fs::write(dir.join("teardown.noe"), "// trigger child exit\n");
     noeta_test_temp::settle_closed(&addr);
     let _ = std::fs::remove_dir_all(&dir);
-    outcome
+    // The error travels up to a `panic!` in the caller, so the server's own words have to travel
+    // with it — this helper is the last place that still holds the log.
+    outcome.map_err(|e| log.explain(e))
 }
 
 /// **The fleet and the single worker are one hot install** (plans/parallel-path-audit.md row 10),

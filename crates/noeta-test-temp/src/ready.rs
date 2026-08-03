@@ -18,6 +18,12 @@
 //! from the fixture program, on a stderr the test piped to `/dev/null` (`plans/backlog.md`, the
 //! fixture-paths sweep).
 //!
+//! That second half — the `/dev/null` — is closed too, and it is closed *here*, because this is
+//! where the failure is worded: every message below quotes what the server said before it stopped
+//! (see [`crate::ServerLog`], whose header records the three investigations the missing line cost).
+//! `the server process exited (exit status: 1)` names the fact; the next paragraph of the same
+//! message now names the cause.
+//!
 //! The four seconds are worth raising anyway, but they are not what was measured to expire: with
 //! this machine at a 1-minute load average of **133 over 20 cores** — 120 spinners, six disk
 //! writers and an 8 GiB resident hog — a `noeta serve --parallel 3` spawn still bound in **0.19s**,
@@ -52,6 +58,8 @@
 use std::net::{SocketAddr, TcpStream};
 use std::process::Child;
 use std::time::{Duration, Instant};
+
+use crate::ServerLog;
 
 /// The budget before any load scaling. Roughly 7× the fixed 4s it replaces, which covers a
 /// cold-cached `noeta serve` spawn on a saturated box with two orders of magnitude to spare
@@ -155,7 +163,7 @@ impl std::fmt::Display for Load {
 /// every caller that only wanted the readiness signal does; `serve`'s empty-probe regression keeps
 /// it, because a connect-then-close *is* the hostile probe it means to make.
 pub fn wait_until_listening(addr: &str) -> Result<TcpStream, String> {
-    wait_to_listen(addr, None, readiness_budget())
+    wait_to_listen(addr, None, None, readiness_budget())
 }
 
 /// Wait until something accepts on `addr`, giving up early if `child` exits without binding.
@@ -164,16 +172,25 @@ pub fn wait_until_listening(addr: &str) -> Result<TcpStream, String> {
 /// argument, a port taken, a panic in the runtime — is reported as soon as its process is reaped
 /// (plus a short grace window for a wrapper whose own child owns the socket), with the exit status
 /// in the message, rather than after the wall-clock budget that exists for *slow* startups.
+///
+/// `log` is the [`ServerLog`] the child was spawned into ([`ServerLog::spawn`]), and it is a
+/// **required** argument rather than an option because the exit status alone was never enough. The
+/// three incidents this module's header recounts each ended at `the server process exited (exit
+/// status: 1)`, and the sentence that would have ended them in five minutes —
+/// `[E0021] cannot bind …: Address already in use`, `[E0005] …` — was on the stderr the caller had
+/// sent to `/dev/null`. A caller who has a child in reach has a log, or the diagnostic dies again.
 pub fn wait_until_listening_or_child_exits(
     child: &mut Child,
     addr: &str,
+    log: &ServerLog,
 ) -> Result<TcpStream, String> {
-    wait_to_listen(addr, Some(child), readiness_budget())
+    wait_to_listen(addr, Some(child), Some(log), readiness_budget())
 }
 
 fn wait_to_listen(
     addr: &str,
     mut child: Option<&mut Child>,
+    log: Option<&ServerLog>,
     budget: Duration,
 ) -> Result<TcpStream, String> {
     let load = machine_load();
@@ -202,7 +219,7 @@ fn wait_to_listen(
         }
         if Instant::now() >= deadline {
             let waited = started.elapsed().as_secs_f64();
-            return Err(match exited {
+            let why = match exited {
                 Some(status) => format!(
                     "nothing ever accepted on {addr}: the server process exited ({status}) and \
                      still nothing had bound {:.1}s later, after {waited:.1}s in all — the server \
@@ -223,6 +240,14 @@ fn wait_to_listen(
                         ""
                     },
                 ),
+            };
+            // The point of the whole exercise: a server that failed to start has already said why,
+            // and this is the moment to repeat it. Both branches get it — a process that exited
+            // says it in its dying words, and one that is alive but never binds is usually stuck
+            // saying something too (a check that keeps failing, a port it will not stop retrying).
+            return Err(match log {
+                Some(log) => format!("{why}\n\n{}", log.quoted()),
+                None => why,
             });
         }
         std::thread::sleep(POLL);
@@ -370,8 +395,13 @@ mod tests {
         let started = Instant::now();
         // Straight to the inner wait so the budget can be one second: a test that asserts on a
         // *timeout* must not sit out the real one.
-        let err = wait_to_listen(&format!("127.0.0.1:{port}"), None, Duration::from_secs(1))
-            .expect_err("nothing is bound to that port");
+        let err = wait_to_listen(
+            &format!("127.0.0.1:{port}"),
+            None,
+            None,
+            Duration::from_secs(1),
+        )
+        .expect_err("nothing is bound to that port");
         assert!(started.elapsed() < Duration::from_secs(10), "it hung");
         for expected in ["waited", "1.0s", "load", BUDGET_ENV, &port.to_string()] {
             assert!(err.contains(expected), "{expected:?} missing from: {err}");
@@ -382,13 +412,15 @@ mod tests {
     /// budget to be 30s in the first place.
     #[test]
     fn a_server_that_exits_without_binding_is_reported_at_once() {
-        let mut child = std::process::Command::new("true")
-            .spawn()
+        let log = ServerLog::new("exits-at-once");
+        let mut child = log
+            .spawn(&mut std::process::Command::new("true"))
             .expect("spawn /bin/true");
         let port = crate::free_port();
         let started = Instant::now();
-        let err = wait_until_listening_or_child_exits(&mut child, &format!("127.0.0.1:{port}"))
-            .expect_err("/bin/true binds nothing");
+        let err =
+            wait_until_listening_or_child_exits(&mut child, &format!("127.0.0.1:{port}"), &log)
+                .expect_err("/bin/true binds nothing");
         assert!(
             started.elapsed() < GRACE_AFTER_EXIT + Duration::from_secs(3),
             "a dead server must not consume the readiness budget: {:?}",
@@ -397,6 +429,32 @@ mod tests {
         assert!(
             err.contains("exited") && err.contains("never came up"),
             "the message must name the exit rather than the budget: {err}"
+        );
+    }
+
+    /// **The defect of record, in miniature.** A server that dies telling you exactly why must have
+    /// said it *in the failure message*. This is the hermetic half of the proof — the
+    /// `noeta-cli` suite `serve::a_server_that_cannot_bind_says_so_in_the_failure` drives the real
+    /// binary into a real `[E0021]` — and it is the half that runs on every `cargo test`.
+    ///
+    /// Before the capture existed this same message ended at `(last connect error: Connection
+    /// refused …)`, and three separate investigations started there.
+    #[test]
+    fn a_dying_server_is_quoted_in_the_message_that_reports_it() {
+        let log = ServerLog::new("dying-words");
+        let mut child = log
+            .spawn(std::process::Command::new("sh").args([
+                "-c",
+                "echo '[E0021] cannot bind 127.0.0.1:1: Address already in use' >&2; exit 1",
+            ]))
+            .expect("spawn sh");
+        let port = crate::free_port();
+        let err =
+            wait_until_listening_or_child_exits(&mut child, &format!("127.0.0.1:{port}"), &log)
+                .expect_err("that server binds nothing");
+        assert!(
+            err.contains("E0021") && err.contains("Address already in use"),
+            "the server's own words are missing from the failure it caused: {err}"
         );
     }
 

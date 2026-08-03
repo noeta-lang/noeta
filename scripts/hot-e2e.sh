@@ -54,7 +54,11 @@ SUITES=(
     # note here asked for: 85 consecutive runs of all nine suites, 765 suite-runs, zero failures —
     # at ambient load, beside a lean-CLI build, beside a release build, with unrestricted intra-suite
     # threads, and pinned to two cores. All four cost under 3s of test time.
-    "serve:1"           # plain routing over a loopback socket, plus the empty-probe regression
+    "serve:3"           # plain routing over a loopback socket, plus the empty-probe regression;
+                        # plus the two null'd-stderr regressions — a server that dies on startup
+                        # (`[E0005]`) and one that loses the bind (`[E0021]`, where readiness
+                        # SUCCEEDS against the squatter) must both have their own words in the
+                        # failure, not just `exit status: 1`
     "parallel_serve:2"  # `--parallel 4`: shared listener, concurrent slow requests, SIGINT drains all;
                         # plus the worker run tail — an aborting worker renders its diagnostic AND its stack
     "live_stream:3"     # SSE both directions, including a body split mid-frame and mid-CRLF
