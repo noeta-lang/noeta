@@ -165,3 +165,36 @@ fn run_target_without_manifest_is_an_error() {
         .code(1)
         .stderr(predicate::str::contains("no `noeta.toml`"));
 }
+
+/// `--target` resolves against the same manifest whether the surface is `run` (an entry file) or
+/// `check` (a file **or a directory**).
+///
+/// `manifest::resolve_active_tiers` searches upward from its argument's *parent*, because its
+/// argument is an entry file. `noeta check`'s `PATH` may be a directory, and a directory is already
+/// the place to search from — handing it over unchanged searched the parent and walked straight past
+/// the `noeta.toml` inside it. So `noeta check --target dev <dir>` refused a project
+/// `noeta run --target dev <dir>/main.noe` compiles, with an operational error naming an empty path.
+#[test]
+fn check_resolves_a_target_against_the_directory_it_is_given() {
+    let file = temp_project(
+        "check_target_dir",
+        "[tiers]\ndebug = \"std\"\n[targets.dev.tiers]\ndebug = true\n",
+        TIERED_PROGRAM,
+    );
+    let dir = file.parent().expect("the project directory");
+
+    // The run surface: the manifest is found from the entry's own directory.
+    lang()
+        .args(["run", "--target", "dev"])
+        .arg(&file)
+        .assert()
+        .success();
+
+    // The check surface, given that same directory, must find the same manifest — not its parent's.
+    lang()
+        .args(["check", "--target", "dev"])
+        .arg(dir)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("no `noeta.toml`").not());
+}
