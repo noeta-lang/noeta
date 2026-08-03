@@ -280,6 +280,8 @@ echo 5 |> add(10)         // add(5, 10)   -> 15
 echo 5 |> div(a: 100)     // div(100, 5)  -> 20  (`a` is named, so the pipe fills `b`)
 ```
 
+When the piped value is the *only* argument, the empty parentheses are optional — `5 |> inc` and `5 |> inc()` are the same call.
+
 **`??` coalesce** supplies a fallback for `none`/absent (short-circuiting — the fallback runs only when needed); **`??=`** is `x = x ?? y`. The `?` try operator and these are covered in [Error Handling](Error-Handling).
 
 **Ranges** eagerly build a `List<int>`. `..` binds looser than `+`/`-`, so `0..n-1` means `0..(n-1)`; an empty range is `[]`:

@@ -254,6 +254,7 @@ fn inc(x: int): int { return x + 1 }
 fn add(a: int, b: int): int { return a + b }
 
 echo 5 |> inc |> inc          // inc(inc(5))
+echo 5 |> inc()               // the same call, written with the empty list
 echo 5 |> add(10)             // add(5, 10)
 
 echo [1, 2, 3, 4]
@@ -261,6 +262,8 @@ echo [1, 2, 3, 4]
     .map(fn(n) => n * 10)
     .sum()                    // 60  (collection work chains as methods)
 ```
+
+A callee that receives nothing but the piped value needs no argument list — `5 |> inc` above is the whole call. Writing the empty parentheses is equivalent, so pick whichever reads better in the chain. The right-hand side is an ordinary expression either way: a method binds as `5 |> obj.m`, and so does anything that evaluates to a function, so `5 |> double` works for `double = fn(x: int) => x * 2`.
 
 ### Piping into a parameter that isn't the first
 
