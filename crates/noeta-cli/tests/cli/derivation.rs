@@ -300,6 +300,96 @@ fn a_program_in_a_data_directory_is_run_without_deriving_a_module_path() {
 }
 
 #[test]
+fn check_derives_no_module_path_for_a_data_directory_program() {
+    // The other half of the test above, and the half that stayed broken: `noeta run` on a migration
+    // was fixed by the loader's entry path, but `noeta check .` derives through the *editor's* copy
+    // of the derivation (shared with the LSP and the MCP `check` tool), which inlined the two lines
+    // and so never learned the data-directory rule. Every project wired for `noeta migrate` — the
+    // documented, tool-generated `20260727150655_create_todos.noe` naming — therefore failed
+    // `noeta check` on its own project root with E0074, telling the author to rename a file the
+    // toolchain had named for them.
+    // The **dependency is load-bearing in this fixture**, and it is what kept the defect out of
+    // sight: a migration is checked as a one-member workspace (the package walk prunes it, so it is
+    // no pool member), and the salsa linker only *applies* derived paths when some member or
+    // dependency module actually derives one — an illegal path alone does not count. With no
+    // dependency the lone migration therefore never reached `apply_derived_paths` and the wrong path
+    // it had been given stayed silent; a single `dep = { path = … }` — which every project wired for
+    // `noeta migrate` has, `para/db` being one — makes it speak. That is exactly `para-db`'s own
+    // example app and the `test-todo` sample.
+    let base = tree(
+        "data_dir_check",
+        &[
+            (
+                "dep/noeta.toml",
+                "[package]\nname = \"local/dep\"\nversion = \"0.1.0\"\n",
+            ),
+            (
+                "dep/dep.noe",
+                "pub fn helper(): string {\n    return \"h\";\n}\n",
+            ),
+            (
+                "app/noeta.toml",
+                "[package]\nname = \"local/app\"\nversion = \"0.1.0\"\n\
+                 [dependencies]\ndep = { path = \"../dep\" }\n\
+                 [db]\nmigrations = \"migrations\"\nseeds = \"seeds\"\n",
+            ),
+            ("app/src/main.noe", "use dep.helper;\necho helper();\n"),
+            (
+                "app/migrations/20260727150655_create_todos.noe",
+                "use dep.helper;\necho helper();\n",
+            ),
+            (
+                "app/seeds/20260727150656_sample_todos.noe",
+                "use dep.helper;\necho helper();\n",
+            ),
+        ],
+    );
+
+    lang()
+        .current_dir(base.join("app"))
+        .args(["check", "."])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("E0074").not())
+        // Not skipped — a migration is a program, and a program that does not compile has to be
+        // reported. All three files are checked; only the module *path* is not derived.
+        .stderr(predicate::str::contains("checked 3 files"));
+}
+
+#[test]
+fn check_still_refuses_an_illegal_module_name_outside_a_data_directory() {
+    // The guard on the fix above: the exception is the *data directory*, not the timestamped shape
+    // of the name. The same file one directory over is an ordinary module, and no `use` can spell
+    // it — so `check` must still say so, or the fix would have bought a green project check by
+    // going blind.
+    let base = tree(
+        "data_dir_check_guard",
+        &[
+            (
+                "noeta.toml",
+                "[package]\nname = \"local/app\"\nversion = \"0.1.0\"\n\
+                 [db]\nmigrations = \"migrations\"\nseeds = \"seeds\"\n",
+            ),
+            ("src/main.noe", "echo \"app\"\n"),
+            (
+                "src/20260727150655_create_todos.noe",
+                "echo \"not a migration\"\n",
+            ),
+        ],
+    );
+
+    lang()
+        .current_dir(&base)
+        .args(["check", "."])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("E0074"))
+        .stderr(predicate::str::contains(
+            "rename it to `_20260727150655_create_todos`",
+        ));
+}
+
+#[test]
 fn a_lone_script_outside_a_package_keeps_its_declared_namespaces() {
     // The one place `namespace` survives, and it survives because it has to: no manifest → no
     // package → no prefix, so there is nothing to derive a path *from*, and a declaration is the
