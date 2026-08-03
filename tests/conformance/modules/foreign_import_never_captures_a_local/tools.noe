@@ -1,0 +1,36 @@
+// The **victim** file. It imports nothing — in particular it never writes `use std.args` — and it
+// binds `args` three ways: as a parameter, as a local, and as a match-pattern binding. All three
+// are ordinary bindings of an ordinary name, and every `args.<method>()` below is a method call on
+// a `string`.
+//
+// The entry module's `use std.args` used to capture all of them. `collect_imports` walks the
+// *merged* program, so its `imports.modules` table is program-wide: once any file bound the handle
+// `args`, the checker resolved every `args.f(…)` receiver in every other file — and in every merged
+// dependency package — to the module `std.args`, and reported "module `std.args` has no function
+// `len`" against source whose author never imported it and could not see the import that broke it.
+//
+// E0059 is deliberately silent here and must stay silent: it asks its statics question of the
+// binding's *own* source, and this file imports nothing. That is exactly why resolution cannot lean
+// on the flat table — a name a file never brought into scope is not in that file's scope.
+
+pub enum Part {
+    Text(text: string)
+    ToolCall(id: string, name: string, args: string)
+}
+
+// A **parameter** named `args`, then a **local** derived from it. The two spellings the defect was
+// reported against (`args.trim()`, `args.len()`).
+pub fn describe(args: string): int {
+    trimmed = args.trim()
+    return trimmed.len()
+}
+
+// A **match-pattern binding** named `args` — the payload of a variant that really does call its
+// third field `args`. This is the more serious half: the binder is introduced by the pattern, so a
+// resolver that consults the module table before the environment cannot see it at all.
+pub fn weigh(p: Part): int {
+    return match p {
+        Part.Text(text) => text.len(),
+        Part.ToolCall(id, name, args) => name.len() + args.len(),
+    }
+}

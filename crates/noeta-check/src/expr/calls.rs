@@ -1092,8 +1092,29 @@ impl Checker {
                 // namespace-group member chain (`http.client.get`, `http` from `use std.http`); both
                 // key the same stdlib return-type tables, and the chain form records its span so
                 // lowering materializes the leaf module value (`std.http.client`).
+                //
+                // A **binding in scope wins** — the `lookup` guard is the whole rule, and every other
+                // import channel already applied it: the selectively-imported-function arm above
+                // ("a local binding of the same name shadows it"), `resolve_namespace_prefix` for the
+                // sibling *namespace* table, and the `Enum.try_from` arm for enum names. `modules`
+                // was the one table in `Imports` resolved without asking the environment first.
+                //
+                // It matters because `imports.modules` is **program-wide**: `collect_imports` walks
+                // the merged program, so a `use std.args` written in the *application's* entry file
+                // binds `args` while checking a *dependency package's* file that never imported it.
+                // A parameter, `for` variable, or
+                // match-pattern binding named `args` then resolved to `std.args`, and `args.len()`
+                // reported "module `std.args` has no function `len`" against source the author of
+                // that file could not have written differently. E0059 is what makes this safe to
+                // decide locally: a name that shadows a module imported in *its own* file is already
+                // an error there, so reaching a module handle here can only mean a foreign file's
+                // import — which must never capture a local. Both backends resolve the receiver
+                // through the runtime scope chain, where a parameter shadows a global module binding
+                // anyway, so the guard also removes a check-rejects/run-accepts divergence.
                 let module_id = match receiver.as_ref() {
-                    Expr::Ident { name: m, .. } => self.imports.modules.get(m.as_str()).cloned(),
+                    Expr::Ident { name: m, .. } if lookup(env, m.as_str()).is_none() => {
+                        self.imports.modules.get(m.as_str()).cloned()
+                    }
                     _ => None,
                 }
                 .or_else(|| self.resolve_namespace_module(receiver, env));

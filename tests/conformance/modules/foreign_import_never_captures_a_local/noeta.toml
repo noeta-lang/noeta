@@ -1,0 +1,5 @@
+# A package, so `tools.noe` is a real sibling module the linker merges into one program with
+# `main.noe`. The merged program is what made a `use` in one file reach into another.
+[package]
+name = "local/desk"
+version = "0.1.0"

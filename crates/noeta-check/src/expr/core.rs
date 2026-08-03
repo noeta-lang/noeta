@@ -1876,10 +1876,17 @@ impl Checker {
                 // than a native `Rvalue::TypedModuleCall`. A bare identifier that is neither a
                 // module, a local binding, nor a user type (a typo'd module) falls through to the
                 // native-call path below and reports there, unchanged.
+                //
+                // A **binding in scope wins over the module table**, the same precedence the plain
+                // `module.func(args)` path applies: `imports.modules` is program-wide, so a `use
+                // std.args` in one file would otherwise capture a parameter named `args` in a
+                // different file (or a merged-in dependency package) and send `args.parse::<T>(s)`
+                // down the native path. Hence `lookup` is tested first and the module test only
+                // guards the *type-name* case.
                 if let Expr::Ident { name, .. } = recv.as_ref()
-                    && !self.imports.modules.contains_key(name.as_str())
                     && (lookup(env, name.as_str()).is_some()
-                        || self.symbols.types.contains(name.as_str()))
+                        || (!self.imports.modules.contains_key(name.as_str())
+                            && self.symbols.types.contains(name.as_str())))
                 {
                     self.check_type_ref(ty);
                     let mut arg_types: Vec<Type> = args
