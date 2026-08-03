@@ -8,7 +8,6 @@
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::process::{Command, Stdio};
-use std::time::Duration;
 
 /// A handler that reports which OS thread served it, so the test can observe more than one worker
 /// doing work (true multi-core, not one thread taking everything).
@@ -60,17 +59,7 @@ fn parallel_workers_share_the_listener_and_drain_together() {
     let addr = format!("127.0.0.1:{port}");
 
     let outcome = (|| -> Result<(), String> {
-        let mut up = false;
-        for _ in 0..80 {
-            if TcpStream::connect(&addr).is_ok() {
-                up = true;
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        if !up {
-            return Err("server did not accept within 4s".to_string());
-        }
+        noeta_test_temp::wait_until_listening_or_child_exits(&mut child, &addr)?;
 
         // Fire 8 concurrent slow (200ms) requests. With a single worker they would serialize into
         // ~200ms each on one core; 4 workers handle them in parallel. We only assert correctness
@@ -95,17 +84,8 @@ fn parallel_workers_share_the_listener_and_drain_together() {
             .args(["-INT", &child.id().to_string()])
             .status()
             .map_err(|e| e.to_string())?;
-        let mut closed = false;
-        for _ in 0..60 {
-            if TcpStream::connect(&addr).is_err() {
-                closed = true;
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        if !closed {
-            return Err("the listener did not close after SIGINT".to_string());
-        }
+        noeta_test_temp::wait_until_closed(&addr)
+            .map_err(|e| format!("the listener did not close after SIGINT: {e}"))?;
         Ok(())
     })();
 

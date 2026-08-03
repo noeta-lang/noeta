@@ -65,18 +65,7 @@ fn a_hot_swap_preserves_signal_state_across_a_handler_edit() {
     let addr = format!("127.0.0.1:{port}");
 
     let outcome = (|| {
-        // Wait for the listener.
-        let mut up = false;
-        for _ in 0..80 {
-            if std::net::TcpStream::connect(&addr).is_ok() {
-                up = true;
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        if !up {
-            return Err("server did not accept within 4s".to_string());
-        }
+        noeta_test_temp::wait_until_listening_or_child_exits(&mut child, &addr)?;
         // Two requests against v1 build up signal state.
         let r1 = get(&addr)?;
         let r2 = get(&addr)?;
@@ -115,12 +104,7 @@ fn a_hot_swap_preserves_signal_state_across_a_handler_edit() {
     let _ = child.kill();
     let _ = child.wait();
     let _ = std::fs::write(dir.join("teardown.noe"), "// trigger child exit\n");
-    for _ in 0..40 {
-        if std::net::TcpStream::connect(&addr).is_err() {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    noeta_test_temp::settle_closed(&addr);
     let _ = std::fs::remove_dir_all(&dir);
     outcome.expect("hot swap round trip");
 }
@@ -178,17 +162,7 @@ fn a_hot_swap_lands_inside_a_package_where_the_entry_is_qualified() {
     let addr = format!("127.0.0.1:{port}");
 
     let outcome = (|| {
-        let mut up = false;
-        for _ in 0..80 {
-            if std::net::TcpStream::connect(&addr).is_ok() {
-                up = true;
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        if !up {
-            return Err("server did not accept within 4s".to_string());
-        }
+        noeta_test_temp::wait_until_listening_or_child_exits(&mut child, &addr)?;
         let r1 = get(&addr)?;
         if r1 != "hello v1 hits=1" {
             return Err(format!("unexpected v1 response: {r1:?}"));
@@ -223,12 +197,7 @@ fn a_hot_swap_lands_inside_a_package_where_the_entry_is_qualified() {
     let _ = child.kill();
     let _ = child.wait();
     let _ = std::fs::write(dir.join("src/teardown.noe"), "// trigger child exit\n");
-    for _ in 0..40 {
-        if std::net::TcpStream::connect(&addr).is_err() {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    noeta_test_temp::settle_closed(&addr);
     let _ = std::fs::remove_dir_all(&dir);
     outcome.expect("hot swap round trip in a package");
 }

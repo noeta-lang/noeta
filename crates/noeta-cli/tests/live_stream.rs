@@ -30,17 +30,6 @@ fn scratch(name: &str) -> noeta_test_temp::TempDir {
     noeta_test_temp::TempDir::new(&format!("live-stream-{name}"))
 }
 
-/// Wait for `addr` to accept, or fail after ~4s.
-fn await_listening(addr: &str) -> Result<(), String> {
-    for _ in 0..80 {
-        if TcpStream::connect(addr).is_ok() {
-            return Ok(());
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    Err(format!("nothing accepted on {addr} within 4s"))
-}
-
 /// Read the whole response (head + body) until the peer closes.
 fn read_to_end(stream: &mut TcpStream) -> Result<String, String> {
     stream
@@ -130,7 +119,7 @@ fn fetch(req: Request): Response {
     let addr = format!("127.0.0.1:{port}");
 
     let outcome = (|| -> Result<(), String> {
-        await_listening(&addr)?;
+        noeta_test_temp::wait_until_listening_or_child_exits(&mut child, &addr)?;
         let mut stream = TcpStream::connect(&addr).map_err(|e| e.to_string())?;
         stream
             .write_all(b"GET /events HTTP/1.1\r\nHost: x\r\nAccept: text/event-stream\r\n\r\n")

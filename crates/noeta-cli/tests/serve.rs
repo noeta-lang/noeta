@@ -45,18 +45,12 @@ fn serve_routes_a_real_request() {
         .spawn()
         .expect("spawn `noeta serve`");
 
-    // Wait (up to ~2.5s) for the listener to accept.
+    // Wait for the listener to accept — see `noeta_test_temp::wait_until_listening`, which is where
+    // the budget for that lives now (it used to be 2.5s here and 4s in every sibling suite).
     let addr = format!("127.0.0.1:{port}");
-    let mut stream = None;
-    for _ in 0..50 {
-        if let Ok(s) = std::net::TcpStream::connect(&addr) {
-            stream = Some(s);
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    let stream = noeta_test_temp::wait_until_listening_or_child_exits(&mut child, &addr);
     let outcome = (|| {
-        let stream = stream.ok_or("server did not accept within 2.5s")?;
+        let stream = stream?;
         // A hostile/empty probe first: connect and close without sending a request (what a port
         // scan or a load balancer's TCP health check does). The accept leaf must absorb it and
         // keep serving — propagating the wire error killed the whole server once (E0021).

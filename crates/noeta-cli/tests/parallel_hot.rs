@@ -62,17 +62,7 @@ fn an_edit_broadcasts_to_every_worker() {
     let addr = format!("127.0.0.1:{port}");
 
     let outcome = (|| -> Result<(), String> {
-        let mut up = false;
-        for _ in 0..80 {
-            if TcpStream::connect(&addr).is_ok() {
-                up = true;
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        if !up {
-            return Err("server did not accept within 4s".to_string());
-        }
+        noeta_test_temp::wait_until_listening_or_child_exits(&mut child, &addr)?;
         // Many requests hit different workers; all serve v1.
         for _ in 0..12 {
             let r = get(&addr)?;
@@ -174,17 +164,7 @@ fn idle_swap_round_trip(parallel: Option<usize>) -> Result<Swap, String> {
     let addr = format!("127.0.0.1:{port}");
 
     let outcome = (|| -> Result<Swap, String> {
-        let mut up = false;
-        for _ in 0..80 {
-            if TcpStream::connect(&addr).is_ok() {
-                up = true;
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        if !up {
-            return Err("server did not accept within 4s".to_string());
-        }
+        noeta_test_temp::wait_until_listening_or_child_exits(&mut child, &addr)?;
         let mut before = Vec::new();
         for _ in 0..fan {
             before.push(get(&addr)?);
@@ -225,12 +205,7 @@ fn idle_swap_round_trip(parallel: Option<usize>) -> Result<Swap, String> {
     let _ = child.kill();
     let _ = child.wait();
     let _ = std::fs::write(dir.join("teardown.noe"), "// trigger child exit\n");
-    for _ in 0..40 {
-        if TcpStream::connect(&addr).is_err() {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    noeta_test_temp::settle_closed(&addr);
     let _ = std::fs::remove_dir_all(&dir);
     outcome
 }

@@ -19,16 +19,6 @@ fn app() -> &'static str {
      }\n"
 }
 
-fn wait_until_up(addr: &str) -> bool {
-    for _ in 0..80 {
-        if TcpStream::connect(addr).is_ok() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    false
-}
-
 /// A slow request on its own thread: connect, send, block reading the reply into `out`.
 fn slow_request(addr: String) -> std::thread::JoinHandle<Result<String, String>> {
     std::thread::spawn(move || {
@@ -69,9 +59,7 @@ fn sigint_drains_in_flight_requests_and_host_binds_local_only() {
     let addr = format!("127.0.0.1:{port}");
 
     let outcome = (|| -> Result<(), String> {
-        if !wait_until_up(&addr) {
-            return Err("server did not accept within 4s".to_string());
-        }
+        noeta_test_temp::wait_until_listening_or_child_exits(&mut child, &addr)?;
         // Start a slow (400ms) request, give it time to arrive at the handler…
         let inflight = slow_request(addr.clone());
         std::thread::sleep(Duration::from_millis(150));
@@ -89,17 +77,8 @@ fn sigint_drains_in_flight_requests_and_host_binds_local_only() {
             return Err(format!("in-flight request was not drained: {resp:?}"));
         }
         // After the drain, the listener is closed — a new connection is refused.
-        let mut refused = false;
-        for _ in 0..40 {
-            if TcpStream::connect(&addr).is_err() {
-                refused = true;
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        if !refused {
-            return Err("the listener did not close after the drain".to_string());
-        }
+        noeta_test_temp::wait_until_closed(&addr)
+            .map_err(|e| format!("the listener did not close after the drain: {e}"))?;
         Ok(())
     })();
 
