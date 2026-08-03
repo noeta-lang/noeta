@@ -406,58 +406,23 @@ pub fn run_project(root: &Path) -> (Verdict, Option<PathBuf>) {
     (Verdict::clean(), None)
 }
 
-/// How the two sides came out. The sweep asserts a floor on **both** of the first two, because a
-/// boolean equality over a population that only ever takes one value has proved one implication and
-/// skipped the other.
+/// How the two sides came out. The sweep asserts a floor on **both** variants, because a boolean
+/// equality over a population that only ever takes one value has proved one implication and skipped
+/// the other.
+///
+/// There is deliberately no third variant. One used to exist — `OpenDivergence`, an argued
+/// exception for the `DataDirOnly` layout, whose `cannot read <a file that exists>` was a live
+/// `noeta-ide` defect this sweep found on its first 36-project probe. It was asserted **from below**
+/// (the suite required it to still be reached), so the day the defect was fixed the oracle went red
+/// and asked to be cleaned up, which is what happened. The invariant now holds the plain boolean it
+/// was written for, and a regression would come back as an ordinary
+/// [`Violation::CheckRefusedRunnableProject`] rather than as a tolerated count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Reach {
     /// Both front-ends accepted the project.
     Accepted,
     /// Both refused it.
     Rejected,
-    /// They disagreed in the one way that is a **known open defect** rather than a finding — see
-    /// [`is_open_divergence`]. Counted, reported, and asserted to still happen: an exception that
-    /// outlives the bug it excuses is how an oracle goes quietly hollow.
-    OpenDivergence,
-}
-
-/// **The one divergence this sweep tolerates, and the reason it is not a bug in the oracle.**
-///
-/// `noeta_ide::project::pool_sources` reads a package's members with
-/// `noeta_loader::read_package_modules`, which **prunes the data directories** — a migration is a
-/// program the driver runs, not a module of the package. A package whose only `.noe` files live in
-/// `migrations/` (or `seeds/`) therefore has an empty member set, `workspace::sync` returns `None`,
-/// and `sweep_pool` reports `cannot read <entry>` for every requested entry instead of falling
-/// through to `check_lone`. Reproduced against the shipped v0.4.4 binary:
-///
-/// ```text
-/// $ noeta check .                                   → exit 2, "cannot read ./migrations/…"
-/// $ noeta run migrations/20260719000002_more_users.noe → exit 0, prints "hi"
-/// ```
-///
-/// It is a real, open, check-too-strict divergence of exactly the class this target exists to find
-/// — this sweep is what found it — and it is excused here only because the fix belongs in
-/// `noeta-ide`, not in the oracle that reports it.
-///
-/// # Why this predicate and not a message match
-///
-/// The obvious exception is "the complaint starts with `cannot read`", and that would also swallow
-/// a genuinely unreadable file — a permission fault, a race with a concurrent fixture, a real
-/// refusal the sweep should shout about. So the test is stronger: **every** complaint must name a
-/// path that this process can see is a readable file. "The check said it could not read a file that
-/// is right there" is the defect and nothing else is.
-///
-/// The failure mode is benign in the direction that matters. If the message changes, or the defect
-/// is fixed and the complaint stops appearing, the exception stops matching — it cannot go quietly
-/// silent, only quietly loud. And the suite additionally asserts this outcome is still *reached*,
-/// so the day it is fixed the sweep says so and asks for the exception to be deleted.
-pub fn is_open_divergence(complaints: &[String]) -> bool {
-    !complaints.is_empty()
-        && complaints.iter().all(|complaint| {
-            complaint
-                .strip_prefix("cannot read ")
-                .is_some_and(|path| Path::new(path.trim()).is_file())
-        })
 }
 
 /// An agreement that did not hold, named by direction — which is what says where to look.
@@ -556,7 +521,6 @@ fn compare(
                 detail: ran.complaints,
             });
         }
-        (false, true) if is_open_divergence(&checked.verdict.complaints) => Reach::OpenDivergence,
         (false, true) => {
             return Err(Violation::CheckRefusedRunnableProject {
                 detail: checked.verdict.complaints,

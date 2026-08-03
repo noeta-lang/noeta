@@ -319,10 +319,21 @@ fn sweep_pool(
 
     let mut db = LangDatabase::default();
     let Some(cache) = workspace::sync(&mut db, None, sources, options.target.as_deref()) else {
-        // No readable member at all: every requested entry is unreachable.
-        for uri in entry_uris {
-            fold.problems.push(format!("cannot read {}", display(uri)));
-        }
+        // **The pool walk yielded no member**, which is not the same thing as "these files cannot
+        // be read". A package whose only `.noe` files live in a data directory — every project
+        // wired for `noeta migrate`, whose `migrations/` holds programs and whose `src/` may not
+        // exist yet — has all of them pruned from the walk ([`noeta_loader::read_package_modules`])
+        // and so has an empty member set. Reporting `cannot read <file>` for each of them said the
+        // one thing that is provably false about a file the walk deliberately stepped past, and
+        // said it while counting zero errors: `noeta check .` printed "0 error(s)" and exited 2 on
+        // a project `noeta run migrations/…` executes.
+        //
+        // With no members, every requested entry is outside the pool by construction, so this is
+        // not a second answer — it is the same one `outside_the_pool` gives a pruned entry, over
+        // the empty pool the walk produced.
+        drop(db);
+        let missed: Vec<&str> = entry_uris.iter().map(String::as_str).collect();
+        outside_the_pool(Vec::new(), &missed, options, fold);
         return;
     };
     // A dependency graph that would not resolve **stops this pool**, reported and unchecked.
@@ -347,7 +358,7 @@ fn sweep_pool(
     } else {
         entry_uris
     };
-    let mut missed: Vec<&String> = Vec::new();
+    let mut missed: Vec<&str> = Vec::new();
     for uri in entry_uris {
         match cache.find_member(uri).and_then(|(_, m)| m.input()) {
             Some(program) => sweep_entry(&db, &cache, &map, program, options, fold),
@@ -388,9 +399,19 @@ fn sweep_pool(
 /// [`workspace::sync`]'s reuse-by-URI keeps the members' inputs and swaps only the entry. They do
 /// **not** share a workspace — two pruned siblings are not each other's modules under the loader
 /// either, since neither is in the walk that produced the other's pool.
+///
+/// # The one entry that gets *no* siblings
+///
+/// `noeta_loader::read_siblings` does not hand every pruned entry the package: its **first** rule
+/// is that a
+/// program in a data directory (`migrations/`, `seeds/`) links against nothing of the package at
+/// all. A migration is not a module and the package's modules are not its concern — it reaches its
+/// dependency packages through the graph and writes the rest itself. Handing it the package here
+/// instead made `noeta check .` resolve `use app.lib.helper` inside a migration that `noeta run`
+/// refuses with E0019: a silent acceptance, which is the serious direction.
 fn outside_the_pool(
     pool: Vec<(String, String)>,
-    entry_uris: &[&String],
+    entry_uris: &[&str],
     options: &ProjectCheckOptions,
     fold: &mut Fold,
 ) {
@@ -414,8 +435,14 @@ fn outside_the_pool(
                 }
             },
         };
-        let mut sources = pool.clone();
-        sources.push(((*uri).clone(), text));
+        // The loader's own rule, not a second spelling of it: a data-directory program links with
+        // no package siblings (`read_siblings`'s `holds_program` arm), every other pruned entry
+        // links against the whole pool.
+        let mut sources = match entry_pool(&path).1 {
+            Some(root) if root.holds_program(&path) => Vec::new(),
+            _ => pool.clone(),
+        };
+        sources.push(((*uri).to_string(), text));
         // The pool's own sort order, extended: `SourceId` assignment follows the member list, and
         // every consumer of a pool agrees on sorted-by-URI.
         sources.sort_by(|(a, _), (b, _)| a.cmp(b));
@@ -423,9 +450,22 @@ fn outside_the_pool(
         let Some(cache) = cache.as_ref() else {
             continue;
         };
-        // Unlike the pool sweep this does **not** stop on a dependency failure: the pool it was
-        // built from already resolved (that check ran before this function was reached), so a
-        // failure here would be about the entry alone and is reported by its own diagnostics.
+        // A dependency graph that would not resolve stops this the same way it stops the pool
+        // sweep, and for the same reason: an unresolved graph turns one accurate sentence into a
+        // hundred unresolved-import errors about code that compiles.
+        //
+        // Reaching this function at all means the failure is unreported. The pool sweep returns
+        // the moment it sees one, so either it saw none — and this entry, a file of the same
+        // package under the same target, will see none either — or **there was no pool**, which is
+        // the data-directory-only package: with no member to resolve from, this is the first and
+        // only place the package's graph is resolved, and staying quiet here would have traded the
+        // false `cannot read` for a silent exit 0 on a project `noeta run` refuses outright.
+        if let Some(err) = cache.dep_error.as_ref().or(cache.dep_degraded.as_ref()) {
+            fold.problems
+                .push(format!("{}: {err}", display(&pool_name(cache))));
+            return;
+        }
+        fold.uncomposed.extend(cache.uncomposed.iter().cloned());
         let map = Arc::new(source_map_of(&db, cache, &[]));
         if let Some(program) = cache.find_member(uri).and_then(|(_, m)| m.input()) {
             sweep_entry(&db, cache, &map, program, options, fold);

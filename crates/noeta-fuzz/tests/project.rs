@@ -16,8 +16,8 @@
 //! the project's **layout**, which is why a generator that emits one buffer of source could not
 //! reach them, and why the input here is a package on disk.
 //!
-//! [`noeta_fuzz::project_target`] documents the invariant, what it deliberately does not assert,
-//! and the one open divergence it tolerates.
+//! [`noeta_fuzz::project_target`] documents the invariant and what it deliberately does not
+//! assert.
 //!
 //! # The floors, and why they are assertions
 //!
@@ -33,7 +33,10 @@
 //! `cargo run --release -p noeta-fuzz --example projectscan -- scan 20000` runs the identical
 //! oracle over as many projects as you care to wait for, and is what should be run after touching
 //! `noeta-ide`, `noeta-db`, the loader's package walk, or module-path derivation. The first 36-
-//! project probe this target ever ran found a live divergence (see `is_open_divergence`).
+//! project probe this target ever ran found a live divergence — `noeta check` reporting every entry
+//! of a migrations-only package unreadable — which was carried here as an argued exception until
+//! `noeta-ide` was fixed, at which point the exception's own from-below assertion failed and it was
+//! deleted.
 
 use std::collections::BTreeMap;
 
@@ -52,13 +55,19 @@ const DEEP_STACK: usize = 64 * 1024 * 1024;
 /// is a floor and not a claim about how much is enough.
 const NONCES: u32 = 900;
 
-/// The floor on projects **both** front-ends accepted. Measured at ~32% of generated projects, so
-/// this is set well below that: it is here to catch the sweep going hollow, not to pin a rate.
+/// The floor on projects **both** front-ends accepted. Measured at 334 of 900 (~37%), so this is
+/// set well below that: it is here to catch the sweep going hollow, not to pin a rate.
 ///
 /// Without it the "`check` clean ⇒ the run side is clean" half is vacuous — every project could be
 /// refused by both for an ordinary typing reason and the suite would stay green while proving
 /// nothing about the direction the worst defects take.
-const MIN_ACCEPTED: u32 = 180;
+///
+/// Raised from 180 when the `DataDirOnly` divergence was fixed. That is not a tune: those 50
+/// projects were always accepted by the *run* side and are now accepted by both, so leaving the
+/// floor where it was would have handed the detector 50 projects of new slack it did not earn — the
+/// same margin it had before (≈63% of the measured rate) is 211, and 200 is the round number below
+/// it. The rejected half did not move, so [`MIN_REJECTED`] does not.
+const MIN_ACCEPTED: u32 = 200;
 
 /// The floor on projects both front-ends refused. Measured at ~63%. The mirror of
 /// [`MIN_ACCEPTED`]: without it the "the run side clean ⇒ `check` is clean" half is the vacuous one.
@@ -80,12 +89,11 @@ fn on_deep_stack<R: Send>(body: impl FnOnce() -> R + Send) -> R {
 struct Row {
     accepted: u32,
     rejected: u32,
-    open: u32,
 }
 
 impl Row {
     fn total(self) -> u32 {
-        self.accepted + self.rejected + self.open
+        self.accepted + self.rejected
     }
 }
 
@@ -132,32 +140,24 @@ fn check_and_run_agree_on_whether_a_generated_project_is_acceptable() {
             match evaluated.reach {
                 Reach::Accepted => row.accepted += 1,
                 Reach::Rejected => row.rejected += 1,
-                Reach::OpenDivergence => row.open += 1,
             }
         }
 
         let total = |pick: fn(Row) -> u32| rows.values().copied().map(pick).sum::<u32>();
         let accepted = total(|r| r.accepted);
         let rejected = total(|r| r.rejected);
-        let open = total(|r| r.open);
         eprintln!(
             "project oracle: {accepted} accepted by both, {rejected} refused by both, \
-             {open} known-open divergence(s), of {NONCES} projects"
+             of {NONCES} projects"
         );
-        // Restated as per-front-end reach, which is the number the coverage claim is about: every
-        // project reaches both sides (each is asked in full), so what matters is how many each one
-        // *accepted*. `check` accepted `accepted`; the run side accepted `accepted + open`, since
-        // the excused divergence is exactly the case the run side took and `check` did not.
-        eprintln!(
-            "  reach: `project_check` accepted {accepted}, the run front-end accepted {}, \
-             of {NONCES} projects each side was asked about in full",
-            accepted + open
-        );
+        // Every project reaches both sides (each is asked in full) and the two agreed on all of
+        // them, so `accepted` is what BOTH front-ends accepted — there is no longer a column in
+        // which one of them alone did.
         for layout in target::LAYOUTS {
             let row = rows.get(layout).copied().unwrap_or_default();
             eprintln!(
-                "  {layout:?}: {} accepted, {} rejected, {} open",
-                row.accepted, row.rejected, row.open
+                "  {layout:?}: {} accepted, {} rejected",
+                row.accepted, row.rejected
             );
         }
 
@@ -208,20 +208,6 @@ fn check_and_run_agree_on_whether_a_generated_project_is_acceptable() {
              package whose only module has a name no `use` can spell is refused by construction, \
              so anything else means this layout is no longer building that shape.",
             unspellable.rejected
-        );
-
-        // …and the one divergence this sweep excuses must still be happening. An exception that
-        // outlives the bug it excuses is how an oracle goes quietly hollow, so it is asserted from
-        // BELOW: the day `noeta_ide::project::sweep_pool` stops reporting `cannot read` for a
-        // package whose only members are migrations, this fails and asks to be deleted.
-        assert!(
-            open > 0,
-            "no project hit the known-open `cannot read <a file that exists>` divergence. If \
-             `noeta-ide` has been fixed — a package whose only `.noe` files live in a data \
-             directory has an empty member set, and `sweep_pool` reports every entry unreadable \
-             instead of falling through to `check_lone` — then DELETE `is_open_divergence`, the \
-             `Reach::OpenDivergence` variant and this assertion, and let the sweep hold the plain \
-             boolean it was written for."
         );
     });
 }

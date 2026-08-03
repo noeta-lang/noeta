@@ -591,3 +591,108 @@ fn a_derived_path_collision_in_a_pruned_subtree_is_reported_by_both_surfaces() {
     );
     drop(root);
 }
+
+/// **A package whose only `.noe` files are migrations reported every one of them unreadable.**
+///
+/// `pool_sources` reads a package's members with `noeta_loader::read_package_modules`, which prunes
+/// the data directories — a migration is a program the driver runs, not a module. A package with no
+/// `src/` therefore has an **empty** member set, `workspace::sync` returns `None`, and `sweep_pool`
+/// used to report `cannot read <entry>` for every requested entry. The claim was false about a file
+/// the walk had deliberately stepped past, and it was made while counting zero errors:
+///
+/// ```text
+/// $ noeta check .                                      → exit 2, "cannot read ./migrations/…"
+/// $ noeta run migrations/20260719000002_more_users.noe → exit 0, prints "hi"
+/// ```
+///
+/// Anything reading the summary line saw "0 error(s)" and called it clean. A pool with no members
+/// now hands its entries to the same `outside_the_pool` path a pruned subtree's entries take.
+#[test]
+fn a_package_whose_only_files_are_migrations_is_checked_by_both_surfaces() {
+    seed();
+    let root = noeta_test_temp::TempDir::new("agreement-datadir-only");
+    let app = root.join("app");
+    let migrations = app.join("migrations");
+    std::fs::create_dir_all(&migrations).unwrap();
+    std::fs::write(
+        app.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    // The name `noeta migrate new` generates: timestamped, so its stem is no namespace segment —
+    // which is exactly why the walk prunes the directory it lives in.
+    let entry = migrations.join("20260719000002_more_users.noe");
+    std::fs::write(&entry, "echo \"hi\";\n").unwrap();
+
+    // Non-vacuity: the package walk really does yield nothing, which is the whole precondition.
+    let package_root = noeta_pm::sources::package_root(&entry).expect("the fixture is a package");
+    let walked: Vec<String> = noeta_loader::read_package_modules(&package_root)
+        .into_iter()
+        .map(|m| m.name)
+        .collect();
+    assert!(
+        walked.is_empty(),
+        "the package walk must yield no member at all, or this fixture tests nothing: {walked:?}"
+    );
+
+    // `both_surfaces` asserts the check side reported no operational problem — which is the half
+    // that used to fail, with `cannot read` naming a file this process can see is right there.
+    let (salsa, loader) = both_surfaces(&app, &entry);
+    assert_eq!(
+        salsa,
+        loader,
+        "`{}` disagrees: `noeta check` says {salsa:?}, the loader (`noeta run`) says {loader:?}",
+        entry.display()
+    );
+    assert!(
+        salsa.is_empty(),
+        "the migration is a program the driver runs and it is well-formed: {salsa:?}"
+    );
+    drop(root);
+}
+
+/// **The same seam in its silent direction: a migration is not given the package's modules.**
+///
+/// `read_siblings`'s first rule is that a data-directory program links against **no** package
+/// siblings — a migration is not a module and the package's modules are not its concern. The salsa
+/// surface applied only the second rule (an entry the walk pruned links against the pool), so it
+/// handed the migration the package's `src/`, resolved a `use` of it, and reported a clean tree for
+/// a program `noeta run` refuses with E0019.
+///
+/// That is `noeta check .` exiting 0 on a project that will not build — the direction that matters,
+/// and the one the `DataDirOnly` layout's own defect was masking: with no `src/` beside it there was
+/// nothing for the migration to be wrongly given.
+#[test]
+fn a_migration_does_not_link_against_the_package_on_either_surface() {
+    seed();
+    let root = noeta_test_temp::TempDir::new("agreement-datadir-siblings");
+    let app = root.join("app");
+    let migrations = app.join("migrations");
+    std::fs::create_dir_all(app.join("src")).unwrap();
+    std::fs::create_dir_all(&migrations).unwrap();
+    std::fs::write(
+        app.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app.join("src").join("lib.noe"),
+        "pub fn helper(): string { return \"from the package\" }\n",
+    )
+    .unwrap();
+    // A module of the package, imported from a migration — which is not a module of it.
+    let entry = migrations.join("20260719000002_more_users.noe");
+    std::fs::write(&entry, "use app.lib.helper;\necho helper();\n").unwrap();
+
+    let (salsa, loader) = both_surfaces(&app, &entry);
+    assert!(
+        loader.contains(&"E0019".to_string()),
+        "the loader must really refuse the import, or the assertion below is vacuous: {loader:?}"
+    );
+    assert_eq!(
+        salsa, loader,
+        "`noeta check` reports a clean tree that `noeta run` refuses: check says {salsa:?}, the \
+         loader says {loader:?}"
+    );
+    drop(root);
+}
