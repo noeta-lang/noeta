@@ -1,7 +1,20 @@
 //! Source spans and source-file bookkeeping — the shared vocabulary every other
 //! crate uses to point at a place in the source. Deliberately tiny and dependency-light.
 
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
+
+/// The filesystem path a `file:` document URI names, or `None` for any other spelling — another
+/// scheme (`untitled:`), or a name that is already a plain path.
+///
+/// A minimal decoder: the path component after `file://`, with `%`-escapes left undecoded (paths
+/// with escaped bytes are rare, and every caller degrades to "not a file" rather than to a wrong
+/// file). `file:///abs` → `/abs`; a leading host (`file://host/p`) is not expected for local files —
+/// the encoder on the other side of this seam (`noeta-ide`'s `path_to_uri`) never writes one.
+pub fn file_uri_path(uri: &str) -> Option<PathBuf> {
+    uri.strip_prefix("file://").map(PathBuf::from)
+}
 
 /// Identifies a single source file within a [`SourceMap`].
 ///
@@ -150,6 +163,26 @@ impl Source {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// This source's name **as a filesystem path** — the one answer anything that wants to *open*
+    /// something relative to this source must use.
+    ///
+    /// A name is written by whoever loaded the source, and it comes in three shapes: a plain path
+    /// (the CLI, which opens files itself), a `file:` URI (the salsa workspace the editor, `noeta
+    /// check` and the MCP surface share, which keys its members by document URI), and a bare label
+    /// for text that has no file at all (`<repl:0>`, a generated expansion's
+    /// `Api ⟨@openapi "petstore.json"⟩`). Only the first two denote a file, and the caller cannot
+    /// tell the third from a relative path — nor does it need to: a label has no parent directory,
+    /// which is already the right answer for text that lives nowhere.
+    ///
+    /// Collapsing the shapes **here** rather than at each use site is the point. Doing it at the
+    /// use site is how [`crate::Source::name`] reached `@openapi` as a `file://…` string that went
+    /// straight into `std::fs::read_to_string`, which then failed as ENOENT on a spec that plainly
+    /// existed — every `ExtDirective::expand` hook that reads a file, in every surface built on the
+    /// workspace.
+    pub fn file_path(&self) -> PathBuf {
+        file_uri_path(&self.name).unwrap_or_else(|| PathBuf::from(&self.name))
     }
 
     pub fn text(&self) -> &str {

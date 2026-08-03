@@ -253,10 +253,19 @@ fn keyword_of(stmt: &Stmt) -> Option<&'static str> {
 /// A source's name is a path for a file on disk and a label otherwise (the REPL, an embedded
 /// snippet); a label has no parent, which correctly yields the empty string — a hook then resolves
 /// against the working directory, the only meaning left when there is no file.
+///
+/// It goes through [`Source::file_path`] and never through `Source::name` directly, because a name
+/// is not always a path: the salsa workspace that `noeta check`, the LSP and the MCP surface all
+/// link through names its members by **document URI**, so the name arrives as
+/// `file:///proj/src/petstore.noe`. Handed on verbatim, that made `Path::join` produce
+/// `file:///proj/src/petstore.json` and every hook that opened its argument fail as ENOENT on a file
+/// that plainly existed — while `noeta run`/`noeta expand`, whose sources are named by path,
+/// worked. The contract this builds is a **filesystem** directory, so the fold belongs here.
 fn source_dir_of(span: Span, sources: &[Source]) -> String {
-    sources
-        .get(span.source.0 as usize)
-        .and_then(|s| std::path::Path::new(s.name()).parent())
+    let Some(path) = sources.get(span.source.0 as usize).map(Source::file_path) else {
+        return String::new();
+    };
+    path.parent()
         .map(|p| p.display().to_string())
         .unwrap_or_default()
 }

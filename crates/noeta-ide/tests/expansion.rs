@@ -69,6 +69,29 @@ fn expand_fails_with_read(ctx: &DirectiveCtx) -> Result<Expansion, ExpansionErro
     })
 }
 
+/// **Actually opens** the file `ctx.source_dir` names — `@openapi`'s own shape, and the only kind of
+/// hook that can tell a *path* from a string that merely looks like one.
+///
+/// Every other fixture here formats `source_dir` into a string and compares it, which is why a
+/// `source_dir` of `file:///proj/src` passed every one of them while `@openapi` failed as ENOENT on
+/// a spec that plainly existed. The read is the assertion.
+fn expand_opens(ctx: &DirectiveCtx) -> Result<Expansion, ExpansionError> {
+    let path = std::path::Path::new(&ctx.source_dir).join(&ctx.args[0]);
+    let display = path.display().to_string();
+    let reads = vec![display.clone()];
+    let text = std::fs::read_to_string(&path).map_err(|e| ExpansionError {
+        message: format!("could not read `{display}`: {e}"),
+        reads: reads.clone(),
+    })?;
+    Ok(Expansion {
+        source: format!(
+            "fn spec_len(): int {{ return {}; }}\n",
+            text.trim().chars().count()
+        ),
+        reads,
+    })
+}
+
 /// How many times the **shape** hook has run. Only [`editing_a_field_re_runs_the_expansion`] uses
 /// `@ix_shape`, so the counter is not racy against the other tests in this binary.
 static SHAPE_CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -132,6 +155,11 @@ impl Extension for Fixture {
                 expand: Some(expand_fails_with_read),
                 ..BASE
             },
+            ExtDirective {
+                name: "ix_opens",
+                expand: Some(expand_opens),
+                ..BASE
+            },
             // Argument-free, so nothing but the decorated declaration's own shape can change what
             // it emits.
             ExtDirective {
@@ -152,6 +180,12 @@ static FIXTURE: Fixture = Fixture;
 fn install() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| noeta_stdlib::registry::install_with_extras(&[&FIXTURE]));
+}
+
+/// The `file:` URI a workspace member is named by — the same spelling `workspace::sync` writes
+/// (`noeta-ide`'s own `path_to_uri`, which is crate-private).
+fn member_uri(path: &std::path::Path) -> String {
+    format!("file://{}", path.display())
 }
 
 /// A one-member salsa workspace over `text`, linked from it as the entry — the editor's own query,
@@ -325,6 +359,75 @@ fn a_failed_expansion_still_reports_its_reads_to_the_link() {
         vec!["/proj/petstore.json".to_string()],
         "the read must survive the failure — creating the spec has to re-trigger the expansion"
     );
+}
+
+/// **`DirectiveCtx::source_dir` is a filesystem directory, not a document URI.**
+///
+/// The salsa workspace every non-`run` surface links through — the LSP, `noeta check`, the MCP
+/// `check` tool — names its members by `file:` URI, and that name is what built `source_dir`. A hook
+/// that only *formats* the string never noticed; a hook that *opens* what it names got
+/// `file:///dir/spec.json` handed to `std::fs::read_to_string` and failed with `No such file or
+/// directory (os error 2)` on a file sitting right there. `noeta run` and `noeta expand`, whose
+/// sources are named by path, worked — so the same project checked broken and ran fine.
+///
+/// The file is written to a real directory and the document opened under its real `file:` URI,
+/// because nothing less reproduces it: an in-memory `/proj/main.noe` is already a path.
+#[test]
+fn a_hook_can_open_the_file_its_source_dir_names() {
+    install();
+    let dir = noeta_test_temp::TempDir::new("source-dir-opens");
+    let entry = dir.join("main.noe");
+    let text = "@ix_opens(\"spec.json\")\nstruct Api { base: string }\n\
+                fn go(): int { return Api.spec_len(); }\necho 1;\n";
+    std::fs::write(&entry, text).expect("write the entry");
+    std::fs::write(dir.join("spec.json"), "{\"n\":1}").expect("write the spec");
+
+    let uri = member_uri(&entry);
+    let mut store = DocumentStore::default();
+    store.open(&uri, text.to_string());
+    let (diags, _) = store.diagnostics(&uri).expect("the document is known");
+    assert!(
+        diags.is_empty(),
+        "the hook must be able to open the spec its `source_dir` names, got: {:?}",
+        diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The same contract one level down, where it is cheapest to read: a workspace member named by
+/// **URI** (as the editor's is) yields a `source_dir` a hook can join onto, and the path it reports
+/// reading comes back as a plain path — not a `file://…` string the watcher has to unpick.
+#[test]
+fn a_uri_named_member_yields_a_filesystem_source_dir() {
+    install();
+    let dir = noeta_test_temp::TempDir::new("source-dir-uri");
+    std::fs::write(dir.join("spec.json"), "{\"n\":1}").expect("write the spec");
+    let entry_path = dir.join("main.noe");
+    let text = "@ix_opens(\"spec.json\")\nstruct Api { base: string }\necho 1;\n";
+
+    let db = noeta_db::LangDatabase::default();
+    // Named exactly as `workspace::sync` names a member.
+    let entry = Source::new(SourceId(0), member_uri(&entry_path), text);
+    let ws = noeta_db::workspace(&db, &entry, &[], noeta_lexer::Edition::DEFAULT, &[]);
+    let linked = noeta_db::linked_from(&db, ws, noeta_db::workspace_entry(&db, ws));
+
+    assert!(
+        linked.program.is_ok(),
+        "the expansion must succeed: {:?}",
+        linked
+            .program
+            .as_ref()
+            .err()
+            .map(|d| d.iter().map(|d| d.message.clone()).collect::<Vec<_>>())
+    );
+    assert_eq!(
+        linked.reads,
+        vec![dir.join("spec.json").display().to_string()],
+        "a reported read must be a filesystem path — the watcher compares it to what `notify` sees"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A workspace with no expanding directive is untouched: no expansion sources, no id past the
