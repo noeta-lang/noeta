@@ -1,9 +1,9 @@
 # noeta-test-temp
 
-Hermetic, per-process fixture directories for the workspace's tests.
+The machine-shared resources a test needs, built in one place: hermetic per-process fixture directories, free loopback ports, and the wait for a spawned server to come up.
 
 - **Takes in:** nothing (a standalone helper; depends on no other crate).
-- **Emits:** `TempDir` (a fixture directory guard), `TempPath` (a path inside one, carrying the guard), and `unique_path` (a guardless unique path, for fixtures handed to a type that takes ownership of the directory).
+- **Emits:** `TempDir` (a fixture directory guard), `TempPath` (a path inside one, carrying the guard), `unique_path` (a guardless unique path, for fixtures handed to a type that takes ownership of the directory), `free_port`, and the readiness waits `wait_until_listening` / `wait_until_listening_or_child_exits` / `wait_until_closed` / `settle_closed` (budget: `readiness_budget`, knob: `NOETA_TEST_READY_SECS`).
 
 ## Why it exists
 

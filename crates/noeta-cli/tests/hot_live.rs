@@ -10,9 +10,7 @@
 
 mod common;
 
-use std::net::TcpStream;
 use std::process::{Command, Stdio};
-use std::time::Duration;
 
 use common::{ws_connect, ws_recv, ws_send};
 
@@ -81,17 +79,7 @@ fn a_live_client_gets_reload_on_swap_and_error_on_red_check() {
     let addr = format!("127.0.0.1:{port}");
 
     let outcome = (|| -> Result<(), String> {
-        let mut up = false;
-        for _ in 0..80 {
-            if TcpStream::connect(&addr).is_ok() {
-                up = true;
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        if !up {
-            return Err("server did not accept within 4s".to_string());
-        }
+        noeta_test_temp::wait_until_listening_or_child_exits(&mut child, &addr)?;
 
         // A live session builds up signal state.
         let mut ws = ws_connect(&addr, "/ws")?;
@@ -156,12 +144,7 @@ fn a_live_client_gets_reload_on_swap_and_error_on_red_check() {
     let _ = child.kill();
     let _ = child.wait();
     let _ = std::fs::write(dir.join("teardown.noe"), "// trigger child exit\n");
-    for _ in 0..40 {
-        if TcpStream::connect(&addr).is_err() {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    noeta_test_temp::settle_closed(&addr);
     let _ = std::fs::remove_dir_all(&dir);
     outcome.expect("liveview hot-reload round trip");
 }

@@ -46,6 +46,31 @@
 //! When a helper must hand back a path *inside* the fixture (a program file to compile, an entry
 //! point), return a [`TempPath`] via [`TempDir::into_child`] — never a bare `PathBuf`, which drops
 //! the guard at the helper's exit and deletes the tree before the test body runs.
+//!
+//! # The other machine-shared resources
+//!
+//! A fixture path is the first thing a spawn-a-server test shares with every other tenant of the
+//! machine, but not the last, and each of the others has already produced its own class of failure
+//! that names anything but its cause. They live here for the same reason the paths do — one
+//! implementation, reached by `dev-dependency`, rather than a helper per suite that is free to
+//! drift.
+//!
+//! [`free_port`] is the port: a test with a fixed `8231` loses the bind to a concurrent run and
+//! reports `Connection reset by peer`.
+//!
+//! [`readiness_budget`] is the *time*: a fixed `for _ in 0..80 { sleep(50ms) }` wait for a server to bind gives
+//! up into a `bool` nobody prints, so the failure arrives a line later as a bare `Connection
+//! refused` naming neither the budget nor the elapsed time — which is how a merge gate came to be
+//! red-lit, and the four seconds blamed, over something else entirely. Sixteen copies of that loop
+//! across eight suites disagreed on the budget and on what a timeout even said. See
+//! [`wait_until_listening_or_child_exits`] and [`wait_until_closed`].
+
+mod ready;
+
+pub use ready::{
+    BUDGET_ENV, readiness_budget, settle_closed, wait_until_closed, wait_until_listening,
+    wait_until_listening_or_child_exits,
+};
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;

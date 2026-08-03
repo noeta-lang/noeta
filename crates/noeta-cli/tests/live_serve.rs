@@ -9,9 +9,7 @@
 
 mod common;
 
-use std::net::TcpStream;
 use std::process::{Command, Stdio};
-use std::time::Duration;
 
 use common::{get, ws_connect, ws_recv, ws_send};
 
@@ -38,17 +36,7 @@ fn the_liveview_example_pushes_snapshot_and_patches_to_a_real_client() {
     let addr = format!("127.0.0.1:{port}");
 
     let outcome = (|| -> Result<(), String> {
-        let mut up = false;
-        for _ in 0..80 {
-            if TcpStream::connect(&addr).is_ok() {
-                up = true;
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        if !up {
-            return Err("server did not accept within 4s".to_string());
-        }
+        noeta_test_temp::wait_until_listening_or_child_exits(&mut child, &addr)?;
 
         // Plain HTTP: the page carries the bindings and loads the shim; the shim is served
         // source-intact from /live.js.
