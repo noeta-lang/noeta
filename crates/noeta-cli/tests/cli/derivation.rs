@@ -390,6 +390,47 @@ fn check_still_refuses_an_illegal_module_name_outside_a_data_directory() {
 }
 
 #[test]
+fn check_refuses_an_illegal_module_name_with_no_legally_derived_sibling() {
+    // The guard above passes for a reason that is not the one it looks like. Its `src/main.noe`
+    // derives a legal path, and the salsa linker only ran the derivation pass at all when *some*
+    // member or dependency module derived one — an illegal path is not a derived path. Take the
+    // legal sibling away and the same package went silent: `check` said "0 error(s)" and exited 0
+    // over a file `run` refuses with E0074, which is the check-vs-run divergence in its purest
+    // form. Any dependency hides it too (every dep module derives), which is why every project
+    // that ever hit this had one.
+    //
+    // So the fixture is deliberately the smallest workspace that can hold the bug: one package,
+    // no dependencies, one module, and that module's name unspellable.
+    let base = tree(
+        "illegal_only_member",
+        &[
+            (
+                "noeta.toml",
+                "[package]\nname = \"local/app\"\nversion = \"0.1.0\"\n",
+            ),
+            ("src/my-utils.noe", "echo \"hi\";\n"),
+        ],
+    );
+
+    // `check` must report it…
+    lang()
+        .current_dir(&base)
+        .args(["check", "."])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("E0074"))
+        .stderr(predicate::str::contains("rename it to `my_utils`"));
+
+    // …and must agree with `run` on the same file, which is the property under test.
+    lang()
+        .current_dir(&base)
+        .args(["run", "src/my-utils.noe"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("E0074"));
+}
+
+#[test]
 fn a_lone_script_outside_a_package_keeps_its_declared_namespaces() {
     // The one place `namespace` survives, and it survives because it has to: no manifest → no
     // package → no prefix, so there is nothing to derive a path *from*, and a declaration is the
