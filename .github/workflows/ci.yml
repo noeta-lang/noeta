@@ -140,6 +140,70 @@ jobs:
       - name: cargo test -p noeta-cli --test doc_samples
         run: cargo test -p noeta-cli --test doc_samples --no-default-features --locked
 
+  docs-site:
+    name: Documentation site (builds, links and anchors resolve)
+    runs-on: ubuntu-latest
+    # `docs/` is source here but it is PUBLISHED by noeta-docs, which syncs it from the latest
+    # release TAG. So a broken intra-page anchor cannot fail anything in this repo: it fails the
+    # docs deploy, after the tag exists, and the only remedy is another patch release. That is not
+    # hypothetical — two links went stale when `attributes_of` and `roles_of` each gained a
+    # name-keyed arm (the heading grew, the link did not), and the site quietly served its last
+    # green build across three releases while every job here stayed green.
+    #
+    # This runs the SITE'S OWN gate against this checkout's `docs/` rather than re-implementing it.
+    # The rule being checked is "what id will rehype-slug mint for this heading", and a second
+    # implementation of that rule in this repo would drift from the real one — which is precisely
+    # the defect class this release already fixed twice, where noeta-ide re-spelled noeta-loader's
+    # module-path derivation and never learned its exceptions. One implementation, used by both.
+    steps:
+      - name: Checkout the language repo
+        uses: actions/checkout@v4
+        with:
+          path: lang
+      - name: Checkout the docs site
+        uses: actions/checkout@v4
+        with:
+          repository: noeta-lang/noeta-docs
+          path: site
+      # The site consumes the design system as a sibling-checkout file: dependency
+      # ("@noeta/theme": "file:../noeta-theme"), so it has to sit next to it on disk.
+      - name: Checkout @noeta/theme
+        uses: actions/checkout@v4
+        with:
+          repository: noeta-lang/noeta-theme
+          path: noeta-theme
+      - uses: pnpm/action-setup@v6
+        with:
+          package_json_file: site/package.json
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: site/pnpm-lock.yaml
+      - name: Install dependencies
+        working-directory: site
+        run: pnpm install --frozen-lockfile
+
+      - name: Build the site against THIS checkout's docs/
+        working-directory: site
+        # NOETA_DOCS_LOCAL / NOETA_GRAMMAR_LOCAL point both syncs at the commit under test instead
+        # of at a published tag — the whole point is to see this branch's prose before it ships.
+        # `astro build` and not `pnpm run build`: the latter also renders the OG image through
+        # Playwright, which needs a Chromium download and cannot affect a link or an anchor.
+        env:
+          NOETA_DOCS_LOCAL: ${{ github.workspace }}/lang/docs
+          NOETA_GRAMMAR_LOCAL: ${{ github.workspace }}/lang/editors/vscode-noeta/syntaxes
+        run: |
+          pnpm run prebuild
+          pnpm exec astro build
+
+      - name: Every internal link and anchor resolves
+        working-directory: site
+        # The generated std/para sections need a released binary and reachable para repos, so they
+        # are legitimately absent here; check-links demotes links INTO an absent generated section
+        # to warnings and checks everything else as strictly as the deploy does.
+        run: pnpm run check:links
+
   jit:
     name: JIT gate (tier-0/1 differential + leak-under-JIT)
     runs-on: ubuntu-latest
