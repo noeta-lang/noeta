@@ -79,18 +79,51 @@ with organization **Variables: write** — `GITHUB_TOKEN` cannot write org varia
 
 ---
 
-## 2. The web properties — they fix themselves
+## 2. The web properties — mostly self-healing, and you still have to look
 
 `noeta-docs` syncs `content/docs` from **the latest release tag**, not from `main`. So immediately
 after a big push and before a release, the docs build can be **red on anchors that are already
-correct in `main`** — it is building last release's content.
+correct in `main`** — it is building last release's content. That failure *is* an ordering artifact
+and the `release-published` dispatch clears it.
 
-**Do not fix those anchors.** The `release-published` dispatch rebuilds docs against the new tag and
-the failure disappears. To confirm ahead of time, build the docs locally against `main`:
+**But a repeated failure is not that, and this section used to say otherwise.** It said "do not fix
+those anchors", full stop. Two links on the reflection page went stale when `attributes_of` and
+`roles_of` each grew a name-keyed arm — the heading lengthened, the link did not — and that advice
+turned a two-character fix into three releases of a site serving pre-v0.4.0 content. Nothing in this
+repo could go red for it, because `docs/` is only *published* downstream.
+
+Two things changed as a result, and between them this should not recur:
+
+- **`ci.yml` has a `docs-site` job.** It checks out noeta-docs and noeta-theme, points them at
+  *this* checkout's `docs/` (`NOETA_DOCS_LOCAL`), builds the site and runs its own `check:links`. A
+  stale anchor now fails a PR here, before a tag exists. It builds `noeta` first and passes it as
+  `NOETA_BIN`, because the site generates its `Diagnostics.md` by running `noeta explain --all
+  --format json` and several pages link into it — with no binary that page is absent and those links
+  read as dead.
+- **The rule below.** Applies to any downstream repo, not just docs.
+
+> **A green dispatch is not a green deploy.** `notify-web` succeeding means the *message was sent*.
+> For v0.4.0 and v0.4.1 the checklist line about the sites was ticked off a green `notify-web` while
+> the docs deploy was failing on every one. Open the receiving repo's run and read its conclusion.
+
+To confirm ahead of time, build the docs locally against `main`:
 
 ```sh
-cd ../noeta-docs && NOETA_DOCS_REF=main pnpm run prebuild && \
-  NOETA_DOCS_REF=main pnpm exec astro build && pnpm run check:links
+cd ../noeta-docs && NOETA_DOCS_LOCAL=$PWD/../lang/docs pnpm run prebuild && \
+  pnpm exec astro build && pnpm run check:links; echo "check:links exit=$?"
+```
+
+`NOETA_DOCS_LOCAL` points the sync at your working tree, so this checks the prose you are about to
+push rather than a ref. Use `NOETA_DOCS_REF=<tag>` instead to reproduce what a *published* tag
+builds.
+
+**A local pass here is weaker than it looks**, and the difference has already bitten: the site finds
+its binary via `NOETA_BIN`, then two conventional paths, then **`noeta` on `PATH`** — so a developer
+machine silently generates `Diagnostics.md` while a bare CI runner does not, and the four pages
+linking into it read as dead only in CI. Run it the way the job does if you want the same answer:
+
+```sh
+NOETA_BIN=$PWD/../lang/target/release/noeta   # or wherever you just built it
 ```
 
 `noeta-registry` is **not** in the dispatch list — it carries no version pill and needs nothing.
@@ -271,7 +304,10 @@ in full for that reason.
 [ ] release workflow green — all jobs, not just the gate
 [ ] GitHub release has 4 tarballs + .vsix + SHA256SUMS
 [ ] org NOETA_VERSION reads the new tag
-[ ] docs / landing / playground rebuilt green off the dispatch
+[ ] docs / landing / playground: each receiving repo's OWN run opened and read green
+    (a green notify-web only means the message was sent — see §2)
+[ ] the docs site actually serves the new version:
+    curl -fsS https://docs.noeta.dev/ | grep -oE 'v0\.[0-9]+\.[0-9]+' | sort -u
 [ ] para: native pins bumped where CI's guard demands it
 [ ] para: any package needing a release identified — floor, source break, or stale lock
 [ ] para: released in dependency order, each confirmed live in the registry
