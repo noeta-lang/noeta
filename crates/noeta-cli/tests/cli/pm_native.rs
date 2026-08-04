@@ -725,6 +725,22 @@ fn doc_api_in_a_composed_toolchain_documents_the_native_package() {
         json.contains("Brighten every pixel"),
         "and its per-method prose:\n{json}"
     );
+    // …and the package's `@`-directives, the one declared surface that is neither a callable nor a
+    // nominal type. Everything needed to document one was already on `ExtDirective` — its `doc`,
+    // `params` and `sites` — and nothing read it, so `@openapi` (para/api's flagship, the whole
+    // reason the hook has an `expand`) appeared in no reference.
+    assert!(
+        json.contains("\"kind\": \"directive\""),
+        "the fx directives are documented:\n{json}"
+    );
+    assert!(
+        json.contains("@fx_spec(spec)"),
+        "rendered as the invocation its contract accepts:\n{json}"
+    );
+    assert!(
+        json.contains("**Attaches to:** types."),
+        "with the placement rule its sites state:\n{json}"
+    );
     // …and std is excluded by the root scope (a package documents only itself).
     assert!(
         !json.contains("\"std.math\""),

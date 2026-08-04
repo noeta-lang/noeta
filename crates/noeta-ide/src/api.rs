@@ -233,6 +233,92 @@ pub fn decls() -> Vec<ApiDecl> {
     decls_in(registry::extensions(), &|_| true)
 }
 
+/// Every `@`-directive the registry knows, sorted by qualified name — the [`decls`] analogue for the
+/// one declared surface that is neither a callable nor a nominal type.
+///
+/// A directive has no `namespace` of its own (nothing imports one; the name resolves globally after
+/// the built-ins and the tier name-space), so it is documented on the page of its **extension's
+/// root** — the namespace a reader already associates with the package that ships it.
+pub fn directives() -> Vec<ApiDecl> {
+    directives_in(registry::extensions(), &|_| true)
+}
+
+/// The directives of just the extensions whose `root` is `root`.
+pub fn directives_of(root: &str) -> Vec<ApiDecl> {
+    directives_in(registry::extensions(), &|ext| ext.root() == root)
+}
+
+/// The directives of every registered extension EXCEPT the named units — the publish scope.
+pub fn directives_excluding(exclude_units: &[&str]) -> Vec<ApiDecl> {
+    directives_in(registry::extensions(), &|ext| {
+        !exclude_units.contains(&ext.name())
+    })
+}
+
+fn directives_in(exts: &[Ext], keep: &dyn Fn(Ext) -> bool) -> Vec<ApiDecl> {
+    let mut out: Vec<ApiDecl> = Vec::new();
+    for ext in exts.iter().filter(|e| keep(**e)) {
+        for d in ext.directives() {
+            out.push(ApiDecl {
+                qualified: format!("{}.@{}", ext.root(), d.name),
+                module: ext.root().to_string(),
+                name: format!("@{}", d.name),
+                kind: "directive",
+                signature: render_directive(d),
+                doc: directive_doc(d),
+            });
+        }
+    }
+    out.sort_by(|a, b| a.qualified.cmp(&b.qualified));
+    out.dedup_by(|a, b| a.qualified == b.qualified);
+    out
+}
+
+/// A directive as a declaration: how it is written. The positional parameters come from
+/// [`ExtDirective::params`] and the named ones from [`ExtDirective::named_keys`], so the rendered
+/// form is the invocation the argument contract actually accepts.
+fn render_directive(d: &noeta_stdlib::registry::ExtDirective) -> String {
+    let mut args: Vec<String> = d.params.iter().map(|p| (*p).to_string()).collect();
+    // A variadic directive (`max_args: None`) accepts more than its named parameters.
+    if d.max_args.is_none() {
+        args.push("…".to_string());
+    }
+    args.extend(d.named_keys.iter().map(|k| format!("{k}: …")));
+    if args.is_empty() {
+        format!("@{}", d.name)
+    } else {
+        format!("@{}({})", d.name, args.join(", "))
+    }
+}
+
+/// A directive's prose: its hover doc, then the placement rule its `sites` state. Where a directive
+/// may be written is not derivable from its name and is the first thing a reader gets wrong, so it
+/// is documented rather than left to a diagnostic.
+fn directive_doc(d: &noeta_stdlib::registry::ExtDirective) -> String {
+    use noeta_stdlib::registry::TierSite;
+    let mut out = d.doc.trim().to_string();
+    let sites: Vec<&str> = d
+        .sites
+        .iter()
+        .map(|s| match s {
+            TierSite::Function => "functions",
+            TierSite::Method => "methods",
+            TierSite::Type => "types",
+            TierSite::Trait => "traits",
+        })
+        .collect();
+    if !out.is_empty() {
+        out.push_str("\n\n");
+    }
+    // Empty `sites` means "attaches to nothing" — the same polarity `ExtTier::sites` has. A reader
+    // meeting such a directive needs to be told it, not left to infer "anywhere" from silence.
+    out.push_str(&match sites.as_slice() {
+        [] => "**Attaches to:** nothing — this directive declares no sites.".to_string(),
+        _ => format!("**Attaches to:** {}.", sites.join(", ")),
+    });
+    out
+}
+
 /// The nominal declarations of just the extensions whose `root` is `root` — the [`modules_of`]
 /// analogue.
 pub fn decls_of(root: &str) -> Vec<ApiDecl> {
@@ -851,6 +937,79 @@ mod tests {
         // A declaration with no prose of its own but documented members still renders them.
         let members_only = with_members("", vec![("a", "fn a(): Self".into())], &[("a", "Prose.")]);
         assert!(members_only.starts_with("#### `fn a(): Self`"));
+    }
+
+    static DEMO_DIRECTIVES: &[noeta_stdlib::registry::ExtDirective] = &[
+        noeta_stdlib::registry::ExtDirective {
+            name: "openapi",
+            sites: &[noeta_stdlib::registry::TierSite::Type],
+            max_args: Some(1),
+            named_keys: &[],
+            detail: "@openapi(\"spec.json\")",
+            doc: "Generates one method per operation in the named OpenAPI document.",
+            params: &["spec"],
+            expand: None,
+        },
+        // A directive with no arguments and no declared sites — the "attaches to nothing" polarity
+        // an empty `sites` means, which a reader has no other way to learn.
+        noeta_stdlib::registry::ExtDirective {
+            name: "marker",
+            sites: &[],
+            max_args: Some(0),
+            named_keys: &[],
+            detail: "@marker",
+            doc: "",
+            params: &[],
+            expand: None,
+        },
+    ];
+    struct DirectiveExt;
+    impl noeta_stdlib::Extension for DirectiveExt {
+        fn name(&self) -> &'static str {
+            "api-native"
+        }
+        fn root(&self) -> &'static str {
+            "para"
+        }
+        fn modules(&self) -> &'static [noeta_stdlib::ExtModule] {
+            &[]
+        }
+        fn directives(&self) -> &'static [noeta_stdlib::registry::ExtDirective] {
+            DEMO_DIRECTIVES
+        }
+    }
+    static DIRECTIVE_EXT: DirectiveExt = DirectiveExt;
+
+    #[test]
+    fn directives_are_documented_with_their_invocation_and_placement() {
+        // A directive is the one declared surface that is neither a callable nor a nominal type, so
+        // no walker covered it: `@openapi` — para/api's flagship, the whole reason `ExtDirective`
+        // grew an `expand` hook — appeared in no reference at all. Everything needed to document
+        // one was already on the declaration (`doc`, `params`, `named_keys`, `sites`); nothing read
+        // it.
+        let ds = directives_in(&[&DIRECTIVE_EXT], &|_| true);
+        assert_eq!(ds.len(), 2, "{ds:?}");
+
+        let openapi = ds.iter().find(|d| d.name == "@openapi").unwrap();
+        assert_eq!(openapi.kind, "directive");
+        // Documented on its extension's root — a directive has no namespace of its own.
+        assert_eq!(openapi.module, "para");
+        assert_eq!(openapi.qualified, "para.@openapi");
+        // The rendered form is the invocation the argument contract accepts.
+        assert_eq!(openapi.signature, "@openapi(spec)");
+        assert!(openapi.doc.contains("one method per operation"));
+        // Where it may be written is the first thing a reader gets wrong, so it is stated.
+        assert!(
+            openapi.doc.contains("**Attaches to:** types."),
+            "{}",
+            openapi.doc
+        );
+
+        let marker = ds.iter().find(|d| d.name == "@marker").unwrap();
+        assert_eq!(marker.signature, "@marker", "no arguments, no parens");
+        // Empty `sites` means "attaches to nothing", the same polarity `ExtTier::sites` has —
+        // silence would read as "anywhere", which is the opposite.
+        assert!(marker.doc.contains("nothing"), "{}", marker.doc);
     }
 
     #[test]

@@ -28,6 +28,14 @@ pub struct Generated {
 
 /// The docs.json schema version. Bump on any breaking shape change — the registry dispatches on
 /// it.
+///
+/// A **new item `kind` is not one.** The hosted renderer requires an item to carry `name` and
+/// `kind` and then prints `kind` as a plain label (`noeta-registry`'s `renderModule` /
+/// `renderDecl`, one generic `.kind` CSS rule), so `impl` and `directive` render on an unchanged
+/// Worker. Bumping would have been actively harmful: [`render_json_to`] refuses an artifact whose
+/// schema is not this constant, so a bump makes every already-published package's stored docs
+/// unreadable by `noeta doc --package` — a real regression bought for nothing. Widen
+/// [`render_json_to`]'s kind whitelist instead.
 const SCHEMA: u32 = 1;
 
 /// Generate the documentation artifact for the package containing `entry` into `out`.
@@ -181,19 +189,27 @@ pub fn registry_docs_json(
         ApiScope::All => (
             noeta_ide::api::modules(),
             noeta_ide::api::types(),
-            noeta_ide::api::decls(),
+            [noeta_ide::api::decls(), noeta_ide::api::directives()].concat(),
         ),
         ApiScope::Root(r) => (
             noeta_ide::api::modules_of(r),
             noeta_ide::api::types_of(r),
-            noeta_ide::api::decls_of(r),
+            [
+                noeta_ide::api::decls_of(r),
+                noeta_ide::api::directives_of(r),
+            ]
+            .concat(),
         ),
         ApiScope::NonBuiltin => {
             let builtin = builtin_extension_names();
             (
                 noeta_ide::api::modules_excluding(&builtin),
                 noeta_ide::api::types_excluding(&builtin),
-                noeta_ide::api::decls_excluding(&builtin),
+                [
+                    noeta_ide::api::decls_excluding(&builtin),
+                    noeta_ide::api::directives_excluding(&builtin),
+                ]
+                .concat(),
             )
         }
     };
@@ -337,6 +353,8 @@ pub fn render_json_to(out: &Path, docs_json_text: &str) -> Result<Generated, Str
                         "trait" => "trait",
                         // A standalone `impl Trait for T` whose target is declared elsewhere.
                         "impl" => "impl",
+                        // An extension's `@`-directive.
+                        "directive" => "directive",
                         _ => return None,
                     },
                     name: item.get("name")?.as_str()?.to_string(),

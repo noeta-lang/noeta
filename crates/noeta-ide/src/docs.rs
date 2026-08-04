@@ -636,7 +636,8 @@ fn api_children(id: &DocId) -> Vec<DocNode> {
             // otherwise be unreachable from the root no matter how well they document themselves.
             let listed: std::collections::HashSet<&str> =
                 nodes.iter().map(|n| n.title.as_str()).collect();
-            let mut orphans: Vec<String> = api::decls()
+            let mut orphans: Vec<String> = [api::decls(), api::directives()]
+                .concat()
                 .into_iter()
                 .map(|d| d.module)
                 .filter(|m| !listed.contains(m.as_str()))
@@ -688,7 +689,8 @@ fn api_children(id: &DocId) -> Vec<DocNode> {
 /// that lists one and not the other misrepresents what the module offers.
 fn api_decl_nodes(qualified: &str) -> impl Iterator<Item = DocNode> + use<> {
     let qualified = qualified.to_string();
-    api::decls()
+    [api::decls(), api::directives()]
+        .concat()
         .into_iter()
         .filter(move |d| d.module == qualified)
         .map(|d| DocNode {
@@ -708,6 +710,9 @@ fn decl_kind(kind: &str) -> DocKind {
         "trait" => DocKind::Trait,
         "enum" => DocKind::Enum,
         "class" => DocKind::Class,
+        // A directive is not a type; `Section` is the corpus's kind for "prose-bearing, not a
+        // value" and is what the tree already renders without a type icon.
+        "directive" => DocKind::Section,
         _ => DocKind::Struct,
     }
 }
@@ -729,7 +734,8 @@ fn api_overview_page(qualified: &str) -> Option<DocPage> {
     // The namespace's nominal declarations, listed under every overview that has any — a module's,
     // and a declaration-only namespace's (`std.http`, whose functions live under `std.http.client`),
     // which is a real page with nothing else on it.
-    let decls: Vec<api::ApiDecl> = api::decls()
+    let decls: Vec<api::ApiDecl> = [api::decls(), api::directives()]
+        .concat()
         .into_iter()
         .filter(|d| d.module == qualified)
         .collect();
@@ -798,7 +804,8 @@ fn api_member_page(id: &DocId, qualified: &str, name: &str) -> Option<DocPage> {
             // Not a function or method of this container, so the remaining thing it can name is one
             // of the namespace's nominal declarations.
             None => {
-                let d = api::decls()
+                let d = [api::decls(), api::directives()]
+                    .concat()
                     .into_iter()
                     .find(|d| d.module == qualified && d.name == name)?;
                 (d.signature, d.doc, decl_kind(d.kind))
@@ -899,7 +906,7 @@ fn api_search(needle: &str) -> Vec<DocHit> {
     }
     // Nominal declarations are searched as members of their namespace, the same shape a function
     // is — searching "Mergeable" should find the trait, not silently nothing.
-    for d in api::decls() {
+    for d in [api::decls(), api::directives()].concat() {
         api_score_into(
             &d.module,
             &api::ApiFn {
