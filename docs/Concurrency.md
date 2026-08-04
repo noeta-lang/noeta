@@ -105,7 +105,7 @@ trait Fetcher {
 
 struct Http {
     impl Fetcher {
-        async fn fetch(url: string): string {
+        pub async fn fetch(url: string): string {
             sleep(1).await
             return "body:" ~ url
         }

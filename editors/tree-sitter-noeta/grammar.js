@@ -293,7 +293,14 @@ module.exports = grammar({
     ),
     // A trait's method contract is the ONE place `static` means something: it declares that no
     // implementation binds `self`, which is what lets a generic body call `T.m(…)` under a bound.
+    //
+    // `pub` is accepted for the same reason it is accepted by the parser and rejected by the
+    // checker (E0053 — a trait's methods are already its contract): an editor that could not
+    // PARSE the rejected form would lose highlighting for the whole file the moment somebody
+    // wrote it. In a type body `pub fn` needs nothing new here — a method IS a
+    // `function_declaration`, which has carried `optional('pub')` since top-level `fn` did.
     trait_method: $ => seq(
+      optional('pub'),
       optional('static'),
       optional('async'),
       'fn',

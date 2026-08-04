@@ -78,11 +78,11 @@ struct Todo {
 class Repo<T> {
     table: string
 
-    fn new(table: string): Repo<T> {
+    pub fn new(table: string): Repo<T> {
         return Repo { table: table }
     }
 
-    fn describe(): string {
+    pub fn describe(): string {
         return "a repo over ${self.table} of ${type_name::<T>()}"
     }
 }

@@ -170,7 +170,7 @@ An `is` test also **flow-narrows**: inside `if x is T { … }` the checker sees 
 trait Speaks { fn speak(): string }
 
 struct Dog { name: string }
-impl Speaks for Dog { fn speak(): string { return "woof" } }
+impl Speaks for Dog { pub fn speak(): string { return "woof" } }
 
 struct Silent { name: string }
 

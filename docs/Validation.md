@@ -11,7 +11,7 @@ struct Port {
     n: int
 
     impl Validate {
-        fn validate(): Result<void, string> {
+        pub fn validate(): Result<void, string> {
             if self.n < 1 || self.n > 65535 {
                 return Err("port out of range: ${self.n}")
             }
@@ -92,14 +92,14 @@ struct Email {
     addr: string
 
     // The sanctioned constructor. Inside the type's own methods, literal construction stays legal.
-    fn new(addr: string): Result<Email, string> {
+    pub fn new(addr: string): Result<Email, string> {
         e = Email { addr: addr }
         e.validate()?
         return Ok(e)
     }
 
     impl Validate {
-        fn validate(): Result<void, string> {
+        pub fn validate(): Result<void, string> {
             if !self.addr.contains("@") {
                 return Err("missing @: ${self.addr}")
             }
@@ -128,7 +128,7 @@ struct Email {
     addr: string
 
     impl Validate {
-        fn validate(): Result<void, string> { return Ok() }
+        pub fn validate(): Result<void, string> { return Ok() }
     }
 }
 // E0060: `Email` is `@validated` — build it through a constructor, not a literal.

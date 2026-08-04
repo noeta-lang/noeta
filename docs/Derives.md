@@ -19,7 +19,7 @@
 class Point {
     x: int
     y: int
-    fn new(x: int, y: int): Point { return Point { x: x, y: y } }
+    pub fn new(x: int, y: int): Point { return Point { x: x, y: y } }
 }
 echo Point.new(1, 2) < Point.new(1, 3)   // true
 
@@ -28,7 +28,7 @@ class User {
     name: string
     id: int
     active: bool
-    fn new(name: string, id: int, active: bool): User { return User { name: name, id: id, active: active } }
+    pub fn new(name: string, id: int, active: bool): User { return User { name: name, id: id, active: active } }
 }
 echo User.new("Ada", 7, true).to_json()  // {"name":"Ada","id":7,"active":true}
 ```
