@@ -4565,7 +4565,7 @@ mod tests {
              async fn make(): Host { return Host { id: 1 } }\n  \
              @test fn checks(): bool { return true }\n\
              }\n"
-                .to_string(),
+            .to_string(),
         );
         let hints = placed_hints_of(&store, "file:///modifiers.noe");
         // `  async fn make(…)` — column 2 is the `a` of `async`, so the line reads `static async fn`.
