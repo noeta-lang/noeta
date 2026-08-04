@@ -17,10 +17,10 @@ pub struct Vec2 {
     y: int = 0
 
     @doc { The origin vector `(0, 0)`. }
-    fn zero(): Vec2 { return Vec2 {} }
+    pub fn zero(): Vec2 { return Vec2 {} }
 
     @doc { The Manhattan length, `|x| + |y|`. }
-    fn manhattan(): int { return abs(self.x) + abs(self.y) }
+    pub fn manhattan(): int { return abs(self.x) + abs(self.y) }
 }
 
 @doc { Add two vectors component-wise. }
