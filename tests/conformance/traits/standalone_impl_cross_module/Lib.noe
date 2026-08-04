@@ -8,7 +8,7 @@ pub trait Store {
 }
 
 pub class NullStore {
-    fn new(): NullStore {
+    pub fn new(): NullStore {
         return NullStore {}
     }
 }
@@ -16,7 +16,7 @@ pub class NullStore {
 // STANDALONE impl (not inside the `class` body) — the case the linker previously dropped for a
 // non-entry module.
 impl Store for NullStore {
-    fn label(): string {
+    pub fn label(): string {
         return "flushed"
     }
 }

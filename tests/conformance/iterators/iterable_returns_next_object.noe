@@ -15,7 +15,7 @@ class Bag {
     pub hi: int
 
     impl Iterable {
-        fn iter(): Cursor {
+        pub fn iter(): Cursor {
             mut n = self.lo
             hi = self.hi
             return Cursor {

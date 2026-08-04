@@ -15,7 +15,7 @@
 // ordinary scoping question with an ordinary answer, and the sibling case that still refuses —
 // a parameter no call can infer — is `reflection/type_name_diagnostics.noe`.
 // The shadowing itself is an E0075 warning — the rule is sound, the spelling is not legible.
-// expect: error E0075 at 36:17
+// expect: error E0075 at 36:21
 // expect: stdout "1B"
 // expect: stdout "1A"
 // expect: exit 0
@@ -28,18 +28,18 @@ struct B {
 class Pair<K, V> {
     pub n: int
 
-    fn new(n: int): Pair<K, V> {
+    pub fn new(n: int): Pair<K, V> {
         return Pair { n: n };
     }
 
     // `K` shadows the class's; it is inferred from the argument, not read off the receiver.
-    fn shadowed<K>(x: K): string {
+    pub fn shadowed<K>(x: K): string {
         return "${self.n}" ~ type_name::<K>();
     }
 
     // The class's `K`, reached under a name the method does not shadow — the control that proves
     // the receiver channel still works and that the two answers differ.
-    fn own(): string {
+    pub fn own(): string {
         return "${self.n}" ~ type_name::<K>();
     }
 }

@@ -21,7 +21,7 @@ use std.session.{Session, Keyring}
 class Account {
     keys: Keyring
 
-    fn new(keys: Keyring): Account {
+    pub fn new(keys: Keyring): Account {
         return Account { keys: keys }
     }
 

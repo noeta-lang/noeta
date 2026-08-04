@@ -31,22 +31,22 @@ struct Tag {
 class Repo<T> {
     pub tbl: string
 
-    fn new(tbl: string): Repo<T> {
+    pub fn new(tbl: string): Repo<T> {
         return Repo { tbl: tbl };
     }
 
-    fn model(): string {
+    pub fn model(): string {
         return self.tbl ~ ":" ~ type_name::<T>();
     }
 }
 class Holder {
     inner: Repo<Note>
 
-    fn new(i: Repo<Note>): Holder {
+    pub fn new(i: Repo<Note>): Holder {
         return Holder { inner: i };
     }
 
-    fn go(): string {
+    pub fn go(): string {
         return self.inner.model();
     }
 }

@@ -8,7 +8,7 @@ struct ParseFailure {
     at: int
 
     impl Error {
-        fn message(): string { return "bad digit at ${self.at}" }
+        pub fn message(): string { return "bad digit at ${self.at}" }
     }
 }
 

@@ -6,11 +6,11 @@ pub class User {
     pub name: string
     pub id: int
 
-    fn new(name: string, id: int): User {
+    pub fn new(name: string, id: int): User {
         return User { name: name, id: id };
     }
 
-    fn greeting(): string {
+    pub fn greeting(): string {
         return "Hi, ${self.name}";
     }
 }

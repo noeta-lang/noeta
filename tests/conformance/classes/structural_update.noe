@@ -9,11 +9,11 @@ class Money {
     pub amount: int
     currency: string
 
-    fn new(amount: int, currency: string): Money {
+    pub fn new(amount: int, currency: string): Money {
         return Money { amount: amount, currency: currency };
     }
 
-    fn show(): string {
+    pub fn show(): string {
         return "${self.amount} ${self.currency}";
     }
 }

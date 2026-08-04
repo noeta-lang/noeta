@@ -6,12 +6,12 @@
 class Inventory {
     items: list
 
-    fn new(items: list): Inventory {
+    pub fn new(items: list): Inventory {
         return Inventory { items: items };
     }
 
     impl Index {
-        fn get(i: int): int {
+        pub fn get(i: int): int {
             return self.items[i];
         }
     }
@@ -24,7 +24,7 @@ class Config {
     pub currency: string
 
     impl Index {
-        fn get(key: string): string {
+        pub fn get(key: string): string {
             return "${key}: ${self.currency}";
         }
     }

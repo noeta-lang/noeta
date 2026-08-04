@@ -34,15 +34,15 @@ trait Buildable {
 struct Thing {
     v: int
     impl Buildable {
-        fn make(a: int, b: string): Thing { return Thing { v: a + b.len() } }
-        fn tag(): string { return "thing" }
+        pub fn make(a: int, b: string): Thing { return Thing { v: a + b.len() } }
+        pub fn tag(): string { return "thing" }
     }
 }
 class Box {
     n: int
     impl Buildable {
-        fn make(a: int, b: string): Box { return Box { n: a } }
-        fn tag(): string { return "box" }
+        pub fn make(a: int, b: string): Box { return Box { n: a } }
+        pub fn tag(): string { return "box" }
     }
 }
 // `Self` in the trait's contract is `T` here, so the call satisfies the declared `T` return.
@@ -56,7 +56,7 @@ fn tag_of<T: Buildable>(): string {
 // A generic TYPE's parameter, inside an instance method — the other channel.
 struct Holder<T: Buildable> {
     n: int
-    fn describe(): string {
+    pub fn describe(): string {
         // `self` is what makes this an INSTANCE method, which is what gives the class's `T` a
         // channel here: its name is read off the receiver's reflected type tag.
         held = self.n

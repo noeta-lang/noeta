@@ -14,7 +14,7 @@ pub struct Marker {
     n: int
 
     impl Equatable {
-        fn eq(other: Marker): bool {
+        pub fn eq(other: Marker): bool {
             return self.n == other.n
         }
     }

@@ -9,7 +9,7 @@ trait Greeter { fn greet(who: string): string }
 
 struct Standalone { id: int }
 impl Greeter for Standalone {
-    fn greet(who: string): string { return who ~ self.id }
+    pub fn greet(who: string): string { return who ~ self.id }
 }
 
 echo Standalone.greet("x")

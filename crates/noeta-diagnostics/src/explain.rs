@@ -316,6 +316,15 @@ impl DiagnosticCode {
                 detail: "A `class`'s fields are private by default. Mark the field `pub` to read it from outside, or reach it through a method. (A value `struct`'s fields are always public, so this never fires for a struct.)",
                 docs: "Structs-Classes-and-Enums",
             },
+            DiagnosticCode::PrivateMethod => Explanation {
+                code: "E0076",
+                title: "private method",
+                group: "Data: structs, classes, enums, fields",
+                severity: Severity::Error,
+                summary: "A private method called — or bound as a handle — from outside its declaring type.",
+                detail: "A method is private by default in every type kind, exactly as a `class`'s fields are: a type's operations belong to it until it says otherwise. Declare it `pub fn` to make it part of the type's public surface, or reach it through a method that already is. Inside the declaring type's own bodies every method is visible, including on another value of that type. A method that implements a `trait` is public by construction — a trait is an outward contract — and must be written `pub` (E0015).",
+                docs: "Structs-Classes-and-Enums",
+            },
             DiagnosticCode::InvalidPackedType => Explanation {
                 code: "E0038",
                 title: "invalid packed type",

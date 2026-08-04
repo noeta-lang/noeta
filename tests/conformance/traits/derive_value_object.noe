@@ -13,7 +13,7 @@ class Point {
     x: int
     y: int
 
-    fn new(x: int, y: int): Point {
+    pub fn new(x: int, y: int): Point {
         return Point { x: x, y: y };
     }
 }

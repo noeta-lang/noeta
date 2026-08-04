@@ -26,8 +26,8 @@ trait Codec {
 struct Blob {
     v: string
     impl Codec {
-        fn decode(raw: string): Blob { return Blob { v: "blob:" ~ raw } }
-        fn encode(): string { return self.v }
+        pub fn decode(raw: string): Blob { return Blob { v: "blob:" ~ raw } }
+        pub fn encode(): string { return self.v }
     }
 }
 

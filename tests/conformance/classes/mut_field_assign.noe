@@ -12,7 +12,7 @@
 class Counter {
     pub mut count: int
     pub label: string
-    fn new(label: string): Counter { return Counter { count: 0, label: label }; }
+    pub fn new(label: string): Counter { return Counter { count: 0, label: label }; }
 }
 mut c = Counter.new("a");
 c.count = 5;

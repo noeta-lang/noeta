@@ -10,7 +10,7 @@
 // expect: exit 0
 class Res {
     pub id: int
-    fn new(id: int): Res { return Res { id: id }; }
+    pub fn new(id: int): Res { return Res { id: id }; }
     destruct { echo "drop ${self.id}"; }
 }
 g = Res.new(99);

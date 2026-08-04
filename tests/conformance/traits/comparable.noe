@@ -10,12 +10,12 @@
 class Money {
     amount: int
 
-    fn new(amount: int): Money {
+    pub fn new(amount: int): Money {
         return Money { amount: amount };
     }
 
     impl Comparable {
-        fn compare(other: Money): Ordering {
+        pub fn compare(other: Money): Ordering {
             return self.amount.compare(other.amount);
         }
     }

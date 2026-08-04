@@ -10,7 +10,7 @@ class User {
     id: int
     active: bool
 
-    fn new(name: string, id: int, active: bool): User {
+    pub fn new(name: string, id: int, active: bool): User {
         return User { name: name, id: id, active: active };
     }
 }
@@ -20,7 +20,7 @@ class Tagged {
     label: string
     at: User
 
-    fn new(label: string, at: User): Tagged {
+    pub fn new(label: string, at: User): Tagged {
         return Tagged { label: label, at: at };
     }
 }

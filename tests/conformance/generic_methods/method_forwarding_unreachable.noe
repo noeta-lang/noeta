@@ -26,7 +26,7 @@ struct Order {
 class Loader {
     pub label: string
 
-    fn new(label: string): Loader {
+    pub fn new(label: string): Loader {
         return Loader { label: label };
     }
 

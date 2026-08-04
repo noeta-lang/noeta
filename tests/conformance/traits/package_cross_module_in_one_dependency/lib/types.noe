@@ -3,5 +3,5 @@ pub trait Store {
 }
 
 pub class NullStore {
-    fn new(): NullStore { return NullStore {} }
+    pub fn new(): NullStore { return NullStore {} }
 }

@@ -4,8 +4,8 @@
 // expect: exit 1
 class Box<T> {
     value: T
-    fn new(v: T): Box<T> { return Box { value: v }; }
-    fn get(): T { return self.value; }
+    pub fn new(v: T): Box<T> { return Box { value: v }; }
+    pub fn get(): T { return self.value; }
 }
 b = Box.new(1);
 echo b.get::<int>();

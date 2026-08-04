@@ -19,7 +19,7 @@ enum Plan: string {
     Paid = "paid"
 
     impl Validate {
-        fn validate(): Result<void, string> {
+        pub fn validate(): Result<void, string> {
             if self == Plan.Legacy {
                 return Err("the legacy plan is no longer accepted")
             }

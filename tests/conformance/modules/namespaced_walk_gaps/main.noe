@@ -32,7 +32,7 @@ use App.Lib.Limits;
 struct Door {
     code: int
     impl Keyed<Grade> {
-        fn key(): Grade {
+        pub fn key(): Grade {
             return Grade.High;
         }
     }

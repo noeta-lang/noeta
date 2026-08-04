@@ -10,8 +10,8 @@
 // expect: exit 0
 class Counter {
     pub mut n: int
-    fn new(): Counter { return Counter { n: 0 } }
-    fn bump(): void { self.n = self.n + 1 }
+    pub fn new(): Counter { return Counter { n: 0 } }
+    pub fn bump(): void { self.n = self.n + 1 }
 }
 
 c = Counter.new()

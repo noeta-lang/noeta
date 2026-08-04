@@ -23,13 +23,13 @@ trait Decodable {
 struct Thing {
     v: int
     impl Decodable {
-        fn decode(raw: string): Thing {
+        pub fn decode(raw: string): Thing {
             return Thing { v: raw.len() }
         }
-        fn combine(other: Thing): int {
+        pub fn combine(other: Thing): int {
             return self.v + other.v
         }
-        fn spread(): List<Thing> {
+        pub fn spread(): List<Thing> {
             return [Thing { v: self.v }, Thing { v: self.v }]
         }
     }

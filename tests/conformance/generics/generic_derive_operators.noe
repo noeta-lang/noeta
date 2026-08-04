@@ -14,7 +14,7 @@ struct Box<T> {
 struct Pair<T> {
     value: T
     impl Comparable {
-        fn compare(other: Pair<T>): Ordering { return Ordering.Less; }
+        pub fn compare(other: Pair<T>): Ordering { return Ordering.Less; }
     }
 }
 

@@ -23,7 +23,7 @@ struct LoadError {
     path: string
 
     impl Error {
-        fn message(): string { return "cannot load `${self.path}`" }
+        pub fn message(): string { return "cannot load `${self.path}`" }
     }
 }
 

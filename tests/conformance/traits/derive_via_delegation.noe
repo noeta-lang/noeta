@@ -14,7 +14,7 @@ trait Currency {
 }
 struct Usd {
     impl Currency {
-        fn symbol(): string { return "US$" }
+        pub fn symbol(): string { return "US$" }
     }
 }
 @derive(Currency, via: unit)

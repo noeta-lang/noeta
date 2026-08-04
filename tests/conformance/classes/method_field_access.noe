@@ -12,24 +12,24 @@
 // expect: exit 0
 class Counter {
     pub mut n: int
-    fn new(): Counter { return Counter { n: 10 }; }
+    pub fn new(): Counter { return Counter { n: 10 }; }
 
     // A bare name is a local; the field is untouched and unread. NOTE: because this body never
     // references `self`, the classification derives it as an ASSOCIATED function (EX.2) — it is
     // called on the type, not on a value.
-    fn shadow(): int {
+    pub fn shadow(): int {
         n = 99;
         return n;
     }
 
     // An explicit `self.n = v` mutates the live field; `self.n` reads it back.
-    fn set_then_read(): int {
+    pub fn set_then_read(): int {
         self.n = 5;
         return self.n;
     }
 
     // A write through an alias mutates the shared instance (reference); `self.n` observes it.
-    fn alias_then_read(): int {
+    pub fn alias_then_read(): int {
         other = self;
         other.n = 7;
         return self.n;

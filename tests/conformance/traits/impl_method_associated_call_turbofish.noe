@@ -10,8 +10,8 @@ trait Marker { fn tag(): string }
 
 struct Box2 { id: int }
 impl Marker for Box2 {
-    fn tag(): string { return "t" }
-    fn pick<T>(x: T): T { return x }
+    pub fn tag(): string { return "t" }
+    pub fn pick<T>(x: T): T { return x }
 }
 
 echo Box2.pick::<int>(3)

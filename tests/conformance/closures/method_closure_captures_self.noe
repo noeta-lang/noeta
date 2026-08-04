@@ -10,18 +10,18 @@
 // expect: exit 0
 struct Counter {
     n: int
-    fn doubled_list(): List<int> {
+    pub fn doubled_list(): List<int> {
         return [1, 2, 3].map(fn(x) => x * self.n)
     }
-    fn via_local(): int {
+    pub fn via_local(): int {
         base = self.n
         add = fn(x: int) => x + base
         return add(10)
     }
-    fn escaping(): (int) -> int {
+    pub fn escaping(): (int) -> int {
         return fn(x: int) => x * self.n
     }
-    fn nested(): int {
+    pub fn nested(): int {
         outer = fn(): int {
             inner = fn(): int { return self.n + 2 }
             return inner()

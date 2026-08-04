@@ -8,12 +8,12 @@
 class Bag {
     items: list
 
-    fn new(items: list): Bag {
+    pub fn new(items: list): Bag {
         return Bag { items: items };
     }
 
     impl Iterable {
-        fn iter(): list {
+        pub fn iter(): list {
             return self.items;
         }
     }

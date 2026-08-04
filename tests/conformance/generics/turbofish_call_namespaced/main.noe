@@ -39,8 +39,8 @@ trait Marker { fn tag(): string }
 
 pub struct Box2 { pub id: int }
 impl Marker for Box2 {
-    fn tag(): string { return "t" }
-    fn pick<T>(x: int): int { return x }
+    pub fn tag(): string { return "t" }
+    pub fn pick<T>(x: int): int { return x }
 }
 
 echo "plain: ${gen(1)}"

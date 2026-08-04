@@ -13,7 +13,7 @@ struct ParseFailure {
     at: int
 
     impl Error {
-        fn message(): string {
+        pub fn message(): string {
             return "bad digit at ${self.at}"
         }
     }
@@ -22,10 +22,10 @@ struct ParseFailure {
 class Shortfall {
     missing: int
 
-    fn new(missing: int): Shortfall { return Shortfall { missing: missing } }
+    pub fn new(missing: int): Shortfall { return Shortfall { missing: missing } }
 
     impl Error {
-        fn message(): string {
+        pub fn message(): string {
             return "insufficient funds: need ${self.missing} more"
         }
     }

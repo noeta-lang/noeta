@@ -14,7 +14,7 @@
 class Resource {
     pub name: string
 
-    fn new(name: string): Resource {
+    pub fn new(name: string): Resource {
         return Resource { name: name };
     }
 

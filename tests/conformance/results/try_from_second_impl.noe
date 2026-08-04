@@ -12,11 +12,11 @@ struct C {
     m: string
 
     impl From<A> {
-        fn from(e: A): C { return C { m: "a${e.n}" } }
+        pub fn from(e: A): C { return C { m: "a${e.n}" } }
     }
 
     impl From<B> {
-        fn from(e: B): C { return C { m: "b${e.s}" } }
+        pub fn from(e: B): C { return C { m: "b${e.s}" } }
     }
 }
 

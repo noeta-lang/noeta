@@ -16,7 +16,7 @@
 // expect: exit 0
 class Node {
     value: int
-    fn new(value: int): Node { return Node { value: value }; }
+    pub fn new(value: int): Node { return Node { value: value }; }
 }
 
 struct Point { x: int y: int }
@@ -24,7 +24,7 @@ struct Point { x: int y: int }
 @derive(Equatable)
 class Tag {
     name: string
-    fn new(name: string): Tag { return Tag { name: name }; }
+    pub fn new(name: string): Tag { return Tag { name: name }; }
 }
 
 a = Node.new(1);

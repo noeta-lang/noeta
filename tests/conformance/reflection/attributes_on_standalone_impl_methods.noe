@@ -21,20 +21,20 @@ trait Describe { fn describe(): string }
 
 class Counter {
     count: int
-    fn new(count: int): Counter { return Counter { count: count }; }
+    pub fn new(count: int): Counter { return Counter { count: count }; }
 }
 
 // The standalone form — the one the manifest used to miss.
 impl Describe for Counter {
     #[Route("/counter")]
-    fn describe(): string { return "counter=${self.count}"; }
+    pub fn describe(): string { return "counter=${self.count}"; }
 }
 
 // The in-body form, for contrast: same key, and it already worked.
 class Holder {
     impl Describe {
         #[Route("/holder")]
-        fn describe(): string { return "holder"; }
+        pub fn describe(): string { return "holder"; }
     }
 }
 

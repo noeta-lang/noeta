@@ -13,7 +13,7 @@ enum Status {
     Refunded;
 
     // An instance method: `self` is the whole enum value, matched to its case.
-    fn label(id: int, who: string): string {
+    pub fn label(id: int, who: string): string {
         return match self {
             Status.Pending  => "Order #${id} awaiting payment",
             Status.Paid     => "Order #${id} paid: ${who}",
@@ -22,7 +22,7 @@ enum Status {
     }
 
     // An instance method that returns another case of the same enum.
-    fn next(): Status {
+    pub fn next(): Status {
         return match self {
             Status.Pending  => Status.Paid,
             Status.Paid     => Status.Refunded,
@@ -31,7 +31,7 @@ enum Status {
     }
 
     // An associated function (no receiver) — called on the bare type name.
-    fn describe_case(status: Status): string {
+    pub fn describe_case(status: Status): string {
         return match status {
             Status.Pending  => "Pending",
             Status.Paid     => "Paid",
@@ -44,7 +44,7 @@ enum OrderError {
     Empty;
     NegativePrice(index: int);
 
-    fn message(): string {
+    pub fn message(): string {
         return match self {
             OrderError.Empty            => "empty order",
             OrderError.NegativePrice(i) => "item ${i} is negative",

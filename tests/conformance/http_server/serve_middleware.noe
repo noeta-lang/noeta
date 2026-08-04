@@ -21,9 +21,9 @@ trait Middleware {
 }
 
 class Logger {
-    fn new(): Logger { return Logger {} }
+    pub fn new(): Logger { return Logger {} }
     impl Middleware {
-        fn before(req: Request): ?Response {
+        pub fn before(req: Request): ?Response {
             echo "log ${req.path()}"
             return none
         }
@@ -31,9 +31,9 @@ class Logger {
 }
 
 class Guard {
-    fn new(): Guard { return Guard {} }
+    pub fn new(): Guard { return Guard {} }
     impl Middleware {
-        fn before(req: Request): ?Response {
+        pub fn before(req: Request): ?Response {
             if req.path() == "/echo" {
                 echo "BLOCKED ${req.path()}"
                 return some(server.response(403, "forbidden"))

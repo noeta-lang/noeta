@@ -37,7 +37,7 @@ match 1 {
 }
 class Sink {
     pub mut got: string = ""
-    fn take(s: string): void {
+    pub fn take(s: string): void {
         self.got = s
     }
 }

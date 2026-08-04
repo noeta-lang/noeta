@@ -41,7 +41,7 @@ struct Email {
     addr: string
 
     impl Validate {
-        fn validate(): Result<void, string> {
+        pub fn validate(): Result<void, string> {
             if !self.addr.contains("@") {
                 return Err("missing @: ${self.addr}")
             }
@@ -59,7 +59,7 @@ struct Port {
     fn label(): string { return "port ${self.n}" }
 
     impl Validate {
-        fn validate(): Result<void, string> {
+        pub fn validate(): Result<void, string> {
             if self.n < 1 || self.n > 65535 {
                 return Err("bad ${self.label()}")
             }
@@ -74,7 +74,7 @@ struct Cluster {
     ports: List<Port>
 
     impl Validate {
-        fn validate(): Result<void, string> {
+        pub fn validate(): Result<void, string> {
             if self.ports.len() >= 2 {
                 return Err("too many ports")
             }
@@ -90,7 +90,7 @@ enum Theme {
     Dark
 
     impl Validate {
-        fn validate(): Result<void, string> {
+        pub fn validate(): Result<void, string> {
             if self == Theme.Dark {
                 return Err("dark mode is off")
             }

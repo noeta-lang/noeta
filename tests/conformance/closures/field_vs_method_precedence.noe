@@ -12,7 +12,7 @@
 struct S {
     f: (int) -> int
     base: int
-    fn f(x: int): int { return self.base + x }
+    pub fn f(x: int): int { return self.base + x }
 }
 s = S { f: fn(x: int) => x + 1, base: 100 }
 echo s.f(1)

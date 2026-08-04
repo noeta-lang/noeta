@@ -19,19 +19,19 @@ struct Email {
 
     // The validating constructor — the sanctioned way to build an `Email` from outside. Inside the
     // type's own methods, literal construction stays legal.
-    fn new(addr: string): Result<Email, string> {
+    pub fn new(addr: string): Result<Email, string> {
         e = Email { addr: addr }
         e.validate()?
         return Ok(e)
     }
 
     // Record-update inside the impl is legal too (it's the type's own code).
-    fn lowered(): Email {
+    pub fn lowered(): Email {
         return Email { ...self, addr: self.addr.lower() }
     }
 
     impl Validate {
-        fn validate(): Result<void, string> {
+        pub fn validate(): Result<void, string> {
             if !self.addr.contains("@") {
                 return Err("missing @: ${self.addr}")
             }

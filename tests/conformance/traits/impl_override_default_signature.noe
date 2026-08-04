@@ -2,7 +2,7 @@
 // any other (L1, UT2). The conformance walk used to skip every defaulted method outright — so an
 // override was exempt from the arity, parameter, return, and `async` rules, while `dyn Trait` and
 // every bound went on typing it from the trait's declaration. E0015.
-// expect: error E0015 at 13:12
+// expect: error E0015 at 13:16
 // expect: exit 1
 trait Labeled {
     fn label(): string { return "thing" }
@@ -10,7 +10,7 @@ trait Labeled {
 
 struct Point {
     impl Labeled {
-        fn label(): int { return 1 }
+        pub fn label(): int { return 1 }
     }
 }
 

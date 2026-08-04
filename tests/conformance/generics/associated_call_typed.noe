@@ -5,7 +5,7 @@
 // expect: exit 1
 class Box<T> {
     value: T
-    fn new(v: T): Box<T> { return Box { value: v }; }
+    pub fn new(v: T): Box<T> { return Box { value: v }; }
 }
 fn max<T: Comparable>(a: T, b: T): T { if a > b { return a; } return b; }
 echo max(Box.new(1), Box.new(2));

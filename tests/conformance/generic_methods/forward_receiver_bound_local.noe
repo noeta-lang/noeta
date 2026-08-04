@@ -25,11 +25,11 @@ struct User {
 class Store {
     pub tag: string
 
-    fn new(): Store {
+    pub fn new(): Store {
         return Store { tag: "s" };
     }
 
-    fn load<T>(text: string): Result<T, JsonError> {
+    pub fn load<T>(text: string): Result<T, JsonError> {
         if self.tag == "" {
             return json.try_parse::<T>("{}");
         }
@@ -40,12 +40,12 @@ class Store {
 class Cache {
     pub inner: Store
 
-    fn new(): Cache {
+    pub fn new(): Cache {
         return Cache { inner: Store.new() };
     }
 
     // The local-binding route: `self.inner` is typed by checking, but `s` is a bare name.
-    fn get<T>(text: string): Result<T, JsonError> {
+    pub fn get<T>(text: string): Result<T, JsonError> {
         s = self.inner;
         return s.load::<T>(text);
     }
@@ -58,7 +58,7 @@ class Cache {
         return json.try_parse::<T>(text);
     }
 
-    fn viaOwn<T>(text: string): Result<T, JsonError> {
+    pub fn viaOwn<T>(text: string): Result<T, JsonError> {
         return self.own::<T>(text);
     }
 }

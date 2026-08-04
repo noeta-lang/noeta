@@ -16,7 +16,7 @@
 // expect: exit 0
 struct Point { x: int }
 enum Mode { Fast; Slow; }
-class Engine { id: int  fn new(): Engine { return Engine { id: 0 }; } }
+class Engine { id: int  pub fn new(): Engine { return Engine { id: 0 }; } }
 
 fn label(t: Type): string {
     return match t {

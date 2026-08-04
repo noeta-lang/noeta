@@ -22,7 +22,7 @@ struct Speaker {
 }
 
 impl Sp for Speaker {
-    fn speak(): string { return "hello"; }
+    pub fn speak(): string { return "hello"; }
 }
 
 fn head(t: Type): string {

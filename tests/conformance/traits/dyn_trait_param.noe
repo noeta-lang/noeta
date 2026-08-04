@@ -8,11 +8,11 @@ trait Greeter {
 }
 
 class En {
-    fn new(): En { return En {} }
+    pub fn new(): En { return En {} }
 }
 
 impl Greeter for En {
-    fn greet(who: string): string { return "hello " ~ who }
+    pub fn greet(who: string): string { return "hello " ~ who }
 }
 
 fn welcome(g: dyn Greeter): string {

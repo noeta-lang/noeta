@@ -16,7 +16,7 @@ struct AppError {
     kind: string
 
     impl From<JsonError> {
-        fn from(e: JsonError): AppError {
+        pub fn from(e: JsonError): AppError {
             return AppError { kind: e.kind() }
         }
     }

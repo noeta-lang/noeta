@@ -16,7 +16,7 @@
 class Repo<T> {
     pub tbl: string
 
-    fn model(): string {
+    pub fn model(): string {
         return self.tbl ~ ":" ~ type_name::<T>();
     }
 }

@@ -6,7 +6,7 @@
 struct Bad { v: int }
 class Pair<T: Comparable> {
     a: T
-    fn new(x: T): Pair<T> { return Pair { a: x }; }
+    pub fn new(x: T): Pair<T> { return Pair { a: x }; }
 }
 p = Pair.new(Bad { v: 1 });
 echo "unreached";

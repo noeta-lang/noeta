@@ -25,11 +25,11 @@ struct Order {
 class Store {
     pub tag: string
 
-    fn new(): Store {
+    pub fn new(): Store {
         return Store { tag: "s" };
     }
 
-    fn load<T>(text: string): Result<T, JsonError> {
+    pub fn load<T>(text: string): Result<T, JsonError> {
         if self.tag == "" {
             return json.try_parse::<T>("{}");
         }
@@ -40,11 +40,11 @@ class Store {
 class Cache {
     pub inner: Store
 
-    fn new(): Cache {
+    pub fn new(): Cache {
         return Cache { inner: Store.new() };
     }
 
-    fn get<T>(text: string): Result<T, JsonError> {
+    pub fn get<T>(text: string): Result<T, JsonError> {
         return self.inner.load::<T>(text);
     }
 }

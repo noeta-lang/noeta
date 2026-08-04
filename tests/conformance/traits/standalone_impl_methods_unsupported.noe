@@ -4,5 +4,5 @@
 // expect: exit 1
 struct Route { path: string }
 impl Clone for Route {
-    fn extra(): int { return 1; }
+    pub fn extra(): int { return 1; }
 }

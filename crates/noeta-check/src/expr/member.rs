@@ -541,6 +541,41 @@ impl Checker {
             || self.coloring.current_type.as_deref() == Some(type_name)
     }
 
+    /// Whether method `name` of type `type_name` is reachable at the current checking context
+    /// (method-visibility arc) — the method twin of [`Self::field_visible`], deliberately written
+    /// as the same three clauses so the two rules cannot drift: a `pub` method always is; a private
+    /// one only inside the declaring type's own bodies, or inside a dev-tier (`@test`) body, which
+    /// is white-box over its module by design.
+    ///
+    /// "Inside the declaring type" is the type, not the instance: a method of `Account` may call a
+    /// private method on *another* `Account`, exactly as it may read that other account's private
+    /// field. Encapsulation is per type, and a type is trusted with its own kind.
+    pub(crate) fn method_visible(&self, type_name: &str, name: &str) -> bool {
+        let private = self
+            .symbols
+            .private_methods
+            .get(type_name)
+            .is_some_and(|ms| ms.contains(name));
+        !private
+            || self.coloring.in_dev_tier
+            || self.coloring.current_type.as_deref() == Some(type_name)
+    }
+
+    /// Report a call to — or a handle bound off — a private method from outside its type (E0076).
+    /// Reported once per access site, on the same reasoning as the field rule: the type's surface
+    /// is what it declares `pub`.
+    pub(crate) fn report_private_method(&mut self, type_name: &str, name: &str, span: Span) {
+        self.error(
+            DiagnosticCode::PrivateMethod,
+            span,
+            format!("cannot call private method `{name}` of `{type_name}` from outside it"),
+        )
+        .help(format!(
+            "methods are private by default in every type kind; declare it `pub fn {name}(…)` to \
+             make it part of `{type_name}`'s surface, or reach it through a method that already is"
+        ));
+    }
+
     /// Report an access to a private field from outside its type (E0035). `access` names the action
     /// for the message — a closed [`FieldAccess`] so a call site cannot invent a verb.
     pub(crate) fn report_private_field(
@@ -732,13 +767,20 @@ impl Checker {
             // ASSOCIATED function's handle is the function itself (`Fn(params) -> ret`) — e.g.
             // `ctor = Stack.new`. A trait's self-less method ([`Receiver::Either`]) takes the
             // instance shape, which is what the unclassified entry already meant here.
+            //
+            // A handle is a way of CALLING the method later, so it is an access now (E0076) —
+            // otherwise `f = Account.helper; f(a)` would be the hole in the rule.
             let instance = self.receiver_of(tn.as_str(), name).handle_takes_receiver();
-            let mut params = Vec::with_capacity(sig.params.len() + 1);
+            let sig_params = sig.params.clone();
+            let ret = sig.ret.clone();
+            if !self.method_visible(tn.as_str(), name) {
+                self.report_private_method(tn.as_str(), name, member_span);
+            }
+            let mut params = Vec::with_capacity(sig_params.len() + 1);
             if instance {
                 params.push(Type::Named(tn.to_string(), Vec::new()));
             }
-            params.extend(sig.params.iter().cloned());
-            let ret = sig.ret.clone();
+            params.extend(sig_params);
             self.sites
                 .handle_sites
                 .insert(member_span, (tn.to_string(), name.to_string(), !instance));
@@ -818,6 +860,11 @@ impl Checker {
         {
             let params = sig.params.clone();
             let ret = sig.ret.clone();
+            // A BOUND handle is an access too (E0076) — the same hole as the unbound one, closed
+            // the same way.
+            if !self.method_visible(n, name) {
+                self.report_private_method(n, name, member_span);
+            }
             // Binding an ASSOCIATED function through a value is the wrong-way shape (E0047) —
             // there is no receiver to capture; bind it off the type instead.
             if !self.receiver_of(n, name).allows_instance_call() {

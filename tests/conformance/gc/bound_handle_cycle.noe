@@ -7,8 +7,8 @@
 class Node {
     pub mut cb: dyn
     pub tag: int
-    fn new(): Node { return Node { cb: 0, tag: 7 } }
-    fn ping(): int { return self.tag }
+    pub fn new(): Node { return Node { cb: 0, tag: 7 } }
+    pub fn ping(): int { return self.tag }
 }
 
 n = Node.new()

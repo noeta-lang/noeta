@@ -11,8 +11,8 @@
 // expect: exit 0
 class Leaf {
     tag: string
-    fn new(t: string): Leaf { return Leaf { tag: t }; }
-    fn announce(): void { echo "use ${self.tag}"; }
+    pub fn new(t: string): Leaf { return Leaf { tag: t }; }
+    pub fn announce(): void { echo "use ${self.tag}"; }
     destruct { echo "drop ${self.tag}"; }
 }
 

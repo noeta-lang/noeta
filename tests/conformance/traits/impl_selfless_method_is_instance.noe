@@ -26,13 +26,13 @@ trait Greeter {
 struct InBody {
     id: int
     impl Greeter {
-        fn greet(who: string): string { return who }
+        pub fn greet(who: string): string { return who }
     }
 }
 
 struct Standalone { id: int }
 impl Greeter for Standalone {
-    fn greet(who: string): string { return who }
+    pub fn greet(who: string): string { return who }
 }
 
 fn through_dyn(g: dyn Greeter): string { return g.greet("dyn inst") }

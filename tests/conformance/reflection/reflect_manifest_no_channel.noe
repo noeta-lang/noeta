@@ -31,9 +31,9 @@ struct Route { path: string }
 class Scanner<T> {
     pub label: string
 
-    fn new(label: string): Scanner<T> { return Scanner { label: label }; }
+    pub fn new(label: string): Scanner<T> { return Scanner { label: label }; }
 
-    fn nested(): int {
+    pub fn nested(): int {
         fn inner(): int { return attributes_of::<T>().len() }
         if self.label == "" { return 0 }
         return inner();

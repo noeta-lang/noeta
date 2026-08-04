@@ -13,7 +13,7 @@ struct RangeError {
     value: int
 
     impl Error {
-        fn message(): string { return "age out of range: ${self.value}" }
+        pub fn message(): string { return "age out of range: ${self.value}" }
     }
 }
 
@@ -22,7 +22,7 @@ struct Person {
     age: int
 
     impl Validate {
-        fn validate(): Result<void, RangeError> {
+        pub fn validate(): Result<void, RangeError> {
             if self.age < 0 || self.age > 130 {
                 return Err(RangeError { value: self.age })
             }
@@ -36,7 +36,7 @@ struct Label {
     text: string
 
     impl Validate {
-        fn validate(): Result<void, string> {
+        pub fn validate(): Result<void, string> {
             if self.text == "" {
                 return Err("empty name")
             }

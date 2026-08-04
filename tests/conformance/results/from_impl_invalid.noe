@@ -9,20 +9,20 @@
 // `.noe` `trait`'s `static fn` implementations to their promise. This case is what pins that the
 // generalization did not lose the behavior — the diagnostic's words changed, the rejection did not.
 // expect: error E0015 at 18:10
-// expect: error E0015 at 25:17
-// expect: error E0015 at 33:12
+// expect: error E0015 at 25:21
+// expect: error E0015 at 33:16
 // expect: exit 1
 struct A { n: int }
 
 struct NoArg {
     impl From {
-        fn from(e: A): NoArg { return NoArg {} }
+        pub fn from(e: A): NoArg { return NoArg {} }
     }
 }
 
 struct WrongParam {
     impl From<A> {
-        fn from(e: string): WrongParam { return WrongParam {} }
+        pub fn from(e: string): WrongParam { return WrongParam {} }
     }
 }
 
@@ -30,7 +30,7 @@ struct SelfRef {
     m: int
 
     impl From<A> {
-        fn from(e: A): SelfRef { return SelfRef { m: self.m + e.n } }
+        pub fn from(e: A): SelfRef { return SelfRef { m: self.m + e.n } }
     }
 }
 

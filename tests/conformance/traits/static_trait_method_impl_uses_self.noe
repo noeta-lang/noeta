@@ -10,8 +10,8 @@
 //     default would otherwise hide: the default proves what the default does, never what an
 //     override does, so only the declaration binds it.
 // expect: error E0015 at 23:21
-// expect: error E0015 at 28:8
-// expect: error E0015 at 35:12
+// expect: error E0015 at 28:12
+// expect: error E0015 at 35:16
 // expect: exit 1
 trait Codec {
     static fn decode(raw: string): int
@@ -25,14 +25,14 @@ struct Direct {
 
 struct Apart { n: int }
 impl Codec for Apart {
-    fn decode(raw: string): int { return self.n }
+    pub fn decode(raw: string): int { return self.n }
 }
 
 struct Override {
     n: int
     impl Codec {
-        fn decode(raw: string): int { return raw.len() }
-        fn tag(): string { return "${self.n}" }
+        pub fn decode(raw: string): int { return raw.len() }
+        pub fn tag(): string { return "${self.n}" }
     }
 }
 

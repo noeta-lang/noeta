@@ -11,15 +11,15 @@ pub trait Codec {
 // made their own standalone impls invisible: the linker decided an impl's eligibility ("is its
 // target type in the program?") from a snapshot taken before it merged any impl bodies' references.
 class Hidden {
-    fn new(): Hidden { return Hidden {} }
+    pub fn new(): Hidden { return Hidden {} }
 }
 
 impl Decoder for Hidden {
-    fn step(s: string): string { return s.upper() }
+    pub fn step(s: string): string { return s.upper() }
 }
 
 class Late {
-    fn new(): Late { return Late {} }
+    pub fn new(): Late { return Late {} }
 }
 
 fn want(x: dyn Decoder): string { return x.step("hi") }
@@ -27,11 +27,11 @@ fn want(x: dyn Decoder): string { return x.step("hi") }
 fn bound<T: Decoder>(x: T): string { return x.step("bound") }
 
 pub class MyCodec {
-    fn new(): MyCodec { return MyCodec {} }
+    pub fn new(): MyCodec { return MyCodec {} }
 }
 
 impl Codec for MyCodec {
-    fn run(): void {
+    pub fn run(): void {
         h = Hidden.new()
         echo want(h)
         echo h.step("direct")
@@ -46,5 +46,5 @@ impl Codec for MyCodec {
 // Hidden` is written above it. No single pass in either direction can see both, so this pins the
 // fixpoint rather than a luckier source order.
 impl Decoder for Late {
-    fn step(s: string): string { return "late-" ~ s }
+    pub fn step(s: string): string { return "late-" ~ s }
 }

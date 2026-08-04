@@ -6,7 +6,7 @@ pub struct Person {
     pub name: string
 
     impl Greets {
-        fn hi(): string {
+        pub fn hi(): string {
             return "hi ${self.name}"
         }
     }

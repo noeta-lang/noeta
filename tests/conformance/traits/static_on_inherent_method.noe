@@ -9,7 +9,7 @@
 //   * a method inside an `impl Trait { … }` block (the implementation, not the contract);
 //   * a top-level `fn`, which has no receiver to declare anything about in the first place.
 // expect: error E0015 at 19:15
-// expect: error E0015 at 22:19
+// expect: error E0015 at 22:23
 // expect: error E0015 at 26:11
 // expect: exit 1
 trait Greeter { fn greet(): string }
@@ -19,7 +19,7 @@ struct Thing {
     static fn make(seed: int): Thing { return Thing { v: seed } }
 
     impl Greeter {
-        static fn greet(): string { return "hi" }
+        pub static fn greet(): string { return "hi" }
     }
 }
 
