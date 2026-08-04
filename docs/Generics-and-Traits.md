@@ -36,7 +36,7 @@ The expected type at an annotated binding can carry the instantiation too — `r
 
 ### Instantiating a generic *type* at the call site
 
-The turbofish above instantiates a **function**. A generic **type** takes one too, on the receiver of an associated call:
+The turbofish above instantiates a **function**. A generic **type** takes one too, on the receiver of a static call:
 
 ```noeta
 struct Todo { id: int }
@@ -51,7 +51,7 @@ r = Repo::<Todo>.new("todos")       // Repo<Todo> — the call says so itself
 echo r.model()                      // todos:Todo
 ```
 
-`Type::<Args>.method(args)` works for **any** associated function, not just one called `new` — Noeta has no constructor concept, so `Repo::<Todo>.open(dsn)` and `Repo::<Todo>.from_dsn(dsn)` read the same way. The type arguments bind to the type's declared parameters in order, arity-checked (E0058, as is a turbofish on a non-generic type). They are the *class's* parameters, and only those: a method's own `<U>` is instantiated on the method, so `Repo.new::<Todo>` is an error (`new` declares no type parameters of its own). Where both are generic, both are spelled — see [Both at once](#both-at-once).
+`Type::<Args>.method(args)` works for **any** static function, not just one called `new` — Noeta has no constructor concept, so `Repo::<Todo>.open(dsn)` and `Repo::<Todo>.from_dsn(dsn)` read the same way. The type arguments bind to the type's declared parameters in order, arity-checked (E0058, as is a turbofish on a non-generic type). They are the *class's* parameters, and only those: a method's own `<U>` is instantiated on the method, so `Repo.new::<Todo>` is an error (`new` declares no type parameters of its own). Where both are generic, both are spelled — see [Both at once](#both-at-once).
 
 The `::` is required: `Repo<Todo>.new(…)` is a parse error, because a bare `<` after an identifier is ambiguous with less-than in expression position. That is the same reason every other type argument in the language is written with a turbofish.
 
@@ -286,7 +286,7 @@ Traits are a **fixed built-in set** — naming an unknown one is E0014. Operator
 | `Display` | `to_string(): string` | `echo`, `${…}` |
 | `Error` | `message(): string` | the idiomatic `Err` payload — see [Error Handling](Error-Handling) |
 | `Validate` | `validate(): Result<void, E>` | a data-boundary invariant; auto-runs at typed decode — see [Validation](Validation) |
-| `From<Source>` | `from(value: Source): Target` — associated | error conversion at `?` — see [Error Handling](Error-Handling#converting-errors-at---impl-fromsource) |
+| `From<Source>` | `from(value: Source): Target` — static | error conversion at `?` — see [Error Handling](Error-Handling#converting-errors-at---impl-fromsource) |
 | `Add` | `add(other): T` | `+` |
 | `Sub` | `sub(other): T` | `-` |
 | `Mul` | `mul(other): T` | `*` |
@@ -384,7 +384,9 @@ There is also a **standalone** `impl Trait for T { ... }`, which must target a s
 
 **Default methods fall back.** A user trait's method *with* a body is a **default**: an implementor may omit it, and the omitted method falls back to the trait's default body — hoisted onto the implementing type, so it dispatches like any method (a default that mentions `self` is an instance method and may call the trait's required methods; a self-less default needs no receiver and may be called either way — see the receiver rule below). A method the impl provides always overrides its default — and an override is held to the trait's signature exactly like a required method is. A **generic** trait implements at an instantiation — `impl Keyed<int> { … }`, `impl Keyed<string> for Tag { … }`, `@derive(Keyed<string>)` — and its defaults substitute the type parameters through their signatures and bodies before hoisting; a bare `impl Keyed`/`@derive(Keyed)` on a generic trait is an arity error naming the parameters.
 
-**Which receiver a method takes is derived, not declared.** A method whose body mentions `self` is an **instance** method: call it on a value, `x.m(…)`. A self-less one that belongs to no trait is an **associated** function: call it on the type, `T.m(…)`. Getting that backwards is E0047 either way — an associated call has no receiver to bind `self` to, and an instance call on an associated function would evaluate a receiver and discard it.
+**Implementations derive their receiver; contracts may declare it.** A method whose body mentions `self` is an **instance** method: call it on a value, `x.m(…)`. A self-less one that belongs to no trait is a **static** function: call it on the type, `T.m(…)`. Getting that backwards is E0047 either way — a static call has no receiver to bind `self` to, and an instance call on a static function would evaluate a receiver and discard it.
+
+That derivation is the whole story for an implementation, and it is not something you may override: `static` on an inherent method, on a method inside an `impl` block, or on a top-level `fn` is E0015. The body already says it, exactly and visibly, and a modifier there would be a second source of truth that can drift from the first. The one place you may *declare* it is a `trait`'s method contract — see [Declaring a static method](#declaring-a-static-method) below.
 
 A self-less method that a **trait** supplies is the third case, and it accepts **both**. The trait's contract puts it in the instance interface — that is how `dyn Trait` reaches it — while its body needs no receiver, so `T.m(…)` is equally well-defined; both spellings run the same code. This holds identically for an in-body `impl Trait { … }` block, a standalone `impl Trait for T { … }`, and a hoisted default, so how you spell the implementation never changes how you may call it:
 
@@ -401,9 +403,63 @@ echo En.greet("Ada")             // hi Ada — on the type
 echo En { id: 1 }.greet("Bob")   // hi Bob — on a value
 ```
 
-(`From` is the exception: its `from` is a conversion that *builds* a value rather than acting on one, so it stays associated-only — and a `from` body that mentions `self` is E0015.)
+(`From` is the exception: it declares its `from` **static** — a conversion *builds* a value rather than acting on one — so it stays type-only, and a `from` body that mentions `self` is E0015. It is an ordinary declared-static method; nothing about it is special-cased.)
 
-**The signature is the contract, `async` included.** An implementation must match the trait's declaration in arity, parameter types, return type, *and* `async`-ness; a mismatch is E0015. `async` belongs on that list because every receiver form types a call from *some* signature and they must all agree: an `async fn m(): T` is called for a `Future<T>` and a plain `fn m(): T` for a `T`, so a synchronous method satisfying an `async` declaration (or the reverse) would make a bound's and a trait object's typing a promise the implementation does not keep.
+#### Declaring a static method
+
+**`static fn m(…)` in a trait declaration promises no implementation binds `self`.** It is legal in a trait body only — on a required signature or on one that carries a default — and it makes receiver-ness a term of the contract, alongside arity, parameter types, return type and `async`-ness:
+
+```noeta
+trait Codec {
+    static fn decode(raw: string): Self   // no implementation may bind `self`
+    static fn tag(): string { return "codec" }
+    fn encode(): string                   // an ordinary instance method
+}
+```
+
+Every implementation is held to it. A body that mentions `self` — in a fresh `impl`, in an *override* of a defaulted static method, or in the trait's own default body — is E0015, the same code and the same class of error as the wrong arity.
+
+**Unmarked stays unconstrained.** Leaving the modifier off means exactly what it always meant: implementations derive their own receiver-ness from their bodies, and a self-less one is reachable both ways. What the modifier buys is the section below on bounded type parameters — it is the promise a generic body spends.
+
+On a user trait the modifier **adds** a guarantee rather than withdrawing a spelling: a self-less trait method already answers `x.m(…)` as well as `T.m(…)` (the third case above), and marking it `static` leaves that alone. The built-in `From` is stricter — `x.from(…)` is E0047, because `from` has been type-only since before the modifier existed and narrowing it is the behaviour callers already depend on.
+
+**A bounded type parameter is a receiver too.** `T.m(…)` inside `fn f<T: Trait>` reaches the methods `Trait` declares **`static`**, because a bound is what licenses them and `T` is the type at run time. One compiled body serves every instantiation, so the call resolves the instantiation's name per call and dispatches on it; nothing is monomorphized.
+
+Only those. `T.m(…)` where the bound's trait does not declare `m` static is E0047, reported at the *definition* — a generic body calling `T.m(…)` is promising something every implementor of the bound must keep, and the body is what makes a promise the bound does not carry. The fix the diagnostic names is to write `static` in the trait, which then holds every implementation to it.
+
+The declaration is doing real work here, and an implementation that happens to be self-less is not a substitute for it. Nor is a self-less *default*: a default says what the default does, never what an override does, and only the declaration binds an override. Everything else a type name can do (`T { … }` construction, `T.Variant`, `T` in an annotation) is not licensed by a bound and stays unavailable. Arguments bind positionally here: the dispatch is by name, and a name has no labels to bind with.
+
+```noeta
+trait Buildable { static fn make(seed: int): Self }
+struct Thing {
+    v: int
+    impl Buildable { fn make(seed: int): Thing { return Thing { v: seed } } }
+}
+fn build<T: Buildable>(seed: int): T {
+    return T.make(seed)     // `Self` is `T`, so this is the declared return
+}
+echo build::<Thing>(3).v    // 3
+```
+
+**The signature is the contract, `async` and `static` included.** An implementation must match the trait's declaration in arity, parameter types, return type, `async`-ness, *and* a declared `static`; a mismatch is E0015. `async` belongs on that list because every receiver form types a call from *some* signature and they must all agree: an `async fn m(): T` is called for a `Future<T>` and a plain `fn m(): T` for a `T`, so a synchronous method satisfying an `async` declaration (or the reverse) would make a bound's and a trait object's typing a promise the implementation does not keep.
+
+**`Self` is the implementing type.** A trait declaration may write `Self` anywhere a type goes — `fn decode(raw: string): Self`, `fn combine(other: Self): int`, `fn spread(): List<Self>` — and it stands for whichever type implements the trait. It is a *declaration* spelling only: the implementation writes the concrete type it is being written for (`fn decode(raw: string): Thing`), and spelling `Self` back in an `impl` is E0013, because at that point the type is known and has a name.
+
+Every way of reaching the method resolves `Self` to the receiver you actually have, so the same signature reads the same through all three of them: on a concrete value it is that value's type, under a `<T: Trait>` bound it is `T`, and on a `dyn Trait` it is `dyn Trait` — the receiver *is* some implementor, and that is as precise as the erasure allows.
+
+```noeta
+trait Decodable { fn decode(raw: string): Self }
+struct Thing {
+    v: int
+    impl Decodable {
+        fn decode(raw: string): Thing { return Thing { v: raw.len() } }
+    }
+}
+fn rebuild<T: Decodable>(seed: T, raw: string): T {
+    return seed.decode(raw)     // a `T`, because `Self` is `T` here
+}
+echo rebuild(Thing { v: 0 }, "hello").v   // 5
+```
 
 ## Trait objects
 

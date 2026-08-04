@@ -3774,7 +3774,7 @@ impl<'m> Vm<'m> {
                             ));
                         };
                         let kind = if is_assoc {
-                            "associated function"
+                            "static function"
                         } else {
                             "method"
                         };

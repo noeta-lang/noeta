@@ -1,0 +1,28 @@
+// `static` is legal in a **trait declaration** and nowhere else (static-trait-methods arc).
+//
+// Everywhere else the body already answers the question, exactly and visibly: a method that
+// mentions `self` takes a receiver, a self-less one is called on the type. A modifier there would
+// be a second source of truth that can disagree with the first — the drift this whole arc exists to
+// remove — so it is refused rather than trusted or silently ignored. All three non-trait
+// declaration sites are pinned:
+//   * an inherent method on a struct/class/enum body;
+//   * a method inside an `impl Trait { … }` block (the implementation, not the contract);
+//   * a top-level `fn`, which has no receiver to declare anything about in the first place.
+// expect: error E0015 at 19:15
+// expect: error E0015 at 22:19
+// expect: error E0015 at 26:11
+// expect: exit 1
+trait Greeter { fn greet(): string }
+
+struct Thing {
+    v: int
+    static fn make(seed: int): Thing { return Thing { v: seed } }
+
+    impl Greeter {
+        static fn greet(): string { return "hi" }
+    }
+}
+
+static fn helper(): int { return 1 }
+
+echo "unreached"

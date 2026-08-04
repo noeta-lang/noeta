@@ -1736,6 +1736,11 @@ pub struct ExtTraitMethod {
     /// kernel bundles' bulk `*_all` forms need: the checker's `bundle_method_call` reads it to type a
     /// method on a `List<T>` of an implementing `T`. Kept per-method (rather than a general trait
     /// notion) precisely because the `List<Self>` receiver is an accepted asymmetry, not a trait rule.
+    ///
+    /// [`BundleReceiver::Static`] is the third case (static-trait-methods arc): **no** receiver, the
+    /// native spelling of `static fn m(…)` in a `.noe` trait. It reaches the checker through the
+    /// synthesized `TraitDecl`'s [`noeta_ast::FnDecl::is_static`], so a native trait's static method
+    /// is licensed and enforced by exactly the rules a `.noe` one is.
     pub receiver: BundleReceiver,
 }
 
@@ -1852,10 +1857,11 @@ pub enum ConstraintLayout {
     Column,
 }
 
-/// Which receiver carries a trait method whose receiver is not the plain `Self` — the per-method
-/// marker on [`ExtTraitMethod::receiver`] (ExtBundle→ExtTrait convergence, slice 4). `ExtBundle` and
-/// `BundleFn` were folded into [`ExtTrait`]/[`ExtTraitMethod`] in that slice; this enum survives as
-/// the **surface adapter** the migrated kernel bundles' dual receiver needs — nothing more.
+/// Which receiver carries a trait method — the per-method marker on [`ExtTraitMethod::receiver`]
+/// (ExtBundle→ExtTrait convergence, slice 4; the `Static` case is the static-trait-methods arc).
+/// `ExtBundle` and `BundleFn` were folded into [`ExtTrait`]/[`ExtTraitMethod`] in that slice; the
+/// [`Self::Bulk`] variant survives as the **surface adapter** the migrated kernel bundles' dual
+/// receiver needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BundleReceiver {
     /// A method on a value of the implementing type itself (`v.dot(w)`) — the ordinary trait method.
@@ -1863,6 +1869,14 @@ pub enum BundleReceiver {
     /// A method on a `List<T>` of the implementing type (`xs.dot_all(ys)`, `xs.sum()`): NOT a general
     /// trait capability, an accepted asymmetry kept only for the kernel bundles' bulk `*_all` forms.
     Bulk,
+    /// **No receiver at all** — the native spelling of a `.noe` trait's `static fn m(…)`. The
+    /// contract states that no implementation binds `self`, so a generic body under the bound may
+    /// write `T.m(…)`; an implementation whose body reaches for `self` is E0015.
+    ///
+    /// The ABI could not express this before: a natively declared trait had only `Element` and
+    /// `Bulk`, both of which take a receiver, so a native `Syncable` had no way to declare a static
+    /// decoder even though the checker's own `From` did exactly that internally.
+    Static,
 }
 
 /// The literal type of an extension-declared attribute field — the subset attribute

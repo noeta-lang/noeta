@@ -64,6 +64,9 @@ pub struct BundleApi {
     pub element_methods: Vec<FnSig>,
     /// Methods acquired on a `List<T>` of the bound type (`xs.dot_all(ys)`).
     pub bulk_methods: Vec<FnSig>,
+    /// Methods the contract declares `static` — **no** receiver, called on the bound type itself
+    /// (`T.decode(raw)`), including from inside a generic body under a `<T: Trait>` bound.
+    pub static_methods: Vec<FnSig>,
 }
 
 /// One extern value type rendered for an agent: its name, the built-in traits it satisfies, and its
@@ -264,12 +267,14 @@ fn render_bundle(qualified: &str, module: &str, b: &noeta_stdlib::ExtTrait) -> B
             format!("{min}+ uniform {fields}")
         }
     };
-    let (mut element_methods, mut bulk_methods) = (Vec::new(), Vec::new());
+    let (mut element_methods, mut bulk_methods, mut static_methods) =
+        (Vec::new(), Vec::new(), Vec::new());
     for m in b.methods {
         let sig = render_fn(&m.sig);
         match m.receiver {
             BundleReceiver::Element => element_methods.push(sig),
             BundleReceiver::Bulk => bulk_methods.push(sig),
+            BundleReceiver::Static => static_methods.push(sig),
         }
     }
     BundleApi {
@@ -278,6 +283,7 @@ fn render_bundle(qualified: &str, module: &str, b: &noeta_stdlib::ExtTrait) -> B
         constraint: format!("@packed struct with fields ({fields}), {layout}"),
         element_methods,
         bulk_methods,
+        static_methods,
     }
 }
 

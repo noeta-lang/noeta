@@ -418,6 +418,7 @@ const TABLE: &[Row] = &[
     Row("FnDecl", "is_public", Inert("a visibility flag")),
     Row("FnDecl", "is_dev_tier", Inert("a tier-provenance flag")),
     Row("FnDecl", "is_async", Inert("a flag")),
+    Row("FnDecl", "is_static", Inert("a flag")),
     Row(
         "FnDecl",
         "captures",
@@ -746,6 +747,7 @@ fn fn_with(node: &str, field: &str) -> FnDecl {
         directives: Vec::new(),
         is_dev_tier: false,
         is_async: false,
+        is_static: false,
         tier: None,
         captures: Vec::new(),
         body: Vec::new(),
@@ -1554,6 +1556,7 @@ fn decl_probes() -> Vec<Stmt> {
             ],
             is_dev_tier: false,
             is_async: false,
+            is_static: false,
             tier: Some(TierDecl {
                 name: s("TierDecl", "name"),
                 name_span: SP,

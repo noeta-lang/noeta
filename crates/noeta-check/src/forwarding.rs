@@ -410,7 +410,7 @@ fn method_candidates<'a>(
 /// the hidden slot is the only channel it has.
 ///
 /// Two exclusions, both matching what `collect_method_sig_classified` classifies as
-/// [`crate::Receiver::Associated`], so the pre-pass and the checker cannot disagree about which
+/// [`crate::Receiver::Static`], so the pre-pass and the checker cannot disagree about which
 /// members have a receiver:
 ///
 /// * a body that mentions `self` is an instance method, receiver channel;
@@ -958,6 +958,29 @@ fn walk_expr(expr: &Expr, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
                     span: *span,
                 };
                 cx.mark_ctor_position(Some(&position), expr, mark);
+            }
+            // `T.m(…)` — a bare enclosing parameter in RECEIVER position. Name-only, exactly like
+            // `type_name::<T>()` and the narrows above and for the same reason: the call is
+            // rewritten into the runtime's by-name dispatch, so the instantiation's name is the
+            // whole of what it reads. Without this the slot is never allocated and the body has no
+            // channel to resolve `T` through, which is the E0058 the checker would then report.
+            //
+            // The receiver is a bare identifier that RESOLVES to a parameter, which is as much as
+            // this walk can know — it runs before name resolution, so a local variable sharing a
+            // parameter's spelling marks a slot no site reads. That costs a hidden slot on a
+            // function whose author spelled a value `T`; it cannot make a call wrong, since the
+            // checker records the site only where the name really is the parameter.
+            if let Expr::Member { receiver, .. } = callee.as_ref()
+                && let Expr::Ident { name, span } = receiver.as_ref()
+            {
+                let as_ref = TypeRef::Named {
+                    name: name.clone(),
+                    args: Vec::new(),
+                    span: *span,
+                };
+                if let Some(p) = cx.bare_param(&as_ref) {
+                    mark(p, false);
+                }
             }
             rec!(callee);
             for a in noeta_ast::CallArg::values(args) {

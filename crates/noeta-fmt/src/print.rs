@@ -1164,6 +1164,11 @@ impl Printer<'_> {
         if decl.is_public {
             parts.push(Doc::text("pub "));
         }
+        // `static` precedes `async` — the same order the parser accepts, so a formatted
+        // declaration re-parses to the identical AST (the fmt safety gate).
+        if decl.is_static {
+            parts.push(Doc::text("static "));
+        }
         if decl.is_async {
             parts.push(Doc::text("async "));
         }
@@ -1581,6 +1586,11 @@ impl Printer<'_> {
     /// A trait method: a bodiless required signature (`fn f(...): T`) or a default with a body.
     fn trait_method(&self, m: &TraitMethod) -> Result<Doc, FmtError> {
         let mut parts = self.attrs(&m.sig.attrs)?;
+        // The declared-receiver modifier, ahead of `async` (see `FnDecl::is_static`). Dropping it
+        // would silently widen the contract the trait states.
+        if m.sig.is_static {
+            parts.push(Doc::text("static "));
+        }
         if m.sig.is_async {
             parts.push(Doc::text("async "));
         }

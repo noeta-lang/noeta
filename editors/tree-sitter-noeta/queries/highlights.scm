@@ -82,8 +82,8 @@
 ; whole literal node, which is more precise than matching its two spellings.
 ; --- BEGIN GENERATED VOCABULARY ---
 [
-  "mut" "fn" "enum" "struct" "type" "class" "destruct" "impl"
-  "trait" "namespace" "use" "pub" "echo"
+  "mut" "fn" "static" "enum" "struct" "type" "class" "destruct"
+  "impl" "trait" "namespace" "use" "pub" "echo"
 ] @keyword
 
 [

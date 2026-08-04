@@ -1,0 +1,57 @@
+// `Self` crosses a `<T: Trait>` bound. A trait's `Self` names the implementing type, and under a
+// bound the implementing type IS the type parameter — so `fn decode(raw: string): Self` called on a
+// `T: Decodable` receiver is a `T`, returnable from a function declared `T`, and `fn combine(other:
+// Self)` accepts a `T`. This used to leak the literal word into the call's type and mismatch
+// everything it met (`[E0007] expected 'T', found 'Self'`), even though the very same signature
+// resolved correctly on a concrete receiver — a bound licensed the method but not its type.
+//
+// The nested positions are the point of `spread`: `Self` is legal anywhere in a signature, so the
+// substitution is total over the lattice rather than a top-level special case.
+//
+// A `dyn Decodable` receiver is the mirror: `Self` resolves to the trait object itself, which is
+// exactly the existential the receiver already is — some implementor, named by `Self`.
+// expect: stdout "5"
+// expect: stdout "3"
+// expect: stdout "2"
+// expect: stdout "7"
+// expect: exit 0
+trait Decodable {
+    fn decode(raw: string): Self
+    fn combine(other: Self): int
+    fn spread(): List<Self>
+}
+struct Thing {
+    v: int
+    impl Decodable {
+        fn decode(raw: string): Thing {
+            return Thing { v: raw.len() }
+        }
+        fn combine(other: Thing): int {
+            return self.v + other.v
+        }
+        fn spread(): List<Thing> {
+            return [Thing { v: self.v }, Thing { v: self.v }]
+        }
+    }
+}
+// `Self` in return position, through the bound: the call is a `T`, so it satisfies the declared `T`.
+fn rebuild<T: Decodable>(seed: T, raw: string): T {
+    return seed.decode(raw)
+}
+// `Self` in parameter position: the bound's own `T` is what the method demands.
+fn merged<T: Decodable>(a: T, b: T): int {
+    return a.combine(b)
+}
+// `Self` nested inside a composite.
+fn copies<T: Decodable>(seed: T): int {
+    return seed.spread().len()
+}
+// The `dyn` mirror: `Self` resolves to `dyn Decodable`, so the call returns something the declared
+// trait-object return accepts.
+fn via_dyn(seed: dyn Decodable, raw: string): dyn Decodable {
+    return seed.decode(raw)
+}
+echo rebuild(Thing { v: 0 }, "hello").v
+echo merged(Thing { v: 1 }, Thing { v: 2 })
+echo copies(Thing { v: 9 })
+echo via_dyn(Thing { v: 0 }, "sevenXX").combine(Thing { v: 0 })

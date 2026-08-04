@@ -184,6 +184,10 @@ pub struct LoweringSites<'a> {
     /// **Bound**-handle sites (`value.method` in value position, EX.2b) → emitted as an
     /// [`Rvalue::BoundHandle`] (the receiver captured) instead of a field load.
     pub bound_handle_sites: &'a HashSet<Span>,
+    /// Type-parameter associated-call sites (`T.m(…)`) → the receiver parameter's spelling. The
+    /// call is rewritten into the runtime's by-name dispatch ([`type_param_assoc_call`]); the
+    /// spelling is what stops the rewritten call from matching this map again.
+    pub type_param_assoc_sites: &'a HashMap<Span, String>,
     /// Field-call sites: `obj.f(args)` call spans the checker resolved to a **field** of the
     /// receiver's type → lowered as [`Rvalue::Field`] then [`Rvalue::Call`] (the field-access-
     /// then-call desugar) instead of [`Rvalue::Method`], so `obj.f(args)` means `(obj.f)(args)`.
@@ -286,6 +290,7 @@ impl LoweringSites<'static> {
             variant_pattern_sites: VARIANT_PATTERNS.get_or_init(HashMap::new),
             handle_sites: HANDLES.get_or_init(HashMap::new),
             bound_handle_sites: SPANS.get_or_init(HashSet::new),
+            type_param_assoc_sites: NAMES.get_or_init(HashMap::new),
             field_call_sites: SPANS.get_or_init(HashSet::new),
             member_method_call_sites: SPANS.get_or_init(HashSet::new),
             f32_literal_sites: SPANS.get_or_init(HashSet::new),
@@ -331,6 +336,7 @@ macro_rules! lowering_sites {
             variant_pattern_sites: &$s.variant_pattern_sites,
             handle_sites: &$s.handle_sites,
             bound_handle_sites: &$s.bound_handle_sites,
+            type_param_assoc_sites: &$s.type_param_assoc_sites,
             field_call_sites: &$s.field_call_sites,
             member_method_call_sites: &$s.member_method_call_sites,
             f32_literal_sites: &$s.f32_literal_sites,
@@ -984,6 +990,110 @@ fn try_conversion_match(operand: &Expr, target: &str, span: Span) -> Expr {
         arms: vec![
             arm("Ok", call(ident("Ok"), vec![ident("$try")])),
             arm("Err", call(ident("Err"), vec![from_call])),
+        ],
+        span,
+    }
+}
+
+/// Build the rewrite a **type-parameter associated call** (`T.m(a, b)`) lowers through:
+///
+/// ```text
+/// match invoke(Type.Named(type_name::<T>(), []), "m", [a, b]) {
+///     Ok($assoc)  => $assoc,
+///     Err($assoc) => panic($assoc),
+/// }
+/// ```
+///
+/// A type parameter is erased, so the compiled body holds no type to dispatch on — but the
+/// instantiation's *name* reaches it through the same per-instantiation channel `type_name::<T>()`
+/// reads, and by-name dispatch of an associated function is something the runtime already does
+/// (`invoke` with a reflection `Type` receiver, both backends, one implementation). So this is a
+/// rewrite onto machinery that exists rather than a new dispatch path: nothing in either backend
+/// learns that type parameters can appear in receiver position.
+///
+/// `Type.Named` rather than `Type.Struct`/`Class`/`Enum`: the receiver is read for the name it
+/// carries, and `Named` is the one case that commits to no kind — `T` may be instantiated with any
+/// of the three.
+///
+/// `invoke` is fallible, and the `Err` arm is not dead code: the checker proves the *bound's* trait
+/// supplies `m` without a receiver, which is everything it can prove statically, and the panic
+/// carries the runtime's own message for anything that still cannot be reached. `$assoc` cannot
+/// collide with a user binding (`$` is not writable in source), and every synthesized node reuses
+/// the call's span except the name lookup, which must sit at the RECEIVER's span — that is where
+/// the checker recorded the channel.
+fn type_param_assoc_call(param: &str, method: &str, args: &[Expr], span: Span, recv: Span) -> Expr {
+    let ident = |name: &str| Expr::Ident {
+        name: noeta_ast::Name::canonical(name),
+        span,
+    };
+    let call = |callee: Expr, args: Vec<Expr>| Expr::Call {
+        callee: Box::new(callee),
+        args: args
+            .into_iter()
+            .map(noeta_ast::CallArg::positional)
+            .collect(),
+        span,
+    };
+    let arm = |variant: &str, body: Expr| noeta_ast::MatchArm {
+        guard: None,
+        pattern: noeta_ast::Pattern::Variant {
+            type_name: None,
+            variant: variant.to_string(),
+            bindings: vec![noeta_ast::Pattern::Binding {
+                name: "$assoc".to_string(),
+                span,
+            }],
+            span,
+        },
+        body: noeta_ast::ClosureBody::Expr(Box::new(body)),
+        span,
+    };
+    // `type_name::<T>()` at the receiver's span — the site the checker recorded the channel at,
+    // and the reason the rewrite resolves `T` at all.
+    let type_name = Expr::Reflect {
+        which: noeta_ast::ReflectKind::TypeName,
+        operand: noeta_ast::ReflectOperand::StaticType(noeta_ast::TypeRef::Named {
+            name: noeta_ast::Name::canonical(param),
+            args: Vec::new(),
+            span: recv,
+        }),
+        span: recv,
+    };
+    let receiver = call(
+        Expr::Member {
+            receiver: Box::new(ident(noeta_ast::reflect::TYPE_ENUM)),
+            name: "Named".to_string(),
+            name_span: span,
+            span,
+        },
+        vec![
+            type_name,
+            Expr::List {
+                items: Vec::new(),
+                span,
+            },
+        ],
+    );
+    let invoke = Expr::Reflect {
+        which: noeta_ast::ReflectKind::Invoke,
+        operand: noeta_ast::ReflectOperand::Dispatch {
+            recv: Some(Box::new(receiver)),
+            name: Box::new(Expr::Str {
+                value: method.to_string(),
+                span,
+            }),
+            args: Box::new(Expr::List {
+                items: args.to_vec(),
+                span,
+            }),
+        },
+        span,
+    };
+    Expr::Match {
+        scrutinee: Box::new(invoke),
+        arms: vec![
+            arm("Ok", ident("$assoc")),
+            arm("Err", call(ident("panic"), vec![ident("$assoc")])),
         ],
         span,
     }
@@ -2601,6 +2711,23 @@ impl Lowerer<'_> {
                             },
                             *span,
                         ));
+                    }
+                    // `T.m(args)` — the receiver is a bounded TYPE PARAMETER, which names a type
+                    // only at run time. Rewritten into the by-name dispatch the runtime already
+                    // performs and re-lowered; the receiver is not lowered as a value, because
+                    // there is no value to lower. Matched on the recorded SPELLING so the rewrite's
+                    // own `Type.Named(…)` member call — which lands on this very span — cannot
+                    // re-enter it.
+                    if let Some(param) = self.sites.type_param_assoc_sites.get(span)
+                        && let Expr::Ident {
+                            name: tn,
+                            span: rspan,
+                        } = receiver.as_ref()
+                        && tn.as_str() == param
+                    {
+                        let values: Vec<Expr> = noeta_ast::CallArg::values(args).cloned().collect();
+                        let rewritten = type_param_assoc_call(param, name, &values, *span, *rspan);
+                        return self.lower_expr(&rewritten, out);
                     }
                     let receiver = self.lower_expr(receiver, out)?;
                     // A field-call site (`obj.f(args)` where the checker resolved `f` to a FIELD of

@@ -1222,7 +1222,7 @@ impl Interpreter {
                 None => Err(self.runtime_error(
                     DiagnosticCode::UnknownName,
                     span,
-                    format!("type `{}` has no associated function `{name}`", def.name()),
+                    format!("type `{}` has no static function `{name}`", def.name()),
                 )),
             },
             other => Err(self.runtime_error(

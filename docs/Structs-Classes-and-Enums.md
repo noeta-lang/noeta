@@ -124,7 +124,7 @@ Methods live in the type body. Member access is **explicit**: a field is read an
 ```noeta
 class Counter {
     pub mut n: int
-    fn new(): Counter { return Counter { n: 10 } }   // associated function (no self)
+    fn new(): Counter { return Counter { n: 10 } }   // static function (no self)
     fn read(): int { return self.n }                  // fields read through self
     fn set_then_read(): int {
         self.n = 5                                     // self.f = v writes the field
@@ -139,7 +139,7 @@ class Counter {
 **Associated functions** take no receiver (constructors are the usual case) and are called on the bare type name; **methods** dispatch on a value:
 
 ```noeta check
-c = Counter.new()   // associated function
+c = Counter.new()   // static function
 c.set_then_read()   // method
 ```
 
@@ -205,7 +205,7 @@ echo match e {
 }
 ```
 
-Enums share the unified body grammar — they can hold methods and `impl Trait { }` blocks. An **instance method's `self` is the whole enum value** (reach the payload by matching); associated functions are called on the type name:
+Enums share the unified body grammar — they can hold methods and `impl Trait { }` blocks. An **instance method's `self` is the whole enum value** (reach the payload by matching); static functions are called on the type name:
 
 ```noeta
 enum Level {

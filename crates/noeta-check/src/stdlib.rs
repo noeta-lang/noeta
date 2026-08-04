@@ -158,7 +158,7 @@ pub(crate) fn sig_to_typeref(
         // with — the parser produces a plain `TypeRef::Named { name: "Self" }` for a bare `Self`
         // (only `Self::Name` becomes an `AssocProjection`) — so the user-trait machinery sees the
         // native and declared spellings as one thing.
-        SigType::SelfTy => named("Self"),
+        SigType::SelfTy => named(crate::subst::SELF_TYPE),
         // "Any number" as a declared type is the union of every numeric scalar — the same set
         // `arith_numeric_union` builds for the lattice side, spelled in the AST's type language.
         // "Any number" as a declared type is the union of every numeric scalar, spelled in the AST's

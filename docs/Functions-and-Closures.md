@@ -111,13 +111,13 @@ echo f(1, c: 9)    // 129 — `b` skipped, and still defaults
 
 The skipped parameter's default is evaluated by the callee in its own scope, exactly as when an argument list simply stops early — skipping one and omitting a trailing one are the same thing to the function being called.
 
-Named arguments work the same on methods and associated functions (`m.f(1, c: 9)`, `M.mk(b: 5, a: 1)`), and through [the pipe operator](#the-pipe-operator).
+Named arguments work the same on methods and static functions (`m.f(1, c: 9)`, `M.mk(b: 5, a: 1)`), and through [the pipe operator](#the-pipe-operator).
 
 A label must name a parameter of the callee (an unknown one is E0061, with the closest match suggested), and no parameter may be filled twice — once positionally and again by name.
 
 ### Where labels can be used
 
-A label binds against the callee's declared parameter **names**, so it works wherever those names are visible. That covers functions, methods, and associated functions declared in Noeta, and **standard-library functions**, whose signatures declare names too:
+A label binds against the callee's declared parameter **names**, so it works wherever those names are visible. That covers functions, methods, and static functions declared in Noeta, and **standard-library functions**, whose signatures declare names too:
 
 ```noeta
 use std.math

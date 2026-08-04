@@ -3050,7 +3050,7 @@ impl Interpreter {
                 None => Err(self.runtime_error(
                     DiagnosticCode::UnknownName,
                     span,
-                    format!("type `{}` has no associated function `{name}`", def.name()),
+                    format!("type `{}` has no static function `{name}`", def.name()),
                 )),
             };
         }
@@ -3612,7 +3612,7 @@ impl Interpreter {
             Value::Type(def) => {
                 let Some(closure) = def.methods.get(method) else {
                     return Ok(invoke_err(format!(
-                        "type `{}` has no associated function `{method}`",
+                        "type `{}` has no static function `{method}`",
                         def.name()
                     )));
                 };
@@ -3620,7 +3620,7 @@ impl Interpreter {
                 let target = format!("{}.{method}", def.name());
                 let (args, supplied) = match self.bind_invoke_args(
                     &target,
-                    "associated function",
+                    "static function",
                     &closure,
                     args,
                     named,

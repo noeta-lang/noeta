@@ -154,34 +154,45 @@ impl Checker {
             }
             Some(_) => {}
         }
-        // `From`'s `from` is an ASSOCIATED conversion — it builds a new target value from its
-        // argument, so a body referencing `self` has no receiver to refer to — and an annotated
-        // parameter must agree with the impl's declared source type.
+        // A built-in trait declares receiver-ness the same way a `.noe` trait does — with `static`
+        // ([`BuiltinTrait::declares_static`]) — and it is enforced by the same rule, spelled once
+        // (static-trait-methods arc). This USED to be a bespoke `if t == BuiltinTrait::From` that
+        // scanned the impl body for `self` and reported in `From`'s own words; `From::from` is now
+        // simply the one built-in whose contract says `static`, so the next static protocol
+        // inherits the check instead of needing a second copy of it.
+        if t.declares_static()
+            && let Some(m) = methods.iter().find(|m| m.name == req_name)
+            && m.body.iter().any(|s| s.mentions("self"))
+        {
+            self.error(
+                DiagnosticCode::InvalidImpl,
+                m.name_span,
+                format!("`{req_name}` uses `self`, but trait `{trait_name}` declares it `static`"),
+            )
+            .help(format!(
+                "a `static` method takes no receiver — build and return the new value from \
+                 `{req_name}`'s parameters alone"
+            ));
+        }
+        // `From` is the one built-in whose `impl` carries a type argument, so it is also the one
+        // whose declared source must agree with the method's annotated parameter. That is a rule
+        // about the trait's TYPE ARGUMENT, not about its receiver — the receiver half above is now
+        // general.
         if t == BuiltinTrait::From
             && let Some(m) = methods.iter().find(|m| m.name == "from")
+            && let (Some(arg), Some(param)) = (trait_args.first(), m.params.first())
         {
-            if m.body.iter().any(|s| s.mentions("self")) {
+            let want = self.annot(arg);
+            let got = self.annot_field(&param.ty);
+            if !Self::sig_types_compatible(&want, &got) {
                 self.error(
                     DiagnosticCode::InvalidImpl,
-                    m.name_span,
-                    "`from` must be an associated function — a conversion has no `self`"
-                        .to_string(),
-                )
-                .help("construct and return the new value from the `from` parameter alone");
-            }
-            if let (Some(arg), Some(param)) = (trait_args.first(), m.params.first()) {
-                let want = self.annot(arg);
-                let got = self.annot_field(&param.ty);
-                if !Self::sig_types_compatible(&want, &got) {
-                    self.error(
-                        DiagnosticCode::InvalidImpl,
-                        param.name_span,
-                        format!(
-                            "`from` converts the declared source `{want}`, but its parameter is \
-                             `{got}`"
-                        ),
-                    );
-                }
+                    param.name_span,
+                    format!(
+                        "`from` converts the declared source `{want}`, but its parameter is \
+                         `{got}`"
+                    ),
+                );
             }
         }
         // `Validate`'s `validate` must return `Result<void, E>` where `E` is a plain `string` or any
@@ -586,6 +597,32 @@ impl Checker {
                     decl.name, decl.name
                 ));
             }
+            // `static` is a contract term in exactly the sense `async` is, and it is checked in
+            // exactly the same place (static-trait-methods arc). A trait that declares `static fn m`
+            // promises **every** implementation answers `m` without a receiver, which is what lets a
+            // generic body under a `<T: Trait>` bound write `T.m(…)` without consulting a single
+            // implementor. An implementation whose body reaches for `self` breaks that promise, so
+            // it is the same class of error as the wrong arity — reported here, at the body that is
+            // wrong, rather than at whichever call site happens to pick this implementor.
+            //
+            // This runs for an OVERRIDE of a defaulted method too: the loop is over the trait's
+            // methods and only a *missing* one is skipped, so overriding `static fn m` with a
+            // `self`-using body is caught by the very same rule.
+            if tm.sig.is_static && m.body.iter().any(|s| s.mentions("self")) {
+                self.error(
+                    DiagnosticCode::InvalidImpl,
+                    m.name_span,
+                    format!(
+                        "`{req_name}` uses `self`, but trait `{}` declares it `static`",
+                        decl.name
+                    ),
+                )
+                .help(format!(
+                    "a `static` method takes no receiver — a `<T: {}>` bound may call it as \
+                     `T.{req_name}(…)`, where nothing binds `self`",
+                    decl.name
+                ));
+            }
             if m.params.len() != tm.sig.params.len() {
                 self.error(
                     DiagnosticCode::InvalidImpl,
@@ -678,6 +715,12 @@ impl Checker {
     /// implementor's binding (slice 1a). A projection with no resolvable binding — or under `dyn`, or
     /// nested inside a composite — degrades to `Type::Unknown` (a gradual hole that defers), so a
     /// conformance comparison never falsely rejects on an unresolved projection.
+    ///
+    /// A bare `Self` resolves **at any depth**, unlike a projection: `fn spread(): List<Self>` is a
+    /// perfectly ordinary contract, and the impl cannot meet it by spelling `Self` back (that is
+    /// E0013), so a nested `Self` left unresolved is a contract no implementation could ever
+    /// satisfy. The same [`subst_self`] the call sites use, so the impl side and the call side
+    /// cannot drift about what `Self` means.
     fn assoc_resolved_type(
         &self,
         ty: &Option<noeta_ast::TypeRef>,
@@ -695,13 +738,10 @@ impl Checker {
         // argument at the call site has nothing to unify a nominal `Self` against. A native trait
         // declaring `SigType::SelfTy` synthesizes into precisely this shape
         // (`stdlib::sig_type_ref`), so one fix serves both trait kinds.
-        if let Some(noeta_ast::TypeRef::Named { name, args, .. }) = ty
-            && name == "Self"
-            && args.is_empty()
-        {
-            return Type::Named(target.to_string(), Vec::new());
-        }
-        self.annot_field(ty)
+        subst_self(
+            self.annot_field(ty),
+            &Type::Named(target.to_string(), Vec::new()),
+        )
     }
 
     /// Validate a user-defined `trait` declaration (L1, UT1). The declaration was registered in
@@ -819,9 +859,31 @@ impl Checker {
         }
         let saved_params = self.enter_type_params(&decl.type_params);
         let bindings = vec![("self".to_string(), Type::DynTrait(decl.name.to_string()))];
+        // These bodies are the trait's OWN contract, the one place `static` is a legal declaration
+        // (static-trait-methods arc) — so the general rejection in `check_fn` stands down here.
+        let saved_contract = std::mem::replace(&mut self.coloring.in_trait_contract, true);
         for m in defaults {
+            // A `static` declaration binds the default exactly as it binds an implementor's
+            // override (E0015, `check_user_trait_impl`): a self-less default is what the promise
+            // says, and a default reaching for `self` would be a contract the trait breaks in its
+            // own body. Reported at the method's name, like every other conformance mismatch.
+            if m.sig.is_static && m.sig.body.iter().any(|s| s.mentions("self")) {
+                self.error(
+                    DiagnosticCode::InvalidImpl,
+                    m.sig.name_span,
+                    format!(
+                        "`{}` is declared `static`, but its default body uses `self`",
+                        m.sig.name
+                    ),
+                )
+                .help(
+                    "a `static` method takes no receiver — drop `static` from the declaration, or \
+                     write a default that needs none",
+                );
+            }
             self.check_fn(&m.sig, env, &bindings, TargetKind::Method);
         }
+        self.coloring.in_trait_contract = saved_contract;
         self.coloring.type_params = saved_params;
     }
 
@@ -905,7 +967,10 @@ impl Checker {
         let mut conflicts: Vec<String> = Vec::new();
         for m in bundle.methods {
             match m.receiver {
-                noeta_ext_abi::BundleReceiver::Element => {
+                // A `Static` method joins the SAME namespace an `Element` one does — the target
+                // type's methods — it is only reached without a receiver. So it collides with the
+                // same names.
+                noeta_ext_abi::BundleReceiver::Element | noeta_ext_abi::BundleReceiver::Static => {
                     if self
                         .symbols
                         .methods

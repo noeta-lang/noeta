@@ -98,9 +98,8 @@ fn family_of(word: ReservedWord) -> Family {
         ReservedRole::Keyword => {}
     }
     match word.word {
-        "fn" | "mut" | "struct" | "class" | "enum" | "type" | "impl" | "trait" | "destruct" => {
-            Family::Declaration
-        }
+        "fn" | "mut" | "struct" | "class" | "enum" | "type" | "impl" | "trait" | "destruct"
+        | "static" => Family::Declaration,
         "use" | "namespace" | "pub" => Family::Import,
         "if" | "then" | "else" | "for" | "while" | "break" | "continue" | "in" | "match"
         | "return" | "yield" => Family::ControlFlow,

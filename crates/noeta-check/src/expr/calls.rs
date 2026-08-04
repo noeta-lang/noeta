@@ -1015,8 +1015,8 @@ impl Checker {
                         format!("type `{shown}` is not callable"),
                     )
                     .help(format!(
-                        "build one with a literal (`{shown} {{ … }}`), or call an associated \
-                         function on the type (`{shown}.new(…)`)"
+                        "build one with a literal (`{shown} {{ … }}`), or call a static function \
+                         on the type (`{shown}.new(…)`)"
                     ));
                     return Type::Unknown;
                 }
@@ -1214,7 +1214,7 @@ impl Checker {
                     // associated-style — there is no receiver to become `self` (E0047,
                     // prelude-redesign EX.2). A self-less method of a trait's interface
                     // ([`Receiver::Either`]) is reachable this way as well as on a value.
-                    if !self.receiver_of(tn.as_str(), name).allows_associated_call() {
+                    if !self.receiver_of(tn.as_str(), name).allows_static_call() {
                         self.error(
                             DiagnosticCode::InvalidReceiver,
                             span,
@@ -1279,9 +1279,82 @@ impl Checker {
                     self.error(
                         DiagnosticCode::TypeMismatch,
                         span,
-                        format!("type `{shown}` has no associated function `{name}`"),
+                        format!("type `{shown}` has no static function `{name}`"),
                     );
                     return Type::Unknown;
+                }
+                // `T.m(args)` — a bounded TYPE PARAMETER in receiver position. Everything above
+                // needed a receiver that names something *now*: a declared type, a module, an enum.
+                // A type parameter names one only at run time, so without this arm the receiver fell
+                // through to the value path and was reported as a missing name (E0005) — at the
+                // DEFINITION site, which is the tell that this was name resolution never consulting
+                // generic scope rather than anything about inference.
+                //
+                // Deliberately narrow: this makes a type parameter legal in receiver position for a
+                // trait-supplied self-less method and nothing else. It does not make `T` a type
+                // name — `T { … }`, `T.Variant`, an annotation position — which is a far larger
+                // commitment, and one a bound does not license.
+                if let Expr::Ident {
+                    name: tn,
+                    span: tn_span,
+                } = receiver.as_ref()
+                    && lookup(env, tn.as_str()).is_none()
+                    && let Some(scoped) = self.coloring.type_params.get(tn.as_str()).cloned()
+                    && let Some((trait_name, declared_static)) =
+                        self.type_param_static_trait(&scoped.param, name)
+                {
+                    let (params, required, ret) = self
+                        .type_param_trait_method(&scoped.param, name)
+                        .expect("the bound that supplies the method also types it");
+                    // The receiver rule (E0047), asked of the trait's DECLARATION — the one place
+                    // that can answer for every implementation at once (static-trait-methods arc).
+                    // An unmarked method stays unconstrained: implementors derive their own
+                    // receiver-ness from their bodies, so nothing here may assume they agree, and
+                    // a self-less DEFAULT proves nothing either — an implementor may override it
+                    // with a body that reads `self`. Only the declaration binds overrides.
+                    if !declared_static {
+                        self.error(
+                            DiagnosticCode::InvalidReceiver,
+                            span,
+                            format!(
+                                "`{name}` cannot be called on the type parameter `{tn}`: trait \
+                                 `{trait_name}` does not declare `{name}` static, so an \
+                                 implementation may need a receiver a `{tn}` has no value to \
+                                 supply"
+                            ),
+                        )
+                        .help(format!(
+                            "declare it in the trait — `static fn {name}(…)` in `trait \
+                             {trait_name}` — which then holds every implementation to it, or call \
+                             it on a value of `{tn}`"
+                        ));
+                    }
+                    // The instantiation's NAME is what the rewritten call dispatches on, and it
+                    // reaches the body through the very channel `type_name::<T>()` reads — recorded
+                    // at the RECEIVER's span, which is where lowering asks for it. A parameter no
+                    // channel carries gets the same tailored E0058 every other name-keyed surface
+                    // gives it, rather than a second wording of the same fact.
+                    let as_ref = TypeRef::Named {
+                        name: noeta_ast::Name::canonical(tn.as_str()),
+                        args: Vec::new(),
+                        span: *tn_span,
+                    };
+                    if !self.record_type_param(&scoped.param, *tn_span) {
+                        self.reject_erased_type_param(&as_ref, &format!("{tn}.{name}"));
+                        self.finalize_closure_args(&params, args, arg_exprs, env);
+                        return ret;
+                    }
+                    // Arguments bind by POSITION here: the rewrite hands them to the runtime's
+                    // by-name dispatch as a list, which has no labels to bind them with. Rejected
+                    // rather than silently bound in written order, which is what a label exists to
+                    // stop meaning.
+                    self.reject_unbound_labels(arg_exprs, name);
+                    self.finalize_closure_args(&params, args, arg_exprs, env);
+                    self.check_args(&params, required, args, arg_exprs, span, name);
+                    self.sites
+                        .type_param_assoc_sites
+                        .insert(call_span, tn.to_string());
+                    return ret;
                 }
                 // `receiver.method(args)` — a built-in method, a user method, or (on a `dyn`/hole
                 // receiver) a runtime-dispatched call that stays deferred.
@@ -1318,7 +1391,7 @@ impl Checker {
                         self.error(
                             DiagnosticCode::InvalidReceiver,
                             span,
-                            format!("`{name}` is an associated function of `{n}`"),
+                            format!("`{name}` is a static function of `{n}`"),
                         )
                         .help(format!("call it on the type: `{n}.{name}(...)`"));
                         return sig.ret.clone();
@@ -1883,7 +1956,7 @@ impl Checker {
         // (every standalone-impl method) was accepted as `T.m(…)` and refused as `T.m::<X>(…)`.
         // Asking [`Checker::receiver_of`] the same question all three sites ask settles it.
         let receiver = self.receiver_of(&type_name, name);
-        if associated && !receiver.allows_associated_call() {
+        if associated && !receiver.allows_static_call() {
             self.error(
                 DiagnosticCode::InvalidReceiver,
                 name_span,
@@ -1899,7 +1972,7 @@ impl Checker {
             self.error(
                 DiagnosticCode::InvalidReceiver,
                 name_span,
-                format!("`{name}` is an associated function of `{type_name}`"),
+                format!("`{name}` is a static function of `{type_name}`"),
             )
             .help(format!(
                 "call it on the type: `{type_name}.{name}::<...>(...)`"

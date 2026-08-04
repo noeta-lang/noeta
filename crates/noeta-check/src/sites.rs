@@ -163,6 +163,19 @@ pub struct Sites {
     /// Bound-handle sites (`value.method` in value position, EX.2b) → lowered to
     /// [`Rvalue::BoundHandle`] (the receiver captured into the handle).
     pub bound_handle_sites: HashSet<Span>,
+    /// **Type-parameter associated-call** sites: the span of a `T.m(…)` call whose receiver `T` is
+    /// an in-scope type parameter, mapped to the parameter's spelling.
+    ///
+    /// A type parameter is erased, so there is no type in the compiled body to dispatch on — but
+    /// the instantiation's NAME reaches the body through the same per-instantiation channel
+    /// `type_name::<T>()` reads (recorded at the *receiver's* span, which is where lowering asks
+    /// for it). Lowering rewrites the call into the by-name dispatch the runtime already performs,
+    /// so this is a rewrite instruction, not a new dispatch mechanism.
+    ///
+    /// The value is the spelling rather than a bare span set because the rewrite it triggers
+    /// contains member calls of its own; matching on the receiver's name is what keeps the
+    /// desugared call from re-entering the rewrite.
+    pub type_param_assoc_sites: HashMap<Span, String>,
     /// Field-call sites: `obj.f(args)` spans the checker resolved to a **field** of the receiver's
     /// type (no method `f` exists — a method wins in call position). Lowering emits field-get +
     /// indirect call (`Rvalue::Field` then `Rvalue::Call`) at these spans instead of method
@@ -393,6 +406,7 @@ pub(crate) const SITE_POLICIES: &[(&str, SiteClass, &str)] = &[
     ("folded_type_tests", SiteClass::SpanKeyed, "span → the constant answer of a statically decided `is`"),
     ("handle_sites", SiteClass::SpanKeyed, "span → (type, method, associated)"),
     ("bound_handle_sites", SiteClass::SpanKeyed, "a bare span set"),
+    ("type_param_assoc_sites", SiteClass::SpanKeyed, "span → the receiver type parameter's SPELLING; no index"),
     ("field_call_sites", SiteClass::SpanKeyed, "a bare span set"),
     ("member_method_call_sites", SiteClass::SpanKeyed, "a bare span set"),
     ("trait_call_sites", SiteClass::SpanKeyed, "span → (trait qualified identity, method)"),
@@ -458,6 +472,7 @@ impl Sites {
             folded_type_tests: _,
             handle_sites: _,
             bound_handle_sites: _,
+            type_param_assoc_sites: _,
             field_call_sites: _,
             member_method_call_sites: _,
             trait_call_sites: _,
@@ -644,6 +659,8 @@ pub(crate) struct SiteMaps {
     /// **Bound**-handle sites (`value.method` in value position, EX.2b): spans whose `Member`
     /// lowers to an [`Rvalue::BoundHandle`] (receiver captured) instead of a field load.
     pub(crate) bound_handle_sites: HashSet<Span>,
+    /// Type-parameter associated-call sites (`T.m(…)`) — see [`Sites::type_param_assoc_sites`].
+    pub(crate) type_param_assoc_sites: HashMap<Span, String>,
     /// Field-call sites (`obj.f(args)` where `f` is a field) — see [`Sites::field_call_sites`].
     pub(crate) field_call_sites: HashSet<Span>,
     /// Generic-method turbofish spans reached via the `TypedModuleCall` surface (D3) — see
@@ -706,6 +723,7 @@ impl SiteMaps {
             folded_type_tests: self.folded_type_tests,
             handle_sites: self.handle_sites,
             bound_handle_sites: self.bound_handle_sites,
+            type_param_assoc_sites: self.type_param_assoc_sites,
             field_call_sites: self.field_call_sites,
             member_method_call_sites: self.member_method_call_sites,
             f32_literal_sites: self.f32_literal_sites,
