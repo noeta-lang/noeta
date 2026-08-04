@@ -11,7 +11,7 @@
 //!   edition change served a stale artifact.
 //!
 //! And a third, found by the parallel-path audit and fixed in its first pass: `package_uses` — the
-//! per-package `[directives]`/`[tiers]` table that decides *which extension* a `@name` expands to —
+//! per-package `[directives]` table that decides *which extension* a `@name` expands to —
 //! was not folded at all, so editing `[directives] openapi = "para"` to `openapi = "other"` changed
 //! no `.noe` byte, produced the same key, hit the cache, and ran the **old provider's generated
 //! code**. Deleting the binding was worse: that should be `E0036`, but a hit skips the whole front

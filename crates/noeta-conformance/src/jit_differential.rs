@@ -280,7 +280,7 @@ fn compare_tiers_workspace(
     } else {
         // No `@name` tables: the corpus's dependency graph is synthesized from the case's
         // subdirectories (`crate::dep_sources`), not from a `noeta.toml`, so no package binds a
-        // `[tiers]`/`[directives]` local name — an empty `PackageUses` is behavior-identical.
+        // `[directives]` local name — an empty `PackageUses` is behavior-identical.
         noeta_db::workspace_with_deps(
             &db,
             &raw.entry,

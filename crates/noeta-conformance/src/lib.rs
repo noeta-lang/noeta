@@ -446,7 +446,7 @@ fn run_linked(entry: &Path, stage: Stage) -> Outcome {
     let load = if deps.is_empty() {
         noeta_loader::load(entry, noeta_lexer::Edition::DEFAULT, root.as_ref())
     } else {
-        // Conformance cases carry no manifest `[tiers]`/`[directives]`, so an empty `PackageUses`
+        // Conformance cases carry no manifest `[directives]`, so an empty `PackageUses`
         // suffices — a dependency's own `@tier(…, text)` still captures via the global scan.
         noeta_loader::load_with_deps(
             entry,

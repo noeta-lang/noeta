@@ -321,7 +321,7 @@ impl TierRegistry {
     }
 
     /// Resolve a `@local` written by the package at `origin` to a concrete [`ResolvedTier`] — the heart
-    /// of per-package tier resolution (per-package naming arc). **A `[tiers]` binding wins**: the
+    /// of per-package tier resolution (per-package naming arc). **A `[directives]` binding wins**: the
     /// package's own local `@name` → the provider it named + the tier that provider exported (so a
     /// rename or a third-party provider resolves to exactly what the manifest declared). **Otherwise the
     /// name resolves ambiently** — a std extension tier or a program `@tier` of that bare name — which
@@ -335,6 +335,7 @@ impl TierRegistry {
         local: &str,
         origin: Option<&noeta_span::PackageOrigin>,
         uses: &noeta_span::PackageUses,
+        packages: &noeta_span::PackageMap,
     ) -> Option<ResolvedTier<'a>> {
         if let Some(o) = origin
             && let Some(u) = uses.get(o, local)
@@ -352,7 +353,7 @@ impl TierRegistry {
             }
             return None;
         }
-        // Ambient (no `[tiers]` binding for this name). With **no binding regime in effect at all**
+        // Ambient (no `[directives]` binding for this name). With **no binding regime in effect at all**
         // — an empty table: a bare script, an embed session, a single-file check — resolve GLOBALLY
         // (any provider root), the tier counterpart of the directive ambient fallback
         // (`resolve_ext_directive_at`). Without it a session extension's own tier (root ≠ `"std"`,
@@ -374,7 +375,27 @@ impl TierRegistry {
                 return Some(ResolvedTier::Ext(t, BUILTIN_PROVIDER.to_string()));
             }
         }
-        self.declared(local).map(ResolvedTier::Declared)
+        // A package's **own** `@tier` still resolves by its bare name — that is what a program
+        // declaring a tier for itself relies on, and it needs no binding because there is no
+        // provider to choose. A **dependency's** does not: it is reachable only through a
+        // `[directives]` binding, exactly as a dependency's directive is (E0019). Being *linked* is
+        // not consent — a `use` of some other name in the provider's module drags the `@tier`
+        // declaration into the program as a side effect, and before this the tier then answered to
+        // its bare name program-wide. That made `use` an accidental second enabling mechanism,
+        // invisible at the call site: nothing about `use para.db.sql` says "this is what makes
+        // `@sql { … }` an expression".
+        //
+        // The comparison is between the declaring package and the using one, NOT keyed on whether a
+        // binding table exists: a project that binds *nothing* has an empty table too, and gating on
+        // that let an import keep working in exactly the case this rule is for. A bare script needs no
+        // special case either — its only package is the root, so its own `@tier` compares equal.
+        // Unknown provenance on either side is not adjudicated.
+        self.declared(local)
+            .filter(|d| match (packages.at(d.span), origin) {
+                (None, _) | (_, None) => true,
+                (Some(declared_in), Some(used_in)) => declared_in == used_in,
+            })
+            .map(ResolvedTier::Declared)
     }
 
     /// The canonical [`TierId`] a `@local` at `origin` resolves to (see [`Self::resolve_at`]).
@@ -383,8 +404,10 @@ impl TierRegistry {
         local: &str,
         origin: Option<&noeta_span::PackageOrigin>,
         uses: &noeta_span::PackageUses,
+        packages: &noeta_span::PackageMap,
     ) -> Option<TierId> {
-        self.resolve_at(local, origin, uses).map(|r| r.id())
+        self.resolve_at(local, origin, uses, packages)
+            .map(|r| r.id())
     }
 
     /// Resolve who provides `tier` under `providers` (a target's tier → provider map; empty ⇒ no
@@ -488,14 +511,31 @@ impl TierRegistry {
     /// extension expr tier omitted its handler, a misconfiguration). The single resolution point
     /// the checker's typing and IR lowering both consult, so native and program expr tiers desugar
     /// through the identical `Call` path.
-    pub fn expr_tier_handler(&self, tier: &str) -> Option<noeta_ast::desugar::ExprTierHandler> {
+    /// Resolved through [`Self::resolve_at`], the same per-package path a block tier takes. It used
+    /// to resolve *globally* — `find_ext_tier` ∪ `declared`, ignoring origin and bindings — which is
+    /// how an expression tier came to have a second, undocumented enabling mechanism: linking the
+    /// provider's module (which any `use` of any name in it does) put the `@tier` declaration in the
+    /// program, and a global lookup then answered to the bare name everywhere. One rule, two
+    /// implementations, drifted — the shape this repo keeps meeting.
+    pub fn expr_tier_handler(
+        &self,
+        tier: &str,
+        origin: Option<&noeta_span::PackageOrigin>,
+        uses: &noeta_span::PackageUses,
+        packages: &noeta_span::PackageMap,
+    ) -> Option<noeta_ast::desugar::ExprTierHandler> {
         use noeta_ast::desugar::ExprTierHandler;
-        if let Some(t) = self.reg().find_ext_tier(tier).filter(|t| t.expr.is_some()) {
-            return t.handler.map(ExprTierHandler::from_native_path);
+        match self.resolve_at(tier, origin, uses, packages)? {
+            ResolvedTier::Ext(t, _) => t
+                .expr
+                .is_some()
+                .then(|| t.handler.map(ExprTierHandler::from_native_path))
+                .flatten(),
+            ResolvedTier::Declared(d) => d
+                .expr
+                .is_some()
+                .then(|| ExprTierHandler::Program(d.runner.clone())),
         }
-        self.declared(tier)
-            .filter(|d| d.expr.is_some())
-            .map(|d| ExprTierHandler::Program(d.runner.clone()))
     }
 
     /// Every declared **verbatim-body** tier's name — text tiers *and* expression tiers, both of
@@ -877,7 +917,9 @@ pub fn code_tiers_in(program: &Program, prov: &Provenance) -> Vec<String> {
         ) {
             return;
         }
-        let Some(resolved) = registry.resolve_at(tier, prov.packages.at(span), &prov.uses) else {
+        let Some(resolved) =
+            registry.resolve_at(tier, prov.packages.at(span), &prov.uses, &prov.packages)
+        else {
             return;
         };
         if resolved.is_code() && seen.insert(tier.to_string()) {
@@ -992,7 +1034,14 @@ pub fn activate_tiers(program: &Program, active: &[&str], prov: &Provenance) -> 
     // provides) simply contribute no identity.
     let active_ids: std::collections::HashSet<TierId> = active
         .iter()
-        .filter_map(|n| registry.resolve_id(n, Some(&noeta_span::PackageOrigin::Root), &prov.uses))
+        .filter_map(|n| {
+            registry.resolve_id(
+                n,
+                Some(&noeta_span::PackageOrigin::Root),
+                &prov.uses,
+                &prov.packages,
+            )
+        })
         .collect();
     // With the `doc` tier live, a declaration-attached `@doc` block (adjacency-resolved on the
     // *input* program, before its blocks are gone) stamps `#[Doc("…")]` onto its declaration —
@@ -1017,9 +1066,12 @@ pub fn activate_tiers(program: &Program, active: &[&str], prov: &Provenance) -> 
     let mut texts: std::collections::BTreeMap<String, Vec<TextBlock>> =
         std::collections::BTreeMap::new();
     for block in resolve_texts(program) {
-        let Some(resolved) =
-            registry.resolve_at(&block.tier, prov.packages.at(block.span), &prov.uses)
-        else {
+        let Some(resolved) = registry.resolve_at(
+            &block.tier,
+            prov.packages.at(block.span),
+            &prov.uses,
+            &prov.packages,
+        ) else {
             continue;
         };
         if matches!(resolved, ResolvedTier::Declared(_))
@@ -1093,9 +1145,12 @@ pub fn activate_tiers(program: &Program, active: &[&str], prov: &Provenance) -> 
                 // Resolve the method's `@name` in the package that wrote it, then judge by identity:
                 // the std `test`/`bench` tiers become runnable roots when live, whatever local name a
                 // rename gave them. Any other tier at a method site collects no root (as before).
-                let Some(id) =
-                    registry.resolve_id(&dir.name, prov.packages.at(dir.name_span), &prov.uses)
-                else {
+                let Some(id) = registry.resolve_id(
+                    &dir.name,
+                    prov.packages.at(dir.name_span),
+                    &prov.uses,
+                    &prov.packages,
+                ) else {
                     continue;
                 };
                 if !active_ids.contains(&id) {
@@ -1242,7 +1297,12 @@ fn resolve_block(
 
         // Resolve the block's `@name` in the package that wrote it (its `tier_span`'s origin), then
         // judge everything below by the resolved tier's identity — not the local spelling.
-        let resolved = registry.resolve_at(tier, prov.packages.at(*tier_span), &prov.uses);
+        let resolved = registry.resolve_at(
+            tier,
+            prov.packages.at(*tier_span),
+            &prov.uses,
+            &prov.packages,
+        );
         let config: Option<String> = resolved
             .as_ref()
             .and_then(|r| r.config().map(str::to_string));

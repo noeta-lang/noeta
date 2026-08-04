@@ -118,10 +118,10 @@ A tier directive can take arguments — `@bench(iterations: 1000)` (or positiona
 
 ## Naming tiers and build targets — `noeta.toml`
 
-Two separate axes. **Which provider declares each tier your source uses** is the `[tiers]` table — a local `@name` → `"provider[:exported]"`, the tier counterpart of `[directives]`. There are no ambient built-in tiers: `test`/`bench`/`doc`/`debug` are ordinary `std` tiers you name here like any other provider's, and `:exported` renames one (to dodge a collision between two providers' same-named tiers):
+Two separate axes. **Which provider supplies each `@name` your source writes** is the `[directives]` table — a local `@name` → `"provider[:exported]"`. One table for directives and tiers alike: source cannot tell them apart until resolution, so the manifest does not make you. There are no ambient built-in tiers: `test`/`bench`/`doc`/`debug` are ordinary `std` tiers you name here like any other provider's, and `:exported` renames one (to dodge a collision between two providers' same-named tiers):
 
 ```toml
-[tiers]
+[directives]
 test  = "std"
 bench = "std"
 debug = "std"
@@ -129,7 +129,7 @@ crit  = "criterion:bench"   # a dependency's `bench` tier, named `@crit` locally
                             # collide with std's `@bench`
 ```
 
-**Which of those tiers are *live* in a build** is a named target's `tiers` — an activation live-set of your local tier names, written as an array on the target: a bare name turns a tier on, a `-name` turns one off (to drop a tier an `extends` base left live). It no longer names a provider (that moved to `[tiers]`); a tier's provider is package-level, the same in every build:
+**Which of those tiers are *live* in a build** is a named target's `tiers` — an activation live-set of your local tier names, written as an array on the target: a bare name turns a tier on, a `-name` turns one off (to drop a tier an `extends` base left live). It no longer names a provider (that moved to `[directives]`); a tier's provider is package-level, the same in every build:
 
 ```toml
 [targets.dev]
@@ -152,7 +152,7 @@ debug = false         # …and drop the inherited debug
 - `extends = "<base>"` inherits another target's live-set; a nearer entry overrides the base's (a `false` turns an inherited tier off). Cycles are detected and rejected.
 - `--target <NAME>` on `noeta run` activates those tiers (unioned with `--tier`). On `noeta test`/`bench`/`doc`, `--target` acts as a **gate** — the tool no-ops if the target does not make its tier live.
 
-`noeta init` scaffolds exactly this shape: a `[tiers]` table naming the four std tiers, a `development` target switching them on beside an explicit `[targets.production]` with no tiers live — a stable label for CI and release builds.
+`noeta init` scaffolds exactly this shape: a `[directives]` table naming the four std tiers, a `development` target switching them on beside an explicit `[targets.production]` with no tiers live — a stable label for CI and release builds.
 
 ### Target-scoped dependencies
 

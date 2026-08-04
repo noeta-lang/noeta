@@ -260,7 +260,7 @@ impl Checker {
         name: &str,
     ) -> Option<&'static noeta_ext_abi::registry::ExtDirective> {
         // No binding regime in effect anywhere in the program — a bare file / editor scratch buffer /
-        // a package that declares no `[directives]` or `[tiers]` at all — leaves nothing to scope by,
+        // a package that declares no `[directives]` at all — leaves nothing to scope by,
         // so resolve globally (the directive counterpart of the tier ambient fallback). The IDE hands
         // even a manifest-less scratch a `Root` origin, so keying on the span alone is not enough; the
         // empty binding table is the reliable "no per-package context" signal. A package that DOES use
@@ -277,7 +277,7 @@ impl Checker {
     }
 
     /// Resolve a `@name` **tier** block for the package that wrote it (per-package naming arc), the
-    /// tier counterpart of [`Self::resolve_ext_directive_at`]: the span's package → its `[tiers]`
+    /// tier counterpart of [`Self::resolve_ext_directive_at`]: the span's package → its `[directives]`
     /// binding (rename/provider) → the concrete tier, else the ambient std/program-declared tier of
     /// that bare name. The same [`crate::tiers::TierRegistry::resolve_at`] activation drives, so the
     /// checker accepts exactly the `@name`s activation keeps — a renamed tier is not "unknown" here.
@@ -290,6 +290,7 @@ impl Checker {
             name,
             self.package_at(span),
             &self.config.provenance.uses,
+            &self.config.provenance.packages,
         )
     }
 
@@ -380,7 +381,7 @@ impl Checker {
                 format!("`@{name}` is a directive a dependency provides, but this package does not bind it"),
             )
             .help(format!(
-                "bind it in `[directives]`: `{name} = \"<dependency>\"` (add `:exported` to rename)"
+                "bind it in `[directives]`: `{name} = \"<provider>\"` (add `:exported` to rename)"
             ));
             return;
         }

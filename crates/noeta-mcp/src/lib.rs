@@ -1147,9 +1147,9 @@ pub(crate) struct ResolvedWorkspace {
     /// The dependency packages as salsa inputs. Empty for inline `source`, for a bare script with
     /// no manifest, and whenever resolution fails (see [`resolve_workspace`]).
     pub deps: Vec<noeta_db::DepSources>,
-    /// The whole program's per-package `@name` resolution tables (`[directives]`/`[tiers]`), from the
+    /// The whole program's per-package `@name` resolution tables (`[directives]`), from the
     /// same query-path graph resolve that produced [`Self::deps`]. Threaded onto the salsa
-    /// [`Workspace`](noeta_db::Workspace) so a renamed text tier (`[tiers] docs = "std:doc"`) lexes
+    /// [`Workspace`](noeta_db::Workspace) so a renamed text tier (`[directives] docs = "std:doc"`) lexes
     /// verbatim under the MCP surface exactly as it does under `noeta run`/`noeta check` and the
     /// editor (per-package tier-naming arc, 3g). Empty for inline `source` and manifest-less scripts.
     pub package_uses: noeta_span::PackageUses,

@@ -25,7 +25,7 @@ fn run_target_activates_its_tiers() {
     // `--tier debug` would — but driven by `noeta.toml`.
     let file = temp_project(
         "prof_run",
-        "[tiers]\ndebug = \"std\"\n[targets.dev.tiers]\ndebug = true\n",
+        "[directives]\ndebug = \"std\"\n[targets.dev.tiers]\ndebug = true\n",
         TIERED_PROGRAM,
     );
     lang()
@@ -44,7 +44,7 @@ fn run_target_activates_its_tiers_via_the_array_spelling() {
     // the boolean sub-table does — end to end through a real `noeta run`.
     let file = temp_project(
         "prof_run_array",
-        "[tiers]\ndebug = \"std\"\n[targets.dev]\ntiers = [\"debug\"]\n",
+        "[directives]\ndebug = \"std\"\n[targets.dev]\ntiers = [\"debug\"]\n",
         TIERED_PROGRAM,
     );
     lang()
@@ -60,7 +60,7 @@ fn run_target_activates_its_tiers_via_the_array_spelling() {
 #[test]
 fn a_renamed_std_tier_activates_and_strips_under_its_local_name() {
     // The headline of per-package tier naming: a package renames std's `debug` tier to a local
-    // `@dbg` (`[tiers] dbg = "std:debug"`). `@dbg` is judged by its identity `(std, debug)`, so it
+    // `@dbg` (`[directives] dbg = "std:debug"`). `@dbg` is judged by its identity `(std, debug)`, so it
     // activates under `--tier dbg` (the block runs) and strips without it — exactly as `@debug` would,
     // proving activation keys on the tier's identity, not the hardcoded built-in name.
     let src = "fn f(x: int): void {\n\
@@ -68,7 +68,7 @@ fn a_renamed_std_tier_activates_and_strips_under_its_local_name() {
                echo \"out ${x}\"\n\
                }\n\
                f(5)\n";
-    let file = temp_project("rename_dbg", "[tiers]\ndbg = \"std:debug\"\n", src);
+    let file = temp_project("rename_dbg", "[directives]\ndbg = \"std:debug\"\n", src);
     lang()
         .arg("run")
         .arg(&file)
@@ -120,7 +120,7 @@ fn test_target_gates_the_runner() {
 fn test_target_with_tier_live_runs() {
     let file = temp_project(
         "prof_test_live",
-        "[tiers]\ntest = \"std\"\n[targets.dev.tiers]\ntest = true\n",
+        "[directives]\ntest = \"std\"\n[targets.dev.tiers]\ntest = true\n",
         TIERED_PROGRAM,
     );
     lang()
@@ -137,7 +137,7 @@ fn test_target_with_tier_live_runs() {
 fn run_unknown_target_is_an_error() {
     let file = temp_project(
         "prof_unknown",
-        "[tiers]\ndebug = \"std\"\n[targets.dev.tiers]\ndebug = true\n",
+        "[directives]\ndebug = \"std\"\n[targets.dev.tiers]\ndebug = true\n",
         TIERED_PROGRAM,
     );
     lang()
@@ -178,7 +178,7 @@ fn run_target_without_manifest_is_an_error() {
 fn check_resolves_a_target_against_the_directory_it_is_given() {
     let file = temp_project(
         "check_target_dir",
-        "[tiers]\ndebug = \"std\"\n[targets.dev.tiers]\ndebug = true\n",
+        "[directives]\ndebug = \"std\"\n[targets.dev.tiers]\ndebug = true\n",
         TIERED_PROGRAM,
     );
     let dir = file.parent().expect("the project directory");

@@ -2644,7 +2644,7 @@ impl DocumentStore {
     /// Which tiers to activate comes from the entry's **own declared blocks**
     /// ([`entry_code_tiers`](noeta_db::entry_code_tiers)), not from the literal name `test`.
     /// Activation resolves a tier by identity rather than spelling, so a plain rename
-    /// (`[tiers] spec = "std:test"`) survived a hardcoded `"test"` — that name still resolved to
+    /// (`[directives] spec = "std:test"`) survived a hardcoded `"test"` — that name still resolved to
     /// `(std, test)` and brought `@spec` alive with it. What did not survive is a package that
     /// moves the name `test` itself onto some other tier: the hardcoded name then activated a
     /// different shape and the explorer was empty for a file full of tests. Asking the entry what
@@ -4870,7 +4870,7 @@ mod tests {
     #[test]
     fn workspace_captures_a_renamed_text_tier_bound_in_the_manifest() {
         // Per-package tier-naming arc (3g), editor seam: a `noeta.toml` binds std's `doc` **text**
-        // tier under a local `@docs` (`[tiers] docs = "std:doc"`). The IDE lexes through its own salsa
+        // tier under a local `@docs` (`[directives] docs = "std:doc"`). The IDE lexes through its own salsa
         // `ast`/`tokens_in` query, not the loader — so it must resolve the SAME per-package text-tier
         // set the loader now does, or the `@docs { … }` markdown body (a bare `"` opens an
         // unterminated string when tokenized as code, `<`/`>` are stray operators) is a hard lex error
@@ -4881,7 +4881,7 @@ mod tests {
             "renamed_text_tier_manifest",
             &[(
                 "noeta.toml",
-                "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n[tiers]\ndocs = \"std:doc\"\n",
+                "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n[directives]\ndocs = \"std:doc\"\n",
             )],
         );
         let entry_uri = path_to_uri(&dir.join("main.noe"));

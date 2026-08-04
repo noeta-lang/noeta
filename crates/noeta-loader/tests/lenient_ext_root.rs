@@ -88,7 +88,15 @@ fn lenient_retains_a_dep_module_use_of_a_native_module_under_an_extension_root()
     );
 
     // `None` native-roots → the Lenient policy the editor and the impact session use.
-    let linked = link_parsed_with_deps(&entry_src, &entry_program, &[], &[&dep_program], &[], None);
+    let linked = link_parsed_with_deps(
+        &entry_src,
+        &entry_program,
+        &[],
+        &[&dep_program],
+        &[],
+        None,
+        &noeta_span::PackageUses::new(),
+    );
 
     // Before the fix this was `Err([E0019 "no module `fixt`"])` from the dep's `use fixt.native`,
     // and the whole program failed to link. Now the extension root is retained.

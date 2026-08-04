@@ -232,7 +232,7 @@ fn fmt_dir_tiers(
                 declared.push((dep.key().to_string(), decls));
             }
         }
-        // The **root package's** `[tiers]` renames (per-package naming arc 3g): a manifest binding
+        // The **root package's** `[directives]` renames (per-package naming arc 3g): a manifest binding
         // `docs = "std:doc"` makes `@docs { … }` a verbatim body for this package, and the formatter
         // must know it or it tokenizes markdown as code and declares the file unparseable — on a
         // file `noeta run` and `noeta check` both accept. The same resolution the loader and the

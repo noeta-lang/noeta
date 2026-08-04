@@ -51,11 +51,43 @@ pub struct ResolvedCommandBinding {
     pub exported: String,
 }
 
-/// Resolve a package's `[directives]`/`[tiers]` bindings against **its own** dependency edges: each
+/// Resolve a package's `[directives]` bindings against **its own** dependency edges: each
 /// local `@name` → the provider namespace root segment(s) (its dependency key → the resolved provider
 /// identities → their `root_segment`) and the exported name. A scope dependency key covers several
 /// members, hence a list; the built-in `"std"` provider resolves to root `"std"`. This is what makes a
 /// `@name` resolve in the package's own context — the same edges a `use <key>.…` resolves through.
+/// The provider namespace roots for an `[directives]` provider written as a **package identity**
+/// (`para/db`), or `None` when the string is not an identity this package depends on — in which case
+/// the caller falls back to treating it as a dependency key.
+///
+/// Only identities reachable through *this* package's own edges count: naming a package you do not
+/// depend on must not resolve, the same rule the dependency-key path follows.
+fn identity_roots(
+    provider: &str,
+    edges: &BTreeMap<String, Vec<String>>,
+    instances: &BTreeMap<String, Instance>,
+    global: &BTreeMap<String, String>,
+) -> Option<Vec<String>> {
+    if !provider.contains('/') {
+        return None;
+    }
+    let reachable = edges.values().flatten().any(|id| id == provider);
+    if !reachable {
+        return None;
+    }
+    // Both roots, for the same reason the dependency-key path carries both: a native package keeps its
+    // own `root_segment`, a `.noe` package is re-rooted under the consumer's link segment.
+    let roots: Vec<String> = instances
+        .get(provider)
+        .map(|i| i.root_segment.clone())
+        .into_iter()
+        .chain(global.get(provider).cloned())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    (!roots.is_empty()).then_some(roots)
+}
+
 fn resolve_package_uses(
     bindings: &BTreeMap<String, crate::manifest::UseBinding>,
     edges: &BTreeMap<String, Vec<String>>,
@@ -67,6 +99,11 @@ fn resolve_package_uses(
         .map(|(local, b)| {
             let provider_roots = if b.provider_key == crate::manifest::BUILTIN_PROVIDER {
                 vec![crate::manifest::BUILTIN_PROVIDER.to_string()]
+            } else if let Some(roots) = identity_roots(&b.provider_key, edges, instances, global) {
+                // A **package identity** (`para/db`) rather than a dependency key. This is the precise
+                // spelling: a scope key (`para`) covers every member package, so it cannot say which
+                // one supplies the `@name`. Resolves to just that package's roots.
+                roots
             } else {
                 // A provider is addressed under two roots in the linked program, and a `@name` may
                 // resolve to either: a **native** package keeps its own namespace root (`root_segment`
@@ -120,13 +157,13 @@ pub struct ResolvedGraph {
     /// the local name resolving collisions between two packages exporting the same command name.
     /// std's own commands are always allowed and never appear here. Sorted by local name.
     pub command_bindings: Vec<ResolvedCommandBinding>,
-    /// The **root** package's resolved `@name` bindings (its `[directives]` and `[tiers]` merged; local
+    /// The **root** package's resolved `@name` bindings (its `[directives]` table; local
     /// `@name` → provider namespace root(s) + exported), in the root's own dependency context. Each
     /// dependency's are carried on its [`noeta_loader::DepPackage`]; this is the root's, which has no
     /// `DepPackage`. Kept separate (rather than only inside [`Self::package_uses`]) because the
     /// reuse/query paths thread it back through `DepPackage`s + this, and rebuild the combined map.
     pub root_directives: std::collections::HashMap<String, noeta_span::PackageUse>,
-    /// The whole program's per-package `@`-name resolution tables (`[directives]` and `[tiers]` alike):
+    /// The whole program's per-package `@`-name resolution tables (directives and tier directives alike):
     /// every dependency's keyed by its [`PackageOrigin::Dependency`] link segment, the root's by
     /// [`PackageOrigin::Root`]. The checker reads this via a span's `SourceId`. Built once here where
     /// every package's `@name` bindings and its link segment are both known.
@@ -270,14 +307,12 @@ struct Instance {
     /// dependency contributes exactly one identity; a **scope** dependency (`key = [ … ]`) contributes
     /// one per member package, all sharing the scope, so a key may map to several.
     edges: BTreeMap<String, Vec<String>>,
-    /// This package's own `[directives]` table (local `@name` → dependency key + exported), captured
-    /// from its manifest. Resolved to provider namespace roots in [`assemble`], once every edge is
-    /// known, using **this** package's own edges — so a `@name` resolves in the package's own context.
+    /// This package's own `[directives]` table (local `@name` → provider + exported), captured from its
+    /// manifest. Resolved to provider namespace roots in [`assemble`], once every edge is known, using
+    /// **this** package's own edges — so a `@name` resolves in the package's own context. One table:
+    /// a `@test { … }` block and an `@openapi` attribute share one namespace, told apart at the use
+    /// site rather than by which manifest table they were written in.
     directives: BTreeMap<String, crate::manifest::UseBinding>,
-    /// This package's own `[tiers]` table (local `@name` → provider key + exported). Resolved through
-    /// the same edges as [`Self::directives`] and merged with them into one per-package `@name` map —
-    /// a `@test { … }` block and a `@openapi` attribute share one namespace, told apart at the use site.
-    tiers: BTreeMap<String, crate::manifest::UseBinding>,
     /// Whether this instance was materialized from a root `[patch]` override (dev-time path
     /// override) — carried into [`LockedPackage::patched`] so the lock writer can omit it.
     patched: bool,
@@ -475,10 +510,9 @@ fn resolve_graph_impl(
     // under the default edition.
     let root_edition = manifest.package().map(|p| p.edition()).unwrap_or_default();
     let registry_ids = walker.registry_ids;
-    // The root's two `@name` tables merged into one (a `@name` is one namespace; the manifest forbids
-    // a local name naming both a directive and a tier), resolved together in the root's own context.
-    let mut root_uses = manifest.directives().clone();
-    root_uses.extend(manifest.tiers().clone());
+    // The root's `@name` table, resolved in the root's own context. One table now: `@name` is one
+    // namespace, so `[directives]` carries directives and tiers alike.
+    let root_uses = manifest.directives().clone();
     #[allow(unused_mut)]
     let mut graph = assemble(
         walker.instances,
@@ -918,7 +952,6 @@ impl Walker<'_> {
                 dev_native: pkg.dev_native.clone(),
                 edges: BTreeMap::new(),
                 directives: child_manifest.directives().clone(),
-                tiers: child_manifest.tiers().clone(),
                 patched,
             },
         );
@@ -1986,7 +2019,7 @@ fn assemble(
     instances: BTreeMap<String, Instance>,
     root_edges: &BTreeMap<String, Vec<String>>,
     command_trust: &BTreeMap<String, crate::manifest::Binding>,
-    // `root_uses`: the root's merged `@name` bindings (its `[directives]` and `[tiers]`), resolved
+    // `root_uses`: the root's `@name` bindings (its `[directives]` table), resolved
     // against the root's own edges — the same context its source `use`s and `@name`s resolve in.
     root_uses: &BTreeMap<String, crate::manifest::UseBinding>,
     scope_trust: BTreeMap<String, crate::lock::ScopeTrust>,
@@ -2085,17 +2118,9 @@ fn assemble(
             prefix.push(inst.package_segment.clone());
         }
         let modules = crate::sources::read_package_sources(&inst.dir, &prefix);
-        // Resolve this dependency's own `[directives]` and `[tiers]` against ITS edges — a `@name` in
-        // this package's source resolves in this package's dependency context, not the root's — and
-        // merge them into one per-package `@name` map (the manifest forbids a local name naming both).
-        let mut directives =
-            resolve_package_uses(&inst.directives, &inst.edges, &instances, &global);
-        directives.extend(resolve_package_uses(
-            &inst.tiers,
-            &inst.edges,
-            &instances,
-            &global,
-        ));
+        // Resolve this dependency's own `[directives]` table against ITS edges — a `@name` in this package's
+        // source resolves in this package's dependency context, not the root's.
+        let directives = resolve_package_uses(&inst.directives, &inst.edges, &instances, &global);
         packages.push(noeta_loader::DepPackage {
             // The loader re-roots the package's intra-package `use`s from the segment its modules
             // derive under **standalone** — always the package half of the identity — to the prefix
@@ -3837,7 +3862,7 @@ mod tests {
 
     #[test]
     fn tier_bindings_resolve_into_the_same_per_package_name_table() {
-        // A `[tiers]` binding resolves like a `[directives]` one — to the provider namespace root +
+        // A `[directives]` binding resolves like a `[directives]` one — to the provider namespace root +
         // exported name — and lands in the SAME per-package `@name` table (a `@test` block and a
         // `@openapi` attribute share one namespace). `std` resolves to root `"std"`; renaming carries.
         let base = crate::test_temp::TempDir::new("tiers");
@@ -3849,7 +3874,7 @@ mod tests {
             app.join("noeta.toml"),
             "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
              [dependencies]\nfx = { path = \"../fuzzkit\" }\n\
-             [tiers]\ntest = \"std\"\nfuzz = \"fx\"\nsoak = \"fx:endurance\"\n",
+             [directives]\ntest = \"std\"\nfuzz = \"fx\"\nsoak = \"fx:endurance\"\n",
         )
         .unwrap();
         std::fs::write(app.join("main.noe"), "echo 1;\n").unwrap();

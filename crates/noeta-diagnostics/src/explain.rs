@@ -502,7 +502,7 @@ impl DiagnosticCode {
                 group: "Directives, attributes, and tiers",
                 severity: Severity::Error,
                 summary: "An `@name` that resolves to nothing: not a built-in directive, not a tier, not one any installed extension declares.",
-                detail: "The name resolves to nothing in the directive namespace — not a built-in directive, not a tier, not one any installed extension declares. Usually a typo (the diagnostic offers the nearest real name); otherwise the providing package needs an entry in the manifest's `[directives]` or `[tiers]` table.",
+                detail: "The name resolves to nothing in the directive namespace — not a built-in directive, not a tier, not one any installed extension declares. Usually a typo (the diagnostic offers the nearest real name); otherwise the providing package needs an entry in the manifest's `[directives]` table.",
                 docs: "Dev-Tiers",
             },
             DiagnosticCode::InvalidDirectiveArgument => Explanation {

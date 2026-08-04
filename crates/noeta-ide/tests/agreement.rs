@@ -116,7 +116,7 @@ use speckit.tiers.run_notes\n\
 fn add(a: int, b: int): int { return a + b }\n";
 
 /// A consumer package binding a `speckit` path dependency's tier under the local name `@notes`,
-/// with the body above. `tiers` is the app's `[tiers]` table (empty for the unbound control) and
+/// with the body above. `tiers` is the app's `[directives]` table (empty for the unbound control) and
 /// `decl` is speckit's own `@tier(…)` declaration — the two knobs the three fixtures turn.
 fn tier_project(name: &str, tiers: &str, decl: &str) -> (noeta_test_temp::TempDir, PathBuf) {
     let root = noeta_test_temp::TempDir::new(name);
@@ -264,7 +264,7 @@ fn a_lex_error_names_the_file_it_is_in() {
 
 /// **The test explorer was empty for a package that moved the name `test` off the test runner.**
 ///
-/// Activation resolves a tier by *identity*, not spelling, so a plain `[tiers] spec = "std:test"`
+/// Activation resolves a tier by *identity*, not spelling, so a plain `[directives] spec = "std:test"`
 /// rename survived the explorer's hardcoded `&["test"]`: the literal `test` still resolved to
 /// `(std, test)` and `@spec` came alive with it. What did not survive is a package that also
 /// **rebinds `test` itself** — here to the bench runner. Then the hardcoded name resolves to a
@@ -282,7 +282,7 @@ fn the_test_explorer_follows_a_renamed_tier() {
     std::fs::write(
         app.join("noeta.toml"),
         "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
-         [tiers]\nspec = \"std:test\"\ntest = \"std:bench\"\n",
+         [directives]\nspec = \"std:test\"\ntest = \"std:bench\"\n",
     )
     .unwrap();
     let source = "fn add(a: int, b: int): int { return a + b }\n\
@@ -305,7 +305,7 @@ fn the_test_explorer_follows_a_renamed_tier() {
 
 /// **A renamed dependency text tier captures on both surfaces.**
 ///
-/// `[tiers] notes = "speckit:spec"` binds the dependency's `@tier(spec, text: "xml")` under a local
+/// `[directives] notes = "speckit:spec"` binds the dependency's `@tier(spec, text: "xml")` under a local
 /// `@notes`. The body is unlexable as code, so a project that checks *and* loads clean can only have
 /// captured it verbatim on both paths — and the [control](a_tier_body_only_captures_because_the_binding_says_so)
 /// below is the same project without the binding, which fails on both. Together they are the
@@ -315,7 +315,7 @@ fn a_renamed_dependency_text_tier_captures_for_the_editor_and_the_loader_alike()
     seed();
     let (root, app) = tier_project(
         "agreement-tier-text",
-        "[tiers]\nnotes = \"speckit:spec\"\n",
+        "[directives]\nnotes = \"speckit:spec\"\n",
         TEXT_TIER_DECL,
     );
     let entry = app.join("main.noe");
@@ -342,7 +342,7 @@ fn a_renamed_dependency_text_tier_captures_for_the_editor_and_the_loader_alike()
     drop(root);
 }
 
-/// **The control.** Strip the `[tiers]` line and nothing else: `@notes` names no tier, the body
+/// **The control.** Strip the `[directives]` line and nothing else: `@notes` names no tier, the body
 /// lexes as code, and the bare `"` is an unterminated string. Both surfaces must say so — a fixture
 /// where both sides are silently empty is the vacuous pass this seam is meant to rule out.
 #[test]
@@ -358,7 +358,7 @@ fn a_tier_body_only_captures_because_the_binding_says_so() {
     drop(root);
 }
 
-/// **The row-8 divergence, pinned.** `[tiers] notes = "speckit:json"` names *speckit's* `json`,
+/// **The row-8 divergence, pinned.** `[directives] notes = "speckit:json"` names *speckit's* `json`,
 /// which is a **code** tier — but std ships a verbatim `@json` under the same exported name.
 ///
 /// The editor's copy of the per-package resolution matched an extension tier by bare name, so it
@@ -372,7 +372,7 @@ fn a_binding_onto_a_dependency_code_tier_is_not_captured_by_a_natives_name() {
     seed();
     let (root, app) = tier_project(
         "agreement-tier-collision",
-        "[tiers]\nnotes = \"speckit:json\"\n",
+        "[directives]\nnotes = \"speckit:json\"\n",
         CODE_TIER_DECL,
     );
     let entry = app.join("main.noe");
