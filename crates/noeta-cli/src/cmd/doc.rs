@@ -167,8 +167,10 @@ pub(crate) fn cmd_doc_api(
     match out {
         Some(out_dir) => match docgen::render_json_to(out_dir, &json) {
             Ok(_) => {
+                // "declarations", not "functions": the API surface is functions *and* the nominal
+                // declarations (traits, enums, classes, structs) a registry unit contributes.
                 println!(
-                    "documented {} module{} ({} function{}) → {}",
+                    "documented {} module{} ({} declaration{}) → {}",
                     done.modules,
                     plural(done.modules),
                     done.decls,

@@ -224,7 +224,7 @@ const FRAMING_DOCS: &[(&str, &str)] = &[
         "Sse",
         "`text/event-stream` — W3C/WHATWG server-sent events. The default, because it is what the \
          overwhelming majority of streaming HTTP APIs speak.\n\nPopulates every `Frame` field: \
-         `data` holds the joined `data:` lines, `event` the frame's name (empty when it names one, \
+         `data` holds the joined `data:` lines, `event` the frame's name (empty when it names none, \
          deliberately **not** defaulted to `\"message\"` the way a browser's `EventSource` does), \
          `id` the stream's last-seen event id (which persists across frames per the spec), and \
          `retry` only on a frame whose own block carried a `retry:` field.",

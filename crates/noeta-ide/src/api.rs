@@ -201,6 +201,279 @@ pub fn method(qualified: &str, name: &str) -> Option<ApiFn> {
         .find(|m| m.name == name)
 }
 
+// --- Nominal declarations: traits, enums, classes, structs ---------------------------------------
+//
+// `ExtModule` and `ExtType` are bags of callables, and the two walkers above render them as such.
+// The other four nominal hooks are not: a trait is a contract, an enum is a closed choice, and a
+// fielded type is a shape. Each renders the way its `.noe` twin does in `docgen` — a `trait`/`enum`/
+// `struct`/`class` item on the page of the module it is namespaced under, carrying a whole rendered
+// declaration as its signature. That is what makes a native package's reference read identically to
+// a Noeta-source one, which is the point of documenting them through the same schema.
+
+/// One nominal declaration of the API reference: a native trait, enum, class, or struct.
+#[derive(Debug, Clone)]
+pub struct ApiDecl {
+    /// The qualified identity (`std.vec.Kernels`).
+    pub qualified: String,
+    /// The module page this declaration belongs on — its namespace (`std.vec`).
+    pub module: String,
+    /// The short name (`Kernels`).
+    pub name: String,
+    /// The docs.json item kind: `trait`, `enum`, `struct`, or `class`.
+    pub kind: &'static str,
+    /// The whole rendered declaration, ready for a code block.
+    pub signature: String,
+    /// The declaration's prose, with any per-member prose folded in beneath it (see
+    /// [`with_members`]). Empty when the declaration documents nothing.
+    pub doc: String,
+}
+
+/// Every nominal declaration the registry knows, sorted by qualified name.
+pub fn decls() -> Vec<ApiDecl> {
+    decls_in(registry::extensions(), &|_| true)
+}
+
+/// The nominal declarations of just the extensions whose `root` is `root` — the [`modules_of`]
+/// analogue.
+pub fn decls_of(root: &str) -> Vec<ApiDecl> {
+    decls_in(registry::extensions(), &|ext| ext.root() == root)
+}
+
+/// The nominal declarations of every registered extension EXCEPT the named units — the
+/// [`modules_excluding`] analogue, and the publish path's scope.
+pub fn decls_excluding(exclude_units: &[&str]) -> Vec<ApiDecl> {
+    decls_in(registry::extensions(), &|ext| {
+        !exclude_units.contains(&ext.name())
+    })
+}
+
+fn decls_in(exts: &[Ext], keep: &dyn Fn(Ext) -> bool) -> Vec<ApiDecl> {
+    let mut out: Vec<ApiDecl> = Vec::new();
+    for ext in exts.iter().filter(|e| keep(**e)) {
+        for t in ext.traits() {
+            out.push(ApiDecl {
+                qualified: t.qualified(),
+                module: t.namespace.to_string(),
+                name: t.name.to_string(),
+                kind: "trait",
+                signature: render_trait(t),
+                doc: with_members(t.doc, trait_members(t), t.docs),
+            });
+        }
+        for e in ext.enums() {
+            out.push(ApiDecl {
+                qualified: e.qualified(),
+                module: e.namespace.to_string(),
+                name: e.name.to_string(),
+                kind: "enum",
+                signature: render_enum(e),
+                doc: with_members(e.doc, enum_members(e), e.docs),
+            });
+        }
+        // Classes and structs are one ABI type (`ExtFielded`) behind two hooks; the `kind`
+        // discriminant, not the hook, decides how each reads — so both walk the same renderer and a
+        // hook/discriminant mismatch (which `Registry::validate` refuses) cannot produce a page
+        // that lies about which it is.
+        for f in ext.classes().iter().chain(ext.structs().iter()) {
+            out.push(ApiDecl {
+                qualified: f.qualified(),
+                module: f.namespace.to_string(),
+                name: f.name.to_string(),
+                kind: match f.kind {
+                    noeta_stdlib::FieldedKind::Class => "class",
+                    noeta_stdlib::FieldedKind::Struct => "struct",
+                },
+                signature: render_fielded(f),
+                doc: with_members(f.doc, fielded_members(f), f.docs),
+            });
+        }
+    }
+    out.sort_by(|a, b| a.qualified.cmp(&b.qualified));
+    out.dedup_by(|a, b| a.qualified == b.qualified);
+    out
+}
+
+/// A native trait as a declaration: its associated types, then its `Self`-receiver methods, then any
+/// `List<Self>` bulk methods under a marker comment. A defaulted method shows `{ … }` and a required
+/// one is bodiless — the same signal `docgen`'s `.noe` `trait_docs` emits, and the one that tells an
+/// implementor which methods they must write.
+fn render_trait(t: &noeta_stdlib::ExtTrait) -> String {
+    use noeta_stdlib::BundleReceiver;
+    let mut sig = format!("trait {} {{\n", t.name);
+    for a in t.assoc_types {
+        sig.push_str(&format!("    type {}\n", a.name));
+    }
+    let body = |m: &noeta_stdlib::ExtTraitMethod| if m.has_default { " { … }\n" } else { "\n" };
+    for m in t
+        .methods
+        .iter()
+        .filter(|m| m.receiver == BundleReceiver::Element)
+    {
+        sig.push_str(&format!("    {}{}", render_trait_method(m), body(m)));
+    }
+    let mut bulk = t
+        .methods
+        .iter()
+        .filter(|m| m.receiver == BundleReceiver::Bulk)
+        .peekable();
+    if bulk.peek().is_some() {
+        sig.push_str("\n    // on List<Self>:\n");
+        for m in bulk {
+            sig.push_str(&format!("    {}{}", render_trait_method(m), body(m)));
+        }
+    }
+    sig.push('}');
+    sig
+}
+
+/// One trait method's signature. Not [`ExtFn::render`], because a trait method's [`RetTy`] is
+/// **receiver-relative** and `ExtFn::render` has no receiver to resolve it against: the receiver
+/// rides as slot 0, so `SameAsArg(0)` is `Self` (or `List<Self>` on a bulk method) and every other
+/// index is shifted by one against the declared parameters. That is exactly how the checker types
+/// the call (`bundle_method_return`), so rendering it any other way documents a return type the
+/// compiler does not produce — `vec.Kernels.scale` would read `: number` where the call really
+/// yields `Self`.
+fn render_trait_method(m: &noeta_stdlib::ExtTraitMethod) -> String {
+    use noeta_stdlib::{BundleReceiver, RetTy};
+    let params: Vec<String> = m
+        .sig
+        .params
+        .iter()
+        .enumerate()
+        .map(|(i, ty)| match m.sig.param_names.get(i) {
+            Some(n) => format!("{n}: {}", ty.render()),
+            None => ty.render(),
+        })
+        .collect();
+    let ret = match m.sig.ret {
+        RetTy::SameAsArg(0) => match m.receiver {
+            BundleReceiver::Element => "Self".to_string(),
+            BundleReceiver::Bulk => "List<Self>".to_string(),
+        },
+        RetTy::SameAsArg(i) => m
+            .sig
+            .params
+            .get(i - 1)
+            .map(noeta_stdlib::SigType::render)
+            .unwrap_or_else(|| "dyn".to_string()),
+        ref other => other.render(m.sig.params),
+    };
+    format!("fn {}({}): {ret}", m.sig.name, params.join(", "))
+}
+
+/// A native enum as a declaration: its backing (`: string`) when it has one, then its variants —
+/// fieldless, algebraic (`Tagged(name: string)`), or backed (`Pending = "pending"`) — then any
+/// instance methods.
+fn render_enum(e: &noeta_stdlib::ExtEnum) -> String {
+    use noeta_stdlib::{EnumBacking, VariantValue};
+    let backing = match e.backing {
+        EnumBacking::None => "",
+        EnumBacking::Str => ": string",
+        EnumBacking::Int => ": int",
+    };
+    let mut sig = format!("enum {}{backing} {{\n", e.name);
+    for v in e.variants {
+        let payload = if v.fields.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "({})",
+                v.fields
+                    .iter()
+                    .map(noeta_stdlib::SigType::render)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        let value = match v.value {
+            VariantValue::None => String::new(),
+            VariantValue::Str(s) => format!(" = \"{s}\""),
+            VariantValue::Int(i) => format!(" = {i}"),
+        };
+        sig.push_str(&format!("    {}{payload}{value}\n", v.name));
+    }
+    for m in e.methods {
+        sig.push_str(&format!("    {}\n", m.render()));
+    }
+    sig.push('}');
+    sig
+}
+
+/// A native class or struct as a declaration: its fields with their visibility and mutability, then
+/// its instance methods.
+fn render_fielded(f: &noeta_stdlib::ExtFielded) -> String {
+    let keyword = match f.kind {
+        noeta_stdlib::FieldedKind::Class => "class",
+        noeta_stdlib::FieldedKind::Struct => "struct",
+    };
+    let mut sig = format!("{keyword} {} {{\n", f.name);
+    for field in f.fields {
+        let vis = if field.is_public { "pub " } else { "" };
+        let mutability = if field.is_mut { "mut " } else { "" };
+        sig.push_str(&format!(
+            "    {vis}{mutability}{}: {}\n",
+            field.name,
+            field.ty.render()
+        ));
+    }
+    for m in f.methods {
+        sig.push_str(&format!("    {}\n", m.render()));
+    }
+    sig.push('}');
+    sig
+}
+
+/// The members of a trait, in the order [`render_trait`] lists them.
+fn trait_members(t: &noeta_stdlib::ExtTrait) -> Vec<(&'static str, String)> {
+    t.methods
+        .iter()
+        .map(|m| (m.sig.name, render_trait_method(m)))
+        .collect()
+}
+
+/// The members of an enum: its variants (rendered as their bare case name — a variant is not a
+/// signature) followed by its instance methods.
+fn enum_members(e: &noeta_stdlib::ExtEnum) -> Vec<(&'static str, String)> {
+    e.variants
+        .iter()
+        .map(|v| (v.name, v.name.to_string()))
+        .chain(e.methods.iter().map(|m| (m.name, m.render())))
+        .collect()
+}
+
+/// The members of a fielded type: its fields (rendered `name: T`) followed by its instance methods.
+fn fielded_members(f: &noeta_stdlib::ExtFielded) -> Vec<(&'static str, String)> {
+    f.fields
+        .iter()
+        .map(|field| (field.name, format!("{}: {}", field.name, field.ty.render())))
+        .chain(f.methods.iter().map(|m| (m.name, m.render())))
+        .collect()
+}
+
+/// Fold a declaration's own prose and its per-member prose into one markdown body.
+///
+/// The rendered signature already lists every member, so a member is given its own subsection only
+/// when it is **documented** — an undocumented one is already visible above and a bare heading
+/// would add nothing. Members appear in declaration order, not the `docs` table's order, so the
+/// prose reads in the same order as the signature it annotates.
+fn with_members(
+    doc: &str,
+    members: Vec<(&'static str, String)>,
+    docs: &[(&'static str, &'static str)],
+) -> String {
+    let mut out = doc.trim().to_string();
+    for (name, rendered) in members {
+        let Some((_, prose)) = docs.iter().find(|(n, _)| *n == name) else {
+            continue;
+        };
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        out.push_str(&format!("#### `{rendered}`\n\n{}", prose.trim()));
+    }
+    out
+}
+
 /// Namespacing violations for the extensions rooted at `pkg_root` (the `--root` form of the publish
 /// lint): every extern type such an extension registers must be qualified under that root — a type
 /// that leaks into another namespace (most commonly an `ExtType` that omits `namespace:` and so
@@ -399,7 +672,177 @@ mod tests {
                     );
                 }
             }
+            // The nominal hooks' tables are keyed the same way and orphan the same way. Each is
+            // checked against the members `with_members` will look the key up among — the exact set
+            // that decides whether the prose renders — so a rename that strands an entry fails here
+            // rather than silently dropping a paragraph from the published page.
+            for tr in ext.traits() {
+                let names: HashSet<&str> = tr.methods.iter().map(|m| m.sig.name).collect();
+                for (key, _) in tr.docs {
+                    assert!(
+                        names.contains(key),
+                        "trait `{}` docs key `{key}` names no method",
+                        tr.qualified()
+                    );
+                }
+            }
+            for e in ext.enums() {
+                let names: HashSet<&str> = e
+                    .variants
+                    .iter()
+                    .map(|v| v.name)
+                    .chain(e.methods.iter().map(|m| m.name))
+                    .collect();
+                for (key, _) in e.docs {
+                    assert!(
+                        names.contains(key),
+                        "enum `{}` docs key `{key}` names no variant or method",
+                        e.qualified()
+                    );
+                }
+            }
+            for f in ext.classes().iter().chain(ext.structs().iter()) {
+                let names: HashSet<&str> = f
+                    .fields
+                    .iter()
+                    .map(|field| field.name)
+                    .chain(f.methods.iter().map(|m| m.name))
+                    .collect();
+                for (key, _) in f.docs {
+                    assert!(
+                        names.contains(key),
+                        "type `{}` docs key `{key}` names no field or method",
+                        f.qualified()
+                    );
+                }
+            }
         }
+    }
+
+    // --- nominal declarations (traits / enums / classes / structs) -------------------------------
+
+    #[test]
+    fn native_traits_reach_the_api_reference_with_their_prose() {
+        // The hole this closes: `decls()` did not exist, so `ext.traits()` was documented nowhere.
+        let kernels = decls()
+            .into_iter()
+            .find(|d| d.qualified == "std.vec.Kernels")
+            .expect("std.vec.Kernels is a registered native trait");
+        assert_eq!(kernels.kind, "trait");
+        assert_eq!(kernels.module, "std.vec", "lands on its namespace's page");
+        // The declaration renders whole: associated types, the contract, and the default marker.
+        assert!(kernels.signature.starts_with("trait Kernels {"));
+        assert!(kernels.signature.contains("type Wide"));
+        assert!(
+            kernels
+                .signature
+                .contains("fn add(other: Self): Self { … }")
+        );
+        // The bulk methods are grouped under their real receiver rather than passed off as `Self`.
+        assert!(kernels.signature.contains("// on List<Self>:"));
+        assert!(
+            kernels
+                .signature
+                .contains("fn add_all(other: List<Self>): List<Self>")
+        );
+        // The trait's own prose leads, and per-method prose follows under its signature.
+        assert!(kernels.doc.starts_with("Element-wise arithmetic"));
+        assert!(
+            kernels
+                .doc
+                .contains("#### `fn dot(other: Self): Self::Wide`")
+        );
+        assert!(kernels.doc.contains("the sum of the element-wise products"));
+    }
+
+    #[test]
+    fn a_trait_methods_receiver_relative_return_renders_as_self() {
+        // `RetTy::SameAsArg(0)` is the RECEIVER on a trait method (`bundle_method_return`), not the
+        // first declared parameter. `ExtFn::render` cannot know that and renders `vec.Kernels.scale`
+        // as `: number` — the type of its `factor` argument, which is not what the call yields.
+        // Rendering the reference from that would have documented a return the compiler never
+        // produces.
+        let kernels = decls()
+            .into_iter()
+            .find(|d| d.qualified == "std.vec.Kernels")
+            .unwrap();
+        assert!(kernels.signature.contains("fn scale(factor: number): Self"));
+        assert!(
+            !kernels
+                .signature
+                .contains("fn scale(factor: number): number")
+        );
+        // A no-argument receiver-relative return has no parameter to be confused with at all.
+        assert!(kernels.signature.contains("fn abs(): Self"));
+        // And the bulk twin of the same shape is `List<Self>`.
+        assert!(
+            kernels
+                .signature
+                .contains("fn scale_all(factor: number): List<Self>")
+        );
+    }
+
+    #[test]
+    fn native_enums_and_structs_reach_the_api_reference() {
+        let all = decls();
+        let framing = all
+            .iter()
+            .find(|d| d.qualified == "std.http.Framing")
+            .expect("std.http.Framing is a registered native enum");
+        assert_eq!(framing.kind, "enum");
+        assert_eq!(framing.module, "std.http");
+        assert!(framing.signature.contains("enum Framing {"));
+        for variant in ["Sse", "Ndjson", "Lines"] {
+            assert!(framing.signature.contains(variant), "variant {variant}");
+            // Per-variant prose is what a caller actually needs here — which `Frame` fields each
+            // framing populates is not derivable from the variant's name.
+            assert!(
+                framing.doc.contains(&format!("#### `{variant}`")),
+                "prose for {variant}"
+            );
+        }
+
+        let frame = all
+            .iter()
+            .find(|d| d.qualified == "std.http.Frame")
+            .expect("std.http.Frame is a registered native struct");
+        // The `kind` discriminant decides the keyword, not the hook it arrived through.
+        assert_eq!(frame.kind, "struct");
+        assert!(frame.signature.contains("struct Frame {"));
+        assert!(frame.signature.contains("pub event: string"));
+        assert!(frame.signature.contains("pub retry: Option<int>"));
+        assert!(frame.doc.contains("#### `retry: Option<int>`"));
+    }
+
+    #[test]
+    fn an_undocumented_member_gets_no_empty_subsection() {
+        // The signature already lists every member, so a bare heading over nothing is noise. Only
+        // documented members earn a subsection.
+        let doc = with_members(
+            "The trait.",
+            vec![("a", "fn a(): Self".into()), ("b", "fn b(): Self".into())],
+            &[("b", "Only b is documented.")],
+        );
+        assert!(doc.contains("#### `fn b(): Self`"));
+        assert!(!doc.contains("#### `fn a(): Self`"));
+        // A declaration with no prose of its own but documented members still renders them.
+        let members_only = with_members("", vec![("a", "fn a(): Self".into())], &[("a", "Prose.")]);
+        assert!(members_only.starts_with("#### `fn a(): Self`"));
+    }
+
+    #[test]
+    fn decls_scope_the_same_way_modules_do() {
+        // The three scopes are the publish path's contract: `--root` filters to one namespace and
+        // `--non-builtin` is empty in the stock toolchain (every unit is a builtin one).
+        assert!(
+            decls_of("std")
+                .iter()
+                .all(|d| d.qualified.starts_with("std"))
+        );
+        assert!(!decls_of("std").is_empty());
+        assert!(decls_of("nosuchpkg").is_empty());
+        let builtin: Vec<&str> = registry::extensions().iter().map(|e| e.name()).collect();
+        assert!(decls_excluding(&builtin).is_empty());
     }
 
     #[test]

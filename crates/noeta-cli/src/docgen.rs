@@ -158,6 +158,12 @@ pub fn toolchain_roots() -> Vec<&'static str> {
 /// rides to the registry and renders on the hosted docs page identically. `package` names the
 /// artifact (e.g. the toolchain's `std`), or `None` for a generic title. `scope` selects which
 /// extensions' surface is documented (see [`ApiScope`]).
+///
+/// A registry unit registers more than functions. Its **nominal** declarations — native traits,
+/// enums, classes and structs ([`noeta_ide::api::decls`]) — land as `trait`/`enum`/`struct`/`class`
+/// items on the page of the module they are namespaced under, exactly where their `.noe` twins sit
+/// in [`generate`]'s output. Until they did, publishing para/p2p emitted a reference with no mention
+/// of `Mergeable` or `Syncable`, the two traits the package exists to have you implement.
 pub fn registry_docs_json(
     package: Option<(String, String)>,
     scope: ApiScope<'_>,
@@ -171,14 +177,23 @@ pub fn registry_docs_json(
             public: true,
         })
     };
-    let (api_modules, api_types) = match scope {
-        ApiScope::All => (noeta_ide::api::modules(), noeta_ide::api::types()),
-        ApiScope::Root(r) => (noeta_ide::api::modules_of(r), noeta_ide::api::types_of(r)),
+    let (api_modules, api_types, api_decls) = match scope {
+        ApiScope::All => (
+            noeta_ide::api::modules(),
+            noeta_ide::api::types(),
+            noeta_ide::api::decls(),
+        ),
+        ApiScope::Root(r) => (
+            noeta_ide::api::modules_of(r),
+            noeta_ide::api::types_of(r),
+            noeta_ide::api::decls_of(r),
+        ),
         ApiScope::NonBuiltin => {
             let builtin = builtin_extension_names();
             (
                 noeta_ide::api::modules_excluding(&builtin),
                 noeta_ide::api::types_excluding(&builtin),
+                noeta_ide::api::decls_excluding(&builtin),
             )
         }
     };
@@ -194,6 +209,34 @@ pub fn registry_docs_json(
             items: m.functions.into_iter().map(fn_item).collect(),
         })
         .collect();
+    // Nominal declarations join their namespace's module page. A namespace with no *module* of its
+    // own still gets a page — an extension may declare a trait under a namespace it registers no
+    // functions in, and dropping it because there was nowhere to put it is the hole this closes.
+    for d in api_decls {
+        let page = match modules
+            .iter()
+            .position(|m| m.namespace.as_deref() == Some(&d.module))
+        {
+            Some(at) => &mut modules[at],
+            None => {
+                modules.push(ModuleDocs {
+                    file: String::new(),
+                    slug: d.module.replace('.', "-"),
+                    namespace: Some(d.module.clone()),
+                    doc: None,
+                    items: Vec::new(),
+                });
+                modules.last_mut().expect("just pushed")
+            }
+        };
+        page.items.push(Item::Decl(DeclDocs {
+            kind: d.kind,
+            name: d.name,
+            signature: d.signature,
+            doc: (!d.doc.is_empty()).then_some(d.doc),
+            public: true,
+        }));
+    }
     modules.extend(api_types.into_iter().map(|t| ModuleDocs {
         file: String::new(),
         slug: t.qualified.replace('.', "-"),
@@ -201,6 +244,9 @@ pub fn registry_docs_json(
         doc: None,
         items: t.methods.into_iter().map(fn_item).collect(),
     }));
+    // Pages are emitted in qualified order; a page created for a declaration-only namespace above
+    // would otherwise land after every module regardless of its name.
+    modules.sort_by(|a, b| a.namespace.cmp(&b.namespace));
     let json = docs_json(&package, &modules);
     let generated = Generated {
         modules: modules.len(),
@@ -734,6 +780,66 @@ mod tests {
         let out = noeta_test_temp::TempDir::new("docgen-api");
         render_json_to(&out, &text).expect("renders from schema alone");
         assert!(out.join("std-math.md").exists());
+    }
+
+    #[test]
+    fn nominal_declarations_land_on_their_namespaces_module_page() {
+        // `registry_docs_json` walked only `modules()`/`types()`, so a unit's traits, enums,
+        // classes and structs reached no artifact at all. They now join the page of the module they
+        // are namespaced under — the same place `generate` puts a `.noe` `trait`/`enum`/`struct` —
+        // so a native package's reference reads like a Noeta-source one.
+        let (text, _) = registry_docs_json(None, ApiScope::All);
+        let doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let modules = doc["modules"].as_array().unwrap();
+
+        let vec_page = modules
+            .iter()
+            .find(|m| m["namespace"] == "std.vec")
+            .expect("std.vec page");
+        let kernels = vec_page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["name"] == "Kernels")
+            .expect("the Kernels trait is an item on std.vec");
+        assert_eq!(kernels["kind"], "trait");
+        assert!(
+            kernels["signature"]
+                .as_str()
+                .unwrap()
+                .contains("trait Kernels {")
+        );
+        assert!(
+            kernels["doc"]
+                .as_str()
+                .unwrap()
+                .contains("Element-wise arithmetic")
+        );
+
+        // The http page carries both an enum and a struct alongside its functions.
+        let http = modules
+            .iter()
+            .find(|m| m["namespace"] == "std.http")
+            .expect("std.http page");
+        let kinds: Vec<(&str, &str)> = http["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|i| Some((i["name"].as_str()?, i["kind"].as_str()?)))
+            .collect();
+        assert!(kinds.contains(&("Framing", "enum")), "{kinds:?}");
+        assert!(kinds.contains(&("Frame", "struct")), "{kinds:?}");
+
+        // Every kind the artifact now emits survives the schema-only render path — `render_json_to`
+        // drops an item whose `kind` it does not know, so a new kind that never reached its
+        // whitelist would vanish between generating and rendering.
+        let out = noeta_test_temp::TempDir::new("docgen-nominal");
+        render_json_to(&out, &text).expect("renders from schema alone");
+        let page = std::fs::read_to_string(out.join("std-vec.md")).unwrap();
+        assert!(page.contains("### `trait Kernels`"), "{page}");
+        let http_page = std::fs::read_to_string(out.join("std-http.md")).unwrap();
+        assert!(http_page.contains("### `enum Framing`"));
+        assert!(http_page.contains("### `struct Frame`"));
     }
 
     #[test]
