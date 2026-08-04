@@ -273,6 +273,54 @@ impl Checker {
         Some(ret)
     }
 
+    /// The bound whose trait supplies `name` to the type parameter `param` — the receiver-position
+    /// half of [`Self::type_param_trait_method`], which types the call once this has said the call
+    /// is legal at all.
+    ///
+    /// `T.m(…)` puts a **type parameter in receiver position**, and the only methods that may be
+    /// reached that way are the ones a trait supplies without a receiver ([`Receiver::Either`]).
+    /// That is not a property of the trait: whether a method needs `self` is derived from the
+    /// *implementation's* body, per implementor, so the honest question is whether **every** type
+    /// that can instantiate `T` answers `m` without one. A single implementor whose `m` reads
+    /// `self` makes the generic body a promise the language cannot keep, and it is caught here
+    /// rather than at whichever call site happens to pick that implementor — the body is what is
+    /// wrong.
+    ///
+    /// Returns `(trait name, the first implementor that needs a receiver)`. `None` when `param` is
+    /// not in scope or no bound's trait declares `name`; the caller then falls through to the
+    /// ordinary receiver path, whose diagnostic ("cannot find `T` in this scope") is the right one
+    /// for a name that is not reaching anything.
+    pub(crate) fn type_param_assoc_trait(
+        &self,
+        param: &ParamRef,
+        name: &str,
+    ) -> Option<(String, Option<String>)> {
+        let bounds = self.param_bounds(param)?.to_vec();
+        for b in &bounds {
+            let Some(decl) = self.symbols.user_traits.get(&b.name) else {
+                continue;
+            };
+            if !decl.methods.iter().any(|m| m.sig.name == name) {
+                continue;
+            }
+            // Implementors are enumerable: a bound is satisfied only by a type the linked program
+            // declares an impl (or a `@derive`) for, and `user_trait_impls` is that record. Order is
+            // a `HashMap`'s, so the reported implementor is stabilized by name — a diagnostic that
+            // changes between runs is a diagnostic nobody can test.
+            let mut offenders: Vec<&String> = self
+                .symbols
+                .user_trait_impls
+                .iter()
+                .filter(|(_, traits)| traits.contains_key(&b.name))
+                .map(|(ty, _)| ty)
+                .filter(|ty| !self.receiver_of(ty, name).allows_associated_call())
+                .collect();
+            offenders.sort();
+            return Some((b.name.clone(), offenders.first().map(|s| (*s).to_string())));
+        }
+        None
+    }
+
     /// Resolve a method call on an in-scope **type parameter** through its user-trait bounds
     /// (S4.3c, typed): the first bound whose trait declares `name` types the call, its signature
     /// substituted at the bound's instantiation — under `<T: Keyed<int>>`, `x.key()` is `int` and

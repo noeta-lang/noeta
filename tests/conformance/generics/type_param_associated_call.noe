@@ -1,0 +1,65 @@
+// A bounded **type parameter in receiver position**: `T.m(…)` inside `fn build<T: Buildable>`.
+//
+// A bound licenses a trait's methods, and a trait-supplied self-less method is reachable on the
+// type as well as on a value — so it should be reachable on `T` too. It was not: the receiver fell
+// through to the value path and `T` was reported missing (`[E0005] cannot find 'T' in this scope`),
+// at the DEFINITION site, which is the tell that name resolution simply never consulted generic
+// scope. A turbofish at the call site did not help, because there was nothing wrong with the
+// inference.
+//
+// Generics are erased, so the compiled body holds no type to dispatch on — but the instantiation's
+// NAME reaches it on the same per-instantiation channel `type_name::<T>()` reads, and by-name
+// dispatch of an associated function is something the runtime already does. So one compiled body
+// serves every `T`, and the two implementors below reach different code through the same call.
+//
+// Both parameter channels are exercised: a generic FN's own parameter (`build`/`tag_of`, on the
+// hidden type-argument slot) and a generic TYPE's parameter inside an instance method (`Holder`,
+// read off the receiver's reflected tag).
+// expect: stdout "5"
+// expect: stdout "thing"
+// expect: stdout "box"
+// expect: stdout "box"
+// expect: stdout "thing"
+// expect: exit 0
+trait Buildable {
+    fn make(a: int, b: string): Self
+    fn tag(): string
+}
+struct Thing {
+    v: int
+    impl Buildable {
+        fn make(a: int, b: string): Thing { return Thing { v: a + b.len() } }
+        fn tag(): string { return "thing" }
+    }
+}
+class Box {
+    n: int
+    impl Buildable {
+        fn make(a: int, b: string): Box { return Box { n: a } }
+        fn tag(): string { return "box" }
+    }
+}
+// `Self` in the trait's contract is `T` here, so the call satisfies the declared `T` return.
+fn build<T: Buildable>(a: int, b: string): T {
+    return T.make(a, b)
+}
+// A non-`Self` return through the same receiver.
+fn tag_of<T: Buildable>(): string {
+    return T.tag()
+}
+// A generic TYPE's parameter, inside an instance method — the other channel.
+struct Holder<T: Buildable> {
+    n: int
+    fn describe(): string {
+        // `self` is what makes this an INSTANCE method, which is what gives the class's `T` a
+        // channel here: its name is read off the receiver's reflected type tag.
+        held = self.n
+        return T.tag()
+    }
+}
+echo build::<Thing>(2, "abc").v
+echo tag_of::<Thing>()
+echo tag_of::<Box>()
+echo build::<Box>(7, "z").tag()
+h: Holder<Thing> = Holder { n: 1 }
+echo h.describe()

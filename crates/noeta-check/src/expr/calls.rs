@@ -1283,6 +1283,72 @@ impl Checker {
                     );
                     return Type::Unknown;
                 }
+                // `T.m(args)` — a bounded TYPE PARAMETER in receiver position. Everything above
+                // needed a receiver that names something *now*: a declared type, a module, an enum.
+                // A type parameter names one only at run time, so without this arm the receiver fell
+                // through to the value path and was reported as a missing name (E0005) — at the
+                // DEFINITION site, which is the tell that this was name resolution never consulting
+                // generic scope rather than anything about inference.
+                //
+                // Deliberately narrow: this makes a type parameter legal in receiver position for a
+                // trait-supplied self-less method and nothing else. It does not make `T` a type
+                // name — `T { … }`, `T.Variant`, an annotation position — which is a far larger
+                // commitment, and one a bound does not license.
+                if let Expr::Ident {
+                    name: tn,
+                    span: tn_span,
+                } = receiver.as_ref()
+                    && lookup(env, tn.as_str()).is_none()
+                    && let Some(scoped) = self.coloring.type_params.get(tn.as_str()).cloned()
+                    && let Some((trait_name, needs_receiver)) =
+                        self.type_param_assoc_trait(&scoped.param, name)
+                {
+                    let (params, required, ret) = self
+                        .type_param_trait_method(&scoped.param, name)
+                        .expect("the bound that supplies the method also types it");
+                    // The receiver rule (E0047), asked of every type that could instantiate `T`.
+                    if let Some(offender) = needs_receiver {
+                        self.error(
+                            DiagnosticCode::InvalidReceiver,
+                            span,
+                            format!(
+                                "`{name}` cannot be called on the type parameter `{tn}`: \
+                                 `{offender}` implements `{trait_name}.{name}` as an instance \
+                                 method, so a `{tn}` could have no receiver to bind `self` to"
+                            ),
+                        )
+                        .help(format!(
+                            "call it on a value of `{tn}`, or make every implementation of \
+                             `{trait_name}.{name}` self-less"
+                        ));
+                    }
+                    // The instantiation's NAME is what the rewritten call dispatches on, and it
+                    // reaches the body through the very channel `type_name::<T>()` reads — recorded
+                    // at the RECEIVER's span, which is where lowering asks for it. A parameter no
+                    // channel carries gets the same tailored E0058 every other name-keyed surface
+                    // gives it, rather than a second wording of the same fact.
+                    let as_ref = TypeRef::Named {
+                        name: noeta_ast::Name::canonical(tn.as_str()),
+                        args: Vec::new(),
+                        span: *tn_span,
+                    };
+                    if !self.record_type_param(&scoped.param, *tn_span) {
+                        self.reject_erased_type_param(&as_ref, &format!("{tn}.{name}"));
+                        self.finalize_closure_args(&params, args, arg_exprs, env);
+                        return ret;
+                    }
+                    // Arguments bind by POSITION here: the rewrite hands them to the runtime's
+                    // by-name dispatch as a list, which has no labels to bind them with. Rejected
+                    // rather than silently bound in written order, which is what a label exists to
+                    // stop meaning.
+                    self.reject_unbound_labels(arg_exprs, name);
+                    self.finalize_closure_args(&params, args, arg_exprs, env);
+                    self.check_args(&params, required, args, arg_exprs, span, name);
+                    self.sites
+                        .type_param_assoc_sites
+                        .insert(call_span, tn.to_string());
+                    return ret;
+                }
                 // `receiver.method(args)` — a built-in method, a user method, or (on a `dyn`/hole
                 // receiver) a runtime-dispatched call that stays deferred.
                 let recv = self.synth(receiver, env);

@@ -403,6 +403,22 @@ echo En { id: 1 }.greet("Bob")   // hi Bob — on a value
 
 (`From` is the exception: its `from` is a conversion that *builds* a value rather than acting on one, so it stays associated-only — and a `from` body that mentions `self` is E0015.)
 
+**A bounded type parameter is a receiver too.** `T.m(…)` inside `fn f<T: Trait>` reaches exactly what the type spelling reaches — the self-less methods `Trait` supplies, the third case above — because a bound is what licenses them and `T` is the type at run time. One compiled body serves every instantiation, so the call resolves the instantiation's name per call and dispatches on it; nothing is monomorphized.
+
+Only that third case. `T.m(…)` where some implementor's `m` reads `self` is E0047, reported at the *definition* — whether a method needs a receiver is derived from each implementation's body, so a generic body calling `T.m(…)` is promising something every implementor of the bound must keep, and the body is what breaks that promise, not the call site that happens to pick the wrong `T`. Everything else a type name can do (`T { … }` construction, `T.Variant`, `T` in an annotation) is not licensed by a bound and stays unavailable. Arguments bind positionally here: the dispatch is by name, and a name has no labels to bind with.
+
+```noeta
+trait Buildable { fn make(seed: int): Self }
+struct Thing {
+    v: int
+    impl Buildable { fn make(seed: int): Thing { return Thing { v: seed } } }
+}
+fn build<T: Buildable>(seed: int): T {
+    return T.make(seed)     // `Self` is `T`, so this is the declared return
+}
+echo build::<Thing>(3).v    // 3
+```
+
 **The signature is the contract, `async` included.** An implementation must match the trait's declaration in arity, parameter types, return type, *and* `async`-ness; a mismatch is E0015. `async` belongs on that list because every receiver form types a call from *some* signature and they must all agree: an `async fn m(): T` is called for a `Future<T>` and a plain `fn m(): T` for a `T`, so a synchronous method satisfying an `async` declaration (or the reverse) would make a bound's and a trait object's typing a promise the implementation does not keep.
 
 **`Self` is the implementing type.** A trait declaration may write `Self` anywhere a type goes — `fn decode(raw: string): Self`, `fn combine(other: Self): int`, `fn spread(): List<Self>` — and it stands for whichever type implements the trait. It is a *declaration* spelling only: the implementation writes the concrete type it is being written for (`fn decode(raw: string): Thing`), and spelling `Self` back in an `impl` is E0013, because at that point the type is known and has a name.

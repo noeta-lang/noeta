@@ -676,7 +676,7 @@ impl Checker {
     /// "compose it yourself out of `type_name`" advice left to give, because `type_name::<T>()`
     /// would fail in the very same places for the very same reason — the fix is always to get the
     /// instantiation to this body, which is what each branch below says how to do.
-    fn reject_erased_type_param(&mut self, ty: &TypeRef, surface: &str) -> bool {
+    pub(crate) fn reject_erased_type_param(&mut self, ty: &TypeRef, surface: &str) -> bool {
         let TypeRef::Named { args, span, .. } = ty else {
             return false;
         };
@@ -790,7 +790,7 @@ impl Checker {
     ///
     /// `false` means neither reaches this body — the caller reports it, because what to *say* about
     /// it depends on the surface.
-    fn record_type_param(&mut self, param: &ParamRef, span: Span) -> bool {
+    pub(crate) fn record_type_param(&mut self, param: &ParamRef, span: Span) -> bool {
         if let Some(i) = self
             .coloring
             .self_type_params
