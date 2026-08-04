@@ -172,6 +172,22 @@ impl Checker {
         self.collect_method_sig_classified(type_name, m, type_params, false);
     }
 
+    /// Record a derived receiver discipline under **both** keys the two consumers ask by: the
+    /// `(type, method)` name the checker resolves calls with, and the declaration's name span the
+    /// IDE anchors its inlay hint to (see [`Symbols::method_receiver_spans`]). One writer, so the
+    /// two indexes cannot disagree about a method — the classification is computed once, by the
+    /// caller, and stored twice here rather than derived twice anywhere.
+    ///
+    /// A method whose `FnDecl` is *synthesized* (a hoisted trait default, a `@derive` bridge) writes
+    /// the span it was cloned from, or a dummy one; either is harmless, because the span index is
+    /// only ever read with a span taken from a parsed declaration.
+    fn record_receiver(&mut self, key: (String, String), m: &FnDecl, receiver: Receiver) {
+        self.symbols.method_receiver.insert(key, receiver);
+        self.symbols
+            .method_receiver_spans
+            .insert(m.name_span, receiver);
+    }
+
     /// [`Self::collect_method_sig`] with control over the receiver classification.
     ///
     /// `trait_provided` says whether a **trait's interface** supplies this method — an `impl Trait`
@@ -200,9 +216,7 @@ impl Checker {
         } else {
             Receiver::inherent(uses_self)
         };
-        self.symbols
-            .method_receiver
-            .insert((type_name.to_string(), m.name.to_string()), receiver);
+        self.record_receiver((type_name.to_string(), m.name.to_string()), m, receiver);
         let xt = &self.imports.extern_types;
         // The type's parameters, then the method's own LAYERED OVER them: a method `<T>` inside a
         // class `<T>` shadows, so an annotation in this signature resolves to the METHOD's `T`.
@@ -1164,8 +1178,9 @@ impl Checker {
         // plan's bridge/forward. So a self-less one is `Either` like any other trait method — an
         // omitted default is reachable as `T.m()` (the documented UT5 spelling) *and* on a value,
         // exactly as the same body written out in the `impl` block would be.
-        self.symbols.method_receiver.insert(
+        self.record_receiver(
             key.clone(),
+            m,
             Receiver::trait_method(m.body.iter().any(|s| s.mentions("self"))),
         );
         self.symbols.methods.insert(

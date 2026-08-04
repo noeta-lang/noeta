@@ -107,6 +107,12 @@ pub use tiers::{
 
 use constructors::compute_fresh_constructors;
 use effects::*;
+/// The derived receiver discipline, published because it is a fact about a *declaration* that the
+/// source never spells — the IDE renders it as an inlay hint ([`Checked::method_receivers`]). It is
+/// re-exported rather than mirrored so there is exactly one enum, derived in exactly one place: a
+/// second copy of "does the body mention `self`" in the IDE crate would drift the first time the
+/// rule gains a case (an explicitly declared self-less method, say).
+pub use env::Receiver;
 use env::*;
 use forwarding::*;
 use sites::SiteMaps;
@@ -163,6 +169,15 @@ pub struct Checked {
     /// beside [`Sites`], not inside it; a handful of entries, so it is populated on every run, like
     /// [`Checked::bundle_bindings`].
     pub packed_layouts: HashMap<String, noeta_ast::reflect::PackedLayout>,
+    /// Every user method's derived [`Receiver`] discipline, keyed by the method's **name span** —
+    /// one entry per declaration. Receiver-ness is never written in source (it is derived from the
+    /// body plus the trait context, EX.2), so this is the only channel by which a reader can be
+    /// told which call form a method admits; the IDE renders it as an inlay hint at the declaration.
+    ///
+    /// An IDE read-side index like [`Checked::packed_layouts`], and populated on every run for the
+    /// same reason: it is one hash insert per method declaration, and a consumer must be able to
+    /// rely on it being there.
+    pub method_receivers: HashMap<Span, Receiver>,
 }
 
 /// Everything that varies a whole-program check, so callers configure one entry point
@@ -419,6 +434,7 @@ pub fn check_all_session_opts(program: &Program, opts: CheckOptions) -> (Checked
         },
         bundle_bindings: checker.bundle_bindings_public(),
         packed_layouts: checker.packed_layouts_public(),
+        method_receivers: checker.symbols.method_receiver_spans.clone(),
     };
     // The whole-program check above ran strict (file mode) — unknown names in a debugged program
     // are real errors. But the returned session, over which console fragments and later entries
@@ -989,6 +1005,16 @@ struct Symbols {
     /// a *meaning* (`Either`), and re-deciding that meaning at each use site is exactly how the
     /// associated-call, instance-call, and turbofish paths drifted apart.
     method_receiver: HashMap<(String, String), Receiver>,
+    /// The same classification keyed by the method's **name span** — one entry per *declaration*,
+    /// where [`Symbols::method_receiver`] keeps one entry per callable `(type, method)` name and so
+    /// keeps only the winner when an `impl` block shadows an inherent method of the same name.
+    /// Written at the same two sites, from the same value, by [`Collector::record_receiver`].
+    ///
+    /// Exists for the IDE's receiver inlay hint, which anchors at a declaration and therefore asks
+    /// by position, not by name: the name key would force the IDE to re-derive a method's owning
+    /// type name (already a qualified identity by link time) and would answer nothing at all for the
+    /// shadowed declaration it is drawing on screen.
+    method_receiver_spans: HashMap<Span, Receiver>,
     /// Which built-in traits each user type satisfies: type name → set of trait names it `@derive`s
     /// or `impl`s. The basis (with the built-in-type table in [`Checker::satisfies`]) for enforcing a
     /// generic call's trait bounds (S4.2).
@@ -1691,6 +1717,7 @@ impl Checker {
         let packed_layouts = self.packed_layouts_public();
         let packed_type_layouts = sorted_packed_layouts(&packed_layouts);
         let relevance = self.relevance;
+        let method_receivers = self.symbols.method_receiver_spans;
         let mut sites = self.sites;
         let expr_types = std::mem::take(&mut sites.expr_types);
         let diverging_stmts = std::mem::take(&mut sites.diverging_stmts);
@@ -1703,6 +1730,7 @@ impl Checker {
             sites,
             bundle_bindings,
             packed_layouts,
+            method_receivers,
         }
     }
 

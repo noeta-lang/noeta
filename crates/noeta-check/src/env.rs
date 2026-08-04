@@ -42,7 +42,7 @@ pub(crate) struct VariantInfo {
 /// same idea in a second vocabulary — the drift this classification exists to prevent, spelled in
 /// the classification itself.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum Receiver {
+pub enum Receiver {
     /// The body reads `self`, so a call must supply one: `x.m(…)` only. `T.m(…)` is E0047 — and
     /// really does fail at run time ("no field `f` on unit"), because nothing binds `self`.
     Instance,

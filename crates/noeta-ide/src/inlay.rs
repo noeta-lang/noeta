@@ -22,11 +22,18 @@
 //! - **call-site parameter names** — `f(⟨n:⟩ 42)`, resolved through the same free-function /
 //!   method lookup signature-help uses; an argument that is already an identifier with the
 //!   parameter's own name shows nothing (it would repeat the code).
+//! - **derived receivers** — `⟨static⟩ fn new(…)` on a method whose body needs no receiver. Same
+//!   argument as the inferred-type hints and nothing more: receiver-ness is *derived* from the body
+//!   (a method that mentions `self` is an instance method; a self-less one is called on the type),
+//!   so today the only way to know whether `Thing.m()` is available is to read the body looking for
+//!   `self`. The hint puts that on screen. It is not a safety device — every wrong call form is
+//!   already a loud E0047.
 
 use std::collections::{HashMap, HashSet};
 
 use noeta_ast::reflect::{PackedLayout, TypeRepr};
 use noeta_ast::{ClosureBody, Expr, FnDecl, Program, Stmt, StrPart};
+use noeta_check::Receiver;
 use noeta_span::{SourceId, Span};
 
 use crate::resolve::DefUse;
@@ -38,6 +45,10 @@ pub enum HintKind {
     Type,
     /// A parameter name (`n:`), before a call argument.
     Parameter,
+    /// A derived **modifier** on a declaration (`static`), in the slot the keyword would occupy.
+    /// Neither a type nor a parameter name, so the adapter gives it no LSP hint kind — the protocol
+    /// has exactly two and this is neither.
+    Modifier,
 }
 
 /// One computed hint: attach `label` at byte `offset` in the requested file.
@@ -54,16 +65,20 @@ pub fn type_hints(
     program: &Program,
     expr_types: &HashMap<Span, TypeRepr>,
     packed_layouts: &HashMap<String, PackedLayout>,
+    receivers: &HashMap<Span, Receiver>,
     source: SourceId,
+    text: &str,
 ) -> Vec<TypeHint> {
     let declarations: HashSet<Span> = DefUse::build(program).binding_spans().collect();
     let mut hints = Vec::new();
     let mut walker = Walker {
         source,
+        text,
         program,
         declarations: &declarations,
         expr_types,
         packed_layouts,
+        receivers,
         hints: &mut hints,
     };
     for stmt in &program.stmts {
@@ -73,14 +88,53 @@ pub fn type_hints(
     hints
 }
 
+/// Where a ghost modifier belongs on a declaration: immediately before `fn` (or `async fn`) — the
+/// slot an explicitly written keyword would occupy, so the line reads as the source it stands for.
+///
+/// [`FnDecl::span`] starts at the first **decoration** when the method carries `#[…]` attributes or
+/// `@tier` directives (the parser consumes them as part of the method), so step past the last of
+/// them; for the undecorated method — nearly all of them — the declaration's own start is the
+/// keyword.
+///
+/// Stepping past the decoration is not enough on its own, because a decoration sits on **its own
+/// line** by convention. Anchoring at its end would put the ghost at the end of the *previous*
+/// line — `#[Route("GET")] static` above a bare `fn handler` — which is not merely ugly: it is a
+/// slot where the keyword could never be written, the very thing this helper exists to avoid. So
+/// skip the whitespace that follows and land on the keyword itself, which is where an author would
+/// type it and the one anchor that reads as the source it stands for.
+fn modifier_offset(decl: &FnDecl, text: &str) -> u32 {
+    let after_decorations = decl
+        .attrs
+        .iter()
+        .map(|a| a.span.end)
+        .chain(decl.directives.iter().map(|d| d.span.end))
+        .max()
+        .map_or(decl.span.start, |end| end.max(decl.span.start));
+    let rest = text
+        .get(after_decorations as usize..)
+        .unwrap_or_default()
+        .len();
+    let leading_ws = text
+        .get(after_decorations as usize..)
+        .unwrap_or_default()
+        .find(|c: char| !c.is_whitespace())
+        .unwrap_or(rest);
+    after_decorations + leading_ws as u32
+}
+
 struct Walker<'a> {
     source: SourceId,
+    /// This document's text — read only to find the keyword a ghost modifier anchors on
+    /// ([`modifier_offset`]); every other hint family anchors on a span the parser recorded.
+    text: &'a str,
     /// The merged program, for resolving a call's callee to its declaration (parameter names).
     program: &'a Program,
     declarations: &'a HashSet<Span>,
     expr_types: &'a HashMap<Span, TypeRepr>,
     /// Name→layout of every `@packed` struct — drives the compact storage suffix on a type label.
     packed_layouts: &'a HashMap<String, PackedLayout>,
+    /// The checker's derived receiver discipline per method **declaration**, keyed by name span.
+    receivers: &'a HashMap<Span, Receiver>,
     hints: &'a mut Vec<TypeHint>,
 }
 
@@ -150,9 +204,21 @@ impl Walker<'_> {
             }
             Stmt::Concurrent { body, .. } => self.stmts(body),
             Stmt::TierBlock { items, .. } => self.stmts(items),
-            Stmt::Impl(_)
-            | Stmt::Trait(_)
-            | Stmt::Namespace { .. }
+            // A **standalone** `impl Trait for T { … }`. A type declaration's *in-body* impl blocks
+            // need no arm: the parser flattens their methods into `methods` as well (see
+            // [`noeta_ast::ClassDecl::impls`]), so walking `decl.impls` here would hint each of them
+            // twice.
+            Stmt::Impl(block) => self.fn_decls(&block.methods),
+            // A trait's method contract. Its defaulted methods carry bodies, which hold bindings
+            // and closures like any other — so walk the bodies, but deliberately NOT through
+            // [`Walker::fn_decl`]: a trait declaration is the one place the receiver hint must not
+            // appear (see [`Walker::receiver_hint`]).
+            Stmt::Trait(decl) => {
+                for method in &decl.methods {
+                    self.stmts(&method.sig.body);
+                }
+            }
+            Stmt::Namespace { .. }
             | Stmt::Use { .. }
             | Stmt::Break { .. }
             | Stmt::Continue { .. } => {}
@@ -192,7 +258,55 @@ impl Walker<'_> {
     }
 
     fn fn_decl(&mut self, decl: &FnDecl) {
+        self.receiver_hint(decl);
         self.stmts(&decl.body);
+    }
+
+    /// The **derived-receiver** hint: a ghost `static` in the modifier slot of a method whose body
+    /// needs no receiver, so that a reader can see which methods answer to `Thing.m()` without
+    /// reading each body for a mention of `self`.
+    ///
+    /// Only the two *self-less* states are hinted. [`Receiver::Instance`] is the unmarked
+    /// expectation — a method is called on a value unless something says otherwise — and marking it
+    /// would put a ghost word on nearly every method in a file, which is precisely the trade the
+    /// annotated-binding rule already refuses ("the type is already on screen" — here, "the
+    /// receiver is already what you assume"). [`Receiver::Associated`] and [`Receiver::Either`]
+    /// share one label because they share the fact the source cannot show: *this body takes no
+    /// receiver*. They differ in whether `x.m(…)` **also** works, and that difference is not
+    /// invisible — it is decided by whether the method sits in a trait's interface, which is the
+    /// enclosing `impl Trait` block, on screen, two lines up.
+    ///
+    /// A top-level `fn` is not a method and has no entry, so it never hints.
+    ///
+    /// **A trait declaration never hints, and the reason is not that nothing could be derived.** A
+    /// trait's default body *is* derivable, and the checker does classify it. But in a contract the
+    /// word is a **promise that binds every implementor**, and a default body cannot make that
+    /// promise: an implementor may override the default with one that reads `self`. Ghosting the
+    /// word there would say "this is already inferred, you needn't write it" — exactly false, since
+    /// writing it in the contract has force that deriving it from one body cannot. So the trait arm
+    /// of [`Walker::stmt`] walks method *bodies* without coming through here, a required method
+    /// (no body, nothing to derive) is the one place the keyword must be written by hand, and a
+    /// ghost `static` on your `impl` method while the trait says nothing is precisely the signal
+    /// that the contract could be promising it.
+    fn receiver_hint(&mut self, decl: &FnDecl) {
+        // No entry ⇒ not a method (a top-level `fn`), or a declaration the checker never reached.
+        let Some(receiver) = self.receivers.get(&decl.name_span) else {
+            return;
+        };
+        if decl.name_span.source != self.source {
+            return;
+        }
+        // FUTURE (explicitly declared self-less methods): when the declaration writes the modifier
+        // itself the hint would merely repeat the source, which is noise — extend this one
+        // predicate with `|| decl.is_static` and the duplicate disappears. Nothing else here moves.
+        if matches!(receiver, Receiver::Instance) {
+            return;
+        }
+        self.hints.push(TypeHint {
+            offset: modifier_offset(decl, self.text),
+            label: "static".to_string(),
+            kind: HintKind::Modifier,
+        });
     }
 
     /// Recurse into every expression that can CONTAIN statements or further expressions — a
