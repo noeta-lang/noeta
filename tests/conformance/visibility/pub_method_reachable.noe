@@ -1,0 +1,31 @@
+// The other half of the rule: a method declared `pub` IS part of the type's surface, in all three
+// kinds, reachable as an instance call, a static call, and a bound handle. `pub` is the outermost
+// modifier — `pub async fn` — matching the order every declaration site accepts.
+// expect: stdout "5"
+// expect: stdout "4"
+// expect: stdout "2"
+// expect: stdout "10"
+// expect: exit 0
+class Account {
+    balance: int
+    pub fn new(): Account { return Account { balance: 5 }; }
+    pub fn read(): int { return self.balance; }
+}
+
+struct Point {
+    n: int
+    pub fn doubled(): int { return self.n * 2; }
+}
+
+enum Level {
+    Low
+    High
+    pub fn rank(): int { return match self { Level.Low => 1, Level.High => 2 }; }
+}
+
+a = Account.new();
+echo a.read();                  // instance call on a `pub` method
+echo Point { n: 2 }.doubled();
+echo Level.High.rank();
+read = Account.read;            // an unbound handle off a `pub` method
+echo read(a) + 5;

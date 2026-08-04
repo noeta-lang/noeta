@@ -2558,6 +2558,48 @@ mod tests {
         );
     }
 
+    /// The method twin of [`dev_tier_fn_gets_white_box_field_access`] (method-visibility arc): a
+    /// private METHOD is reachable inside an active dev-tier fn body, for the same reason a private
+    /// field is — co-located tooling is inside the encapsulation boundary, not outside it. Written
+    /// beside the field case rather than somewhere else, because the two are one rule and a reader
+    /// who changes one must see the other.
+    ///
+    /// (This cannot live in the conformance corpus: that harness never activates a tier, so the
+    /// `@test` block is stripped before anything is checked.)
+    #[test]
+    fn dev_tier_fn_gets_white_box_method_access() {
+        let program = parse_program(
+            "class Account { balance: int  pub fn new(b: int): Account { return Account { balance: b }; }  fn fee(): int { return self.balance / 100; } }\n\
+             @test fn touches(): void { assert(Account.new(500).fee() == 5); }\n",
+        );
+        let active = crate::check_all(
+            &activate_tiers(&program, &["test"], &Provenance::unattributed()).program,
+        );
+        assert!(
+            active.diagnostics.is_empty(),
+            "white-box dev-tier fn must not raise E0076: {:?}",
+            active.diagnostics
+        );
+        let inactive =
+            crate::check_all(&activate_tiers(&program, &[], &Provenance::unattributed()).program);
+        assert!(inactive.diagnostics.is_empty());
+    }
+
+    /// The scoping half, mirroring [`ordinary_fn_cannot_read_private_field`]: ordinary same-module
+    /// code is still outside the type, so calling its private method is E0076.
+    #[test]
+    fn ordinary_fn_cannot_call_private_method() {
+        let program = parse_program(
+            "class Account { balance: int  pub fn new(b: int): Account { return Account { balance: b }; }  fn fee(): int { return self.balance / 100; } }\n\
+             fn reads(): int { a = Account.new(500); return a.fee(); }\n",
+        );
+        let diags = crate::check_all(&program).diagnostics;
+        assert!(
+            diags.iter().any(|d| d.code == DiagnosticCode::PrivateMethod),
+            "ordinary code calling a private method must be E0076: {diags:?}"
+        );
+    }
+
     /// An unknown tier is an `E0036` whether or not it would be active, and its block is dropped.
     #[test]
     fn unknown_tier_reports_e0036() {
