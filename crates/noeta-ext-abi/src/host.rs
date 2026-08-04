@@ -766,6 +766,18 @@ pub struct RealP2pConfig {
     /// The app-namespace that keys this node's persistent identity + on-disk store, set by the CLI
     /// via `RealHost::with_p2p_app`. `None` uses the transport's own default location.
     pub app_id: Option<String>,
+    /// An exact directory for this node's persistent identity + on-disk store, set via
+    /// `RealHost::with_p2p_dir`. Overrides `app_id`'s per-user default location, so a host running
+    /// several user identities (one isolate per signed-in user) gives each its own node. `None`
+    /// keeps the per-app default.
+    ///
+    /// **Precedence:** any explicitly named directory — this one, or one a program passes when it
+    /// opens a node — beats the environment; `$NOETA_P2P_DIR` steers only the node nobody named.
+    /// A host-supplied directory does not lose to the env var, and the reason is safety rather than
+    /// tidiness: a multi-tenant server handing each signed-in user its own directory must not have
+    /// every tenant collapsed onto one identity and store by a single process-wide variable, which
+    /// would silently mix one user's data into another's.
+    pub data_dir: Option<std::path::PathBuf>,
 }
 
 /// Whether a host permits **real** peer networking (para-namespace arc → F2b). `P2p` used to be a
