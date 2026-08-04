@@ -9,7 +9,7 @@
 
 use crate::support::*;
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdout, Stdio};
+use std::process::{Child, ChildStdout};
 
 /// A file with the shape that broke the server: several modules of ordinary, moderately nested code.
 /// Nesting stays well inside the parser's inline limit — that is the whole point, since it was
@@ -68,27 +68,32 @@ fn realistic_workspace(name: &str) -> PathBuf {
 struct Session {
     child: Child,
     stdout: BufReader<ChildStdout>,
+    /// The server's stderr, in a file rather than an undrained pipe — see
+    /// [`noeta_test_temp::ServerLog::spawn_stdio_protocol`]. Every assertion below is about a reply
+    /// that did or did not arrive, and the reason a reply did not arrive is on this stream.
+    log: noeta_test_temp::ServerLog,
     next_id: u64,
 }
 
 impl Session {
     /// Spawn the server and complete the `initialize` handshake.
     fn start() -> Session {
-        let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("noeta"))
-            .arg("mcp")
-            .env(
-                "NOETA_CACHE_DIR",
-                concat!(env!("CARGO_TARGET_TMPDIR"), "/noeta-cache"),
+        let log = noeta_test_temp::ServerLog::new("mcp-stdio");
+        let mut child = log
+            .spawn_stdio_protocol(
+                std::process::Command::new(assert_cmd::cargo::cargo_bin("noeta"))
+                    .arg("mcp")
+                    .env(
+                        "NOETA_CACHE_DIR",
+                        concat!(env!("CARGO_TARGET_TMPDIR"), "/noeta-cache"),
+                    ),
             )
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
             .expect("spawn `noeta mcp`");
         let stdout = BufReader::new(child.stdout.take().expect("piped stdout"));
         let mut session = Session {
             child,
             stdout,
+            log,
             next_id: 1,
         };
         let init = session.request(
@@ -101,7 +106,10 @@ impl Session {
         );
         assert!(
             init.get("result").is_some(),
-            "initialize should succeed: {init}"
+            "{}",
+            session
+                .log
+                .explain(format!("initialize should succeed: {init}"))
         );
         session.notify("notifications/initialized");
         session
@@ -131,11 +139,22 @@ impl Session {
             .stdout
             .read_line(&mut line)
             .expect("read from the server");
-        assert_ne!(
-            read, 0,
-            "the server closed stdout without answering `{method}` — it died mid-request"
+        // The log carries both of these: a server that died mid-request said why on stderr before
+        // it went, and a "malformed response" is usually a diagnostic that escaped onto stdout.
+        assert!(
+            read != 0,
+            "{}",
+            self.log.explain(format!(
+                "the server closed stdout without answering `{method}` — it died mid-request"
+            ))
         );
-        serde_json::from_str(&line).unwrap_or_else(|e| panic!("malformed response {line:?}: {e}"))
+        serde_json::from_str(&line).unwrap_or_else(|e| {
+            panic!(
+                "{}",
+                self.log
+                    .explain(format!("malformed response {line:?}: {e}"))
+            )
+        })
     }
 
     /// Call one tool over the wire and return its `result`, asserting it is not an error.

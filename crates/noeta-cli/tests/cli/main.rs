@@ -13,6 +13,7 @@ mod automation;
 mod bench;
 mod build;
 mod cache;
+mod capture;
 mod check;
 mod derivation;
 mod doc;
