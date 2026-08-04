@@ -985,23 +985,26 @@ fn composed_toolchain_end_to_end() {
 fn dap_launch(cwd: &std::path::Path, entry: &std::path::Path) -> String {
     use std::io::{BufRead, BufReader, Read, Write};
 
+    // stderr goes to a `ServerLog` file, not a pipe: `NOETA_COMPOSE_DEBUG=1` makes this child the
+    // chattiest of the stdio-protocol ones — it narrates a whole toolchain composition — and a piped
+    // stderr nobody reads blocks the writer at 64 KiB, which here means the adapter stops mid-compose
+    // and the framed-message loop below waits on a reply that will never come.
     let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin("noeta"));
-    let mut child = cmd
-        .env(
-            "NOETA_CACHE_DIR",
-            concat!(env!("CARGO_TARGET_TMPDIR"), "/noeta-cache"),
+    let log = noeta_test_temp::ServerLog::new("dap-launch");
+    let mut child = log
+        .spawn_stdio_protocol(
+            cmd.env(
+                "NOETA_CACHE_DIR",
+                concat!(env!("CARGO_TARGET_TMPDIR"), "/noeta-cache"),
+            )
+            .env("NOETA_COMPOSE_DEBUG", "1")
+            .env(
+                "NOETA_COMPOSE_TARGET_DIR",
+                PathBuf::from(env!("CARGO_TARGET_TMPDIR")).parent().unwrap(),
+            )
+            .arg("dap")
+            .current_dir(cwd),
         )
-        .env("NOETA_COMPOSE_DEBUG", "1")
-        .env(
-            "NOETA_COMPOSE_TARGET_DIR",
-            PathBuf::from(env!("CARGO_TARGET_TMPDIR")).parent().unwrap(),
-        )
-        .arg("dap")
-        .current_dir(cwd)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
         .expect("the debug adapter starts");
     let mut stdin = child.stdin.take().expect("stdin");
     let mut stdout = BufReader::new(child.stdout.take().expect("stdout"));
@@ -1026,6 +1029,7 @@ fn dap_launch(cwd: &std::path::Path, entry: &std::path::Path) -> String {
     // it ends when the pipe closes, so a hang here is a real hang and not a missing sentinel.
     let mut collected = String::new();
     let mut header = String::new();
+    let mut terminated = false;
     loop {
         header.clear();
         if stdout.read_line(&mut header).unwrap_or(0) == 0 {
@@ -1048,11 +1052,22 @@ fn dap_launch(cwd: &std::path::Path, entry: &std::path::Path) -> String {
             collected.push_str(&message);
         }
         if message.contains(r#""event":"terminated""#) {
+            terminated = true;
             break;
         }
     }
     drop(stdin);
     let _ = child.wait();
+    // The pipe closing before `terminated` means the adapter died rather than finished the program.
+    // Its reason is on stderr, which the caller's assertion on `collected` cannot show — so say it
+    // here, where the log is still in hand.
+    assert!(
+        terminated,
+        "{}",
+        log.explain(
+            "the debug adapter closed stdout without a `terminated` event — it died mid-launch"
+        )
+    );
     collected
 }
 
@@ -1068,22 +1083,24 @@ fn mcp_check(cwd: &std::path::Path, entry: &std::path::Path) -> String {
     // A raw `std::process::Command`: `assert_cmd`'s wrapper owns the child's pipes, and this test
     // needs to talk on them. Same environment `lang()`/`composed_env` set, spelled out.
     let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin("noeta"));
-    let mut child = cmd
-        .env(
-            "NOETA_CACHE_DIR",
-            concat!(env!("CARGO_TARGET_TMPDIR"), "/noeta-cache"),
+    // stderr into a `ServerLog` file for the same two reasons as `dap_launch`: `NOETA_COMPOSE_DEBUG`
+    // narration cannot fill an unread pipe and stall the server, and the composition it narrates is
+    // exactly what a failing `initialize` here needs quoted.
+    let log = noeta_test_temp::ServerLog::new("mcp-compose");
+    let mut child = log
+        .spawn_stdio_protocol(
+            cmd.env(
+                "NOETA_CACHE_DIR",
+                concat!(env!("CARGO_TARGET_TMPDIR"), "/noeta-cache"),
+            )
+            .env("NOETA_COMPOSE_DEBUG", "1")
+            .env(
+                "NOETA_COMPOSE_TARGET_DIR",
+                PathBuf::from(env!("CARGO_TARGET_TMPDIR")).parent().unwrap(),
+            )
+            .arg("mcp")
+            .current_dir(cwd),
         )
-        .env("NOETA_COMPOSE_DEBUG", "1")
-        .env(
-            "NOETA_COMPOSE_TARGET_DIR",
-            PathBuf::from(env!("CARGO_TARGET_TMPDIR")).parent().unwrap(),
-        )
-        .arg("mcp")
-        .current_dir(cwd)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
         .expect("the MCP server starts");
     let mut stdin = child.stdin.take().expect("stdin");
     let mut stdout = BufReader::new(child.stdout.take().expect("stdout"));
@@ -1096,7 +1113,11 @@ fn mcp_check(cwd: &std::path::Path, entry: &std::path::Path) -> String {
     .unwrap();
     stdin.flush().unwrap();
     stdout.read_line(&mut line).expect("the initialize reply");
-    assert!(line.contains("serverInfo"), "initialize reply: {line}");
+    assert!(
+        line.contains("serverInfo"),
+        "{}",
+        log.explain(format!("initialize reply: {line}"))
+    );
 
     writeln!(
         stdin,
@@ -1112,9 +1133,14 @@ fn mcp_check(cwd: &std::path::Path, entry: &std::path::Path) -> String {
     stdin.flush().unwrap();
 
     line.clear();
-    stdout.read_line(&mut line).expect("the check reply");
+    let read = stdout.read_line(&mut line).expect("the check reply");
     drop(stdin);
     let _ = child.wait();
+    assert!(
+        read != 0,
+        "{}",
+        log.explain("the MCP server closed stdout without answering `check` — it died mid-request")
+    );
     line
 }
 

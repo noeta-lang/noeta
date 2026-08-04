@@ -1699,43 +1699,47 @@ fn interactive_oob_publish_signs_keyless_end_to_end() {
     git_in(&["commit", "-q", "-m", "r"], &repo);
     git_in(&["tag", "v1.0.0"], &repo);
 
-    // Publish interactively (OOB), piping stdio so the test can play the user.
-    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("noeta"))
-        .current_dir(&repo)
-        .env(
-            "NOETA_CACHE_DIR",
-            concat!(env!("CARGO_TARGET_TMPDIR"), "/noeta-cache"),
+    // Publish interactively (OOB), piping stdin/stdout so the test can play the user. stderr is the
+    // one stream this test never reads, so it goes to a `ServerLog` file rather than a pipe: a
+    // publish that talks to four mock services (OIDC, Fulcio, Rekor, the registry) has plenty to say
+    // when one of them misbehaves, and an unread pipe would stop it at 64 KiB — mid-handshake,
+    // before the sign-in URL the loop below is waiting for.
+    let log = noeta_test_temp::ServerLog::new("publish-interactive");
+    let mut child = log
+        .spawn_stdio_protocol(
+            std::process::Command::new(assert_cmd::cargo::cargo_bin("noeta"))
+                .current_dir(&repo)
+                .env(
+                    "NOETA_CACHE_DIR",
+                    concat!(env!("CARGO_TARGET_TMPDIR"), "/noeta-cache"),
+                )
+                .env("NOETA_REGISTRY_DIR", &reg)
+                .env_remove("NOETA_SIGNING_KEY")
+                .env_remove("GITHUB_ACTIONS")
+                .env("NOETA_OIDC_URL", &oidc)
+                .env("NOETA_FULCIO_URL", &fulcio)
+                .env("NOETA_REKOR_URL", &rekor)
+                .env("NOETA_SIGSTORE_TRUST_ROOT", &trust_root)
+                .args([
+                    "publish",
+                    "--git",
+                    repo.to_str().unwrap(),
+                    "--tag",
+                    "v1.0.0",
+                    "--interactive",
+                    "--oob",
+                ]),
         )
-        .env("NOETA_REGISTRY_DIR", &reg)
-        .env_remove("NOETA_SIGNING_KEY")
-        .env_remove("GITHUB_ACTIONS")
-        .env("NOETA_OIDC_URL", &oidc)
-        .env("NOETA_FULCIO_URL", &fulcio)
-        .env("NOETA_REKOR_URL", &rekor)
-        .env("NOETA_SIGSTORE_TRUST_ROOT", &trust_root)
-        .args([
-            "publish",
-            "--git",
-            repo.to_str().unwrap(),
-            "--tag",
-            "v1.0.0",
-            "--interactive",
-            "--oob",
-        ])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
         .expect("spawn noeta publish");
 
     // Read the CLI's output until it announces the sign-in URL.
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
     let auth_url = loop {
         let mut line = String::new();
-        assert_ne!(
-            stdout.read_line(&mut line).expect("read publish output"),
-            0,
-            "publish ended before printing the sign-in URL"
+        assert!(
+            stdout.read_line(&mut line).expect("read publish output") != 0,
+            "{}",
+            log.explain("publish ended before printing the sign-in URL")
         );
         let trimmed = line.trim();
         if trimmed.starts_with("http://") {
@@ -1774,10 +1778,15 @@ fn interactive_oob_publish_signs_keyless_end_to_end() {
     let mut rest_out = String::new();
     stdout.read_to_string(&mut rest_out).unwrap();
     let status = child.wait().expect("publish exits");
-    assert!(status.success(), "publish failed: {rest_out}");
+    assert!(
+        status.success(),
+        "{}",
+        log.explain(format!("publish failed: {rest_out}"))
+    );
     assert!(
         rest_out.contains(&format!("keyless: {EMAIL}")),
-        "expected keyless email identity in: {rest_out}"
+        "{}",
+        log.explain(format!("expected keyless email identity in: {rest_out}"))
     );
 
     // The consumer verifies and pins the email identity.

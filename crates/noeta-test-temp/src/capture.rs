@@ -139,6 +139,31 @@ impl ServerLog {
         cmd.stdout(self.stdio()).stderr(self.stdio()).spawn()
     }
 
+    /// Spawn `cmd` as a **stdio-protocol** child: stdin and stdout stay pipes for the caller to
+    /// speak on, and only stderr goes into this log.
+    ///
+    /// `noeta mcp` (JSON-RPC) and `noeta dap` (DAP framing) carry their protocol on stdout, so
+    /// [`ServerLog::spawn`] cannot be used — the test has to read the replies. What those suites
+    /// wrote instead was `.stderr(Stdio::piped())` and then never a single read of it, which is
+    /// worse than the null'd stderr this module was written against: a pipe holds 64 KiB and then
+    /// **blocks the writer**, so a child that says enough on stderr stops mid-sentence, never
+    /// answers the request the test is waiting on, and the suite hangs until the harness timeout —
+    /// with the explanation sitting unread in the pipe. Nothing has actually hung yet; these
+    /// children are terse today, and one `NOETA_COMPOSE_DEBUG=1` build that got chatty is all it
+    /// would take.
+    ///
+    /// Routing stderr to the file settles both halves at once. The pipe cannot fill, so the
+    /// deadlock is gone by construction rather than by a drain thread that teardown would then have
+    /// to join; and what the child said survives into [`ServerLog::explain`] on the failure path,
+    /// so `the server closed stdout without answering` finally arrives with the panic that closed
+    /// it.
+    pub fn spawn_stdio_protocol(&self, cmd: &mut Command) -> std::io::Result<Child> {
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(self.stdio())
+            .spawn()
+    }
+
     /// A `Stdio` for the child: a `dup` of the open file, so the child's writes append to the same
     /// description this process holds.
     fn stdio(&self) -> Stdio {
@@ -300,6 +325,49 @@ mod tests {
         let quoted = log.quoted();
         assert!(quoted.contains("nothing at all"), "{quoted}");
         assert_eq!(log.explain("it broke").lines().next().unwrap(), "it broke");
+    }
+
+    /// **The deadlock a stdio-protocol child would hit.** The child says far more than a pipe's
+    /// 64 KiB on stderr and only *then* reads the request it is supposed to answer. With stderr
+    /// piped and never drained it blocks mid-noise, the reply never comes, and the caller's
+    /// `read_line` waits forever; with stderr in the log it answers, and the noise is still
+    /// quotable afterwards.
+    ///
+    /// Run on a thread with a deadline, because the regression this pins is a *hang*: a plain
+    /// version of this test would not fail, it would wedge the suite until the harness gave up.
+    #[test]
+    fn a_stdio_protocol_child_answers_even_when_its_stderr_outruns_a_pipe() {
+        use std::io::{BufRead, BufReader, Write};
+
+        let (done, answered) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let log = ServerLog::new("stdio-protocol");
+            let mut child = log
+                .spawn_stdio_protocol(Command::new("sh").args([
+                    "-c",
+                    "i=0; while [ $i -lt 20000 ]; do echo \"noise $i\" >&2; i=$((i+1)); done; \
+                     echo LAST-NOISE >&2; read line; echo \"reply:$line\"",
+                ]))
+                .expect("spawn sh");
+            let mut stdin = child.stdin.take().expect("stdin is a pipe");
+            let mut stdout = BufReader::new(child.stdout.take().expect("stdout is a pipe"));
+            writeln!(stdin, "ping").expect("write the request");
+            stdin.flush().expect("flush");
+            let mut line = String::new();
+            stdout.read_line(&mut line).expect("read the reply");
+            let _ = child.wait();
+            done.send(()).ok();
+            (line, log.tail())
+        });
+        answered
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("the child answered rather than blocking on an undrained stderr pipe");
+        let (reply, tail) = worker.join().expect("the worker thread");
+        assert_eq!(reply.trim(), "reply:ping");
+        assert!(
+            tail.contains("LAST-NOISE"),
+            "stderr belongs to the log, not the protocol: {tail}"
+        );
     }
 
     /// `explain` never quotes the same log twice — the readiness helper has usually quoted it
