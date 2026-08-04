@@ -2328,13 +2328,13 @@ mod tests {
          class C {\n\
              impl T {\n\
                  @doc { An in-body impl method. }\n\
-                 fn area(): int { return 5; }\n\
+                 pub fn area(): int { return 5; }\n\
              }\n\
          }\n\
          struct P { y: int }\n\
          impl T for P {\n\
              @doc { A standalone impl method. }\n\
-             fn area(): int { return self.y; }\n\
+             pub fn area(): int { return self.y; }\n\
          }\n";
 
     /// Every `(target, prose)` pair the reflection manifest carries for the `Doc` attribute, which
@@ -2595,7 +2595,9 @@ mod tests {
         );
         let diags = crate::check_all(&program).diagnostics;
         assert!(
-            diags.iter().any(|d| d.code == DiagnosticCode::PrivateMethod),
+            diags
+                .iter()
+                .any(|d| d.code == DiagnosticCode::PrivateMethod),
             "ordinary code calling a private method must be E0076: {diags:?}"
         );
     }

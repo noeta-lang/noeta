@@ -4804,10 +4804,7 @@ where
                 move |(
                     (
                         (
-                            (
-                                ((((attrs, pub_kw), static_kw), async_kw), name_pair),
-                                type_params,
-                            ),
+                            (((((attrs, pub_kw), static_kw), async_kw), name_pair), type_params),
                             params,
                         ),
                         ret,
