@@ -2606,12 +2606,12 @@ impl Checker {
                 && let Some(ty) = self.coloring.current_type.clone()
                 && !self
                     .receiver_of(&ty, decl.name.as_str())
-                    .allows_associated_call()
+                    .allows_static_call()
             {
                 self.error(
                     DiagnosticCode::InvalidDirectiveSite,
                     dir.name_span,
-                    format!("a `@{}` method must be an associated function", dir.name),
+                    format!("a `@{}` method must be a static function", dir.name),
                 )
                 .help(
                     "a test/bench method is called with no receiver, so its body must not use \

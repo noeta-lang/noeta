@@ -410,7 +410,7 @@ fn method_candidates<'a>(
 /// the hidden slot is the only channel it has.
 ///
 /// Two exclusions, both matching what `collect_method_sig_classified` classifies as
-/// [`crate::Receiver::Associated`], so the pre-pass and the checker cannot disagree about which
+/// [`crate::Receiver::Static`], so the pre-pass and the checker cannot disagree about which
 /// members have a receiver:
 ///
 /// * a body that mentions `self` is an instance method, receiver channel;

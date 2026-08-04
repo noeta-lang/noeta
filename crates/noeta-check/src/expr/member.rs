@@ -824,7 +824,7 @@ impl Checker {
                 self.error(
                     DiagnosticCode::InvalidReceiver,
                     member_span,
-                    format!("`{name}` is an associated function of `{n}`"),
+                    format!("`{name}` is a static function of `{n}`"),
                 )
                 .help(format!("bind it off the type: `{n}.{name}`"));
             } else {

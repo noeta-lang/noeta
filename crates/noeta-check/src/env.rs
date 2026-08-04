@@ -30,12 +30,17 @@ pub(crate) struct VariantInfo {
 /// are not the same question once a trait is involved.
 ///
 /// This used to be a `bool` ("is it an instance method?") with the third state encoded as *absence
-/// from the table* — which worked only by accident: the associated-call site read a missing entry
-/// with `unwrap_or(false)` and the instance-call site with `unwrap_or(true)`, so an unclassified
-/// method happened to be permitted both ways. Two call sites with opposite defaults is a
-/// coincidence, not a design, and it reads as a bug from either side alone; the turbofish site,
-/// which used one default for both directions, had already drifted out of agreement with it. The
-/// state is named here instead, so a reader sees three cases and a `match` makes them decide.
+/// from the table* — which worked only by accident: the static-call site read a missing entry with
+/// `unwrap_or(false)` and the instance-call site with `unwrap_or(true)`, so an unclassified method
+/// happened to be permitted both ways. Two call sites with opposite defaults is a coincidence, not
+/// a design, and it reads as a bug from either side alone; the turbofish site, which used one
+/// default for both directions, had already drifted out of agreement with it. The state is named
+/// here instead, so a reader sees three cases and a `match` makes them decide.
+///
+/// The variants say **static**, the word the language's own modifier and every diagnostic use for
+/// "takes no receiver" (static-trait-methods arc). They used to say "associated", which named the
+/// same idea in a second vocabulary — the drift this classification exists to prevent, spelled in
+/// the classification itself.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Receiver {
     /// The body reads `self`, so a call must supply one: `x.m(…)` only. `T.m(…)` is E0047 — and
@@ -43,7 +48,11 @@ pub(crate) enum Receiver {
     Instance,
     /// A self-less **inherent** function: `T.m(…)` only. `x.m(…)` is E0047 — the receiver would be
     /// evaluated and then silently discarded.
-    Associated,
+    ///
+    /// **Derived**, never declared: `static` is a modifier only a `trait`'s method contract may
+    /// write, because only a contract needs to bind implementations it cannot see. An inherent
+    /// method's body is right there, so the body decides and writing the modifier is E0015.
+    Static,
     /// A self-less method belonging to a **trait's interface**: reachable **both** ways. The trait's
     /// contract puts it in the instance interface (`x.m(…)` — and that is how `dyn Trait` dispatches
     /// it), while the body needs no receiver, so calling it on the type (`T.m(…)`) is equally
@@ -58,7 +67,7 @@ impl Receiver {
         if uses_self {
             Receiver::Instance
         } else {
-            Receiver::Associated
+            Receiver::Static
         }
     }
 
@@ -74,20 +83,20 @@ impl Receiver {
     }
 
     /// Whether `T.m(…)` (no receiver) is legal.
-    pub(crate) fn allows_associated_call(self) -> bool {
+    pub(crate) fn allows_static_call(self) -> bool {
         !matches!(self, Receiver::Instance)
     }
 
     /// Whether `x.m(…)` (with a receiver) is legal.
     pub(crate) fn allows_instance_call(self) -> bool {
-        !matches!(self, Receiver::Associated)
+        !matches!(self, Receiver::Static)
     }
 
     /// Whether a handle bound off the **type** (`T.m` in value position) carries the receiver as its
     /// first parameter. `Either` reads as instance here — which is exactly what the absent entry
     /// already meant, so a trait method's handle keeps its instance shape.
     pub(crate) fn handle_takes_receiver(self) -> bool {
-        !matches!(self, Receiver::Associated)
+        !matches!(self, Receiver::Static)
     }
 }
 

@@ -2112,8 +2112,7 @@ impl Checker {
                 self.error(
                     DiagnosticCode::InvalidTypeArguments,
                     *span,
-                    "a call-site type argument list must be followed by an associated call"
-                        .to_string(),
+                    "a call-site type argument list must be followed by a static call".to_string(),
                 )
                 .help(format!(
                     "write `{head}::<...>.method(args)`. The instantiation is consumed by the \

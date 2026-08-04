@@ -191,7 +191,7 @@ struct Point { x: int  y: int }        // value type
 
 class Counter {
     pub mut n: int
-    fn new(): Counter { return Counter { n: 0 } }   // associated function (no self)
+    fn new(): Counter { return Counter { n: 0 } }   // static function (no self)
     fn bump(): void { self.n = self.n + 1 }         // method; fields read through self
 }
 

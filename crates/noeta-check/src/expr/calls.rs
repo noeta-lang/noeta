@@ -1015,8 +1015,8 @@ impl Checker {
                         format!("type `{shown}` is not callable"),
                     )
                     .help(format!(
-                        "build one with a literal (`{shown} {{ … }}`), or call an associated \
-                         function on the type (`{shown}.new(…)`)"
+                        "build one with a literal (`{shown} {{ … }}`), or call a static function \
+                         on the type (`{shown}.new(…)`)"
                     ));
                     return Type::Unknown;
                 }
@@ -1214,7 +1214,7 @@ impl Checker {
                     // associated-style — there is no receiver to become `self` (E0047,
                     // prelude-redesign EX.2). A self-less method of a trait's interface
                     // ([`Receiver::Either`]) is reachable this way as well as on a value.
-                    if !self.receiver_of(tn.as_str(), name).allows_associated_call() {
+                    if !self.receiver_of(tn.as_str(), name).allows_static_call() {
                         self.error(
                             DiagnosticCode::InvalidReceiver,
                             span,
@@ -1279,7 +1279,7 @@ impl Checker {
                     self.error(
                         DiagnosticCode::TypeMismatch,
                         span,
-                        format!("type `{shown}` has no associated function `{name}`"),
+                        format!("type `{shown}` has no static function `{name}`"),
                     );
                     return Type::Unknown;
                 }
@@ -1391,7 +1391,7 @@ impl Checker {
                         self.error(
                             DiagnosticCode::InvalidReceiver,
                             span,
-                            format!("`{name}` is an associated function of `{n}`"),
+                            format!("`{name}` is a static function of `{n}`"),
                         )
                         .help(format!("call it on the type: `{n}.{name}(...)`"));
                         return sig.ret.clone();
@@ -1956,7 +1956,7 @@ impl Checker {
         // (every standalone-impl method) was accepted as `T.m(…)` and refused as `T.m::<X>(…)`.
         // Asking [`Checker::receiver_of`] the same question all three sites ask settles it.
         let receiver = self.receiver_of(&type_name, name);
-        if associated && !receiver.allows_associated_call() {
+        if associated && !receiver.allows_static_call() {
             self.error(
                 DiagnosticCode::InvalidReceiver,
                 name_span,
@@ -1972,7 +1972,7 @@ impl Checker {
             self.error(
                 DiagnosticCode::InvalidReceiver,
                 name_span,
-                format!("`{name}` is an associated function of `{type_name}`"),
+                format!("`{name}` is a static function of `{type_name}`"),
             )
             .help(format!(
                 "call it on the type: `{type_name}.{name}::<...>(...)`"

@@ -176,7 +176,7 @@ impl Checker {
     ///
     /// `trait_provided` says whether a **trait's interface** supplies this method — an `impl Trait`
     /// block's own method, in-body or standalone. It changes what a *self-less* body means: an
-    /// inherent one is an associated function ([`Receiver::Associated`], `T.m(…)` only), a trait's
+    /// inherent one is an associated function ([`Receiver::Static`], `T.m(…)` only), a trait's
     /// is reachable either way ([`Receiver::Either`]), because the trait's contract puts it in the
     /// instance interface — `dyn Trait` dispatches it on a value — while its body needs no receiver.
     /// A body that *does* read `self` is [`Receiver::Instance`] either way; the trait cannot conjure
@@ -1758,7 +1758,7 @@ fn subst_self_assoc_in_fn(m: &FnDecl, bindings: &HashMap<&str, &TypeRef>) -> FnD
 
 /// Whether an `impl <trait_name>` block's methods belong to the trait's **instance interface** —
 /// the question that decides whether a self-less one is [`Receiver::Either`] (reachable both ways)
-/// or [`Receiver::Associated`] (on the type only).
+/// or [`Receiver::Static`] (on the type only).
 ///
 /// True for every user, native, and built-in trait *except* one whose contract declares its method
 /// **`static`** ([`BuiltinTrait::declares_static`] — `From::from` builds a value rather than acting
@@ -1767,11 +1767,21 @@ fn subst_self_assoc_in_fn(m: &FnDecl, bindings: &HashMap<&str, &TypeRef>) -> FnD
 /// source order: an `impl` written above its `trait` must classify like one written below it, and
 /// during this walk the trait table is only half-populated.
 ///
-/// A **user** trait's `static` declaration deliberately does NOT feed this: an unmarked self-less
-/// trait method is `Receiver::Either` today, and the arc is non-breaking, so marking one `static`
-/// adds a promise (`T.m(…)` under a bound, no `self` in any impl) without withdrawing the `x.m(…)`
-/// spelling that already worked. Reading `user_traits` here would also reintroduce exactly the
-/// source-order dependence this function is written to avoid.
+/// A **user** trait's `static` declaration deliberately does NOT feed this, so a user static method
+/// stays `Receiver::Either` while `From`'s is `Receiver::Static`. Two reasons, and the asymmetry is
+/// a KNOWN one rather than an oversight:
+///
+///   * The arc is non-breaking by construction. An unmarked self-less trait method is `Either`
+///     today, so marking one `static` adds a promise (`T.m(…)` under a bound, and no `self` in any
+///     implementation) without withdrawing the `x.m(…)` spelling that already worked.
+///   * Reading `symbols.user_traits` here would reintroduce exactly the source-order dependence
+///     this function is written to avoid: this runs in the FIRST collect walk, the same one that
+///     registers `Stmt::Trait`, so a type declared above its trait would classify differently from
+///     one declared below it.
+///
+/// Closing the gap — making a declared-`static` user method type-only, as `From`'s is — needs a
+/// reclassification pass after `user_traits` is complete, not a lookup here. It is deliberately not
+/// done: it would be the one part of this arc that changes what an existing spelling means.
 fn trait_supplies_instance_interface(trait_name: &str) -> bool {
     BuiltinTrait::from_name(trait_name).is_none_or(|t| !t.declares_static())
 }

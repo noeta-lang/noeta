@@ -249,7 +249,7 @@ impl DiagnosticCode {
                 title: "invalid receiver",
                 group: "Functions and calls",
                 severity: Severity::Error,
-                summary: "A method called through the wrong receiver — an instance method as `Type.m(…)`, or an associated function on a value.",
+                summary: "A method called through the wrong receiver — an instance method as `Type.m(…)`, a static function on a value, or `T.m(…)` under a bound whose trait does not declare `m` static.",
                 detail: "",
                 docs: "Generics-and-Traits",
             },

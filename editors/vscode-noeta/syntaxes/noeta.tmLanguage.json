@@ -353,7 +353,7 @@
         },
         {
           "name": "storage.type.noeta",
-          "match": "\\b(mut|fn|enum|struct|type|class|destruct|impl|trait)\\b"
+          "match": "\\b(mut|fn|static|enum|struct|type|class|destruct|impl|trait)\\b"
         }
       ]
     },

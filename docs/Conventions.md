@@ -68,7 +68,7 @@ echo posts.filter(fn(p) => is_public(p)).len()
 
 ## Constructors
 
-**A constructor is a convention, not a keyword.** It is an associated function — one with no `self` — that returns an instance of its own type, and the ecosystem calls the primary one `new`:
+**A constructor is a convention, not a keyword.** It is a static function — one with no `self` — that returns an instance of its own type, and the ecosystem calls the primary one `new`:
 
 ```noeta
 struct Todo {
