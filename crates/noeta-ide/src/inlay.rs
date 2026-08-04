@@ -67,11 +67,13 @@ pub fn type_hints(
     packed_layouts: &HashMap<String, PackedLayout>,
     receivers: &HashMap<Span, Receiver>,
     source: SourceId,
+    text: &str,
 ) -> Vec<TypeHint> {
     let declarations: HashSet<Span> = DefUse::build(program).binding_spans().collect();
     let mut hints = Vec::new();
     let mut walker = Walker {
         source,
+        text,
         program,
         declarations: &declarations,
         expr_types,
@@ -93,17 +95,38 @@ pub fn type_hints(
 /// `@tier` directives (the parser consumes them as part of the method), so step past the last of
 /// them; for the undecorated method — nearly all of them — the declaration's own start is the
 /// keyword.
-fn modifier_offset(decl: &FnDecl) -> u32 {
-    decl.attrs
+///
+/// Stepping past the decoration is not enough on its own, because a decoration sits on **its own
+/// line** by convention. Anchoring at its end would put the ghost at the end of the *previous*
+/// line — `#[Route("GET")] static` above a bare `fn handler` — which is not merely ugly: it is a
+/// slot where the keyword could never be written, the very thing this helper exists to avoid. So
+/// skip the whitespace that follows and land on the keyword itself, which is where an author would
+/// type it and the one anchor that reads as the source it stands for.
+fn modifier_offset(decl: &FnDecl, text: &str) -> u32 {
+    let after_decorations = decl
+        .attrs
         .iter()
         .map(|a| a.span.end)
         .chain(decl.directives.iter().map(|d| d.span.end))
         .max()
-        .map_or(decl.span.start, |end| end.max(decl.span.start))
+        .map_or(decl.span.start, |end| end.max(decl.span.start));
+    let rest = text
+        .get(after_decorations as usize..)
+        .unwrap_or_default()
+        .len();
+    let leading_ws = text
+        .get(after_decorations as usize..)
+        .unwrap_or_default()
+        .find(|c: char| !c.is_whitespace())
+        .unwrap_or(rest);
+    after_decorations + leading_ws as u32
 }
 
 struct Walker<'a> {
     source: SourceId,
+    /// This document's text — read only to find the keyword a ghost modifier anchors on
+    /// ([`modifier_offset`]); every other hint family anchors on a span the parser recorded.
+    text: &'a str,
     /// The merged program, for resolving a call's callee to its declaration (parameter names).
     program: &'a Program,
     declarations: &'a HashSet<Span>,
@@ -280,7 +303,7 @@ impl Walker<'_> {
             return;
         }
         self.hints.push(TypeHint {
-            offset: modifier_offset(decl),
+            offset: modifier_offset(decl, self.text),
             label: "static".to_string(),
             kind: HintKind::Modifier,
         });

@@ -759,6 +759,7 @@ impl DocumentStore {
                 &ide.packed_layouts,
                 &ide.method_receivers,
                 source,
+                doc.text(db),
             )
             .into_iter()
             .filter(|hint| start <= hint.offset && hint.offset <= end)
@@ -4539,12 +4540,18 @@ mod tests {
         );
     }
 
-    /// The ghost keyword lands **after** a method's `#[…]` attributes, not before them: a method's
+    /// The ghost keyword anchors **on the `fn` keyword**, past any `#[…]` attributes: a method's
     /// `FnDecl::span` starts at its first decoration (the parser consumes them as part of the
     /// method), so anchoring naively at `span.start` would render `⟨static⟩ #[Route(…)] fn make`,
     /// putting the keyword somewhere it could never be written.
+    ///
+    /// Stepping to the decoration's *end* is not enough either, which is what the second case
+    /// pins. An attribute sits on its own line by convention, so ending there would strand the
+    /// ghost at the end of the previous line — `#[Route(…)] static` floating above a bare
+    /// `fn handler` — which is the same "slot where it could never be written" failure in a less
+    /// obvious costume.
     #[test]
-    fn inlay_hints_anchor_the_ghost_static_after_a_methods_attributes() {
+    fn inlay_hints_anchor_the_ghost_static_on_the_fn_keyword() {
         let mut store = test_store();
         store.open(
             "file:///deco.noe",
@@ -4556,10 +4563,28 @@ mod tests {
             .to_string(),
         );
         let hints = placed_hints_of(&store, "file:///deco.noe");
-        // Column 22 is the end of `  #[Route(path: "/x")]` — the modifier slot, just before `fn`.
+        // `  #[Route(path: "/x")]` ends at column 22; column 23 is the `f` of `fn`.
         assert!(
-            hints.contains(&(3, 22, "static".to_string())),
-            "ghost keyword sits between the attribute and `fn`: {hints:?}"
+            hints.contains(&(3, 23, "static".to_string())),
+            "ghost keyword sits on `fn`, not on the space before it: {hints:?}"
+        );
+
+        // The convention: the attribute on its own line, the declaration below it.
+        let mut store = test_store();
+        store.open(
+            "file:///deco_own_line.noe",
+            "@attribute struct Route { path: string }\n\
+             class Host {\n  \
+             pub id: int\n  \
+             #[Route(path: \"/x\")]\n  \
+             fn make(): Host { return Host { id: 1 } }\n\
+             }\n"
+            .to_string(),
+        );
+        let hints = placed_hints_of(&store, "file:///deco_own_line.noe");
+        assert!(
+            hints.contains(&(4, 2, "static".to_string())),
+            "ghost keyword drops to the `fn` line rather than trailing the attribute: {hints:?}"
         );
     }
 

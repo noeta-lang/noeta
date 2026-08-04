@@ -1191,11 +1191,11 @@ impl LanguageServer for Backend {
                 text_edits: None,
                 tooltip: None,
                 // A type label starts `: ` glued to the name it follows; a parameter label
-                // `n:` precedes its argument. Neither wants leading padding; both want a
-                // space on the right. A modifier stands as its own word between whatever
-                // precedes it (indentation, or a `@test` directive) and the `fn` keyword, so it
-                // is the one family that wants padding on both sides.
-                padding_left: Some(matches!(kind, inlay::HintKind::Modifier)),
+                // `n:` precedes its argument. A modifier anchors ON the `fn` keyword, so the
+                // whitespace already separating it from what precedes — the indentation, or the
+                // newline after an attribute on its own line — is the source's own. None of the
+                // three wants leading padding; all three want a space on the right.
+                padding_left: Some(false),
                 padding_right: Some(true),
                 data: None,
             })
