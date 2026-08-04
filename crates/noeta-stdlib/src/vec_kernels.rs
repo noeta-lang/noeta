@@ -114,7 +114,75 @@ pub(crate) const VEC_KERNELS: ExtTrait = ExtTrait {
         layout: ConstraintLayout::Any,
         arity: ConstraintArity::Uniform { min: 2 },
     }),
+    doc: "Element-wise arithmetic over any uniform numeric `@packed` shape. Adopt it with an empty \
+          impl — every method already has a native body:\n\n```noeta\n@packed\nstruct Vec2 { x: \
+          float, y: float }\n\nimpl vec.Kernels for Vec2 {}\n\nlet a = Vec2 { x: 1.0, y: 2.0 }\nlet \
+          b = a.add(Vec2 { x: 0.5, y: 0.5 })\n```\n\nThe implementing type must be a `@packed` \
+          struct of **two or more fields of one numeric kind** (E0015 otherwise). That uniform \
+          element is what the associated types derive from: `Self::Wide` widens it (so `dot` cannot \
+          overflow on narrow integers) and `Self::Float` promotes it (so `length` returns a float \
+          even for an integer shape).\n\nEvery method has a bulk `*_all` twin on `List<Self>` that \
+          runs over the packed list's contiguous bytes in one pass — `xs.add_all(ys)` rather than a \
+          loop over `add`.",
+    docs: KERNELS_DOCS,
 };
+
+/// Per-method prose for [`VEC_KERNELS`]. The element form and its bulk `*_all` twin are separate
+/// entries in the trait's method table, so each is documented on its own.
+const KERNELS_DOCS: &[(&str, &str)] = &[
+    ("add", "Element-wise addition."),
+    ("sub", "Element-wise subtraction."),
+    ("scale", "Multiply every element by a scalar factor."),
+    ("min", "Element-wise minimum of two values."),
+    ("max", "Element-wise maximum of two values."),
+    ("abs", "Element-wise absolute value."),
+    (
+        "dot",
+        "The dot product — the sum of the element-wise products. Returns `Self::Wide`, the widened \
+         element type, so the accumulation cannot overflow a narrow element.",
+    ),
+    (
+        "length",
+        "The Euclidean length (L2 norm). Returns `Self::Float`, the float-promoted element type, so \
+         an integer shape still answers with a float.",
+    ),
+    (
+        "normalize",
+        "The unit vector in the same direction — every element divided by `length`. A zero-length \
+         value normalizes to the zero vector rather than producing NaN.\n\n**Float shapes only.** \
+         An integer vector has no unit vector, so calling this on one is a runtime error.",
+    ),
+    (
+        "add_all",
+        "Bulk element-wise addition over two equal-length lists, in one pass over the packed \
+         bytes.",
+    ),
+    (
+        "sub_all",
+        "Bulk element-wise subtraction over two equal-length lists.",
+    ),
+    (
+        "scale_all",
+        "Bulk scalar multiply over a whole packed list.",
+    ),
+    (
+        "min_all",
+        "Bulk element-wise minimum over two equal-length lists.",
+    ),
+    (
+        "max_all",
+        "Bulk element-wise maximum over two equal-length lists.",
+    ),
+    ("abs_all", "Bulk element-wise absolute value."),
+    (
+        "dot_all",
+        "Bulk dot product — one `Self::Wide` per element pair.",
+    ),
+    (
+        "length_all",
+        "Bulk Euclidean length — one float per element of the list.",
+    ),
+];
 
 /// `Kernels`' full method set: the shared element methods + `normalize` + the bulk `*_all` forms.
 const KERNELS_METHODS: &[ExtTraitMethod] = &[
@@ -256,7 +324,58 @@ pub(crate) const VEC_SAT_KERNELS: ExtTrait = ExtTrait {
         layout: ConstraintLayout::Any,
         arity: ConstraintArity::Uniform { min: 2 },
     }),
+    doc: "Saturating arithmetic over any uniform **integer** `@packed` shape — the clamping twin \
+          of `Kernels`. Adopt it with an empty impl:\n\n```noeta\n@packed\nstruct Color { r: u8, \
+          g: u8, b: u8 }\n\nimpl vec.SatKernels for Color {}\n```\n\nEvery method saturates at the \
+          element type's bounds instead of wrapping: `250u8 + 10u8` is `255`, not `4`. That is the \
+          right arithmetic for channel intensities, which is what this trait is for.\n\nIt \
+          deliberately omits `dot`/`length`/`normalize` — those are vector-space operations, and a \
+          saturating channel vector is a clamped tuple of intensities, not a vector. Every method \
+          returns `Self` or `List<Self>`, so unlike `Kernels` it declares no associated types.",
+    docs: SAT_DOCS,
 };
+
+/// Per-method prose for [`VEC_SAT_KERNELS`]. The bulk `*_all` forms take `List<Self>` receivers, so
+/// each pair is documented once on the element form and once on the bulk one — the two are separate
+/// entries in the trait's method table and a reader meets them separately.
+const SAT_DOCS: &[(&str, &str)] = &[
+    (
+        "add",
+        "Element-wise addition, saturating at the element type's maximum.",
+    ),
+    (
+        "sub",
+        "Element-wise subtraction, saturating at the element type's minimum (no wrap to a huge \
+         value on underflow).",
+    ),
+    (
+        "scale",
+        "Multiply every element by a scalar factor, saturating at the element type's bounds.",
+    ),
+    ("min", "Element-wise minimum of two values."),
+    ("max", "Element-wise maximum of two values."),
+    (
+        "add_all",
+        "Bulk element-wise addition over two equal-length lists, saturating. Runs over the packed \
+         lists' contiguous bytes.",
+    ),
+    (
+        "sub_all",
+        "Bulk element-wise subtraction over two equal-length lists, saturating.",
+    ),
+    (
+        "scale_all",
+        "Bulk scalar multiply over a whole packed list, saturating.",
+    ),
+    (
+        "min_all",
+        "Bulk element-wise minimum over two equal-length lists.",
+    ),
+    (
+        "max_all",
+        "Bulk element-wise maximum over two equal-length lists.",
+    ),
+];
 
 const SAT_METHODS: &[ExtTraitMethod] = &[
     tfn(

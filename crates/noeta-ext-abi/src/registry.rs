@@ -1244,6 +1244,14 @@ pub struct ExtEnum {
     /// role names → `semantic_enums`); [`Registry::validate`] refuses a struct/class-only directive
     /// here. Default empty.
     pub directives: &'static [ExtTypeDirective],
+    /// The enum's **own documentation prose** (markdown), or empty — what the choice means, which
+    /// the variant list alone does not say. The [`ExtTrait::doc`] analogue.
+    pub doc: &'static str,
+    /// Per-**member** documentation prose: `(name, markdown)` pairs covering both
+    /// [`ExtEnum::variants`] and [`ExtEnum::methods`]. One table serves both because the two name
+    /// spaces are already disjoint (a method name may not collide with a variant's case name — see
+    /// [`ExtEnum::methods`]). Opt-in and sparse.
+    pub docs: &'static [(&'static str, &'static str)],
 }
 
 /// One variant of an [`ExtEnum`]: its case name plus **either** a positional payload (an algebraic
@@ -1282,6 +1290,8 @@ impl ExtEnum {
         },
         traits: &[],
         directives: &[],
+        doc: "",
+        docs: &[],
     };
 
     /// The variant named `variant`, with its declaration index, if any.
@@ -1520,6 +1530,13 @@ pub struct ExtFielded {
     /// `validated_types`); [`Registry::validate`] rejects a directive illegal for this type's
     /// [`FieldedKind`] (`@semantic` is enum-only, so it is refused here). Default empty.
     pub directives: &'static [ExtTypeDirective],
+    /// The type's **own documentation prose** (markdown), or empty. The [`ExtTrait::doc`] analogue.
+    pub doc: &'static str,
+    /// Per-**member** documentation prose: `(name, markdown)` pairs covering both
+    /// [`ExtFielded::fields`] and [`ExtFielded::methods`]. One table serves both because the two
+    /// name spaces are already disjoint (see [`ExtFielded::methods`]: a method name is disjoint from
+    /// the type's field names). Opt-in and sparse.
+    pub docs: &'static [(&'static str, &'static str)],
 }
 
 /// The pre-unification name for [`ExtFielded`], defaulting (via [`ExtFielded::DEFAULTS`]) to a
@@ -1572,6 +1589,8 @@ impl ExtFielded {
         traits: &[],
         kind: FieldedKind::Class,
         directives: &[],
+        doc: "",
+        docs: &[],
     };
 
     /// Literal-shortening defaults for a value **struct** (`..ExtStruct::STRUCT_DEFAULTS`) — the
@@ -1676,6 +1695,17 @@ pub struct ExtTrait {
     /// the extension author's own declaration and is validated at assembly. `None` leaves the trait
     /// shape-agnostic (implementable for any type), the pre-slice-3 behavior.
     pub self_constraint: Option<PackedConstraint>,
+    /// The trait's **own documentation prose** (markdown), or empty. A trait is a contract a user
+    /// writes an `impl` against, so the declaration-level prose is the part that matters most —
+    /// what the trait means and what an implementor promises. [`ExtModule`] and [`ExtType`] carry
+    /// only the per-member [`docs`](ExtTrait::docs) table because a module/handle is a bag of
+    /// callables; a trait is not.
+    pub doc: &'static str,
+    /// Per-method **documentation prose**: `(method_name, markdown)` pairs, the [`ExtTrait`]
+    /// analogue of [`ExtModule::docs`] / [`ExtType::docs`]. Opt-in and sparse — a method absent from
+    /// this table renders signature-only. Keyed by [`ExtTraitMethod::sig`]'s name, so one table
+    /// covers required and defaulted methods alike.
+    pub docs: &'static [(&'static str, &'static str)],
 }
 
 /// A native trait's **default-body dispatch** ([`ExtTrait::dispatch`], slice 2): the same
@@ -1760,6 +1790,8 @@ impl ExtTrait {
         assoc_types: &[],
         dispatch: None,
         self_constraint: None,
+        doc: "",
+        docs: &[],
     };
 }
 
@@ -4769,6 +4801,8 @@ mod runtime_registry_tests {
             .into())
         }),
         self_constraint: Some(VEC3_CONSTRAINT),
+        doc: "",
+        docs: &[],
     };
     const M_VEC: ExtModule = ExtModule {
         name: "vec",

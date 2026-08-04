@@ -141,6 +141,7 @@ const WIDGET: ExtTrait = ExtTrait {
     dispatch: None,
     // No structural `Self`-constraint (slice 3) — exercised by `ext_self_constraint_seam.rs`.
     self_constraint: None,
+    ..ExtTrait::DEFAULTS
 };
 
 // --- The OTHER native value kind: a native CLASS that implements the trait (Pass 2b) --------------
@@ -169,6 +170,7 @@ const PANEL: ExtClass = ExtClass {
     traits: &["Widget"],
     kind: FieldedKind::Class,
     directives: &[],
+    ..ExtClass::DEFAULTS
 };
 
 /// `Panel`'s native method dispatch — the native implementation of `Widget.describe()` for a class
@@ -233,6 +235,7 @@ const MODE: ExtEnum = ExtEnum {
     dispatch: mode_dispatch,
     traits: &["Widget"],
     directives: &[],
+    ..ExtEnum::DEFAULTS
 };
 
 /// `Mode`'s native enum-method dispatch — the native implementation of `Widget.describe()` for an
@@ -286,6 +289,7 @@ const BADGE: ExtStruct = ExtStruct {
     traits: &["Widget", "Comparable"],
     kind: FieldedKind::Struct,
     directives: &[],
+    ..ExtStruct::DEFAULTS
 };
 
 /// `Badge`'s native method dispatch — the native implementation of `Widget.describe()` for a struct

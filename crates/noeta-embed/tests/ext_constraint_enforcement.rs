@@ -168,6 +168,7 @@ const COLS_BUNDLE: ExtTrait = ExtTrait {
         layout: ConstraintLayout::Column,
         arity: ConstraintArity::Exact,
     }),
+    ..ExtTrait::DEFAULTS
 };
 
 fn cols_dispatch(
@@ -252,6 +253,7 @@ const NUM_BUNDLE: ExtTrait = ExtTrait {
         layout: ConstraintLayout::Any,
         arity: ConstraintArity::Uniform { min: 2 },
     }),
+    ..ExtTrait::DEFAULTS
 };
 
 /// The derive validator under test: a type deriving `Checked` must declare a field named `id`.
@@ -321,6 +323,7 @@ const FX_TRAITS: &[ExtTrait] = &[
         dispatch: None,
         // `Renderable` is shape-agnostic; the `self_constraint` path is exercised by `Packable` below.
         self_constraint: None,
+        ..ExtTrait::DEFAULTS
     },
     // A **native trait carrying a structural `Self`-constraint** (ExtBundle→ExtTrait convergence,
     // slice 3) — the field under test. `Packable` may only be `impl`-ed for a `@packed` struct that
@@ -349,6 +352,7 @@ const FX_TRAITS: &[ExtTrait] = &[
             layout: ConstraintLayout::Any,
             arity: ConstraintArity::Uniform { min: 2 },
         }),
+        ..ExtTrait::DEFAULTS
     },
     // The two migrated **kernel traits** (ExtBundle→ExtTrait fold-in, slice 4), namespaced to the
     // qualified module `fx.kern` so `impl kern.Cols`/`impl kern.Num` resolve through the surface

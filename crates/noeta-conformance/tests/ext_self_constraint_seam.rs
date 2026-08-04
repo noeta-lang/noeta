@@ -69,6 +69,7 @@ const LANES: ExtTrait = ExtTrait {
         layout: ConstraintLayout::Any,
         arity: ConstraintArity::Uniform { min: 2 },
     }),
+    ..ExtTrait::DEFAULTS
 };
 
 // --- The native @packed struct that implements it ------------------------------------------------
@@ -103,6 +104,7 @@ const DUO: ExtStruct = ExtStruct {
     traits: &["Lanes"],
     kind: FieldedKind::Struct,
     directives: &[ExtTypeDirective::Packed(PackedLayoutKind::Row)],
+    ..ExtStruct::DEFAULTS
 };
 
 /// Read `Duo`'s two `int` fields off the marshalled instance.

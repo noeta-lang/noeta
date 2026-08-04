@@ -203,8 +203,46 @@ const HTTP_ENUMS: &[ExtEnum] = &[ExtEnum {
             value: VariantValue::None,
         },
     ],
+    doc: "How `client.stream` cuts a response body into `Frame`s. The three cuts cover the deployed \
+          world, and they are deliberately one enum rather than three entry points: switching an \
+          LLM client between an OpenAI-compatible endpoint and a native Ollama one changes this \
+          argument and nothing else.\n\n```noeta\nfor frame in client.stream(req, \
+          Framing.Ndjson) {\n    let msg = json.parse::<Message>(frame.data)\n}\n```\n\nIt is a real \
+          enum rather than a string, so a `match` over it is exhaustive (E0011) and a typo is a \
+          compile error instead of a runtime surprise. The variants are a choice, not a value with \
+          a wire representation, so there is no `.value()` on them.",
+    docs: FRAMING_DOCS,
     ..ExtEnum::DEFAULTS
 }];
+
+/// Per-variant prose for [`HTTP_ENUMS`]' `Framing`. Each variant states which [`Frame`] fields it
+/// populates, since that is the part a caller gets wrong.
+///
+/// [`Frame`]: noeta_ext_abi::stream::Frame
+const FRAMING_DOCS: &[(&str, &str)] = &[
+    (
+        "Sse",
+        "`text/event-stream` — W3C/WHATWG server-sent events. The default, because it is what the \
+         overwhelming majority of streaming HTTP APIs speak.\n\nPopulates every `Frame` field: \
+         `data` holds the joined `data:` lines, `event` the frame's name (empty when it names one, \
+         deliberately **not** defaulted to `\"message\"` the way a browser's `EventSource` does), \
+         `id` the stream's last-seen event id (which persists across frames per the spec), and \
+         `retry` only on a frame whose own block carried a `retry:` field.",
+    ),
+    (
+        "Ndjson",
+        "Newline-delimited JSON: one JSON document per line, blank lines skipped. `Frame.data` is \
+         the line **verbatim** — not parsed — so you choose your own decoding (`json.parse`, or a \
+         typed `json.parse::<T>`) and a malformed line is yours to report rather than one the \
+         reader swallows. `event` and `id` are empty.",
+    ),
+    (
+        "Lines",
+        "One raw line per frame in `Frame.data`, blank lines **kept** — that is the whole \
+         difference from `Ndjson`: a blank line is content in a log tail, and is not a JSON \
+         document. `event` and `id` are empty.",
+    ),
+];
 
 /// The `http` unit's native value struct: `Frame` (http-streaming arc) — one frame cut out of a
 /// streaming body.
@@ -246,8 +284,42 @@ const HTTP_STRUCTS: &[ExtStruct] = &[ExtStruct {
             is_mut: false,
         },
     ],
+    doc: "One frame cut out of a streaming response body by `client.stream`. Which fields carry \
+          anything depends on the `Framing` the stream was opened with — see that enum's \
+          variants.\n\nIt is a **struct**, not a class and not an extern handle, and that is \
+          load-bearing: a struct is `Send` when all its fields are (these are all `string`/`?int`), \
+          so a frame crosses a channel or an isolate. The motivating case is an LLM client \
+          re-emitting provider tokens to a browser, which is channel-based — a `class`/`dyn` is \
+          `!Send` and could not participate.\n\nEvery field is readable and none is mutable: a \
+          frame is a decoded observation, so reading it is the point and mutating it in place is \
+          meaningless (build a new one).",
+    docs: FRAME_DOCS,
     ..ExtStruct::STRUCT_DEFAULTS
 }];
+
+/// Per-field prose for [`HTTP_STRUCTS`]' `Frame`.
+const FRAME_DOCS: &[(&str, &str)] = &[
+    (
+        "event",
+        "The SSE `event:` field — the frame's name. Empty when the framing has no notion of one \
+         (`Ndjson`, `Lines`), or when an SSE frame names none.",
+    ),
+    (
+        "data",
+        "The frame's payload: the joined SSE `data:` lines, one NDJSON document, or one raw line. \
+         Always verbatim — never parsed for you.",
+    ),
+    (
+        "id",
+        "The SSE stream's last-seen event id, which persists across frames per the spec. Empty \
+         under `Ndjson`/`Lines`.",
+    ),
+    (
+        "retry",
+        "The SSE reconnection delay in milliseconds, set only on a frame whose own block carried a \
+         `retry:` field. `none` otherwise.",
+    ),
+];
 
 /// The `id` unit's extern type: `Uuid` (X2 — pure, byte-ordered, key-capable).
 const ID_TYPES: &[ExtType] = &[ExtType {
