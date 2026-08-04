@@ -678,6 +678,12 @@ impl Checker {
     /// implementor's binding (slice 1a). A projection with no resolvable binding — or under `dyn`, or
     /// nested inside a composite — degrades to `Type::Unknown` (a gradual hole that defers), so a
     /// conformance comparison never falsely rejects on an unresolved projection.
+    ///
+    /// A bare `Self` resolves **at any depth**, unlike a projection: `fn spread(): List<Self>` is a
+    /// perfectly ordinary contract, and the impl cannot meet it by spelling `Self` back (that is
+    /// E0013), so a nested `Self` left unresolved is a contract no implementation could ever
+    /// satisfy. The same [`subst_self`] the call sites use, so the impl side and the call side
+    /// cannot drift about what `Self` means.
     fn assoc_resolved_type(
         &self,
         ty: &Option<noeta_ast::TypeRef>,
@@ -695,13 +701,10 @@ impl Checker {
         // argument at the call site has nothing to unify a nominal `Self` against. A native trait
         // declaring `SigType::SelfTy` synthesizes into precisely this shape
         // (`stdlib::sig_type_ref`), so one fix serves both trait kinds.
-        if let Some(noeta_ast::TypeRef::Named { name, args, .. }) = ty
-            && name == "Self"
-            && args.is_empty()
-        {
-            return Type::Named(target.to_string(), Vec::new());
-        }
-        self.annot_field(ty)
+        subst_self(
+            self.annot_field(ty),
+            &Type::Named(target.to_string(), Vec::new()),
+        )
     }
 
     /// Validate a user-defined `trait` declaration (L1, UT1). The declaration was registered in

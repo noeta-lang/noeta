@@ -277,7 +277,10 @@ impl Checker {
     /// (S4.3c, typed): the first bound whose trait declares `name` types the call, its signature
     /// substituted at the bound's instantiation — under `<T: Keyed<int>>`, `x.key()` is `int` and
     /// `x.same(other)` demands an `int`. A bare bound on a generic trait substitutes its
-    /// parameters permissively (`dyn`). Returns `(parameter types, required count, return type)`;
+    /// parameters permissively (`dyn`), and the contract's `Self` — the implementing type —
+    /// substitutes to the **type parameter itself**, so `<T: Decodable>` with
+    /// `fn decode(raw: string): Self` types `seed.decode(raw)` as `T`.
+    /// Returns `(parameter types, required count, return type)`;
     /// `None` when the receiver is not a bounded parameter or no bound's trait declares `name` —
     /// the caller stays lenient exactly as before (bounds license, they don't close the world).
     pub(crate) fn type_param_trait_method(
@@ -310,22 +313,25 @@ impl Checker {
                     )
                 })
                 .collect();
+            // `Self` in the contract is the RECEIVER's type, which here is the type parameter the
+            // call was made on: under `<T: Decodable>` with `fn decode(raw: string): Self`,
+            // `seed.decode(raw)` is a `T`. Resolved alongside the trait's own parameters because
+            // both are the same act — reading a signature written in the trait's scope at a site
+            // in the caller's — and leaving either one raw leaks a name the caller cannot match.
+            let self_ty = Type::Param(param.clone());
             let sig_ty = |t: &TypeRef| from_ref_q(t, &self.imports.extern_types, &trait_scope);
+            let inst = |t: Type| subst_self(apply_subst(&t, &subst), &self_ty);
             let params: Vec<Type> = m
                 .sig
                 .params
                 .iter()
-                .map(|p| apply_subst(&p.ty.as_ref().map(&sig_ty).unwrap_or(Type::Unknown), &subst))
+                .map(|p| inst(p.ty.as_ref().map(&sig_ty).unwrap_or(Type::Unknown)))
                 .collect();
             let ret = async_return(
                 m.sig.ret.as_ref().map(&sig_ty).unwrap_or(Type::Unknown),
                 m.sig.is_async,
             );
-            return Some((
-                params,
-                required_params(&m.sig.params),
-                apply_subst(&ret, &subst),
-            ));
+            return Some((params, required_params(&m.sig.params), inst(ret)));
         }
         None
     }
@@ -348,6 +354,10 @@ impl Checker {
     ///   generic trait — its parameters instantiate permissively to `dyn`. Leaving them raw leaked
     ///   the trait's own parameter name into the call's type (`s.get(k)` typed as `V`), which then
     ///   mismatched every real type it met.
+    /// * **`Self` must be substituted.** Same failure, same shape: the contract's `Self` leaked
+    ///   into the call's type and mismatched everything. Here it resolves to `dyn Trait` — the
+    ///   receiver *is* some implementor and `Self` names that implementor, so the trait object is
+    ///   the most precise answer this side of the erasure.
     pub(crate) fn dyn_trait_method(
         &self,
         tr: &str,
@@ -362,22 +372,26 @@ impl Checker {
             .iter()
             .map(|tp| (ParamId::at(tp.span), Type::Dyn))
             .collect();
+        // `Self` resolves to the trait object itself — the only thing known about the receiver
+        // here. That is exactly the existential a `dyn` receiver *is*: the value is some
+        // implementor, and `Self` names that implementor, so `dyn Trait` is the most precise type
+        // this side of the erasure. Same reasoning as the trait's own parameters instantiating
+        // permissively above, and the same rule the bound path applies with a `T` in hand — the
+        // two receivers must not disagree about the same method.
+        let self_ty = Type::DynTrait(tr.to_string());
         let sig_ty = |t: &TypeRef| from_ref_q(t, &self.imports.extern_types, &trait_scope);
+        let inst = |t: Type| subst_self(apply_subst(&t, &subst), &self_ty);
         let params: Vec<Type> = m
             .sig
             .params
             .iter()
-            .map(|p| apply_subst(&p.ty.as_ref().map(&sig_ty).unwrap_or(Type::Unknown), &subst))
+            .map(|p| inst(p.ty.as_ref().map(&sig_ty).unwrap_or(Type::Unknown)))
             .collect();
         let ret = async_return(
             m.sig.ret.as_ref().map(&sig_ty).unwrap_or(Type::Unknown),
             m.sig.is_async,
         );
-        Some((
-            params,
-            required_params(&m.sig.params),
-            apply_subst(&ret, &subst),
-        ))
+        Some((params, required_params(&m.sig.params), inst(ret)))
     }
 
     /// How `type_name.name` may be reached ([`Receiver`]) — the one place the table is consulted,

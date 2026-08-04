@@ -405,6 +405,24 @@ echo En { id: 1 }.greet("Bob")   // hi Bob — on a value
 
 **The signature is the contract, `async` included.** An implementation must match the trait's declaration in arity, parameter types, return type, *and* `async`-ness; a mismatch is E0015. `async` belongs on that list because every receiver form types a call from *some* signature and they must all agree: an `async fn m(): T` is called for a `Future<T>` and a plain `fn m(): T` for a `T`, so a synchronous method satisfying an `async` declaration (or the reverse) would make a bound's and a trait object's typing a promise the implementation does not keep.
 
+**`Self` is the implementing type.** A trait declaration may write `Self` anywhere a type goes — `fn decode(raw: string): Self`, `fn combine(other: Self): int`, `fn spread(): List<Self>` — and it stands for whichever type implements the trait. It is a *declaration* spelling only: the implementation writes the concrete type it is being written for (`fn decode(raw: string): Thing`), and spelling `Self` back in an `impl` is E0013, because at that point the type is known and has a name.
+
+Every way of reaching the method resolves `Self` to the receiver you actually have, so the same signature reads the same through all three of them: on a concrete value it is that value's type, under a `<T: Trait>` bound it is `T`, and on a `dyn Trait` it is `dyn Trait` — the receiver *is* some implementor, and that is as precise as the erasure allows.
+
+```noeta
+trait Decodable { fn decode(raw: string): Self }
+struct Thing {
+    v: int
+    impl Decodable {
+        fn decode(raw: string): Thing { return Thing { v: raw.len() } }
+    }
+}
+fn rebuild<T: Decodable>(seed: T, raw: string): T {
+    return seed.decode(raw)     // a `T`, because `Self` is `T` here
+}
+echo rebuild(Thing { v: 0 }, "hello").v   // 5
+```
+
 ## Trait objects
 
 A `dyn Trait` parameter or binding accepts any implementor and dispatches on the value's concrete type at run time, while typing statically from the trait's declaration — return type, parameter types, arity, and whether the method is `async`:
