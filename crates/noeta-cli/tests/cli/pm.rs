@@ -183,13 +183,16 @@ fn tier_dep_project(name: &str) -> PathBuf {
     std::fs::write(
         app.join("noeta.toml"),
         "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
-         [dependencies]\nfuzzkit = { path = \"../fuzzkit\" }\n",
+         [dependencies]\nfuzzkit = { path = \"../fuzzkit\", package = \"acme/fuzz\" }\n\
+         [directives]\nfuzz = \"acme/fuzz\"\n",
     )
     .unwrap();
+    // No `use` of the runner: a dependency's `@name` is reachable through its `[directives]`
+    // binding and nothing else. Importing the handler used to work as a side effect of linking it,
+    // which made `use` an invisible second opt-in — see `tiers::TierRegistry::resolve_at`.
     std::fs::write(
         app.join("main.noe"),
-        "use fuzzkit.tiers.run_fuzz\n\
-         @fuzz(cases: 7) {\n    fn app_case(): void { echo \"  app_case ran\" }\n}\n",
+        "@fuzz(cases: 7) {\n    fn app_case(): void { echo \"  app_case ran\" }\n}\n",
     )
     .unwrap();
     std::fs::write(
@@ -217,7 +220,7 @@ fn tier_dep_project(name: &str) -> PathBuf {
     app.join("main.noe")
 }
 
-/// The package-provider e2e: `fuzzkit` also declares `@tier(bench, config: Fuzz)`; the app's `[tiers]`
+/// The package-provider e2e: `fuzzkit` also declares `@tier(bench, config: Fuzz)`; the app's `[directives]`
 /// binds `bench = "fuzzkit"`, so its `@bench` is fuzzkit's tier — package-level, not target-selected.
 /// Extends [`tier_dep_project`]'s fixture.
 fn tier_override_project(name: &str) -> PathBuf {
@@ -237,7 +240,7 @@ fn tier_override_project(name: &str) -> PathBuf {
         app_dir.join("noeta.toml"),
         "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
          [dependencies]\nfuzzkit = { path = \"../fuzzkit\" }\n\
-         [tiers]\nbench = \"fuzzkit\"\n\
+         [directives]\nbench = \"fuzzkit\"\n\
          [targets.custom.tiers]\nbench = true\n",
     )
     .unwrap();
@@ -252,7 +255,7 @@ fn tier_override_project(name: &str) -> PathBuf {
 
 #[test]
 fn a_tiers_binding_routes_a_tier_to_its_package_provider() {
-    // `[tiers] bench = "fuzzkit"` binds the app's `@bench` to fuzzkit's `@tier(bench)` — package-level,
+    // `[directives] bench = "fuzzkit"` binds the app's `@bench` to fuzzkit's `@tier(bench)` — package-level,
     // so its config is fuzzkit's `Fuzz` (`cases:` is valid, not std's `Bench { iterations }`) and it
     // dispatches to fuzzkit's runner. The provider is the same whether or not a target is passed (a
     // target only selects which tiers are *live*, never which provider a tier resolves to).
@@ -285,7 +288,7 @@ fn a_provider_that_declares_no_such_tier_is_an_error() {
         app_dir.join("noeta.toml"),
         "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
          [dependencies]\nfuzzkit = { path = \"../fuzzkit\" }\n\
-         [tiers]\nbench = \"fuzzkit\"\n\
+         [directives]\nbench = \"fuzzkit\"\n\
          [targets.custom.tiers]\nbench = true\n",
     )
     .unwrap();
@@ -328,7 +331,8 @@ fn tests_in_a_dependency_using_program_run() {
 #[test]
 fn a_dependency_declared_tier_dispatches_cross_package() {
     // The third-party proof (tier-providers T4): the tier, its config attribute, and its runner
-    // all live in a path dependency; the consumer opts in with one `use` and writes `@fuzz` blocks.
+    // all live in a path dependency; the consumer opts in with one `[directives]` binding and writes
+    // `@fuzz` blocks. No import — a tier directive is bound, never imported.
     let entry = tier_dep_project("tier_dep_dispatch");
     lang().arg("fuzz").arg(&entry).assert().success().stdout(
         predicate::str::contains("fuzzkit: 1 roots")
@@ -345,7 +349,7 @@ fn a_dependency_declared_tier_dispatches_cross_package() {
 }
 
 /// A **tier-name collision**: two path dependencies each declare a runner-bearing `@tier(fuzz)`. The
-/// app depends on both and disambiguates in `[tiers]` — `fuzz = "depa"` keeps one under its own name,
+/// app depends on both and disambiguates in `[directives]` — `fuzz = "depa"` keeps one under its own name,
 /// `crit = "depb:fuzz"` **renames** the other to a local `@crit`. This is the case rename exists for,
 /// and the residual the generic `noeta <localname>` dispatch used to miss: the runner is registered
 /// under what the provider exported (`fuzz` on `depb`), so a lookup keyed on the literal local name
@@ -387,7 +391,7 @@ fn tier_collision_project(name: &str) -> PathBuf {
         app.join("noeta.toml"),
         "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
          [dependencies]\ndepa = { path = \"../depa\" }\ndepb = { path = \"../depb\" }\n\
-         [tiers]\nfuzz = \"depa\"\ncrit = \"depb:fuzz\"\n",
+         [directives]\nfuzz = \"depa\"\ncrit = \"depb:fuzz\"\n",
     )
     .unwrap();
     std::fs::write(
@@ -404,7 +408,7 @@ fn tier_collision_project(name: &str) -> PathBuf {
 #[test]
 fn a_renamed_collision_tier_dispatches_by_identity() {
     // The renamed-local-name generic dispatch: `noeta fuzz` runs depa's runner (bound by its own
-    // name), and `noeta crit` runs depb's — the local name `crit` resolving through `[tiers]` to
+    // name), and `noeta crit` runs depb's — the local name `crit` resolving through `[directives]` to
     // depb's exported `fuzz`, not a literal `find_tier_runner("crit")` that would miss. The other
     // package's block strips each time (its identity is not active), so exactly one runner fires.
     let entry = tier_collision_project("tier_collision");
@@ -443,13 +447,15 @@ fn text_tier_dep_project(name: &str) -> PathBuf {
     std::fs::write(
         app.join("noeta.toml"),
         "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
-         [dependencies]\nspeckit = { path = \"../speckit\" }\n",
+         [dependencies]\nspeckit = { path = \"../speckit\", package = \"acme/spec\" }\n\
+         [directives]\nspec = \"acme/spec\"\n",
     )
     .unwrap();
+    // Bound, not imported — and the binding is also what tells the *lexer* to capture the body
+    // verbatim, which is why the XML below (quotes and all) never reaches the Noeta tokenizer.
     std::fs::write(
         app.join("main.noe"),
-        "use speckit.tiers.run_specs\n\
-         @spec {\n  <case name=\"adds\" expect=\"3\"/>\n}\n\
+        "@spec {\n  <case name=\"adds\" expect=\"3\"/>\n}\n\
          fn add(a: int, b: int): int { return a + b }\n",
     )
     .unwrap();
@@ -515,7 +521,7 @@ fn add(a: int, b: int): int { return a + b }\n";
 
 #[test]
 fn a_renamed_text_tier_captures_under_its_local_name() {
-    // The 3g headline: `[tiers] docs = "std:doc"` renames std's `doc` **text** tier to a local
+    // The 3g headline: `[directives] docs = "std:doc"` renames std's `doc` **text** tier to a local
     // `@docs`. The lexer only knows `doc` as verbatim-capturing, so the local `docs` must be added —
     // per package, from the manifest binding — or `@docs { # markdown }` tokenizes as code and the
     // parse blows up on the bare quote. Both `run` (the block strips, program prints nothing) and
@@ -527,7 +533,7 @@ fn a_renamed_text_tier_captures_under_its_local_name() {
     std::fs::write(&entry, RENAMED_TEXT_TIER_SRC).unwrap();
     std::fs::write(
         base.join("noeta.toml"),
-        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n[tiers]\ndocs = \"std:doc\"\n",
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n[directives]\ndocs = \"std:doc\"\n",
     )
     .unwrap();
     lang()
@@ -540,7 +546,7 @@ fn a_renamed_text_tier_captures_under_its_local_name() {
 }
 
 /// A consumer app + a `speckit` path dependency declaring a **text** tier `@tier(spec, text: "xml")`,
-/// which the app binds under a *different* local name via `[tiers] checks = "speckit:spec"`. The cross-
+/// which the app binds under a *different* local name via `[directives] checks = "speckit:spec"`. The cross-
 /// package renamed-text-tier proof: capture must key on the app's own local `@checks`, resolved through
 /// the binding to the dependency's declared text tier — not on the exported `spec` spelling.
 fn renamed_dep_text_tier_project(name: &str) -> PathBuf {
@@ -554,7 +560,7 @@ fn renamed_dep_text_tier_project(name: &str) -> PathBuf {
         app.join("noeta.toml"),
         "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
          [dependencies]\nspeckit = { path = \"../speckit\" }\n\
-         [tiers]\nchecks = \"speckit:spec\"\n",
+         [directives]\nchecks = \"speckit:spec\"\n",
     )
     .unwrap();
     std::fs::write(
@@ -583,7 +589,7 @@ fn renamed_dep_text_tier_project(name: &str) -> PathBuf {
 #[test]
 fn a_renamed_dependency_text_tier_captures_cross_package() {
     // The app's `@checks { … }` XML body (quotes and all, invalid as Noeta tokens) captures verbatim
-    // only because the loader resolves the app's `[tiers] checks = "speckit:spec"` binding to the
+    // only because the loader resolves the app's `[directives] checks = "speckit:spec"` binding to the
     // dependency's declared text tier and adds `checks` to the app package's text-tier set. Without
     // 3g's per-package resolution, only the bare `spec` would capture and `@checks` would fail to parse.
     let entry = renamed_dep_text_tier_project("rename_dep_text_tier");

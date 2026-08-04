@@ -299,7 +299,7 @@ backdating_update!(DerivedPath);
 /// The local `@name`s each package binds to a **text** (verbatim-body) tier, keyed by the binding
 /// package's [`PackageOrigin`] — the per-package input to [`tokens_in`]'s lex, memoizing what
 /// [`noeta_loader::renamed_text_tier_locals`] returned. Newtype for the same [`salsa::Update`]/orphan reason as
-/// [`WorkspaceUses`]; backdating so it invalidates the workspace-aware lexes only when a `[tiers]`
+/// [`WorkspaceUses`]; backdating so it invalidates the workspace-aware lexes only when a `[directives]`
 /// binding or a dependency's `@tier(…, text)` declaration actually changes.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct RenamedTextTiers(std::collections::HashMap<noeta_span::PackageOrigin, Vec<String>>);
@@ -324,7 +324,7 @@ backdating_update!(ExtTierEnv);
 /// on this input* so it stays one dependency.
 ///
 /// It carries each tier's **provider root** and not only its name, because per-package resolution is
-/// scoped: `[tiers] notes = "speckit:json"` names *speckit's* `json`, and answering "is that a
+/// scoped: `[directives] notes = "speckit:json"` names *speckit's* `json`, and answering "is that a
 /// verbatim tier?" by bare name says yes for std's `@json` — capturing prose the compiler lexes as
 /// code. See [`noeta_loader::ExtTiers::is_verbatim_scoped`].
 #[salsa::input(singleton, debug)]
@@ -358,7 +358,7 @@ fn ext_tiers(db: &dyn salsa::Database) -> noeta_loader::ExtTiers {
 }
 
 /// The **verbatim-body** tier names the extensions installed for `db` declare — the program-wide
-/// (unscoped) half of the lexer's seed, for an ambient `@json` that no `[tiers]` binding renames.
+/// (unscoped) half of the lexer's seed, for an ambient `@json` that no `[directives]` binding renames.
 fn ext_verbatim_tier_names(db: &dyn salsa::Database) -> Vec<String> {
     ext_tiers(db).verbatim_names()
 }
@@ -503,10 +503,10 @@ pub struct Workspace {
     /// carries its re-root info; [`linked_from`] re-roots and links them as closed units.
     #[returns(ref)]
     pub dep_modules: Vec<DepModule>,
-    /// The whole program's per-package `@name` resolution tables (`[directives]`/`[tiers]`), resolved
+    /// The whole program's per-package `@name` resolution tables (`[directives]`), resolved
     /// on the query path (`noeta_pm::graph::resolve_graph_query`) alongside `dep_modules`. Empty for a
     /// lone/sibling-only workspace (no manifest, no bindings). [`workspace_renamed_text_tiers`] reads
-    /// it to lex a package's renamed text tiers (`[tiers] docs = "std:doc"`) verbatim in the editor,
+    /// it to lex a package's renamed text tiers (`[directives] docs = "std:doc"`) verbatim in the editor,
     /// exactly as the loader does under `noeta run`/`noeta check`.
     #[returns(ref)]
     pub package_uses: WorkspaceUses,
@@ -607,7 +607,7 @@ pub fn workspace(
         .enumerate()
         .map(|(i, s)| source_program_at(db, s, root_edition, path_at(paths, i)))
         .collect();
-    // No manifest on this deps-free path → no `[tiers]`/`[directives]` bindings, so no renamed text
+    // No manifest on this deps-free path → no `[directives]` bindings, so no renamed text
     // tiers (a member's own `@tier(…, text)` is discovered by the per-file token scan regardless).
     Workspace::new(
         db,
@@ -624,9 +624,9 @@ pub fn workspace(
 /// `use <dep-key>.…` resolves in the salsa graph exactly as in the CLI's `load_with_deps`.
 ///
 /// `package_uses` is the whole program's per-package `@name` resolution tables
-/// (`[directives]`/`[tiers]`), resolved on the query path (`noeta_pm::graph::resolve_graph_query`)
+/// (`[directives]`), resolved on the query path (`noeta_pm::graph::resolve_graph_query`)
 /// exactly as `noeta_project::workspace::sync` does — so a renamed text tier
-/// (`[tiers] docs = "std:doc"`) lexes verbatim through this path, not only the editor's. A caller
+/// (`[directives] docs = "std:doc"`) lexes verbatim through this path, not only the editor's. A caller
 /// with no manifest bindings (an inline source, a synthetic filesystem-only dependency graph) passes
 /// an empty [`PackageUses`](noeta_span::PackageUses), which is behavior-identical to before this
 /// parameter existed.
@@ -771,7 +771,7 @@ pub fn workspace_text_tiers(db: &dyn salsa::Database, ws: Workspace) -> Vec<Stri
 /// Enumerating those two is genuinely per-surface: the loader walks a `Vec<Lexed>` beside a
 /// `PackageMap` it just built, the editor walks salsa's `dep_modules`. Deciding what they *mean* is
 /// not, and that half is where the divergence was: this query used to match an ext tier by bare
-/// name, so `[tiers] notes = "speckit:json"` — a dependency's **code** tier that happens to share a
+/// name, so `[directives] notes = "speckit:json"` — a dependency's **code** tier that happens to share a
 /// name with std's verbatim `@json` — captured its body as prose here while the loader lexed it as
 /// code. `noeta check` passed a file `noeta run` could not lex.
 ///
@@ -831,7 +831,7 @@ fn workspace_text_tiers_union(db: &dyn salsa::Database, ws: Workspace) -> noeta_
 
 /// Workspace-aware tokenization: like [`tokens`], but lexing with the source's package text-tier
 /// set ([`source_text_tiers`]) — so a text tier declared in one file (or dependency package), or one
-/// a package **renamed** through a `[tiers]` binding, captures `@<name> { … }` bodies verbatim in
+/// a package **renamed** through a `[directives]` binding, captures `@<name> { … }` bodies verbatim in
 /// that package's members. What [`linked`] reads; the per-file [`tokens`] stays the single-file
 /// surface (its two-pass covers same-file declarations).
 #[salsa::tracked(returns(ref))]
@@ -1052,6 +1052,7 @@ pub fn linked_from(db: &dyn salsa::Database, ws: Workspace, entry: SourceProgram
         &dep_refs,
         &broken_refs,
         ws.native_roots(db).0.as_deref(),
+        &ws.package_uses(db).0,
     );
     let noeta_loader::Linkage {
         mut program,
@@ -2285,7 +2286,7 @@ mod tests {
     fn workspace_with_deps_lexes_a_renamed_text_tier_verbatim() {
         // Per-package tier-naming arc (3g), harness seam: the `workspace_with_deps` path (used by
         // `noeta-mcp` and `noeta-conformance`) now carries the whole program's `@name` tables, so a
-        // `[tiers] docs = "std:doc"` binding — the root package renaming std's `doc` **text** tier
+        // `[directives] docs = "std:doc"` binding — the root package renaming std's `doc` **text** tier
         // under a local `@docs` — lexes the `@docs { … }` body verbatim, exactly as the loader does
         // under `noeta run`/`noeta check` and the editor does through `sync`. The db twin of the IDE's
         // `workspace_captures_a_renamed_text_tier_bound_in_the_manifest`.
@@ -2304,7 +2305,7 @@ mod tests {
         );
         // The root package binds local `@docs` → std's `doc` tier, keyed by `PackageOrigin::Root`
         // (members are Root, see `workspace_packages`) — the same shape `resolve_graph_query` yields
-        // for a `[tiers]` table.
+        // for a `[directives]` table.
         let mut package_uses = noeta_span::PackageUses::new();
         package_uses.set(
             noeta_span::PackageOrigin::Root,

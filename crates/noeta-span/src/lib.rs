@@ -340,7 +340,7 @@ impl PackageMap {
     }
 }
 
-/// One resolved per-package `@`-name binding (`[directives]` / `[tiers]`): the provider namespace
+/// One resolved per-package `@`-name binding (`[directives]`): the provider namespace
 /// **root** segment(s) the local `@name` resolves to — a scope dependency key covers several member
 /// packages, hence a list — and the name the provider exported. Matched against an extension unit by
 /// `unit.root() ∈ provider_roots && declared-name == exported`, the same root-namespace identity the

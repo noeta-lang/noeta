@@ -100,7 +100,7 @@ impl CompileFailure {
     }
 }
 
-/// Resolve the root package's tier → provider map (provider dispatch) from its `[tiers]` table — who
+/// Resolve the root package's tier → provider map (provider dispatch) from its `[directives]` table — who
 /// provides each tier the root names, **independent of the build target** (a tier's provider is
 /// package-level; the target only selects which are live). A bare script with no manifest yields an
 /// empty map (its tiers resolve ambiently). The `target` is accepted for call-site symmetry but no
@@ -147,7 +147,7 @@ pub struct FrontFacts {
     pub active: Vec<String>,
     pub providers: BTreeMap<String, String>,
     pub deps: Vec<noeta_loader::DepPackage>,
-    /// The whole program's per-package `@`-name resolution tables (`[directives]`; `[tiers]` later),
+    /// The whole program's per-package `@`-name resolution tables (`[directives]`; `[directives]` later),
     /// keyed by [`noeta_span::PackageOrigin`]. Resolved with the dependency graph and carried to the
     /// checker so a `@name` resolves in the package that wrote it.
     pub package_uses: noeta_span::PackageUses,
@@ -283,7 +283,7 @@ pub fn load_project(file: &Path, facts: &FrontFacts) -> Result<Loaded, CompileFa
     } else {
         let active_refs: Vec<&str> = facts.active.iter().map(String::as_str).collect();
         // Activation resolves each `@name` per the package that wrote it (per-package naming arc):
-        // the whole-program `[tiers]`/`[directives]` bindings and the span→package map.
+        // the whole-program `[directives]` bindings and the span→package map.
         let mut activated = noeta_check::activate_tiers(&linked.program, &active_refs, &provenance);
         // Only an *error* stops the load; anything advisory rides out on `Loaded::warnings` for the
         // caller to report.
@@ -618,7 +618,7 @@ fn key_deps(key: &mut noeta_cache::KeyBuilder, deps: &[noeta_loader::DepPackage]
         for (local, global) in dep_renames {
             key.source(format!("<rename {prefix} {local}>"), global.as_bytes());
         }
-        // This dep's own `[directives]`/`[tiers]` bindings — the same "which extension does `@name`
+        // This dep's own `[directives]` bindings — the same "which extension does `@name`
         // mean" input the root's are, resolved in *its* dependency context. `HashMap`-backed, so
         // each binding is its own key entry (the builder sorts) and never an unordered join.
         for (local, use_) in directives {
@@ -791,7 +791,7 @@ mod tests {
     /// A `@name` binding is compilation input: **re-pointing one must change the key.**
     ///
     /// This is the unit-level half of a defect proven end to end. A project binding
-    /// `[tiers] dbg = "std:debug"` and rebound to `"std:doc"` changes no `.noe` byte, and the tier
+    /// `[directives] dbg = "std:debug"` and rebound to `"std:doc"` changes no `.noe` byte, and the tier
     /// *provider* map (`local → provider`, which the key already folded) says `dbg → std` for both
     /// — the exported name lives only in `package_uses`. With it unkeyed, the second run was a
     /// cache hit that re-ran the FIRST binding's program: `dbg 5 / out 5` where the truth (a `doc`

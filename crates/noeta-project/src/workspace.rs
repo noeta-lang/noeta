@@ -355,7 +355,7 @@ pub(crate) struct ResolvedDeps {
     pub(crate) modules: Vec<DepModule>,
     pub(crate) uris: Vec<String>,
     pub(crate) programs: Vec<SourceProgram>,
-    /// The whole program's per-package `@name` resolution tables (`[directives]`/`[tiers]`), from the
+    /// The whole program's per-package `@name` resolution tables (`[directives]`), from the
     /// same query-path graph resolve that produced the modules. Threaded onto the [`Workspace`] input
     /// so the editor lexes a package's renamed text tiers verbatim (per-package tier-naming arc, 3g).
     pub(crate) package_uses: noeta_span::PackageUses,
@@ -604,7 +604,7 @@ fn resolve_dep_modules(
     // exactly as `noeta check` does.
     deps.native_roots = NativeRoots(Some(noeta_loader::native_dep_roots(&packages)));
     // The per-package `@name` tables travel onto the workspace even when the package has no linkable
-    // modules (the root's own `[tiers]` bindings live here), so carry them before the module walk.
+    // modules (the root's own `[directives]` bindings live here), so carry them before the module walk.
     deps.package_uses = graph.package_uses;
     // Previous dep inputs by URI, for reuse.
     let mut old_by_uri: HashMap<String, (DepModule, SourceProgram)> = match previous {

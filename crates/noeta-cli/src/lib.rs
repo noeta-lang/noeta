@@ -1525,7 +1525,7 @@ fn try_bare_file_run(err: &clap::Error) -> Option<ExitCode> {
     Some(cmd_run(&file, &[], &None, false, false, &prog_args))
 }
 
-/// How a tier the root **bound** in `[tiers]` resolves by identity, for the generic
+/// How a tier the root **bound** in `[directives]` resolves by identity, for the generic
 /// `noeta <localname> <file>` dispatch — owned so the borrow of `activated.registry` is released
 /// before `activated` is moved into `run_declared_tier`.
 enum BoundTier {
@@ -1586,13 +1586,13 @@ fn try_tier_dispatch(err: &clap::Error) -> Option<ExitCode> {
     .ok()?
     .ok()?;
     let activated = noeta_check::activate_tiers(&linked.program, &[&name], &linked.provenance);
-    // A tier the ROOT renamed in `[tiers]` (`crit = "depB:fuzz"`, or a collision it disambiguated)
+    // A tier the ROOT renamed in `[directives]` (`crit = "depB:fuzz"`, or a collision it disambiguated)
     // must dispatch by **identity**, not by the literal local name: the runner is registered under
     // what the provider exported (`fuzz` on `depB`), so `find_tier_runner(&"crit")` /
     // `declared_by(&"crit", …)` — which key on the local name — miss it. Resolve the binding in the
     // root's own context (the same `resolve_at` activation used, so the roots already collected under
     // the resolved identity) and dispatch to that provider's runner. An **unbound** bare name has no
-    // `[tiers]` entry and falls through to the ambient path below — a std tier, a real-named
+    // `[directives]` entry and falls through to the ambient path below — a std tier, a real-named
     // third-party tier, or a program `@tier` of that bare name — so nothing that works today changes.
     let bound = linked
         .provenance
@@ -1604,6 +1604,7 @@ fn try_tier_dispatch(err: &clap::Error) -> Option<ExitCode> {
                 &name,
                 Some(&noeta_span::PackageOrigin::Root),
                 &linked.provenance.uses,
+                &linked.provenance.packages,
             ) {
                 // A native extension runner (`std:test`, a third-party tier that ships one).
                 Some(noeta_check::ResolvedTier::Ext(t, root)) => {
@@ -1629,7 +1630,7 @@ fn try_tier_dispatch(err: &clap::Error) -> Option<ExitCode> {
             ))),
             BoundTier::Unresolved => {
                 eprintln!(
-                    "noeta: tier `{name}` is bound in `[tiers]` to a provider that declares no such \
+                    "noeta: tier `{name}` is bound in `[directives]` to a provider that declares no such \
                      tier — is the dependency imported (`use <root>.…`)?"
                 );
                 Some(ExitCode::from(2))

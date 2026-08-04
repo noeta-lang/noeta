@@ -3030,7 +3030,7 @@ impl Registry {
 
     /// The installed extension tier named `name`, if any. A bare-name lookup: it returns the first
     /// unit's tier of that name, which is unambiguous only while no two units export the same tier
-    /// name. Per-package resolution (a `@name` a package's `[tiers]` binds) must go through
+    /// name. Per-package resolution (a `@name` a package's `[directives]` binds) must go through
     /// [`Registry::find_ext_tier_scoped`] so it lands on the *provider the binding named*.
     pub fn find_ext_tier(&self, name: &str) -> Option<&'static ExtTier> {
         self.ext_tiers().find(|t| t.name == name)
@@ -3038,7 +3038,7 @@ impl Registry {
 
     /// The **provider namespace root** of the first installed tier named `name` — the [`Extension::root`]
     /// of the unit that declares it (`"std"` for the built-in four). This is how an *ambient* `@name`
-    /// (one a package uses without a `[tiers]` binding — always a std tier on the default registry, since
+    /// (one a package uses without a `[directives]` binding — always a std tier on the default registry, since
     /// a third-party tier is reachable only through a binding) recovers its canonical identity without
     /// hardcoding `"std"`. `None` if no installed unit declares the name.
     pub fn ext_tier_root(&self, name: &str) -> Option<&'static str> {
@@ -3051,7 +3051,7 @@ impl Registry {
     /// Resolve an extension tier **scoped to a set of provider namespace roots** (per-package naming
     /// arc, the tier counterpart of [`Registry::find_ext_directive_scoped`]): the `exported` tier
     /// declared by a unit whose [`Extension::root`] is one of `provider_roots`. This is how a
-    /// `@name { … }` block resolves to the specific provider a using package's `[tiers]` binding named
+    /// `@name { … }` block resolves to the specific provider a using package's `[directives]` binding named
     /// — so two providers exporting the same tier name (e.g. `std` and `criterion` both shipping
     /// `bench`) never shadow each other. `provider_roots` empty → no match.
     pub fn find_ext_tier_scoped(
@@ -4195,7 +4195,7 @@ fn validate(units: &[&'static (dyn Extension + Sync)]) -> Result<(), String> {
     for (axis, names) in [
         (
             // Tier names, like command names, are enforced unique only among **std-root** units. A
-            // dependency's tier reaches a using package through a `[tiers]` binding that fixes a
+            // dependency's tier reaches a using package through a `[directives]` binding that fixes a
             // distinct local `@name` (resolved scoped to the provider it named), so two dependency
             // packages exporting the same tier name — or one colliding with a std tier — coexist:
             // the binding resolves it (`crit = "criterion:bench"`), rather than making the assembled
@@ -5038,7 +5038,7 @@ mod runtime_registry_tests {
     fn a_duplicate_tier_name_is_rejected_only_among_std_units() {
         // Tier-name uniqueness is enforced only among **std-root** units (per-package naming arc,
         // mirroring the command axis). A dependency's tier reaches a using package through a
-        // `[tiers]` binding that fixes a distinct local name (resolved scoped to the provider), so two
+        // `[directives]` binding that fixes a distinct local name (resolved scoped to the provider), so two
         // dependency packages exporting the same tier name coexist — the binding resolves the
         // collision (`crit = "criterion:bench"`). Two **std** units doing it would be an ambient
         // ambiguity no binding can fix, so that still refuses to assemble.
@@ -5069,7 +5069,7 @@ mod runtime_registry_tests {
         static B_TIER: TierUnit = TierUnit("b.tools", "b");
         assert!(
             validate(&[&A_TIER, &B_TIER]).is_ok(),
-            "two dependency providers may export the same tier name (a `[tiers]` binding resolves it)"
+            "two dependency providers may export the same tier name (a `[directives]` binding resolves it)"
         );
         // Two std-root units exporting the same tier name — an ambient ambiguity, still rejected.
         static STD_A: TierUnit = TierUnit("std.a", "std");

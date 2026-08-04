@@ -336,7 +336,7 @@ pub struct DepPackage {
     /// unrepresentable here rather than silently degrading to the default. (`noeta-edition` is the
     /// bottom-of-DAG vocabulary crate, so depending on the type costs the loader nothing.)
     pub edition: noeta_lexer::Edition,
-    /// This package's resolved `@name` bindings — its `[directives]` and `[tiers]` merged into one map
+    /// This package's resolved `@name` bindings — its `[directives]` table
     /// (local `@name` → the provider namespace root(s) and exported name, per-package naming arc; a
     /// `@name` is one namespace, so the two tables cannot collide). Resolved by the package manager in
     /// **this** package's dependency context; the loader keys them by this package's [`PackageOrigin`]
@@ -730,7 +730,7 @@ pub fn link(
         editions.set(id, root_edition);
         packages.set(id, PackageOrigin::Root);
     }
-    // The deps-free path has no manifest and so no `[tiers]`/`[directives]` bindings — an empty
+    // The deps-free path has no manifest and so no `[directives]` bindings — an empty
     // `PackageUses` means [`lex_program`] contributes no per-package renamed text tiers (only a
     // file's own `@tier(…, text)` declarations, which its per-file scan discovers regardless).
     let (lexeds, text_tiers) = lex_program(
@@ -1108,6 +1108,7 @@ pub fn link_with_deps_appending(
             &dep_refs,
             &broken_refs,
             Some(&native_roots),
+            package_uses,
         )
     };
     let mut linked = link(&sibling_programs, &broken);
@@ -1308,6 +1309,10 @@ pub struct ParsedDir {
     /// The root package's edition, which every directory module was parsed under and which generated
     /// code takes too (it is written by the extension the *root* installed).
     root_edition: noeta_lexer::Edition,
+    /// The whole program's resolved `@name` tables. Kept past the lex (which uses them for renamed
+    /// text tiers) because linking needs them too: an `[directives]` binding is a link root, so each entry
+    /// link pulls in the `@tier` handlers its package bound (see `seed_bound_tier_handlers`).
+    package_uses: noeta_span::PackageUses,
 }
 
 /// What linking one directory entry produced — [`ParsedDir::link_entry`]'s result.
@@ -1421,6 +1426,7 @@ pub fn parse_dir(
         native_roots,
         text_tiers,
         root_edition,
+        package_uses: package_uses.clone(),
     }
 }
 
@@ -1546,6 +1552,7 @@ impl ParsedDir {
             &dep_refs,
             &broken,
             Some(&self.native_roots),
+            &self.package_uses,
         )
         .map_err(|mut d| {
             attribute_to_spans(&mut d, &self.sources);
@@ -1580,7 +1587,7 @@ impl ParsedDir {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtTierFacts {
     /// The declaring extension unit's namespace root (`"std"` for the built-in four) — what a
-    /// `[tiers]` binding's `provider_roots` is matched against.
+    /// `[directives]` binding's `provider_roots` is matched against.
     pub root: String,
     /// The tier name the unit exported.
     pub name: String,
@@ -1647,7 +1654,7 @@ impl ExtTiers {
 
     /// Every **verbatim-body** tier name, in install order — the program-wide set the lexer seeds
     /// with, since a native tier's bodies must capture even though no `.noe` file declares them.
-    /// A bare-name list on purpose: an *ambient* `@json` (no `[tiers]` binding) has no provider to
+    /// A bare-name list on purpose: an *ambient* `@json` (no `[directives]` binding) has no provider to
     /// scope by.
     pub fn verbatim_names(&self) -> Vec<String> {
         self.0
@@ -1676,7 +1683,7 @@ impl ExtTiers {
 /// **The local `@name`s each package binds to a verbatim-body tier** — the one resolution behind both
 /// the batch loader's [`lex_program`] and the editor's `noeta_db::workspace_renamed_text_tiers`.
 ///
-/// A `[tiers]` binding `local = "provider[:exported]"` makes `local` capture `@local { … }` bodies
+/// A `[directives]` binding `local = "provider[:exported]"` makes `local` capture `@local { … }` bodies
 /// verbatim for the binding package *only* — two packages may bind the same spelling to different
 /// meanings — so the result is keyed by the binding [`PackageOrigin`]. The provider is resolved the
 /// two ways a tier can be provided, mirroring the checker's `TierRegistry::resolve_at`:
@@ -1686,7 +1693,7 @@ impl ExtTiers {
 /// * a **program-declared** provider — a dependency shipping `@tier(exported, …, text: "…")`. At lex
 ///   time there is no parsed AST, but each source's own text-tier declarations are already known from
 ///   the lexer's token scan (`noeta_lexer::Lexed::text_tier_decls`); `declared_by_dependency` supplies
-///   them per dependency **link segment**, which is what a `[tiers]` binding's `provider_roots`
+///   them per dependency **link segment**, which is what a `[directives]` binding's `provider_roots`
 ///   carries for a `.noe` provider (a program `@tier` runner is re-rooted to the consumer's link
 ///   segment), so the two line up.
 ///
@@ -1758,7 +1765,7 @@ pub fn widened_text_tiers<'a>(
 /// (or one dependency package) captures `@x { … }` bodies verbatim in every other. Only programs
 /// declaring text tiers pay the second pass.
 ///
-/// **Per-package renamed text tiers (per-package naming arc, sub-step 3g).** A `[tiers]` binding may
+/// **Per-package renamed text tiers (per-package naming arc, sub-step 3g).** A `[directives]` binding may
 /// map a *local* `@name` onto a text provider tier (`docs = "std:doc"`, `@docs { # markdown }`). The
 /// lexer only knows the provider's *exported* name (`doc`) as verbatim-capturing, so the local name
 /// must be added — but **only for the package that bound it**. Two packages can bind different locals,
@@ -1822,7 +1829,7 @@ fn lex_program(
 
     // Fast path: the default `{doc}` covers every program-wide name and no package renamed a text
     // tier — the first pass already lexed correctly, so nothing re-lexes (the common case: no text
-    // tier beyond `doc`, no `[tiers]` text binding).
+    // tier beyond `doc`, no `[directives]` text binding).
     let default = noeta_lexer::TextTiers::default();
     if global_names.iter().all(|name| default.contains(name)) && renamed.is_empty() {
         return (lexeds, global);
@@ -2057,6 +2064,8 @@ pub fn link_parsed(
 ) -> Result<Linkage, Vec<LoadDiagnostic>> {
     // Sibling-only linking has no resolved dependency graph, so it is lenient: it can flag a missing
     // intra-project module but must not adjudicate foreign roots (see [`RetainPolicy`]).
+    // No dependency graph here, so no `[directives]` bindings to honor — a sibling-only link never has a
+    // provider package to pull a handler from.
     link_core(
         entry,
         entry_program,
@@ -2064,6 +2073,7 @@ pub fn link_parsed(
         modules,
         broken,
         RetainPolicy::Lenient,
+        &noeta_span::PackageUses::new(),
     )
 }
 
@@ -2089,6 +2099,7 @@ pub fn link_parsed_with_deps(
     dep_modules: &[&Program],
     broken: &[&BrokenModule],
     native_roots: Option<&[String]>,
+    package_uses: &noeta_span::PackageUses,
 ) -> Result<Linkage, Vec<LoadDiagnostic>> {
     // Sibling and dependency modules alike join the resolution pool *and* drive imports: a `use` is
     // file-scoped, so a module that writes `use std.{env}` must get `env` bound in the merged
@@ -2101,7 +2112,15 @@ pub fn link_parsed_with_deps(
         },
         None => RetainPolicy::Lenient,
     };
-    link_core(entry, entry_program, &pool, &pool, broken, retain)
+    link_core(
+        entry,
+        entry_program,
+        &pool,
+        &pool,
+        broken,
+        retain,
+        package_uses,
+    )
 }
 
 /// Where a top-level name in **one compilation unit** came from — a declaration that unit makes, or
@@ -2146,6 +2165,7 @@ fn link_core(
     drivers: &[&Program],
     broken: &[&BrokenModule],
     retain: RetainPolicy,
+    package_uses: &noeta_span::PackageUses,
 ) -> Result<Linkage, Vec<LoadDiagnostic>> {
     // For the complete policy: the always-retained roots are the installed extensions. The loader
     // is already global-registry-coupled (verbatim-tier names below), so the process default —
@@ -2650,6 +2670,24 @@ fn link_core(
         });
     }
 
+    // **An `[directives]` binding is a link root.** Binding `sql = "para/db"` is the statement of intent that
+    // this package writes `@sql { … }`; nothing then *names* the handler, so no `use` reaches it and
+    // the `use`-driven merge above leaves it out. But the tier registry collects `@tier` declarations
+    // from the **linked program**, so an unlinked handler makes the binding resolve to nothing and
+    // `@sql { … }` reports as "not an expression tier" — the manifest saying one thing and the
+    // compiler seeing another.
+    //
+    // Only pure-Noeta (`.noe`) providers need this. A native package's tiers live in the extension
+    // registry, which installing the package populates, which is why `[directives]` worked and
+    // `[directives]` did not: the two halves of one rule, drifted.
+    seed_bound_tier_handlers(
+        package_uses,
+        &module_views,
+        &module_maps,
+        &mut merged_q,
+        &mut imported,
+    );
+
     // **A data attribute is a link root.** A `#[...]` exists precisely so that something which never
     // names a declaration can still find it — `attributes_of::<Tool>()` discovers it, `invoke` calls
     // it by name — so an annotated declaration in a pooled module belongs to the program even though
@@ -3041,6 +3079,68 @@ fn carries_data_attribute(stmt: &Stmt) -> bool {
 /// separate `use`s that drive their own imports (a dependency re-drives its own `use`s), so the walk
 /// stays scoped to `path`'s own declarations. The `@tier(…, config: T)` pull is now just one edge of
 /// this closure — `referenced_names` sees the config type like any other reference.
+/// Merge the `@tier` handler each `[directives]` binding names, plus its same-module closure — the link root
+/// an `[directives]` binding is (see the call site).
+///
+/// Every package's bindings are walked, not just the root's: a dependency that writes `@sql { … }` in
+/// its own source binds it in its own manifest, and its handler has to be linked for the same reason.
+/// A binding whose provider is native, or names a tier no `.noe` module declares, matches nothing here
+/// and is left to the extension registry.
+///
+/// Merging a handler the source never ends up writing a block for is inert — it is a `pub fn` like any
+/// other, and the same over-approximation [`merge_one_dep`] documents applies: a declaration that goes
+/// unused costs nothing, unlike a value binding, which would *run*.
+fn seed_bound_tier_handlers(
+    package_uses: &noeta_span::PackageUses,
+    module_views: &[ModuleView],
+    module_maps: &std::collections::HashMap<Vec<String>, qualify::UnitMap>,
+    merged_q: &mut HashSet<String>,
+    imported: &mut Vec<Stmt>,
+) {
+    for (_origin, _local, use_) in package_uses.iter() {
+        for view in module_views {
+            // The provider is matched on the module's namespace **root**, the same root-namespace
+            // identity `provider_roots` carries and the module system uses everywhere else.
+            let Some(root) = view.namespace.first() else {
+                continue;
+            };
+            if !use_.provider_roots.iter().any(|r| r == root) {
+                continue;
+            }
+            for stmt in view.stmts {
+                let Stmt::Fn(f) = stmt else {
+                    continue;
+                };
+                let Some(tier) = &f.tier else {
+                    continue;
+                };
+                if tier.name != use_.exported {
+                    continue;
+                }
+                let qualified = format!("{}.{}", view.namespace.join("."), f.name);
+                if !merged_q.insert(qualified) {
+                    continue;
+                }
+                let mut decl = stmt.clone();
+                if let Some(map) = module_maps.get(&view.namespace) {
+                    qualify::qualify_stmt(&mut decl, map);
+                }
+                imported.push(decl);
+                // The handler's own same-module dependencies — its `config:` attribute struct, the
+                // `expr:` value type, every helper its body calls.
+                merge_module_closure(
+                    &view.namespace,
+                    f.name.as_str(),
+                    module_views,
+                    module_maps,
+                    merged_q,
+                    imported,
+                );
+            }
+        }
+    }
+}
+
 fn merge_module_closure(
     path: &[String],
     root: &str,
@@ -6073,7 +6173,7 @@ mod tests {
         assert!(!errs.is_empty());
     }
 
-    /// One `[tiers]` binding, as [`renamed_text_tier_locals`] takes it.
+    /// One `[directives]` binding, as [`renamed_text_tier_locals`] takes it.
     fn binds(
         origin: PackageOrigin,
         local: &str,

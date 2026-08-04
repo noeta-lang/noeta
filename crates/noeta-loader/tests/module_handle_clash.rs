@@ -161,17 +161,25 @@ fn link_two_packages(import_line: &str, call_line: &str) -> noeta_ast::Program {
         "use acme.dep.unescape\nuse other.api.escape\necho unescape(\"a%20b\")\necho escape(\"a b\")\n",
     );
     let pool = [&decoder, &encoder];
-    link_parsed_with_deps(&entry_src, &entry, &[], &pool, &[], None)
-        .unwrap_or_else(|errors| {
-            panic!(
-                "the two packages must link: {:?}",
-                errors
-                    .iter()
-                    .map(|e| (e.diagnostic.code.code(), &e.diagnostic.message))
-                    .collect::<Vec<_>>()
-            )
-        })
-        .program
+    link_parsed_with_deps(
+        &entry_src,
+        &entry,
+        &[],
+        &pool,
+        &[],
+        None,
+        &noeta_span::PackageUses::new(),
+    )
+    .unwrap_or_else(|errors| {
+        panic!(
+            "the two packages must link: {:?}",
+            errors
+                .iter()
+                .map(|e| (e.diagnostic.code.code(), &e.diagnostic.message))
+                .collect::<Vec<_>>()
+        )
+    })
+    .program
 }
 
 /// The reported defect: a whole-module import in one package, hijacked by another package's
@@ -273,9 +281,17 @@ fn the_entry_keeps_its_short_handle_next_to_a_dependencys_canonical_one() {
         "/proj/main.noe",
         "use acme.dep.unescape\nuse std.http.url\necho url.encode(unescape(\"a%20b\"))\n",
     );
-    let program = link_parsed_with_deps(&entry_src, &entry, &[], &[&dep], &[], None)
-        .expect("entry and dependency must link")
-        .program;
+    let program = link_parsed_with_deps(
+        &entry_src,
+        &entry,
+        &[],
+        &[&dep],
+        &[],
+        None,
+        &noeta_span::PackageUses::new(),
+    )
+    .expect("entry and dependency must link")
+    .program;
 
     assert_eq!(
         call_head(&program, "unescape").as_deref(),
@@ -312,9 +328,17 @@ fn a_local_named_like_the_handle_is_left_alone() {
         "/proj/main.noe",
         "use acme.dep.head\necho head(\"abcdef\")\n",
     );
-    let program = link_parsed_with_deps(&entry_src, &entry, &[], &[&dep], &[], None)
-        .expect("must link")
-        .program;
+    let program = link_parsed_with_deps(
+        &entry_src,
+        &entry,
+        &[],
+        &[&dep],
+        &[],
+        None,
+        &noeta_span::PackageUses::new(),
+    )
+    .expect("must link")
+    .program;
     assert_eq!(
         call_head(&program, "head").as_deref(),
         Some("url.slice"),
@@ -339,8 +363,16 @@ fn a_native_import_colliding_with_a_noe_import_in_one_file_is_reported() {
         "/proj/main.noe",
         "use proj.url\nuse pkg.url\necho url.encode(\"a b\")\n",
     );
-    let errors = link_parsed_with_deps(&entry_src, &entry, &[&sibling], &[], &[], None)
-        .expect_err("two imports binding `url` in one file must not link silently");
+    let errors = link_parsed_with_deps(
+        &entry_src,
+        &entry,
+        &[&sibling],
+        &[],
+        &[],
+        None,
+        &noeta_span::PackageUses::new(),
+    )
+    .expect_err("two imports binding `url` in one file must not link silently");
     assert!(
         errors.iter().any(|e| e.diagnostic.code.code() == "E0020"),
         "the collision must be reported as E0020, got: {:?}",
@@ -363,7 +395,16 @@ fn importing_one_native_module_twice_in_a_file_is_not_a_collision() {
         "use pkg.url\nuse pkg.url\necho url.encode(\"a b\")\n",
     );
     assert!(
-        link_parsed_with_deps(&entry_src, &entry, &[], &[], &[], None).is_ok(),
+        link_parsed_with_deps(
+            &entry_src,
+            &entry,
+            &[],
+            &[],
+            &[],
+            None,
+            &noeta_span::PackageUses::new()
+        )
+        .is_ok(),
         "a repeated identical import is a no-op"
     );
 }

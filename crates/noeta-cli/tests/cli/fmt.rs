@@ -106,12 +106,12 @@ fn fmt_diff_over_stdin() {
         .stdout(predicate::str::contains("+echo 1"));
 }
 
-/// **A `[tiers]`-renamed text tier's body must survive `noeta fmt`** (parallel-path audit row 8).
+/// **A `[directives]`-renamed text tier's body must survive `noeta fmt`** (parallel-path audit row 8).
 ///
 /// `noeta fmt` discovers the project's verbatim-body tiers itself — a fifth place the "which
 /// `@name`s lex verbatim" question is answered, beside the loader, the salsa graph and the two
 /// grammar generators. It scanned `@tier(…, text:)` declarations and the installed extensions'
-/// tiers, but not the manifest's `[tiers]` table, even though it already resolves the graph that
+/// tiers, but not the manifest's `[directives]` table, even though it already resolves the graph that
 /// carries it. So a package that renames std's `doc` onto a local `@docs` had its markdown body
 /// tokenized as code by the formatter alone: `noeta run` and `noeta check` accept the file, and
 /// `noeta fmt` reports it unformattable.
@@ -120,7 +120,7 @@ fn fmt_keeps_a_renamed_text_tier_body_verbatim() {
     let dir = fmt_dir("renamed_text_tier");
     std::fs::write(
         dir.join("noeta.toml"),
-        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n[tiers]\ndocs = \"std:doc\"\n",
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n[directives]\ndocs = \"std:doc\"\n",
     )
     .unwrap();
     // Canonical already, apart from the body — which is markdown, and a hard lex error as code (a

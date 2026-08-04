@@ -222,7 +222,7 @@ pub(crate) fn dispatch_generic_tier(name: &str, file: &Path) -> Option<ExitCode>
         .map(|runner| invoke_tier_runner(runner, name, file))
 }
 
-/// Dispatch a tier the root **renamed** in `[tiers]`, resolved by identity to a
+/// Dispatch a tier the root **renamed** in `[directives]`, resolved by identity to a
 /// `(provider_root, exported)` pair — look up the native runner **scoped** to that provider (never
 /// the literal local name), so a renamed std tier (`mytest = "std:test"`) or a collision the root
 /// disambiguated (`crit = "depB:fuzz"`, where two dependencies each export a `fuzz` runner) reaches

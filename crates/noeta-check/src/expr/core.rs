@@ -1095,7 +1095,12 @@ impl Checker {
                 holes,
                 span,
             } => {
-                let handler = self.symbols.tier_registry.expr_tier_handler(tier);
+                let handler = self.symbols.tier_registry.expr_tier_handler(
+                    tier,
+                    self.package_at(*tier_span),
+                    &self.config.provenance.uses,
+                    &self.config.provenance.packages,
+                );
                 match handler {
                     Some(handler) => {
                         let call = noeta_ast::desugar::tier_expr_call(

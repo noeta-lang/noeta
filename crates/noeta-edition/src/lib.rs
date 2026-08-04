@@ -134,7 +134,7 @@ pub struct Provenance {
     /// answer for a single-file check or a synthetic program, neither of which has a package graph
     /// to judge against.
     pub packages: noeta_span::PackageMap,
-    /// Per-package `@`-name resolution tables (`[directives]`, `[tiers]`), keyed by
+    /// Per-package `@`-name resolution tables (`[directives]`, `[directives]`), keyed by
     /// [`PackageOrigin`](noeta_span::PackageOrigin): the loader/pm builds them from each package's
     /// manifest in that package's own dependency context. Empty means no package binds any extension
     /// `@name`, so only built-in directives and program-declared tiers resolve.

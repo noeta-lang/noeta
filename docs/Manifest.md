@@ -176,7 +176,7 @@ The binding *is* the grant. One entry both authorizes the provider to contribute
 
 Because the local name is yours, two packages exporting the same command name coexist: bind one of them under a different key. The first `:` splits the identity from the exported name — a package identity always contains a `/` and never a `:` — so the exported half may contain any character, including a space (`remote-add = "acme/tools:remote add"`).
 
-Unlike [`[tiers]`](#tiers--tier-providers) and [`[directives]`](#directives--extension-directives), which are per-package and keyed by the using package's own dependency keys, this table is **root-only** and keyed by full package **identity**: it is a capability grant, and a grant is the top-level project's alone to make. A dependency's own `[trust.commands]` is not read.
+Unlike [`[directives]`](#directives--where-each-name-comes-from), which is per-package and may be keyed by the using package's own dependency keys, this table is **root-only** and keyed by full package **identity**: it is a capability grant, and a grant is the top-level project's alone to make. A dependency's own `[trust.commands]` is not read.
 
 A bare `commands = ["company/package"]` array — granting every command a package ships, rather than binding them one at a time — is refused with a message naming this table as its replacement.
 
@@ -193,41 +193,39 @@ imported  = "warn"     # imported feeds are broader — warn, don't fail
 
 A bare string under `[trust]` — `advisories = "fail"` — sets every tier at once. A key that is not one of the three tiers, or an action that is not `"fail"`/`"warn"`/`"off"`, is a manifest error.
 
-## `[directives]` — extension directives
+## `[directives]` — where each `@name` comes from
 
-The `[directives]` table names which dependency provides each extension `@`-directive your source uses — a local `@name` → `"dep-key[:exported]"`, the directive counterpart of [`[tiers]`](#tiers--tier-providers). A directive an extension declares is not ambient: a `@name` your package writes resolves only through an entry here.
+The `[directives]` table names who provides each `@name` your source writes — a local `@name` → `"provider[:exported]"`. **Plain directives (`@openapi`) and *tier directives* — the ones that take a block, `@test { … }`, `@sql { … }` — are bound the same way.** A `@name` is one namespace, and source cannot tell the two apart until resolution, so the manifest does not ask you to classify them.
 
 ```toml
 [dependencies]
-para = { version = "^0.2", package = "para/api" }
+para = [
+    { version = "^0.2", package = "para/api" },
+    { version = "^0.4", package = "para/db" },
+]
 
 [directives]
-openapi = "para"            # para/api's `@openapi`
-oapi    = "para:openapi"    # the same directive, written `@oapi` in this package's source
+test    = "std"             # std's `@test { … }`
+openapi = "para/api"        # para/api's `@openapi` directive
+sql     = "para/db"         # para/db's `@sql { … }` block tier
+oapi    = "para/api:openapi"  # the same directive, written `@oapi` in this package's source
+crit    = "acme/criterion:bench"  # a dependency's `bench` tier, written `@crit` locally
 ```
 
-The provider is a key of **this package's** `[dependencies]` — the same key a `use <key>.…` resolves through. Unlike `[tiers]` there is no built-in `"std"` provider, because a directive always comes from a dependency; naming a provider that is not a declared dependency is a manifest error.
+A provider is the built-in `"std"`, a package **identity** (`para/db`), or a key of this package's `[dependencies]` (including a `[targets.<name>.dependencies]` key, for a dev-only tier). **Prefer the identity.** A key bound to a *scope* covers several member packages at once — `para` above is `para/api` *and* `para/db` — so it cannot say which one you meant. Naming a provider that is neither `"std"` nor a declared dependency is a manifest error.
 
-Both tables are **per-package**: a `@name` resolves in the source that wrote it, so a dependency's `@openapi` means whatever *its* manifest said regardless of what you bind `@openapi` to, and two packages can name one provider's directive differently. `:exported` renames — which is how two providers' same-named directives coexist. A local name may not appear in both `[directives]` and `[tiers]`: source cannot tell a directive from a tier before resolution, so a `@name` is one namespace.
+Nothing here is ambient. A `@name` a dependency provides resolves **only** through an entry in this table, and the entry is also what pulls a pure-Noeta provider's handler into your program — an `import` neither substitutes for a binding nor is needed alongside one. There are no ambient built-in tiers either: `test`/`bench`/`doc`/`debug` are ordinary `std` tiers you name here like any other provider's.
 
-Binding a directive does **not** authorize the provider's native code. That stays root-only, in [`[trust].native`](#trust--grants-and-provenance-policy).
+Bindings are **per-package**: a `@name` resolves in the source that wrote it, so a dependency's `@openapi` means whatever *its* manifest said regardless of what you bind `@openapi` to, and two packages can name one provider's `@name` differently. `:exported` renames — which is how two providers' same-named entries coexist.
 
-## `[tiers]` — tier providers
+Which of the *tier directives* among these are live in a build is a separate axis — a target's `tiers` live-set ([below](#targets--build-recipes)) — because only tier directives activate.
 
-The `[tiers]` table names which provider declares each dev-tier your source writes as `@name { … }` — a local `@name` → `"provider[:exported]"`, the tier counterpart of [`[directives]`](#directives--extension-directives). The provider is the built-in `"std"` or a dependency declared in `[dependencies]` (or under a `[targets.<name>.dependencies]`, for a dev-only tier). There are no ambient built-in tiers — `test`/`bench`/`doc`/`debug` are ordinary `std` tiers you name here — and `:exported` renames one to dodge a collision between two providers' same-named tiers:
+Binding a `@name` does **not** authorize the provider's native code. That stays root-only, in [`[trust].native`](#trust--grants-and-provenance-policy).
 
-```toml
-[tiers]
-test  = "std"
-bench = "std"
-crit  = "criterion:bench"   # a dependency's `bench` tier, written `@crit` locally
-```
-
-A provider is bound per package and is the same in every build; a target only selects which of these tiers are *live* (below). A local name may not appear in both `[tiers]` and [`[directives]`](#directives--extension-directives) — a `@name` is one namespace.
 
 ## `[targets]` — build recipes
 
-A target is a named build recipe: an **activation live-set** of the local tier names (from `[tiers]`) that are live in the build, plus its own dependencies (dev-dependencies) and an optional base to inherit from. The live-set no longer names a provider (that is `[tiers]`'s job) — it is an array of tier names where a bare name is live and a `-`-prefixed name turns an inherited tier off.
+A target is a named build recipe: an **activation live-set** of the local tier names (from `[directives]`) that are live in the build, plus its own dependencies (dev-dependencies) and an optional base to inherit from. The live-set no longer names a provider (that is `[directives]`'s job) — it is an array of tier names where a bare name is live and a `-`-prefixed name turns an inherited tier off.
 
 ```toml
 [targets.test]
@@ -243,7 +241,7 @@ tiers = ["bench", "-test"]           # add bench, drop the inherited test
 
 - **`extends`** names a base target to inherit the live-set and dependencies from; a nearer entry overrides the base's (a `-name` turns an inherited tier off). Inheritance cycles are an error.
 - **`dependencies`** follows the same rules as the global `[dependencies]` table.
-- **`tiers`** is a live-set of local tier names — the array form above (bare = live, `-name` = off), or the equivalent boolean sub-table `[targets.<name>.tiers]` with `name = true`/`false`; the provider each resolves to lives in the top-level `[tiers]` table.
+- **`tiers`** is a live-set of local tier names — the array form above (bare = live, `-name` = off), or the equivalent boolean sub-table `[targets.<name>.tiers]` with `name = true`/`false`; the provider each resolves to lives in the top-level `[directives]` table.
 
 The target to build is chosen at the command line (`--target`), not in the manifest.
 
@@ -256,7 +254,7 @@ The pair `noeta init` scaffolds is the pattern to copy: a `development` target t
 name = "acme/app"
 version = "0.1.0"
 
-[tiers]
+[directives]
 test = "std"
 bench = "std"
 doc = "std"

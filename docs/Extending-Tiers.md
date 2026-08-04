@@ -25,7 +25,7 @@ pub fn run_fuzz(roots: List<TierRoot>): void {
 - `@tier(name[, config: Type])` names the tier consumers write as `@<name> { … }`; the optional `config:` names an `@attribute` struct whose fields are the tier's knobs — exactly the `Bench { iterations }` model, so `@fuzz(cases: 500) { … }` stamps `#[Fuzz(cases: 500)]` onto each contained fn and the ordinary construction gate validates it.
 - The decorated fn is the **runner**: it must be `fn(roots: List<TierRoot>): void`, where each `TierRoot { name: string, run: () -> void }` is an activated root fn as a first-class handle. Anything else about the declaration — a name colliding with a built-in, a duplicate, a non-attribute config, a wrong signature — is **E0051** at the declaration.
 - A consumer opts in with one import (`use fuzzkit.tiers.run_fuzz` — the config struct links along with the runner), writes `@fuzz { … }` blocks, and runs **`noeta fuzz <file>`**: the unknown subcommand resolves against the file's declared tiers and dispatches to the runner in-process, after the compose and before the `noeta-<cmd>` external-binary probes. Roots keep white-box access and strip from a normal build, exactly like the built-in tiers.
-- In `noeta.toml`, any identifier is a valid local tier name in a target's `tiers` live-set — whether it resolves (against your `[tiers]` bindings) is checked where the tier is used.
+- In `noeta.toml`, any identifier is a valid local tier name in a target's `tiers` live-set — whether it resolves (against your `[directives]` bindings) is checked where the tier is used.
 
 ### Native runners
 
@@ -35,17 +35,19 @@ This is not a std privilege — `@test`, `@bench`, and `@doc` are dispatched thr
 
 ### Choosing a tier's provider
 
-A tier's provider is bound **per package** in the `[tiers]` table, not per target — the same in every build. To use a dependency's tier, name it there:
+A tier's provider is bound **per package** in the `[directives]` table, not per target — the same in every build. `[directives]` is where *every* `@name` a package writes is bound, directives included: source cannot tell a directive from a tier until resolution, so the manifest does not ask you to. To use a dependency's tier, name it there:
 
 ```toml
 [dependencies]
 fuzzkit = { version = "^1.0", package = "acme/fuzzkit" }
 
-[tiers]
-bench = "fuzzkit"           # this package's `@bench` is fuzzkit's `@tier(bench, config: …)`
+[directives]
+bench = "acme/fuzzkit"      # this package's `@bench` is fuzzkit's `@tier(bench, config: …)`
 ```
 
-`noeta bench app.noe` runs **fuzzkit's** tier — its config attribute is what `@bench(…)` blocks stamp, and its runner receives the roots — whether or not a target is passed (a target only selects which tiers are *live*, never which provider a tier resolves to). A tier a **dependency** declares is reachable only through such a binding — an unbound name is not ambient. To keep std's `bench` *and* fuzzkit's side by side, rename one (`crit = "fuzzkit:bench"`, written `@crit`). Two providers may export the same tier name precisely because the binding disambiguates; `E0051` rejects only two declarations of one tier *within one package*. A provider that declares no such tier is an error naming both sides. `doc` binds the same way — a `doc = "docgen"` provider is the documentation-site seam: activation stamps every attached block as `#[Doc]`, and the runner walks `attributes_of::<Doc>()`. The `[tiers]` bindings are part of the compile (and the startup-cache key), and `noeta <tier> <file>` dispatches through them.
+`noeta bench app.noe` runs **fuzzkit's** tier — its config attribute is what `@bench(…)` blocks stamp, and its runner receives the roots — whether or not a target is passed (a target only selects which tiers are *live*, never which provider a tier resolves to). A tier a **dependency** declares is reachable only through such a binding — an unbound name is not ambient. To keep std's `bench` *and* fuzzkit's side by side, rename one (`crit = "fuzzkit:bench"`, written `@crit`). Two providers may export the same tier name precisely because the binding disambiguates; `E0051` rejects only two declarations of one tier *within one package*. A provider that declares no such tier is an error naming both sides. `doc` binds the same way — a `doc = "docgen"` provider is the documentation-site seam: activation stamps every attached block as `#[Doc]`, and the runner walks `attributes_of::<Doc>()`. The `[directives]` bindings are part of the compile (and the startup-cache key), and `noeta <tier> <file>` dispatches through them.
+
+A provider is a **package identity** (`acme/fuzzkit`), the built-in `"std"`, or a `[dependencies]` key. Prefer the identity: a key bound to a *scope* covers several member packages at once (`para` → `para/aether` + `para/db`) and cannot say which one you meant.
 
 ---
 
@@ -82,11 +84,11 @@ echo @greet { hello ${name}! }     // " hello world! "
 
 `text: "<lang>"` is optional on an expression tier but recommended — the language ID drives editor highlighting of the body. An expression tier has no runner semantics: its blocks never activate or strip, `noeta <tier>` rejects it, and a block in *statement* position (its value silently discarded) is **E0052** — assign or return it.
 
-Because the declaration is ordinary code, a **pure-Noeta package** can ship `@sql`, `@json`, or `@html` — parsed, checked, typed embedded languages — with no native code and no compiler plugin: consumers `use` the handler's module and write blocks. See `examples/sql_tier.noe` for a small end-to-end DSL.
+Because the declaration is ordinary code, a **pure-Noeta package** can ship `@sql`, `@json`, or `@html` — parsed, checked, typed embedded languages — with no native code and no compiler plugin. A consumer binds it in `[directives]` (`sql = "para/db"`) and writes blocks; **no import is involved**, and none is enough on its own. The binding is what pulls the handler into the program, exactly as it is for a native provider's tier — one rule for both kinds, which is the point. See `examples/sql_tier.noe` for a small end-to-end DSL.
 
 ### Native (Rust-package) expression tiers
 
-A **native** package declares an expression tier the same way it registers modules and types — through the extension ABI (`ExtTier`), naming the body language, the value type, and a **native handler** (a module function). The tier is then available wherever the package is installed, with no import of the handler, and its blocks are checked and typed like any expression. std itself uses this seam for **`@json`**: a native handler (`std.template.render`) that interleaves the statics with JSON-quoted holes.
+A **native** package declares an expression tier the same way it registers modules and types — through the extension ABI (`ExtTier`), naming the body language, the value type, and a **native handler** (a module function). A consumer binds it in `[directives]` like any other, and its blocks are then checked and typed like any expression. std itself uses this seam for **`@json`**: a native handler (`std.template.render`) that interleaves the statics with JSON-quoted holes.
 
 ```noeta
 id = "u-7"
