@@ -4550,6 +4550,36 @@ mod tests {
     /// ghost at the end of the previous line — `#[Route(…)] static` floating above a bare
     /// `fn handler` — which is the same "slot where it could never be written" failure in a less
     /// obvious costume.
+    /// The two other things that can stand between the indentation and the method's body: an
+    /// `async` keyword, and a `@tier` directive. A directive is a decoration, so the ghost steps
+    /// past it onto `fn` exactly as it does an attribute. `async` is **not** a decoration — it is
+    /// part of the signature the trait contract fixes — so the ghost sits before it and the line
+    /// reads `static async fn`, matching the order the modifier is written in.
+    #[test]
+    fn inlay_hints_anchor_the_ghost_static_before_async_and_after_a_directive() {
+        let mut store = test_store();
+        store.open(
+            "file:///modifiers.noe",
+            "class Host {\n  \
+             pub id: int\n  \
+             async fn make(): Host { return Host { id: 1 } }\n  \
+             @test fn checks(): bool { return true }\n\
+             }\n"
+                .to_string(),
+        );
+        let hints = placed_hints_of(&store, "file:///modifiers.noe");
+        // `  async fn make(…)` — column 2 is the `a` of `async`, so the line reads `static async fn`.
+        assert!(
+            hints.contains(&(2, 2, "static".to_string())),
+            "ghost precedes `async`, which belongs to the signature: {hints:?}"
+        );
+        // `  @test fn checks(…)` — the directive ends at column 7; column 8 is the `f` of `fn`.
+        assert!(
+            hints.contains(&(3, 8, "static".to_string())),
+            "ghost steps past a `@tier` directive onto `fn`: {hints:?}"
+        );
+    }
+
     #[test]
     fn inlay_hints_anchor_the_ghost_static_on_the_fn_keyword() {
         let mut store = test_store();
