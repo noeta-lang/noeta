@@ -724,11 +724,15 @@ impl DocumentStore {
         out
     }
 
-    /// Inlay **type hints** for the visible `range` of `uri`: the inferred type of every
+    /// Inlay hints for the visible `range` of `uri`: the inferred type of every
     /// un-annotated binding *declaration*, positioned right after the binding's name — rendered
     /// with the same `expr_types` spelling hover shows, so the inline text and the hover can never
     /// disagree. `None` if the document is unknown; an unlinkable workspace degrades to the entry's
     /// own AST (hints for within-file bindings keep working while a sibling is broken).
+    ///
+    /// Plus the closure-parameter, call-argument-name and derived-receiver families — see
+    /// [`inlay`]. Every family reads an index the checker already built for this document version,
+    /// so the whole set costs one AST walk.
     pub fn inlay_hints(
         &self,
         uri: &str,
@@ -749,11 +753,17 @@ impl DocumentStore {
         };
         let ide = noeta_db::linked_checked_ide_from(db, cache.workspace, doc);
         Some(
-            inlay::type_hints(program, &ide.expr_types, &ide.packed_layouts, source)
-                .into_iter()
-                .filter(|hint| start <= hint.offset && hint.offset <= end)
-                .map(|hint| (index.position(hint.offset, encoding), hint.label, hint.kind))
-                .collect(),
+            inlay::type_hints(
+                program,
+                &ide.expr_types,
+                &ide.packed_layouts,
+                &ide.method_receivers,
+                source,
+            )
+            .into_iter()
+            .filter(|hint| start <= hint.offset && hint.offset <= end)
+            .map(|hint| (index.position(hint.offset, encoding), hint.label, hint.kind))
+            .collect(),
         )
     }
 
@@ -4201,6 +4211,21 @@ mod tests {
         assert!(store.workspaces.is_empty());
     }
 
+    /// All inlay hints for a document as `(line, character, label)` triples — `hints_of` without
+    /// the column, for the families whose whole point is *where* they anchor.
+    fn placed_hints_of(store: &DocumentStore, uri: &str) -> Vec<(u32, u32, String)> {
+        store
+            .inlay_hints(
+                uri,
+                Range::new(Position::new(0, 0), Position::new(9999, 0)),
+                Encoding::Utf16,
+            )
+            .expect("document is open")
+            .into_iter()
+            .map(|(position, label, _)| (position.line, position.character, label))
+            .collect()
+    }
+
     /// All inlay hints for a document as `(line, label)` pairs, whole-file range, UTF-16.
     fn hints_of(store: &DocumentStore, uri: &str) -> Vec<(u32, String)> {
         store
@@ -4417,6 +4442,125 @@ mod tests {
             assert!(labels.contains(&"new"), "`{tail}|` offers: {labels:?}");
             assert!(labels.contains(&"open"), "`{tail}|` offers: {labels:?}");
         }
+    }
+
+    /// A method's **receiver-ness is derived, never written**: a body that mentions `self` is an
+    /// instance method, a self-less one is called on the type. So the only way to know whether
+    /// `Counter.make()` is available is to read the body hunting for `self` — the hint puts it on
+    /// screen, in the slot the keyword would occupy, exactly as the inferred-type hints do for a
+    /// type the author elided.
+    #[test]
+    fn inlay_hints_ghost_static_on_a_self_less_method() {
+        let mut store = test_store();
+        store.open(
+            "file:///receiver.noe",
+            "class Counter {\n  \
+             mut n: int = 0\n  \
+             fn make(): Counter { return Counter { n: 0 } }\n  \
+             fn bump(by: int): void { self.n = self.n + by }\n\
+             }\n\
+             fn free(): int { return 1 }\n"
+                .to_string(),
+        );
+        let hints = placed_hints_of(&store, "file:///receiver.noe");
+        // The self-less method is hinted, anchored at the `fn` keyword (column 2 after the indent).
+        assert!(
+            hints.contains(&(2, 2, "static".to_string())),
+            "self-less method hints at its `fn`: {hints:?}"
+        );
+        // The instance method is NOT: a receiver is the unmarked expectation, and marking it would
+        // put a ghost word on nearly every method in the file.
+        assert!(
+            !hints
+                .iter()
+                .any(|(line, _, label)| *line == 3 && label == "static"),
+            "instance method must not hint: {hints:?}"
+        );
+        // A top-level fn is not a method at all — it has no receiver discipline to show.
+        assert!(
+            !hints
+                .iter()
+                .any(|(line, _, label)| *line == 5 && label == "static"),
+            "top-level fn must not hint: {hints:?}"
+        );
+    }
+
+    /// Where the hint may appear: an `impl` block's method, yes — a **trait declaration**, never.
+    ///
+    /// In a trait the word is a promise that binds every implementor, and a default body cannot
+    /// make that promise (an implementor may override it with one that reads `self`). Ghosting it
+    /// there would say "already inferred, you needn't write it", which is exactly false. A required
+    /// method has no body to derive from at all. So the trait says nothing, and the ghost on the
+    /// `impl` method is precisely the signal that the contract *could* promise it.
+    #[test]
+    fn inlay_hints_never_ghost_static_inside_a_trait_declaration() {
+        let mut store = test_store();
+        store.open(
+            "file:///traitrec.noe",
+            "trait Greeter {\n  \
+             fn greet(): string\n  \
+             fn shout(): string { return \"HEY\" }\n\
+             }\n\
+             struct Host { id: int }\n\
+             impl Greeter for Host {\n  \
+             fn greet(): string { return \"hi\" }\n\
+             }\n\
+             class Inline {\n  \
+             pub id: int\n  \
+             impl Greeter {\n    \
+             fn greet(): string { return \"yo\" }\n  \
+             }\n\
+             }\n"
+            .to_string(),
+        );
+        let hints = placed_hints_of(&store, "file:///traitrec.noe");
+        // The trait's required method (line 1) and its self-less DEFAULT (line 2) both stay silent.
+        assert!(
+            !hints
+                .iter()
+                .any(|(line, _, label)| (*line == 1 || *line == 2) && label == "static"),
+            "a trait declaration must never hint: {hints:?}"
+        );
+        // Both impl-block methods hint at their `fn` — the standalone `impl … for Host` (line 6)
+        // and the class's in-body `impl Greeter` (line 11) — and each exactly ONCE. The count is
+        // the load-bearing part for the in-body one: the parser flattens an in-body impl's methods
+        // into the type's `methods` as well, so a walk that also descended into `decl.impls` would
+        // draw two ghosts on the same `fn`.
+        assert_eq!(
+            hints
+                .iter()
+                .filter(|(_, _, label)| label == "static")
+                .collect::<Vec<_>>(),
+            vec![
+                &(6, 2, "static".to_string()),
+                &(11, 4, "static".to_string())
+            ],
+            "one ghost per impl method, standalone and in-body: {hints:?}"
+        );
+    }
+
+    /// The ghost keyword lands **after** a method's `#[…]` attributes, not before them: a method's
+    /// `FnDecl::span` starts at its first decoration (the parser consumes them as part of the
+    /// method), so anchoring naively at `span.start` would render `⟨static⟩ #[Route(…)] fn make`,
+    /// putting the keyword somewhere it could never be written.
+    #[test]
+    fn inlay_hints_anchor_the_ghost_static_after_a_methods_attributes() {
+        let mut store = test_store();
+        store.open(
+            "file:///deco.noe",
+            "@attribute struct Route { path: string }\n\
+             class Host {\n  \
+             pub id: int\n  \
+             #[Route(path: \"/x\")] fn make(): Host { return Host { id: 1 } }\n\
+             }\n"
+            .to_string(),
+        );
+        let hints = placed_hints_of(&store, "file:///deco.noe");
+        // Column 22 is the end of `  #[Route(path: "/x")]` — the modifier slot, just before `fn`.
+        assert!(
+            hints.contains(&(3, 22, "static".to_string())),
+            "ghost keyword sits between the attribute and `fn`: {hints:?}"
+        );
     }
 
     #[test]

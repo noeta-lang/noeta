@@ -37,7 +37,7 @@ pub(crate) struct VariantInfo {
 /// which used one default for both directions, had already drifted out of agreement with it. The
 /// state is named here instead, so a reader sees three cases and a `match` makes them decide.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum Receiver {
+pub enum Receiver {
     /// The body reads `self`, so a call must supply one: `x.m(…)` only. `T.m(…)` is E0047 — and
     /// really does fail at run time ("no field `f` on unit"), because nothing binds `self`.
     Instance,

@@ -1180,16 +1180,22 @@ impl LanguageServer for Backend {
             .map(|(position, label, kind)| InlayHint {
                 position: wire_position(position),
                 label: InlayHintLabel::String(label),
-                kind: Some(match kind {
-                    inlay::HintKind::Type => InlayHintKind::TYPE,
-                    inlay::HintKind::Parameter => InlayHintKind::PARAMETER,
-                }),
+                kind: match kind {
+                    inlay::HintKind::Type => Some(InlayHintKind::TYPE),
+                    inlay::HintKind::Parameter => Some(InlayHintKind::PARAMETER),
+                    // The protocol has exactly two kinds and a derived modifier is neither, so it
+                    // carries none — the client then styles it with its default inlay theming
+                    // rather than being told, wrongly, that `static` is a type.
+                    inlay::HintKind::Modifier => None,
+                },
                 text_edits: None,
                 tooltip: None,
                 // A type label starts `: ` glued to the name it follows; a parameter label
                 // `n:` precedes its argument. Neither wants leading padding; both want a
-                // space on the right.
-                padding_left: Some(false),
+                // space on the right. A modifier stands as its own word between whatever
+                // precedes it (indentation, or a `@test` directive) and the `fn` keyword, so it
+                // is the one family that wants padding on both sides.
+                padding_left: Some(matches!(kind, inlay::HintKind::Modifier)),
                 padding_right: Some(true),
                 data: None,
             })
