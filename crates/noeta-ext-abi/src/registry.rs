@@ -4301,6 +4301,28 @@ fn validate(units: &[&'static (dyn Extension + Sync)]) -> Result<(), String> {
             }
         }
     }
+    // A native trait's namespace must live under its own unit's root — the same rule extern types,
+    // enums, classes and structs are already held to above, and the one hook it was never applied
+    // to. `ExtTrait::DEFAULTS` fills `namespace: "std"` exactly as the others do, so a third-party
+    // trait that forgets `namespace:` claims `std.Mergeable`: unreachable under the package's own
+    // root, and squatting a name only std may claim. Nothing refused it — not assembly (this loop
+    // did not exist) and not the publish lint (which walked `types()` alone) — so it would have
+    // shipped.
+    for unit in units {
+        let root = unit.root();
+        for t in unit.traits() {
+            if t.namespace != root && !t.namespace.starts_with(&format!("{root}.")) {
+                return Err(format!(
+                    "native trait `{}` of unit `{}` declares namespace `{}`, outside the unit's \
+                     root `{root}` — a missing `namespace:` defaults to `std`, which only std \
+                     may claim",
+                    t.name,
+                    unit.name(),
+                    t.namespace
+                ));
+            }
+        }
+    }
     // A native trait's structural `Self`-constraint (slice 3) with `Uniform` arity reads only
     // `fields[0]` (every field of the bound type must equal it) — declaring more than one kind is an
     // author bug that would silently ignore the rest, so refuse it here where every assembly path
@@ -5065,6 +5087,52 @@ mod runtime_registry_tests {
         assert!(
             validate(&[&SQ]).is_err(),
             "a type namespaced outside its unit's root must refuse to assemble"
+        );
+    }
+
+    #[test]
+    fn a_trait_namespace_outside_the_units_root_is_rejected() {
+        // The same rule, on the hook it was never applied to. `ExtTrait::DEFAULTS` fills
+        // `namespace: "std"` exactly as `ExtType::DEFAULTS` does, so a package trait that forgets
+        // the field claims `std.Mergeable` — but assembly checked types, enums, classes and
+        // structs, and the publish lint walked `types()` alone, so this one shipped.
+        const SQUATTER: ExtTrait = ExtTrait {
+            name: "Mergeable",
+            // The DEFAULTS value a forgotten `namespace:` leaves behind.
+            ..ExtTrait::DEFAULTS
+        };
+        static TRAITS: &[ExtTrait] = &[SQUATTER];
+        static OK_TRAITS: &[ExtTrait] = &[ExtTrait {
+            name: "Mergeable",
+            namespace: "acme.crdt",
+            ..ExtTrait::DEFAULTS
+        }];
+        struct TraitUnit(&'static [ExtTrait]);
+        impl Extension for TraitUnit {
+            fn name(&self) -> &'static str {
+                "acme.crdt"
+            }
+            fn root(&self) -> &'static str {
+                "acme"
+            }
+            fn modules(&self) -> &'static [ExtModule] {
+                &[]
+            }
+            fn traits(&self) -> &'static [ExtTrait] {
+                self.0
+            }
+        }
+        static SQ: TraitUnit = TraitUnit(TRAITS);
+        static OK: TraitUnit = TraitUnit(OK_TRAITS);
+        assert!(
+            validate(&[&SQ]).is_err(),
+            "a trait namespaced outside its unit's root must refuse to assemble"
+        );
+        // A trait namespaced under a submodule of the root is the ordinary case and stays legal —
+        // `std.vec.Kernels` and `para.crdt.Mergeable` are both spelled this way.
+        assert!(
+            validate(&[&OK]).is_ok(),
+            "root-relative namespacing is fine"
         );
     }
 

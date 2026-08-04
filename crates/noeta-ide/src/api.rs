@@ -532,16 +532,39 @@ fn namespace_violations_in(
             ));
             continue; // its types would all re-report the same squat
         }
-        for t in ext.types() {
-            if !under(t.namespace, root) {
+        // Every nominal declaration, not just the extern types. All five hooks default `namespace`
+        // to `"std"` through their `DEFAULTS`, so all five leak the same way — a package's trait
+        // that forgets `namespace:` claims `std.Mergeable`, is unreachable under the package's own
+        // root, and squats a name in the toolchain's namespace. The lint checked one of the five.
+        for (what, name, namespace) in nominal_namespaces(*ext) {
+            if !under(namespace, root) {
                 out.push(format!(
-                    "extern type `{}` is namespaced `{}`, not under its extension's root `{root}` \
-                     — set `namespace: \"{root}\"` on it (the field defaults to `std`)",
-                    t.name, t.namespace
+                    "{what} `{name}` is namespaced `{namespace}`, not under its extension's root \
+                     `{root}` — set `namespace: \"{root}\"` on it (the field defaults to `std`)"
                 ));
             }
         }
     }
+    out
+}
+
+/// Every nominal declaration an extension registers, as `(what it is, its name, its namespace)` —
+/// the one place the five hooks that carry a `namespace` are enumerated together, so a lint or a
+/// walker over "the extension's declared identities" cannot silently cover four of five.
+fn nominal_namespaces(ext: Ext) -> Vec<(&'static str, &'static str, &'static str)> {
+    let mut out: Vec<(&'static str, &'static str, &'static str)> = ext
+        .types()
+        .iter()
+        .map(|t| ("extern type", t.name, t.namespace))
+        .collect();
+    out.extend(ext.traits().iter().map(|t| ("trait", t.name, t.namespace)));
+    out.extend(ext.enums().iter().map(|e| ("enum", e.name, e.namespace)));
+    out.extend(ext.classes().iter().map(|c| ("class", c.name, c.namespace)));
+    out.extend(
+        ext.structs()
+            .iter()
+            .map(|s| ("struct", s.name, s.namespace)),
+    );
     out
 }
 
@@ -1036,6 +1059,85 @@ mod tests {
             namespace_violations_in(&[&DIVERGENT_EXT], &|_| true, &["std", "css", "html"])
                 .is_empty()
         );
+    }
+
+    /// A package whose trait, enum, class and struct each forget `namespace:` and so default to
+    /// `std` — the exact omission the lint exists to catch, on the four hooks it did not check.
+    static LEAKY_TRAITS: &[noeta_stdlib::ExtTrait] = &[noeta_stdlib::ExtTrait {
+        name: "Mergeable",
+        ..noeta_stdlib::ExtTrait::DEFAULTS
+    }];
+    static LEAKY_ENUMS: &[noeta_stdlib::ExtEnum] = &[noeta_stdlib::ExtEnum {
+        name: "Framing",
+        ..noeta_stdlib::ExtEnum::DEFAULTS
+    }];
+    static LEAKY_CLASSES: &[noeta_stdlib::ExtClass] = &[noeta_stdlib::ExtClass {
+        name: "Node",
+        ..noeta_stdlib::ExtClass::DEFAULTS
+    }];
+    static LEAKY_STRUCTS: &[noeta_stdlib::ExtStruct] = &[noeta_stdlib::ExtStruct {
+        name: "Frame",
+        ..noeta_stdlib::ExtStruct::STRUCT_DEFAULTS
+    }];
+    struct LeakyNominalExt;
+    impl noeta_stdlib::Extension for LeakyNominalExt {
+        fn name(&self) -> &'static str {
+            "leaky-nominal"
+        }
+        fn root(&self) -> &'static str {
+            "para"
+        }
+        fn modules(&self) -> &'static [noeta_stdlib::ExtModule] {
+            &[]
+        }
+        fn traits(&self) -> &'static [noeta_stdlib::ExtTrait] {
+            LEAKY_TRAITS
+        }
+        fn enums(&self) -> &'static [noeta_stdlib::ExtEnum] {
+            LEAKY_ENUMS
+        }
+        fn classes(&self) -> &'static [noeta_stdlib::ExtClass] {
+            LEAKY_CLASSES
+        }
+        fn structs(&self) -> &'static [noeta_stdlib::ExtStruct] {
+            LEAKY_STRUCTS
+        }
+    }
+    static LEAKY_NOMINAL_EXT: LeakyNominalExt = LeakyNominalExt;
+
+    #[test]
+    fn the_publish_lint_covers_every_nominal_hook_not_just_extern_types() {
+        // The lint iterated `ext.types()` alone, so a package trait that omitted `namespace:`
+        // claimed `std.Mergeable` — unreachable under the package's own root, squatting a name in
+        // the toolchain's namespace — and published clean. All five hooks default to `"std"`
+        // through their `DEFAULTS`, so all five leak identically.
+        let violations = namespace_violations_in(&[&LEAKY_NOMINAL_EXT], &|_| true, &[]);
+        assert_eq!(
+            violations.len(),
+            4,
+            "one per leaked declaration: {violations:?}"
+        );
+        // Each names what it is, so the fix ("set `namespace:`") lands on the right declaration.
+        for (what, name) in [
+            ("trait", "Mergeable"),
+            ("enum", "Framing"),
+            ("class", "Node"),
+            ("struct", "Frame"),
+        ] {
+            assert!(
+                violations
+                    .iter()
+                    .any(|v| v.starts_with(&format!("{what} `{name}`")) && v.contains("`std`")),
+                "a leaked {what} is reported: {violations:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_well_namespaced_nominal_surface_is_clean() {
+        // No false positives: the shipped stdlib's own traits/enums/structs sit under `std`, which
+        // is their unit's root, and the whole registry lints clean under it.
+        assert!(namespace_violations("std").is_empty());
     }
 
     #[test]
