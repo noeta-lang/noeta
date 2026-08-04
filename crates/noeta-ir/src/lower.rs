@@ -1066,7 +1066,13 @@ fn type_param_assoc_call(param: &str, method: &str, args: &[Expr], span: Span, r
             name_span: span,
             span,
         },
-        vec![type_name, Expr::List { items: Vec::new(), span }],
+        vec![
+            type_name,
+            Expr::List {
+                items: Vec::new(),
+                span,
+            },
+        ],
     );
     let invoke = Expr::Reflect {
         which: noeta_ast::ReflectKind::Invoke,
@@ -2713,12 +2719,14 @@ impl Lowerer<'_> {
                     // own `Type.Named(…)` member call — which lands on this very span — cannot
                     // re-enter it.
                     if let Some(param) = self.sites.type_param_assoc_sites.get(span)
-                        && let Expr::Ident { name: tn, span: rspan } = receiver.as_ref()
+                        && let Expr::Ident {
+                            name: tn,
+                            span: rspan,
+                        } = receiver.as_ref()
                         && tn.as_str() == param
                     {
                         let values: Vec<Expr> = noeta_ast::CallArg::values(args).cloned().collect();
-                        let rewritten =
-                            type_param_assoc_call(param, name, &values, *span, *rspan);
+                        let rewritten = type_param_assoc_call(param, name, &values, *span, *rspan);
                         return self.lower_expr(&rewritten, out);
                     }
                     let receiver = self.lower_expr(receiver, out)?;
