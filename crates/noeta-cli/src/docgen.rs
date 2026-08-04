@@ -335,6 +335,8 @@ pub fn render_json_to(out: &Path, docs_json_text: &str) -> Result<Generated, Str
                         "class" => "class",
                         "enum" => "enum",
                         "trait" => "trait",
+                        // A standalone `impl Trait for T` whose target is declared elsewhere.
+                        "impl" => "impl",
                         _ => return None,
                     },
                     name: item.get("name")?.as_str()?.to_string(),
@@ -451,17 +453,20 @@ fn module_docs(source: &Source) -> Option<ModuleDocs> {
     // A package module documents its `pub` API; a bare script documents everything.
     let public_only = namespace.is_some();
 
-    // Adjacency-resolved docs: the module doc, the sections, and each decl's text keyed by name.
+    // Adjacency-resolved docs: the module doc, the sections, and each decl's text keyed by the
+    // declaration's **name span**, not its name. `resolve_docs` reports a method's prose under the
+    // method's bare name, so a name key collides a `Point.describe` with a top-level `describe` and
+    // hands one of them the other's paragraph. A name span is unique in the file by construction.
     let mut module_doc = None;
-    let mut decl_docs: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut decl_docs: Docs = std::collections::HashMap::new();
     let mut sections: Vec<(u32, String)> = Vec::new();
     for doc in resolve_docs(program) {
         let text = dedent_doc(&doc.text).trim().to_string();
         match doc.target {
             DocTarget::Module => module_doc = Some(text),
             DocTarget::Section => sections.push((doc.span.start, text)),
-            DocTarget::Decl { name, .. } => {
-                decl_docs.insert(name, text);
+            DocTarget::Decl { name_span, .. } => {
+                decl_docs.insert(name_span, text);
             }
         }
     }
@@ -471,12 +476,44 @@ fn module_docs(source: &Source) -> Option<ModuleDocs> {
         .into_iter()
         .map(|(at, text)| (at, Item::Section(text)))
         .collect();
+    // A **standalone** `impl Trait for T { … }` is not part of any declaration's AST node (unlike an
+    // in-body `impl`, which the parser flattens into the type's own `methods`). Collect them first
+    // so a target declared in this file can absorb its own; the leftovers — impls of a type declared
+    // in a sibling module, which the package orphan rule permits — become items of their own rather
+    // than vanishing.
+    let mut standalone: Vec<&noeta_ast::ImplDecl> = program
+        .stmts
+        .iter()
+        .filter_map(|s| match s {
+            Stmt::Impl(i) => Some(i),
+            _ => None,
+        })
+        .collect();
+    let declared: std::collections::HashSet<&str> = program
+        .stmts
+        .iter()
+        .filter_map(|s| match s {
+            Stmt::Struct(d) => Some(d.name.as_str()),
+            Stmt::Class(d) => Some(d.name.as_str()),
+            Stmt::Enum(d) => Some(d.name.as_str()),
+            _ => None,
+        })
+        .collect();
     for stmt in &program.stmts {
         let (at, decl) = match stmt {
             Stmt::Fn(f) => (f.span.start, fn_docs(f, &decl_docs)),
-            Stmt::Struct(s) => (s.span.start, struct_docs(s, &decl_docs)),
-            Stmt::Class(c) => (c.span.start, class_docs(c, &decl_docs)),
-            Stmt::Enum(e) => (e.span.start, enum_docs(e, &decl_docs)),
+            Stmt::Struct(s) => (
+                s.span.start,
+                struct_docs(s, &decl_docs, &impls_for(s.name.as_str(), &standalone)),
+            ),
+            Stmt::Class(c) => (
+                c.span.start,
+                class_docs(c, &decl_docs, &impls_for(c.name.as_str(), &standalone)),
+            ),
+            Stmt::Enum(e) => (
+                e.span.start,
+                enum_docs(e, &decl_docs, &impls_for(e.name.as_str(), &standalone)),
+            ),
             Stmt::Trait(t) => (t.span.start, trait_docs(t, &decl_docs)),
             _ => continue,
         };
@@ -484,6 +521,10 @@ fn module_docs(source: &Source) -> Option<ModuleDocs> {
             continue;
         }
         items.push((at, Item::Decl(decl)));
+    }
+    standalone.retain(|i| !declared.contains(i.target.as_str()));
+    for i in standalone {
+        items.push((i.span.start, Item::Decl(impl_docs(i, &decl_docs))));
     }
     items.sort_by_key(|(at, _)| *at);
 
@@ -502,7 +543,64 @@ fn basename(path: &str) -> &str {
     path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
-fn fn_docs(f: &FnDecl, docs: &std::collections::HashMap<String, String>) -> DeclDocs {
+/// Declaration prose, keyed by the declaration's **name span** — unique in the file, unlike the
+/// bare name a method and a top-level function may share.
+type Docs = std::collections::HashMap<noeta_span::Span, String>;
+
+/// The standalone impls in `from` whose target is the type named `name`.
+fn impls_for<'a>(name: &str, from: &[&'a noeta_ast::ImplDecl]) -> Vec<&'a noeta_ast::ImplDecl> {
+    from.iter()
+        .filter(|i| i.target.as_str() == name)
+        .copied()
+        .collect()
+}
+
+/// The generic parameter list (`<T, K: Comparable>`), or empty for a non-generic declaration.
+fn type_params(params: &[noeta_ast::TypeParam]) -> String {
+    if params.is_empty() {
+        return String::new();
+    }
+    let rendered: Vec<String> = params
+        .iter()
+        .map(|p| {
+            if p.bounds.is_empty() {
+                p.name.clone()
+            } else {
+                let bounds: Vec<String> = p.bounds.iter().map(|b| b.name.to_string()).collect();
+                format!("{}: {}", p.name, bounds.join(" + "))
+            }
+        })
+        .collect();
+    format!("<{}>", rendered.join(", "))
+}
+
+/// One function/method signature, without the leading `pub`/`async` a top-level declaration adds.
+fn fn_signature(f: &FnDecl) -> String {
+    let params: Vec<String> = f
+        .params
+        .iter()
+        .map(|p| match &p.ty {
+            Some(ty) => format!("{}: {}", p.name, render_type_ref(ty)),
+            None => p.name.clone(),
+        })
+        .collect();
+    let mut sig = String::new();
+    if f.is_async {
+        sig.push_str("async ");
+    }
+    sig.push_str(&format!(
+        "fn {}{}({})",
+        f.name,
+        type_params(&f.type_params),
+        params.join(", ")
+    ));
+    if let Some(ret) = &f.ret {
+        sig.push_str(&format!(": {}", render_type_ref(ret)));
+    }
+    sig
+}
+
+fn fn_docs(f: &FnDecl, docs: &Docs) -> DeclDocs {
     let mut sig = String::new();
     if let Some(tier) = &f.tier {
         match &tier.config {
@@ -513,33 +611,19 @@ fn fn_docs(f: &FnDecl, docs: &std::collections::HashMap<String, String>) -> Decl
     if f.is_public {
         sig.push_str("pub ");
     }
-    if f.is_async {
-        sig.push_str("async ");
-    }
-    let params: Vec<String> = f
-        .params
-        .iter()
-        .map(|p| match &p.ty {
-            Some(ty) => format!("{}: {}", p.name, render_type_ref(ty)),
-            None => p.name.clone(),
-        })
-        .collect();
-    sig.push_str(&format!("fn {}({})", f.name, params.join(", ")));
-    if let Some(ret) = &f.ret {
-        sig.push_str(&format!(": {}", render_type_ref(ret)));
-    }
+    sig.push_str(&fn_signature(f));
     DeclDocs {
         kind: "fn",
         name: f.name.to_string(),
         signature: sig,
-        doc: docs.get(f.name.as_str()).cloned(),
+        doc: docs.get(&f.name_span).cloned(),
         public: f.is_public,
     }
 }
 
-/// Render a field list body (`{ name: T … }`), one field per line.
+/// Render a field list, one field per line.
 fn fields_block(fields: &[noeta_ast::FieldDecl]) -> String {
-    let mut out = String::from(" {\n");
+    let mut out = String::new();
     for field in fields {
         let ty = field
             .ty
@@ -550,11 +634,72 @@ fn fields_block(fields: &[noeta_ast::FieldDecl]) -> String {
         let mutability = if field.mut_field { "mut " } else { "" };
         out.push_str(&format!("    {vis}{mutability}{}: {ty}\n", field.name));
     }
-    out.push('}');
     out
 }
 
-fn struct_docs(s: &StructDecl, docs: &std::collections::HashMap<String, String>) -> DeclDocs {
+/// Render a type's methods, one signature per line — the half of a type's API that lived only in
+/// the AST. A type's `methods` already holds the flattened copy of every in-body `impl Trait { … }`
+/// method (the parser puts them there so dispatch resolves them), so this one list is the whole
+/// callable surface and walking `impls` as well would print each of those twice.
+fn methods_block(methods: &[FnDecl]) -> String {
+    let mut out = String::new();
+    for m in methods {
+        let vis = if m.is_public { "pub " } else { "" };
+        out.push_str(&format!("    {vis}{}\n", fn_signature(m)));
+    }
+    out
+}
+
+/// The trait names a type conforms to: its in-body `impl Trait { … }` blocks plus any **standalone**
+/// `impl Trait for T { … }` found in the same file. Sorted and deduped — the same trait reached by
+/// two routes is one conformance.
+fn conformances(
+    in_body: &[noeta_ast::ImplBlock],
+    standalone: &[&noeta_ast::ImplDecl],
+) -> Vec<String> {
+    let mut names: Vec<String> = in_body
+        .iter()
+        .map(|i| i.trait_name.to_string())
+        .chain(standalone.iter().map(|i| i.trait_name.to_string()))
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Fold a declaration's own prose, its trait conformances, and its documented members into one
+/// markdown body — the `.noe` twin of `noeta_ide::api::with_members`, and deliberately the same
+/// shape so a package's own types read like the native ones beside them.
+///
+/// A member earns a subsection only when it is documented: the signature above already lists every
+/// one, so an empty heading would be noise.
+fn with_members(
+    doc: Option<&String>,
+    conformances: &[String],
+    members: &[&FnDecl],
+    docs: &Docs,
+) -> Option<String> {
+    let mut out = doc.cloned().unwrap_or_default();
+    if !conformances.is_empty() {
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        let list: Vec<String> = conformances.iter().map(|t| format!("`{t}`")).collect();
+        out.push_str(&format!("**Implements:** {}", list.join(", ")));
+    }
+    for m in members {
+        let Some(prose) = docs.get(&m.name_span) else {
+            continue;
+        };
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        out.push_str(&format!("#### `{}`\n\n{}", fn_signature(m), prose.trim()));
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+fn struct_docs(s: &StructDecl, docs: &Docs, standalone: &[&noeta_ast::ImplDecl]) -> DeclDocs {
     let mut sig = String::new();
     if s.decorators.attribute.is_some() {
         sig.push_str("@attribute\n");
@@ -562,40 +707,118 @@ fn struct_docs(s: &StructDecl, docs: &std::collections::HashMap<String, String>)
     if s.is_public {
         sig.push_str("pub ");
     }
-    sig.push_str(&format!("struct {}{}", s.name, fields_block(&s.fields)));
+    sig.push_str(&format!(
+        "struct {}{} {{\n{}{}{}}}",
+        s.name,
+        type_params(&s.type_params),
+        fields_block(&s.fields),
+        methods_block(&s.methods),
+        standalone_block(standalone)
+    ));
+    let members: Vec<&FnDecl> = s
+        .methods
+        .iter()
+        .chain(standalone_methods(standalone))
+        .collect();
     DeclDocs {
         kind: "struct",
         name: s.name.to_string(),
         signature: sig,
-        doc: docs.get(s.name.as_str()).cloned(),
+        doc: with_members(
+            docs.get(&s.name_span),
+            &conformances(&s.impls, standalone),
+            &members,
+            docs,
+        ),
         public: s.is_public,
     }
 }
 
-fn class_docs(c: &ClassDecl, docs: &std::collections::HashMap<String, String>) -> DeclDocs {
+fn class_docs(c: &ClassDecl, docs: &Docs, standalone: &[&noeta_ast::ImplDecl]) -> DeclDocs {
     let mut sig = String::new();
     if c.is_public {
         sig.push_str("pub ");
     }
-    sig.push_str(&format!("class {}{}", c.name, fields_block(&c.fields)));
+    sig.push_str(&format!(
+        "class {}{} {{\n{}{}{}}}",
+        c.name,
+        type_params(&c.type_params),
+        fields_block(&c.fields),
+        methods_block(&c.methods),
+        standalone_block(standalone)
+    ));
+    let members: Vec<&FnDecl> = c
+        .methods
+        .iter()
+        .chain(standalone_methods(standalone))
+        .collect();
     DeclDocs {
         kind: "class",
         name: c.name.to_string(),
         signature: sig,
-        doc: docs.get(c.name.as_str()).cloned(),
+        doc: with_members(
+            docs.get(&c.name_span),
+            &conformances(&c.impls, standalone),
+            &members,
+            docs,
+        ),
         public: c.is_public,
     }
 }
 
-fn enum_docs(e: &EnumDecl, docs: &std::collections::HashMap<String, String>) -> DeclDocs {
+/// The methods carried by a set of standalone impls — the one method carrier a type's own `methods`
+/// does not already contain.
+fn standalone_methods<'a>(
+    impls: &'a [&'a noeta_ast::ImplDecl],
+) -> impl Iterator<Item = &'a FnDecl> {
+    impls.iter().flat_map(|i| i.methods.iter())
+}
+
+/// A type's standalone-impl methods, rendered under a `// impl Trait` marker per impl. They belong
+/// in the declaration — they are callable on the type like any other method — but the marker keeps
+/// the reader's mental model right: these arrived from a separate `impl` block, and an in-body one's
+/// methods (already flattened into the type's own `methods`) are printed without it.
+fn standalone_block(impls: &[&noeta_ast::ImplDecl]) -> String {
+    let mut out = String::new();
+    for i in impls {
+        if i.methods.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("\n    // impl {}\n", i.trait_name));
+        out.push_str(&methods_block(&i.methods));
+    }
+    out
+}
+
+/// A backed variant's constant (`= "pending"`), for the literal forms an enum backing permits.
+fn backed_value(expr: &noeta_ast::Expr) -> String {
+    use noeta_ast::Expr;
+    match expr {
+        Expr::Str { value, .. } => format!(" = \"{value}\""),
+        Expr::Int { value, .. } => format!(" = {value}"),
+        Expr::Float { value, .. } => format!(" = {value}"),
+        Expr::Bool { value, .. } => format!(" = {value}"),
+        // A backing must be a literal, so anything else is not one — say nothing rather than guess.
+        _ => String::new(),
+    }
+}
+
+fn enum_docs(e: &EnumDecl, docs: &Docs, standalone: &[&noeta_ast::ImplDecl]) -> DeclDocs {
     let mut sig = String::new();
     if e.is_public {
         sig.push_str("pub ");
     }
-    sig.push_str(&format!("enum {} {{\n", e.name));
+    // The backing is what makes `.value()` exist and typed — dropping it turned every backed enum
+    // in the reference into a plain one.
+    let backing = e
+        .backing
+        .as_ref()
+        .map(|b| format!(": {}", render_type_ref(b)))
+        .unwrap_or_default();
+    sig.push_str(&format!("enum {}{backing} {{\n", e.name));
     for v in &e.variants {
-        if v.fields.is_empty() {
-            sig.push_str(&format!("    {}\n", v.name));
+        let payload = if v.fields.is_empty() {
+            String::new()
         } else {
             let fields: Vec<String> = v
                 .fields
@@ -605,20 +828,38 @@ fn enum_docs(e: &EnumDecl, docs: &std::collections::HashMap<String, String>) -> 
                     None => p.name.clone(),
                 })
                 .collect();
-            sig.push_str(&format!("    {}({})\n", v.name, fields.join(", ")));
-        }
+            format!("({})", fields.join(", "))
+        };
+        let value = v
+            .backed_value
+            .as_ref()
+            .map(backed_value)
+            .unwrap_or_default();
+        sig.push_str(&format!("    {}{payload}{value}\n", v.name));
     }
+    sig.push_str(&methods_block(&e.methods));
+    sig.push_str(&standalone_block(standalone));
     sig.push('}');
+    let members: Vec<&FnDecl> = e
+        .methods
+        .iter()
+        .chain(standalone_methods(standalone))
+        .collect();
     DeclDocs {
         kind: "enum",
         name: e.name.to_string(),
         signature: sig,
-        doc: docs.get(e.name.as_str()).cloned(),
+        doc: with_members(
+            docs.get(&e.name_span),
+            &conformances(&e.impls, standalone),
+            &members,
+            docs,
+        ),
         public: e.is_public,
     }
 }
 
-fn trait_docs(t: &TraitDecl, docs: &std::collections::HashMap<String, String>) -> DeclDocs {
+fn trait_docs(t: &TraitDecl, docs: &Docs) -> DeclDocs {
     let mut sig = String::new();
     for a in &t.decorators.attrs {
         sig.push_str(&format!("#[{}]\n", a.name));
@@ -626,7 +867,17 @@ fn trait_docs(t: &TraitDecl, docs: &std::collections::HashMap<String, String>) -
     if t.is_public {
         sig.push_str("pub ");
     }
-    sig.push_str(&format!("trait {} {{\n", t.name));
+    sig.push_str(&format!(
+        "trait {}{} {{\n",
+        t.name,
+        type_params(&t.type_params)
+    ));
+    for a in &t.assoc_types {
+        match &a.default {
+            Some(d) => sig.push_str(&format!("    type {} = {}\n", a.name, render_type_ref(d))),
+            None => sig.push_str(&format!("    type {}\n", a.name)),
+        }
+    }
     for m in &t.methods {
         let params: Vec<String> = m
             .sig
@@ -637,7 +888,12 @@ fn trait_docs(t: &TraitDecl, docs: &std::collections::HashMap<String, String>) -
                 None => p.name.clone(),
             })
             .collect();
-        sig.push_str(&format!("    fn {}({})", m.sig.name, params.join(", ")));
+        sig.push_str(&format!(
+            "    fn {}{}({})",
+            m.sig.name,
+            type_params(&m.sig.type_params),
+            params.join(", ")
+        ));
         if let Some(ret) = &m.sig.ret {
             sig.push_str(&format!(": {}", render_type_ref(ret)));
         }
@@ -649,8 +905,30 @@ fn trait_docs(t: &TraitDecl, docs: &std::collections::HashMap<String, String>) -
         kind: "trait",
         name: t.name.to_string(),
         signature: sig,
-        doc: docs.get(t.name.as_str()).cloned(),
+        doc: docs.get(&t.name_span).cloned(),
         public: t.is_public,
+    }
+}
+
+/// A **standalone** `impl Trait for T { … }` whose target is not declared in this file — the
+/// cross-module case the package orphan rule permits (the rule's boundary is the package, not the
+/// file). It has no declaration to fold into here, so it documents itself.
+fn impl_docs(i: &noeta_ast::ImplDecl, docs: &Docs) -> DeclDocs {
+    let sig = format!(
+        "impl {} for {} {{\n{}}}",
+        i.trait_name,
+        i.target,
+        methods_block(&i.methods)
+    );
+    let members: Vec<&FnDecl> = i.methods.iter().collect();
+    DeclDocs {
+        kind: "impl",
+        name: format!("{} for {}", i.trait_name, i.target),
+        signature: sig,
+        doc: with_members(None, &[], &members, docs),
+        // A standalone impl has no visibility of its own; it is as public as the pair it joins, and
+        // a package module that writes one is stating a fact about its public surface.
+        public: true,
     }
 }
 
@@ -780,6 +1058,162 @@ mod tests {
         let out = noeta_test_temp::TempDir::new("docgen-api");
         render_json_to(&out, &text).expect("renders from schema alone");
         assert!(out.join("std-math.md").exists());
+    }
+
+    /// Document one in-memory module and return its items, for the `.noe`-source tests below.
+    fn docs_of(text: &str) -> ModuleDocs {
+        let source = Source::new(SourceId::FIRST, "t.noe".to_string(), text.to_string());
+        module_docs(&source).expect("the fixture parses")
+    }
+
+    /// The `DeclDocs` named `name`, or panic.
+    fn decl<'a>(m: &'a ModuleDocs, name: &str) -> &'a DeclDocs {
+        m.items
+            .iter()
+            .find_map(|i| match i {
+                Item::Decl(d) if d.name == name => Some(d),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no declaration named `{name}`"))
+    }
+
+    #[test]
+    fn a_types_methods_and_impls_are_documented() {
+        // The statement walk matched five `Stmt` kinds and ended `_ => continue`, and the type
+        // renderers printed fields only. So a package written entirely in Noeta shipped a reference
+        // listing its types with no methods on them and no sign of what they implement — the same
+        // hole the native side had, on the path every package takes.
+        let m = docs_of(
+            r#"
+namespace demo.shapes
+
+@doc { A point in the plane. }
+pub struct Point {
+    pub x: float
+
+    @doc { The distance from the origin. }
+    fn magnitude(): float { return self.x }
+
+    impl Describable {
+        fn describe(): string { return "point" }
+    }
+}
+
+pub trait Describable {
+    fn describe(): string
+}
+"#,
+        );
+        let point = decl(&m, "Point");
+        // The methods reach the signature — including the one the parser flattened out of the
+        // in-body `impl`, which is how a call resolves it.
+        assert!(
+            point.signature.contains("fn magnitude(): float"),
+            "{}",
+            point.signature
+        );
+        assert!(
+            point.signature.contains("fn describe(): string"),
+            "{}",
+            point.signature
+        );
+        // The conformance is stated, and the method's own `@doc` reaches the page.
+        let doc = point.doc.as_deref().unwrap();
+        assert!(doc.contains("**Implements:** `Describable`"), "{doc}");
+        assert!(doc.contains("#### `fn magnitude(): float`"), "{doc}");
+        assert!(doc.contains("The distance from the origin."), "{doc}");
+    }
+
+    #[test]
+    fn a_standalone_impl_joins_its_target_or_documents_itself() {
+        // A standalone `impl Trait for T` is the one method carrier the parser flattens nowhere, so
+        // it needs collecting on its own. When its target is declared in the same file it folds
+        // into that declaration; when the target lives in a sibling module — which the package
+        // orphan rule permits — it becomes an item rather than vanishing.
+        let m = docs_of(
+            r#"
+namespace demo.shapes
+
+pub enum Stroke: string {
+    Solid = "solid"
+}
+
+impl Describable for Stroke {
+    fn describe(): string { return "stroke" }
+}
+
+impl Describable for Imported {
+    fn describe(): string { return "imported" }
+}
+"#,
+        );
+        let stroke = decl(&m, "Stroke");
+        assert!(
+            stroke
+                .doc
+                .as_deref()
+                .unwrap()
+                .contains("**Implements:** `Describable`")
+        );
+        // The impl's methods are callable on the type, so they belong in its declaration — under a
+        // marker, because they did not come from the type's own body.
+        assert!(
+            stroke.signature.contains("// impl Describable"),
+            "{}",
+            stroke.signature
+        );
+        assert!(stroke.signature.contains("fn describe(): string"));
+        // The backing and its variant constants survive: an enum's `.value()` exists *because* of
+        // the backing, and dropping it turned every backed enum into a plain one.
+        assert!(
+            stroke.signature.contains("enum Stroke: string {"),
+            "{}",
+            stroke.signature
+        );
+        assert!(
+            stroke.signature.contains("Solid = \"solid\""),
+            "{}",
+            stroke.signature
+        );
+
+        let orphan = decl(&m, "Describable for Imported");
+        assert_eq!(orphan.kind, "impl");
+        assert!(
+            orphan
+                .signature
+                .starts_with("impl Describable for Imported {")
+        );
+    }
+
+    #[test]
+    fn method_prose_is_keyed_by_span_not_name() {
+        // `resolve_docs` reports a method's prose under its bare name, so a name-keyed map hands a
+        // top-level `describe` and a method `describe` each other's paragraph — whichever was
+        // inserted last wins for both.
+        let m = docs_of(
+            r#"
+namespace demo.shapes
+
+@doc { The FREE function. }
+pub fn describe(): string { return "free" }
+
+pub class Panel {
+    @doc { The METHOD. }
+    fn describe(): string { return "method" }
+}
+"#,
+        );
+        assert_eq!(
+            decl(&m, "describe").doc.as_deref(),
+            Some("The FREE function.")
+        );
+        assert!(
+            decl(&m, "Panel")
+                .doc
+                .as_deref()
+                .unwrap()
+                .contains("The METHOD.")
+        );
     }
 
     #[test]
