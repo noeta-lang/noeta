@@ -22,6 +22,13 @@ crate-type = ["staticlib", "rlib"]
 # `cargo test --workspace` fails to even build it otherwise. Its coverage lives in the
 # `noeta build --native` end-to-end differential, which links and runs the real archive.
 test = false
+# …and `bench` is the *same* switch, not a second concern: a bench target is compiled with `--test`
+# against the libtest harness exactly as a test target is, so `bench = true` (the default) rebuilds
+# the very target `test = false` just excluded. `cargo build --benches` — and `--all-targets`, which
+# implies it — hit `error: entry symbol 'main' declared multiple times` on this crate alone while
+# `cargo test --workspace` was clean, so the workspace-wide `--all-targets` build was unusable and
+# the failure read as unrelated to a setting two lines above it.
+bench = false
 doctest = false
 
 [dependencies]
