@@ -171,6 +171,9 @@ pub struct RealHost {
     /// and surfaces it (with "real networking permitted") through [`P2pProvider::real_p2p`], so the
     /// extension can build the node.
     p2p_app_id: Option<String>,
+    /// An exact directory for the `para.p2p` node's persistent identity/store, set by a driver
+    /// that runs several identities (`RealHost::with_p2p_dir`). `None` ⇒ the per-app default.
+    p2p_data_dir: Option<std::path::PathBuf>,
     /// Whether this host streams program output to the real terminal as it is produced
     /// ([`Console::streams_output`]), instead of letting it batch until the run ends.
     ///
@@ -283,6 +286,7 @@ impl RealHost {
             next_proc: 1,
             tel: RealTelemetry::new(),
             p2p_app_id: None,
+            p2p_data_dir: None,
             live_output: false,
         })
     }
@@ -309,6 +313,14 @@ impl RealHost {
     /// to the extension via [`P2pProvider::real_p2p`].
     pub fn with_p2p_app(mut self, app_id: Option<String>) -> RealHost {
         self.p2p_app_id = app_id;
+        self
+    }
+
+    /// Pin the `para.p2p` node's persistent state to an exact directory, overriding the per-app
+    /// default. The seam a multi-tenant driver uses to give each signed-in user its own p2p
+    /// identity. Surfaced to the extension via [`P2pProvider::real_p2p`].
+    pub fn with_p2p_dir(mut self, dir: Option<std::path::PathBuf>) -> RealHost {
+        self.p2p_data_dir = dir;
         self
     }
 
@@ -1215,6 +1227,7 @@ impl noeta_stdlib::host::P2pProvider for RealHost {
     fn real_p2p(&self) -> Option<noeta_stdlib::host::RealP2pConfig> {
         Some(noeta_stdlib::host::RealP2pConfig {
             app_id: self.p2p_app_id.clone(),
+            data_dir: self.p2p_data_dir.clone(),
         })
     }
 }
