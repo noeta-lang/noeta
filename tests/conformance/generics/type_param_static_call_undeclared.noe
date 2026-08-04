@@ -1,0 +1,27 @@
+// The receiver rule holds for a type parameter too: `T.m(…)` reaches only what the bound's trait
+// declares `static`. `Named` does not, so a `T` may have nothing to bind `self` to and there is no
+// value at the call to become one — E0047.
+//
+// The reason is the **declaration**, not a survey of implementors. It used to be the survey: the
+// checker enumerated every type in the linked program that implements the bound and asked each
+// one's body whether it needed a receiver. Two things were wrong with that. It is action at a
+// distance — an `impl` in a module this file never names decides whether this body compiles — and
+// it is not a question that can be cached against any one declaration. And it is not even
+// conservative enough to be sound as written: a self-less implementation (or a self-less *default*)
+// proves nothing about the override somebody adds later.
+//
+// So the fact moved into the contract, where arity, parameter types, return type and `async`-ness
+// already live: `static fn label(): string` in the trait, checked once per impl (E0015), trusted at
+// every use. Adding the modifier here is the fix the help line names.
+//
+// Still reported at the DEFINITION site rather than at whichever call site instantiates it: the
+// generic body is what promises something the bound does not guarantee.
+// expect: error E0047 at 26:42
+// expect: exit 1
+trait Named { fn label(): string }
+struct Thing {
+    v: int
+    impl Named { fn label(): string { return "thing ${self.v}" } }
+}
+fn describe<T: Named>(): string { return T.label() }
+echo describe::<Thing>()

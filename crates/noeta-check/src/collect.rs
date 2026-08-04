@@ -1760,14 +1760,20 @@ fn subst_self_assoc_in_fn(m: &FnDecl, bindings: &HashMap<&str, &TypeRef>) -> FnD
 /// the question that decides whether a self-less one is [`Receiver::Either`] (reachable both ways)
 /// or [`Receiver::Associated`] (on the type only).
 ///
-/// True for every user, native, and built-in trait *except* one whose method is associated by
-/// contract ([`BuiltinTrait::associated_method`] — `From::from` builds a value rather than acting
-/// on one, and the checker already refuses a `from` body that mentions `self`). Deciding it from
-/// the closed built-in set rather than from `symbols.user_traits` keeps it independent of source
-/// order: an `impl` written above its `trait` must classify like one written below it, and during
-/// this walk the trait table is only half-populated.
+/// True for every user, native, and built-in trait *except* one whose contract declares its method
+/// **`static`** ([`BuiltinTrait::declares_static`] — `From::from` builds a value rather than acting
+/// on one, and the checker already refuses an implementation whose body mentions `self`). Deciding
+/// it from the closed built-in set rather than from `symbols.user_traits` keeps it independent of
+/// source order: an `impl` written above its `trait` must classify like one written below it, and
+/// during this walk the trait table is only half-populated.
+///
+/// A **user** trait's `static` declaration deliberately does NOT feed this: an unmarked self-less
+/// trait method is `Receiver::Either` today, and the arc is non-breaking, so marking one `static`
+/// adds a promise (`T.m(…)` under a bound, no `self` in any impl) without withdrawing the `x.m(…)`
+/// spelling that already worked. Reading `user_traits` here would also reintroduce exactly the
+/// source-order dependence this function is written to avoid.
 fn trait_supplies_instance_interface(trait_name: &str) -> bool {
-    BuiltinTrait::from_name(trait_name).is_none_or(|t| !t.associated_method())
+    BuiltinTrait::from_name(trait_name).is_none_or(|t| !t.declares_static())
 }
 
 /// Every method of every in-body `impl Trait { … }` block, paired with whether its trait supplies an

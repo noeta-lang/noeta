@@ -1239,6 +1239,15 @@ struct Coloring {
     /// may read/write/construct its module's private fields (the Rust `#[cfg(test)]` model). `false`
     /// for ordinary fns and methods. Set from [`FnDecl::is_dev_tier`] in [`Checker::check_fn`].
     in_dev_tier: bool,
+    /// While checking a **trait's own default body** — the one declaration site where
+    /// [`noeta_ast::FnDecl::is_static`] is a legal, meaningful modifier (static-trait-methods arc).
+    ///
+    /// Every body in the program funnels through [`Checker::check_fn`], which is therefore the one
+    /// place the "`static` is a trait-contract term, never an implementation's" rule can be spelled
+    /// *once*. A trait default is the single exception, and this flag states that exception where it
+    /// lives rather than repeating the rule at each of the four other call sites. `false` everywhere
+    /// else — a top-level `fn`, an inherent method, an `impl` block's method.
+    in_trait_contract: bool,
     /// The generic type parameters in scope while checking the current declaration, each mapped to
     /// its declared trait **bounds** (`<T: Comparable>` → `{"T": [Comparable]}`), including an
     /// instantiated bound's type arguments (`<T: Keyed<int>>`). Empty at top level; saved and
@@ -2682,6 +2691,29 @@ impl Checker {
         // one place every function/method body funnels through, so it cannot drift from what is
         // actually checked.
         self.visited_bodies.insert(decl.name_span);
+        // `static` declares receiver-ness, and receiver-ness is a **contract** term — so it belongs
+        // to a `trait`'s declaration and nowhere else (static-trait-methods arc). Everywhere else
+        // the body already answers the question: a method that mentions `self` needs one and a
+        // self-less one does not, derived, exactly, from source the reader is looking at. A
+        // modifier there would be a second source of truth that can disagree with the first, which
+        // is the very failure this arc exists to remove — so it is refused rather than trusted or
+        // silently ignored. E0015, the code every other "this implementation does not match what
+        // was declared" mismatch already carries.
+        if decl.is_static && !self.coloring.in_trait_contract {
+            self.error(
+                DiagnosticCode::InvalidImpl,
+                decl.name_span,
+                format!(
+                    "`{}` cannot be declared `static`: only a trait's method contract may declare \
+                     a receiver",
+                    decl.name
+                ),
+            )
+            .help(
+                "drop `static` — outside a `trait` declaration the body decides: a method that \
+                 mentions `self` takes a receiver, a self-less one is called on the type",
+            );
+        }
         self.require_signature(decl);
         // A function/method's `#[...]` attributes are validated like a type's: each names an
         // `Attribute` capability (E0029) and constructs it from its literal args (E0009/E0007/E0005).

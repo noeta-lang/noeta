@@ -984,6 +984,10 @@ fn empty_fn(name: &str, span: Span) -> FnDecl {
         directives: Vec::new(),
         is_dev_tier: false,
         is_async: false,
+        // A synthesized method is an IMPLEMENTATION, and an implementation never declares its
+        // receiver-ness — the body decides. (A trait's `static` declaration is checked against
+        // that body like any other contract term.)
+        is_static: false,
         tier: None,
         captures: Vec::new(),
         body: Vec::new(),

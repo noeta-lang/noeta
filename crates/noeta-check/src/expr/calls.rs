@@ -1300,26 +1300,33 @@ impl Checker {
                 } = receiver.as_ref()
                     && lookup(env, tn.as_str()).is_none()
                     && let Some(scoped) = self.coloring.type_params.get(tn.as_str()).cloned()
-                    && let Some((trait_name, needs_receiver)) =
-                        self.type_param_assoc_trait(&scoped.param, name)
+                    && let Some((trait_name, declared_static)) =
+                        self.type_param_static_trait(&scoped.param, name)
                 {
                     let (params, required, ret) = self
                         .type_param_trait_method(&scoped.param, name)
                         .expect("the bound that supplies the method also types it");
-                    // The receiver rule (E0047), asked of every type that could instantiate `T`.
-                    if let Some(offender) = needs_receiver {
+                    // The receiver rule (E0047), asked of the trait's DECLARATION — the one place
+                    // that can answer for every implementation at once (static-trait-methods arc).
+                    // An unmarked method stays unconstrained: implementors derive their own
+                    // receiver-ness from their bodies, so nothing here may assume they agree, and
+                    // a self-less DEFAULT proves nothing either — an implementor may override it
+                    // with a body that reads `self`. Only the declaration binds overrides.
+                    if !declared_static {
                         self.error(
                             DiagnosticCode::InvalidReceiver,
                             span,
                             format!(
-                                "`{name}` cannot be called on the type parameter `{tn}`: \
-                                 `{offender}` implements `{trait_name}.{name}` as an instance \
-                                 method, so a `{tn}` could have no receiver to bind `self` to"
+                                "`{name}` cannot be called on the type parameter `{tn}`: trait \
+                                 `{trait_name}` does not declare `{name}` static, so an \
+                                 implementation may need a receiver a `{tn}` has no value to \
+                                 supply"
                             ),
                         )
                         .help(format!(
-                            "call it on a value of `{tn}`, or make every implementation of \
-                             `{trait_name}.{name}` self-less"
+                            "declare it in the trait — `static fn {name}(…)` in `trait \
+                             {trait_name}` — which then holds every implementation to it, or call \
+                             it on a value of `{tn}`"
                         ));
                     }
                     // The instantiation's NAME is what the rewritten call dispatches on, and it

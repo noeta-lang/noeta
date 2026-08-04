@@ -1,0 +1,47 @@
+// `static fn m(…)` in a **trait declaration** — the one place receiver-ness is a contract term
+// rather than a fact derived from a body (static-trait-methods arc).
+//
+// Arity, parameter types, return type and `async`-ness are all declared once and checked once per
+// impl (E0015); receiver-ness was the odd one out, derived from every implementation separately and
+// never stated. `static` puts it with the others: the trait promises no implementation binds `self`,
+// each `impl` is held to that, and every use site may believe it.
+//
+// The promise is what a generic body spends: `T.decode(…)` under `<T: Codec>` is legal here and is
+// E0047 without the modifier. A declared-`static` method may still carry a default — `tag` does —
+// as long as the default itself needs no receiver.
+//
+// The modifier does not narrow anything else: `encode` is an ordinary instance method on the same
+// trait, and `dyn Codec` still dispatches it.
+// expect: stdout "blob:x"
+// expect: stdout "codec"
+// expect: stdout "x"
+// expect: stdout "dyn x"
+// expect: exit 0
+trait Codec {
+    static fn decode(raw: string): Self
+    static fn tag(): string { return "codec" }
+    fn encode(): string
+}
+
+struct Blob {
+    v: string
+    impl Codec {
+        fn decode(raw: string): Blob { return Blob { v: "blob:" ~ raw } }
+        fn encode(): string { return self.v }
+    }
+}
+
+fn round_trip<T: Codec>(raw: string): T {
+    return T.decode(raw)
+}
+
+fn label<T: Codec>(): string {
+    return T.tag()
+}
+
+fn through_dyn(c: dyn Codec): string { return c.encode() }
+
+echo round_trip::<Blob>("x").encode()
+echo label::<Blob>()
+echo Blob.decode("x").v.slice(5)
+echo through_dyn(Blob { v: "dyn x" })

@@ -1333,6 +1333,19 @@ pub struct FnDecl {
     /// `T` is the declared inner return type; its body may use the postfix `.await` suspend operator.
     /// `false` for an ordinary function, method, or generator.
     pub is_async: bool,
+    /// Whether the declaration is `static fn` — a **receiverless** method, declared as such
+    /// (static-trait-methods arc). Meaningful in a **trait declaration only**, on a required
+    /// signature or on a default: it promises that no implementation binds `self`, which is what
+    /// makes `T.m(…)` legal inside a generic body under a `<T: Trait>` bound without asking every
+    /// implementor in the program. Every other declaration site — an inherent method, an `impl`
+    /// block's method, a top-level `fn` — derives receiver-ness from the body, so writing the
+    /// modifier there is a second source of truth and is rejected (E0015). Parsed everywhere so
+    /// that rejection is a diagnostic with a span rather than a parse fumble.
+    ///
+    /// Unmarked stays **unconstrained**: a trait method without it behaves exactly as before —
+    /// implementations derive, a self-less one is reachable both ways. The modifier only ever adds
+    /// a promise.
+    pub is_static: bool,
     /// The `@tier(name, config: Type)` directive when this fn **declares a dev-tier** and is its
     /// runner (tier-providers T2). A package exporting such a fn makes `@<name> { … }` blocks
     /// available to consumers; the runner is invoked with the activated roots. `None` for an

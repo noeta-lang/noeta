@@ -1,15 +1,21 @@
 // A bounded **type parameter in receiver position**: `T.m(…)` inside `fn build<T: Buildable>`.
 //
-// A bound licenses a trait's methods, and a trait-supplied self-less method is reachable on the
-// type as well as on a value — so it should be reachable on `T` too. It was not: the receiver fell
+// A bound licenses a trait's methods, and a method the trait declares `static` takes no receiver —
+// so it is reachable on `T` exactly as it is on a concrete type. It was not: the receiver fell
 // through to the value path and `T` was reported missing (`[E0005] cannot find 'T' in this scope`),
 // at the DEFINITION site, which is the tell that name resolution simply never consulted generic
 // scope. A turbofish at the call site did not help, because there was nothing wrong with the
 // inference.
 //
+// `static` is what makes the call legal, and it is a **declaration**, not a survey: the trait says
+// once that no implementation binds `self`, every `impl` is held to that (E0015), and the generic
+// body is believed without a single implementor being consulted. Drop the modifier and the same
+// call is E0047 — see `type_param_static_call_undeclared.noe` — because a self-less implementation
+// today says nothing about the implementation written tomorrow.
+//
 // Generics are erased, so the compiled body holds no type to dispatch on — but the instantiation's
 // NAME reaches it on the same per-instantiation channel `type_name::<T>()` reads, and by-name
-// dispatch of an associated function is something the runtime already does. So one compiled body
+// dispatch of a receiverless function is something the runtime already does. So one compiled body
 // serves every `T`, and the two implementors below reach different code through the same call.
 //
 // Both parameter channels are exercised: a generic FN's own parameter (`build`/`tag_of`, on the
@@ -22,8 +28,8 @@
 // expect: stdout "thing"
 // expect: exit 0
 trait Buildable {
-    fn make(a: int, b: string): Self
-    fn tag(): string
+    static fn make(a: int, b: string): Self
+    static fn tag(): string
 }
 struct Thing {
     v: int

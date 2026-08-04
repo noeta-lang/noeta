@@ -47,6 +47,13 @@ pub enum TokenKind {
     /// `Future<T>` rather than running the body; the completion value has the declared inner type.
     #[token("async")]
     AsyncKw,
+    /// `static fn m(...)` — declares a **receiverless** method in a `trait` body (static-trait-methods
+    /// arc). Legal in a trait declaration only: it is the one place receiver-ness is a *contract*
+    /// term rather than something an implementation's body derives, which is what lets a generic
+    /// body write `T.m(…)` against a bound without scanning every implementor. Writing it on an
+    /// inherent method or in an `impl` block is E0015 — there the body decides.
+    #[token("static")]
+    StaticKw,
     /// The postfix suspend operator `expr.await` (Track A). Chains with `?` and further calls
     /// (`fetch(url).await?.text().await?`). A keyword so `.await` parses unambiguously as a postfix
     /// suspend rather than a field access.
@@ -428,6 +435,7 @@ impl TokenKind {
             TokenKind::ReturnKw => "ReturnKw",
             TokenKind::YieldKw => "YieldKw",
             TokenKind::AsyncKw => "AsyncKw",
+            TokenKind::StaticKw => "StaticKw",
             TokenKind::AwaitKw => "AwaitKw",
             TokenKind::ConcurrentKw => "ConcurrentKw",
             TokenKind::SpawnKw => "SpawnKw",
@@ -543,6 +551,7 @@ impl TokenKind {
             TokenKind::ReturnKw => "`return`",
             TokenKind::YieldKw => "`yield`",
             TokenKind::AsyncKw => "`async`",
+            TokenKind::StaticKw => "`static`",
             TokenKind::AwaitKw => "`await`",
             TokenKind::ConcurrentKw => "`concurrent`",
             TokenKind::SpawnKw => "`spawn`",
@@ -719,6 +728,7 @@ impl TokenKind {
         TokenKind::ReturnKw,
         TokenKind::YieldKw,
         TokenKind::AsyncKw,
+        TokenKind::StaticKw,
         TokenKind::AwaitKw,
         TokenKind::ConcurrentKw,
         TokenKind::SpawnKw,

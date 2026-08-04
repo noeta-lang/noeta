@@ -1,10 +1,16 @@
 // `impl From` shape validation (all E0015): the impl names exactly one source type
-// (`impl From<Source>`), its `from` parameter must agree with that declared source, and `from`
-// is an ASSOCIATED conversion — it builds a new value from its argument, so a body referencing
-// `self` has no receiver to refer to.
-// expect: error E0015 at 12:10
-// expect: error E0015 at 19:17
-// expect: error E0015 at 27:12
+// (`impl From<Source>`), its `from` parameter must agree with that declared source, and `from` is
+// **static** — it builds a new value from its argument, so a body referencing `self` has no
+// receiver to refer to.
+//
+// The last of those used to be a bespoke `if trait == From` in the checker that scanned the impl
+// body itself. It is now the general rule (static-trait-methods arc): `From` is simply the one
+// built-in whose contract declares its method static, checked by the same code path that holds a
+// `.noe` `trait`'s `static fn` implementations to their promise. This case is what pins that the
+// generalization did not lose the behavior — the diagnostic's words changed, the rejection did not.
+// expect: error E0015 at 18:10
+// expect: error E0015 at 25:17
+// expect: error E0015 at 33:12
 // expect: exit 1
 struct A { n: int }
 

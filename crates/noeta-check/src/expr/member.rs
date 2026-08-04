@@ -278,45 +278,36 @@ impl Checker {
     /// is legal at all.
     ///
     /// `T.m(…)` puts a **type parameter in receiver position**, and the only methods that may be
-    /// reached that way are the ones a trait supplies without a receiver ([`Receiver::Either`]).
-    /// That is not a property of the trait: whether a method needs `self` is derived from the
-    /// *implementation's* body, per implementor, so the honest question is whether **every** type
-    /// that can instantiate `T` answers `m` without one. A single implementor whose `m` reads
-    /// `self` makes the generic body a promise the language cannot keep, and it is caught here
-    /// rather than at whichever call site happens to pick that implementor — the body is what is
-    /// wrong.
+    /// reached that way are the ones the bound's trait **declares `static`** (static-trait-methods
+    /// arc). That is a **trait-declaration lookup**: one map hit and one flag.
     ///
-    /// Returns `(trait name, the first implementor that needs a receiver)`. `None` when `param` is
-    /// not in scope or no bound's trait declares `name`; the caller then falls through to the
+    /// It used to be a whole-program scan. Receiver-ness was the one part of a signature derived
+    /// from a body and never declared — arity, parameter types, return type and `async`-ness are
+    /// all contract terms checked once per impl (E0015) and trusted thereafter — so answering
+    /// "may a `T` be a receiver here?" meant enumerating **every implementor in the linked
+    /// program** and asking each one's body. That is action at a distance (an `impl` in a distant
+    /// module changes whether a generic body compiles), and it is not a question salsa can cache
+    /// against one declaration. Declaring the fact in the trait moves receiver-ness where existence
+    /// already lives: guaranteed by the contract, checked once per impl, trusted at every use.
+    ///
+    /// Returns `(trait name, whether the trait declares `name` static)`. `None` when `param` is not
+    /// in scope or no bound's trait declares `name` at all; the caller then falls through to the
     /// ordinary receiver path, whose diagnostic ("cannot find `T` in this scope") is the right one
     /// for a name that is not reaching anything.
-    pub(crate) fn type_param_assoc_trait(
+    pub(crate) fn type_param_static_trait(
         &self,
         param: &ParamRef,
         name: &str,
-    ) -> Option<(String, Option<String>)> {
+    ) -> Option<(String, bool)> {
         let bounds = self.param_bounds(param)?.to_vec();
         for b in &bounds {
             let Some(decl) = self.symbols.user_traits.get(&b.name) else {
                 continue;
             };
-            if !decl.methods.iter().any(|m| m.sig.name == name) {
+            let Some(m) = decl.methods.iter().find(|m| m.sig.name == name) else {
                 continue;
-            }
-            // Implementors are enumerable: a bound is satisfied only by a type the linked program
-            // declares an impl (or a `@derive`) for, and `user_trait_impls` is that record. Order is
-            // a `HashMap`'s, so the reported implementor is stabilized by name — a diagnostic that
-            // changes between runs is a diagnostic nobody can test.
-            let mut offenders: Vec<&String> = self
-                .symbols
-                .user_trait_impls
-                .iter()
-                .filter(|(_, traits)| traits.contains_key(&b.name))
-                .map(|(ty, _)| ty)
-                .filter(|ty| !self.receiver_of(ty, name).allows_associated_call())
-                .collect();
-            offenders.sort();
-            return Some((b.name.clone(), offenders.first().map(|s| (*s).to_string())));
+            };
+            return Some((b.name.clone(), m.sig.is_static));
         }
         None
     }

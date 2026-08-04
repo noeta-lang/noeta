@@ -512,7 +512,8 @@ impl Pretty for FnDecl {
             None => String::new(),
         };
         out.push_str(&format!(
-            "({tier}{directives}{attrs}{}fn {}{}{}{captures} [{}]{ret} {}",
+            "({tier}{directives}{attrs}{}{}fn {}{}{}{captures} [{}]{ret} {}",
+            if self.is_static { "static " } else { "" },
             if self.is_async { "async " } else { "" },
             pub_str(self.is_public),
             self.name,

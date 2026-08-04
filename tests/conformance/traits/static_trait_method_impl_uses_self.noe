@@ -1,0 +1,39 @@
+// A trait declares `static`; an implementation reaches for `self` anyway. That is the same class of
+// contract break as the wrong arity or the wrong `async`-ness, so it is the same code (E0015),
+// reported the same way — at the implementation, which is what is wrong.
+//
+// All three implementation shapes are pinned together, because the rule has to hold for each or the
+// promise a generic body spends is not one the language keeps:
+//   * `Direct`  — an in-body `impl` of a REQUIRED static method;
+//   * `Apart`   — the standalone `impl Trait for T` spelling of the same thing;
+//   * `Override` — an OVERRIDE of a static method the trait DEFAULTS. This is the case a self-less
+//     default would otherwise hide: the default proves what the default does, never what an
+//     override does, so only the declaration binds it.
+// expect: error E0015 at 23:21
+// expect: error E0015 at 28:8
+// expect: error E0015 at 35:12
+// expect: exit 1
+trait Codec {
+    static fn decode(raw: string): int
+    static fn tag(): string { return "codec" }
+}
+
+struct Direct {
+    n: int
+    impl Codec { fn decode(raw: string): int { return self.n } }
+}
+
+struct Apart { n: int }
+impl Codec for Apart {
+    fn decode(raw: string): int { return self.n }
+}
+
+struct Override {
+    n: int
+    impl Codec {
+        fn decode(raw: string): int { return raw.len() }
+        fn tag(): string { return "${self.n}" }
+    }
+}
+
+echo "unreached"
