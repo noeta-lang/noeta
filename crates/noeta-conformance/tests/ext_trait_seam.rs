@@ -535,7 +535,7 @@ struct Card {
     title: string
 }
 impl Widget for Card {
-    fn describe(): string {
+    pub fn describe(): string {
         return "card:${self.title}"
     }
 }
@@ -661,7 +661,7 @@ struct Card {
     title: string
 }
 impl Widget for Card {
-    fn describe(): string {
+    pub fn describe(): string {
         return "card:${self.title}"
     }
 }

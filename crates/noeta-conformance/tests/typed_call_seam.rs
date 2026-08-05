@@ -119,7 +119,7 @@ use testext.build
 struct Point {
     x: int
     y: int
-    fn sum(): int { return self.x + self.y; }
+    pub fn sum(): int { return self.x + self.y; }
 }
 
 // A struct built entirely from the recipe — a real instance, so its method is callable.

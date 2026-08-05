@@ -398,7 +398,7 @@ struct Ov {
     n: int
 }
 impl Gadget for Ov {
-    fn tag(): string {
+    pub fn tag(): string {
         return "ov:own"
     }
 }
@@ -468,7 +468,7 @@ fn two_native_traits_may_not_both_default_one_method() {
 #[test]
 fn an_override_resolves_two_native_traits_defaulting_one_method() {
     let diags = check_diagnostics(
-        "use fx.Gadget\nuse fx.Trinket\nstruct Both { n: int }\nimpl Gadget for Both { fn tag(): string { return \"mine\" } }\nimpl Trinket for Both {}\nb = Both { n: 1 }\necho b.tag()\n",
+        "use fx.Gadget\nuse fx.Trinket\nstruct Both { n: int }\nimpl Gadget for Both { pub fn tag(): string { return \"mine\" } }\nimpl Trinket for Both {}\nb = Both { n: 1 }\necho b.tag()\n",
     );
     assert!(
         diags.is_empty(),
@@ -481,7 +481,7 @@ fn an_override_resolves_two_native_traits_defaulting_one_method() {
 #[test]
 fn an_impl_may_override_a_defaulted_native_trait_method() {
     let diags = check_diagnostics(
-        "use fx.Gadget\nstruct Ov { n: int }\nimpl Gadget for Ov { fn tag(): string { return \"x\" } }\no = Ov { n: 1 }\necho o.tag()\n",
+        "use fx.Gadget\nstruct Ov { n: int }\nimpl Gadget for Ov { pub fn tag(): string { return \"x\" } }\no = Ov { n: 1 }\necho o.tag()\n",
     );
     assert!(
         diags.is_empty(),

@@ -42,7 +42,7 @@ fn run_real_isolate_collects_cycles_at_its_own_safepoints() {
     let file = temp_program(
         "isolate_cycle_gc",
         "class Node { pub mut next: ?Node\n\
-         fn new(): Node { return Node { next: none } } }\n\
+         pub fn new(): Node { return Node { next: none } } }\n\
          async fn spin(count: int): int {\n\
          mut i = 0\n\
          while i < count {\n\
@@ -276,7 +276,7 @@ fn run_real_isolate_class_global_read_is_a_precise_error() {
     let file = temp_program(
         "isolate_class_global",
         "class Counter { pub n: int\n\
-         fn new(): Counter { return Counter { n: 42 } } }\n\
+         pub fn new(): Counter { return Counter { n: 42 } } }\n\
          counter = Counter.new()\n\
          async fn work(x: int) use (counter): int { return counter.n + x }\n\
          async fn run(): int {\n\
@@ -337,7 +337,7 @@ fn run_real_isolate_worker_teardown_runs_leaked_cycle_destructors() {
     let src = format!(
         "use std.fs\n\
          class Node {{ pub mut peer: ?Node\n\
-         fn new(): Node {{ return Node {{ peer: none }} }}\n\
+         pub fn new(): Node {{ return Node {{ peer: none }} }}\n\
          destruct {{ fs.append(\"{marker_path}\", \"x\\n\") }} }}\n\
          fn spin(count: int): int {{\n\
          mut i = 0\n\
@@ -629,7 +629,7 @@ fn run_real_isolate_cancel_still_runs_the_workers_destructors() {
         "use std.{{io, fs}}\n\
          use std.task.{{sleep}}\n\
          class Res {{ pub tag: string\n\
-         fn new(t: string): Res {{ return Res {{ tag: t }} }}\n\
+         pub fn new(t: string): Res {{ return Res {{ tag: t }} }}\n\
          destruct {{ fs.append(\"{marker_path}\", \"x\\n\") }} }}\n\
          fn spin(): int {{\n\
          held = Res.new(\"held\")\n\

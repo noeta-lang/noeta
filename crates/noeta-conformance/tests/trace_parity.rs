@@ -92,7 +92,7 @@ fn nested_function_panic_traces_identically() {
 fn method_panic_traces_identically() {
     // `check` reads `self` so it derives as an *instance* method (prelude-redesign EX.2).
     let (vm, eval, source) = both_traces(
-        "struct Acct {\n    v: int\n    fn check(): int {\n        panic(\"no funds: ${self.v}\")\n    }\n}\nfn charge(a: Acct): int {\n    return a.check()\n}\nmut a = Acct { v: 1 }\nmut r = charge(a)\necho r\n",
+        "struct Acct {\n    v: int\n    pub fn check(): int {\n        panic(\"no funds: ${self.v}\")\n    }\n}\nfn charge(a: Acct): int {\n    return a.check()\n}\nmut a = Acct { v: 1 }\nmut r = charge(a)\necho r\n",
     );
     let vm_story = story(&vm, &source);
     assert_eq!(vm_story, story(&eval, &source), "vm={vm:#?} eval={eval:#?}");
