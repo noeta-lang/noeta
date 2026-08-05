@@ -52,7 +52,7 @@ echo snap.n          // 1
 
 Fields are declared `name: T`, one per line (or `;`-separated). A **`class`**'s fields are **private by default**; a **`struct`**'s and an **`enum`** payload's are always public:
 
-- Reading or setting a non-`pub` field of a `class` from outside the type is E0035. A `struct` never raises it — its fields are public whether or not you write `pub`.
+- Reading or setting a non-`pub` field of a `class` from outside the type is E0035. A `struct` never raises it — its fields are public, and writing `pub` on one is refused (E0077): the word would restate what `struct` already said, and suggest the fields written without it are private. It is the field twin of the `pub`-in-a-`trait` refusal below.
 - Assigning a non-`mut` field is E0033, in every kind.
 - A private field is readable inside *any* method of the declaring type, on *any* value of that type (`other.x`), not just `self`.
 

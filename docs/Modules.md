@@ -6,8 +6,8 @@ Programs span multiple files. **A file is a module, and its path comes from wher
 // src/models.noe  →  the module `hello.models`
 
 pub struct User {
-    pub name: string
-    pub id: int
+    name: string
+    id: int
 }
 
 pub fn greet(u: User): string {

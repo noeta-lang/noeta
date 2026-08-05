@@ -1192,9 +1192,12 @@ pub struct FieldDecl {
     pub name_span: Span,
     /// Whether the field was declared `mut` (opt-in mutability).
     pub mut_field: bool,
-    /// Whether the field was declared `pub`. Parsed in slice 1; visibility is **not yet enforced**
-    /// (slice 2). The settled model: struct fields default public, class fields default private with
-    /// per-field `pub` opt-in — so this bit is the explicit `pub` marker, read by slice-2 enforcement.
+    /// Whether the field was declared `pub`. The settled model: a `class`'s fields default private
+    /// with a per-field `pub` opt-in (this bit is what `collect` reads to seed `private_fields`,
+    /// the E0035 gate), a `struct`'s are public unconditionally — so on a struct field the bit
+    /// decides nothing and writing the word is **refused** (E0077), the field twin of the `pub`-in-
+    /// a-`trait` refusal. The bit is still recorded for a struct, because the formatter round-trips
+    /// what was written rather than silently repairing a program the checker will refuse.
     pub is_public: bool,
     pub ty: Option<TypeRef>,
     /// A per-field default value (`x: int = expr`), object-model slice 5. A field *with* a default

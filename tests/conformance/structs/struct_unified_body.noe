@@ -1,13 +1,15 @@
-// The unified declaration body: a `struct` (the value kind) may carry a `pub` field, a `mut`
-// field, and inherent methods — the same body grammar as a `class`, minus `destruct`. Methods read
-// fields directly (no `self.`), exactly as class methods do. Runs identically on both backends.
+// The unified declaration body: a `struct` (the value kind) may carry a plain field, a `mut` field,
+// and inherent methods — the same body grammar as a `class`, minus `destruct`. Methods read fields
+// directly (no `self.`), exactly as class methods do. Runs identically on both backends. A field
+// carries no `pub`: a struct's fields are already public, so the word is refused (E0077) — while a
+// `pub` on a METHOD in the same body means what it says. See `visibility/pub_on_struct_field_rejected`.
 // expect: stdout "hits"
 // expect: stdout "7"
 // expect: stdout "8"
 // expect: stdout "100"
 // expect: exit 0
 struct Counter {
-    pub label: string
+    label: string
     mut count: int
 
     pub fn next(): int { return self.count + 1; }

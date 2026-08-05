@@ -1,0 +1,25 @@
+// The field twin of `pub_on_trait_declaration_rejected`: on a value `struct`'s field, `pub` is
+// refused (E0077). A struct's fields are public by construction — it is the value kind and has no
+// private state to opt out of — so the word restates what `struct` already said, and worse, it
+// would suggest the fields written without it are private, which is the one thing it must not
+// imply. Refused rather than accepted-and-ignored, on the same ground `static` is refused where a
+// body already decides: a modifier that means nothing is still a modifier a reader has to interpret.
+//
+// It PARSES — `pub` is part of the field production — so this is a diagnostic with a span on the
+// field's NAME, not a parse fumble about an unexpected token. `mut` beside it is untouched: that
+// modifier decides something (opt-in mutability), and the two are judged independently.
+//
+// The `pub` on the METHOD in the same body is legal and means what it says (method-visibility
+// arc). That neighbour, one line away, is why a redundant `pub` on a field stopped being harmless.
+// expect: error E0077 at 18:9
+// expect: error E0077 at 20:13
+// expect: exit 1
+struct Counter {
+    pub label: string
+    mut count: int
+    pub mut total: int
+
+    pub fn next(): int { return self.count + 1; }
+}
+
+echo "unreached";

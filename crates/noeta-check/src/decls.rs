@@ -186,6 +186,32 @@ impl Checker {
         for f in &r.fields {
             self.check_type_opt(&f.ty);
             self.check_attrs(&f.attrs, TargetKind::Field);
+            // `pub` on a `struct`'s field decides nothing: a value struct's fields are public by
+            // construction — `collect` never registers one as private and `field_public` reports
+            // every one of them public regardless of this bit — so the word restates what `struct`
+            // already said, and it suggests the fields written without it are private. That is the
+            // same failure `pub` on a trait's own method is refused for (E0053), and refused here
+            // for the same reason `static` is refused where a body already decides: a modifier that
+            // means nothing is still a modifier a reader has to interpret. The method-visibility
+            // arc made the cost real rather than theoretical — a `pub` that *does* decide now sits
+            // one line away, on a method, in this very body.
+            if f.is_public {
+                self.error(
+                    DiagnosticCode::RedundantVisibility,
+                    f.name_span,
+                    format!(
+                        "field `{}` cannot be declared `pub`: a `struct`'s fields are already \
+                         public",
+                        f.name
+                    ),
+                )
+                .help(
+                    "drop `pub` here — a `struct` is the value kind and has no private state to \
+                     opt out of; declare the type a `class` if some of its fields should be \
+                     hidden. This is about a FIELD: on a method in the same body `pub` means what \
+                     it says, and a method implementing a trait must carry it (E0015)",
+                );
+            }
         }
         self.validate_field_defaults(&r.fields, env);
         self.check_derives(

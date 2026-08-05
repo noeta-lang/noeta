@@ -3,7 +3,7 @@
 // state-machine cell.
 // expect: stdout "11"
 // expect: exit 0
-struct S { pub mut n: int }
+struct S { mut n: int }
 mut s = S { n: 1 }
 async fn grow(x: int) use (s): void {
     s.n = s.n + x

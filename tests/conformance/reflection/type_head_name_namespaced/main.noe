@@ -19,8 +19,8 @@
 // expect: exit 0
 
 pub struct Todo {
-    pub id: int
-    pub title: string
+    id: int
+    title: string
 }
 
 pub class Session {

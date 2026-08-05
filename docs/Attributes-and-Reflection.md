@@ -258,7 +258,7 @@ A type's **qualified runtime identity**, as a `string` — the same name `type_o
 // `type_name` then reports `app.storage.Todo` — see
 // [Modules](Modules#where-a-modules-path-comes-from).
 pub struct Todo {
-    pub id: int
+    id: int
 }
 
 echo type_name::<Todo>()                        // Todo

@@ -892,6 +892,11 @@ mod tests {
                 "struct P { x: int }\n",
                 "struct P { x: string }\n",
             ),
+            // Deliberately a `struct`, where the checker REFUSES the `pub` (E0077 — a struct's
+            // fields are already public). This gate is parse-level, and the formatter's job there
+            // is to round-trip what was written rather than quietly repair it: a printer that
+            // dropped `pub` on a struct field would turn a program the checker rejects into one it
+            // accepts, silently, which is the failure mode this table exists to make impossible.
             (
                 "field visibility",
                 "struct P { pub x: int }\n",

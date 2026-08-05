@@ -2,7 +2,7 @@
 // `pick` through a turbofish call, so the linker's same-module reference graph only drags `pick`
 // into the merged program if that callee name is visited by the qualification walk.
 
-pub struct Tag { pub id: int }
+pub struct Tag { id: int }
 
 pub fn pick<T>(x: int): int { return x }
 

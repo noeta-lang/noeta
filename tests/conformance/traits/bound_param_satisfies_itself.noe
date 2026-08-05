@@ -25,7 +25,7 @@ struct Loud {
 }
 
 struct Agent<P: Speaker> {
-    pub voice: P
+    voice: P
 
     pub fn of(v: P): Agent<P> {
         return Agent { voice: v }

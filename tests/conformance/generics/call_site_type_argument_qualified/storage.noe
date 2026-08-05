@@ -1,5 +1,5 @@
 pub struct Todo {
-    pub id: int
+    id: int
 }
 pub class Repo<T> {
     pub tbl: string

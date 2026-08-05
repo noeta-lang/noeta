@@ -23,7 +23,7 @@
 // expect: exit 0
 
 pub struct Ticket {
-    pub id: int
+    id: int
 }
 
 pub enum Priority {

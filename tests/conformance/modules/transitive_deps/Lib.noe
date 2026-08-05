@@ -16,9 +16,9 @@ pub fn twice(n: int): int {
 // `origin` references it, so it must still be merged (an intra-module reference is not gated by
 // visibility). Its fields are `pub` so the consumer can read the returned value.
 struct Point {
-    pub x: int
-    pub y: int
-    pub total: int
+    x: int
+    y: int
+    total: int
 }
 
 // A second internal helper, referenced by `origin` — proving the closure runs to a fixpoint (the

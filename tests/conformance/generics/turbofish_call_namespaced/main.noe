@@ -27,7 +27,7 @@
 
 use std.json;
 
-pub struct Todo { pub id: int }
+pub struct Todo { id: int }
 
 fn gen<T>(x: int): int { return x }
 
@@ -37,7 +37,7 @@ fn helper(): int { return gen::<Todo>(7) }
 
 trait Marker { fn tag(): string }
 
-pub struct Box2 { pub id: int }
+pub struct Box2 { id: int }
 impl Marker for Box2 {
     pub fn tag(): string { return "t" }
     pub fn pick<T>(x: int): int { return x }

@@ -3168,8 +3168,10 @@ fn a_declared_type_is_not_callable() {
     assert!(codes("struct S { n: int }\necho S { n: 5 }.n\n").is_empty());
     assert!(
         codes(
+            // The field carries no `pub` — a struct's fields are already public, so the word is
+            // refused (E0077); the `pub` on the associated fn is what makes `S.make()` reachable.
             "struct S {\n  \
-               pub n: int\n  \
+               n: int\n  \
                pub fn make(): S { return S { n: 1 } }\n\
              }\n\
              echo S.make().n\n"
