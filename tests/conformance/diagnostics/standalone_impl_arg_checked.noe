@@ -11,11 +11,11 @@ trait Keyed {
 
 class Door {
     code: int
-    fn new(c: int): Door { return Door { code: c } }
+    pub fn new(c: int): Door { return Door { code: c } }
 }
 
 impl Keyed for Door {
-    fn same(other: int): bool { return self.code == other }
+    pub fn same(other: int): bool { return self.code == other }
 }
 
 d = Door.new(1)

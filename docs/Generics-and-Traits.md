@@ -43,8 +43,8 @@ struct Todo { id: int }
 
 class Repo<T> {
     pub tbl: string
-    fn new(tbl: string): Repo<T> { return Repo { tbl: tbl } }
-    fn model(): string { return self.tbl ~ ":" ~ type_name::<T>() }
+    pub fn new(tbl: string): Repo<T> { return Repo { tbl: tbl } }
+    pub fn model(): string { return self.tbl ~ ":" ~ type_name::<T>() }
 }
 
 r = Repo::<Todo>.new("todos")       // Repo<Todo> — the call says so itself
@@ -65,11 +65,11 @@ struct Tag { id: int }
 
 class Repo<T> {
     pub tbl: string
-    fn new(tbl: string): Repo<T> { return Repo { tbl: tbl } }
+    pub fn new(tbl: string): Repo<T> { return Repo { tbl: tbl } }
 }
 class Holder {
     inner: Repo<Note>
-    fn new(i: Repo<Note>): Holder { return Holder { inner: i } }
+    pub fn new(i: Repo<Note>): Holder { return Holder { inner: i } }
 }
 fn users(): Repo<User> { return Repo.new("users") }         // a declared return
 fn describe(r: Repo<Tag>): string { return r.tbl }           // a parameter's type
@@ -89,7 +89,7 @@ struct User { id: int }
 
 class Repo<T> {
     pub tbl: string
-    fn new(tbl: string): Repo<T> { return Repo { tbl: tbl } }
+    pub fn new(tbl: string): Repo<T> { return Repo { tbl: tbl } }
 }
 
 r: Repo<User> = Repo::<Todo>.new("todos")   // E0007 — a Repo<Todo> is not a Repo<User>
@@ -104,8 +104,8 @@ A method may declare **its own** type parameters, instantiated per call — inde
 ```noeta
 class Box<T> {
     pub value: T
-    fn new(v: T): Box<T> { return Box { value: v } }
-    fn paired<U>(u: U): Pair<T, U> { return Pair { first: self.value, second: u } }
+    pub fn new(v: T): Box<T> { return Box { value: v } }
+    pub fn paired<U>(u: U): Pair<T, U> { return Pair { first: self.value, second: u } }
 }
 struct Pair<A, B> { first: A  second: B }
 
@@ -127,7 +127,7 @@ A **self-less** member of a generic class carrying its own uninferable parameter
 struct Todo { id: int }
 
 class Repo<T> {
-    fn blank<U>(): string { return type_name::<T>() ~ "/" ~ type_name::<U>() }
+    pub fn blank<U>(): string { return type_name::<T>() ~ "/" ~ type_name::<U>() }
 }
 
 echo Repo::<Todo>.blank::<int>()    // Todo/int
@@ -172,9 +172,9 @@ struct Order { id: int }
 
 class Store {
     pub tag: string
-    fn new(): Store { return Store { tag: "s" } }
+    pub fn new(): Store { return Store { tag: "s" } }
 
-    fn load<T>(text: string): Result<T, JsonError> {
+    pub fn load<T>(text: string): Result<T, JsonError> {
         echo self.tag
         return json.try_parse::<T>(text)
     }
@@ -182,9 +182,9 @@ class Store {
 
 class Cache {
     pub inner: Store
-    fn new(): Cache { return Cache { inner: Store.new() } }
+    pub fn new(): Cache { return Cache { inner: Store.new() } }
 
-    fn get<T>(text: string): Result<T, JsonError> {
+    pub fn get<T>(text: string): Result<T, JsonError> {
         s = self.inner                  // `self.inner.load::<T>(text)` here would be E0058
         return s.load::<T>(text)
     }
@@ -207,11 +207,11 @@ struct Order {
 class Loader {
     pub label: string
 
-    fn new(label: string): Loader {
+    pub fn new(label: string): Loader {
         return Loader { label: label }
     }
 
-    fn load<T>(text: string): Result<T, JsonError> {
+    pub fn load<T>(text: string): Result<T, JsonError> {
         echo self.label
         return json.try_parse::<T>(text)
     }
@@ -332,7 +332,7 @@ trait Keyed<K> {
 struct Door {
     code: int
     impl Keyed<int> {
-        fn key(): int {
+        pub fn key(): int {
             return self.code
         }
     }
@@ -354,12 +354,12 @@ Implement a trait **in the type's body** with `impl Trait { }` (uniform across c
 ```noeta
 class Money {
     amount: int
-    fn new(a: int): Money { return Money { amount: a } }
+    pub fn new(a: int): Money { return Money { amount: a } }
     impl Add {
-        fn add(other: Money): Money { return Money { amount: self.amount + other.amount } }
+        pub fn add(other: Money): Money { return Money { amount: self.amount + other.amount } }
     }
     impl Comparable {
-        fn compare(other: Money): Ordering { return self.amount.compare(other.amount) }
+        pub fn compare(other: Money): Ordering { return self.amount.compare(other.amount) }
     }
 }
 echo (Money.new(3) < Money.new(5))   // true
@@ -371,7 +371,7 @@ echo (Money.new(3) < Money.new(5))   // true
 class Adder {
     pub base: int
     impl Callable {
-        fn call(x: int): int { return self.base + x }
+        pub fn call(x: int): int { return self.base + x }
     }
 }
 add10 = Adder { base: 10 }
@@ -396,7 +396,7 @@ trait Greeter { fn greet(who: string): string }
 struct En {
     id: int
     impl Greeter {
-        fn greet(who: string): string { return "hi " ~ who }
+        pub fn greet(who: string): string { return "hi " ~ who }
     }
 }
 echo En.greet("Ada")             // hi Ada — on the type
@@ -433,7 +433,7 @@ The declaration is doing real work here, and an implementation that happens to b
 trait Buildable { static fn make(seed: int): Self }
 struct Thing {
     v: int
-    impl Buildable { fn make(seed: int): Thing { return Thing { v: seed } } }
+    impl Buildable { pub fn make(seed: int): Thing { return Thing { v: seed } } }
 }
 fn build<T: Buildable>(seed: int): T {
     return T.make(seed)     // `Self` is `T`, so this is the declared return
@@ -452,7 +452,7 @@ trait Decodable { fn decode(raw: string): Self }
 struct Thing {
     v: int
     impl Decodable {
-        fn decode(raw: string): Thing { return Thing { v: raw.len() } }
+        pub fn decode(raw: string): Thing { return Thing { v: raw.len() } }
     }
 }
 fn rebuild<T: Decodable>(seed: T, raw: string): T {
@@ -474,7 +474,7 @@ trait Fetcher {
 
 struct Http {
     impl Fetcher {
-        async fn fetch(url: string): string {
+        pub async fn fetch(url: string): string {
             sleep(1).await
             return "body:" ~ url
         }
@@ -500,7 +500,7 @@ The bound and the trait object agree by construction: both read the trait's decl
 class Point {
     x: int
     y: int
-    fn new(x: int, y: int): Point { return Point { x: x, y: y } }
+    pub fn new(x: int, y: int): Point { return Point { x: x, y: y } }
 }
 echo Point.new(1, 2) < Point.new(1, 3)   // true
 ```

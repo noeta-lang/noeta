@@ -9,7 +9,7 @@ trait Fetcher {
 
 struct Http {
     impl Fetcher {
-        async fn fetch(url: string): string { return "body" }
+        pub async fn fetch(url: string): string { return "body" }
     }
 }
 

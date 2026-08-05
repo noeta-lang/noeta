@@ -11,7 +11,7 @@ struct AppError {
     detail: string
 
     impl From<LowError> {
-        fn from(e: LowError): AppError {
+        pub fn from(e: LowError): AppError {
             return AppError { detail: "code ${e.code}" }
         }
     }

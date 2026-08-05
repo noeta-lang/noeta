@@ -11,8 +11,8 @@
 // expect: exit 0
 class R {
     name: string
-    fn new(name: string): R { return R { name: name }; }
-    fn use_it(): void { echo "use ${self.name}"; }
+    pub fn new(name: string): R { return R { name: name }; }
+    pub fn use_it(): void { echo "use ${self.name}"; }
     destruct { echo "close ${self.name}"; }
 }
 

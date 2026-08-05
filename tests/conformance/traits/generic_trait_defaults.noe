@@ -17,7 +17,7 @@ trait Keyed<K> {
 struct Door {
     code: int
     impl Keyed<int> {
-        fn key(): int { return self.code }
+        pub fn key(): int { return self.code }
     }
 }
 echo Door { code: 7 }.describe()
@@ -25,7 +25,7 @@ echo Door { code: 7 }.same(7)
 
 struct Tag { name: string }
 impl Keyed<string> for Tag {
-    fn key(): string { return self.name }
+    pub fn key(): string { return self.name }
 }
 echo Tag { name: "a" }.same("a")
 

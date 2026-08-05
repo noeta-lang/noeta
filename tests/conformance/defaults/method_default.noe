@@ -7,11 +7,11 @@
 class Counter {
     start: int
 
-    fn from(start: int): Counter {
+    pub fn from(start: int): Counter {
         return Counter { start: start };
     }
 
-    fn bump(by: int = 1): int {
+    pub fn bump(by: int = 1): int {
         return self.start + by;
     }
 }

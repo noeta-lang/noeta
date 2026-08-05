@@ -544,7 +544,7 @@ fn a_native_trait_incomplete_impl_is_rejected() {
     accepts(
         "use fx.Renderable\n\
          struct Card { title: string }\n\
-         impl Renderable for Card { fn render(): string { return self.title } }\n\
+         impl Renderable for Card { pub fn render(): string { return self.title } }\n\
          echo 1\n",
     );
     // An INCOMPLETE impl — the required `render` is missing — is E0015.
@@ -574,7 +574,7 @@ fn a_native_trait_self_constraint_is_enforced() {
     accepts(
         "use fx.Packable\n\
          @packed struct Vec2 { x: f32; y: f32 }\n\
-         impl Packable for Vec2 { fn lane_count(): int { return 2 } }\n\
+         impl Packable for Vec2 { pub fn lane_count(): int { return 2 } }\n\
          echo 1\n",
     );
     // A NON-`@packed` target is rejected (E0015): the self-constraint requires a packed struct, so the
@@ -582,7 +582,7 @@ fn a_native_trait_self_constraint_is_enforced() {
     rejects(
         "use fx.Packable\n\
          struct Plain { x: int }\n\
-         impl Packable for Plain { fn lane_count(): int { return 2 } }\n\
+         impl Packable for Plain { pub fn lane_count(): int { return 2 } }\n\
          echo 1\n",
         "cannot bind `Packable`",
     );
@@ -591,7 +591,7 @@ fn a_native_trait_self_constraint_is_enforced() {
     rejects(
         "use fx.Packable\n\
          @packed struct Flags2 { a: bool; b: bool }\n\
-         impl Packable for Flags2 { fn lane_count(): int { return 2 } }\n\
+         impl Packable for Flags2 { pub fn lane_count(): int { return 2 } }\n\
          echo 1\n",
         "requires at least 2 `numeric` fields",
     );

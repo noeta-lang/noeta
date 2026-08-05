@@ -1210,6 +1210,14 @@ impl Checker {
                         .get(&(tn.to_string(), name.to_string()))
                         .cloned()
                 {
+                    // Visibility first (E0076): a private method is not part of the type's surface
+                    // at all, so `Box.helper(…)` written outside `Box` is refused before any
+                    // question about *how* it may be reached. Reported and then typed on, exactly
+                    // as a private FIELD read is — one diagnostic per access site, and the rest of
+                    // the call still checked.
+                    if !self.method_visible(tn.as_str(), name) {
+                        self.report_private_method(tn.as_str(), name, span);
+                    }
                     // An INSTANCE method (its body references `self`) cannot be called
                     // associated-style — there is no receiver to become `self` (E0047,
                     // prelude-redesign EX.2). A self-less method of a trait's interface
@@ -1382,6 +1390,10 @@ impl Checker {
                         .get(&(n.clone(), name.to_string()))
                         .cloned()
                 {
+                    // Visibility first (E0076) — see the associated-call arm above.
+                    if !self.method_visible(n, name) {
+                        self.report_private_method(n, name, span);
+                    }
                     // An ASSOCIATED function (never touches `self`) is not callable on a value —
                     // the receiver would be silently discarded (E0047, prelude-redesign EX.2). A
                     // self-less method of a trait's interface ([`Receiver::Either`]) IS callable
@@ -1622,6 +1634,12 @@ impl Checker {
             .get(&(n.clone(), "call".to_string()))
             .cloned()
         {
+            // The `Callable` protocol is a public one: `obj(args)` is a *use* of the type from
+            // wherever it is written, so a private `call` is E0076 like any other private method.
+            // A type that wants to be invocable says `pub fn call`.
+            if !self.method_visible(n, "call") {
+                self.report_private_method(n, "call", span);
+            }
             return Some(self.call_user_method(
                 "call",
                 Some(n.as_str()),
@@ -1955,6 +1973,11 @@ impl Checker {
         // both directions, while the plain paths used opposite ones, so an unclassified method
         // (every standalone-impl method) was accepted as `T.m(…)` and refused as `T.m::<X>(…)`.
         // Asking [`Checker::receiver_of`] the same question all three sites ask settles it.
+        // Visibility holds for the turbofish form too (E0076): spelling the type arguments does
+        // not widen the surface.
+        if !self.method_visible(&type_name, name) {
+            self.report_private_method(&type_name, name, name_span);
+        }
         let receiver = self.receiver_of(&type_name, name);
         if associated && !receiver.allows_static_call() {
             self.error(

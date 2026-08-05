@@ -18,7 +18,7 @@ trait Speaker {
 
 struct Loud {
     impl Speaker {
-        fn say(text: string): string {
+        pub fn say(text: string): string {
             return text ~ "!"
         }
     }
@@ -27,12 +27,12 @@ struct Loud {
 struct Agent<P: Speaker> {
     pub voice: P
 
-    fn of(v: P): Agent<P> {
+    pub fn of(v: P): Agent<P> {
         return Agent { voice: v }
     }
 
     // An associated fn calling a sibling associated fn, both under the type's bound.
-    fn make(v: P): Agent<P> {
+    pub fn make(v: P): Agent<P> {
         return Agent.of(v)
     }
 
@@ -41,7 +41,7 @@ struct Agent<P: Speaker> {
     }
 
     // An instance method calling a sibling instance method.
-    fn outer(text: string): string {
+    pub fn outer(text: string): string {
         return "loud: " ~ self.inner(text)
     }
 }

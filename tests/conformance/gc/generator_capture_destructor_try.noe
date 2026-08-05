@@ -9,7 +9,7 @@
 // expect: exit 0
 class Res {
     pub tag: string
-    fn new(t: string): Res { return Res { tag: t } }
+    pub fn new(t: string): Res { return Res { tag: t } }
     destruct { echo "drop ${self.tag}" }
 }
 fn gen(): Iterator<int> {

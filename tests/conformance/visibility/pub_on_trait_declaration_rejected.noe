@@ -1,0 +1,21 @@
+// The mirror of `trait_impl_must_be_pub`: inside a `trait`'s OWN declaration, `pub` is refused
+// (E0053). Every method a trait declares is already its public contract, so the word would restate
+// what `trait` said — and worse, it would suggest the unmarked ones are private, which is the one
+// thing it must not imply. Refused rather than accepted-and-ignored, on the same ground `static` is
+// refused where a body already decides: a modifier that means nothing is still a modifier a reader
+// has to interpret.
+//
+// It PARSES — `pub` is part of the method production, not a field declaration's opening — so this
+// is a diagnostic with a span on the method, not a parse fumble about an unexpected token.
+// expect: error E0053 at 14:12
+// expect: error E0053 at 17:19
+// expect: exit 1
+trait Speaks {
+    pub fn speak(): string
+    // `pub` is read ahead of `static` and the two are judged independently: `static` is legal here
+    // (a trait's contract is the one place receiver-ness is declared), `pub` is not.
+    pub static fn tag(): string
+    fn count(): int
+}
+
+echo "unreached";

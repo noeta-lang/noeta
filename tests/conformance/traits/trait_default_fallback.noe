@@ -14,11 +14,11 @@ trait Greeter {
 }
 
 class Casual {
-    fn new(): Casual { return Casual {} }
+    pub fn new(): Casual { return Casual {} }
 }
 
 impl Greeter for Casual {
-    fn greet(who: string): string { return "hi " ~ who }
+    pub fn greet(who: string): string { return "hi " ~ who }
 }
 
 echo Casual.new().greet_all()

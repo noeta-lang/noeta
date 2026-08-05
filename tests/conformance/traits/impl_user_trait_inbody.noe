@@ -10,7 +10,7 @@ struct Rect {
     w: int
     h: int
     impl Area {
-        fn area(): int { return self.w * self.h }
+        pub fn area(): int { return self.w * self.h }
     }
 }
 

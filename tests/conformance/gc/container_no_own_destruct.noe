@@ -11,7 +11,7 @@
 // expect: exit 0
 class Inner {
     tag: string
-    fn new(tag: string): Inner { return Inner { tag: tag }; }
+    pub fn new(tag: string): Inner { return Inner { tag: tag }; }
     destruct { echo "drop inner ${self.tag}"; }
 }
 

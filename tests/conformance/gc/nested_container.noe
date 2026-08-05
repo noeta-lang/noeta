@@ -12,21 +12,21 @@
 // expect: exit 0
 class Inner {
     tag: string
-    fn new(tag: string): Inner { return Inner { tag: tag }; }
+    pub fn new(tag: string): Inner { return Inner { tag: tag }; }
     destruct { echo "drop inner ${self.tag}"; }
 }
 
 class Mid {
     tag: string
     inner: Inner
-    fn new(tag: string): Mid { return Mid { tag: tag, inner: Inner.new("i") }; }
+    pub fn new(tag: string): Mid { return Mid { tag: tag, inner: Inner.new("i") }; }
     destruct { echo "drop mid ${self.tag}"; }
 }
 
 class Outer {
     tag: string
     mid: Mid
-    fn new(tag: string): Outer { return Outer { tag: tag, mid: Mid.new("m") }; }
+    pub fn new(tag: string): Outer { return Outer { tag: tag, mid: Mid.new("m") }; }
     destruct { echo "drop outer ${self.tag}"; }
 }
 

@@ -26,10 +26,10 @@
 struct Box<T> { value: T }
 class Holder<T> {
     pub item: T
-    fn new(x: T): Holder<T> { return Holder { item: x }; }
+    pub fn new(x: T): Holder<T> { return Holder { item: x }; }
     // NOT a fresh constructor: it hands back a value it was given. Its call sites must not stamp
     // their instantiation onto it — that object belongs to whoever built it.
-    fn same(h: Holder<T>): Holder<T> { return h; }
+    pub fn same(h: Holder<T>): Holder<T> { return h; }
 }
 struct Point { x: int }
 

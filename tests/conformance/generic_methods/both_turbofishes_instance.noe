@@ -18,12 +18,12 @@ struct Todo {
 class Repo<T> {
     pub tbl: string
 
-    fn new(tbl: string): Repo<T> {
+    pub fn new(tbl: string): Repo<T> {
         return Repo { tbl: tbl };
     }
 
     // An INSTANCE method (it reads `self`) with its own uninferable parameter.
-    fn tagged<U>(): string {
+    pub fn tagged<U>(): string {
         return self.tbl ~ "/" ~ type_name::<T>() ~ "/" ~ type_name::<U>();
     }
 }

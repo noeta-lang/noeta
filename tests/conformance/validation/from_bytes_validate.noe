@@ -9,7 +9,7 @@
     kind: int
 
     impl Validate {
-        fn validate(): Result<void, string> {
+        pub fn validate(): Result<void, string> {
             if self.kind < 0 || self.kind > 9 {
                 return Err("bad kind ${self.kind}")
             }

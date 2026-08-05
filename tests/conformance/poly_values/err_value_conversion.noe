@@ -11,7 +11,7 @@ struct High {
     msg: string
 
     impl From<Low> {
-        fn from(e: Low): High {
+        pub fn from(e: Low): High {
             return High { msg: "low ${e.code}" }
         }
     }

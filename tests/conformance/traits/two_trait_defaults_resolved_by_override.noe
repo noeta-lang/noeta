@@ -15,7 +15,7 @@ trait Wave {
 struct P {
     x: int
     impl Greet {
-        fn hello(): string { return "mine" }
+        pub fn hello(): string { return "mine" }
     }
     impl Wave {}
 }

@@ -16,7 +16,7 @@
 // declarations that each spell `T`. (Their gate is `noeta-check`'s unit tests, which assert the
 // diagnostic list is *empty*; this corpus header can only assert that expected diagnostics are
 // present.)
-// expect: error E0075 at 40:14
+// expect: error E0075 at 40:18
 // expect: stdout "User"
 // expect: stdout "Todo"
 // expect: stdout "ok"
@@ -37,12 +37,12 @@ struct User {
 
 class Repo<T> {
     // Warned: this `T` hides the class's, and the two are indistinguishable at any call site.
-    fn label<T>(): string {
+    pub fn label<T>(): string {
         return type_name::<T>();
     }
 
     // Silent: a name of its own, which reaches BOTH parameters — the fix the warning asks for.
-    fn distinct<U>(): string {
+    pub fn distinct<U>(): string {
         return type_name::<T>();
     }
 }

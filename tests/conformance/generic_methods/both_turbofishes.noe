@@ -32,26 +32,26 @@ struct User {
 class Repo<T> {
     pub tbl: string
 
-    fn new(tbl: string): Repo<T> {
+    pub fn new(tbl: string): Repo<T> {
         return Repo { tbl: tbl };
     }
 
     // Self-less, and `U` is uninferable: the whole point.
-    fn blank<U>(): string {
+    pub fn blank<U>(): string {
         return type_name::<T>() ~ "/" ~ type_name::<U>();
     }
 
     // Self-less, but `U` IS inferable from the argument — the form that already worked.
-    fn describe<U>(x: U): string {
+    pub fn describe<U>(x: U): string {
         return type_name::<T>() ~ "/" ~ type_name::<U>();
     }
 
-    fn model(): string {
+    pub fn model(): string {
         return self.tbl ~ ":" ~ type_name::<T>();
     }
 }
 class Plain {
-    fn blank<U>(): string {
+    pub fn blank<U>(): string {
         return type_name::<U>();
     }
 }

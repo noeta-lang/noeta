@@ -31,7 +31,7 @@ Aliasing makes the difference concrete:
 
 ```noeta
 class Box { pub mut n: int
-    fn new(v: int): Box { return Box { n: v } }
+    pub fn new(v: int): Box { return Box { n: v } }
 }
 struct Counter { mut n: int }
 
@@ -50,10 +50,10 @@ echo snap.n          // 1
 
 ## Fields
 
-Fields are declared `name: T`, one per line (or `;`-separated). They are **private by default**:
+Fields are declared `name: T`, one per line (or `;`-separated). A **`class`**'s fields are **private by default**; a **`struct`**'s and an **`enum`** payload's are always public:
 
-- Reading a non-`pub` field from outside the type is E0035.
-- Assigning a non-`mut` field is E0033.
+- Reading or setting a non-`pub` field of a `class` from outside the type is E0035. A `struct` never raises it — its fields are public whether or not you write `pub`.
+- Assigning a non-`mut` field is E0033, in every kind.
 - A private field is readable inside *any* method of the declaring type, on *any* value of that type (`other.x`), not just `self`.
 
 ```noeta
@@ -62,6 +62,10 @@ class Account {
     mut balance: int      // assignable, but private (read only inside methods)
 }
 ```
+
+A struct's fields are public because a value **is** its contents: structural `==` already compares them field by field, and copy-on-write means there is no shared instance whose invariant could be broken behind your back. Hiding them would be a promise the kind cannot keep. A class has an identity that outlives any one assignment, so it can keep an invariant, and default-private is what lets it.
+
+Whether the *operations* are public is a separate question, answered the same way for every kind — see [Method visibility](#method-visibility) below.
 
 ### Per-field defaults
 
@@ -124,9 +128,9 @@ Methods live in the type body. Member access is **explicit**: a field is read an
 ```noeta
 class Counter {
     pub mut n: int
-    fn new(): Counter { return Counter { n: 10 } }   // static function (no self)
-    fn read(): int { return self.n }                  // fields read through self
-    fn set_then_read(): int {
+    pub fn new(): Counter { return Counter { n: 10 } }   // static function (no self)
+    pub fn read(): int { return self.n }              // fields read through self
+    pub fn set_then_read(): int {
         self.n = 5                                     // self.f = v writes the field
         return self.n                                  // 5
     }
@@ -144,6 +148,44 @@ c.set_then_read()   // method
 ```
 
 **A field holding a function is callable through the receiver**: `obj.f(args)` means `(obj.f)(args)` when `f` is a field of function type (see [Functions & Closures](Functions-and-Closures#calling-a-closure-valued-field)). If a method and a field share a name, the method wins in call position and the field in value position — `g = obj.f; g(x)` always reaches the field.
+
+## Method visibility
+
+A method is **private by default** and `pub` puts it on the type's surface. This is one rule for `class`, `struct` and `enum` alike — unlike fields, whose default is per kind.
+
+```noeta
+class Account {
+    mut balance: int = 0
+    fn fee(): int { return self.balance / 100 }          // internal
+    pub fn charge(): int { return self.balance - self.fee() }
+}
+
+a = Account { }
+echo a.charge()   // fine
+// a.fee()        // E0076: cannot call private method `fee` of `Account` from outside it
+```
+
+- Calling a non-`pub` method from outside its type is E0076 — whether by `x.m(…)`, `T.m(…)`, either turbofish form, `obj(…)` through the `Callable` protocol, or by binding a handle (`f = T.m`).
+- A private method is reachable inside *any* method of the declaring type, on *any* value of that type (`other.m()`), exactly as a private field is.
+- A `@test`/`@doc` body sees its module's privates — dev tiers are white-box by design.
+
+Fields and methods answer different questions, which is why they do not share a default. A struct's fields are public because a value *is* its contents; that says nothing about which operations belong to the type's API. A `Point` whose `x` and `y` are visible still benefits from keeping a helper internal, and the alternative — making struct methods public by default for symmetry with struct fields — would mean a struct could never have a private helper at all.
+
+A method that implements a `trait` must be written `pub`:
+
+```noeta
+trait Speaks { fn speak(): string }
+
+class Dog {
+    impl Speaks {
+        pub fn speak(): string { return "woof" }
+    }
+}
+```
+
+A trait is an outward contract — anyone holding a `dyn Speaks` calls the method — so the implementation is on the public surface by construction. Omitting `pub` is E0015. It is required rather than implied so that a reader of an `impl` block can see what is callable without first knowing which names the trait declares, and so that adding a method to a trait cannot silently change the visibility of a method written elsewhere.
+
+Inside a `trait`'s *own* declaration `pub` is refused (E0053): every method a trait declares is already its contract, and writing the word there would suggest the unmarked ones are private.
 
 ## Destructors (class only)
 
@@ -210,7 +252,7 @@ Enums share the unified body grammar — they can hold methods and `impl Trait {
 ```noeta
 enum Level {
     Low; Mid; High
-    fn rank(): int {
+    pub fn rank(): int {
         return match self { Level.Low => 0, Level.Mid => 1, Level.High => 2 }
     }
 }

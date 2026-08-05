@@ -12,8 +12,8 @@ struct Pair<A, B> {
 }
 class Box<T> {
     value: T
-    fn new(v: T): Box<T> { return Box { value: v }; }
-    fn paired<U>(u: U): Pair<T, U> {
+    pub fn new(v: T): Box<T> { return Box { value: v }; }
+    pub fn paired<U>(u: U): Pair<T, U> {
         return Pair { first: self.value, second: u };
     }
 }

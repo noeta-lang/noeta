@@ -6,7 +6,7 @@
 // expect: exit 1
 struct Stack {
     id: int
-    fn make(): Stack { return Stack { id: 9 } }
+    pub fn make(): Stack { return Stack { id: 9 } }
 }
 
 echo Stack { id: 1 }.make().id

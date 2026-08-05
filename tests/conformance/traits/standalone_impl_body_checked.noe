@@ -13,10 +13,10 @@
 // expect: exit 1
 trait Answer { fn answer(): int }
 class Wrong {
-    fn new(): Wrong { return Wrong {} }
+    pub fn new(): Wrong { return Wrong {} }
 }
 impl Answer for Wrong {
-    fn answer(): int {
+    pub fn answer(): int {
         return "not an int"
     }
 }

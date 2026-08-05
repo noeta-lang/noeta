@@ -10,7 +10,7 @@ struct Counter {
     pub label: string
     mut count: int
 
-    fn next(): int { return self.count + 1; }
+    pub fn next(): int { return self.count + 1; }
 }
 
 c = Counter { label: "hits", count: 7 };

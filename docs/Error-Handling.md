@@ -49,7 +49,7 @@ struct ParseFailure {
     at: int
 
     impl Error {
-        fn message(): string { return "bad digit at ${self.at}" }
+        pub fn message(): string { return "bad digit at ${self.at}" }
     }
 }
 
@@ -87,7 +87,7 @@ struct HaltError {
     code: int
 
     impl Display {
-        fn to_string(): string { return "halted with code ${self.code}" }
+        pub fn to_string(): string { return "halted with code ${self.code}" }
     }
 }
 
@@ -100,7 +100,7 @@ For a **wrapper** error holding an inner failure, delegate instead: `@derive(Err
 struct ParseFailure {
     at: int
     impl Error {
-        fn message(): string { return "bad digit at ${self.at}" }
+        pub fn message(): string { return "bad digit at ${self.at}" }
     }
 }
 
@@ -204,7 +204,7 @@ struct AppError {
     detail: string
 
     impl From<JsonError> {
-        fn from(e: JsonError): AppError {
+        pub fn from(e: JsonError): AppError {
             return AppError { detail: "decode failed: ${e.message()}" }
         }
     }

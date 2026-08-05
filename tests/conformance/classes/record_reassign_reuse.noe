@@ -10,7 +10,7 @@ class Point {
     pub x: int
     pub y: int
 
-    fn show(): string {
+    pub fn show(): string {
         return "${self.x} ${self.y}";
     }
 }

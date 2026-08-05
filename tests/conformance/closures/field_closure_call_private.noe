@@ -5,7 +5,7 @@
 // expect: exit 1
 class Machine {
     op: (int) -> int
-    fn new(): Machine { return Machine { op: fn(x: int) => x * 2 } }
+    pub fn new(): Machine { return Machine { op: fn(x: int) => x * 2 } }
     fn run(x: int): int { return self.op(x) }
 }
 m = Machine.new()

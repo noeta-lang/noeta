@@ -6,8 +6,8 @@
 // expect: exit 0
 class Stack {
     items: list
-    fn new(items: list): Stack { return Stack { items: items } }
-    fn size(): int { return self.items.len() }
+    pub fn new(items: list): Stack { return Stack { items: items } }
+    pub fn size(): int { return self.items.len() }
 }
 
 // The constructor as a value.

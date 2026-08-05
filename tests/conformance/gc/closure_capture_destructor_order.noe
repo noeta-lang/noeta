@@ -8,7 +8,7 @@
 // expect: exit 0
 class R {
     pub tag: string
-    fn new(t: string): R { return R { tag: t } }
+    pub fn new(t: string): R { return R { tag: t } }
     destruct { echo "drop ${self.tag}" }
 }
 fn make(): () -> string {

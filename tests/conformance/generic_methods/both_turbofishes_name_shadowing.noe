@@ -18,8 +18,8 @@
 // seed's two entries are simply two different keys and `or_insert` means only what it says.
 // Both `<T>`-over-`<T>` methods are also E0075 warnings — sound, but unreadable, which is what
 // the warning says. The program still runs and still exits 0; that is what makes it a warning.
-// expect: error E0075 at 35:16
-// expect: error E0075 at 46:14
+// expect: error E0075 at 35:20
+// expect: error E0075 at 46:18
 // expect: stdout "User"
 // expect: stdout "Todo/User"
 // expect: stdout "User"
@@ -32,18 +32,18 @@ struct User {
 }
 class Repo<T> {
     // `T` again: a FRESH parameter that shadows the class's inside this method.
-    fn collide<T>(x: T): string {
+    pub fn collide<T>(x: T): string {
         return type_name::<T>();
     }
 
     // A distinct name reaches both, and still does.
-    fn distinct<U>(): string {
+    pub fn distinct<U>(): string {
         return type_name::<T>() ~ "/" ~ type_name::<U>();
     }
 
     // The case nothing caught: no argument, so no type mismatch could stumble over the
     // discarded turbofish. It answered `Todo` and checked clean.
-    fn label<T>(): string {
+    pub fn label<T>(): string {
         return type_name::<T>();
     }
 }

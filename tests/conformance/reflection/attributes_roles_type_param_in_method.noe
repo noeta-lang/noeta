@@ -57,17 +57,17 @@ fn renderHome(): int { return 4; }
 class Scanner<T> {
     pub label: string
 
-    fn new(label: string): Scanner<T> {
+    pub fn new(label: string): Scanner<T> {
         return Scanner { label: label };
     }
 
     // Reads `self`, so an INSTANCE method: `T` comes off the receiver's reflected tag.
-    fn count(): string {
+    pub fn count(): string {
         return "${self.label} attrs: ${attributes_of::<T>().len()}";
     }
 
     // Self-less: no receiver exists, so `T` arrives on the hidden slot the call site fills.
-    fn describe(): string {
+    pub fn describe(): string {
         return "self-less attrs: ${attributes_of::<T>().len()}";
     }
 }
@@ -77,11 +77,11 @@ class Scanner<T> {
 class Auditor {
     pub extra: int
 
-    fn new(): Auditor {
+    pub fn new(): Auditor {
         return Auditor { extra: 0 };
     }
 
-    fn roles<E>(): string {
+    pub fn roles<E>(): string {
         return "own param roles: ${roles_of::<E>().len() + self.extra}";
     }
 }

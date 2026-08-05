@@ -38,6 +38,33 @@ impl Checker {
         methods: &[FnDecl],
         assoc_bindings: &[(String, noeta_ast::TypeRef)],
     ) {
+        // A method that implements a trait is part of the type's **public** surface, necessarily:
+        // a trait is an outward contract, and anyone holding a `dyn Trait` — or a `<T: Trait>`
+        // generic body — calls it. So it must SAY so (method-visibility arc). Required explicitly
+        // rather than implied, on the same ground the rest of the language reads: a declaration
+        // says what it means, and a reader of the `impl` block should not have to know which names
+        // the trait happens to declare to know which of these methods are callable from outside.
+        // The implied alternative also makes the visibility of a method change when a trait adds or
+        // removes it, at a distance, with nothing at the impl site to read.
+        //
+        // Checked at the shared funnel, so an in-body `impl Trait { }` and a standalone
+        // `impl Trait for T { }` state the same requirement in the same words for every trait,
+        // built-in and user-declared alike.
+        for m in methods.iter().filter(|m| !m.is_public) {
+            self.error(
+                DiagnosticCode::InvalidImpl,
+                m.name_span,
+                format!(
+                    "`{}` implements `{trait_name}`, so it must be declared `pub`",
+                    m.name
+                ),
+            )
+            .help(format!(
+                "a trait is an outward contract — anyone holding a `dyn {trait_name}` calls this \
+                 method — so write `pub fn {}(…)`; methods are otherwise private by default",
+                m.name
+            ));
+        }
         // A user-defined trait (L1, UT2): validate conformance against its declared contract —
         // instantiated at the impl's type arguments when the trait is generic (`impl
         // Cache<string>` checks `fn get(k: string): …`) — then return before the built-in
@@ -801,6 +828,28 @@ impl Checker {
                         "trait `{}` declares method `{}` more than once",
                         decl.name, m.sig.name
                     ),
+                );
+            }
+            // `pub` on a trait's own method DECLARATION (method-visibility arc). Every method a
+            // trait declares is the contract itself, so `pub` restates what `trait` already said —
+            // and it would suggest, wrongly, that the unmarked ones are private. Refused rather
+            // than accepted-and-ignored, for the same reason `static` is refused where the body
+            // already decides: a modifier that means nothing is a modifier a reader must still
+            // interpret. (The `impl` block is the other side of this — there `pub` is REQUIRED,
+            // because there it distinguishes the method from an inherent one.)
+            if m.sig.is_public {
+                self.error(
+                    DiagnosticCode::InvalidTraitDeclaration,
+                    m.sig.name_span,
+                    format!(
+                        "`{}` cannot be declared `pub`: every method a `trait` declares is \
+                         already its public contract",
+                        m.sig.name
+                    ),
+                )
+                .help(
+                    "drop `pub` here — write it on the `impl` block's method instead, where it \
+                     tells a reader the method is part of the type's surface",
                 );
             }
             // A trait method's parameters carry `#[...]` attributes like any other callable's, and

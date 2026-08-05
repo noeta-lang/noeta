@@ -9,7 +9,7 @@
 // expect: exit 0
 class Box {
     pub mut n: int
-    fn new(n: int): Box { return Box { n: n }; }
+    pub fn new(n: int): Box { return Box { n: n }; }
 }
 
 struct Counter { mut n: int }

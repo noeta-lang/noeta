@@ -32,7 +32,7 @@ struct Todo {
 class Repo<T> {
     pub tbl: string
 
-    fn new(tbl: string): Repo<T> {
+    pub fn new(tbl: string): Repo<T> {
         return Repo { tbl: tbl };
     }
 
@@ -46,11 +46,11 @@ class Repo<T> {
     }
 
     // …and the read surface above it is plain `?T` / `List<T>` — no cast, no `dyn` leaking out.
-    fn find(row: dyn): ?T {
+    pub fn find(row: dyn): ?T {
         return self.map_row(row);
     }
 
-    fn all(rows: List<dyn>): List<T> {
+    pub fn all(rows: List<dyn>): List<T> {
         mut out: List<T> = [];
         for row in rows {
             out = match self.map_row(row) {
@@ -63,7 +63,7 @@ class Repo<T> {
 
     // Self-less: no receiver exists to read a tag off, so `T` rides the hidden slot the call site
     // fills from the expected type. The narrow reads the slot's NAME, needing no recipe.
-    fn coerce(row: dyn): ?T {
+    pub fn coerce(row: dyn): ?T {
         return row.as<T>();
     }
 }

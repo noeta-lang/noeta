@@ -46,15 +46,15 @@ fn label<T>(v: T, trim: bool = false, tag: string = "none"): string {
 class Repo {
     pub n: int
 
-    fn new(n: int): Repo {
+    pub fn new(n: int): Repo {
         return Repo { n: n }
     }
 
-    fn decode<T>(text: string, trim: bool = false, tag: string = "none"): string {
+    pub fn decode<T>(text: string, trim: bool = false, tag: string = "none"): string {
         return "${self.n}:" ~ decode::<T>(text, trim, tag)
     }
 
-    fn label<T>(v: T, trim: bool = false, tag: string = "none"): string {
+    pub fn label<T>(v: T, trim: bool = false, tag: string = "none"): string {
         return "${self.n}:${type_name::<T>()}/${trim}/${tag}"
     }
 }

@@ -25,11 +25,11 @@ class Inner<T> {
         return Inner { tbl: tbl };
     }
 
-    fn relay(raw: string): Inner<T> {
+    pub fn relay(raw: string): Inner<T> {
         return Inner.new(raw);
     }
 
-    fn model(): string {
+    pub fn model(): string {
         return self.tbl ~ ":" ~ type_name::<T>();
     }
 }

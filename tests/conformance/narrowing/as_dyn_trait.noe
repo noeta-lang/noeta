@@ -15,7 +15,7 @@ struct Dog {
 }
 
 impl Speaks for Dog {
-    fn speak(): string {
+    pub fn speak(): string {
         return "woof"
     }
 }

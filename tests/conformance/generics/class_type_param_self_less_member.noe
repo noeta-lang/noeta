@@ -28,13 +28,13 @@ class Repo<T> {
     pub tbl: string
 
     // Self-less: no receiver exists yet. `T` rides the hidden slot the call site fills.
-    fn new(tbl: string): Repo<T> {
+    pub fn new(tbl: string): Repo<T> {
         echo "building " ~ tbl ~ " for " ~ type_name::<T>();
         return Repo { tbl: tbl };
     }
 
     // Reads `self`, so an INSTANCE method: `T` comes off the receiver's reflected tag, unchanged.
-    fn model(): string {
+    pub fn model(): string {
         return self.tbl ~ ":" ~ type_name::<T>();
     }
 }

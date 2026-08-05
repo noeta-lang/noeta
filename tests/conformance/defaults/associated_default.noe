@@ -7,7 +7,7 @@
 class Counter {
     pub start: int
 
-    fn from(start: int = 0): Counter {
+    pub fn from(start: int = 0): Counter {
         return Counter { start: start };
     }
 }

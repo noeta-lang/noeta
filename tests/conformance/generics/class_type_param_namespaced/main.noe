@@ -27,17 +27,17 @@ struct User {
 class Repo<T> {
     pub tbl: string
 
-    fn new(tbl: string): Repo<T> {
+    pub fn new(tbl: string): Repo<T> {
         return Repo { tbl: tbl };
     }
 
-    fn model(): string {
+    pub fn model(): string {
         return self.tbl ~ ":" ~ type_name::<T>();
     }
 
     // Reads `self`, so it is an INSTANCE method: the receiver is what carries `T`, and a
     // self-less member of a generic type has nothing to read the instantiation from (E0058).
-    fn model_name(): string {
+    pub fn model_name(): string {
         if self.tbl == "" {
             return "?";
         }

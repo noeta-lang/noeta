@@ -8,7 +8,7 @@ struct Email {
     addr: string
 
     impl Validate {
-        fn validate(): Result<void, string> { return Ok() }
+        pub fn validate(): Result<void, string> { return Ok() }
     }
 }
 e = Email { addr: "x@y" }

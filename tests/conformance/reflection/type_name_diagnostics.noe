@@ -20,7 +20,7 @@
 struct Box {
     id: int
 
-    fn label<U>(): string {
+    pub fn label<U>(): string {
         return "${self.id}" ~ type_name::<U>()
     }
 }

@@ -977,6 +977,23 @@ struct Symbols {
     /// inside the declaring type's own methods ([`Checker::current_type`]); read/write/construction
     /// elsewhere is E0035.
     private_fields: HashMap<String, HashSet<String>>,
+    /// Type name → the set of its **private** methods (method-visibility arc). A method is private
+    /// unless declared `pub`, in EVERY type kind — `struct`, `class` and `enum` alike, which is the
+    /// one place this table differs from [`Self::private_fields`].
+    ///
+    /// Fields and methods answer different questions, so they do not have to share a default. A
+    /// `struct`'s fields are public because a value *is* its contents: structural `==` already
+    /// compares them field-wise and copy-on-write leaves no shared invariant to protect, so hiding
+    /// them would be incoherent. API surface is orthogonal — a `Point` whose `x`/`y` are visible
+    /// still benefits from an internal helper. Per-kind method visibility was considered and
+    /// rejected: it would mean a struct could never have a private helper, which is exactly the gap
+    /// this arc closes, merely narrowed to one kind.
+    ///
+    /// A method supplied by a `trait` — an `impl` block's own method, a hoisted default, a derive's
+    /// bridge — never appears here: a trait is an outward contract, so implementing one puts the
+    /// method on the type's public surface by construction. The `impl` must still *write* `pub`
+    /// (E0015); this table records the access rule, not the declaration rule.
+    private_methods: HashMap<String, HashSet<String>>,
     /// Every top-level value binding's name, collected in the pre-pass (F1). Top-level globals are
     /// **hoisted** — a function body may reference one declared textually later — so the
     /// unknown-name gate treats them all as known regardless of order. (A top-level *direct*

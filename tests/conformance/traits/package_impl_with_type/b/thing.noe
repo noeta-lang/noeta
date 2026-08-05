@@ -6,9 +6,9 @@ use a.speaks.{Speaks};
 
 pub class Thing {
     pub id: int
-    fn new(id: int): Thing { return Thing { id: id } }
+    pub fn new(id: int): Thing { return Thing { id: id } }
 }
 
 impl Speaks for Thing {
-    fn speak(): string { return "b says ${self.id}" }
+    pub fn speak(): string { return "b says ${self.id}" }
 }

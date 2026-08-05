@@ -41,11 +41,11 @@ fn checker_diagnostic_gallery() {
         ),
         (
             "E0014 `impl` of an unknown trait",
-            "class W {\n  impl Frob {\n    fn frob(other: W): W { return other; }\n  }\n}",
+            "class W {\n  impl Frob {\n    pub fn frob(other: W): W { return other; }\n  }\n}",
         ),
         (
             "E0015 `impl` missing the trait's required method",
-            "class M {\n  amount: int\n  impl Add {\n    fn plus(other: M): M { return other; }\n  }\n}",
+            "class M {\n  amount: int\n  impl Add {\n    pub fn plus(other: M): M { return other; }\n  }\n}",
         ),
     ];
     let mut out = String::new();
@@ -121,7 +121,7 @@ fn forwarding_refusal_gallery() {
             // spelling (`tests/conformance/generic_methods/forward_receiver_bound_local.noe`
             // measures that it then works), which is what the help says.
             "E0058 forwarding through a compound receiver",
-            "class Inner {\n    pub tag: string\n    fn label<T>(): string { return \"${self.tag}${type_name::<T>()}\"; }\n}\n\
+            "class Inner {\n    pub tag: string\n    pub fn label<T>(): string { return \"${self.tag}${type_name::<T>()}\"; }\n}\n\
              class Outer {\n    pub inner: Inner\n    fn label<T>(): string { return self.inner.label::<T>(); }\n}",
         ),
         (
@@ -130,7 +130,7 @@ fn forwarding_refusal_gallery() {
             // caller carries only what its own sites spell. No route to point at, so no help: a
             // help line that repeats what the source already does is worse than none.
             "E0058 forwarding a callee's composite slot through a member turbofish",
-            "class Holder {\n    pub tag: string\n    fn deep<U>(x: U): string { return \"${self.tag}${type_name::<U>()}\"; }\n    fn mid<V>(v: List<V>): string { return self.deep::<List<V>>(v); }\n}\n\
+            "class Holder {\n    pub tag: string\n    fn deep<U>(x: U): string { return \"${self.tag}${type_name::<U>()}\"; }\n    pub fn mid<V>(v: List<V>): string { return self.deep::<List<V>>(v); }\n}\n\
              fn outer<T>(h: Holder, xs: List<T>): string { return h.mid::<T>(xs); }",
         ),
     ];

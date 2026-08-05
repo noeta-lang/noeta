@@ -186,7 +186,7 @@ trait Speaks { fn speak(): string }
 
 @derive(Comparable)
 struct Dog { age: int }
-impl Speaks for Dog { fn speak(): string { return "woof" } }
+impl Speaks for Dog { pub fn speak(): string { return "woof" } }
 
 echo traits_of(Dog { age: 3 })   // ["Comparable", "Speaks"]
 echo traits_of(42)               // []
@@ -213,7 +213,7 @@ The payload-free cases are spelled **bare** here: the scrutinee is a `Type`, so 
 ```noeta
 trait Speaks { fn speak(): string }
 struct Dog { name: string }
-impl Speaks for Dog { fn speak(): string { return "woof" } }
+impl Speaks for Dog { pub fn speak(): string { return "woof" } }
 
 fn boom(): never { panic("unreachable") }
 fn handle(pet: dyn Speaks, n: int | string): void { return }
@@ -679,7 +679,7 @@ struct Slug {
     normalized: bool = false
 
     // A constructor by convention only. `construct` has no idea this is here.
-    fn new(text: string): Slug {
+    pub fn new(text: string): Slug {
         return Slug { text: text.trim().lower(), normalized: true }
     }
 }
@@ -714,7 +714,7 @@ struct Port {
     n: int
 
     impl Validate {
-        fn validate(): Result<void, string> {
+        pub fn validate(): Result<void, string> {
             if self.n < 1 || self.n > 65535 { return Err("port ${self.n} out of range") }
             return Ok()
         }
@@ -739,7 +739,7 @@ struct Email {
     addr: string
 
     impl Validate {
-        fn validate(): Result<void, string> {
+        pub fn validate(): Result<void, string> {
             if !self.addr.contains("@") { return Err("missing @: ${self.addr}") }
             return Ok()
         }
@@ -854,7 +854,7 @@ With three operands, `recv` is a value (→ an instance method) or a bare type n
 struct Rect {
     w: int
     h: int
-    fn new(w: int, h: int): Rect { return Rect { w: w, h: h } }
+    pub fn new(w: int, h: int): Rect { return Rect { w: w, h: h } }
     fn area(): int { return self.w * self.h }
 }
 

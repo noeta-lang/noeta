@@ -4,8 +4,8 @@
 // expect: exit 0
 class Holder<T: Comparable> {
     v: T
-    fn new(x: T): Holder<T> { return Holder { v: x }; }
-    fn value(): T { return self.v; }
+    pub fn new(x: T): Holder<T> { return Holder { v: x }; }
+    pub fn value(): T { return self.v; }
 }
 h = Holder.new(5);
 echo h.value();

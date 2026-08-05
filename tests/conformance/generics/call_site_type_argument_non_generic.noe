@@ -7,7 +7,7 @@
 class Plain {
     pub tbl: string
 
-    fn new(tbl: string): Plain {
+    pub fn new(tbl: string): Plain {
         return Plain { tbl: tbl };
     }
 }

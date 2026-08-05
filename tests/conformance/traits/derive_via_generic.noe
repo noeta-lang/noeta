@@ -36,7 +36,7 @@ trait Greet {
 struct Inner {
     tag: string
     impl Greet {
-        fn hello(): string { return "hi " ~ self.tag }
+        pub fn hello(): string { return "hi " ~ self.tag }
     }
 }
 @derive(Greet, via: value)

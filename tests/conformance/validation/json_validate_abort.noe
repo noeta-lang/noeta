@@ -9,7 +9,7 @@ struct Port {
     n: int
 
     impl Validate {
-        fn validate(): Result<void, string> {
+        pub fn validate(): Result<void, string> {
             if self.n < 1 || self.n > 65535 {
                 return Err("port ${self.n} out of range")
             }

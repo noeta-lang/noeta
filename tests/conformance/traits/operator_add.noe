@@ -7,12 +7,12 @@ class Money {
     amount: int
     currency: string
 
-    fn new(amount: int, currency: string): Money {
+    pub fn new(amount: int, currency: string): Money {
         return Money { amount: amount, currency: currency };
     }
 
     impl Add {
-        fn add(other: Money): Money {
+        pub fn add(other: Money): Money {
             return Money { amount: self.amount + other.amount, currency: self.currency };
         }
     }

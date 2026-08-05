@@ -15,7 +15,7 @@
 use pkg.lib.{Decoder};
 
 pub class Target {
-    fn new(): Target { return Target {} }
+    pub fn new(): Target { return Target {} }
 }
 
 trait Marked {
@@ -23,7 +23,7 @@ trait Marked {
 }
 
 impl Marked for Target {
-    fn mark(): string { return "marked" }
+    pub fn mark(): string { return "marked" }
 }
 
 fn want(x: dyn Decoder): string { return x.step("hi") }

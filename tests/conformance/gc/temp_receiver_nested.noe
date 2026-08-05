@@ -11,8 +11,8 @@
 // expect: exit 0
 class N {
     v: int
-    fn new(v: int): N { return N { v: v }; }
-    fn val(): int { return self.v; }
+    pub fn new(v: int): N { return N { v: v }; }
+    pub fn val(): int { return self.v; }
     destruct { echo "drop ${self.v}"; }
 }
 

@@ -7,7 +7,7 @@ trait Greeter { fn greet(who: string): string }
 
 struct En {
     impl Greeter {
-        fn greet(who: string): string { return "hi " ~ who }
+        pub fn greet(who: string): string { return "hi " ~ who }
     }
 }
 

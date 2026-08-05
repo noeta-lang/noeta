@@ -22,10 +22,10 @@ use std.json.JsonError
 struct Port {
     n: int
 
-    fn label(): string { return "port ${self.n}" }
+    pub fn label(): string { return "port ${self.n}" }
 
     impl Validate {
-        fn validate(): Result<void, string> {
+        pub fn validate(): Result<void, string> {
             if self.n < 1 || self.n > 65535 {
                 return Err("${self.label()} out of range")
             }
@@ -41,7 +41,7 @@ struct Cluster {
     ports: List<Port>
 
     impl Validate {
-        fn validate(): Result<void, string> {
+        pub fn validate(): Result<void, string> {
             if self.ports.len() >= 2 {
                 return Err("too many ports")
             }

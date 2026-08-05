@@ -16,7 +16,7 @@ trait Keyed<K> {
 struct Door {
     code: int
     impl Keyed<int> {
-        fn key(): int {
+        pub fn key(): int {
             return self.code
         }
     }

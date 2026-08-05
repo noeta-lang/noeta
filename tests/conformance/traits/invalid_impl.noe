@@ -6,6 +6,6 @@ class Money {
     amount: int
 
     impl Add {
-        fn plus(other: Money): Money { return other; }
+        pub fn plus(other: Money): Money { return other; }
     }
 }

@@ -16,15 +16,15 @@ class Order {
     items: List<Item>
     mut status: Status
 
-    fn new(id: int, items: List<Item>): Order {
+    pub fn new(id: int, items: List<Item>): Order {
         return Order { id: id, items: items, status: Status.Pending };
     }
 
-    fn total(): float {
+    pub fn total(): float {
         return self.items.map(fn(it) => it.price * it.qty).sum();
     }
 
-    fn label(): string {
+    pub fn label(): string {
         return match self.status {
             Status.Pending => "Order #${self.id} awaiting payment",
             Status.Paid => "Order #${self.id} paid",

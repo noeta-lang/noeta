@@ -13,14 +13,14 @@
 
 class Res {
     pub id: int
-    fn new(n: int): Res { return Res { id: n } }
+    pub fn new(n: int): Res { return Res { id: n } }
     destruct { echo "drop ${self.id}" }
 }
 
 struct Box<T> { value: T }
 class Holder<T> {
     item: T
-    fn new(x: T): Holder<T> { return Holder { item: x } }
+    pub fn new(x: T): Holder<T> { return Holder { item: x } }
 }
 enum Tree<T> { Leaf(T); Empty; }
 

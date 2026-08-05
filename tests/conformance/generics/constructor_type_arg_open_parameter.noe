@@ -17,11 +17,11 @@ struct Todo {
 class Inner<T> {
     pub tbl: string
 
-    fn new(tbl: string): Inner<T> {
+    pub fn new(tbl: string): Inner<T> {
         return Inner { tbl: tbl };
     }
 
-    fn model(): string {
+    pub fn model(): string {
         return self.tbl ~ ":" ~ type_name::<T>();
     }
 }

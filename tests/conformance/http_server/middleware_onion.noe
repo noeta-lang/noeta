@@ -31,7 +31,7 @@ struct Next {
     stack: List<dyn Middleware>
     index: int
 
-    fn run(req: Request): Response {
+    pub fn run(req: Request): Response {
         if self.index >= self.stack.len() {
             tap = req.header("x-tap") ?? "none"
             return server.response(200, "handler ${req.path()} tap=${tap}")
@@ -43,9 +43,9 @@ struct Next {
 
 // Pass-through: rewrite the request (a header the terminal echoes), then mutate the response.
 class Tap {
-    fn new(): Tap { return Tap {} }
+    pub fn new(): Tap { return Tap {} }
     impl Middleware {
-        fn handle(req: Request, next: Next): Response {
+        pub fn handle(req: Request, next: Next): Response {
             resp = next.run(req.with_header("x-tap", "seen"))
             return resp.with_header("x-tap-out", "done")
         }
@@ -54,9 +54,9 @@ class Tap {
 
 // Short-circuit: answer `/echo` without ever calling `next`.
 class Block {
-    fn new(): Block { return Block {} }
+    pub fn new(): Block { return Block {} }
     impl Middleware {
-        fn handle(req: Request, next: Next): Response {
+        pub fn handle(req: Request, next: Next): Response {
             if req.path() == "/echo" {
                 return server.response(403, "blocked")
             }

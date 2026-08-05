@@ -1,0 +1,10 @@
+// The rejected permutation. `async pub fn` is a parse error (E0003, "found `pub` expected `fn`"),
+// not a silently-accepted synonym for `pub async fn` — one declaration has one spelling. `pub` is
+// read in the METHOD production, ahead of `static`/`async`, so putting it anywhere else in the run
+// leaves the parser looking for `fn` and saying so.
+// expect: error E0003 at 9:11
+// expect: exit 1
+class Account {
+    balance: int
+    async pub fn go(): int { return self.balance; }
+}

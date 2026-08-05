@@ -41,12 +41,12 @@ struct Count {
 class Repo<K> {
     pub label: string
 
-    fn new(label: string): Repo<K> {
+    pub fn new(label: string): Repo<K> {
         return Repo { label: label };
     }
 
     // An INSTANCE method (it reads `self`), so the call goes through method dispatch.
-    fn load<T>(text: string): Result<T, JsonError> {
+    pub fn load<T>(text: string): Result<T, JsonError> {
         if self.label == "" {
             return json.try_parse::<T>("{}");
         }
@@ -54,13 +54,13 @@ class Repo<K> {
     }
 
     // An ASSOCIATED function (no `self`), reached on the type name.
-    fn parse<T>(text: string): Result<T, JsonError> {
+    pub fn parse<T>(text: string): Result<T, JsonError> {
         return json.try_parse::<T>(text);
     }
 
     // The method's own `T` and the class's `K` in one body: `T` resolves through the hidden slot
     // this call supplied, `K` off the receiver's reflected type tag.
-    fn describe<T>(): string {
+    pub fn describe<T>(): string {
         return "${self.label}:${type_name::<T>()}:${type_name::<K>()}";
     }
 }

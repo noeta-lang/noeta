@@ -9,11 +9,11 @@ trait Greeter {
 
 class Formal {
     prefix: string
-    fn new(p: string): Formal { return Formal { prefix: p } }
+    pub fn new(p: string): Formal { return Formal { prefix: p } }
 }
 
 impl Greeter for Formal {
-    fn greet(who: string): string { return self.prefix ~ " " ~ who }
+    pub fn greet(who: string): string { return self.prefix ~ " " ~ who }
 }
 
 g = Formal.new("Dear")

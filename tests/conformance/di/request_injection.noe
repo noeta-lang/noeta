@@ -20,7 +20,7 @@ use std.http.server
 use std.http.{Request, Response}
 
 class Api {
-    fn new(): Api {
+    pub fn new(): Api {
         return Api {}
     }
     fn show(req: Request): string {

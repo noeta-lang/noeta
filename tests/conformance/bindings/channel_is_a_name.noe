@@ -7,11 +7,11 @@
 class Topic {
     channel: string
 
-    fn new(channel: string): Topic {
+    pub fn new(channel: string): Topic {
         return Topic { channel: channel }
     }
 
-    fn name(): string {
+    pub fn name(): string {
         return self.channel
     }
 }

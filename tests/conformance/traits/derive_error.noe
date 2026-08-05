@@ -13,7 +13,7 @@ struct A {
     code: int
 
     impl Display {
-        fn to_string(): string { return "A#${self.code}" }
+        pub fn to_string(): string { return "A#${self.code}" }
     }
 }
 

@@ -216,6 +216,25 @@ impl Checker {
         } else {
             Receiver::inherent(uses_self)
         };
+        // Method visibility, recorded at the ONE funnel every kind's methods pass through
+        // (struct/class/enum inherent bodies, in-body `impl` blocks, standalone `impl`s) — so the
+        // rule cannot be spelled once per kind and drift. A method is private unless declared
+        // `pub`; a TRAIT-supplied one is public by construction (`trait_provided`), because the
+        // trait's contract is what puts it on the outward surface.
+        if !trait_provided && !m.is_public {
+            self.symbols
+                .private_methods
+                .entry(type_name.to_string())
+                .or_default()
+                .insert(m.name.to_string());
+        } else {
+            // A later registration WINS over an earlier one for the same key (an `impl` method
+            // over an inherent of the same name), so a public one must clear a private entry
+            // rather than leave it standing.
+            if let Some(set) = self.symbols.private_methods.get_mut(type_name) {
+                set.remove(m.name.as_str());
+            }
+        }
         self.record_receiver((type_name.to_string(), m.name.to_string()), m, receiver);
         let xt = &self.imports.extern_types;
         // The type's parameters, then the method's own LAYERED OVER them: a method `<T>` inside a

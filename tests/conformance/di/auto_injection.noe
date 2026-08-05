@@ -10,7 +10,7 @@ use std.json
 struct CreateUser { name: string  age: int }
 
 class UsersController {
-    fn new(): UsersController { return UsersController {} }
+    pub fn new(): UsersController { return UsersController {} }
     fn create(body: CreateUser): string { return "created ${body.name} (${body.age})" }
 }
 

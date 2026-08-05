@@ -28,7 +28,7 @@ class K {
 
     impl Area {
         @doc { A method in an in-body impl block. }
-        fn area(): int { return self.n; }
+        pub fn area(): int { return self.n; }
     }
 }
 
@@ -37,7 +37,7 @@ struct P { y: int }
 
 impl Area for P {
     @doc { A method in a standalone impl. }
-    fn area(): int { return self.y; }
+    pub fn area(): int { return self.y; }
 }
 
 @doc { A documented enum. }

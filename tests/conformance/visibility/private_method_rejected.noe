@@ -1,0 +1,31 @@
+// Method-visibility arc — a method is private by default in EVERY type kind, and calling one from
+// outside its type is E0076. Fields keep their per-kind default (a struct's are public), because
+// fields and methods answer different questions: whether the DATA is the value, and what the type's
+// API is. A `struct` whose `n` is readable can still keep a helper to itself, which is exactly what
+// this case pins — the alternative, per-kind method visibility, would mean a struct could never
+// have a private helper at all.
+// expect: error E0076 at 29:6
+// expect: error E0076 at 30:6
+// expect: error E0076 at 31:6
+// expect: exit 1
+class Account {
+    balance: int
+    fn fee(): int { return self.balance / 100; }
+    pub fn new(): Account { return Account { balance: 500 }; }
+}
+
+struct Point {
+    n: int
+    fn doubled(): int { return self.n * 2; }
+}
+
+enum Level {
+    Low
+    High
+    fn rank(): int { return match self { Level.Low => 1, Level.High => 2 }; }
+}
+
+a = Account.new();
+echo a.fee();
+echo Point { n: 2 }.doubled();
+echo Level.Low.rank();

@@ -32,7 +32,7 @@ class Order {
     items: List<Item>
     mut status: Status
 
-    fn new(id: int, customer: User, items: List<Item>): Order {
+    pub fn new(id: int, customer: User, items: List<Item>): Order {
         return Order { id: id, customer: customer, items: items, status: Status.Pending };
     }
 
@@ -40,7 +40,7 @@ class Order {
         return self.items.map(fn(it) => it.price * it.qty).sum();
     }
 
-    fn label(): string {
+    pub fn label(): string {
         return match self.status {
             Status.Pending  => "Order #${self.id} awaiting payment",
             Status.Paid     => "Order #${self.id} paid: ${self.customer.name}",

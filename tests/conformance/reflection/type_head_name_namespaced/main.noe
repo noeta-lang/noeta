@@ -25,7 +25,7 @@ pub struct Todo {
 
 pub class Session {
     pub token: string
-    fn new(): Session {
+    pub fn new(): Session {
         return Session { token: "t" }
     }
 }

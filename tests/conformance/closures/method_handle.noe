@@ -7,9 +7,9 @@
 // expect: exit 0
 class Stack {
     items: list
-    fn new(items: list): Stack { return Stack { items: items } }
-    fn size(): int { return self.items.len() }
-    fn scaled(factor: int): int { return self.items.len() * factor }
+    pub fn new(items: list): Stack { return Stack { items: items } }
+    pub fn size(): int { return self.items.len() }
+    pub fn scaled(factor: int): int { return self.items.len() * factor }
 }
 
 stacks = [Stack.new([1, 2, 3]), Stack.new([4, 5])]

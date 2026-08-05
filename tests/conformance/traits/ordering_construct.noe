@@ -18,12 +18,12 @@ echo match o {
 class Desc {
     amount: int
 
-    fn new(a: int): Desc {
+    pub fn new(a: int): Desc {
         return Desc { amount: a };
     }
 
     impl Comparable {
-        fn compare(other: Desc): Ordering {
+        pub fn compare(other: Desc): Ordering {
             if self.amount > other.amount {
                 return Ordering.Less;
             }

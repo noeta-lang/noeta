@@ -21,7 +21,7 @@ struct Dog {
 }
 
 impl Speaks for Dog {
-    fn speak(): string {
+    pub fn speak(): string {
         return "woof"
     }
 }
@@ -37,7 +37,7 @@ enum Coin {
     Tails
 
     impl Speaks {
-        fn speak(): string {
+        pub fn speak(): string {
             return "clink"
         }
     }

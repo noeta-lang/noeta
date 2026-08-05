@@ -3,5 +3,5 @@ pub trait Decoder {
 }
 
 pub class Target {
-    fn new(): Target { return Target {} }
+    pub fn new(): Target { return Target {} }
 }

@@ -6,5 +6,5 @@
 use lib.types.{Store, NullStore};
 
 impl Store for NullStore {
-    fn label(): string { return "flushed" }
+    pub fn label(): string { return "flushed" }
 }

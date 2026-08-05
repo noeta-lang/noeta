@@ -14,11 +14,11 @@ trait Fetcher {
 }
 
 class Http {
-    fn new(): Http { return Http {} }
+    pub fn new(): Http { return Http {} }
 }
 
 impl Fetcher for Http {
-    async fn fetch(url: string): string {
+    pub async fn fetch(url: string): string {
         sleep(1).await
         return "body:" ~ url
     }

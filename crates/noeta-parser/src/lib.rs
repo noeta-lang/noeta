@@ -4535,6 +4535,14 @@ where
         .repeated()
         .collect::<Vec<_>>();
         let method = method_decos
+            // `pub` is part of the METHOD production, not a field declaration's opening — the same
+            // shape `static` established. A type body reads a leading identifier as a field
+            // (`name: T`), so before this `pub fn m()` put `fn` in name position and reported
+            // "`fn` cannot be used as a name" (E0046), which says nothing about what is wrong.
+            // Reading the modifier here makes `pub` on a method mean what it says, and it is the
+            // OUTERMOST modifier — `pub static async fn` — matching every language that pairs
+            // visibility with the rest.
+            .then(just(T::PubKw).or_not())
             // Accepted here only to be REJECTED with a span: an inherent (or `impl`-block) method
             // derives its receiver from its body, so a declaration would be a second source of
             // truth. See `FnDecl::is_static`.
@@ -4553,7 +4561,13 @@ where
                 move |(
                     (
                         (
-                            (((((decos, static_kw), async_kw), name_pair), type_params), params),
+                            (
+                                (
+                                    ((((decos, pub_kw), static_kw), async_kw), name_pair),
+                                    type_params,
+                                ),
+                                params,
+                            ),
                             captures,
                         ),
                         ret,
@@ -4572,7 +4586,7 @@ where
                     FnDecl {
                         name: Name::written(name_pair.0),
                         name_span: name_pair.1,
-                        is_public: false,
+                        is_public: pub_kw.is_some(),
                         type_params,
                         params,
                         ret,
@@ -4769,6 +4783,11 @@ where
             .clone()
             .repeated()
             .collect::<Vec<_>>()
+            // Accepted here only to be REJECTED with a span (E0053): every method a `trait`
+            // declares is already the type's outward contract, so `pub` states a fact the `trait`
+            // keyword has already stated. Parsed rather than left to fail as a field opening, for
+            // the same reason `static` is.
+            .then(just(T::PubKw).or_not())
             // The ONE site where `static` means something: a trait declaration is the only place
             // receiver-ness is a contract term rather than a fact derived from a body.
             .then(just(T::StaticKw).or_not())
@@ -4783,7 +4802,13 @@ where
             .then(block.clone().or_not())
             .map_with(
                 move |(
-                    ((((((attrs, static_kw), async_kw), name_pair), type_params), params), ret),
+                    (
+                        (
+                            (((((attrs, pub_kw), static_kw), async_kw), name_pair), type_params),
+                            params,
+                        ),
+                        ret,
+                    ),
                     body,
                 ),
                       e| {
@@ -4792,7 +4817,7 @@ where
                         sig: FnDecl {
                             name: Name::written(name_pair.0),
                             name_span: name_pair.1,
-                            is_public: false,
+                            is_public: pub_kw.is_some(),
                             type_params,
                             params,
                             ret,

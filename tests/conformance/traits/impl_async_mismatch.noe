@@ -2,14 +2,14 @@
 // satisfy an `async` trait method. Without this the trait-object and bound typings — both taken
 // from the trait's declaration — would promise a `Future` the implementation never produces.
 // E0015, reported at the impl's method name.
-// expect: error E0015 at 12:8
+// expect: error E0015 at 12:12
 // expect: exit 1
 trait Fetcher {
     async fn fetch(url: string): string
 }
 
 impl Fetcher for Http {
-    fn fetch(url: string): string { return "sync" }
+    pub fn fetch(url: string): string { return "sync" }
 }
 
 struct Http { id: int }

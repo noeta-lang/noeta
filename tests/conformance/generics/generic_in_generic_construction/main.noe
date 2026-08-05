@@ -36,11 +36,11 @@ class Repository<T> {
     pub tbl: string
     pub pk: string
 
-    fn new(tbl: string, pk: string): Repository<T> {
+    pub fn new(tbl: string, pk: string): Repository<T> {
         return Repository { tbl: tbl, pk: pk };
     }
 
-    fn model(): string {
+    pub fn model(): string {
         return self.tbl ~ ":" ~ type_name::<T>();
     }
 }
@@ -51,17 +51,17 @@ class LiveRepository<T> {
     repo: Repository<T>
     conn: string
 
-    fn new(tbl: string, pk: string, conn: string): LiveRepository<T> {
+    pub fn new(tbl: string, pk: string, conn: string): LiveRepository<T> {
         return LiveRepository { repo: Repository.new(tbl, pk), conn: conn };
     }
 
-    fn describe(): string {
+    pub fn describe(): string {
         return self.repo.model() ~ "@" ~ self.conn;
     }
 
     // The inner repository's own answer, reached through an INSTANCE method (it reads `self`), so
     // `Outer` below observes the nested tag without `repo` leaving the class.
-    fn inner_model(): string {
+    pub fn inner_model(): string {
         return self.repo.model();
     }
 }
@@ -84,11 +84,11 @@ echo live.describe() != other.describe();
 class Outer<T> {
     live: LiveRepository<T>
 
-    fn new(tbl: string, conn: string): Outer<T> {
+    pub fn new(tbl: string, conn: string): Outer<T> {
         return Outer { live: LiveRepository.new(tbl, "id", conn) };
     }
 
-    fn describe(): string {
+    pub fn describe(): string {
         return "deep:" ~ self.live.inner_model();
     }
 }

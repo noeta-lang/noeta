@@ -28,7 +28,7 @@ echo scale64(2.5)
 
 class Counter {
     pub mut n: i64
-    fn bump(by: i64): i64 {
+    pub fn bump(by: i64): i64 {
         self.n = self.n + by
         return self.n
     }
