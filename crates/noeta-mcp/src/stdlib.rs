@@ -43,30 +43,59 @@ pub struct ModuleApi {
     pub ring: Option<String>,
     /// Every function the module exposes, in registration order.
     pub functions: Vec<FnSig>,
-    /// The module's **method bundles** (kernel methods): named method sets a user type acquires by
-    /// explicit opt-in — `impl <module>.<Bundle> for T {}` — validated against the bundle's
-    /// structural constraint at compile time. Empty for most modules.
-    pub bundles: Vec<BundleApi>,
+    /// The **native traits** namespaced to this module — contracts a user type takes on with
+    /// `impl <module>.<Trait> for T { … }`. Empty for most modules.
+    pub traits: Vec<TraitApi>,
 }
 
-/// One method bundle rendered for an agent: its opt-in syntax, what a binding type must look like,
-/// and the methods the type (and `List<T>`, for the bulk forms) acquires.
+/// One native trait rendered for an agent: how to implement it, what an implementor must supply,
+/// and any structural constraint on the implementing type.
+///
+/// This used to be `BundleApi`, and listed only traits carrying a structural constraint — the
+/// kernel "bundles". That filter made every ordinary native trait invisible to an agent:
+/// `para.crdt.Mergeable`, whose required `merge` is the entire contract a CRDT type signs, was in
+/// no MCP answer at all. A bundle is not a different thing from a trait — the ExtBundle→ExtTrait
+/// fold-in unified them in the ABI — it is a trait that additionally constrains `Self`'s shape,
+/// which is what [`TraitApi::constraint`] being an `Option` says.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
-pub struct BundleApi {
-    /// The bundle's surface name, e.g. `Kernels`.
+pub struct TraitApi {
+    /// The trait's surface name, e.g. `Kernels`, `Mergeable`.
     pub name: String,
-    /// The opt-in a user writes, e.g. `impl vec.Kernels for MyType {}`.
+    /// Its fully-qualified identity, e.g. `std.vec.Kernels`.
+    pub qualified: String,
+    /// The impl a user writes. An empty body when every method is defaulted (the kernel traits);
+    /// otherwise one naming the methods that must be written.
     pub impl_syntax: String,
-    /// The structural constraint a binding type must satisfy, e.g.
-    /// `@packed struct with fields (f32, f32, f32), column layout`.
-    pub constraint: String,
-    /// Methods acquired on a value of the bound type itself (`v.dot(w)`).
-    pub element_methods: Vec<FnSig>,
-    /// Methods acquired on a `List<T>` of the bound type (`xs.dot_all(ys)`).
-    pub bulk_methods: Vec<FnSig>,
-    /// Methods the contract declares `static` — **no** receiver, called on the bound type itself
-    /// (`T.decode(raw)`), including from inside a generic body under a `<T: Trait>` bound.
-    pub static_methods: Vec<FnSig>,
+    /// The structural constraint an implementing type must satisfy, e.g.
+    /// `@packed struct with fields (f32, f32, f32), column layout`. Absent for an ordinary trait,
+    /// which any type may implement.
+    pub constraint: Option<String>,
+    /// The trait's associated types, e.g. `Wide`, `Float` — named in method signatures as
+    /// `Self::Wide` and derived from the implementing type.
+    pub associated_types: Vec<String>,
+    /// The whole contract, in declaration order. Each method says which receiver it takes and
+    /// whether an implementor must write it.
+    pub methods: Vec<TraitMethodApi>,
+}
+
+/// One method of a [`TraitApi`]: its signature plus the two facts an implementor needs — where it
+/// is called from, and whether they have to write it.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct TraitMethodApi {
+    pub name: String,
+    /// The full rendered signature, e.g. `fn merge(dyn): dyn`.
+    pub signature: String,
+    /// The rendered parameter types, in order.
+    pub params: Vec<String>,
+    /// The rendered return type.
+    pub returns: String,
+    /// How it is called: `self` (a value of the implementing type, `v.dot(w)`), `List<Self>` (the
+    /// bulk kernel forms, `xs.dot_all(ys)`), or `static` (no receiver — `T.decode(raw)`, reachable
+    /// from inside a generic body under a `<T: Trait>` bound).
+    pub receiver: String,
+    /// Whether an implementor **must** write this method. A required method absent from an `impl`
+    /// is E0015; a defaulted one is answered by the trait and may be overridden.
+    pub required: bool,
 }
 
 /// One extern value type rendered for an agent: its name, the built-in traits it satisfies, and its
@@ -202,43 +231,93 @@ fn render_module(qname: String, m: &noeta_stdlib::ExtModule) -> ModuleApi {
         .chain(m.ctx_functions.iter())
         .map(render_fn)
         .collect();
-    // The kernel "bundles" (`vec.Kernels`, `vec.SatKernels`) are native `ExtTrait`s since the
-    // ExtBundle→ExtTrait fold-in (slice 4): namespaced to the qualified module and carrying a
-    // structural `self_constraint`. Scanned from the registry (traits are extension-level, not a
-    // module field), so the agent-facing surface is unchanged.
-    let bundles = module_kernel_traits(&qname)
+    // Traits are extension-level, not a module field, so they are scanned from the registry by the
+    // namespace they declare — which for a native trait is the qualified module it is reached
+    // through (`impl vec.Kernels for T {}`).
+    let traits = module_traits(&qname)
         .into_iter()
-        .map(|t| render_bundle(&qname, m.name, t))
+        .map(|t| render_trait(&qname, m.name, t))
         .collect();
     ModuleApi {
         module: qname,
         ring: m.ring.map(str::to_string),
         functions,
-        bundles,
+        traits,
     }
 }
 
-/// The kernel **traits** a module contributes (`vec.Kernels`, `vec.SatKernels`) — native traits
-/// namespaced to the qualified module and carrying a structural `self_constraint` (slice 4).
-fn module_kernel_traits(qname: &str) -> Vec<&'static noeta_stdlib::ExtTrait> {
+/// The native traits a module contributes.
+///
+/// This used to additionally require `self_constraint.is_some()`, which restricted the answer to
+/// the kernel "bundles" and hid every ordinary native trait — `para.crdt.Mergeable` and `Syncable`
+/// among them. A constraint is an extra thing a trait may carry, never what makes it a trait.
+fn module_traits(qname: &str) -> Vec<&'static noeta_stdlib::ExtTrait> {
     registry::extensions()
         .iter()
         .flat_map(|e| e.traits())
-        .filter(|t| t.namespace == qname && t.self_constraint.is_some())
+        .filter(|t| t.namespace == qname)
         .collect()
 }
 
-fn render_bundle(qualified: &str, module: &str, b: &noeta_stdlib::ExtTrait) -> BundleApi {
-    use noeta_stdlib::{BundleReceiver, ConstraintField, ConstraintLayout};
+fn render_trait(qualified: &str, module: &str, t: &noeta_stdlib::ExtTrait) -> TraitApi {
+    use noeta_stdlib::BundleReceiver;
+    let methods: Vec<TraitMethodApi> = t
+        .methods
+        .iter()
+        .map(|m| {
+            let sig = render_fn(&m.sig);
+            TraitMethodApi {
+                name: sig.name,
+                signature: sig.signature,
+                params: sig.params,
+                returns: sig.returns,
+                receiver: match m.receiver {
+                    BundleReceiver::Element => "self",
+                    BundleReceiver::Bulk => "List<Self>",
+                    BundleReceiver::Static => "static",
+                }
+                .to_string(),
+                required: !m.has_default,
+            }
+        })
+        .collect();
     // The impl site names the trait through the module *binding* (`use std.{vec}` then
-    // `impl vec.Kernels for T {}`), so the short module name is the one to show.
-    let impl_syntax = format!(
-        "use {qualified} … impl {module}.{} for YourType {{}}",
-        b.name
-    );
-    let constraint = b
-        .self_constraint
-        .expect("a kernel trait always carries a self_constraint");
+    // `impl vec.Kernels for T {}`), so the short module name is the one to show. A trait whose
+    // methods are all defaulted is adopted with an empty body; one with required methods is not,
+    // and showing `{}` for it would hand an agent an impl that is E0015 on arrival.
+    let required: Vec<&str> = methods
+        .iter()
+        .filter(|m| m.required)
+        .map(|m| m.name.as_str())
+        .collect();
+    let body = if required.is_empty() {
+        "{}".to_string()
+    } else {
+        format!(
+            "{{ {} }}",
+            required
+                .iter()
+                .map(|n| format!("fn {n}(…) {{ … }}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        )
+    };
+    TraitApi {
+        name: t.name.to_string(),
+        qualified: format!("{}.{}", t.namespace, t.name),
+        impl_syntax: format!(
+            "use {qualified} … impl {module}.{} for YourType {body}",
+            t.name
+        ),
+        constraint: t.self_constraint.map(render_constraint),
+        associated_types: t.assoc_types.iter().map(|a| a.name.to_string()).collect(),
+        methods,
+    }
+}
+
+/// A trait's structural `Self`-constraint in prose — what an implementing type's shape must be.
+fn render_constraint(constraint: noeta_stdlib::PackedConstraint) -> String {
+    use noeta_stdlib::{ConstraintField, ConstraintLayout};
     let fields = constraint
         .fields
         .iter()
@@ -263,28 +342,9 @@ fn render_bundle(qualified: &str, module: &str, b: &noeta_stdlib::ExtTrait) -> B
     // A `Uniform` constraint reads only `fields[0]` — every field must be that kind, `min` or more.
     let fields = match constraint.arity {
         noeta_stdlib::ConstraintArity::Exact => fields,
-        noeta_stdlib::ConstraintArity::Uniform { min } => {
-            format!("{min}+ uniform {fields}")
-        }
+        noeta_stdlib::ConstraintArity::Uniform { min } => format!("{min}+ uniform {fields}"),
     };
-    let (mut element_methods, mut bulk_methods, mut static_methods) =
-        (Vec::new(), Vec::new(), Vec::new());
-    for m in b.methods {
-        let sig = render_fn(&m.sig);
-        match m.receiver {
-            BundleReceiver::Element => element_methods.push(sig),
-            BundleReceiver::Bulk => bulk_methods.push(sig),
-            BundleReceiver::Static => static_methods.push(sig),
-        }
-    }
-    BundleApi {
-        name: b.name.to_string(),
-        impl_syntax,
-        constraint: format!("@packed struct with fields ({fields}), {layout}"),
-        element_methods,
-        bulk_methods,
-        static_methods,
-    }
+    format!("@packed struct with fields ({fields}), {layout}")
 }
 
 fn render_type(t: &ExtType) -> TypeApi {
@@ -417,28 +477,105 @@ mod tests {
     }
 
     #[test]
-    fn bundles_surface_with_opt_in_syntax() {
-        // kernel-methods: `vec` contributes the `Kernels` bundle; agents must see the opt-in
-        // (`impl vec.Kernels for T {}`), the structural constraint, and both method receivers.
+    fn a_constrained_trait_surfaces_with_its_opt_in_and_shape() {
+        // kernel-methods: `vec` contributes `Kernels`; an agent must see the opt-in
+        // (`impl vec.Kernels for T {}`), the structural constraint, and each method's receiver.
         let out = query(Some("std.vec"));
         assert_eq!(out.modules.len(), 1);
-        let bundles = &out.modules[0].bundles;
+        let traits = &out.modules[0].traits;
+        let kernels = traits
+            .iter()
+            .find(|t| t.name == "Kernels")
+            .expect("std.vec contributes the Kernels trait");
+        assert_eq!(kernels.qualified, "std.vec.Kernels");
         assert!(
-            !bundles.is_empty(),
-            "std.vec should contribute at least one bundle"
-        );
-        let kernels = &bundles[0];
-        assert!(
-            kernels
-                .impl_syntax
-                .contains(&format!("impl vec.{} for", kernels.name)),
+            kernels.impl_syntax.contains("impl vec.Kernels for"),
             "opt-in syntax was {:?}",
             kernels.impl_syntax
         );
-        assert!(kernels.constraint.contains("@packed"));
+        // Every kernel method is defaulted, so the opt-in really is an empty body.
         assert!(
-            !kernels.element_methods.is_empty() || !kernels.bulk_methods.is_empty(),
-            "bundle should list its methods"
+            kernels.impl_syntax.ends_with("{}"),
+            "{:?}",
+            kernels.impl_syntax
         );
+        assert!(kernels.methods.iter().all(|m| !m.required));
+        assert!(
+            kernels
+                .constraint
+                .as_deref()
+                .is_some_and(|c| c.contains("@packed")),
+            "a kernel trait constrains Self's shape: {:?}",
+            kernels.constraint
+        );
+        // Both receivers reach the agent, and the associated types its returns name.
+        assert!(kernels.methods.iter().any(|m| m.receiver == "self"));
+        assert!(kernels.methods.iter().any(|m| m.receiver == "List<Self>"));
+        assert!(kernels.associated_types.contains(&"Wide".to_string()));
+    }
+
+    /// A native trait with a **required** method and no structural constraint — the shape
+    /// `para.crdt.Mergeable` has, and the shape the old `self_constraint.is_some()` filter hid
+    /// from every MCP answer.
+    static ORDINARY_METHODS: &[noeta_stdlib::ExtTraitMethod] = &[
+        noeta_stdlib::ExtTraitMethod {
+            sig: noeta_stdlib::ExtFn {
+                param_names: &["other"],
+                name: "merge",
+                params: &[SigType::SelfTy],
+                ret: noeta_stdlib::RetTy::SameAsArg(0),
+            },
+            has_default: false,
+            ..noeta_stdlib::ExtTraitMethod::DEFAULTS
+        },
+        noeta_stdlib::ExtTraitMethod {
+            sig: noeta_stdlib::ExtFn {
+                param_names: &["raw"],
+                name: "decode",
+                params: &[SigType::Bytes],
+                ret: noeta_stdlib::RetTy::SameAsArg(0),
+            },
+            has_default: false,
+            receiver: noeta_stdlib::BundleReceiver::Static,
+        },
+    ];
+    static ORDINARY: noeta_stdlib::ExtTrait = noeta_stdlib::ExtTrait {
+        name: "Mergeable",
+        namespace: "para.crdt",
+        methods: ORDINARY_METHODS,
+        ..noeta_stdlib::ExtTrait::DEFAULTS
+    };
+
+    #[test]
+    fn an_unconstrained_trait_is_rendered_with_its_required_contract() {
+        let rendered = render_trait("para.crdt", "crdt", &ORDINARY);
+        assert_eq!(rendered.qualified, "para.crdt.Mergeable");
+        // No structural constraint: any type may implement it. The old surface could not say this
+        // — it only ever rendered traits that had one.
+        assert_eq!(rendered.constraint, None);
+        // Both required methods are marked, and the impl syntax does NOT offer an empty body: an
+        // `impl Mergeable for T {}` is E0015 on arrival, so showing `{}` would hand an agent a
+        // program that cannot compile.
+        assert!(rendered.methods.iter().all(|m| m.required));
+        assert!(
+            !rendered.impl_syntax.ends_with("{}"),
+            "{:?}",
+            rendered.impl_syntax
+        );
+        assert!(
+            rendered.impl_syntax.contains("fn merge(…)"),
+            "{:?}",
+            rendered.impl_syntax
+        );
+        // The static method's receiver reaches the agent — it is called `T.decode(raw)`, not on a
+        // value, and nothing else in the answer says so.
+        let decode = rendered
+            .methods
+            .iter()
+            .find(|m| m.name == "decode")
+            .unwrap();
+        assert_eq!(decode.receiver, "static");
+        let merge = rendered.methods.iter().find(|m| m.name == "merge").unwrap();
+        assert_eq!(merge.receiver, "self");
     }
 }
