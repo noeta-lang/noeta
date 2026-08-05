@@ -5,8 +5,14 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+# Internal: not a contract crate, so it never goes to crates.io. Only the `*-abi` crates
+# carry a stability promise (docs/Extension-Compatibility.md).
+publish = false
 
 [dependencies]
+# For `NodeId`, which is contract vocabulary and therefore lives in the `-abi` crate: an extension
+# integrating with the graph must be able to name it without depending on this engine.
+noeta-reactive-abi = { workspace = true }
 
 [lints]
 workspace = true

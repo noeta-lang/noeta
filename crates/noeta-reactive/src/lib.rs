@@ -93,24 +93,13 @@ pub struct FlushOverflow;
 
 /// Index into the graph's node table — the id a `signal`/`computed`/`effect` value carries.
 ///
-/// A plain table index (like `noeta_value::ChannelId`), pinned to `u32`. Freed slots are reused, so an
-/// id is only meaningful until its node is [`disposed`](ReactiveGraph::dispose).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct NodeId(u32);
-
-impl NodeId {
-    /// Wrap a backing-table index.
-    #[inline]
-    pub fn from_index(index: usize) -> Self {
-        NodeId(index as u32)
-    }
-
-    /// The index into the backing table.
-    #[inline]
-    pub fn index(self) -> usize {
-        self.0 as usize
-    }
-}
+/// **Defined in [`noeta_reactive_abi`]**, not here: it is contract vocabulary. Every
+/// [`ReactiveSource`](noeta_reactive_abi::ReactiveSource) method takes or returns one, so an
+/// extension integrating with the graph needs the type — and making it reach into this crate, an
+/// internal one with no stability promise, to get it would contradict the compatibility rule that a
+/// package may depend on `*-abi` crates alone. Re-exported so `noeta_reactive::NodeId` keeps
+/// resolving for the engine's own callers.
+pub use noeta_reactive_abi::NodeId;
 
 /// Which flavor of reactive node this is. Determines read semantics (a `Signal` returns its stored
 /// value; a `Computed` recomputes-on-read when dirty; an `Effect` is never read, only run) and dirty

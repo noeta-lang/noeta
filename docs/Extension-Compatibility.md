@@ -4,7 +4,7 @@ This page is the compatibility statement for **native package authors**—the an
 
 The short version:
 
-1. **`noeta-ext-abi` is the API you write against.** It (plus `noeta-reactive-abi`, if you integrate with the reactive engine) is the surface with a compatibility promise.
+1. **`noeta-ext-abi` is the API you write against.** It (plus `noeta-reactive-abi`, if you integrate with the reactive engine) is the surface with a compatibility promise—and the only part of the toolchain published to **crates.io**, so you depend on a version range rather than a git tag.
 2. **Everything else in the toolchain is internal.** You *can* git-depend on internal crates—some first-party packages do—but they carry no stability promise at all.
 3. **At consume time, the consumer's toolchain wins.** Your pinned toolchain tag governs only your own repository's CI; toolchain composition rebuilds your crate from source against the consumer's copy of every toolchain crate.
 4. **Pre-1.0, a minor release may break you.** Breaks are listed in release notes, and the conformance harness is the recommended tripwire.
@@ -50,24 +50,34 @@ An extension whose values participate in the reactive graph—a synced signal, a
 **Everything that is not a contract crate.** Concretely:
 
 - **`noeta-embed`**—the host-process embedding API (`Session`, the `Value` bridge, `Handle`s)—is **unstable by decision**: it is a 0.x surface that adapts to its consumers until a real engine integration has exercised it, and its own documentation says to expect breaking changes between minor versions.
-- **The internal crates**—`noeta-loader`, `noeta-check`, `noeta-lexer`, `noeta-ast`, `noeta-stdlib`, `noeta-ir`, and the rest of the workspace. These are the toolchain's own organs. Nothing stops a package from git-depending on them, and some first-party packages currently do—`para/api`'s impl crate pulls `noeta-loader`/`noeta-lexer`/`noeta-ast`/ `noeta-check`/`noeta-stdlib` to run Noeta code inside its directive expansion, and `para/p2p` uses `noeta-stdlib` as a dev-dependency so its conformance fixtures actually execute. That is allowed, and composition will patch those crates to the consumer's toolchain just like the ABI crate—but honestly: **they carry no stability promise**. Their APIs may change in any release, without a deprecation cycle and without being called out in release notes. A package that reaches past `noeta-ext-abi` accepts keeping pace with the toolchain by hand.
+- **The internal crates**—`noeta-loader`, `noeta-check`, `noeta-lexer`, `noeta-ast`, `noeta-stdlib`, `noeta-ir`, and the rest of the workspace. These are the toolchain's own organs. Nothing stops a package from git-depending on them, and first-party packages do so in their **test harnesses**—`para/api` pulls `noeta-loader`/`noeta-lexer`/`noeta-ast`/`noeta-check`/`noeta-stdlib` as dev-dependencies so its expansion tests actually execute the client `@openapi` generated, and `para/p2p` uses `noeta-stdlib` the same way for its conformance fixtures. Neither reaches past `noeta-ext-abi` in the code it ships: a directive's `expand` hook produces source, and the toolchain owns parsing and checking it. That is allowed either way, and composition will patch those crates to the consumer's toolchain just like the ABI crate—but honestly: **they carry no stability promise**. Their APIs may change in any release, without a deprecation cycle and without being called out in release notes. A package that reaches past `noeta-ext-abi` accepts keeping pace with the toolchain by hand.
 
 The rule of thumb: if the crate name does not end in `-abi`, treat every use of it as a fork-risk you have chosen, not a contract the toolchain owes you.
 
 ## One toolchain wins: how versions resolve at consume time
 
-A standalone package pins its toolchain crates by git tag—the release it is built and tested against:
+A package depends on the contract crate from **crates.io**, by range:
 
 ```toml
 # the package's native/Cargo.toml
 [dependencies]
-noeta-ext-abi = { git = "https://github.com/noeta-lang/noeta", tag = "v0.2.0" }
+noeta-ext-abi = "0.5"
+```
+
+A range rather than an exact version because a *patch* release of the toolchain does not change the contract — so `0.5.1` should not cost every package a manifest edit. A **minor** bump still does, deliberately: pre-1.0 a minor may break you (below), and that is a change worth looking at.
+
+A git pin on the toolchain repository also still works, and is what a package reaching past the contract must use, since the internal crates are not published:
+
+```toml
+noeta-ext-abi = { git = "https://github.com/noeta-lang/noeta", tag = "v0.5.0" }
 ```
 
 That pin governs **only the package's own repository**: `cargo test` in your CI, your local builds. When a *consumer* depends on your package, toolchain composition builds your crate again—from source, inside the consumer's composed shim—and resolves every toolchain crate to **the consumer's own toolchain version**, not your tag:
 
 - With a **workspace (local-path) toolchain**, the composer injects a `[patch]` section keyed on the canonical toolchain repository URL that rewrites *every* `crates/*` member to the consumer's exact toolchain source (the key is this build's `repository`, overridable with `NOETA_TOOLCHAIN_REPO`—it must equal the URL your `Cargo.toml` declares). Your git pin is overridden wholesale.
 - With a **released (git-tag) toolchain**, the shim's own dependencies use the running binary's version tag, and the composer injects the same `[patch]` section, redirecting every toolchain crate to a cached checkout of the **binary's own release tag**—regardless of the tag your package pins. A package pinned at an older tag (say `v0.2.0`) still composes under a newer binary (say `v0.2.1`): your pin is overridden to the consumer's toolchain, exactly as in the workspace case. That is the whole one-toolchain-wins guarantee—without it, your pin and the shim's tag would be two different sources, two compiled copies of `noeta-ext-abi`, and a type error instead of a build.
+
+The composer emits **two** patch tables, one keyed on the toolchain repository URL and one on `crates-io`, because a package may name the contract crate either way. A version requirement is patched exactly like a git pin: without that, `noeta-ext-abi = "0.5"` would resolve the real published crate, which is a *second* copy of the ABI, and your `dyn Extension` would not match the shim's.
 
 Either way the whole graph resolves to **one copy** of each toolchain crate—necessary for Rust type identity (a second compiled copy of `noeta-ext-abi` would make your `dyn Extension` a different type than the shim's)—and that copy is the consumer's. Three consequences worth internalizing:
 

@@ -5,12 +5,17 @@ name: Release
 #   - package the VS Code extension .vsix,
 #   - attach the tarballs + .vsix + a SHA256SUMS covering all of them to a GitHub release,
 #   - on a NON-prerelease, dispatch `release-published` to the web repos so docs advances to this
-#     release's docs and the sites refresh their version pill.
+#     release's docs and the sites refresh their version pill,
+#   - on a NON-prerelease, publish the two CONTRACT crates to crates.io.
 #
 # Prerelease is detected from the tag: any `-` suffix (v1.2.0-rc.1, v1.2.0-alpha) is a prerelease.
-# crates.io is intentionally NOT published here — extensions resolve toolchain crates by git, not
-# crates.io, and the embedding surface (noeta-embed) isn't stabilized yet. When it is, a
-# `publish-crates` job for the noeta-embed dependency closure drops in, gated on non-prerelease.
+#
+# Only `noeta-ext-abi` and `noeta-reactive-abi` go to crates.io. That is the whole documented stable
+# surface, and publishing it is what lets a native package depend on a **range** (`"0.5"`) instead of
+# an exact git tag — so a patch release stops costing a manifest edit in every package repo. Every
+# other crate is `publish = false`: they are internal organs with no stability promise, and shipping
+# them would advertise a semver contract this project does not keep. `noeta-embed` stays unpublished
+# until its surface stabilizes.
 on:
   push:
     tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
@@ -185,6 +190,35 @@ jobs:
           files: dist/*
           prerelease: ${{ needs.build.outputs.is_prerelease == 'true' }}
           body_path: notes.md
+
+  # Publish the **contract crates** to crates.io. Only these two: `noeta-ext-abi` is the API a native
+  # package is written against, and `noeta-reactive-abi` is the reactive-graph contract built on it.
+  # Every other crate in the workspace carries `publish = false` — they are the toolchain's own
+  # organs, with no stability promise, and putting them on crates.io would advertise a semver
+  # contract this project does not intend to keep (docs/Extension-Compatibility.md).
+  #
+  # Order is load-bearing: `noeta-reactive-abi` depends on `noeta-ext-abi` **by version**, so it
+  # cannot resolve until the first is live on the index. `cargo publish` waits for the index to
+  # catch up before returning, so the second step's resolution succeeds.
+  #
+  # Skipped for a prerelease: a crates.io version cannot be unpublished, only yanked, so a `-rc`
+  # tag must not burn the number.
+  publish-crates:
+    name: Publish contract crates to crates.io
+    needs: [gate, build]
+    if: needs.build.outputs.is_prerelease != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.0
+      - name: Publish noeta-ext-abi
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p noeta-ext-abi --locked
+      - name: Publish noeta-reactive-abi
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p noeta-reactive-abi --locked
 
   # Advance the web properties. Docs syncs its content from this release's tag, so it must run only
   # for a real (non-prerelease) release; the landing/playground pills just refresh. GITHUB_TOKEN

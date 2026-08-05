@@ -105,6 +105,39 @@ fn composed_project(name: &str) -> PathBuf {
     app.join("main.noe")
 }
 
+/// [`composed_project`]'s twin, with the native crate depending on `noeta-ext-abi` **by version**
+/// rather than by path — the form a package takes once the contract crates are published to
+/// crates.io (`noeta-ext-abi = "0.5"`).
+///
+/// This is the shape that proves `[patch.crates-io]` works. Without that table the version
+/// requirement resolves the *real* crates.io crate, which is a **second** copy of `noeta-ext-abi`:
+/// the package's `dyn Extension` then fails to match the shim's `noeta_ext_abi::Extension` and the
+/// `NOETA_EXTENSIONS` aggregation does not type-check. Exactly the failure the git patch has always
+/// prevented, reached through the other door.
+fn composed_project_versioned(name: &str) -> PathBuf {
+    let entry = composed_project(name);
+    // <base>/app/main.noe -> <base>/imgfx/native
+    let krate = entry
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("fixture base")
+        .join("imgfx")
+        .join("native");
+    let manifest = krate.join("Cargo.toml");
+    let text = std::fs::read_to_string(&manifest).expect("fixture manifest");
+    // Swap the path dependency for the published-style version requirement.
+    let start = text.find("noeta-ext-abi = {").expect("path dep present");
+    let end = text[start..].find('\n').expect("line end") + start;
+    let swapped = format!(
+        "{}noeta-ext-abi = \"{}\"{}",
+        &text[..start],
+        env!("CARGO_PKG_VERSION"),
+        &text[end..]
+    );
+    std::fs::write(&manifest, swapped).unwrap();
+    entry
+}
+
 /// The proving extension's Rust source (see [`composed_project`]).
 const IMGFX_NATIVE_SRC: &str = r##"
 //! The Phase-3 proving extension: one module, one extern type with plain + ctx methods, one
@@ -841,6 +874,26 @@ fn build_native_of_a_native_dep_app_runs_the_composed_handler() {
         "the composed AOT runtime leaked the mixed crate's dev formatter into the native artifact"
     );
     let _ = std::fs::remove_file(&app_bin);
+}
+
+/// A native package that depends on the contract crate **by version** (the crates.io form) composes
+/// and dispatches exactly like one that depends by path. See [`composed_project_versioned`] — this
+/// is the regression test for publishing `noeta-ext-abi`, and it fails with a `dyn Extension` type
+/// mismatch if `[patch.crates-io]` is dropped from the composed shim.
+#[test]
+fn a_version_dependency_on_the_contract_crate_composes() {
+    let _guard = compose_guard();
+    let entry = composed_project_versioned("pm_compose_versioned");
+    lang()
+        .arg("run")
+        .arg(&entry)
+        .assert()
+        .success()
+        // `42` is `fx.double(21)` — a call into the extension's native module. Reaching it proves the
+        // package's `dyn Extension` unified with the shim's, i.e. that composition redirected the
+        // version requirement to this toolchain's own `noeta-ext-abi` rather than resolving a second
+        // copy from the index.
+        .stdout(predicate::str::contains("42"));
 }
 
 #[test]
