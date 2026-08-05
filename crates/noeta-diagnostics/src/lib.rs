@@ -480,6 +480,19 @@ pub enum DiagnosticCode {
     /// but the parameter is the ordinary, expected meaning inside its own declaration, and naming a
     /// type `T` is a choice the parameter's author does not control.
     ShadowedTypeParameter,
+    /// A `pub` written where the thing it marks is **already public**, so the word decides nothing.
+    /// Today that is a value `struct`'s field: a struct's fields are public by construction (there
+    /// is no private state to opt out of — see [`DiagnosticCode::PrivateField`]), so `pub n: int`
+    /// restates what `struct` already said, and worse, it implies the unmarked fields are private.
+    ///
+    /// Refused rather than accepted-and-ignored, on the same ground `static` is refused where a
+    /// body already decides: a modifier that means nothing is still a modifier a reader has to
+    /// interpret. That cost rose sharply with the method-visibility arc, which put a `pub` that
+    /// *does* decide — on a method — one line away in the same type body.
+    ///
+    /// The trait twin of this rule is [`DiagnosticCode::InvalidTraitDeclaration`], where `pub` on a
+    /// trait's own method is refused for the identical reason.
+    RedundantVisibility,
 }
 
 impl DiagnosticCode {
@@ -561,6 +574,7 @@ impl DiagnosticCode {
         DiagnosticCode::IllegalModulePath,
         DiagnosticCode::ShadowedTypeParameter,
         DiagnosticCode::PrivateMethod,
+        DiagnosticCode::RedundantVisibility,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -643,6 +657,7 @@ impl DiagnosticCode {
             DiagnosticCode::IllegalModulePath => "E0074",
             DiagnosticCode::ShadowedTypeParameter => "E0075",
             DiagnosticCode::PrivateMethod => "E0076",
+            DiagnosticCode::RedundantVisibility => "E0077",
         }
     }
 

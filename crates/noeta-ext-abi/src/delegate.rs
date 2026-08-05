@@ -1,5 +1,5 @@
 //! Host-capability **delegation** (audit-2 F7 / audit-6 F9): forwarding `impl`s for the [`crate::Host`]
-//! union's capability traits, generated per capability by [`delegate_host!`].
+//! union's capability traits, generated per capability by [`delegate_host!`](crate::delegate_host).
 //!
 //! A custom `Host` is otherwise all-or-nothing: the union is 12 supertraits and ~70 required
 //! methods, so an embedder that wants to override ONE capability (expose the engine's world as

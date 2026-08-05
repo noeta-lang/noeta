@@ -27,8 +27,8 @@
 // expect: exit 0
 
 pub struct Todo {
-    pub id: int
-    pub title: string
+    id: int
+    title: string
 }
 
 t = Todo { id: 2, title: "x" }

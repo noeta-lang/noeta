@@ -325,6 +325,15 @@ impl DiagnosticCode {
                 detail: "A method is private by default in every type kind, exactly as a `class`'s fields are: a type's operations belong to it until it says otherwise. Declare it `pub fn` to make it part of the type's public surface, or reach it through a method that already is. Inside the declaring type's own bodies every method is visible, including on another value of that type. A method that implements a `trait` is public by construction — a trait is an outward contract — and must be written `pub` (E0015).",
                 docs: "Structs-Classes-and-Enums",
             },
+            DiagnosticCode::RedundantVisibility => Explanation {
+                code: "E0077",
+                title: "redundant visibility",
+                group: "Data: structs, classes, enums, fields",
+                severity: Severity::Error,
+                summary: "A `pub` on something that is already public — a value `struct`'s field.",
+                detail: "A `struct`'s fields are public by construction: it is the value kind, and it has no private state to opt out of. So `pub n: int` restates what `struct` already said, and it implies the fields written without it are private, which is the one thing it must not imply. Drop the word. If some of the type's state should be hidden, make it a `class`, where fields default private and `pub` is the opt-in that decides (E0035). The trait twin of this rule is E0053 — `pub` on a trait's own method, refused for the same reason.",
+                docs: "Structs-Classes-and-Enums",
+            },
             DiagnosticCode::InvalidPackedType => Explanation {
                 code: "E0038",
                 title: "invalid packed type",

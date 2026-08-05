@@ -1,6 +1,6 @@
 // The `App.Models` library module the entry imports with the single `use` form.
 
 pub struct User {
-    pub name: string
-    pub id: int
+    name: string
+    id: int
 }

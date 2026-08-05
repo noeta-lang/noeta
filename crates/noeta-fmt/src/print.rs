@@ -1417,6 +1417,11 @@ impl Printer<'_> {
 
     fn field(&self, f: &FieldDecl) -> Result<Doc, FmtError> {
         let mut parts = self.attrs(&f.attrs)?;
+        // On a `class` field `pub` is the opt-in that decides (E0035); on a `struct` field it is
+        // refused by the checker (E0077 — a struct's fields are already public). Printed either
+        // way, for the same reason a trait method's is: dropping it would make the formatted source
+        // re-parse to a different AST, which the fmt safety gate exists to catch. The formatter
+        // does not silently repair a program the checker will refuse.
         if f.is_public {
             parts.push(Doc::text("pub "));
         }

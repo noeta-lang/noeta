@@ -29,7 +29,7 @@ class Repo<T> {
     }
 }
 struct Holder<T> {
-    pub label: string
+    label: string
 
     pub fn new(label: string): Holder<T> {
         return Holder { label: label };

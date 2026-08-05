@@ -2,6 +2,6 @@
 // importer binds it under.
 
 pub struct Todo {
-    pub id: int
-    pub title: string
+    id: int
+    title: string
 }

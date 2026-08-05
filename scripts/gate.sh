@@ -368,7 +368,9 @@ has_target() {
 #   fmt + clippy  (tier 1, --quick)  — the two lints that have twice landed a red `main`, and the
 #                                     cheapest things that can. Fast enough for the inner loop.
 #   test/docs/jit (tier 2, default)  — the oracles: conformance, eval↔VM differential, leak, the
-#                                     check-vs-run project differential, the doc samples, the JIT's
+#                                     check-vs-run project differential, the doc samples, rustdoc's
+#                                     intra-doc links for `noeta-ext-abi` (see the scope note at
+#                                     that step — it is that crate only, and why), the JIT's
 #                                     own differential, and the `#[ignore]`d real-socket end-to-end
 #                                     suites (hot reload, LiveView, drain).
 #                                     This is the set a merge to `main` must clear.
@@ -434,6 +436,33 @@ step 2 test "shape: noeta-stdlib (no default)" -- \
 # --- docs: every ```noeta block in docs/ runs through the real binary --------------------------
 step 2 docs "doc samples (docs/*.md)" -- \
     "${CARGO[@]}" test -p noeta-cli --test doc_samples --no-default-features --locked
+
+# --- docs: rustdoc's own links, for the crate whose product IS its documentation ---------------
+#
+# The step above runs the ```noeta samples in docs/*.md. Nothing ran rustdoc, so a broken
+# `[`Item`]` link was a *warning* on a `cargo doc` that still exited 0 — invisible. There were 28
+# of them in `noeta-ext-abi` when this step was written, ten to a `Registry::validate` that is a
+# private free function and never was a method, and one whose doc line had drifted off the function
+# it described onto the const below it.
+#
+# SCOPE — `noeta-ext-abi` ONLY, and that is a deliberate cut, not an oversight:
+#   * COVERED: the whole public and private doc surface of `crates/noeta-ext-abi`. This crate's
+#     entire product is a documented contract for third-party extension authors, who read it as
+#     rustdoc; a dead link there is the first thing an outside reader hits, and there is no other
+#     gate on it.
+#   * NOT COVERED: every other crate. Measured before scoping — `-D broken_intra_doc_links` over
+#     `cargo doc --workspace --no-deps --keep-going` reports **137** errors across 22 crates
+#     (`noeta-pm` 19, `noeta-check` 18, `noeta-ide` 12, …), which is a cleanup arc, not a step.
+#     Widening this to the workspace means doing that arc first; until then a green gate says
+#     nothing about any crate but this one, and the name says so.
+#
+# Both link lints are denied, because both are the same failure to a reader: `broken_intra_doc_links`
+# is a link to nothing, `private_intra_doc_links` is a link the public page renders as plain text.
+# `--no-deps` so the verdict is about this crate's own prose. RUSTDOCFLAGS is passed through `env`
+# rather than exported, so it cannot leak into any other step's cargo invocation.
+step 2 docs "rustdoc intra-doc links (noeta-ext-abi)" -- \
+    env RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links" \
+    "${CARGO[@]}" doc -p noeta-ext-abi --no-deps --locked
 
 # --- jit: the tier-0/tier-1 differential + leak-under-JIT --------------------------------------
 step 2 jit "JIT unit tests (noeta-vm)" -- \

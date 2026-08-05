@@ -4453,7 +4453,11 @@ where
                 },
             );
         // A field in a `struct` or `class` body: `#[...]? pub? mut? name: type (= default)?`
-        // (newline-separated, no terminator). `pub` and `mut` are both opt-in; a field may carry
+        // (newline-separated, no terminator). `pub` is accepted by the grammar in BOTH bodies, but
+        // only decides something in a `class`; on a `struct`'s field the checker refuses it with a
+        // span (E0077 — a struct's fields are already public), for the same reason `pub` on a
+        // trait's own method is parsed here and refused there rather than left to fail as an
+        // unexpected token. `pub` and `mut` are both opt-in; a field may carry
         // leading `#[...]` attributes (P2.4b). A trailing `= expr` is a per-field default (slice 5),
         // making the field optional in a literal. Disambiguated from a method by the token after any
         // leading `#[...]` (`fn` opens a method; `pub`/`mut`/a name opens a field).

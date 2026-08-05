@@ -1,5 +1,5 @@
 // A library module exporting the type the entry's enum wraps positionally.
 
 pub struct User {
-    pub name: string
+    name: string
 }

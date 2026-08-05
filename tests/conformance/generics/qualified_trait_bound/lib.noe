@@ -3,7 +3,7 @@ pub trait Greets {
 }
 
 pub struct Person {
-    pub name: string
+    name: string
 
     impl Greets {
         pub fn hi(): string {

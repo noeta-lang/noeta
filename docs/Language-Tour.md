@@ -203,7 +203,7 @@ c.bump()
 echo c.n                                // 1
 ```
 
-A `class`'s fields are private by default; mark them `pub` to read from outside, `mut` to allow assignment. (A `struct`'s fields are always public — a value *is* its contents.) Fields can have defaults, and literals support shorthand (`Point { x, y }`) and spread (`Point { ...p, x: 9 }`).
+A `class`'s fields are private by default; mark them `pub` to read from outside, `mut` to allow assignment. (A `struct`'s fields are always public — a value *is* its contents — so writing `pub` on one is refused, E0077.) Fields can have defaults, and literals support shorthand (`Point { x, y }`) and spread (`Point { ...p, x: 9 }`).
 
 **Methods are private by default in every kind**, and `pub` puts one on the type's surface — so a `struct` with public data can still keep a helper to itself. A method implementing a `trait` must be written `pub`, because a trait is an outward contract. See [Method visibility](Structs-Classes-and-Enums#method-visibility).
 

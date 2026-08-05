@@ -59,7 +59,7 @@ pub enum NativeValue {
     /// are host/IO-shaped), so by-value marshalling matches the rest of this view.
     Extern(crate::ExternBox),
     /// A native-declared language **enum value** (native-extensibility S1) — the argument view of a
-    /// real [`Value::Enum`], so a dispatch may receive a variant a user matched or a native call
+    /// real `Value::Enum`, so a dispatch may receive a variant a user matched or a native call
     /// produced (`describe(color: Color)`). `enum_name` is the enum's **short** name (the runtime
     /// identity, matching how a value carries it), `variant` the case, and `fields` its positional
     /// payload deeply marshalled (empty for a fieldless/backed variant). The twin of
@@ -315,7 +315,7 @@ pub enum SigType {
     /// reflected as `dyn`.)
     Generic(&'static str, &'static [SigType]),
     /// A **trait associated-type projection** `Self::Name` (ExtBundle→ExtTrait convergence, slice 1b)
-    /// — the ABI form of the AST [`noeta_ast::TypeRef::AssocProjection`]. A native trait method names
+    /// — the ABI form of the AST `TypeRef::AssocProjection`. A native trait method names
     /// its element-relative return as `SigType::Assoc("Wide")`; the checker maps it onto the trait's
     /// [`ExtAssocType`] and, on a **concrete** receiver, resolves it through the same `trait_assoc`
     /// table a `.noe` `trait`'s `Self::Name` uses (slice 1a) — the type the implementing type's
@@ -1241,7 +1241,7 @@ pub struct ExtEnum {
     /// The **built-in directives** this enum carries (native type-declaration unification, Slice D) —
     /// the [`ExtEnum`] twin of [`ExtFielded::directives`], the same crosscutting channel. The only
     /// directive legal on an enum is [`ExtTypeDirective::Semantic`] (marking its fieldless variants as
-    /// role names → `semantic_enums`); [`Registry::validate`] refuses a struct/class-only directive
+    /// role names → `semantic_enums`); [`Registry::new`] refuses a struct/class-only directive
     /// here. Default empty.
     pub directives: &'static [ExtTypeDirective],
     /// The enum's **own documentation prose** (markdown), or empty — what the choice means, which
@@ -1364,7 +1364,7 @@ pub enum FieldedKind {
 ///
 /// Carried on the crosscutting [`ExtFielded::directives`] / [`ExtEnum::directives`] channel — one
 /// field per kind, never four parallel fields. The checker's `seed_ext_directives` pass translates
-/// each variant into its table write, and [`Registry::validate`] enforces which (kind, directive)
+/// each variant into its table write, and [`Registry::new`] enforces which (kind, directive)
 /// pairs are legal at assembly (the native analogue of the AST placement gate E0054), since a native
 /// type bypasses the source-level site check.
 ///
@@ -1397,7 +1397,7 @@ pub enum ExtTypeDirective {
     /// *facet* of an attribute: applying the role-bearing attribute to a declaration confers each
     /// tagged role on that declaration, surfaced by `roles_of()` as a `RoleBinding { target, role }`.
     /// Struct-only, and **only** on a type that also carries [`ExtTypeDirective::Attribute`] — the
-    /// role has nothing to attach to otherwise. [`Registry::validate`] enforces the coupling at
+    /// role has nothing to attach to otherwise. [`Registry::new`] enforces the coupling at
     /// assembly (the native analogue of the checker's E0031 role rules): each [`ExtRoleTag::enum_name`]
     /// must resolve to a `@semantic` enum (a native enum carrying [`ExtTypeDirective::Semantic`], or
     /// the built-in `Semantic` prelude enum), and its named variant must exist and be **fieldless**.
@@ -1413,7 +1413,7 @@ pub enum ExtTypeDirective {
     /// exactly like a `.noe` `@packed` struct's list. A *single* `@packed` value is always boxed (flat
     /// storage is a property of the *list*, keyed by construction-site span), so a native constructor
     /// returning a `NativeOut::Instance` yields the same boxed `Object` a source `Pt{..}` literal does.
-    /// [`Registry::validate`] enforces the native analogue of the checker's **E0038** all-packable-field
+    /// [`Registry::new`] enforces the native analogue of the checker's **E0038** all-packable-field
     /// rule: every [`ExtField::ty`] must be [`SigType::Int`]/[`SigType::Float`]/[`SigType::F32`]/
     /// [`SigType::Bool`], or a [`SigType::Named`] resolving to another `@packed` struct in the same unit
     /// set — anything heap-shaped (a `string`/`List`/class/enum/`dyn`) refuses to assemble.
@@ -1440,7 +1440,7 @@ pub enum PackedLayoutKind {
 /// `RoleTag { enum_name, variant }`. Both name a fieldless variant of a `@semantic` enum by the
 /// identity a role query and a materialized `role` value carry: the enum's qualified identity for a
 /// native `@semantic` enum, or the bare `"Semantic"` for the built-in prelude enum. Carried inside
-/// [`ExtTypeDirective::Role`]; [`Registry::validate`] resolves and checks each at assembly, and
+/// [`ExtTypeDirective::Role`]; [`Registry::new`] resolves and checks each at assembly, and
 /// [`Registry::native_roles`] projects it into `reflect::build`'s native-role table.
 #[derive(Debug, Clone, Copy)]
 pub struct ExtRoleTag {
@@ -1527,7 +1527,7 @@ pub struct ExtFielded {
     /// The **built-in directives** this type carries (native type-declaration unification, Slice D) —
     /// the `.noe` `Decorators` twin, uniform across native fielded + enum kinds. `seed_ext_directives`
     /// translates each into its `Symbols` insert (e.g. [`ExtTypeDirective::Validated`] →
-    /// `validated_types`); [`Registry::validate`] rejects a directive illegal for this type's
+    /// `validated_types`); [`Registry::new`] rejects a directive illegal for this type's
     /// [`FieldedKind`] (`@semantic` is enum-only, so it is refused here). Default empty.
     pub directives: &'static [ExtTypeDirective],
     /// The type's **own documentation prose** (markdown), or empty. The [`ExtTrait::doc`] analogue.
@@ -1603,7 +1603,7 @@ impl ExtFielded {
 
     /// Whether this fielded struct is usable as a `#[...]` data attribute — it carries
     /// [`ExtTypeDirective::Attribute`] (D2). Assembly guarantees such a type is `Struct`-kind
-    /// (a class carrying `@attribute` is rejected at [`Registry::validate`]), so a `true` here is a
+    /// (a class carrying `@attribute` is rejected at [`Registry::new`]), so a `true` here is a
     /// well-formed attribute whose fields are its construction contract. This is the fielded twin of
     /// an [`ExtAttribute`] existing, and the predicate `extension_attribute_types` reflects on so a
     /// native fielded `@attribute` materializes through the *same* manifest path as a data-only one.
@@ -1769,7 +1769,7 @@ pub struct ExtTraitMethod {
     ///
     /// [`BundleReceiver::Static`] is the third case (static-trait-methods arc): **no** receiver, the
     /// native spelling of `static fn m(…)` in a `.noe` trait. It reaches the checker through the
-    /// synthesized `TraitDecl`'s [`noeta_ast::FnDecl::is_static`], so a native trait's static method
+    /// synthesized `TraitDecl`'s `FnDecl::is_static`, so a native trait's static method
     /// is licensed and enforced by exactly the rules a `.noe` one is.
     pub receiver: BundleReceiver,
 }
@@ -2087,10 +2087,10 @@ pub struct TierRun<'a> {
 /// The **native tier runner** an extension registers for one of its [`ExtTier`]s — the code/text
 /// counterpart of [`ExtTier::handler`] (which is the *expression*-tier evaluator). Where `handler`
 /// names a Noeta function an `@<name> { … }` value block desugars into, a runner is a Rust fn
-/// pointer the CLI calls **in-process** to *drive* the tier: it receives the same [`CommandCtx`]
-/// driver an [`ExtCommand`] does (so it can `run_file`/load on the real host) plus the tier's
+/// pointer the CLI calls **in-process** to *drive* the tier: it receives the same [`crate::CommandCtx`]
+/// driver an [`crate::ExtCommand`] does (so it can `run_file`/load on the real host) plus the tier's
 /// activated roots ([`TierRun`]), and returns the process exit code (0 ok, 1 program error, 2 setup
-/// failure) exactly like [`ExtCommand::run`].
+/// failure) exactly like [`crate::ExtCommand::run`].
 ///
 /// This is the seam that lets `noeta test`/`bench`/`doc` stop being hardcoded clap verbs and become
 /// registry-dispatched the same way a program-declared `@tier(name) fn runner` and an expression
@@ -2401,7 +2401,7 @@ pub trait Extension: Sync {
     /// The extension's first-class **classes** (native-extensibility S2) — real reference-type
     /// language classes (identity, destructor, fields, cycle participation). Default empty; seeded
     /// eagerly into the checker's symbol tables at prelude time by qualified identity. Every entry
-    /// must be [`FieldedKind::Class`] (checked by [`Registry::validate`]).
+    /// must be [`FieldedKind::Class`] (checked by [`Registry::new`]).
     fn classes(&self) -> &'static [ExtClass] {
         &[]
     }
@@ -2410,7 +2410,7 @@ pub trait Extension: Sync {
     /// no identity/destructor). The value-semantics twin of [`Extension::classes`]; both hooks
     /// produce the shared [`ExtFielded`] type, distinguished by [`ExtFielded::kind`]. Default empty;
     /// seeded eagerly alongside classes at prelude time. Every entry must be [`FieldedKind::Struct`]
-    /// (checked by [`Registry::validate`]).
+    /// (checked by [`Registry::new`]).
     fn structs(&self) -> &'static [ExtStruct] {
         &[]
     }
@@ -2463,7 +2463,7 @@ pub trait Extension: Sync {
     /// capability-broker seam). Default empty — most extensions provide none.
     ///
     /// A capability is a service one extension exposes to another as a **trait object**, reached at
-    /// run time by trait type via [`NativeCtx::capability`] / [`capability`]. It generalizes the
+    /// run time by trait type via [`crate::NativeCtx::capability`] / [`crate::capability`]. It generalizes the
     /// hardcoded cross-extension seams (`std.tracing`'s context stack, the reactive graph) into one
     /// mechanism, so a new collaboration between extensions — including an out-of-tree package and
     /// core — needs neither a new `NativeCtx` method nor either side naming the other's types. See
@@ -2490,12 +2490,12 @@ pub struct ExtCapability {
     /// cell.
     pub state_key: &'static str,
     /// Initializer for that state on first access — the same `init` the provider passes to
-    /// [`NativeCtx::state`], so reaching the engine via a module dispatch or via a capability yields
+    /// [`crate::NativeCtx::state`], so reaching the engine via a module dispatch or via a capability yields
     /// the *same* cell regardless of which happened first.
     pub init: fn() -> Box<dyn std::any::Any>,
     /// Build the erased trait-object handle from the backing state: returns a boxed
     /// `Box<dyn Trait>` (a concrete, sized fat pointer) type-erased as `Box<dyn Any>`, which
-    /// [`capability`] recovers by a safe `downcast`. The handle typically holds a clone of `state`
+    /// [`crate::capability`] recovers by a safe `downcast`. The handle typically holds a clone of `state`
     /// so it can borrow the engine per-call and release before re-entry.
     pub build: fn(crate::ExtState) -> Box<dyn std::any::Any>,
 }
@@ -2615,7 +2615,7 @@ pub enum UseKind {
 
 impl Registry {
     /// Assemble a registry from its complete unit list, validating uniqueness (a violation is a
-    /// `panic` — a mis-assembled binary must not start; see [`Registry::validate`]).
+    /// `panic` — a mis-assembled binary must not start; [`Registry::try_new`] is the non-panicking twin).
     pub fn new(units: Vec<&'static (dyn Extension + Sync)>) -> Registry {
         match Registry::try_new(units) {
             Ok(registry) => registry,
@@ -3040,7 +3040,7 @@ impl Registry {
     }
 
     /// Route a **trait default-body** method call to the trait's shared ctx dispatch
-    /// (ExtBundle→ExtTrait convergence, slice 2) — the trait twin of [`Registry::dispatch_bundle_method`].
+    /// (ExtBundle→ExtTrait convergence, slice 2) — the trait twin of the retired `dispatch_bundle_method`.
     /// The checker resolved this call span to a `(trait, method)` route because the method is defaulted,
     /// the trait carries a native [`ExtTrait::dispatch`], and the implementing type provides no override.
     /// `trait_q` is the trait's **qualified identity** (`fx.Gadget`); the receiver rides as slot 0.
@@ -3731,9 +3731,9 @@ pub fn default_registry() -> Option<&'static Registry> {
 /// would seed std-only into every composed binary and make its `install` panic.
 static DEFAULT_PROVIDER: OnceLock<fn() -> Vec<&'static (dyn Extension + Sync)>> = OnceLock::new();
 
-/// Register the [`DEFAULT_PROVIDER`] — the units to fall back to when nothing was explicitly
+/// Register the `DEFAULT_PROVIDER` — the units to fall back to when nothing was explicitly
 /// installed. Idempotent and first-registration-wins; it does not install anything (see
-/// [`DEFAULT_PROVIDER`]), so it can never race an assembling binary's explicit [`install`].
+/// `DEFAULT_PROVIDER`), so it can never race an assembling binary's explicit [`install`].
 ///
 /// Called from a link-time initializer in the unit-declaring crate, not from application code.
 pub fn set_default_provider(provider: fn() -> Vec<&'static (dyn Extension + Sync)>) {
@@ -3747,10 +3747,10 @@ pub fn set_default_provider(provider: fn() -> Vec<&'static (dyn Extension + Sync
 /// not link the crate that declares the units (audit-6 finding 2), so the units reach this registry
 /// from outside: an assembling binary installs its exact set at entry
 /// (`noeta_cli::run_cli`, `noeta-runner`, `noeta-embed`), and otherwise the
-/// [`DEFAULT_PROVIDER`] registered by the unit-declaring crate is installed lazily, here.
+/// `DEFAULT_PROVIDER` registered by the unit-declaring crate is installed lazily, here.
 ///
 /// That fallback is what makes seeding **structural rather than remembered** (within the linkage
-/// scope noted on [`DEFAULT_PROVIDER`]). It used to be neither:
+/// scope noted on `DEFAULT_PROVIDER`). It used to be neither:
 /// this function panicked unless something had already seeded, which an assembling binary does but a
 /// *test* binary does not — so a crate's tests passed only when some sibling test happened to run
 /// first through the lazily-seeding `noeta-stdlib` facade. Different scheduling, different set of
@@ -3804,10 +3804,9 @@ pub fn install_default(provider: fn() -> Vec<&'static (dyn Extension + Sync)>) {
     DEFAULT.get_or_init(|| Registry::new(provider()));
 }
 
-/// The uniqueness sweep behind [`Registry::new`] — O(n²) over a handful of units.
 /// The built-in `Semantic` prelude enum's variant names (native type-declaration unification, Slice
 /// D3). Mirrors `noeta_ast::reflect::SEMANTIC_VARIANTS` — `noeta-ext-abi` is dep-free of `noeta-ast`,
-/// so [`Registry::validate`]'s native `@role` check keeps its own copy to resolve a tag naming the
+/// so `validate`'s native `@role` check keeps its own copy to resolve a tag naming the
 /// built-in `Semantic` vocabulary (every variant fieldless, so a named one is valid iff it appears
 /// here). If the prelude list changes, update this mirror.
 const BUILTIN_SEMANTIC_VARIANTS: &[&str] = &[
@@ -3904,6 +3903,9 @@ fn packable_field(units: &[&'static (dyn Extension + Sync)], ty: &SigType) -> bo
     }
 }
 
+/// The uniqueness sweep behind [`Registry::new`] — O(n²) over a handful of units. Private:
+/// every caller reaches it through [`Registry::new`] / [`Registry::try_new`], which is what the
+/// public docs point at.
 fn validate(units: &[&'static (dyn Extension + Sync)]) -> Result<(), String> {
     for (i, unit) in units.iter().enumerate() {
         for other in &units[i + 1..] {

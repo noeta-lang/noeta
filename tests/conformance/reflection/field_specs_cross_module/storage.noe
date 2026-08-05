@@ -2,6 +2,6 @@
 // field schema under — is the qualified `app.storage.Todo`.
 
 pub struct Todo {
-    pub id: int
-    pub title: string
+    id: int
+    title: string
 }
