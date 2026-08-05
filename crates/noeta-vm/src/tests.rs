@@ -49,8 +49,20 @@ fn run(src: &str) -> RunResult {
     let parsed = parse(&source, &lexed.tokens);
     VmBackend::new()
         .try_run(&parsed.program)
-        .expect("program should be in the M1.0 subset")
+        .expect(COVERAGE_REGRESSION)
 }
+
+/// What every compile/run `expect` in this suite says when it fires.
+///
+/// `compile` and `try_run` still return a `Result`, but there is no "supported subset" left for
+/// a program to fall outside of: the VM cleared the **Thrust-A gate** — it compiles every
+/// parse-clean case of the comparable corpus — and `noeta-conformance`'s `corpus.rs` asserts
+/// that floor never regresses. An [`noeta_compiler::Unsupported`] reaching one of these
+/// therefore means the VM's coverage went *backwards*; its own doc calls that an internal
+/// invariant break. The fixture is the messenger — investigate the compiler rather than
+/// rewriting a perfectly good test program around it.
+const COVERAGE_REGRESSION: &str =
+    "a parse-clean program failed to compile — the VM's coverage regressed";
 
 /// Run `f` on a deep worker stack — for a test whose front-end recursion (checker
 /// `check`/`synth`, the reuse/drops passes) out-recurses libtest's ~2 MiB debug test thread;
@@ -650,14 +662,15 @@ fn shapes_carry_packed_key_capability() {
     assert!(!flag("Plain"), "a non-packed struct is not key-capable");
 }
 
-/// Compile a source program to a [`Module`] (or panic if it's outside the VM subset), for the
-/// tests that need to drive `run_module`/`run_module_jit` directly.
+/// Compile a source program to a [`Module`] for the tests that need to drive
+/// `run_module`/`run_module_jit` directly. A failure here is a compiler coverage regression
+/// (see [`COVERAGE_REGRESSION`]), never a fixture the VM is not expected to reach.
 #[cfg(feature = "jit")]
 fn compile_module(src: &str) -> Module {
     let source = Source::new(SourceId::FIRST, "test.noe", src);
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
-    compile(&parsed.program).expect("program should be in the M1.0 subset")
+    compile(&parsed.program).expect(COVERAGE_REGRESSION)
 }
 
 /// P-CALL S1 lock test: every offset [`frame_layout`] reports must locate the real `Frame` field,
@@ -1275,7 +1288,7 @@ fn run_with_collector(src: &str, mode: noeta_value::CollectorMode) -> RunResult 
     let source = Source::new(SourceId::FIRST, "test.noe", src);
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
-    let module = compile(&parsed.program).expect("program should be in the M1.0 subset");
+    let module = compile(&parsed.program).expect(COVERAGE_REGRESSION);
     VmBackend::new().run_module_with_collector(&module, mode)
 }
 
@@ -2228,8 +2241,10 @@ fn next_id_is_a_deterministic_counter() {
 
 #[test]
 fn capture_free_closure_inside_a_method_is_supported() {
-    // The `fn(it) => it.price * it.qty` closure captures nothing enclosing, so it compiles
-    // even though it is defined inside a method (true upvalue capture stays unsupported).
+    // The `fn(it) => it.price * it.qty` closure captures nothing enclosing — the simplest
+    // shape a closure in a method body can have. Capture itself works here too (the compiler
+    // boxes an enclosing local into a cell and threads it through `MakeClosure`); this pins the
+    // capture-free case, which reaches the method's `self` without any upvalue at all.
     let r = run(
         "struct Item { price: float qty: int }\nclass Cart {\n  items: List<Item>\n  pub fn new(items: List<Item>): Cart { return Cart { items: items }; }\n  pub fn total(): float { return self.items.map(fn(it) => it.price * it.qty).sum(); }\n}\nc = Cart.new([Item { price: 2.5, qty: 4 }, Item { price: 1.0, qty: 3 }]);\necho c.total();\n",
     );
@@ -2648,7 +2663,7 @@ fn worker_teardown_reaps_stranded_reference_cycles() {
     let source = Source::new(SourceId::FIRST, "test.noe", src);
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
-    let module = Arc::new(compile(&parsed.program).expect("in subset"));
+    let module = Arc::new(compile(&parsed.program).expect(COVERAGE_REGRESSION));
     let proto = module
         .protos
         .iter()
@@ -2715,7 +2730,7 @@ fn a_worker_ships_its_program_output_home() {
     let source = Source::new(SourceId::FIRST, "test.noe", src);
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
-    let module = Arc::new(compile(&parsed.program).expect("in subset"));
+    let module = Arc::new(compile(&parsed.program).expect(COVERAGE_REGRESSION));
     let proto = module
         .protos
         .iter()
@@ -2787,7 +2802,7 @@ fn a_cancelled_worker_reports_cancelled_and_frees_its_heap() {
     let source = Source::new(SourceId::FIRST, "test.noe", src);
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
-    let module = Arc::new(compile(&parsed.program).expect("in subset"));
+    let module = Arc::new(compile(&parsed.program).expect(COVERAGE_REGRESSION));
     let proto = module
         .protos
         .iter()
@@ -2898,7 +2913,7 @@ fn a_worker_arms_its_executor_against_its_own_cancellation() {
     let source = Source::new(SourceId::FIRST, "test.noe", src);
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
-    let module = Arc::new(compile(&parsed.program).expect("in subset"));
+    let module = Arc::new(compile(&parsed.program).expect(COVERAGE_REGRESSION));
     let proto = module
         .protos
         .iter()
@@ -2974,7 +2989,7 @@ fn a_cancelled_top_level_run_stops_and_frees_its_heap() {
     let source = Source::new(SourceId::FIRST, "test.noe", src);
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
-    let module = compile(&parsed.program).expect("in subset");
+    let module = compile(&parsed.program).expect(COVERAGE_REGRESSION);
     let before = noeta_value::live_count();
     let out = VmBackend::new().run_module_with(
         &module,
@@ -3028,7 +3043,7 @@ fn native_code_observes_a_cancellation_request_at_a_loop_header() {
         let source = Source::new(SourceId::FIRST, "test.noe", src);
         let lexed = lex(&source);
         let parsed = parse(&source, &lexed.tokens);
-        let module = compile(&parsed.program).expect("in subset");
+        let module = compile(&parsed.program).expect(COVERAGE_REGRESSION);
         // Ask for the stop once the loop is definitely running natively.
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(150));
@@ -3072,7 +3087,7 @@ fn an_ordinary_run_arms_no_cancellation_flag() {
     let source = Source::new(SourceId::FIRST, "test.noe", src);
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
-    let module = compile(&parsed.program).expect("in subset");
+    let module = compile(&parsed.program).expect(COVERAGE_REGRESSION);
     let mut vm = Vm::load(
         &module,
         Box::new(noeta_stdlib::SandboxHost::new()),
