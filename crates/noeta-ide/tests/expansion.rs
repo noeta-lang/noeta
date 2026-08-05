@@ -31,7 +31,7 @@ fn spec_path(ctx: &DirectiveCtx) -> String {
 fn expand_ok(ctx: &DirectiveCtx) -> Result<Expansion, ExpansionError> {
     Ok(Expansion {
         source: format!(
-            "fn from_{}(): string {{ return self.base; }}\n",
+            "pub fn from_{}(): string {{ return self.base; }}\n",
             ctx.args[0]
         ),
         reads: Vec::new(),
@@ -53,7 +53,7 @@ fn expand_unchecked(_: &DirectiveCtx) -> Result<Expansion, ExpansionError> {
 fn expand_reads(ctx: &DirectiveCtx) -> Result<Expansion, ExpansionError> {
     Ok(Expansion {
         source: format!(
-            "fn from_{}(): string {{ return self.base; }}\n",
+            "pub fn from_{}(): string {{ return self.base; }}\n",
             ctx.args[0]
         ),
         reads: vec![spec_path(ctx)],
@@ -85,7 +85,7 @@ fn expand_opens(ctx: &DirectiveCtx) -> Result<Expansion, ExpansionError> {
     })?;
     Ok(Expansion {
         source: format!(
-            "fn spec_len(): int {{ return {}; }}\n",
+            "pub fn spec_len(): int {{ return {}; }}\n",
             text.trim().chars().count()
         ),
         reads,

@@ -477,7 +477,9 @@ fn expand_fx_spec(ctx: &DirectiveCtx) -> Result<Expansion, ExpansionError> {
     let spec = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut source = String::new();
     for name in spec.lines().map(str::trim).filter(|l| !l.is_empty()) {
-        source.push_str(&format!("fn {name}(): int {{ return fx.double(21); }}\n"));
+        source.push_str(&format!(
+            "pub fn {name}(): int {{ return fx.double(21); }}\n"
+        ));
     }
     Ok(Expansion {
         source,
@@ -493,7 +495,7 @@ fn expand_fx_shape(ctx: &DirectiveCtx) -> Result<Expansion, ExpansionError> {
     let mut source = String::new();
     for (name, spelling) in &ctx.fields {
         source.push_str(&format!(
-            "fn {name}_type(): string {{ return \"{spelling}\"; }}\n"
+            "pub fn {name}_type(): string {{ return \"{spelling}\"; }}\n"
         ));
     }
     Ok(Expansion {
@@ -975,8 +977,8 @@ fn composed_toolchain_end_to_end() {
                 .and(predicate::str::contains("struct PetStore {"))
                 // …one accessor per line of the spec, so the printed source is a function of the
                 // spec file: this is the CI diff that makes a spec change reviewable.
-                .and(predicate::str::contains("fn list_pets(): int"))
-                .and(predicate::str::contains("fn get_pet(): int")),
+                .and(predicate::str::contains("pub fn list_pets(): int"))
+                .and(predicate::str::contains("pub fn get_pet(): int")),
         )
         .stderr(predicate::str::contains("expanded 1 declaration"))
         .get_output()
@@ -1011,10 +1013,10 @@ fn composed_toolchain_end_to_end() {
         .stdout(
             predicate::str::contains("// Order ⟨@fx_shape⟩")
                 .and(predicate::str::contains(
-                    r#"fn id_type(): string { return "int"; }"#,
+                    r#"pub fn id_type(): string { return "int"; }"#,
                 ))
                 .and(predicate::str::contains(
-                    r#"fn tags_type(): string { return "List<string>"; }"#,
+                    r#"pub fn tags_type(): string { return "List<string>"; }"#,
                 )),
         )
         .stderr(predicate::str::contains("expanded 1 declaration"));
