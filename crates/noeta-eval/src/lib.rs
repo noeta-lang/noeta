@@ -7782,7 +7782,7 @@ mod tests {
         // `a + b` on a class implementing `Add` dispatches to its `add` method (M1.8); the VM
         // reproduces this identically (see noeta-vm), guarded by the differential oracle.
         let out = run(
-            "class Money {\n  amount: int\n  currency: string\n  fn new(a: int, c: string): Money { return Money { amount: a, currency: c }; }\n  impl Add {\n    fn add(other: Money): Money { return Money { amount: self.amount + other.amount, currency: self.currency }; }\n  }\n}\na = Money.new(5, \"USD\");\nb = Money.new(3, \"USD\");\nt = a + b;\necho t.amount;\necho t.currency;\n",
+            "class Money {\n  amount: int\n  currency: string\n  pub fn new(a: int, c: string): Money { return Money { amount: a, currency: c }; }\n  impl Add {\n    pub fn add(other: Money): Money { return Money { amount: self.amount + other.amount, currency: self.currency }; }\n  }\n}\na = Money.new(5, \"USD\");\nb = Money.new(3, \"USD\");\nt = a + b;\necho t.amount;\necho t.currency;\n",
         );
         assert_eq!(out.stdout, "8\nUSD\n");
         assert_eq!(out.exit_code, 0);
@@ -7793,7 +7793,7 @@ mod tests {
         // `impl Equatable` routes `==`/`!=` to `eq` (here ignoring `tag`); `!=` negates. The VM
         // reproduces this identically (see noeta-vm), guarded by the differential oracle.
         let out = run(
-            "class M {\n  amount: int\n  tag: int\n  fn new(a: int, t: int): M { return M { amount: a, tag: t }; }\n  impl Equatable {\n    fn eq(other: M): bool { return self.amount == other.amount; }\n  }\n}\na = M.new(5, 1);\nb = M.new(5, 2);\necho a == b;\necho a != b;\necho a == M.new(9, 1);\n",
+            "class M {\n  amount: int\n  tag: int\n  pub fn new(a: int, t: int): M { return M { amount: a, tag: t }; }\n  impl Equatable {\n    pub fn eq(other: M): bool { return self.amount == other.amount; }\n  }\n}\na = M.new(5, 1);\nb = M.new(5, 2);\necho a == b;\necho a != b;\necho a == M.new(9, 1);\n",
         );
         assert_eq!(out.stdout, "true\nfalse\nfalse\n");
         assert_eq!(out.exit_code, 0);
@@ -7804,7 +7804,7 @@ mod tests {
         // `impl Comparable` routes `< <= > >=` to `compare` (delegating to the built-in primitive
         // `.compare()`); the returned `Ordering` is mapped to each operator's bool.
         let out = run(
-            "class M {\n  amount: int\n  fn new(a: int): M { return M { amount: a }; }\n  impl Comparable {\n    fn compare(other: M): Ordering { return self.amount.compare(other.amount); }\n  }\n}\na = M.new(5);\nb = M.new(8);\necho a < b;\necho a > b;\necho a <= b;\necho a >= b;\n",
+            "class M {\n  amount: int\n  pub fn new(a: int): M { return M { amount: a }; }\n  impl Comparable {\n    pub fn compare(other: M): Ordering { return self.amount.compare(other.amount); }\n  }\n}\na = M.new(5);\nb = M.new(8);\necho a < b;\necho a > b;\necho a <= b;\necho a >= b;\n",
         );
         assert_eq!(out.stdout, "true\nfalse\ntrue\nfalse\n");
         assert_eq!(out.exit_code, 0);
@@ -7817,7 +7817,7 @@ mod tests {
         // routes to `impl Display`; `==` routes to `impl Equatable`. The VM reproduces this (see
         // noeta-vm), guarded by the differential oracle.
         let out = run(
-            "enum Color {\n  Red;\n  Green;\n  fn label(): string { return match self { Color.Red => \"r\", Color.Green => \"g\" }; }\n  fn first(): Color { return Color.Red; }\n  impl Display { fn to_string(): string { return \"<${self.label()}>\"; } }\n  impl Equatable { fn eq(other: Color): bool { return true; } }\n}\necho Color.Green.label();\necho Color.first();\necho Color.Red == Color.Green;\necho Color.Red != Color.Green;\n",
+            "enum Color {\n  Red;\n  Green;\n  pub fn label(): string { return match self { Color.Red => \"r\", Color.Green => \"g\" }; }\n  pub fn first(): Color { return Color.Red; }\n  impl Display { pub fn to_string(): string { return \"<${self.label()}>\"; } }\n  impl Equatable { pub fn eq(other: Color): bool { return true; } }\n}\necho Color.Green.label();\necho Color.first();\necho Color.Red == Color.Green;\necho Color.Red != Color.Green;\n",
         );
         assert_eq!(out.stdout, "g\n<r>\ntrue\nfalse\n");
         assert_eq!(out.exit_code, 0);
@@ -7838,7 +7838,7 @@ mod tests {
     fn derive_comparable_orders_fields_lexicographically() {
         // `@derive(Comparable)` synthesizes structural ordering: compare `x`, then `y`.
         let out = run(
-            "@derive(Comparable)\nclass P {\n  x: int\n  y: int\n  fn new(x: int, y: int): P { return P { x: x, y: y }; }\n}\na = P.new(1, 2);\nb = P.new(1, 5);\nc = P.new(1, 2);\necho a < b;\necho a > b;\necho a <= c;\necho a >= c;\n",
+            "@derive(Comparable)\nclass P {\n  x: int\n  y: int\n  pub fn new(x: int, y: int): P { return P { x: x, y: y }; }\n}\na = P.new(1, 2);\nb = P.new(1, 5);\nc = P.new(1, 2);\necho a < b;\necho a > b;\necho a <= c;\necho a >= c;\n",
         );
         assert_eq!(out.stdout, "true\nfalse\ntrue\ntrue\n");
     }
@@ -7847,7 +7847,7 @@ mod tests {
     fn comparison_on_non_comparable_object_still_errors() {
         // Without `@derive(Comparable)` or an `impl`, an object has no order: `<` is an error.
         let out = run(
-            "class P {\n  x: int\n  fn new(x: int): P { return P { x: x }; }\n}\necho P.new(1) < P.new(2);\n",
+            "class P {\n  x: int\n  pub fn new(x: int): P { return P { x: x }; }\n}\necho P.new(1) < P.new(2);\n",
         );
         assert_eq!(out.exit_code, 1);
         assert_eq!(out.diagnostics[0].code, DiagnosticCode::TypeMismatch);
@@ -8222,25 +8222,25 @@ mod tests {
 
     #[test]
     fn class_constructor_and_instance_method() {
-        let src = "class Box { v: int fn new(v: int): Box { return Box { v: v }; } fn doubled(): int { return self.v * 2; } } b = Box.new(21); echo b.doubled(); echo b.v;";
+        let src = "class Box { pub v: int pub fn new(v: int): Box { return Box { v: v }; } pub fn doubled(): int { return self.v * 2; } } b = Box.new(21); echo b.doubled(); echo b.v;";
         assert_eq!(run(src).stdout, "42\n21\n");
     }
 
     #[test]
     fn method_takes_arguments_alongside_fields() {
-        let src = "class Counter { base: int fn new(base: int): Counter { return Counter { base: base }; } fn plus(n: int): int { return self.base + n; } } c = Counter.new(10); echo c.plus(5);";
+        let src = "class Counter { base: int pub fn new(base: int): Counter { return Counter { base: base }; } pub fn plus(n: int): int { return self.base + n; } } c = Counter.new(10); echo c.plus(5);";
         assert_eq!(run(src).stdout, "15\n");
     }
 
     #[test]
     fn structural_update_overrides_one_field() {
-        let src = "class M { amount: int currency: string fn new(a: int, c: string): M { return M { amount: a, currency: c }; } } a = M.new(500, \"USD\"); b = M { amount: 300, ...a }; echo b.amount; echo b.currency; echo a.amount;";
+        let src = "class M { pub amount: int pub currency: string pub fn new(a: int, c: string): M { return M { amount: a, currency: c }; } } a = M.new(500, \"USD\"); b = M { amount: 300, ...a }; echo b.amount; echo b.currency; echo a.amount;";
         assert_eq!(run(src).stdout, "300\nUSD\n500\n");
     }
 
     #[test]
     fn missing_field_is_an_error() {
-        let result = run("class P { x: int y: int } p = P { x: 1 };");
+        let result = run("class P { pub x: int y: int } p = P { x: 1 };");
         assert_eq!(result.exit_code, 1);
         assert_eq!(result.diagnostics[0].code, DiagnosticCode::MissingField);
     }
@@ -8249,13 +8249,13 @@ mod tests {
     fn destructors_run_in_reverse_declaration_order_at_program_end() {
         // A `destruct` block runs when the last reference to an instance drops; top-level
         // bindings are destroyed at program end in reverse declaration order.
-        let src = "class R { name: string fn new(name: string): R { return R { name: name }; } destruct { echo \"close ${self.name}\"; } } a = R.new(\"a\"); b = R.new(\"b\"); echo \"body\";";
+        let src = "class R { name: string pub fn new(name: string): R { return R { name: name }; } destruct { echo \"close ${self.name}\"; } } a = R.new(\"a\"); b = R.new(\"b\"); echo \"body\";";
         assert_eq!(run(src).stdout, "body\nclose b\nclose a\n");
     }
 
     #[test]
     fn reassignment_destroys_the_displaced_instance() {
-        let src = "class R { name: string fn new(name: string): R { return R { name: name }; } destruct { echo \"close ${self.name}\"; } } mut x = R.new(\"first\"); x = R.new(\"second\"); echo \"mid\";";
+        let src = "class R { name: string pub fn new(name: string): R { return R { name: name }; } destruct { echo \"close ${self.name}\"; } } mut x = R.new(\"first\"); x = R.new(\"second\"); echo \"mid\";";
         assert_eq!(run(src).stdout, "close first\nmid\nclose second\n");
     }
 
