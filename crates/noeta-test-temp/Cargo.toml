@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+# Internal: not a contract crate, so it never goes to crates.io. Only the `*-abi` crates
+# carry a stability promise (docs/Extension-Compatibility.md).
+publish = false
 
 # Test-only, and depends on nothing: the one place a test fixture path is built, so no two processes
 # can share one. Pulled in as a `dev-dependency` by every crate whose tests touch the disk.

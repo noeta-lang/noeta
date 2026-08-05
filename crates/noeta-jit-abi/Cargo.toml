@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+# Internal: not a contract crate, so it never goes to crates.io. Only the `*-abi` crates
+# carry a stability promise (docs/Extension-Compatibility.md).
+publish = false
 
 # The cranelift-free ABI contract shared between the JIT/AOT codegen (`noeta-jit`) and the runtime
 # that executes native bodies (`noeta-vm`'s helpers + AOT dispatch binding). Splitting it out lets an
