@@ -8004,7 +8004,7 @@ mod tests {
 
     #[test]
     fn if_else_chain() {
-        let src = "fn classify(n) { if n == 0 { return \"zero\"; } else if n == 1 { return \"one\"; } else { return \"many\"; } } echo classify(0); echo classify(1); echo classify(7);";
+        let src = "fn classify(n: int): string { if n == 0 { return \"zero\"; } else if n == 1 { return \"one\"; } else { return \"many\"; } } echo classify(0); echo classify(1); echo classify(7);";
         assert_eq!(run(src).stdout, "zero\none\nmany\n");
     }
 
@@ -8050,7 +8050,7 @@ mod tests {
     #[test]
     fn recursion_with_if() {
         assert_eq!(
-            run("fn fact(n) { if n <= 1 { return 1; } return n * fact(n - 1); } echo fact(5);")
+            run("fn fact(n: int): int { if n <= 1 { return 1; } return n * fact(n - 1); } echo fact(5);")
                 .stdout,
             "120\n"
         );
@@ -8124,7 +8124,7 @@ mod tests {
 
     #[test]
     fn match_wildcard_and_literals() {
-        let src = "fn name(n) { return match n { 0 => \"zero\", 1 => \"one\", _ => \"many\" }; } echo name(0); echo name(5);";
+        let src = "fn name(n: int): string { return match n { 0 => \"zero\", 1 => \"one\", _ => \"many\" }; } echo name(0); echo name(5);";
         assert_eq!(run(src).stdout, "zero\nmany\n");
     }
 
@@ -8152,7 +8152,7 @@ mod tests {
     #[test]
     fn functions_and_calls() {
         assert_eq!(
-            run("fn add(a, b) { return a + b; } echo add(2, 3);").stdout,
+            run("fn add(a: int, b: int): int { return a + b; } echo add(2, 3);").stdout,
             "5\n"
         );
     }
@@ -8170,7 +8170,7 @@ mod tests {
         // Forward references through the shared global scope work; true self-recursion
         // is exercised once `if` (control flow) lands in Slice 3.
         assert_eq!(
-            run("fn dbl(n) { return n * 2; } fn quad(n) { return dbl(dbl(n)); } echo quad(3);")
+            run("fn dbl(n: int): int { return n * 2; } fn quad(n: int): int { return dbl(dbl(n)); } echo quad(3);")
                 .stdout,
             "12\n"
         );
@@ -8179,11 +8179,11 @@ mod tests {
     #[test]
     fn pipeline_threads_value_as_first_argument() {
         assert_eq!(
-            run("fn inc(n) { return n + 1; } echo 5 |> inc |> inc;").stdout,
+            run("fn inc(n: int): int { return n + 1; } echo 5 |> inc |> inc;").stdout,
             "7\n"
         );
         assert_eq!(
-            run("fn add(a, b) { return a + b; } echo 5 |> add(10);").stdout,
+            run("fn add(a: int, b: int): int { return a + b; } echo 5 |> add(10);").stdout,
             "15\n"
         );
     }
@@ -8204,7 +8204,7 @@ mod tests {
 
     #[test]
     fn arity_mismatch_is_an_error() {
-        let result = run("fn one(a) { return a; } echo one(1, 2);");
+        let result = run("fn one(a: int): int { return a; } echo one(1, 2);");
         assert_eq!(result.diagnostics[0].code, DiagnosticCode::TypeMismatch);
     }
 
@@ -8317,7 +8317,7 @@ mod tests {
 
     #[test]
     fn coalesce_round_trip_through_option() {
-        let src = "fn find(b): int { if b { return some(10); } return none; } \
+        let src = "fn find(b: bool): Option<int> { if b { return some(10); } return none; } \
                    echo find(true) ?? -1; echo find(false) ?? -1;";
         assert_eq!(run(src).stdout, "10\n-1\n");
     }
@@ -8372,7 +8372,7 @@ mod tests {
 
     #[test]
     fn result_and_option_participate_in_match() {
-        let src = "fn run_it(b): int { if b { return Ok(1); } return Err(\"no\"); } \
+        let src = "fn run_it(b: bool): Result<int, string> { if b { return Ok(1); } return Err(\"no\"); } \
                    echo match run_it(true) { Ok(n) => \"ok ${n}\", Err(e) => \"err ${e}\" }; \
                    echo match run_it(false) { Ok(n) => \"ok ${n}\", Err(e) => \"err ${e}\" };";
         assert_eq!(run(src).stdout, "ok 1\nerr no\n");
