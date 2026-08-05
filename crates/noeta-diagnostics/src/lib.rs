@@ -12,6 +12,21 @@ use std::fmt;
 /// A stable, catalog-assigned diagnostic code. The numeric code is part of the
 /// language's contract (conformance cases reference it as `E0001`), so existing
 /// variants must never be renumbered — only appended to.
+///
+/// **Append at the tail. Never declare a variant in the middle, however well it reads there.**
+/// This enum is on the `.noeb` wire: `Module::diagnostics` is a `Vec<Diagnostic>` and a
+/// `Diagnostic` carries one of these, and postcard encodes a variant by its *declaration index*.
+/// Appending is free; inserting shifts every discriminant after it. An artifact written by the
+/// previous build then decodes to the **wrong diagnostic, silently** — every code's payload has
+/// the same shape (`severity`, `span`, `message`, `labels`, `help`), so nothing about the stream
+/// looks wrong and the tail stays in sync. It reads clean and means something else.
+///
+/// This is not hypothetical: `PrivateMethod` (E0076) was first declared beside its twin
+/// `PrivateField`, which moved roughly half the catalogue and was caught only by
+/// `noeta-bundle`'s `module_layout_digest` gate. It was moved here instead of bumping
+/// `FORMAT_VERSION` around the break — not creating the break dominates versioning it, and
+/// leaves no artifact to invalidate. Semantic neighbours belong in the docs and in
+/// [`DiagnosticCode::code`], not in the declaration order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum DiagnosticCode {

@@ -204,24 +204,7 @@ pub const MAGIC: &[u8; 4] = b"NOEB";
 /// reflected tag was rejected at `attributes_of::<T>()` and answered at `field_specs_of::<T>()`, and
 /// `roles_of::<E>()` had no register at all. One name-string operand is what `Op::FieldSpecsOf`,
 /// `Op::VariantsOf` and `Op::Construct` already take; the two channels fill it identically.
-///
-/// Bumped to 19 by the method-visibility arc: `noeta_diagnostics::DiagnosticCode` — carried by
-/// `Module::diagnostics` (a `Vec<Diagnostic>`, one per compiled chunk) — gained
-/// `DiagnosticCode::PrivateMethod` (E0076), and it was declared *in place*, beside its twin
-/// `PrivateField`, rather than appended at the end of the catalogue. Appending a variant is not a
-/// wire break, because postcard writes a variant's declaration index; inserting one shifts every
-/// discriminant after it, which here is roughly half the catalogue. A version-18 artifact carrying
-/// any code declared after `PrivateField` therefore decodes to the wrong diagnostic — silently, since
-/// the payload shape (`severity`, `span`, `message`, `labels`, `help`) is identical for every code, so
-/// nothing about the stream looks wrong and the tail stays in sync. That is the whole failure mode
-/// this pair exists to make loud: the artifact reads clean and *means* something else.
-///
-/// The variant was placed there deliberately and stays there: `PrivateMethod` is the exact twin of
-/// `PrivateField` — one rule, `method_visible` written as the same three clauses as `field_visible` —
-/// and the catalogue is read by people far more often than it is decoded by a previous build. Paying
-/// one version bump to keep the two codes adjacent is the right trade; append-only ordering would
-/// make the enum a history of when things were added rather than a map of what the language refuses.
-pub const FORMAT_VERSION: u8 = 19;
+pub const FORMAT_VERSION: u8 = 18;
 
 /// The SHA-256 of one canonical [`Module`]'s postcard encoding — the *other* half of
 /// [`FORMAT_VERSION`], and the thing that makes the changelog above enforceable.
@@ -245,7 +228,7 @@ pub const FORMAT_VERSION: u8 = 19;
 /// pair exists to prevent. The test's message says so; this doc says so; the changelog paragraph
 /// you are about to write is the third place.
 pub const MODULE_LAYOUT_DIGEST: &str =
-    "fbc5dd5805ca544eb7c81b6aaa04876ea7b2489b397ef7d0f7f65a984df81517";
+    "992b2f919e64dedac239b39f33c8ff6f960de252abe5dc42deda12514fdb1a10";
 
 /// The runtime version stamped into and checked against artifacts — the building crate's
 /// package version. Any release that changes the serialized [`Module`] layout bumps this, so a
