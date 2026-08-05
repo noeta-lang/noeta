@@ -384,11 +384,11 @@ There is also a **standalone** `impl Trait for T { ... }`, which must target a s
 
 **Default methods fall back.** A user trait's method *with* a body is a **default**: an implementor may omit it, and the omitted method falls back to the trait's default body — hoisted onto the implementing type, so it dispatches like any method (a default that mentions `self` is an instance method and may call the trait's required methods; a self-less default needs no receiver and may be called either way — see the receiver rule below). A method the impl provides always overrides its default — and an override is held to the trait's signature exactly like a required method is. A **generic** trait implements at an instantiation — `impl Keyed<int> { … }`, `impl Keyed<string> for Tag { … }`, `@derive(Keyed<string>)` — and its defaults substitute the type parameters through their signatures and bodies before hoisting; a bare `impl Keyed`/`@derive(Keyed)` on a generic trait is an arity error naming the parameters.
 
-**Implementations derive their receiver; contracts may declare it.** A method whose body mentions `self` is an **instance** method: call it on a value, `x.m(…)`. A self-less one that belongs to no trait is a **static** function: call it on the type, `T.m(…)`. Getting that backwards is E0047 either way — a static call has no receiver to bind `self` to, and an instance call on a static function would evaluate a receiver and discard it.
+**Implementations derive their receiver; contracts may declare it.** A method whose body mentions `self` is an **instance** method: call it on a value, `x.m(…)`. A self-less one is a **static** function — call it on the type, `T.m(…)` — unless a trait's interface supplies it and the trait left it undeclared, which is the third case below. Getting that backwards is E0047 either way, and the two halves are one rule about receivers that would not mean anything: a static call has no receiver to bind `self` to, and an instance call on a static function would evaluate a receiver and then discard it.
 
 That derivation is the whole story for an implementation, and it is not something you may override: `static` on an inherent method, on a method inside an `impl` block, or on a top-level `fn` is E0015. The body already says it, exactly and visibly, and a modifier there would be a second source of truth that can drift from the first. The one place you may *declare* it is a `trait`'s method contract — see [Declaring a static method](#declaring-a-static-method) below.
 
-A self-less method that a **trait** supplies is the third case, and it accepts **both**. The trait's contract puts it in the instance interface — that is how `dyn Trait` reaches it — while its body needs no receiver, so `T.m(…)` is equally well-defined; both spellings run the same code. This holds identically for an in-body `impl Trait { … }` block, a standalone `impl Trait for T { … }`, and a hoisted default, so how you spell the implementation never changes how you may call it:
+A self-less method that a **trait** supplies, and that the trait did *not* declare `static`, is the third case, and it accepts **both**. The trait's contract puts it in the instance interface — that is how `dyn Trait` reaches it — while its body needs no receiver, so `T.m(…)` is equally well-defined; both spellings run the same code. This holds identically for an in-body `impl Trait { … }` block, a standalone `impl Trait for T { … }`, and a hoisted default, so how you spell the implementation never changes how you may call it:
 
 ```noeta
 trait Greeter { fn greet(who: string): string }
@@ -403,7 +403,7 @@ echo En.greet("Ada")             // hi Ada — on the type
 echo En { id: 1 }.greet("Bob")   // hi Bob — on a value
 ```
 
-(`From` is the exception: it declares its `from` **static** — a conversion *builds* a value rather than acting on one — so it stays type-only, and a `from` body that mentions `self` is E0015. It is an ordinary declared-static method; nothing about it is special-cased.)
+(`From` is not an exception to any of this, though it reads like the obvious candidate for one: it declares its `from` **static** — a conversion *builds* a value rather than acting on one — so it is type-only on a concrete type and a `from` body that mentions `self` is E0015, both by the general rule below. It is an ordinary declared-static method; nothing about it is special-cased.)
 
 #### Declaring a static method
 
@@ -419,9 +419,43 @@ trait Codec {
 
 Every implementation is held to it. A body that mentions `self` — in a fresh `impl`, in an *override* of a defaulted static method, or in the trait's own default body — is E0015, the same code and the same class of error as the wrong arity.
 
-**Unmarked stays unconstrained.** Leaving the modifier off means exactly what it always meant: implementations derive their own receiver-ness from their bodies, and a self-less one is reachable both ways. What the modifier buys is the section below on bounded type parameters — it is the promise a generic body spends.
+**Unmarked stays unconstrained.** Leaving the modifier off means exactly what it always meant: implementations derive their own receiver-ness from their bodies, and a self-less one is reachable both ways. What the modifier buys is the two paragraphs below and the section on bounded type parameters after them — a receiver discipline the call sites can see, and the promise a generic body spends.
 
-On a user trait the modifier **adds** a guarantee rather than withdrawing a spelling: a self-less trait method already answers `x.m(…)` as well as `T.m(…)` (the third case above), and marking it `static` leaves that alone. The built-in `From` is stricter — `x.from(…)` is E0047, because `from` has been type-only since before the modifier existed and narrowing it is the behaviour callers already depend on.
+**A declared-`static` method is type-only on a concrete type.** `T.m(…)` is the call; `x.m(…)` on a value is E0047, exactly as it is for an inherent static function and for exactly the same stated reason — `T.m(…)` and `x.m(…)` reach the same prototype, so nothing binds the receiver and it would be evaluated and then discarded. This is the one thing the modifier withdraws, and it is what makes `static` mean one thing rather than two: an undeclared self-less trait method is `Either` because the trait put it in the instance interface and nothing said otherwise, while a declared one has a contract saying the receiver is not part of the method's meaning. The diagnostic names the trait and points at the `static fn` line, since unlike an inherent static function there is no self-less body in front of you to explain the refusal.
+
+Nothing that was written before the modifier existed can notice: `static` is new syntax, so no such program has one, and a merely self-less trait method is untouched — it still answers both spellings.
+
+**`dyn Trait` still reaches it, through instance syntax.** That is not in tension with the paragraph above, and the difference is the whole reason the receiver rule is worded as "would be evaluated and then discarded" rather than "takes no `self`". On a concrete type the receiver really is discarded, because the type name already selected the code. A trait object has no type name to call on: the receiver is the only thing choosing which implementor runs, so it is not discarded there — it *is* the dispatch, and it is never bound to `self`.
+
+```noeta
+trait Codec {
+    static fn tag(): string
+    fn encode(): string
+}
+struct Blob {
+    v: string
+    impl Codec {
+        pub fn tag(): string { return "blob" }
+        pub fn encode(): string { return self.v }
+    }
+}
+fn label(c: dyn Codec): string { return c.tag() }
+
+echo Blob.tag()                 // blob — on the type
+echo label(Blob { v: "x" })     // blob — through `dyn Codec`, the receiver dispatching
+```
+
+The one spelling that is refused, on the same declarations:
+
+```noeta error
+trait Codec { static fn tag(): string }
+struct Blob {
+    v: string
+    impl Codec { pub fn tag(): string { return "blob" } }
+}
+
+echo Blob { v: "x" }.tag()      // E0047 — on a value of a concrete type
+```
 
 **A bounded type parameter is a receiver too.** `T.m(…)` inside `fn f<T: Trait>` reaches the methods `Trait` declares **`static`**, because a bound is what licenses them and `T` is the type at run time. One compiled body serves every instantiation, so the call resolves the instantiation's name per call and dispatches on it; nothing is monomorphized.
 

@@ -24,7 +24,7 @@
 // expect: stdout "5"
 // expect: stdout "thing"
 // expect: stdout "box"
-// expect: stdout "box"
+// expect: stdout "Box"
 // expect: stdout "thing"
 // expect: exit 0
 trait Buildable {
@@ -66,6 +66,9 @@ struct Holder<T: Buildable> {
 echo build::<Thing>(2, "abc").v
 echo tag_of::<Thing>()
 echo tag_of::<Box>()
-echo build::<Box>(7, "z").tag()
+// That `build::<Box>` really produced a `Box` is asked of the VALUE's own type tag. `tag` cannot
+// answer it: it is declared `static`, which makes it type-only on a concrete receiver as well as
+// reachable on `T` — `build::<Box>(…).tag()` is E0047 (`traits/static_trait_method_type_only.noe`).
+echo type_of(build::<Box>(7, "z")).name()
 h: Holder<Thing> = Holder { n: 1 }
 echo h.describe()

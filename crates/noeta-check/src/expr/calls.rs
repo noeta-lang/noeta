@@ -1394,18 +1394,33 @@ impl Checker {
                     if !self.method_visible(n, name) {
                         self.report_private_method(n, name, span);
                     }
-                    // An ASSOCIATED function (never touches `self`) is not callable on a value —
-                    // the receiver would be silently discarded (E0047, prelude-redesign EX.2). A
-                    // self-less method of a trait's interface ([`Receiver::Either`]) IS callable
-                    // here: the trait's contract puts it in the instance interface, and that is how
-                    // `dyn Trait` reaches it.
+                    // A STATIC function (never touches `self`) is not callable on a value — the
+                    // receiver would be evaluated and then discarded (E0047, prelude-redesign
+                    // EX.2). That covers an inherent self-less function and a trait method the
+                    // contract declares `static`; a merely self-less method of a trait's interface
+                    // ([`Receiver::Either`]) IS callable here, and so is a declared-static one
+                    // reached through `dyn Trait`, where the receiver is not discarded but is the
+                    // dispatch itself (a `dyn` receiver never reaches this arm — see
+                    // `Checker::dyn_trait_method`).
                     if !self.receiver_of(n, name).allows_instance_call() {
-                        self.error(
+                        let declared_by = self.static_declaring_trait(n, name);
+                        let d = self.error(
                             DiagnosticCode::InvalidReceiver,
                             span,
                             format!("`{name}` is a static function of `{n}`"),
-                        )
-                        .help(format!("call it on the type: `{n}.{name}(...)`"));
+                        );
+                        d.help(static_receiver_help(
+                            &format!("call it on the type: `{n}.{name}(...)`"),
+                            name,
+                            declared_by.as_ref().map(|(t, _)| t.as_str()),
+                        ));
+                        // Both labels or neither: the renderer draws the primary caret only when a
+                        // diagnostic carries no labels of its own, so pointing at the declaration
+                        // without also pointing at the call would move the error off the call site.
+                        if let Some((_, Some(at))) = declared_by {
+                            d.label(span, format!("called on a value of `{n}`"))
+                                .label(at, "declared `static` here");
+                        }
                         return sig.ret.clone();
                     }
                     return self.call_user_method(

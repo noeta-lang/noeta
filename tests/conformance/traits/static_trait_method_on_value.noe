@@ -1,0 +1,41 @@
+// The other half of `static_trait_method_type_only.noe`: a trait's declared-`static` method reached
+// on a **value of a concrete type** is E0047.
+//
+// It is the same judgment the language already makes about an inherent static function, and for the
+// same stated reason — the receiver would be evaluated and then discarded. What changed is that a
+// *declared* `static` now earns it too, so the modifier means one thing rather than two: it used to
+// promise `T.m(…)` under a bound while leaving `x.m(…)` standing, which made the built-in `From`
+// (type-only since before the modifier existed) look like a special case of nothing.
+//
+// All four ways in are pinned, because a rule that holds for three of them is not a rule:
+//   * an in-body `impl Trait { … }` block's method;
+//   * the standalone `impl Trait for T { … }` spelling of the same thing;
+//   * a hoisted DEFAULT the implementor never wrote out;
+//   * a bound method HANDLE (`x.m`), which has no receiver to capture either.
+//
+// The diagnostic names the trait and points at the `static fn` that made the method type-only —
+// which is the whole difference from an inherent static function, whose self-less body is right
+// there in front of the reader.
+// expect: error E0047 at 37:6
+// expect: error E0047 at 38:6
+// expect: error E0047 at 39:6
+// expect: error E0047 at 40:5
+// expect: exit 1
+trait Codec {
+    static fn tag(): string
+    static fn kind(): string { return "codec" }
+}
+
+struct InBody {
+    v: string
+    impl Codec { pub fn tag(): string { return "in-body" } }
+}
+
+struct Apart { v: string }
+impl Codec for Apart { pub fn tag(): string { return "apart" } }
+
+echo InBody { v: "x" }.tag()
+echo Apart { v: "x" }.tag()
+echo InBody { v: "x" }.kind()
+h = InBody { v: "x" }.tag
+echo h()

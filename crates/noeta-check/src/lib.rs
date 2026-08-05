@@ -105,6 +105,7 @@ pub use tiers::{
     activate_tiers, code_tiers_in, dedent_doc, resolve_docs, resolve_texts,
 };
 
+use collect::TraitSuppliedMethod;
 use constructors::compute_fresh_constructors;
 use effects::*;
 /// The derived receiver discipline, published because it is a fact about a *declaration* that the
@@ -1032,6 +1033,18 @@ struct Symbols {
     /// type name (already a qualified identity by link time) and would answer nothing at all for the
     /// shadowed declaration it is drawing on screen.
     method_receiver_spans: HashMap<Span, Receiver>,
+    /// Every method a **trait's interface** supplied, in registration order, with the trait that
+    /// supplied it — the worklist [`Collector::narrow_declared_static`] replays once the trait table
+    /// is complete, to downgrade a **declared-`static`** one from [`Receiver::Either`] to
+    /// [`Receiver::Static`].
+    ///
+    /// It is a recorded worklist rather than a lookup at the classification site because the two
+    /// facts become available at different times: a method is classified inside the SAME walk that
+    /// registers `Stmt::Trait`, so a type written above its trait would read a half-populated table
+    /// and classify differently from one written below it. Order-dependent classification is not a
+    /// thing a language may have; deferring the *decision* (not the *observation*) to a pass over a
+    /// complete table is what removes it.
+    trait_supplied_methods: Vec<TraitSuppliedMethod>,
     /// Which built-in traits each user type satisfies: type name → set of trait names it `@derive`s
     /// or `impl`s. The basis (with the built-in-type table in [`Checker::satisfies`]) for enforcing a
     /// generic call's trait bounds (S4.2).

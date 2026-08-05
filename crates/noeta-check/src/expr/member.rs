@@ -865,15 +865,25 @@ impl Checker {
             if !self.method_visible(n, name) {
                 self.report_private_method(n, name, member_span);
             }
-            // Binding an ASSOCIATED function through a value is the wrong-way shape (E0047) —
-            // there is no receiver to capture; bind it off the type instead.
+            // Binding a STATIC function through a value is the wrong-way shape (E0047) — there is
+            // no receiver to capture; bind it off the type instead.
             if !self.receiver_of(n, name).allows_instance_call() {
-                self.error(
+                let declared_by = self.static_declaring_trait(n, name);
+                let d = self.error(
                     DiagnosticCode::InvalidReceiver,
                     member_span,
                     format!("`{name}` is a static function of `{n}`"),
-                )
-                .help(format!("bind it off the type: `{n}.{name}`"));
+                );
+                d.help(static_receiver_help(
+                    &format!("bind it off the type: `{n}.{name}`"),
+                    name,
+                    declared_by.as_ref().map(|(t, _)| t.as_str()),
+                ));
+                // Both labels or neither — see the call-site twin in `expr::calls`.
+                if let Some((_, Some(at))) = declared_by {
+                    d.label(member_span, format!("bound off a value of `{n}`"))
+                        .label(at, "declared `static` here");
+                }
             } else {
                 self.sites.bound_handle_sites.insert(member_span);
             }
