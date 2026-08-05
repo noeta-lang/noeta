@@ -14,8 +14,12 @@ use noeta_diagnostics::Diagnostic;
 use noeta_object::Shape;
 use noeta_span::Span;
 
-/// A register index. M1.0's allocator is monotonic (one register per value, no reuse); a
-/// reusing allocator is a later optimization the disassembly snapshots will make visible.
+/// A register index. IR→bytecode lowering allocates **monotonically** — a fresh register per
+/// temporary and local, live until frame teardown — and `noeta_compiler::regalloc` then coalesces
+/// registers whose live ranges never overlap onto one slot, shrinking `Chunk::num_registers` and
+/// making reclamation prompt (`set_reg`'s release-on-write frees the previous occupant at the
+/// point of reuse rather than at teardown). So a register number here is a *post-coalescing* slot,
+/// and the disassembly snapshots show it.
 pub type Reg = u16;
 
 /// An interned name index into [`Module::names`] (P-VMT-OPSZ). Every instruction-embedded name —
