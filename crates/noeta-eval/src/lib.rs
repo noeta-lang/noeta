@@ -7683,6 +7683,18 @@ fn match_pattern(
 
 #[cfg(test)]
 mod tests {
+    //! # Checker-rejected fixtures
+    //!
+    //! [`IrRefBackend::run`] runs the checker for its site maps and *discards its diagnostics*, so
+    //! a fixture here can be a program `noeta check` would refuse and still execute — which means
+    //! a fixture whose declarations do not describe what its code does passes anyway, testing
+    //! something other than what it claims. Every such lie has been driven out. What remains is a
+    //! short list of fixtures that are invalid **on purpose**, each carrying a comment saying so:
+    //! deliberate-error tests whose whole subject is the refusal, and REPL entries fed to
+    //! [`Session::eval`] via [`program_of`], which resolve against the session's persistent scope
+    //! rather than standing alone. A fixture that fails `check_all` and has no such comment is a
+    //! bug in the fixture, not a new member of this list.
+
     use super::*;
     use noeta_lexer::lex;
     use noeta_parser::parse;
@@ -7752,6 +7764,15 @@ mod tests {
         );
     }
 
+    /// Parse one entry: either a whole program (for [`run`]) or a single REPL entry (for
+    /// [`Session::eval`]/[`Session::type_of`]).
+    ///
+    /// A session entry is deliberately **not** checkable on its own. `mut r = Res.new(7)` or
+    /// `x + 1` names things declared by an *earlier* entry and living in the session's persistent
+    /// scope, so `check_all` over the entry alone reports `UnknownName` for each of them — that
+    /// partiality is the shape being tested, and no such fixture should be rewritten into a
+    /// self-contained program. Whole programs handed to [`run`] carry no such excuse: see the
+    /// checker-rejected-fixtures note below.
     fn program_of(text: &str) -> Program {
         let source = Source::new(SourceId::FIRST, "test.noe", text);
         let lexed = lex(&source);
@@ -7846,6 +7867,7 @@ mod tests {
     #[test]
     fn comparison_on_non_comparable_object_still_errors() {
         // Without `@derive(Comparable)` or an `impl`, an object has no order: `<` is an error.
+        // Deliberately checker-rejected — that refusal is the subject, at run time as well.
         let out = run(
             "class P {\n  x: int\n  pub fn new(x: int): P { return P { x: x }; }\n}\necho P.new(1) < P.new(2);\n",
         );
@@ -8136,12 +8158,17 @@ mod tests {
 
     #[test]
     fn unmatched_value_is_a_runtime_error() {
+        // Deliberately checker-rejected: the checker calls this `NonExhaustiveMatch`, and the
+        // point is that a value falling off the end of a `match` still aborts at RUN time rather
+        // than yielding a bogus result (see this module's checker-rejected-fixtures note).
         let result = run("enum E { A; B; } echo match E.B { E.A => 1 };");
         assert_eq!(result.exit_code, 1);
     }
 
     #[test]
     fn immutable_binding_reports_error() {
+        // Deliberately checker-rejected: reassigning an immutable binding is the subject, so the
+        // fixture cannot be made check-clean without deleting the test.
         let result = run("name = \"a\"; name = \"b\";");
         assert_eq!(
             result.diagnostics[0].code,
@@ -8198,12 +8225,23 @@ mod tests {
 
     #[test]
     fn calling_a_non_function_is_an_error() {
+        // Deliberately checker-rejected: calling a non-callable is the subject; the runtime must
+        // reach the same verdict the checker does.
         let result = run("x = 5; echo x(1);");
         assert_eq!(result.diagnostics[0].code, DiagnosticCode::TypeMismatch);
     }
 
     #[test]
     fn arity_mismatch_is_an_error() {
+        // Deliberately checker-rejected, and it must stay that way: the checker refuses this
+        // program too, which makes the test look vestigial. It is not. The reference backend runs
+        // calls that never passed a whole-program check — console fragments evaluated against a
+        // live `Session`, hot-swapped code, a `.noeb` written by an older build (inserting a
+        // variant into a diagnostic-code enum is enough to make a stale artifact decode into
+        // something structurally valid and semantically wrong). An arity mismatch arriving by one
+        // of those routes has to fail cleanly rather than corrupt, so the runtime's own arity
+        // check is defence in depth rather than a copy of the checker's — and this test is what
+        // pins it. Making the fixture check-clean would quietly remove that coverage.
         let result = run("fn one(a: int): int { return a; } echo one(1, 2);");
         assert_eq!(result.diagnostics[0].code, DiagnosticCode::TypeMismatch);
     }
@@ -8285,24 +8323,24 @@ mod tests {
     fn question_propagates_err_from_enclosing_fn() {
         // `validate` returns Err; `?` re-returns it from `run_it`, so the trailing
         // `Ok("done")` never executes and the caller sees the original error.
-        let src = "fn validate(): int { return Err(\"empty\"); } \
-                   fn run_it(): int { validate()?; return Ok(\"done\"); } \
+        let src = "fn validate(): Result<string, string> { return Err(\"empty\"); } \
+                   fn run_it(): Result<string, string> { validate()?; return Ok(\"done\"); } \
                    echo run_it();";
         assert_eq!(run(src).stdout, "Err(empty)\n");
     }
 
     #[test]
     fn question_unwraps_ok_and_some() {
-        let src = "fn ok_val(): int { return Ok(41); } \
-                   fn use_it(): int { x = ok_val()?; return Ok(x + 1); } \
+        let src = "fn ok_val(): Result<int, string> { return Ok(41); } \
+                   fn use_it(): Result<int, string> { x = ok_val()?; return Ok(x + 1); } \
                    echo use_it();";
         assert_eq!(run(src).stdout, "Ok(42)\n");
     }
 
     #[test]
     fn question_propagates_none() {
-        let src = "fn lookup(): int { return none; } \
-                   fn first(): int { v = lookup()?; return some(v); } \
+        let src = "fn lookup(): Option<int> { return none; } \
+                   fn first(): Option<int> { v = lookup()?; return some(v); } \
                    echo first();";
         assert_eq!(run(src).stdout, "none\n");
     }
@@ -8324,7 +8362,12 @@ mod tests {
 
     #[test]
     fn question_on_a_non_result_is_an_error() {
-        let result = run("fn f(): int { x = 5?; return Ok(x); } echo f();");
+        // Deliberately checker-rejected: `5?` is `InvalidTry` (E0016) to the checker, and that
+        // refusal *is* the subject — the fixture exists to prove the runtime refuses it too, with
+        // the same shape (`exit 1`, a `TypeMismatch` diagnostic) rather than unwrapping garbage.
+        // Everything else about the program is honest: `f` declares the `Result<int, string>` it
+        // actually returns, so the only diagnostic left is the one being tested.
+        let result = run("fn f(): Result<int, string> { x = 5?; return Ok(x); } echo f();");
         assert_eq!(result.exit_code, 1);
         assert_eq!(result.diagnostics[0].code, DiagnosticCode::TypeMismatch);
     }

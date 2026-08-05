@@ -4,6 +4,27 @@
 //! `debug_session_vm`, `compile_module`, `peak_residency`, ...) — a by-subject
 //! split would duplicate or re-plumb them, which is churn beyond the
 //! verbatim-move pattern.
+//!
+//! # Checker-rejected fixtures
+//!
+//! `run`/`compile_module` go through [`noeta_compiler::compile`], which runs the checker for its
+//! site maps and *discards its diagnostics* — so a fixture here can be a program `noeta check`
+//! would refuse and still execute. That is a loaded gun: a fixture whose declarations do not
+//! describe what its code does passes anyway, testing something other than what it claims. Every
+//! such lie has been driven out; what is left is a short list of fixtures that are invalid **on
+//! purpose**, and each one carries a comment saying so. Two kinds:
+//!
+//! - **The refusal is the subject.** `echo 42[0]`, `for x in 42`, a non-exhaustive `match`, an
+//!   immutable reassignment, an undeclared `#[Attribute]`. Making these check-clean would delete
+//!   what they test.
+//! - **The runtime's own guard is the subject.** The checker refuses the program *and* the VM
+//!   refuses it at run time, and the test pins the second refusal. This is not redundancy: the VM
+//!   is reached by code that never passed a whole-program check — debug-console fragments against
+//!   a live session, hot-swapped bodies, a `.noeb` written by an older build — and code arriving
+//!   by any of those routes must fail cleanly rather than corrupt.
+//!
+//! So: if a fixture in this file fails `check_all` and has no comment explaining why, it is a bug
+//! in the fixture, not a new member of this list.
 
 use super::*;
 use noeta_lexer::lex;
@@ -253,6 +274,13 @@ fn run_traced(src: &str) -> (RunResult, Vec<TraceFrame>) {
 }
 
 /// Parse a fragment the way a debug console would (statements allowed; no checker).
+///
+/// A console fragment is **not** a whole program and is not checkable as one: `base + 1` or
+/// `echo twice(n)` names bindings that live in the paused session's globals, not in the fragment,
+/// so `check_all` on it alone reports `UnknownName` for every one of them. That unresolvability is
+/// the shape being tested — the fragment resolves at *install* time against the running Vm — so no
+/// fixture reaching this helper should be "fixed" into a self-contained program. See the
+/// checker-rejected-fixtures section of this module's docs.
 fn fragment(src: &str) -> Program {
     let source = Source::new(SourceId(1), "<console>", src);
     let lexed = lex(&source);
@@ -639,7 +667,7 @@ fn an_abort_captures_a_stack_trace_and_a_clean_run_captures_none() {
 /// the flag yet.
 #[test]
 fn shapes_carry_packed_key_capability() {
-    let src = "@packed struct Outer { m: Mid }\n@packed struct Mid { c: Cell; n: i64 }\n@packed struct Cell { x: int; y: bool }\n@packed struct Vec2f { x: f32; y: f32 }\nstruct Plain { x: int }\no = Outer { m: Mid { c: Cell { x: 1, y: true }, n: 2i64 } }\nv = Vec2f { x: 1.0, y: 2.0 }\np = Plain { x: 1 }\necho o.m.n\n";
+    let src = "@packed struct Outer { m: Mid }\n@packed struct Mid { c: Cell; n: i64 }\n@packed struct Cell { x: int; y: bool }\n@packed struct Vec2f { x: f32; y: f32 }\nstruct Plain { x: int }\no = Outer { m: Mid { c: Cell { x: 1, y: true }, n: 2i64 } }\nv = Vec2f { x: 1.0f32, y: 2.0f32 }\np = Plain { x: 1 }\necho o.m.n\n";
     let source = Source::new(SourceId::FIRST, "test.noe", src);
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
@@ -1643,6 +1671,8 @@ fn mutable_reassignment() {
 
 #[test]
 fn immutable_reassignment_is_e0006() {
+    // Deliberately checker-rejected: reassigning an immutable binding is exactly the refusal under
+    // test, and the VM must raise it too (see the module docs).
     let r = run("name = \"a\";\nname = \"b\";\n");
     assert_eq!(r.exit_code, 1);
     assert_eq!(r.diagnostics.len(), 1);
@@ -1695,6 +1725,16 @@ fn parameter_shadows_global() {
 
 #[test]
 fn arity_mismatch_is_type_error() {
+    // Deliberately checker-rejected, and it must stay that way: the checker also refuses this
+    // program, which makes the test look redundant. It is not. The VM is reached by calls that
+    // never passed a whole-program check — a debug-console fragment evaluated against a live
+    // session, a hot-swapped body, a `.noeb` produced by an older build (inserting a variant into
+    // a diagnostic-code enum is enough to make a stale artifact decode into something
+    // structurally valid and semantically wrong). A call arriving by one of those routes with the
+    // wrong number of arguments must fail cleanly instead of reading past the argument window, so
+    // the VM's own arity check is defence in depth, not a duplicate of the checker's — and this
+    // test is the only thing pinning it. Fixing the fixture into a checkable program would delete
+    // the coverage while leaving the test looking healthy.
     let r = run("fn add(a: int, b: int): int { return a + b; }\necho add(1);\n");
     assert_eq!(r.exit_code, 1);
     assert_eq!(
@@ -1731,6 +1771,8 @@ fn division_by_zero_is_e0008() {
 
 #[test]
 fn unknown_name_is_e0005() {
+    // Deliberately checker-rejected: an unresolvable name is the subject, so the fixture cannot be
+    // made check-clean without deleting the test (see the module docs).
     let r = run("echo missing;\n");
     assert_eq!(r.exit_code, 1);
     assert_eq!(
@@ -1975,6 +2017,8 @@ fn derive_comparable_orders_fields_lexicographically() {
 
 #[test]
 fn comparison_on_non_comparable_object_errors() {
+    // Deliberately checker-rejected: a class with no `Comparable` derive and no `impl` has no `<`,
+    // and the refusal is the subject — the VM must reach the same verdict (see the module docs).
     let r = run(
         "class P {\n  x: int\n  pub fn new(x: int): P { return P { x: x }; }\n}\necho P.new(1) < P.new(2);\n",
     );
@@ -2015,6 +2059,8 @@ fn index_dispatches_to_index_trait() {
 
 #[test]
 fn indexing_a_non_indexable_is_type_error() {
+    // Deliberately checker-rejected: indexing an `int` is the subject; the VM guard is what this
+    // pins (see the module docs).
     let r = run("echo 42[0];\n");
     assert_eq!(r.exit_code, 1);
     assert_eq!(
@@ -2190,6 +2236,10 @@ fn match_literals_and_wildcard() {
 
 #[test]
 fn unmatched_value_is_a_runtime_error() {
+    // Deliberately checker-rejected: the checker calls this `NonExhaustiveMatch`, and the whole
+    // point is that a value falling off the end of a `match` at RUN time still aborts with a
+    // diagnostic instead of yielding a bogus result — the second line of defence a hot-swapped or
+    // stale-artifact program depends on (see the module docs).
     let r = run("enum E { A; B; C; }\necho match E.C { E.A => 1, E.B => 2 };\n");
     assert_eq!(r.exit_code, 1);
     assert_eq!(
@@ -2207,11 +2257,11 @@ fn result_constructors_display_bare() {
 #[test]
 fn question_propagates_err_and_unwraps_ok() {
     assert_eq!(
-        run("fn validate(): int { return Err(\"empty\"); }\nfn run_it(): int { validate()?; return Ok(\"done\"); }\necho run_it();\n").stdout,
+        run("fn validate(): Result<string, string> { return Err(\"empty\"); }\nfn run_it(): Result<string, string> { validate()?; return Ok(\"done\"); }\necho run_it();\n").stdout,
         "Err(empty)\n"
     );
     assert_eq!(
-        run("fn ok_val(): int { return Ok(41); }\nfn use_it(): int { return Ok(ok_val()? + 1); }\necho use_it();\n").stdout,
+        run("fn ok_val(): Result<int, string> { return Ok(41); }\nfn use_it(): Result<int, string> { return Ok(ok_val()? + 1); }\necho use_it();\n").stdout,
         "Ok(42)\n"
     );
 }
@@ -2292,7 +2342,10 @@ fn filter_map_sum_pipeline() {
 fn sum_promotes_to_float_when_any_element_is_float() {
     assert_eq!(run("echo [1, 2, 3].sum();\n").stdout, "6\n");
     assert_eq!(run("echo [1, 2.5, 3].sum();\n").stdout, "6.5\n");
-    assert_eq!(run("echo [].sum();\n").stdout, "0\n");
+    // The empty case needs its element type spelled: a bare `[]` synthesizes `List<?>`, on which
+    // method resolution can find no `sum` — the annotation says what the program means without
+    // touching what is proved (an empty sum is the int zero, not a float).
+    assert_eq!(run("xs: List<int> = []\necho xs.sum();\n").stdout, "0\n");
 }
 
 #[test]
@@ -2325,6 +2378,8 @@ fn for_over_map_iterates_values_in_key_order() {
 
 #[test]
 fn iterating_a_non_collection_is_a_type_error() {
+    // Deliberately checker-rejected: `for x in 42` is the subject; the VM guard is what this pins
+    // (see the module docs).
     let r = run("for x in 42 { echo x; }\n");
     assert_eq!(r.exit_code, 1);
     assert_eq!(
@@ -2337,6 +2392,7 @@ fn iterating_a_non_collection_is_a_type_error() {
 fn len_of_an_int_is_an_unknown_method() {
     // `len` is a collection method (P1.2), so on an int it is an unknown method (E0005) — the
     // same error every other unknown method raises (the old free `len(42)` was a TypeMismatch).
+    // Deliberately checker-rejected: the missing method IS the subject (see the module docs).
     let r = run("echo (42).len();\n");
     assert_eq!(r.exit_code, 1);
     assert_eq!(
@@ -2377,6 +2433,11 @@ fn disassembly_is_stable() {
 fn attribute_manifest_records_decorations() {
     // `#[...]` data attributes (with literal args) are collected into the queryable
     // build manifest, in source order, keyed by the decorated type.
+    //
+    // Deliberately checker-rejected: `Entity` and `Route` are undeclared, so the checker reports
+    // `NotAnAttribute` for both. Declaring them would test the checker's attribute rules instead
+    // of the manifest — what this fixture proves is that the COMPILER records a decoration
+    // verbatim, name and args, whether or not anything downstream has agreed to it yet.
     let source = Source::new(
         SourceId::FIRST,
         "t.noe",
@@ -2558,7 +2619,7 @@ fn disassembly_of_a_question_propagating_function_is_stable() {
     let source = Source::new(
         SourceId::FIRST,
         "t.noe",
-        "fn validate(): int { return Err(\"bad\"); }\nfn place(): int { validate()?; return Ok(\"ok\"); }\necho place();\n",
+        "fn validate(): Result<string, string> { return Err(\"bad\"); }\nfn place(): Result<string, string> { validate()?; return Ok(\"ok\"); }\necho place();\n",
     );
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
