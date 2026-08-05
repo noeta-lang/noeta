@@ -266,7 +266,11 @@ impl VmBackend {
         VmBackend
     }
 
-    /// Compile and run a program, or report that it falls outside the supported subset.
+    /// Compile and run a program. The [`Unsupported`] arm is not a subset boundary any more: the
+    /// VM has compiled every parse-clean case in the comparable corpus since the Thrust-A gate,
+    /// which `noeta-conformance`'s `corpus.rs` pins at `not_run.unsupported == 0` and forbids
+    /// regressing. So an `Err` here means the VM's coverage slipped — a defect to investigate,
+    /// not a program to rewrite.
     #[cfg(feature = "compile")]
     pub fn try_run(&self, program: &Program) -> Result<RunResult, Unsupported> {
         let module = compile(program)?;
