@@ -2645,6 +2645,91 @@ mod tests {
         assert!(inactive.diagnostics.is_empty());
     }
 
+    /// The **package** half of the white-box rule, and the one that was missing: a dev-tier body
+    /// opens the package it ships with, never a dependency's.
+    ///
+    /// This is `#[cfg(test)]`'s boundary, and the reason it is drawn there is not symmetry — it is
+    /// that a package's own `@test` blocks are usually the only thing exercising its surface. With
+    /// the gate off inside them, a method the author forgot to publish type-checks everywhere the
+    /// author looks and fails the first time a consumer calls it. That is not hypothetical: it is
+    /// how the noeta 0.5 sweep let a whole release's worth of under-published methods through, para
+    /// api's entire documented surface among them.
+    #[test]
+    fn a_dev_tier_fn_does_not_get_white_box_over_a_dependency() {
+        use noeta_span::{PackageMap, PackageOrigin, PackageUses};
+
+        // Two sources, two packages: the class ships in `dep`, the `@test` block is the root's.
+        let dep_src = Source::new(
+            SourceId::FIRST,
+            "dep.noe",
+            "class Account { balance: int  pub fn new(b: int): Account { return Account { balance: b }; }  fn fee(): int { return self.balance / 100; } }\n"
+                .to_string(),
+        );
+        let root_src = Source::new(
+            SourceId(1),
+            "main.noe",
+            "@test fn touches(): void { assert(Account.new(500).fee() == 5); }\n".to_string(),
+        );
+        let parse_one = |src: &Source| {
+            let lexed = lex(src);
+            let parsed = parse(src, &lexed.tokens);
+            assert!(
+                lexed.diagnostics.is_empty() && parsed.diagnostics.is_empty(),
+                "fixture must parse cleanly"
+            );
+            parsed.program
+        };
+        let mut program = parse_one(&dep_src);
+        program.stmts.extend(parse_one(&root_src).stmts);
+
+        let mut packages = PackageMap::default();
+        packages.set(
+            SourceId::FIRST,
+            PackageOrigin::Dependency("dep".to_string()),
+        );
+        packages.set(SourceId(1), PackageOrigin::Root);
+        let prov = Provenance::of(Default::default(), packages, PackageUses::new());
+
+        let activated = activate_tiers(&program, &["test"], &prov);
+        let diags = crate::check_all_with(
+            &activated.program,
+            crate::CheckOptions::for_workspace(prov.clone()),
+        )
+        .diagnostics;
+        let private = diags
+            .iter()
+            .find(|d| d.code == DiagnosticCode::PrivateMethod)
+            .unwrap_or_else(|| {
+                panic!("a @test must not reach a DEPENDENCY's private method: {diags:?}")
+            });
+        // And the message points at the declaration, which is in the other package's file — the
+        // whole reason the label exists.
+        assert!(
+            private
+                .labels
+                .iter()
+                .any(|l| l.span.source == SourceId::FIRST),
+            "E0076 must label the declaration site: {private:?}"
+        );
+
+        // Same program, one package: the white-box rule still holds, so this is a narrowing and not
+        // a repeal.
+        let mut same = PackageMap::default();
+        same.set(SourceId::FIRST, PackageOrigin::Root);
+        same.set(SourceId(1), PackageOrigin::Root);
+        let prov = Provenance::of(Default::default(), same, PackageUses::new());
+        let activated = activate_tiers(&program, &["test"], &prov);
+        let diags =
+            crate::check_all_with(&activated.program, crate::CheckOptions::for_workspace(prov))
+                .diagnostics;
+        assert!(
+            !diags
+                .iter()
+                .any(|d| d.code == DiagnosticCode::PrivateMethod),
+            "co-located tooling keeps its white-box access: {diags:?}"
+        );
+    }
+
     /// The scoping half, mirroring [`ordinary_fn_cannot_read_private_field`]: ordinary same-module
     /// code is still outside the type, so calling its private method is E0076.
     #[test]
