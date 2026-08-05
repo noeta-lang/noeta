@@ -23,7 +23,6 @@
 use std::any::Any;
 
 use noeta_ext_abi::{CtxError, NativeCtx, Retained};
-use noeta_reactive::NodeId;
 
 /// The reactive engine, as seen by a foreign source node.
 ///
@@ -32,6 +31,29 @@ use noeta_reactive::NodeId;
 /// — every method takes `ctx` and manages the engine borrow internally, releasing it before any
 /// re-entry into user code (the reactive flush is exactly such a re-entry). That is why the methods
 /// take `&self` and a fresh `ctx` each call rather than borrowing the engine for the handle's life.
+/// Index into the reactive graph's node table — the id a `signal`/`computed`/`effect` value carries,
+/// and the handle every [`ReactiveSource`] method passes.
+///
+/// A plain table index, pinned to `u32`. Freed slots are reused, so an id is only meaningful until
+/// its node is disposed. It lives here rather than in the engine because it is part of *this*
+/// contract: an extension that never depends on `noeta-reactive` still has to name it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct NodeId(u32);
+
+impl NodeId {
+    /// Wrap a backing-table index.
+    #[inline]
+    pub fn from_index(index: usize) -> Self {
+        NodeId(index as u32)
+    }
+
+    /// The index into the backing table.
+    #[inline]
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
 pub trait ReactiveSource {
     /// Create a **source node** over the arena `cell` the extension owns, returning its [`NodeId`] in
     /// the shared reactive graph. The cell holds the node's current value; the extension updates it

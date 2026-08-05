@@ -5,6 +5,11 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+description = "The extension ABI for the Noeta programming language: the registration, marshalling and dispatch contract a native package's Rust crate is written against."
+homepage = "https://noeta.dev"
+documentation = "https://docs.noeta.dev"
+keywords = ["noeta", "extension", "abi", "plugin"]
+categories = ["development-tools::ffi"]
 
 [dependencies]
 serde = { workspace = true }

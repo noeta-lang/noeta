@@ -1287,14 +1287,25 @@ fn toolchain_patch_section(src_root: &Path) -> String {
     if names.is_empty() {
         return String::new();
     }
-    let mut out = format!("\n[patch.{}]\n", toml_quote(&repo));
-    for name in names {
-        out.push_str(&format!(
-            "{name} = {{ path = {} }}\n",
-            toml_quote(&crates_dir.join(&name).display().to_string())
-        ));
-    }
-    out
+    // Two patch tables, because a package may reference the contract crates either way. `[patch.<git
+    // url>]` covers a git pin; `[patch.crates-io]` covers the published `noeta-ext-abi = "0.5"` form.
+    // BOTH are required for one-toolchain-wins: a version dependency resolves the real crates.io
+    // crate otherwise, which is a *second* copy of `noeta-ext-abi` — the package's `dyn Extension`
+    // then fails to match the shim's `noeta_ext_abi::Extension` and `NOETA_EXTENSIONS` does not
+    // type-check. Same failure the git patch exists to prevent, reached through the other door.
+    let entries: String = names
+        .iter()
+        .map(|name| {
+            format!(
+                "{name} = {{ path = {} }}\n",
+                toml_quote(&crates_dir.join(name).display().to_string())
+            )
+        })
+        .collect();
+    format!(
+        "\n[patch.{}]\n{entries}\n[patch.crates-io]\n{entries}",
+        toml_quote(&repo)
+    )
 }
 
 /// The generated shim entry point: aggregate every entry crate's exported `NOETA_EXTENSIONS`

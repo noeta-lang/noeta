@@ -3041,13 +3041,15 @@ dependencies = [
 [[package]]
 name = "noeta-reactive"
 version = "0.5.0"
+dependencies = [
+ "noeta-reactive-abi",
+]
 
 [[package]]
 name = "noeta-reactive-abi"
 version = "0.5.0"
 dependencies = [
  "noeta-ext-abi",
- "noeta-reactive",
 ]
 
 [[package]]

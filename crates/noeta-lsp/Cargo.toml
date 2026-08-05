@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+# Internal: not a contract crate, so it never goes to crates.io. Only the `*-abi` crates
+# carry a stability promise (docs/Extension-Compatibility.md).
+publish = false
 
 # A thin tower-lsp wire adapter: every language feature lives in noeta-ide (the shared IDE engine,
 # MCP M5), so this crate needs only the engine, the diagnostic model it maps onto the wire, and the

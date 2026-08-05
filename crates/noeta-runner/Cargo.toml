@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+# Internal: not a contract crate, so it never goes to crates.io. Only the `*-abi` crates
+# carry a stability promise (docs/Extension-Compatibility.md).
+publish = false
 
 # The lean production runtime (dev-deps D3): the native analogue of `noeta-wasm-runner`, extended
 # with the compiler so it can run `.noe` source (PHP-style deploy) as well as a `.noeb`/stapled

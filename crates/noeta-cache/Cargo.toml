@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+# Internal: not a contract crate, so it never goes to crates.io. Only the `*-abi` crates
+# carry a stability promise (docs/Extension-Compatibility.md).
+publish = false
 
 [dependencies]
 # Only dependency: a collision-resistant digest for the content-addressed cache key. The cache

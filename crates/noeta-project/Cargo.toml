@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+# Internal: not a contract crate, so it never goes to crates.io. Only the `*-abi` crates
+# carry a stability promise (docs/Extension-Compatibility.md).
+publish = false
 
 # The project model: "which files are this program, and is it clean". `project_check` — the one
 # answer `noeta check`, the LSP's `workspace/diagnostic` and the MCP `check` tool all give — plus the
