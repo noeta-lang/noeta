@@ -318,7 +318,7 @@ fn a_user_impl_of_a_self_constrained_native_trait_requires_the_shape() {
     let non_packed = check_diagnostics(
         "use nm.Lanes\n\
          struct Plain { x: int }\n\
-         impl Lanes for Plain { fn sum(): int { return self.x } }\n\
+         impl Lanes for Plain { pub fn sum(): int { return self.x } }\n\
          echo 1\n",
     );
     assert!(
@@ -331,7 +331,7 @@ fn a_user_impl_of_a_self_constrained_native_trait_requires_the_shape() {
     let mismatched = check_diagnostics(
         "use nm.Lanes\n\
          @packed struct One { x: i32 }\n\
-         impl Lanes for One { fn sum(): int { return 0 } }\n\
+         impl Lanes for One { pub fn sum(): int { return 0 } }\n\
          echo 1\n",
     );
     assert!(
@@ -347,7 +347,7 @@ fn a_user_impl_of_a_self_constrained_native_trait_requires_the_shape() {
     let ok = check_diagnostics(
         "use nm.Lanes\n\
          @packed struct MyPair { x: int; y: int }\n\
-         impl Lanes for MyPair { type Wide = int; fn sum(): int { return self.x + self.y } }\n\
+         impl Lanes for MyPair { type Wide = int; pub fn sum(): int { return self.x + self.y } }\n\
          echo 1\n",
     );
     assert!(

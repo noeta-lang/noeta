@@ -2727,7 +2727,7 @@ fn orphan_project(name: &str, glue_module: &str) -> PathBuf {
     .unwrap();
     std::fs::write(
         base.join("b/thing.noe"),
-        "pub class Thing {\n  pub id: int\n  fn new(id: int): Thing { return Thing { id: id } }\n}\n",
+        "pub class Thing {\n  pub id: int\n  pub fn new(id: int): Thing { return Thing { id: id } }\n}\n",
     )
     .unwrap();
     std::fs::write(
@@ -2760,7 +2760,7 @@ fn a_cross_package_orphan_impl_is_rejected_naming_all_three_packages() {
     let entry = orphan_project(
         "pm_orphan_reject",
         "use a.speaks.{Speaks};\nuse b.thing.{Thing};\n\
-         impl Speaks for Thing { fn speak(): string { return \"glue\" } }\n",
+         impl Speaks for Thing { pub fn speak(): string { return \"glue\" } }\n",
     );
     let out = lang().arg("run").arg(&entry).assert().failure();
     let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
@@ -2802,7 +2802,7 @@ fn an_impl_in_the_traits_package_or_the_types_package_is_accepted() {
     std::fs::write(
         base.join("a/speaks.noe"),
         "use b.thing.{Thing};\npub trait Speaks { fn speak(): string }\n\
-         impl Speaks for Thing { fn speak(): string { return \"a says ${self.id}\" } }\n",
+         impl Speaks for Thing { pub fn speak(): string { return \"a says ${self.id}\" } }\n",
     )
     .unwrap();
     std::fs::write(
@@ -2833,8 +2833,8 @@ fn an_impl_in_the_traits_package_or_the_types_package_is_accepted() {
     std::fs::write(
         base.join("b/thing.noe"),
         "use a.speaks.{Speaks};\npub class Thing {\n  pub id: int\n  \
-         fn new(id: int): Thing { return Thing { id: id } }\n}\n\
-         impl Speaks for Thing { fn speak(): string { return \"b says ${self.id}\" } }\n",
+         pub fn new(id: int): Thing { return Thing { id: id } }\n}\n\
+         impl Speaks for Thing { pub fn speak(): string { return \"b says ${self.id}\" } }\n",
     )
     .unwrap();
     std::fs::write(
