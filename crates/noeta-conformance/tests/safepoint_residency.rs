@@ -33,7 +33,7 @@ fn cycle_loop_program() -> String {
     format!(
         "class Node {{\n\
          \x20   pub mut next: ?Node\n\
-         \x20   fn new(): Node {{ return Node {{ next: none }} }}\n\
+         \x20   pub fn new(): Node {{ return Node {{ next: none }} }}\n\
          }}\n\
          mut i = 0\n\
          while i < {ITERS} {{\n\

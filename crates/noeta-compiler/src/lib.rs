@@ -5856,7 +5856,7 @@ mod tests {
     #[test]
     fn a_method_proto_is_named_type_dot_method() {
         let m = compile_dbg(
-            "struct Point { x: int\n  fn mag(): int { return self.x }\n}\nmut p = Point { x: 3 };\np.mag();\n",
+            "struct Point { x: int\n  pub fn mag(): int { return self.x }\n}\nmut p = Point { x: 3 };\np.mag();\n",
         );
         assert!(
             m.protos

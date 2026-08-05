@@ -91,13 +91,13 @@ fn doc_tier_stamps_members_and_traits_not_only_top_level_declarations() {
              fn double(): int { return self.n * 2 }\n\
              impl Area {\n\
                  @doc { An in-body impl method. }\n\
-                 fn area(): int { return self.n }\n\
+                 pub fn area(): int { return self.n }\n\
              }\n\
          }\n\
          struct P { y: int }\n\
          impl Area for P {\n\
              @doc { A standalone impl method. }\n\
-             fn area(): int { return self.y }\n\
+             pub fn area(): int { return self.y }\n\
          }\n\
          for d in attributes_of::<Doc>() { echo \"${d.target}=${d.value.text.trim()}\" }\n",
     );

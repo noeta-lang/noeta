@@ -127,17 +127,17 @@ fn a_cross_module_coherence_conflict_renders_both_files() {
             (
                 "types.noe",
                 "namespace pkg.types;\npub trait Decoder { fn step(): string }\n\
-                 pub class Target { fn new(): Target { return Target {} } }\n",
+                 pub class Target { pub fn new(): Target { return Target {} } }\n",
             ),
             (
                 "first.noe",
                 "namespace pkg.first;\nuse pkg.types.{Decoder, Target};\n\
-                 impl Decoder for Target { fn step(): string { return \"first\" } }\n",
+                 impl Decoder for Target { pub fn step(): string { return \"first\" } }\n",
             ),
             (
                 "second.noe",
                 "namespace pkg.second;\nuse pkg.types.{Decoder, Target};\n\
-                 impl Decoder for Target { fn step(): string { return \"second\" } }\n",
+                 impl Decoder for Target { pub fn step(): string { return \"second\" } }\n",
             ),
             (
                 "main.noe",

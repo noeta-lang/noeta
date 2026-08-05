@@ -347,14 +347,14 @@ fn a_method_body_swap_reaches_instances_created_before_the_swap() {
     // content-interned shape and dispatch by name into the new body.
     let v1 = "class Counter {\n\
               n: int\n\
-              fn new(): Counter { return Counter { n: 7 }; }\n\
-              fn describe(): string { return \"v1 ${self.n}\"; }\n\
+              pub fn new(): Counter { return Counter { n: 7 }; }\n\
+              pub fn describe(): string { return \"v1 ${self.n}\"; }\n\
               }\n\
               mut c = Counter.new()\n";
     let v2 = "class Counter {\n\
               n: int\n\
-              fn new(): Counter { return Counter { n: 7 }; }\n\
-              fn describe(): string { return \"v2 ${self.n}\"; }\n\
+              pub fn new(): Counter { return Counter { n: 7 }; }\n\
+              pub fn describe(): string { return \"v2 ${self.n}\"; }\n\
               }\n\
               mut c = Counter.new()\n";
     oracle(v1, v2, "echo c.describe();");
@@ -746,16 +746,16 @@ fn a_reordered_region_keeps_a_standalone_impls_methods() {
                 trait Describe { fn describe(): string }\n";
     let counter = "class Counter {\n\
                    \x20   count: int\n\
-                   \x20   fn new(count: int): Counter { return Counter { count: count }; }\n\
+                   \x20   pub fn new(count: int): Counter { return Counter { count: count }; }\n\
                    }\n\
                    impl Describe for Counter {\n\
                    \x20   #[Route(\"/counter\")]\n\
-                   \x20   fn describe(): string { return \"counter=${self.count}\"; }\n\
+                   \x20   pub fn describe(): string { return \"counter=${self.count}\"; }\n\
                    }\n";
     let holder = "class Holder {\n\
                   \x20   impl Describe {\n\
                   \x20       #[Route(\"/holder\")]\n\
-                  \x20       fn describe(): string { return \"holder\"; }\n\
+                  \x20       pub fn describe(): string { return \"holder\"; }\n\
                   \x20   }\n\
                   }\n";
     oracle_over_a_reorder(
