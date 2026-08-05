@@ -90,6 +90,7 @@ const REDUCE: ExtTrait = ExtTrait {
     // No structural `Self`-constraint (slice 3): `Reduce` binds any implementing type; the
     // constraint path is exercised by `ext_self_constraint_seam.rs`.
     self_constraint: None,
+    ..ExtTrait::DEFAULTS
 };
 
 // --- The native @packed struct that implements it ------------------------------------------------
@@ -143,6 +144,7 @@ const ACCUM: ExtStruct = ExtStruct {
     traits: &["Reduce"],
     kind: FieldedKind::Struct,
     directives: &[ExtTypeDirective::Packed(PackedLayoutKind::Row)],
+    ..ExtStruct::DEFAULTS
 };
 
 /// Read `Accum`'s three `int` fields off the marshalled instance.

@@ -440,6 +440,11 @@ param_names: &[],
         layout: ConstraintLayout::Any,
         arity: ConstraintArity::Exact,
     }),
+    // Prose, so the composed-toolchain docs test proves the whole path: an extension's declaration
+    // AND its documentation reach the published artifact.
+    doc: "Raw-buffer pixel kernels. `impl fx.Pixels for YourPixel {}` over a three-`f32` @packed \
+          struct and the whole list gains `brighten`.",
+    docs: &[("brighten", "Brighten every pixel in the list by `delta`.")],
 };
 
 fn pixels_bundle_dispatch(
@@ -733,6 +738,42 @@ fn doc_api_in_a_composed_toolchain_documents_the_native_package() {
     for f in ["\"double\"", "\"acc\"", "\"sum_r\"", "\"brighten_all\""] {
         assert!(json.contains(f), "fx function {f} documented");
     }
+    // …and so is the package's native **trait** — the surface `impl fx.Pixels for Px {}` binds
+    // against. The generator walked `modules()`/`types()` only, so a published native package's
+    // reference named none of its traits, enums, classes or structs. This is the composed-toolchain
+    // proof of the whole path: the declaration, its rendered contract, and its prose.
+    assert!(
+        json.contains("\"kind\": \"trait\""),
+        "the Pixels trait is documented:\n{json}"
+    );
+    assert!(
+        json.contains("trait Pixels {"),
+        "the trait renders as a declaration:\n{json}"
+    );
+    assert!(
+        json.contains("Raw-buffer pixel kernels"),
+        "the trait's prose rides along:\n{json}"
+    );
+    assert!(
+        json.contains("Brighten every pixel"),
+        "and its per-method prose:\n{json}"
+    );
+    // …and the package's `@`-directives, the one declared surface that is neither a callable nor a
+    // nominal type. Everything needed to document one was already on `ExtDirective` — its `doc`,
+    // `params` and `sites` — and nothing read it, so `@openapi` (para/api's flagship, the whole
+    // reason the hook has an `expand`) appeared in no reference.
+    assert!(
+        json.contains("\"kind\": \"directive\""),
+        "the fx directives are documented:\n{json}"
+    );
+    assert!(
+        json.contains("@fx_spec(spec)"),
+        "rendered as the invocation its contract accepts:\n{json}"
+    );
+    assert!(
+        json.contains("**Attaches to:** types."),
+        "with the placement rule its sites state:\n{json}"
+    );
     // …and std is excluded by the root scope (a package documents only itself).
     assert!(
         !json.contains("\"std.math\""),

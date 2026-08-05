@@ -201,6 +201,370 @@ pub fn method(qualified: &str, name: &str) -> Option<ApiFn> {
         .find(|m| m.name == name)
 }
 
+// --- Nominal declarations: traits, enums, classes, structs ---------------------------------------
+//
+// `ExtModule` and `ExtType` are bags of callables, and the two walkers above render them as such.
+// The other four nominal hooks are not: a trait is a contract, an enum is a closed choice, and a
+// fielded type is a shape. Each renders the way its `.noe` twin does in `docgen` — a `trait`/`enum`/
+// `struct`/`class` item on the page of the module it is namespaced under, carrying a whole rendered
+// declaration as its signature. That is what makes a native package's reference read identically to
+// a Noeta-source one, which is the point of documenting them through the same schema.
+
+/// One nominal declaration of the API reference: a native trait, enum, class, or struct.
+#[derive(Debug, Clone)]
+pub struct ApiDecl {
+    /// The qualified identity (`std.vec.Kernels`).
+    pub qualified: String,
+    /// The module page this declaration belongs on — its namespace (`std.vec`).
+    pub module: String,
+    /// The short name (`Kernels`).
+    pub name: String,
+    /// The docs.json item kind: `trait`, `enum`, `struct`, or `class`.
+    pub kind: &'static str,
+    /// The whole rendered declaration, ready for a code block.
+    pub signature: String,
+    /// The declaration's prose, with any per-member prose folded in beneath it (see
+    /// [`with_members`]). Empty when the declaration documents nothing.
+    pub doc: String,
+}
+
+/// Every nominal declaration the registry knows, sorted by qualified name.
+pub fn decls() -> Vec<ApiDecl> {
+    decls_in(registry::extensions(), &|_| true)
+}
+
+/// Every `@`-directive the registry knows, sorted by qualified name — the [`decls`] analogue for the
+/// one declared surface that is neither a callable nor a nominal type.
+///
+/// A directive has no `namespace` of its own (nothing imports one; the name resolves globally after
+/// the built-ins and the tier name-space), so it is documented on the page of its **extension's
+/// root** — the namespace a reader already associates with the package that ships it.
+pub fn directives() -> Vec<ApiDecl> {
+    directives_in(registry::extensions(), &|_| true)
+}
+
+/// The directives of just the extensions whose `root` is `root`.
+pub fn directives_of(root: &str) -> Vec<ApiDecl> {
+    directives_in(registry::extensions(), &|ext| ext.root() == root)
+}
+
+/// The directives of every registered extension EXCEPT the named units — the publish scope.
+pub fn directives_excluding(exclude_units: &[&str]) -> Vec<ApiDecl> {
+    directives_in(registry::extensions(), &|ext| {
+        !exclude_units.contains(&ext.name())
+    })
+}
+
+fn directives_in(exts: &[Ext], keep: &dyn Fn(Ext) -> bool) -> Vec<ApiDecl> {
+    let mut out: Vec<ApiDecl> = Vec::new();
+    for ext in exts.iter().filter(|e| keep(**e)) {
+        for d in ext.directives() {
+            out.push(ApiDecl {
+                qualified: format!("{}.@{}", ext.root(), d.name),
+                module: ext.root().to_string(),
+                name: format!("@{}", d.name),
+                kind: "directive",
+                signature: render_directive(d),
+                doc: directive_doc(d),
+            });
+        }
+    }
+    out.sort_by(|a, b| a.qualified.cmp(&b.qualified));
+    out.dedup_by(|a, b| a.qualified == b.qualified);
+    out
+}
+
+/// A directive as a declaration: how it is written. The positional parameters come from
+/// [`ExtDirective::params`] and the named ones from [`ExtDirective::named_keys`], so the rendered
+/// form is the invocation the argument contract actually accepts.
+fn render_directive(d: &noeta_stdlib::registry::ExtDirective) -> String {
+    let mut args: Vec<String> = d.params.iter().map(|p| (*p).to_string()).collect();
+    // A variadic directive (`max_args: None`) accepts more than its named parameters.
+    if d.max_args.is_none() {
+        args.push("…".to_string());
+    }
+    args.extend(d.named_keys.iter().map(|k| format!("{k}: …")));
+    if args.is_empty() {
+        format!("@{}", d.name)
+    } else {
+        format!("@{}({})", d.name, args.join(", "))
+    }
+}
+
+/// A directive's prose: its hover doc, then the placement rule its `sites` state. Where a directive
+/// may be written is not derivable from its name and is the first thing a reader gets wrong, so it
+/// is documented rather than left to a diagnostic.
+fn directive_doc(d: &noeta_stdlib::registry::ExtDirective) -> String {
+    use noeta_stdlib::registry::TierSite;
+    let mut out = d.doc.trim().to_string();
+    let sites: Vec<&str> = d
+        .sites
+        .iter()
+        .map(|s| match s {
+            TierSite::Function => "functions",
+            TierSite::Method => "methods",
+            TierSite::Type => "types",
+            TierSite::Trait => "traits",
+        })
+        .collect();
+    if !out.is_empty() {
+        out.push_str("\n\n");
+    }
+    // Empty `sites` means "attaches to nothing" — the same polarity `ExtTier::sites` has. A reader
+    // meeting such a directive needs to be told it, not left to infer "anywhere" from silence.
+    out.push_str(&match sites.as_slice() {
+        [] => "**Attaches to:** nothing — this directive declares no sites.".to_string(),
+        _ => format!("**Attaches to:** {}.", sites.join(", ")),
+    });
+    out
+}
+
+/// The nominal declarations of just the extensions whose `root` is `root` — the [`modules_of`]
+/// analogue.
+pub fn decls_of(root: &str) -> Vec<ApiDecl> {
+    decls_in(registry::extensions(), &|ext| ext.root() == root)
+}
+
+/// The nominal declarations of every registered extension EXCEPT the named units — the
+/// [`modules_excluding`] analogue, and the publish path's scope.
+pub fn decls_excluding(exclude_units: &[&str]) -> Vec<ApiDecl> {
+    decls_in(registry::extensions(), &|ext| {
+        !exclude_units.contains(&ext.name())
+    })
+}
+
+fn decls_in(exts: &[Ext], keep: &dyn Fn(Ext) -> bool) -> Vec<ApiDecl> {
+    let mut out: Vec<ApiDecl> = Vec::new();
+    for ext in exts.iter().filter(|e| keep(**e)) {
+        for t in ext.traits() {
+            out.push(ApiDecl {
+                qualified: t.qualified(),
+                module: t.namespace.to_string(),
+                name: t.name.to_string(),
+                kind: "trait",
+                signature: render_trait(t),
+                doc: with_members(t.doc, trait_members(t), t.docs),
+            });
+        }
+        for e in ext.enums() {
+            out.push(ApiDecl {
+                qualified: e.qualified(),
+                module: e.namespace.to_string(),
+                name: e.name.to_string(),
+                kind: "enum",
+                signature: render_enum(e),
+                doc: with_members(e.doc, enum_members(e), e.docs),
+            });
+        }
+        // Classes and structs are one ABI type (`ExtFielded`) behind two hooks; the `kind`
+        // discriminant, not the hook, decides how each reads — so both walk the same renderer and a
+        // hook/discriminant mismatch (which `Registry::validate` refuses) cannot produce a page
+        // that lies about which it is.
+        for f in ext.classes().iter().chain(ext.structs().iter()) {
+            out.push(ApiDecl {
+                qualified: f.qualified(),
+                module: f.namespace.to_string(),
+                name: f.name.to_string(),
+                kind: match f.kind {
+                    noeta_stdlib::FieldedKind::Class => "class",
+                    noeta_stdlib::FieldedKind::Struct => "struct",
+                },
+                signature: render_fielded(f),
+                doc: with_members(f.doc, fielded_members(f), f.docs),
+            });
+        }
+    }
+    out.sort_by(|a, b| a.qualified.cmp(&b.qualified));
+    out.dedup_by(|a, b| a.qualified == b.qualified);
+    out
+}
+
+/// A native trait as a declaration: its associated types, then its `Self`-receiver methods, then any
+/// `List<Self>` bulk methods under a marker comment. A defaulted method shows `{ … }` and a required
+/// one is bodiless — the same signal `docgen`'s `.noe` `trait_docs` emits, and the one that tells an
+/// implementor which methods they must write.
+fn render_trait(t: &noeta_stdlib::ExtTrait) -> String {
+    use noeta_stdlib::BundleReceiver;
+    let mut sig = format!("trait {} {{\n", t.name);
+    for a in t.assoc_types {
+        sig.push_str(&format!("    type {}\n", a.name));
+    }
+    let body = |m: &noeta_stdlib::ExtTraitMethod| if m.has_default { " { … }\n" } else { "\n" };
+    for m in t
+        .methods
+        .iter()
+        // Element and Static both belong to the ordinary contract; only Bulk's `List<Self>`
+        // receiver is grouped apart below.
+        .filter(|m| m.receiver != BundleReceiver::Bulk)
+    {
+        sig.push_str(&format!("    {}{}", render_trait_method(m), body(m)));
+    }
+    let mut bulk = t
+        .methods
+        .iter()
+        .filter(|m| m.receiver == BundleReceiver::Bulk)
+        .peekable();
+    if bulk.peek().is_some() {
+        sig.push_str("\n    // on List<Self>:\n");
+        for m in bulk {
+            sig.push_str(&format!("    {}{}", render_trait_method(m), body(m)));
+        }
+    }
+    sig.push('}');
+    sig
+}
+
+/// One trait method's signature. Not [`ExtFn::render`], because a trait method's [`RetTy`] is
+/// **receiver-relative** and `ExtFn::render` has no receiver to resolve it against: the receiver
+/// rides as slot 0, so `SameAsArg(0)` is `Self` (or `List<Self>` on a bulk method) and every other
+/// index is shifted by one against the declared parameters. That is exactly how the checker types
+/// the call (`bundle_method_return`), so rendering it any other way documents a return type the
+/// compiler does not produce — `vec.Kernels.scale` would read `: number` where the call really
+/// yields `Self`.
+fn render_trait_method(m: &noeta_stdlib::ExtTraitMethod) -> String {
+    use noeta_stdlib::{BundleReceiver, RetTy};
+    let params: Vec<String> = m
+        .sig
+        .params
+        .iter()
+        .enumerate()
+        .map(|(i, ty)| match m.sig.param_names.get(i) {
+            Some(n) => format!("{n}: {}", ty.render()),
+            None => ty.render(),
+        })
+        .collect();
+    let ret = match m.sig.ret {
+        RetTy::SameAsArg(0) => match m.receiver {
+            BundleReceiver::Element => "Self".to_string(),
+            BundleReceiver::Bulk => "List<Self>".to_string(),
+            // A static method binds no receiver, but slot 0 still denotes the implementing type —
+            // which is what a static constructor (`Syncable`'s decoder) returns.
+            BundleReceiver::Static => "Self".to_string(),
+        },
+        RetTy::SameAsArg(i) => m
+            .sig
+            .params
+            .get(i - 1)
+            .map(noeta_stdlib::SigType::render)
+            .unwrap_or_else(|| "dyn".to_string()),
+        ref other => other.render(m.sig.params),
+    };
+    format!("fn {}({}): {ret}", m.sig.name, params.join(", "))
+}
+
+/// A native enum as a declaration: its backing (`: string`) when it has one, then its variants —
+/// fieldless, algebraic (`Tagged(name: string)`), or backed (`Pending = "pending"`) — then any
+/// instance methods.
+fn render_enum(e: &noeta_stdlib::ExtEnum) -> String {
+    use noeta_stdlib::{EnumBacking, VariantValue};
+    let backing = match e.backing {
+        EnumBacking::None => "",
+        EnumBacking::Str => ": string",
+        EnumBacking::Int => ": int",
+    };
+    let mut sig = format!("enum {}{backing} {{\n", e.name);
+    for v in e.variants {
+        let payload = if v.fields.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "({})",
+                v.fields
+                    .iter()
+                    .map(noeta_stdlib::SigType::render)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        let value = match v.value {
+            VariantValue::None => String::new(),
+            VariantValue::Str(s) => format!(" = \"{s}\""),
+            VariantValue::Int(i) => format!(" = {i}"),
+        };
+        sig.push_str(&format!("    {}{payload}{value}\n", v.name));
+    }
+    for m in e.methods {
+        sig.push_str(&format!("    {}\n", m.render()));
+    }
+    sig.push('}');
+    sig
+}
+
+/// A native class or struct as a declaration: its fields with their visibility and mutability, then
+/// its instance methods.
+fn render_fielded(f: &noeta_stdlib::ExtFielded) -> String {
+    let keyword = match f.kind {
+        noeta_stdlib::FieldedKind::Class => "class",
+        noeta_stdlib::FieldedKind::Struct => "struct",
+    };
+    let mut sig = format!("{keyword} {} {{\n", f.name);
+    for field in f.fields {
+        let vis = if field.is_public { "pub " } else { "" };
+        let mutability = if field.is_mut { "mut " } else { "" };
+        sig.push_str(&format!(
+            "    {vis}{mutability}{}: {}\n",
+            field.name,
+            field.ty.render()
+        ));
+    }
+    for m in f.methods {
+        sig.push_str(&format!("    {}\n", m.render()));
+    }
+    sig.push('}');
+    sig
+}
+
+/// The members of a trait, in the order [`render_trait`] lists them.
+fn trait_members(t: &noeta_stdlib::ExtTrait) -> Vec<(&'static str, String)> {
+    t.methods
+        .iter()
+        .map(|m| (m.sig.name, render_trait_method(m)))
+        .collect()
+}
+
+/// The members of an enum: its variants (rendered as their bare case name — a variant is not a
+/// signature) followed by its instance methods.
+fn enum_members(e: &noeta_stdlib::ExtEnum) -> Vec<(&'static str, String)> {
+    e.variants
+        .iter()
+        .map(|v| (v.name, v.name.to_string()))
+        .chain(e.methods.iter().map(|m| (m.name, m.render())))
+        .collect()
+}
+
+/// The members of a fielded type: its fields (rendered `name: T`) followed by its instance methods.
+fn fielded_members(f: &noeta_stdlib::ExtFielded) -> Vec<(&'static str, String)> {
+    f.fields
+        .iter()
+        .map(|field| (field.name, format!("{}: {}", field.name, field.ty.render())))
+        .chain(f.methods.iter().map(|m| (m.name, m.render())))
+        .collect()
+}
+
+/// Fold a declaration's own prose and its per-member prose into one markdown body.
+///
+/// The rendered signature already lists every member, so a member is given its own subsection only
+/// when it is **documented** — an undocumented one is already visible above and a bare heading
+/// would add nothing. Members appear in declaration order, not the `docs` table's order, so the
+/// prose reads in the same order as the signature it annotates.
+fn with_members(
+    doc: &str,
+    members: Vec<(&'static str, String)>,
+    docs: &[(&'static str, &'static str)],
+) -> String {
+    let mut out = doc.trim().to_string();
+    for (name, rendered) in members {
+        let Some((_, prose)) = docs.iter().find(|(n, _)| *n == name) else {
+            continue;
+        };
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        out.push_str(&format!("#### `{rendered}`\n\n{}", prose.trim()));
+    }
+    out
+}
+
 /// Namespacing violations for the extensions rooted at `pkg_root` (the `--root` form of the publish
 /// lint): every extern type such an extension registers must be qualified under that root — a type
 /// that leaks into another namespace (most commonly an `ExtType` that omits `namespace:` and so
@@ -259,16 +623,39 @@ fn namespace_violations_in(
             ));
             continue; // its types would all re-report the same squat
         }
-        for t in ext.types() {
-            if !under(t.namespace, root) {
+        // Every nominal declaration, not just the extern types. All five hooks default `namespace`
+        // to `"std"` through their `DEFAULTS`, so all five leak the same way — a package's trait
+        // that forgets `namespace:` claims `std.Mergeable`, is unreachable under the package's own
+        // root, and squats a name in the toolchain's namespace. The lint checked one of the five.
+        for (what, name, namespace) in nominal_namespaces(*ext) {
+            if !under(namespace, root) {
                 out.push(format!(
-                    "extern type `{}` is namespaced `{}`, not under its extension's root `{root}` \
-                     — set `namespace: \"{root}\"` on it (the field defaults to `std`)",
-                    t.name, t.namespace
+                    "{what} `{name}` is namespaced `{namespace}`, not under its extension's root \
+                     `{root}` — set `namespace: \"{root}\"` on it (the field defaults to `std`)"
                 ));
             }
         }
     }
+    out
+}
+
+/// Every nominal declaration an extension registers, as `(what it is, its name, its namespace)` —
+/// the one place the five hooks that carry a `namespace` are enumerated together, so a lint or a
+/// walker over "the extension's declared identities" cannot silently cover four of five.
+fn nominal_namespaces(ext: Ext) -> Vec<(&'static str, &'static str, &'static str)> {
+    let mut out: Vec<(&'static str, &'static str, &'static str)> = ext
+        .types()
+        .iter()
+        .map(|t| ("extern type", t.name, t.namespace))
+        .collect();
+    out.extend(ext.traits().iter().map(|t| ("trait", t.name, t.namespace)));
+    out.extend(ext.enums().iter().map(|e| ("enum", e.name, e.namespace)));
+    out.extend(ext.classes().iter().map(|c| ("class", c.name, c.namespace)));
+    out.extend(
+        ext.structs()
+            .iter()
+            .map(|s| ("struct", s.name, s.namespace)),
+    );
     out
 }
 
@@ -399,7 +786,250 @@ mod tests {
                     );
                 }
             }
+            // The nominal hooks' tables are keyed the same way and orphan the same way. Each is
+            // checked against the members `with_members` will look the key up among — the exact set
+            // that decides whether the prose renders — so a rename that strands an entry fails here
+            // rather than silently dropping a paragraph from the published page.
+            for tr in ext.traits() {
+                let names: HashSet<&str> = tr.methods.iter().map(|m| m.sig.name).collect();
+                for (key, _) in tr.docs {
+                    assert!(
+                        names.contains(key),
+                        "trait `{}` docs key `{key}` names no method",
+                        tr.qualified()
+                    );
+                }
+            }
+            for e in ext.enums() {
+                let names: HashSet<&str> = e
+                    .variants
+                    .iter()
+                    .map(|v| v.name)
+                    .chain(e.methods.iter().map(|m| m.name))
+                    .collect();
+                for (key, _) in e.docs {
+                    assert!(
+                        names.contains(key),
+                        "enum `{}` docs key `{key}` names no variant or method",
+                        e.qualified()
+                    );
+                }
+            }
+            for f in ext.classes().iter().chain(ext.structs().iter()) {
+                let names: HashSet<&str> = f
+                    .fields
+                    .iter()
+                    .map(|field| field.name)
+                    .chain(f.methods.iter().map(|m| m.name))
+                    .collect();
+                for (key, _) in f.docs {
+                    assert!(
+                        names.contains(key),
+                        "type `{}` docs key `{key}` names no field or method",
+                        f.qualified()
+                    );
+                }
+            }
         }
+    }
+
+    // --- nominal declarations (traits / enums / classes / structs) -------------------------------
+
+    #[test]
+    fn native_traits_reach_the_api_reference_with_their_prose() {
+        // The hole this closes: `decls()` did not exist, so `ext.traits()` was documented nowhere.
+        let kernels = decls()
+            .into_iter()
+            .find(|d| d.qualified == "std.vec.Kernels")
+            .expect("std.vec.Kernels is a registered native trait");
+        assert_eq!(kernels.kind, "trait");
+        assert_eq!(kernels.module, "std.vec", "lands on its namespace's page");
+        // The declaration renders whole: associated types, the contract, and the default marker.
+        assert!(kernels.signature.starts_with("trait Kernels {"));
+        assert!(kernels.signature.contains("type Wide"));
+        assert!(
+            kernels
+                .signature
+                .contains("fn add(other: Self): Self { … }")
+        );
+        // The bulk methods are grouped under their real receiver rather than passed off as `Self`.
+        assert!(kernels.signature.contains("// on List<Self>:"));
+        assert!(
+            kernels
+                .signature
+                .contains("fn add_all(other: List<Self>): List<Self>")
+        );
+        // The trait's own prose leads, and per-method prose follows under its signature.
+        assert!(kernels.doc.starts_with("Element-wise arithmetic"));
+        assert!(
+            kernels
+                .doc
+                .contains("#### `fn dot(other: Self): Self::Wide`")
+        );
+        assert!(kernels.doc.contains("the sum of the element-wise products"));
+    }
+
+    #[test]
+    fn a_trait_methods_receiver_relative_return_renders_as_self() {
+        // `RetTy::SameAsArg(0)` is the RECEIVER on a trait method (`bundle_method_return`), not the
+        // first declared parameter. `ExtFn::render` cannot know that and renders `vec.Kernels.scale`
+        // as `: number` — the type of its `factor` argument, which is not what the call yields.
+        // Rendering the reference from that would have documented a return the compiler never
+        // produces.
+        let kernels = decls()
+            .into_iter()
+            .find(|d| d.qualified == "std.vec.Kernels")
+            .unwrap();
+        assert!(kernels.signature.contains("fn scale(factor: number): Self"));
+        assert!(
+            !kernels
+                .signature
+                .contains("fn scale(factor: number): number")
+        );
+        // A no-argument receiver-relative return has no parameter to be confused with at all.
+        assert!(kernels.signature.contains("fn abs(): Self"));
+        // And the bulk twin of the same shape is `List<Self>`.
+        assert!(
+            kernels
+                .signature
+                .contains("fn scale_all(factor: number): List<Self>")
+        );
+    }
+
+    #[test]
+    fn native_enums_and_structs_reach_the_api_reference() {
+        let all = decls();
+        let framing = all
+            .iter()
+            .find(|d| d.qualified == "std.http.Framing")
+            .expect("std.http.Framing is a registered native enum");
+        assert_eq!(framing.kind, "enum");
+        assert_eq!(framing.module, "std.http");
+        assert!(framing.signature.contains("enum Framing {"));
+        for variant in ["Sse", "Ndjson", "Lines"] {
+            assert!(framing.signature.contains(variant), "variant {variant}");
+            // Per-variant prose is what a caller actually needs here — which `Frame` fields each
+            // framing populates is not derivable from the variant's name.
+            assert!(
+                framing.doc.contains(&format!("#### `{variant}`")),
+                "prose for {variant}"
+            );
+        }
+
+        let frame = all
+            .iter()
+            .find(|d| d.qualified == "std.http.Frame")
+            .expect("std.http.Frame is a registered native struct");
+        // The `kind` discriminant decides the keyword, not the hook it arrived through.
+        assert_eq!(frame.kind, "struct");
+        assert!(frame.signature.contains("struct Frame {"));
+        assert!(frame.signature.contains("pub event: string"));
+        assert!(frame.signature.contains("pub retry: Option<int>"));
+        assert!(frame.doc.contains("#### `retry: Option<int>`"));
+    }
+
+    #[test]
+    fn an_undocumented_member_gets_no_empty_subsection() {
+        // The signature already lists every member, so a bare heading over nothing is noise. Only
+        // documented members earn a subsection.
+        let doc = with_members(
+            "The trait.",
+            vec![("a", "fn a(): Self".into()), ("b", "fn b(): Self".into())],
+            &[("b", "Only b is documented.")],
+        );
+        assert!(doc.contains("#### `fn b(): Self`"));
+        assert!(!doc.contains("#### `fn a(): Self`"));
+        // A declaration with no prose of its own but documented members still renders them.
+        let members_only = with_members("", vec![("a", "fn a(): Self".into())], &[("a", "Prose.")]);
+        assert!(members_only.starts_with("#### `fn a(): Self`"));
+    }
+
+    static DEMO_DIRECTIVES: &[noeta_stdlib::registry::ExtDirective] = &[
+        noeta_stdlib::registry::ExtDirective {
+            name: "openapi",
+            sites: &[noeta_stdlib::registry::TierSite::Type],
+            max_args: Some(1),
+            named_keys: &[],
+            detail: "@openapi(\"spec.json\")",
+            doc: "Generates one method per operation in the named OpenAPI document.",
+            params: &["spec"],
+            expand: None,
+        },
+        // A directive with no arguments and no declared sites — the "attaches to nothing" polarity
+        // an empty `sites` means, which a reader has no other way to learn.
+        noeta_stdlib::registry::ExtDirective {
+            name: "marker",
+            sites: &[],
+            max_args: Some(0),
+            named_keys: &[],
+            detail: "@marker",
+            doc: "",
+            params: &[],
+            expand: None,
+        },
+    ];
+    struct DirectiveExt;
+    impl noeta_stdlib::Extension for DirectiveExt {
+        fn name(&self) -> &'static str {
+            "api-native"
+        }
+        fn root(&self) -> &'static str {
+            "para"
+        }
+        fn modules(&self) -> &'static [noeta_stdlib::ExtModule] {
+            &[]
+        }
+        fn directives(&self) -> &'static [noeta_stdlib::registry::ExtDirective] {
+            DEMO_DIRECTIVES
+        }
+    }
+    static DIRECTIVE_EXT: DirectiveExt = DirectiveExt;
+
+    #[test]
+    fn directives_are_documented_with_their_invocation_and_placement() {
+        // A directive is the one declared surface that is neither a callable nor a nominal type, so
+        // no walker covered it: `@openapi` — para/api's flagship, the whole reason `ExtDirective`
+        // grew an `expand` hook — appeared in no reference at all. Everything needed to document
+        // one was already on the declaration (`doc`, `params`, `named_keys`, `sites`); nothing read
+        // it.
+        let ds = directives_in(&[&DIRECTIVE_EXT], &|_| true);
+        assert_eq!(ds.len(), 2, "{ds:?}");
+
+        let openapi = ds.iter().find(|d| d.name == "@openapi").unwrap();
+        assert_eq!(openapi.kind, "directive");
+        // Documented on its extension's root — a directive has no namespace of its own.
+        assert_eq!(openapi.module, "para");
+        assert_eq!(openapi.qualified, "para.@openapi");
+        // The rendered form is the invocation the argument contract accepts.
+        assert_eq!(openapi.signature, "@openapi(spec)");
+        assert!(openapi.doc.contains("one method per operation"));
+        // Where it may be written is the first thing a reader gets wrong, so it is stated.
+        assert!(
+            openapi.doc.contains("**Attaches to:** types."),
+            "{}",
+            openapi.doc
+        );
+
+        let marker = ds.iter().find(|d| d.name == "@marker").unwrap();
+        assert_eq!(marker.signature, "@marker", "no arguments, no parens");
+        // Empty `sites` means "attaches to nothing", the same polarity `ExtTier::sites` has —
+        // silence would read as "anywhere", which is the opposite.
+        assert!(marker.doc.contains("nothing"), "{}", marker.doc);
+    }
+
+    #[test]
+    fn decls_scope_the_same_way_modules_do() {
+        // The three scopes are the publish path's contract: `--root` filters to one namespace and
+        // `--non-builtin` is empty in the stock toolchain (every unit is a builtin one).
+        assert!(
+            decls_of("std")
+                .iter()
+                .all(|d| d.qualified.starts_with("std"))
+        );
+        assert!(!decls_of("std").is_empty());
+        assert!(decls_of("nosuchpkg").is_empty());
+        let builtin: Vec<&str> = registry::extensions().iter().map(|e| e.name()).collect();
+        assert!(decls_excluding(&builtin).is_empty());
     }
 
     #[test]
@@ -593,6 +1223,85 @@ mod tests {
             namespace_violations_in(&[&DIVERGENT_EXT], &|_| true, &["std", "css", "html"])
                 .is_empty()
         );
+    }
+
+    /// A package whose trait, enum, class and struct each forget `namespace:` and so default to
+    /// `std` — the exact omission the lint exists to catch, on the four hooks it did not check.
+    static LEAKY_TRAITS: &[noeta_stdlib::ExtTrait] = &[noeta_stdlib::ExtTrait {
+        name: "Mergeable",
+        ..noeta_stdlib::ExtTrait::DEFAULTS
+    }];
+    static LEAKY_ENUMS: &[noeta_stdlib::ExtEnum] = &[noeta_stdlib::ExtEnum {
+        name: "Framing",
+        ..noeta_stdlib::ExtEnum::DEFAULTS
+    }];
+    static LEAKY_CLASSES: &[noeta_stdlib::ExtClass] = &[noeta_stdlib::ExtClass {
+        name: "Node",
+        ..noeta_stdlib::ExtClass::DEFAULTS
+    }];
+    static LEAKY_STRUCTS: &[noeta_stdlib::ExtStruct] = &[noeta_stdlib::ExtStruct {
+        name: "Frame",
+        ..noeta_stdlib::ExtStruct::STRUCT_DEFAULTS
+    }];
+    struct LeakyNominalExt;
+    impl noeta_stdlib::Extension for LeakyNominalExt {
+        fn name(&self) -> &'static str {
+            "leaky-nominal"
+        }
+        fn root(&self) -> &'static str {
+            "para"
+        }
+        fn modules(&self) -> &'static [noeta_stdlib::ExtModule] {
+            &[]
+        }
+        fn traits(&self) -> &'static [noeta_stdlib::ExtTrait] {
+            LEAKY_TRAITS
+        }
+        fn enums(&self) -> &'static [noeta_stdlib::ExtEnum] {
+            LEAKY_ENUMS
+        }
+        fn classes(&self) -> &'static [noeta_stdlib::ExtClass] {
+            LEAKY_CLASSES
+        }
+        fn structs(&self) -> &'static [noeta_stdlib::ExtStruct] {
+            LEAKY_STRUCTS
+        }
+    }
+    static LEAKY_NOMINAL_EXT: LeakyNominalExt = LeakyNominalExt;
+
+    #[test]
+    fn the_publish_lint_covers_every_nominal_hook_not_just_extern_types() {
+        // The lint iterated `ext.types()` alone, so a package trait that omitted `namespace:`
+        // claimed `std.Mergeable` — unreachable under the package's own root, squatting a name in
+        // the toolchain's namespace — and published clean. All five hooks default to `"std"`
+        // through their `DEFAULTS`, so all five leak identically.
+        let violations = namespace_violations_in(&[&LEAKY_NOMINAL_EXT], &|_| true, &[]);
+        assert_eq!(
+            violations.len(),
+            4,
+            "one per leaked declaration: {violations:?}"
+        );
+        // Each names what it is, so the fix ("set `namespace:`") lands on the right declaration.
+        for (what, name) in [
+            ("trait", "Mergeable"),
+            ("enum", "Framing"),
+            ("class", "Node"),
+            ("struct", "Frame"),
+        ] {
+            assert!(
+                violations
+                    .iter()
+                    .any(|v| v.starts_with(&format!("{what} `{name}`")) && v.contains("`std`")),
+                "a leaked {what} is reported: {violations:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_well_namespaced_nominal_surface_is_clean() {
+        // No false positives: the shipped stdlib's own traits/enums/structs sit under `std`, which
+        // is their unit's root, and the whole registry lints clean under it.
+        assert!(namespace_violations("std").is_empty());
     }
 
     #[test]

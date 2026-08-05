@@ -137,7 +137,17 @@
 /// env-overrides-config reflex — a process-wide variable outranking a per-tenant directory would
 /// collapse every signed-in user onto one identity and store, silently mixing one user's data into
 /// another's.
-pub const ABI_VERSION: u32 = 14;
+///
+/// **15** — [`registry::ExtTrait`], [`registry::ExtEnum`] and [`registry::ExtFielded`] each gained a
+/// `doc` (the declaration's own prose) and a `docs` (its per-member table, the field
+/// [`registry::ExtModule`] and [`registry::ExtType`] have carried since the docs-browser arc). A
+/// source break only for a literal that named every field rather than spreading `..DEFAULTS`; add
+/// nothing and the defaults are empty. The point of the addition is that until it existed a native
+/// trait had nowhere to say what an implementor promises, and the API reference walked
+/// `modules()`/`types()` alone — so a published package's docs named none of its traits, enums,
+/// classes or structs. Assembly also now holds a trait's `namespace` to its unit's root, the rule
+/// the other four nominal hooks were already held to and traits were not.
+pub const ABI_VERSION: u32 = 15;
 
 pub mod args;
 pub mod channel;

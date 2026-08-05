@@ -407,6 +407,16 @@ const TABLE: &[Row] = &[
         ),
     ),
     Row(
+        "ExtEnum",
+        "doc",
+        Prose("the enum's own markdown for the docs browser; rendered, never checked"),
+    ),
+    Row(
+        "ExtEnum",
+        "docs",
+        Prose("per-variant/per-method markdown for the docs browser; rendered, never checked"),
+    ),
+    Row(
         "ExtVariant",
         "name",
         Data(Anchor(CHECK_PRELUDE, "fn seed_ext_enums(")),
@@ -533,6 +543,16 @@ const TABLE: &[Row] = &[
                 "fn native_validated_struct_bars_construction_and_validates_at_a_door(",
             ),
         ),
+    ),
+    Row(
+        "ExtFielded",
+        "doc",
+        Prose("the type's own markdown for the docs browser; rendered, never checked"),
+    ),
+    Row(
+        "ExtFielded",
+        "docs",
+        Prose("per-field/per-method markdown for the docs browser; rendered, never checked"),
     ),
     // --- ExtRoleTag (native type-declaration unification, Slice D3) -----------------------------
     // A native `@role` tag inside `ExtTypeDirective::Role`. Both fields state a RULE the enforcer
@@ -661,6 +681,16 @@ const TABLE: &[Row] = &[
                 "fn a_native_trait_self_constraint_is_enforced(",
             ),
         ),
+    ),
+    Row(
+        "ExtTrait",
+        "doc",
+        Prose("the trait's own markdown for the docs browser; rendered, never checked"),
+    ),
+    Row(
+        "ExtTrait",
+        "docs",
+        Prose("per-method markdown for the docs browser; rendered, never checked"),
     ),
     Row(
         "ExtTraitMethod",

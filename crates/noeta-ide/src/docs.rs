@@ -630,14 +630,43 @@ fn api_children(id: &DocId) -> Vec<DocNode> {
                 expandable: true,
                 location: None,
             }));
+            // A namespace that holds only nominal declarations is still a container the tree must
+            // offer — `std.http` registers its functions under `std.http.client`/`.server`, so
+            // `Framing` and `Frame` live in a namespace with no module of its own and would
+            // otherwise be unreachable from the root no matter how well they document themselves.
+            let listed: std::collections::HashSet<&str> =
+                nodes.iter().map(|n| n.title.as_str()).collect();
+            let mut orphans: Vec<String> = [api::decls(), api::directives()]
+                .concat()
+                .into_iter()
+                .map(|d| d.module)
+                .filter(|m| !listed.contains(m.as_str()))
+                .collect();
+            orphans.sort();
+            orphans.dedup();
+            let orphans: Vec<DocNode> = orphans
+                .into_iter()
+                .map(|m| DocNode {
+                    id: DocId::new(format!("{API_ROOT}/{m}")),
+                    title: m,
+                    kind: DocKind::Module,
+                    detail: None,
+                    has_page: true,
+                    expandable: true,
+                    location: None,
+                })
+                .collect();
+            nodes.extend(orphans);
             nodes
         }
-        // A qualified name is either a module (→ functions) or an extern type (→ methods).
+        // A qualified name is either a module (→ functions and nominal declarations) or an extern
+        // type (→ methods).
         [_root, qualified] => {
             if let Some(m) = api::module(qualified) {
                 m.functions
                     .iter()
                     .map(|f| api_fn_node(qualified, f, DocKind::Function))
+                    .chain(api_decl_nodes(qualified))
                     .collect()
             } else if let Some(t) = api::type_(qualified) {
                 t.methods
@@ -645,10 +674,46 @@ fn api_children(id: &DocId) -> Vec<DocNode> {
                     .map(|f| api_fn_node(qualified, f, DocKind::Method))
                     .collect()
             } else {
-                Vec::new()
+                // Not a module and not an extern type — but a unit may declare a trait under a
+                // namespace it registers no functions in, and that namespace is still a real page.
+                api_decl_nodes(qualified).collect()
             }
         }
         _ => Vec::new(),
+    }
+}
+
+/// The nominal declarations (traits, enums, classes, structs) namespaced under `qualified`, as tree
+/// leaves. They sit beside the module's functions for the same reason they sit on its `docs.json`
+/// page: `use std.vec` brings `vec.Kernels` into reach exactly as it brings `vec.add`, so a browser
+/// that lists one and not the other misrepresents what the module offers.
+fn api_decl_nodes(qualified: &str) -> impl Iterator<Item = DocNode> + use<> {
+    let qualified = qualified.to_string();
+    [api::decls(), api::directives()]
+        .concat()
+        .into_iter()
+        .filter(move |d| d.module == qualified)
+        .map(|d| DocNode {
+            id: DocId::new(format!("{API_ROOT}/{}/{}", d.module, d.name)),
+            title: d.name.clone(),
+            kind: decl_kind(d.kind),
+            detail: Some(api_detail(&d.signature)),
+            has_page: true,
+            expandable: false,
+            location: None,
+        })
+}
+
+/// An [`api::ApiDecl`]'s docs.json kind as the browser's own.
+fn decl_kind(kind: &str) -> DocKind {
+    match kind {
+        "trait" => DocKind::Trait,
+        "enum" => DocKind::Enum,
+        "class" => DocKind::Class,
+        // A directive is not a type; `Section` is the corpus's kind for "prose-bearing, not a
+        // value" and is what the tree already renders without a type icon.
+        "directive" => DocKind::Section,
+        _ => DocKind::Struct,
     }
 }
 
@@ -666,12 +731,23 @@ fn api_page(id: &DocId) -> Option<DocPage> {
 /// summaries, like a docs.rs module page. Gives the tree's module/type rows something to open and
 /// gives a module-name search hit a destination.
 fn api_overview_page(qualified: &str) -> Option<DocPage> {
+    // The namespace's nominal declarations, listed under every overview that has any — a module's,
+    // and a declaration-only namespace's (`std.http`, whose functions live under `std.http.client`),
+    // which is a real page with nothing else on it.
+    let decls: Vec<api::ApiDecl> = [api::decls(), api::directives()]
+        .concat()
+        .into_iter()
+        .filter(|d| d.module == qualified)
+        .collect();
     let (kind, members): (DocKind, Vec<api::ApiFn>) = if let Some(m) = api::module(qualified) {
         (DocKind::Module, m.functions)
-    } else {
-        // Not a module, so the only other thing this page can be about is an extern type.
-        let t = api::type_(qualified)?;
+    } else if let Some(t) = api::type_(qualified) {
         (DocKind::Struct, t.methods)
+    } else if !decls.is_empty() {
+        (DocKind::Module, Vec::new())
+    } else {
+        // Not a module, not an extern type, and nothing declared under it: no such page.
+        return None;
     };
     let noun = if kind == DocKind::Module {
         "Functions"
@@ -679,9 +755,10 @@ fn api_overview_page(qualified: &str) -> Option<DocPage> {
         "Methods"
     };
     let mut markdown = String::new();
-    if members.is_empty() {
+    if members.is_empty() && decls.is_empty() {
         markdown.push_str(&format!("_No {}._", noun.to_lowercase()));
-    } else {
+    }
+    if !members.is_empty() {
         markdown.push_str(&format!("### {noun}\n\n"));
         for f in &members {
             let summary = f.doc.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
@@ -689,6 +766,20 @@ fn api_overview_page(qualified: &str) -> Option<DocPage> {
                 markdown.push_str(&format!("- `{}`\n", f.signature));
             } else {
                 markdown.push_str(&format!("- `{}` — {}\n", f.signature, summary.trim()));
+            }
+        }
+    }
+    if !decls.is_empty() {
+        if !markdown.is_empty() {
+            markdown.push('\n');
+        }
+        markdown.push_str("### Types and traits\n\n");
+        for d in &decls {
+            let summary = d.doc.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+            if summary.is_empty() {
+                markdown.push_str(&format!("- `{} {}`\n", d.kind, d.name));
+            } else {
+                markdown.push_str(&format!("- `{} {}` — {}\n", d.kind, d.name, summary.trim()));
             }
         }
     }
@@ -706,16 +797,27 @@ fn api_overview_page(qualified: &str) -> Option<DocPage> {
 /// A single function/method page: the rendered signature, its prose, and cross-references to guide
 /// pages that mention it.
 fn api_member_page(id: &DocId, qualified: &str, name: &str) -> Option<DocPage> {
-    let (f, kind) = match api::function(qualified, name) {
-        Some(f) => (f, DocKind::Function),
-        None => (api::method(qualified, name)?, DocKind::Method),
+    let (signature, markdown, kind) = match api::function(qualified, name) {
+        Some(f) => (f.signature, f.doc, DocKind::Function),
+        None => match api::method(qualified, name) {
+            Some(f) => (f.signature, f.doc, DocKind::Method),
+            // Not a function or method of this container, so the remaining thing it can name is one
+            // of the namespace's nominal declarations.
+            None => {
+                let d = [api::decls(), api::directives()]
+                    .concat()
+                    .into_iter()
+                    .find(|d| d.module == qualified && d.name == name)?;
+                (d.signature, d.doc, decl_kind(d.kind))
+            }
+        },
     };
     Some(DocPage {
         id: id.clone(),
         title: format!("{qualified}.{name}"),
         kind,
-        signature: Some(f.signature),
-        markdown: f.doc,
+        signature: Some(signature),
+        markdown,
         location: None,
         xrefs: guide_xrefs_for(qualified, name),
     })
@@ -801,6 +903,21 @@ fn api_search(needle: &str) -> Vec<DocHit> {
         for f in &t.methods {
             api_score_into(&t.qualified, f, DocKind::Method, needle, &mut hits);
         }
+    }
+    // Nominal declarations are searched as members of their namespace, the same shape a function
+    // is — searching "Mergeable" should find the trait, not silently nothing.
+    for d in [api::decls(), api::directives()].concat() {
+        api_score_into(
+            &d.module,
+            &api::ApiFn {
+                name: d.name,
+                signature: d.signature,
+                doc: d.doc,
+            },
+            decl_kind(d.kind),
+            needle,
+            &mut hits,
+        );
     }
     hits
 }
@@ -1458,6 +1575,70 @@ mod tests {
         let rendered = page(&ctx, &m0.id).expect("method page renders");
         assert_eq!(rendered.kind, DocKind::Method);
         assert!(rendered.signature.is_some());
+    }
+
+    #[test]
+    fn a_modules_native_traits_and_types_browse_beside_its_functions() {
+        // The browser read `modules()`/`types()` only, so `std.vec` listed nineteen functions and
+        // neither of the two traits the module exists to have you `impl` — the same hole
+        // `noeta doc --api` had, through the same corpus.
+        let ctx = DocCtx::empty();
+        let vec_mod = children(&ctx, &DocId::new("api"))
+            .into_iter()
+            .find(|n| n.title == "std.vec")
+            .expect("std.vec module present");
+        let kids = children(&ctx, &vec_mod.id);
+        let kernels = kids
+            .iter()
+            .find(|n| n.title == "Kernels")
+            .expect("the Kernels trait browses under std.vec");
+        assert_eq!(kernels.kind, DocKind::Trait);
+        assert!(kernels.has_page);
+        assert!(
+            kids.iter().any(|n| n.kind == DocKind::Function),
+            "the module's functions are still there"
+        );
+
+        // Its page carries the whole declaration and its prose.
+        let rendered = page(&ctx, &kernels.id).expect("the trait page renders");
+        assert_eq!(rendered.kind, DocKind::Trait);
+        assert!(
+            rendered
+                .signature
+                .as_deref()
+                .unwrap()
+                .contains("trait Kernels {")
+        );
+        assert!(rendered.markdown.contains("Element-wise arithmetic"));
+
+        // An enum and a struct reach the tree with their own kinds, not a generic one.
+        let http = children(&ctx, &DocId::new("api"))
+            .into_iter()
+            .find(|n| n.title == "std.http")
+            .expect("std.http module present");
+        let http_kids = children(&ctx, &http.id);
+        let framing = http_kids.iter().find(|n| n.title == "Framing").unwrap();
+        assert_eq!(framing.kind, DocKind::Enum);
+        let frame = http_kids.iter().find(|n| n.title == "Frame").unwrap();
+        assert_eq!(frame.kind, DocKind::Struct);
+
+        // `std.http` registers no functions of its own (they live under `std.http.client`), so it
+        // is a namespace that exists *only* because declarations are namespaced under it. Its row
+        // promises a page, and that page must render rather than 404.
+        let overview = page(&ctx, &http.id).expect("a declaration-only namespace has a page");
+        assert!(overview.markdown.contains("### Types and traits"));
+        assert!(overview.markdown.contains("`enum Framing`"));
+    }
+
+    #[test]
+    fn searching_finds_a_native_trait_by_name() {
+        let ctx = DocCtx::empty();
+        let hits = search(&ctx, "satkernels");
+        assert!(
+            hits.iter().any(|h| h.title.contains("SatKernels")),
+            "the trait is searchable: {:?}",
+            hits.iter().map(|h| &h.title).collect::<Vec<_>>()
+        );
     }
 
     #[test]

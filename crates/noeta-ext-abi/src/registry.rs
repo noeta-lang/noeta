@@ -1244,6 +1244,14 @@ pub struct ExtEnum {
     /// role names → `semantic_enums`); [`Registry::validate`] refuses a struct/class-only directive
     /// here. Default empty.
     pub directives: &'static [ExtTypeDirective],
+    /// The enum's **own documentation prose** (markdown), or empty — what the choice means, which
+    /// the variant list alone does not say. The [`ExtTrait::doc`] analogue.
+    pub doc: &'static str,
+    /// Per-**member** documentation prose: `(name, markdown)` pairs covering both
+    /// [`ExtEnum::variants`] and [`ExtEnum::methods`]. One table serves both because the two name
+    /// spaces are already disjoint (a method name may not collide with a variant's case name — see
+    /// [`ExtEnum::methods`]). Opt-in and sparse.
+    pub docs: &'static [(&'static str, &'static str)],
 }
 
 /// One variant of an [`ExtEnum`]: its case name plus **either** a positional payload (an algebraic
@@ -1282,6 +1290,8 @@ impl ExtEnum {
         },
         traits: &[],
         directives: &[],
+        doc: "",
+        docs: &[],
     };
 
     /// The variant named `variant`, with its declaration index, if any.
@@ -1520,6 +1530,13 @@ pub struct ExtFielded {
     /// `validated_types`); [`Registry::validate`] rejects a directive illegal for this type's
     /// [`FieldedKind`] (`@semantic` is enum-only, so it is refused here). Default empty.
     pub directives: &'static [ExtTypeDirective],
+    /// The type's **own documentation prose** (markdown), or empty. The [`ExtTrait::doc`] analogue.
+    pub doc: &'static str,
+    /// Per-**member** documentation prose: `(name, markdown)` pairs covering both
+    /// [`ExtFielded::fields`] and [`ExtFielded::methods`]. One table serves both because the two
+    /// name spaces are already disjoint (see [`ExtFielded::methods`]: a method name is disjoint from
+    /// the type's field names). Opt-in and sparse.
+    pub docs: &'static [(&'static str, &'static str)],
 }
 
 /// The pre-unification name for [`ExtFielded`], defaulting (via [`ExtFielded::DEFAULTS`]) to a
@@ -1572,6 +1589,8 @@ impl ExtFielded {
         traits: &[],
         kind: FieldedKind::Class,
         directives: &[],
+        doc: "",
+        docs: &[],
     };
 
     /// Literal-shortening defaults for a value **struct** (`..ExtStruct::STRUCT_DEFAULTS`) — the
@@ -1676,6 +1695,17 @@ pub struct ExtTrait {
     /// the extension author's own declaration and is validated at assembly. `None` leaves the trait
     /// shape-agnostic (implementable for any type), the pre-slice-3 behavior.
     pub self_constraint: Option<PackedConstraint>,
+    /// The trait's **own documentation prose** (markdown), or empty. A trait is a contract a user
+    /// writes an `impl` against, so the declaration-level prose is the part that matters most —
+    /// what the trait means and what an implementor promises. [`ExtModule`] and [`ExtType`] carry
+    /// only the per-member [`docs`](ExtTrait::docs) table because a module/handle is a bag of
+    /// callables; a trait is not.
+    pub doc: &'static str,
+    /// Per-method **documentation prose**: `(method_name, markdown)` pairs, the [`ExtTrait`]
+    /// analogue of [`ExtModule::docs`] / [`ExtType::docs`]. Opt-in and sparse — a method absent from
+    /// this table renders signature-only. Keyed by [`ExtTraitMethod::sig`]'s name, so one table
+    /// covers required and defaulted methods alike.
+    pub docs: &'static [(&'static str, &'static str)],
 }
 
 /// A native trait's **default-body dispatch** ([`ExtTrait::dispatch`], slice 2): the same
@@ -1765,6 +1795,8 @@ impl ExtTrait {
         assoc_types: &[],
         dispatch: None,
         self_constraint: None,
+        doc: "",
+        docs: &[],
     };
 }
 
@@ -4283,6 +4315,28 @@ fn validate(units: &[&'static (dyn Extension + Sync)]) -> Result<(), String> {
             }
         }
     }
+    // A native trait's namespace must live under its own unit's root — the same rule extern types,
+    // enums, classes and structs are already held to above, and the one hook it was never applied
+    // to. `ExtTrait::DEFAULTS` fills `namespace: "std"` exactly as the others do, so a third-party
+    // trait that forgets `namespace:` claims `std.Mergeable`: unreachable under the package's own
+    // root, and squatting a name only std may claim. Nothing refused it — not assembly (this loop
+    // did not exist) and not the publish lint (which walked `types()` alone) — so it would have
+    // shipped.
+    for unit in units {
+        let root = unit.root();
+        for t in unit.traits() {
+            if t.namespace != root && !t.namespace.starts_with(&format!("{root}.")) {
+                return Err(format!(
+                    "native trait `{}` of unit `{}` declares namespace `{}`, outside the unit's \
+                     root `{root}` — a missing `namespace:` defaults to `std`, which only std \
+                     may claim",
+                    t.name,
+                    unit.name(),
+                    t.namespace
+                ));
+            }
+        }
+    }
     // A native trait's structural `Self`-constraint (slice 3) with `Uniform` arity reads only
     // `fields[0]` (every field of the bound type must equal it) — declaring more than one kind is an
     // author bug that would silently ignore the rest, so refuse it here where every assembly path
@@ -4783,6 +4837,8 @@ mod runtime_registry_tests {
             .into())
         }),
         self_constraint: Some(VEC3_CONSTRAINT),
+        doc: "",
+        docs: &[],
     };
     const M_VEC: ExtModule = ExtModule {
         name: "vec",
@@ -5045,6 +5101,52 @@ mod runtime_registry_tests {
         assert!(
             validate(&[&SQ]).is_err(),
             "a type namespaced outside its unit's root must refuse to assemble"
+        );
+    }
+
+    #[test]
+    fn a_trait_namespace_outside_the_units_root_is_rejected() {
+        // The same rule, on the hook it was never applied to. `ExtTrait::DEFAULTS` fills
+        // `namespace: "std"` exactly as `ExtType::DEFAULTS` does, so a package trait that forgets
+        // the field claims `std.Mergeable` — but assembly checked types, enums, classes and
+        // structs, and the publish lint walked `types()` alone, so this one shipped.
+        const SQUATTER: ExtTrait = ExtTrait {
+            name: "Mergeable",
+            // The DEFAULTS value a forgotten `namespace:` leaves behind.
+            ..ExtTrait::DEFAULTS
+        };
+        static TRAITS: &[ExtTrait] = &[SQUATTER];
+        static OK_TRAITS: &[ExtTrait] = &[ExtTrait {
+            name: "Mergeable",
+            namespace: "acme.crdt",
+            ..ExtTrait::DEFAULTS
+        }];
+        struct TraitUnit(&'static [ExtTrait]);
+        impl Extension for TraitUnit {
+            fn name(&self) -> &'static str {
+                "acme.crdt"
+            }
+            fn root(&self) -> &'static str {
+                "acme"
+            }
+            fn modules(&self) -> &'static [ExtModule] {
+                &[]
+            }
+            fn traits(&self) -> &'static [ExtTrait] {
+                self.0
+            }
+        }
+        static SQ: TraitUnit = TraitUnit(TRAITS);
+        static OK: TraitUnit = TraitUnit(OK_TRAITS);
+        assert!(
+            validate(&[&SQ]).is_err(),
+            "a trait namespaced outside its unit's root must refuse to assemble"
+        );
+        // A trait namespaced under a submodule of the root is the ordinary case and stays legal —
+        // `std.vec.Kernels` and `para.crdt.Mergeable` are both spelled this way.
+        assert!(
+            validate(&[&OK]).is_ok(),
+            "root-relative namespacing is fine"
         );
     }
 

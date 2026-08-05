@@ -55,6 +55,7 @@ const HUE: ExtEnum = ExtEnum {
     dispatch: shade_enum_dispatch,
     traits: &[],
     directives: &[],
+    ..ExtEnum::DEFAULTS
 };
 
 const TONE: ExtEnum = ExtEnum {
@@ -79,6 +80,7 @@ const TONE: ExtEnum = ExtEnum {
     dispatch: shade_enum_dispatch,
     traits: &[],
     directives: &[],
+    ..ExtEnum::DEFAULTS
 };
 
 const LEVEL: ExtEnum = ExtEnum {
@@ -101,6 +103,7 @@ const LEVEL: ExtEnum = ExtEnum {
     dispatch: shade_enum_dispatch,
     traits: &[],
     directives: &[],
+    ..ExtEnum::DEFAULTS
 };
 
 const TAG: ExtEnum = ExtEnum {
@@ -130,6 +133,7 @@ const TAG: ExtEnum = ExtEnum {
     dispatch: shade_enum_dispatch,
     traits: &[],
     directives: &[],
+    ..ExtEnum::DEFAULTS
 };
 
 const FX_ENUMS: &[ExtEnum] = &[HUE, TONE, LEVEL, TAG];
