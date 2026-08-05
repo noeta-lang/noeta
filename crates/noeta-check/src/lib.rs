@@ -637,7 +637,7 @@ impl SessionChecker {
     /// must isolate entries regardless.
     fn reset_scratch(&mut self) {
         self.checker.coloring.current_type = None;
-        self.checker.coloring.in_dev_tier = false;
+        self.checker.coloring.dev_tier_at = None;
         self.checker.coloring.type_params.clear();
         self.checker.coloring.current_ret = Type::Unknown;
         self.checker.coloring.collected_returns = None;
@@ -931,6 +931,11 @@ struct TraitDefaultConflict {
     traits: (String, String),
 }
 
+/// Where a private member was declared — `Some(span)` for a `.noe` declaration, `None` for one a
+/// native extension registered, which has no source to point at. Distinct from the outer `Option`
+/// the lookups return: that one answers *whether* the member is private at all.
+pub(crate) type DeclSite = Option<Span>;
+
 /// The checker's **symbol tables** — everything `collect` (pass 0/1) registers about the
 /// program's declarations, read by every later pass. One of [`Checker`]'s four field groups
 /// (audit-3 Finding 2): grouping makes each module's borrow surface explicit.
@@ -977,7 +982,10 @@ struct Symbols {
     /// private, so this holds every field *not* declared `pub`. A private field is visible only
     /// inside the declaring type's own methods ([`Checker::current_type`]); read/write/construction
     /// elsewhere is E0035.
-    private_fields: HashMap<String, HashSet<String>>,
+    /// The value is each private field's **declaration site**, which the diagnostic points a second
+    /// label at and the white-box rule reads the declaring package from — see
+    /// [`Checker::white_box_over`].
+    private_fields: HashMap<String, HashMap<String, DeclSite>>,
     /// Type name → the set of its **private** methods (method-visibility arc). A method is private
     /// unless declared `pub`, in EVERY type kind — `struct`, `class` and `enum` alike, which is the
     /// one place this table differs from [`Self::private_fields`].
@@ -994,7 +1002,10 @@ struct Symbols {
     /// bridge — never appears here: a trait is an outward contract, so implementing one puts the
     /// method on the type's public surface by construction. The `impl` must still *write* `pub`
     /// (E0015); this table records the access rule, not the declaration rule.
-    private_methods: HashMap<String, HashSet<String>>,
+    /// The value is each private method's **declaration site**, on the same reasoning as
+    /// [`Self::private_fields`]: a visibility error is about two places, and the one the programmer
+    /// has to edit is the declaration.
+    private_methods: HashMap<String, HashMap<String, DeclSite>>,
     /// Every top-level value binding's name, collected in the pre-pass (F1). Top-level globals are
     /// **hoisted** — a function body may reference one declared textually later — so the
     /// unknown-name gate treats them all as known regardless of order. (A top-level *direct*
@@ -1291,10 +1302,17 @@ struct Coloring {
     /// capture their surroundings.
     in_sealed_body: bool,
     /// While checking the body of a fn lifted from a **dev-tier block** (`@test`/…, slice 6d), the
-    /// type-scoped field-privacy gate is relaxed to white-box access: co-located developer tooling
-    /// may read/write/construct its module's private fields (the Rust `#[cfg(test)]` model). `false`
-    /// for ordinary fns and methods. Set from [`FnDecl::is_dev_tier`] in [`Checker::check_fn`].
-    in_dev_tier: bool,
+    /// type-scoped privacy gates are relaxed to white-box access: co-located developer tooling may
+    /// read/write/construct its module's private fields and call its private methods (the Rust
+    /// `#[cfg(test)]` model). `None` for ordinary fns and methods; set from [`FnDecl::is_dev_tier`]
+    /// in [`Checker::check_fn`].
+    ///
+    /// It holds the dev-tier fn's own **span**, not a bare bit, because "its module's" is half the
+    /// rule. `#[cfg(test)]` opens the crate it sits in, not every crate it links; a `@test` block
+    /// that could reach into a *dependency's* privates would report nothing where a consumer will
+    /// fail, which is exactly how a release's worth of under-published methods got past this
+    /// checker. The span answers which package is being trusted — see [`Checker::white_box_over`].
+    dev_tier_at: Option<Span>,
     /// While checking a **trait's own default body** — the one declaration site where
     /// [`noeta_ast::FnDecl::is_static`] is a legal, meaningful modifier (static-trait-methods arc).
     ///
@@ -1586,6 +1604,30 @@ impl Checker {
     /// file and says nothing about which package shipped it.
     fn package_at(&self, span: Span) -> Option<&PackageOrigin> {
         self.config.provenance.packages.at(span)
+    }
+
+    /// Whether the body being checked may see the private member declared at `decl` — the white-box
+    /// half of [`Checker::field_visible`] and [`Checker::method_visible`], spelled once so the two
+    /// gates cannot answer it differently.
+    ///
+    /// True only inside a dev-tier body (`@test`/…) that belongs to the **same package** as the
+    /// declaration. `#[cfg(test)]` is the model and the boundary is the same one: a test may open
+    /// the module it ships with, never a dependency's. Without this, a package's own `@test` blocks
+    /// silently type-check calls no consumer can make, and every under-published method looks fine
+    /// right up until somebody imports it.
+    ///
+    /// Unknown provenance on either side is permissive, matching [`Self::package_at`]'s contract
+    /// that `None` means *unjudgeable* rather than "the root": a single-file check, a REPL fragment,
+    /// and generated code have no package to compare, and inventing one would refuse programs on a
+    /// guess.
+    fn white_box_over(&self, decl: DeclSite) -> bool {
+        let Some(at) = self.coloring.dev_tier_at else {
+            return false;
+        };
+        match (self.package_at(at), decl.and_then(|d| self.package_at(d))) {
+            (Some(here), Some(there)) => here == there,
+            _ => true,
+        }
     }
 
     /// Record an error diagnostic, returning `&mut` to the just-pushed diagnostic so a help line can
@@ -3007,8 +3049,10 @@ impl Checker {
         let saved_loop_depth = std::mem::replace(&mut self.coloring.loop_depth, 0);
         // White-box field privacy inside a dev-tier fn (slice 6d). Sticky: a nested fn declared in a
         // dev-tier body stays white-box too (co-located tooling). Restored after the body.
-        let saved_dev_tier = self.coloring.in_dev_tier;
-        self.coloring.in_dev_tier = decl.is_dev_tier || saved_dev_tier;
+        let saved_dev_tier = self.coloring.dev_tier_at;
+        if decl.is_dev_tier {
+            self.coloring.dev_tier_at = Some(decl.name_span);
+        }
         // SEALED body env: a named function's body sees its `use (…)` captures, `self`/`extra`,
         // and its parameters — never the surrounding value scope implicitly (anonymous closures
         // are the auto-capturing form). Each capture resolves against the DECLARATION site's env
@@ -3105,7 +3149,7 @@ impl Checker {
         // iterator protocol with the source cursor held as machine state (G.4), so no control-flow
         // context around a `yield` is rejected here.
         env.pop();
-        self.coloring.in_dev_tier = saved_dev_tier;
+        self.coloring.dev_tier_at = saved_dev_tier;
         self.coloring.current_ret = saved_ret;
         self.coloring.current_async = saved_async;
         self.coloring.current_yield = saved_yield;

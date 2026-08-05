@@ -266,7 +266,7 @@ impl Checker {
                 .private_methods
                 .entry(type_name.to_string())
                 .or_default()
-                .insert(m.name.to_string());
+                .insert(m.name.to_string(), Some(m.name_span));
         } else {
             // A later registration WINS over an earlier one for the same key (an `impl` method
             // over an inherent of the same name), so a public one must clear a private entry
@@ -519,11 +519,11 @@ impl Checker {
                     // Class fields default **private**; only those declared `pub` are public
                     // (object-model slice 2d). Struct fields are always public, so structs never
                     // register here.
-                    let private: HashSet<String> = c
+                    let private: HashMap<String, DeclSite> = c
                         .fields
                         .iter()
                         .filter(|f| !f.is_public)
-                        .map(|f| f.name.clone())
+                        .map(|f| (f.name.clone(), Some(f.name_span)))
                         .collect();
                     if !private.is_empty() {
                         self.symbols

@@ -529,16 +529,32 @@ impl Checker {
     /// (object-model slice 2d): a public field always is; a private one (a `class` field not
     /// declared `pub`) only inside the declaring type's own methods/destructor ([`Self::current_type`]).
     pub(crate) fn field_visible(&self, type_name: &str, field: &str) -> bool {
-        let private = self
-            .symbols
+        let Some(decl) = self.private_field_decl(type_name, field) else {
+            return true; // public
+        };
+        // White-box for dev-tier (`@test`/…) fn bodies: co-located tooling sees its OWN package's
+        // privates (slice 6d), so a private field is visible there regardless of `current_type`.
+        self.white_box_over(decl) || self.coloring.current_type.as_deref() == Some(type_name)
+    }
+
+    /// Where field `field` of `type_name` was declared, if it is private — `None` when it is public.
+    /// The one lookup both the gate and the diagnostic go through, so the label can never point at a
+    /// declaration the gate did not judge.
+    pub(crate) fn private_field_decl(&self, type_name: &str, field: &str) -> Option<DeclSite> {
+        self.symbols
             .private_fields
             .get(type_name)
-            .is_some_and(|fs| fs.contains(field));
-        // White-box for dev-tier (`@test`/…) fn bodies: co-located tooling sees its module's
-        // privates (slice 6d), so a private field is visible there regardless of `current_type`.
-        !private
-            || self.coloring.in_dev_tier
-            || self.coloring.current_type.as_deref() == Some(type_name)
+            .and_then(|fs| fs.get(field))
+            .copied()
+    }
+
+    /// The method twin of [`Self::private_field_decl`].
+    pub(crate) fn private_method_decl(&self, type_name: &str, name: &str) -> Option<DeclSite> {
+        self.symbols
+            .private_methods
+            .get(type_name)
+            .and_then(|ms| ms.get(name))
+            .copied()
     }
 
     /// Whether method `name` of type `type_name` is reachable at the current checking context
@@ -551,26 +567,29 @@ impl Checker {
     /// private method on *another* `Account`, exactly as it may read that other account's private
     /// field. Encapsulation is per type, and a type is trusted with its own kind.
     pub(crate) fn method_visible(&self, type_name: &str, name: &str) -> bool {
-        let private = self
-            .symbols
-            .private_methods
-            .get(type_name)
-            .is_some_and(|ms| ms.contains(name));
-        !private
-            || self.coloring.in_dev_tier
-            || self.coloring.current_type.as_deref() == Some(type_name)
+        let Some(decl) = self.private_method_decl(type_name, name) else {
+            return true; // `pub`
+        };
+        self.white_box_over(decl) || self.coloring.current_type.as_deref() == Some(type_name)
     }
 
     /// Report a call to — or a handle bound off — a private method from outside its type (E0076).
     /// Reported once per access site, on the same reasoning as the field rule: the type's surface
     /// is what it declares `pub`.
     pub(crate) fn report_private_method(&mut self, type_name: &str, name: &str, span: Span) {
-        self.error(
+        // The edit is at the DECLARATION, so point a second label there. Without it the message
+        // names a method and a type and leaves the reader to find which of a package's files
+        // declares it — the common case being a dependency they have not opened.
+        let decl = self.private_method_decl(type_name, name);
+        let d = self.error(
             DiagnosticCode::PrivateMethod,
             span,
             format!("cannot call private method `{name}` of `{type_name}` from outside it"),
-        )
-        .help(format!(
+        );
+        if let Some(decl) = decl.flatten() {
+            d.label(decl, format!("`{name}` is declared here, without `pub`"));
+        }
+        d.help(format!(
             "methods are private by default in every type kind; declare it `pub fn {name}(…)` to \
              make it part of `{type_name}`'s surface, or reach it through a method that already is"
         ));
@@ -586,12 +605,16 @@ impl Checker {
         span: Span,
     ) {
         let verb = access.verb();
-        self.error(
+        let decl = self.private_field_decl(type_name, field);
+        let d = self.error(
             DiagnosticCode::PrivateField,
             span,
             format!("cannot {verb} private field `{field}` of `{type_name}` from outside it"),
-        )
-        .help(format!(
+        );
+        if let Some(decl) = decl.flatten() {
+            d.label(decl, format!("`{field}` is declared here, without `pub`"));
+        }
+        d.help(format!(
             "fields of a `class` are private by default; declare it `pub {field}: ...` to expose \
                  it, or go through a method"
         ));

@@ -53,7 +53,7 @@ impl Checker {
         struct FieldedDecl {
             qualified: String,
             fields: Vec<(String, Type)>,
-            private: HashSet<String>,
+            private: HashMap<String, DeclSite>,
             muts: HashSet<String>,
             kind: noeta_types::TypeKind,
         }
@@ -67,11 +67,13 @@ impl Checker {
                     .map(|f| (f.name.to_string(), stdlib::sig_to_type(self.reg(), &f.ty)))
                     .collect();
                 // Fields default **private** (a class's `.noe` rule) — only `is_public` are exempt.
+                // `None` for the declaration site: a native field is registered through the ABI,
+                // not parsed, so there is no source line to point a label at.
                 let private = cl
                     .fields
                     .iter()
                     .filter(|f| !f.is_public)
-                    .map(|f| f.name.to_string())
+                    .map(|f| (f.name.to_string(), None))
                     .collect();
                 let muts = cl
                     .fields
