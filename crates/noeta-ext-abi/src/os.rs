@@ -92,7 +92,7 @@ pub const PROCESS_TYPE_NAME: &str = "Process";
 pub const PROCESS_TYPE_IDENTITY: &str = "std.os.Process";
 
 /// A handle to a spawned child process — a thin `{ id }` into the host's process registry, the
-/// listener/reader-id model (NOT [`crate::FileHandle`]'s self-contained state, because a real OS
+/// listener/reader-id model (NOT `FileHandle`'s self-contained state, because a real OS
 /// child can only be manipulated through the host). A **reference** value like `FileHandle`: its
 /// lifecycle methods mutate host-side state shared by every alias. Not key-capable; equality is by
 /// handle identity (two handles are equal iff they name the same spawned child).

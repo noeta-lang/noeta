@@ -131,7 +131,7 @@ impl NetError {
     }
 
     /// The composed sentence the value displays as, and what `message()` returns:
-    /// `timeout request to `https://api.example.com`: …` reads as one line in a log.
+    /// `timeout request to <https://api.example.com>: …` reads as one line in a log.
     pub fn message(&self) -> String {
         format!(
             "{} request to `{}`: {}",

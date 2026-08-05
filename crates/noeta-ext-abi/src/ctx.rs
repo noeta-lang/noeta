@@ -143,7 +143,7 @@ pub trait NativeCtx {
     /// The host capability seam — filesystem, clock, network, … (what a plain dispatch receives).
     fn host(&mut self) -> &mut dyn Host;
 
-    /// Write raw text to the program's standard output (the compared [`crate::RunResult`] stdout).
+    /// Write raw text to the program's standard output (the compared `RunResult` stdout).
     ///
     /// The seam that lets an ordinary native (`std.io`'s `out`/`outln`) reach the compared output
     /// buffer without a lowerer intrinsic or bytecode change — the same buffer the `echo` keyword
@@ -151,7 +151,7 @@ pub trait NativeCtx {
     /// oracle stays byte-identical by construction.
     fn write_stdout(&mut self, text: &str);
 
-    /// Write raw text to the program's standard error (the compared [`crate::RunResult`] stderr).
+    /// Write raw text to the program's standard error (the compared `RunResult` stderr).
     ///
     /// The stderr twin of [`NativeCtx::write_stdout`] (`std.io`'s `err`/`errln`). stderr is
     /// *observable output*, routed through the backends' buffers just like stdout — not a host
@@ -325,7 +325,7 @@ pub trait NativeCtx {
     fn option_payload(&mut self, slot: Slot) -> CtxResult<Option<Slot>>;
 
     /// Whether two slots' values are equal under the **language's `==`** — the exact
-    /// [`BinaryOp::Eq`](noeta_ast) semantics each backend already runs (structural for value types
+    /// `BinaryOp::Eq` semantics each backend already runs (structural for value types
     /// and collections, reference identity for a `class` without `impl Equatable`, distinct
     /// int/float rungs). Both argument slots are untouched. Used by an opt-in reactive `signal`'s
     /// change-suppression: an equal `set` need not re-fire dependents. Backend-implemented so the

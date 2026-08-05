@@ -272,7 +272,7 @@ pub trait Executor {
     /// executor runs `run_sync` through `host` **at spawn** and caches the outcome, so it is
     /// ready on the first poll (deterministic, in-oracle); the real executor runs the
     /// descriptor's real body on its tokio runtime (real concurrency, out-of-oracle) and
-    /// consults `host` only for a [`RealBody::Sync`] fallback.
+    /// consults `host` only for an [`ExternIo::run_sync`] fallback.
     fn spawn_ext(&mut self, host: &mut dyn Host, io: Box<dyn ExternIo>) -> u64;
 
     /// Poll a descriptor begun by [`Self::spawn_ext`]: `Some(outcome)` once completed (the

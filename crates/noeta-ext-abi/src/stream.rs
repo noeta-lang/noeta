@@ -609,7 +609,7 @@ impl FrameStream {
         }
     }
 
-    /// Whether the response status is a 2xx — the [`crate::NetResponse::ok`] twin.
+    /// Whether the response status is a 2xx — the [`crate::NetResponse`] `ok` twin.
     pub fn is_ok(&self) -> bool {
         (200..=299).contains(&self.status)
     }

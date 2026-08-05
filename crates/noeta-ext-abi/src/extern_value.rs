@@ -26,7 +26,7 @@ use std::fmt;
 /// values live on the heap beyond any borrow.
 pub trait ExternValue: fmt::Debug + Send {
     /// The value's **qualified type identity** — `"{namespace}.{name}"`, exactly
-    /// [`crate::registry::ExtType::qualified`] of the `ExtType` this value belongs to
+    /// [`crate::registry::NominalType::qualified`] of the `ExtType` this value belongs to
     /// (`"std.id.Uuid"`). Drives `type_of`, `is`/`.as<T>()` narrowing, and method-table lookup;
     /// the runtime compares it by pointer/content, so return one pre-joined `&'static` literal —
     /// never a formatted string. Two extensions may register the same *short* name under distinct
