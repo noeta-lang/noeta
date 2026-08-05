@@ -102,6 +102,12 @@ pub fn type_hints(
 /// slot where the keyword could never be written, the very thing this helper exists to avoid. So
 /// skip the whitespace that follows and land on the keyword itself, which is where an author would
 /// type it and the one anchor that reads as the source it stands for.
+///
+/// That keyword may be `pub`, which is **outermost** in the modifier order (`pub static async fn`),
+/// so the ghost belongs after it — anchoring on `pub` would render `⟨static⟩pub fn m()`, the same
+/// unwritable slot one modifier further along. The guard is `decl.is_public` rather than the text
+/// alone because the parser records no span for the keyword, so the AST is the authority on whether
+/// one is there and the text only says where it ends.
 fn modifier_offset(decl: &FnDecl, text: &str) -> u32 {
     let after_decorations = decl
         .attrs
@@ -119,7 +125,21 @@ fn modifier_offset(decl: &FnDecl, text: &str) -> u32 {
         .unwrap_or_default()
         .find(|c: char| !c.is_whitespace())
         .unwrap_or(rest);
-    after_decorations + leading_ws as u32
+    let at = after_decorations + leading_ws as u32;
+    if !decl.is_public {
+        return at;
+    }
+    let after = text.get(at as usize..).unwrap_or_default();
+    let Some(after_pub) = after.strip_prefix("pub") else {
+        return at;
+    };
+    if !after_pub.starts_with(char::is_whitespace) {
+        return at;
+    }
+    let ws = after_pub
+        .find(|c: char| !c.is_whitespace())
+        .unwrap_or(after_pub.len());
+    at + 3 + ws as u32
 }
 
 struct Walker<'a> {

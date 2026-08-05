@@ -4580,6 +4580,28 @@ mod tests {
         );
     }
 
+    /// `pub` is outermost in the modifier order (`pub static async fn`), so the ghost belongs
+    /// after it. Anchoring on `pub` would render `⟨static⟩pub fn make()` — the same slot-where-it-
+    /// could-never-be-written failure the anchor logic exists to prevent, one modifier along.
+    #[test]
+    fn inlay_hints_anchor_the_ghost_static_after_pub() {
+        let mut store = test_store();
+        store.open(
+            "file:///pubmod.noe",
+            "class Host {\n  \
+             pub id: int\n  \
+             pub async fn make(): Host { return Host { id: 1 } }\n\
+             }\n"
+            .to_string(),
+        );
+        let hints = placed_hints_of(&store, "file:///pubmod.noe");
+        // `  pub async fn make(…)` — `pub` spans columns 2..5, so column 6 is the `a` of `async`.
+        assert!(
+            hints.contains(&(2, 6, "static".to_string())),
+            "ghost follows `pub` and precedes `async`: {hints:?}"
+        );
+    }
+
     #[test]
     fn inlay_hints_anchor_the_ghost_static_on_the_fn_keyword() {
         let mut store = test_store();
