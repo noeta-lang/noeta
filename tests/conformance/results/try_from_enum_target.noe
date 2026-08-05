@@ -17,7 +17,7 @@ enum AppError {
     Other
 
     impl From<LowError> {
-        fn from(e: LowError): AppError {
+        pub fn from(e: LowError): AppError {
             return AppError.Wrapped(code: e.code)
         }
     }

@@ -4,6 +4,6 @@
 // expect: exit 1
 class Widget {
     impl Frobnicate {
-        fn frob(other: Widget): Widget { return other; }
+        pub fn frob(other: Widget): Widget { return other; }
     }
 }

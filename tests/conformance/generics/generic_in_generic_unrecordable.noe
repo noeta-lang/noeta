@@ -22,22 +22,22 @@ struct Todo {
 class Repository<T> {
     pub tbl: string
 
-    fn new(tbl: string): Repository<T> {
+    pub fn new(tbl: string): Repository<T> {
         return Repository { tbl: tbl };
     }
 
-    fn model(): string {
+    pub fn model(): string {
         return self.tbl ~ ":" ~ type_name::<T>();
     }
 }
 class Live<T> {
     repo: Repository<T>
 
-    fn new(tbl: string): Live<T> {
+    pub fn new(tbl: string): Live<T> {
         return Live { repo: Repository.new(tbl) };
     }
 
-    fn rebuild(): Repository<T> {
+    pub fn rebuild(): Repository<T> {
         r: Repository<T> = Repository.new(self.repo.tbl ~ "2");
         return r;
     }

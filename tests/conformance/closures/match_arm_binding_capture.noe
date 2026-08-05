@@ -33,7 +33,7 @@ echo count(some(2), ys)
 // Inside a method, where the closure captures the arm binding *and* `self`.
 struct Threshold {
     step: int
-    fn matches(o: ?int, xs: List<int>): int {
+    pub fn matches(o: ?int, xs: List<int>): int {
         return match o {
             some(want) => xs.filter(fn(n) => n == want + self.step).len(),
             none => 0,

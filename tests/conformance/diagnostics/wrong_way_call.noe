@@ -6,6 +6,6 @@
 class Stack {
     items: list
     fn new(items: list): Stack { return Stack { items: items } }
-    fn size(): int { return self.items.len() }
+    pub fn size(): int { return self.items.len() }
 }
 echo Stack.size()

@@ -11,7 +11,7 @@ trait Describable {
 struct Point {
     x: int
     impl Describable {
-        fn label(): string { return "point" }
+        pub fn label(): string { return "point" }
     }
 }
 
@@ -19,7 +19,7 @@ struct Plain {
     x: int
     impl Describable {
         // Both defaults adopted; `describe` overridden.
-        fn describe(): string { return "P" ~ self.x }
+        pub fn describe(): string { return "P" ~ self.x }
     }
 }
 

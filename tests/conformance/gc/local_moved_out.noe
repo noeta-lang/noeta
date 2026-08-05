@@ -11,7 +11,7 @@
 class R {
     name: string
 
-    fn new(name: string): R {
+    pub fn new(name: string): R {
         return R { name: name };
     }
 

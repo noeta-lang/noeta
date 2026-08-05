@@ -406,6 +406,47 @@ pub(crate) fn subst_or_dyn(ty: &Type, subst: &Subst, tps: &ParamSet) -> Type {
     apply_subst(ty, &full)
 }
 
+/// The spelling a trait declaration uses for "the implementing type". It is a trait-DECLARATION
+/// word only: it never names a declared type (writing it as an impl's return is E0013), so a
+/// [`Type::Named`] carrying it is always the contract's `Self` and never a nominal collision.
+pub(crate) const SELF_TYPE: &str = "Self";
+
+/// Substitute a trait contract's `Self` for the type the **receiver** actually has, deeply — the
+/// half of trait-signature instantiation that [`apply_subst`] cannot do, because `Self` is not a
+/// declared type parameter and so has no [`ParamId`] to key on.
+///
+/// A trait's signature is written in the trait's scope, where `Self` stands for whichever type
+/// implements it. Reading that signature at a call site therefore has to answer *two* questions,
+/// not one: what the trait's own `<…>` parameters are bound to (that is `apply_subst`), and what
+/// `Self` is here. Resolving only the first left the literal word `Self` in the call's type, which
+/// then mismatched every real type it met — `[E0007] expected 'T', found 'Self'` — even though a
+/// concrete receiver had always resolved it (see [`Checker::assoc_resolved_type`], which does the
+/// same job on the impl-conformance side).
+///
+/// Deliberately total over the lattice rather than top-level-only: `Self` is legal anywhere in a
+/// signature, so `fn split(): List<Self>` and `fn pick(other: ?Self)` must resolve too.
+pub(crate) fn subst_self(ty: Type, self_ty: &Type) -> Type {
+    let r = |t: Type| subst_self(t, self_ty);
+    match ty {
+        // Bare `Self`. A `Self<…>` with arguments is not a form the surface has — `Self` names one
+        // type, not a constructor — so the arity guard keeps this to the exact spelling.
+        Type::Named(n, ref args) if n == SELF_TYPE && args.is_empty() => self_ty.clone(),
+        Type::Named(n, args) => Type::Named(n, args.into_iter().map(r).collect()),
+        Type::List(t) => Type::List(Box::new(r(*t))),
+        Type::Set(t) => Type::Set(Box::new(r(*t))),
+        Type::Map(k, v) => Type::Map(Box::new(r(*k)), Box::new(r(*v))),
+        Type::Option(t) => Type::Option(Box::new(r(*t))),
+        Type::Result(t, e) => Type::Result(Box::new(r(*t)), Box::new(r(*e))),
+        Type::Tuple(es) => Type::Tuple(es.into_iter().map(r).collect()),
+        Type::Union(es) => Type::union(es.into_iter().map(r)),
+        Type::Fn { params, ret } => Type::Fn {
+            params: params.into_iter().map(r).collect(),
+            ret: Box::new(r(*ret)),
+        },
+        other => other,
+    }
+}
+
 /// Substitute resolved type parameters into a type, deeply. An unresolved parameter is left as
 /// itself (the caller erases any residue to `dyn`).
 pub(crate) fn apply_subst(ty: &Type, subst: &Subst) -> Type {

@@ -15,22 +15,22 @@ struct Todo {
 class Quiet<T> {
     pub tbl: string
 
-    fn new(tbl: string): Quiet<T> {
+    pub fn new(tbl: string): Quiet<T> {
         return Quiet { tbl: tbl };
     }
 
-    fn label(): string {
+    pub fn label(): string {
         return self.tbl;
     }
 }
 class Live<T> {
     q: Quiet<T>
 
-    fn new(tbl: string): Live<T> {
+    pub fn new(tbl: string): Live<T> {
         return Live { q: Quiet.new(tbl) };
     }
 
-    fn grow(): string {
+    pub fn grow(): string {
         r: Quiet<T> = Quiet.new("x");
         return self.q.label() ~ "/" ~ r.label();
     }

@@ -6,6 +6,6 @@ struct Broken {
     code: int
 
     impl Error {
-        fn describe(): string { return "nope" }
+        pub fn describe(): string { return "nope" }
     }
 }

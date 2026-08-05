@@ -11,7 +11,7 @@ enum Color { Red; Green; }
 struct Point { x: int }
 class Box {
     v: int
-    fn new(): Box { return Box { v: 1 }; }
+    pub fn new(): Box { return Box { v: 1 }; }
 }
 
 fn kind(t: Type): string {

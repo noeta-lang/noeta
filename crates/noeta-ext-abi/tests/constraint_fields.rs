@@ -705,13 +705,16 @@ const TABLE: &[Row] = &[
         "has_default",
         Data(Anchor(CHECK_PRELUDE, "fn synth_trait_decl(")),
     ),
-    // `receiver` (ExtBundle→ExtTrait fold-in, slice 4): which receiver carries a kernel-trait method —
-    // `Self` (Element) or `List<Self>` (Bulk, the accepted dual-receiver asymmetry). States a RULE
-    // about which receiver a method is reachable on: `bundle_method_call` reads it to type a method on
-    // a bound `T` vs a `List<T>` of one; calling a Bulk method on an element (or the reverse) is not
-    // resolved. No shipped extension declares a kernel trait the corpus cannot reach with a bulk
-    // method, so the `kernels_methods.noe` corpus case (which calls both `v.add(w)` and `xs.add_all(ys)`)
-    // is the exerciser.
+    // `receiver` (ExtBundle→ExtTrait fold-in, slice 4; `Static` from the static-trait-methods arc):
+    // which receiver carries a trait method — `Self` (Element), `List<Self>` (Bulk, the accepted
+    // dual-receiver asymmetry), or NONE (Static, the native spelling of a `.noe` trait's `static fn`).
+    // States a RULE about which receiver a method is reachable on: `bundle_method_call` reads it to
+    // type a method on a bound `T` vs a `List<T>` of one; calling a Bulk method on an element (or the
+    // reverse) is not resolved. `Static` reaches the checker through `synth_trait_decl`, which sets
+    // the synthesized `FnDecl::is_static` from it, so a native static method is licensed at `T.m(…)`
+    // and enforced at the impl by the same rules a `.noe` one is. No shipped extension declares a
+    // kernel trait the corpus cannot reach with a bulk method, so the `kernels_methods.noe` corpus
+    // case (which calls both `v.add(w)` and `xs.add_all(ys)`) is the exerciser.
     Row(
         "ExtTraitMethod",
         "receiver",

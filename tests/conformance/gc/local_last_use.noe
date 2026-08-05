@@ -13,11 +13,11 @@
 class Resource {
     name: string
 
-    fn new(name: string): Resource {
+    pub fn new(name: string): Resource {
         return Resource { name: name };
     }
 
-    fn use_it(): void {
+    pub fn use_it(): void {
         echo "using ${self.name}";
     }
 

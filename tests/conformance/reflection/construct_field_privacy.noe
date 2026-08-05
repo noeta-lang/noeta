@@ -34,9 +34,9 @@ class Box {
 
     // The class's own code may write the literal — that is what privacy means — so this is how a
     // `Box` with a real secret is built. The reflective door is refused even here.
-    fn sealed(l: string, s: int): Box { return Box { label: l, secret: s } }
+    pub fn sealed(l: string, s: int): Box { return Box { label: l, secret: s } }
 
-    fn reflectively(): Result<dyn, string> {
+    pub fn reflectively(): Result<dyn, string> {
         mut named: Map<string, dyn> = {}
         named["label"] = self.label
         named["secret"] = 1

@@ -10,12 +10,12 @@ class Money {
     amount: int
     tag: int
 
-    fn new(amount: int, tag: int): Money {
+    pub fn new(amount: int, tag: int): Money {
         return Money { amount: amount, tag: tag };
     }
 
     impl Equatable {
-        fn eq(other: Money): bool {
+        pub fn eq(other: Money): bool {
             return self.amount == other.amount;
         }
     }

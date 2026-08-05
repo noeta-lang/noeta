@@ -68,7 +68,7 @@ echo posts.filter(fn(p) => is_public(p)).len()
 
 ## Constructors
 
-**A constructor is a convention, not a keyword.** It is an associated function — one with no `self` — that returns an instance of its own type, and the ecosystem calls the primary one `new`:
+**A constructor is a convention, not a keyword.** It is a static function — one with no `self` — that returns an instance of its own type, and the ecosystem calls the primary one `new`:
 
 ```noeta
 struct Todo {
@@ -78,11 +78,11 @@ struct Todo {
 class Repo<T> {
     table: string
 
-    fn new(table: string): Repo<T> {
+    pub fn new(table: string): Repo<T> {
         return Repo { table: table }
     }
 
-    fn describe(): string {
+    pub fn describe(): string {
         return "a repo over ${self.table} of ${type_name::<T>()}"
     }
 }

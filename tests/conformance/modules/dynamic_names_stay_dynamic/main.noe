@@ -31,7 +31,7 @@ use std.json
 
 class Shape {
     w: int
-    fn new(w: int): Shape { return Shape { w: w } }
+    pub fn new(w: int): Shape { return Shape { w: w } }
     fn area(): int { return self.w }
 }
 

@@ -719,6 +719,10 @@ fn synth_trait_decl(
                 directives: Vec::new(),
                 is_dev_tier: false,
                 is_async: false,
+                // A native trait declares receiver-ness the same way a `.noe` trait does — through
+                // its ABI method's receiver marker (static-trait-methods, ABI half). `Static` is the
+                // "no receiver" case `BundleReceiver` could not express before.
+                is_static: matches!(m.receiver, noeta_ext_abi::BundleReceiver::Static),
                 tier: None,
                 captures: Vec::new(),
                 body: Vec::new(),

@@ -12,7 +12,7 @@
 // expect: exit 0
 class Leaf {
     tag: string
-    fn new(tag: string): Leaf { return Leaf { tag: tag }; }
+    pub fn new(tag: string): Leaf { return Leaf { tag: tag }; }
     destruct { echo "drop leaf ${self.tag}"; }
 }
 
@@ -20,7 +20,7 @@ class Pair {
     label: string
     first: Leaf
     second: Leaf
-    fn new(label: string): Pair {
+    pub fn new(label: string): Pair {
         return Pair { label: label, first: Leaf.new("first"), second: Leaf.new("second") };
     }
     destruct { echo "drop pair ${self.label}"; }

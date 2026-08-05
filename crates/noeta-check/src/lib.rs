@@ -107,6 +107,12 @@ pub use tiers::{
 
 use constructors::compute_fresh_constructors;
 use effects::*;
+/// The derived receiver discipline, published because it is a fact about a *declaration* that the
+/// source never spells — the IDE renders it as an inlay hint ([`Checked::method_receivers`]). It is
+/// re-exported rather than mirrored so there is exactly one enum, derived in exactly one place: a
+/// second copy of "does the body mention `self`" in the IDE crate would drift the first time the
+/// rule gains a case (an explicitly declared self-less method, say).
+pub use env::Receiver;
 use env::*;
 use forwarding::*;
 use sites::SiteMaps;
@@ -163,6 +169,15 @@ pub struct Checked {
     /// beside [`Sites`], not inside it; a handful of entries, so it is populated on every run, like
     /// [`Checked::bundle_bindings`].
     pub packed_layouts: HashMap<String, noeta_ast::reflect::PackedLayout>,
+    /// Every user method's derived [`Receiver`] discipline, keyed by the method's **name span** —
+    /// one entry per declaration. Receiver-ness is never written in source (it is derived from the
+    /// body plus the trait context, EX.2), so this is the only channel by which a reader can be
+    /// told which call form a method admits; the IDE renders it as an inlay hint at the declaration.
+    ///
+    /// An IDE read-side index like [`Checked::packed_layouts`], and populated on every run for the
+    /// same reason: it is one hash insert per method declaration, and a consumer must be able to
+    /// rely on it being there.
+    pub method_receivers: HashMap<Span, Receiver>,
 }
 
 /// Everything that varies a whole-program check, so callers configure one entry point
@@ -419,6 +434,7 @@ pub fn check_all_session_opts(program: &Program, opts: CheckOptions) -> (Checked
         },
         bundle_bindings: checker.bundle_bindings_public(),
         packed_layouts: checker.packed_layouts_public(),
+        method_receivers: checker.symbols.method_receiver_spans.clone(),
     };
     // The whole-program check above ran strict (file mode) — unknown names in a debugged program
     // are real errors. But the returned session, over which console fragments and later entries
@@ -961,6 +977,23 @@ struct Symbols {
     /// inside the declaring type's own methods ([`Checker::current_type`]); read/write/construction
     /// elsewhere is E0035.
     private_fields: HashMap<String, HashSet<String>>,
+    /// Type name → the set of its **private** methods (method-visibility arc). A method is private
+    /// unless declared `pub`, in EVERY type kind — `struct`, `class` and `enum` alike, which is the
+    /// one place this table differs from [`Self::private_fields`].
+    ///
+    /// Fields and methods answer different questions, so they do not have to share a default. A
+    /// `struct`'s fields are public because a value *is* its contents: structural `==` already
+    /// compares them field-wise and copy-on-write leaves no shared invariant to protect, so hiding
+    /// them would be incoherent. API surface is orthogonal — a `Point` whose `x`/`y` are visible
+    /// still benefits from an internal helper. Per-kind method visibility was considered and
+    /// rejected: it would mean a struct could never have a private helper, which is exactly the gap
+    /// this arc closes, merely narrowed to one kind.
+    ///
+    /// A method supplied by a `trait` — an `impl` block's own method, a hoisted default, a derive's
+    /// bridge — never appears here: a trait is an outward contract, so implementing one puts the
+    /// method on the type's public surface by construction. The `impl` must still *write* `pub`
+    /// (E0015); this table records the access rule, not the declaration rule.
+    private_methods: HashMap<String, HashSet<String>>,
     /// Every top-level value binding's name, collected in the pre-pass (F1). Top-level globals are
     /// **hoisted** — a function body may reference one declared textually later — so the
     /// unknown-name gate treats them all as known regardless of order. (A top-level *direct*
@@ -989,6 +1022,16 @@ struct Symbols {
     /// a *meaning* (`Either`), and re-deciding that meaning at each use site is exactly how the
     /// associated-call, instance-call, and turbofish paths drifted apart.
     method_receiver: HashMap<(String, String), Receiver>,
+    /// The same classification keyed by the method's **name span** — one entry per *declaration*,
+    /// where [`Symbols::method_receiver`] keeps one entry per callable `(type, method)` name and so
+    /// keeps only the winner when an `impl` block shadows an inherent method of the same name.
+    /// Written at the same two sites, from the same value, by [`Collector::record_receiver`].
+    ///
+    /// Exists for the IDE's receiver inlay hint, which anchors at a declaration and therefore asks
+    /// by position, not by name: the name key would force the IDE to re-derive a method's owning
+    /// type name (already a qualified identity by link time) and would answer nothing at all for the
+    /// shadowed declaration it is drawing on screen.
+    method_receiver_spans: HashMap<Span, Receiver>,
     /// Which built-in traits each user type satisfies: type name → set of trait names it `@derive`s
     /// or `impl`s. The basis (with the built-in-type table in [`Checker::satisfies`]) for enforcing a
     /// generic call's trait bounds (S4.2).
@@ -1239,6 +1282,15 @@ struct Coloring {
     /// may read/write/construct its module's private fields (the Rust `#[cfg(test)]` model). `false`
     /// for ordinary fns and methods. Set from [`FnDecl::is_dev_tier`] in [`Checker::check_fn`].
     in_dev_tier: bool,
+    /// While checking a **trait's own default body** — the one declaration site where
+    /// [`noeta_ast::FnDecl::is_static`] is a legal, meaningful modifier (static-trait-methods arc).
+    ///
+    /// Every body in the program funnels through [`Checker::check_fn`], which is therefore the one
+    /// place the "`static` is a trait-contract term, never an implementation's" rule can be spelled
+    /// *once*. A trait default is the single exception, and this flag states that exception where it
+    /// lives rather than repeating the rule at each of the four other call sites. `false` everywhere
+    /// else — a top-level `fn`, an inherent method, an `impl` block's method.
+    in_trait_contract: bool,
     /// The generic type parameters in scope while checking the current declaration, each mapped to
     /// its declared trait **bounds** (`<T: Comparable>` → `{"T": [Comparable]}`), including an
     /// instantiated bound's type arguments (`<T: Keyed<int>>`). Empty at top level; saved and
@@ -1682,6 +1734,7 @@ impl Checker {
         let packed_layouts = self.packed_layouts_public();
         let packed_type_layouts = sorted_packed_layouts(&packed_layouts);
         let relevance = self.relevance;
+        let method_receivers = self.symbols.method_receiver_spans;
         let mut sites = self.sites;
         let expr_types = std::mem::take(&mut sites.expr_types);
         let diverging_stmts = std::mem::take(&mut sites.diverging_stmts);
@@ -1694,6 +1747,7 @@ impl Checker {
             sites,
             bundle_bindings,
             packed_layouts,
+            method_receivers,
         }
     }
 
@@ -2597,12 +2651,12 @@ impl Checker {
                 && let Some(ty) = self.coloring.current_type.clone()
                 && !self
                     .receiver_of(&ty, decl.name.as_str())
-                    .allows_associated_call()
+                    .allows_static_call()
             {
                 self.error(
                     DiagnosticCode::InvalidDirectiveSite,
                     dir.name_span,
-                    format!("a `@{}` method must be an associated function", dir.name),
+                    format!("a `@{}` method must be a static function", dir.name),
                 )
                 .help(
                     "a test/bench method is called with no receiver, so its body must not use \
@@ -2682,6 +2736,29 @@ impl Checker {
         // one place every function/method body funnels through, so it cannot drift from what is
         // actually checked.
         self.visited_bodies.insert(decl.name_span);
+        // `static` declares receiver-ness, and receiver-ness is a **contract** term — so it belongs
+        // to a `trait`'s declaration and nowhere else (static-trait-methods arc). Everywhere else
+        // the body already answers the question: a method that mentions `self` needs one and a
+        // self-less one does not, derived, exactly, from source the reader is looking at. A
+        // modifier there would be a second source of truth that can disagree with the first, which
+        // is the very failure this arc exists to remove — so it is refused rather than trusted or
+        // silently ignored. E0015, the code every other "this implementation does not match what
+        // was declared" mismatch already carries.
+        if decl.is_static && !self.coloring.in_trait_contract {
+            self.error(
+                DiagnosticCode::InvalidImpl,
+                decl.name_span,
+                format!(
+                    "`{}` cannot be declared `static`: only a trait's method contract may declare \
+                     a receiver",
+                    decl.name
+                ),
+            )
+            .help(
+                "drop `static` — outside a `trait` declaration the body decides: a method that \
+                 mentions `self` takes a receiver, a self-less one is called on the type",
+            );
+        }
         self.require_signature(decl);
         // A function/method's `#[...]` attributes are validated like a type's: each names an
         // `Attribute` capability (E0029) and constructs it from its literal args (E0009/E0007/E0005).

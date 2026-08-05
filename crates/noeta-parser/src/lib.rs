@@ -4374,6 +4374,11 @@ where
             .repeated()
             .collect::<Vec<_>>()
             .then(just(T::PubKw).or_not())
+            // `static` is accepted at EVERY `fn` declaration site so that the one place it means
+            // something (a trait's method contract) and the places it does not are told apart by a
+            // CHECKER diagnostic with a span, not by a parse failure whose message would be about
+            // an unexpected token. See `FnDecl::is_static`.
+            .then(just(T::StaticKw).or_not())
             .then(just(T::AsyncKw).or_not())
             .then_ignore(just(T::FnKw))
             .then(id.clone())
@@ -4386,7 +4391,13 @@ where
                 move |(
                     (
                         (
-                            (((((attrs, pub_kw), async_kw), name_pair), type_params), params),
+                            (
+                                (
+                                    ((((attrs, pub_kw), static_kw), async_kw), name_pair),
+                                    type_params,
+                                ),
+                                params,
+                            ),
                             captures,
                         ),
                         ret,
@@ -4408,6 +4419,7 @@ where
                         is_dev_tier: false,
                         tier: None,
                         is_async: async_kw.is_some(),
+                        is_static: static_kw.is_some(),
                         body,
                         span: ctx.to_span(e.span()),
                     })
@@ -4523,6 +4535,18 @@ where
         .repeated()
         .collect::<Vec<_>>();
         let method = method_decos
+            // `pub` is part of the METHOD production, not a field declaration's opening — the same
+            // shape `static` established. A type body reads a leading identifier as a field
+            // (`name: T`), so before this `pub fn m()` put `fn` in name position and reported
+            // "`fn` cannot be used as a name" (E0046), which says nothing about what is wrong.
+            // Reading the modifier here makes `pub` on a method mean what it says, and it is the
+            // OUTERMOST modifier — `pub static async fn` — matching every language that pairs
+            // visibility with the rest.
+            .then(just(T::PubKw).or_not())
+            // Accepted here only to be REJECTED with a span: an inherent (or `impl`-block) method
+            // derives its receiver from its body, so a declaration would be a second source of
+            // truth. See `FnDecl::is_static`.
+            .then(just(T::StaticKw).or_not())
             .then(just(T::AsyncKw).or_not())
             .then_ignore(just(T::FnKw))
             .then(id.clone())
@@ -4535,7 +4559,19 @@ where
             .then(block.clone())
             .map_with(
                 move |(
-                    ((((((decos, async_kw), name_pair), type_params), params), captures), ret),
+                    (
+                        (
+                            (
+                                (
+                                    ((((decos, pub_kw), static_kw), async_kw), name_pair),
+                                    type_params,
+                                ),
+                                params,
+                            ),
+                            captures,
+                        ),
+                        ret,
+                    ),
                     body,
                 ),
                       e| {
@@ -4550,7 +4586,7 @@ where
                     FnDecl {
                         name: Name::written(name_pair.0),
                         name_span: name_pair.1,
-                        is_public: false,
+                        is_public: pub_kw.is_some(),
                         type_params,
                         params,
                         ret,
@@ -4562,6 +4598,7 @@ where
                         is_dev_tier: false,
                         tier: None,
                         is_async: async_kw.is_some(),
+                        is_static: static_kw.is_some(),
                         captures,
                         body,
                         span: ctx.to_span(e.span()),
@@ -4746,6 +4783,14 @@ where
             .clone()
             .repeated()
             .collect::<Vec<_>>()
+            // Accepted here only to be REJECTED with a span (E0053): every method a `trait`
+            // declares is already the type's outward contract, so `pub` states a fact the `trait`
+            // keyword has already stated. Parsed rather than left to fail as a field opening, for
+            // the same reason `static` is.
+            .then(just(T::PubKw).or_not())
+            // The ONE site where `static` means something: a trait declaration is the only place
+            // receiver-ness is a contract term rather than a fact derived from a body.
+            .then(just(T::StaticKw).or_not())
             .then(just(T::AsyncKw).or_not())
             .then_ignore(just(T::FnKw))
             .then(id.clone())
@@ -4756,13 +4801,23 @@ where
             .then(just(T::Colon).ignore_then(type_p.clone()).or_not())
             .then(block.clone().or_not())
             .map_with(
-                move |((((((attrs, async_kw), name_pair), type_params), params), ret), body), e| {
+                move |(
+                    (
+                        (
+                            (((((attrs, pub_kw), static_kw), async_kw), name_pair), type_params),
+                            params,
+                        ),
+                        ret,
+                    ),
+                    body,
+                ),
+                      e| {
                     let has_default = body.is_some();
                     TraitMethod {
                         sig: FnDecl {
                             name: Name::written(name_pair.0),
                             name_span: name_pair.1,
-                            is_public: false,
+                            is_public: pub_kw.is_some(),
                             type_params,
                             params,
                             ret,
@@ -4771,6 +4826,7 @@ where
                             is_dev_tier: false,
                             tier: None,
                             is_async: async_kw.is_some(),
+                            is_static: static_kw.is_some(),
                             // A trait signature declares an interface; a default body that needs
                             // captures would be an impl concern — none here.
                             captures: Vec::new(),

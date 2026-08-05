@@ -22,12 +22,12 @@ struct Marker {
     y: int = 0
 
     @doc { A marker at the origin with the given `label`. }
-    fn at_origin(label: string): Marker {
+    pub fn at_origin(label: string): Marker {
         return Marker { label: label }
     }
 
     @doc { Move the marker by `(dx, dy)`, returning a new marker. }
-    fn shifted(dx: int, dy: int): Marker {
+    pub fn shifted(dx: int, dy: int): Marker {
         return Marker { label: self.label, x: self.x + dx, y: self.y + dy }
     }
 }
@@ -44,12 +44,12 @@ class Tally {
     @doc {
         Increment the tally by `by`. 
     }
-    fn bump(by: int): void {
+    pub fn bump(by: int): void {
         self.n = self.n + by.to_u64()
     }
 
     @doc { The current count. }
-    fn count(): u64 {
+    pub fn count(): u64 {
         return self.n
     }
 
@@ -70,7 +70,7 @@ enum Figure {
     }
 
     @doc { The area of the figure. }
-    fn area(): float {
+    pub fn area(): float {
         return match self {
             Figure.Circle(r) => 3.14159 * r * r,
             Figure.Rect(w, h) => (w * h).to_float(),

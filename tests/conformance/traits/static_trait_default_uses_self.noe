@@ -1,0 +1,14 @@
+// A trait declares `static` and then writes a default body that uses `self`. The trait breaks its
+// own promise, so it is the same E0015 an implementor would get — the contract is checked against
+// the body that stands in for every implementation exactly as it is against each real one.
+//
+// Without this the modifier would be trustworthy only where somebody wrote an `impl`: a trait whose
+// static default reads `self` and that nobody implements yet would still license `T.m(…)` in a
+// generic body, and the first implementor to omit the method would inherit a body with no receiver.
+// expect: error E0015 at 12:15
+// expect: exit 1
+trait Codec {
+    fn width(): int
+    static fn tag(): string { return "codec ${self.width()}" }
+}
+echo "unreached"

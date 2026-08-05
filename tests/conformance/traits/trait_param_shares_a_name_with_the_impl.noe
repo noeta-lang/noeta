@@ -29,7 +29,7 @@ class Box<K> {
     pub code: int
 
     impl Keyed<int> {
-        fn key(): int {
+        pub fn key(): int {
             return self.code;
         }
     }

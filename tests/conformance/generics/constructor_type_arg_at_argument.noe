@@ -20,22 +20,22 @@ struct User {
 class Inner<T> {
     pub tbl: string
 
-    fn new(tbl: string): Inner<T> {
+    pub fn new(tbl: string): Inner<T> {
         return Inner { tbl: tbl };
     }
 
-    fn model(): string {
+    pub fn model(): string {
         return self.tbl ~ ":" ~ type_name::<T>();
     }
 }
 class Holder {
     inner: Inner<User>
 
-    fn new(i: Inner<User>): Holder {
+    pub fn new(i: Inner<User>): Holder {
         return Holder { inner: i };
     }
 
-    fn go(): string {
+    pub fn go(): string {
         return self.inner.model();
     }
 }

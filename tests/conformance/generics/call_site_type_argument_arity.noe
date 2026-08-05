@@ -9,7 +9,7 @@ struct Todo {
 class Repo<T> {
     pub tbl: string
 
-    fn new(tbl: string): Repo<T> {
+    pub fn new(tbl: string): Repo<T> {
         return Repo { tbl: tbl };
     }
 }

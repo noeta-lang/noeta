@@ -5,7 +5,7 @@
 // expect: exit 0
 class G {
     pub mut n: int
-    fn new(): G { return G { n: 0 }; }
+    pub fn new(): G { return G { n: 0 }; }
 }
 g = G.new()
 fn sync_add(x: int) use (g): void { g.n = g.n + x }

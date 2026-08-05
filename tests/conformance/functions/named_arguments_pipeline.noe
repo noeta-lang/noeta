@@ -52,7 +52,7 @@ echo 5 |> g(6, c: 9)
 // A method binds identically; the receiver stays the receiver.
 class Box {
     pub v: int
-    fn scale(k: int, off: int): int { return self.v * k + off }
+    pub fn scale(k: int, off: int): int { return self.v * k + off }
 }
 box = Box { v: 3 }
 echo 10 |> box.scale(k: 4)

@@ -4,7 +4,7 @@
 // expect: error E0035 at 12:8
 class Account {
     balance: int
-    fn new(): Account { return Account { balance: 42 }; }
+    pub fn new(): Account { return Account { balance: 42 }; }
     fn show(): int { return balance; }
 }
 

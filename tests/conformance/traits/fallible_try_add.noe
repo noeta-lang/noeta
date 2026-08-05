@@ -12,12 +12,12 @@ class Money {
     pub amount: int
     currency: string
 
-    fn new(amount: int, currency: string): Money {
+    pub fn new(amount: int, currency: string): Money {
         return Money { amount: amount, currency: currency };
     }
 
     impl TryAdd {
-        fn try_add(other: Money): Result<Money, MoneyError> {
+        pub fn try_add(other: Money): Result<Money, MoneyError> {
             if self.currency != other.currency {
                 return Err(MoneyError.CurrencyMismatch);
             }

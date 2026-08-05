@@ -12,7 +12,7 @@ enum Color { Red; Green; }
 struct Point { x: int }
 class Box {
     v: int
-    fn new(v: int): Box { return Box { v: v }; }
+    pub fn new(v: int): Box { return Box { v: v }; }
 }
 
 // A concrete enum widens into `Enum` at a call boundary.

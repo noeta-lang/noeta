@@ -335,7 +335,7 @@ fn generic_call_instantiates_return_type() {
 fn associated_call_is_typed_precisely() {
     // `Box.new(1)` resolves to `Box` (not a hole), so passing it where an `int` is expected is a
     // concrete mismatch — proving the associated-call result is the constructor's return type.
-    let src = "class Box<T> {\n  value: T\n  fn new(v: T): Box<T> { return Box { value: v }; }\n}\n\
+    let src = "class Box<T> {\n  value: T\n  pub fn new(v: T): Box<T> { return Box { value: v }; }\n}\n\
                fn need_int(n: int): int { return n; }\n\
                echo need_int(Box.new(1));\n";
     assert_eq!(codes(src), ["E0007"]);
@@ -356,7 +356,7 @@ fn literal_infers_its_type_arguments_from_fields() {
 fn instance_keeps_its_type_argument() {
     // `Box<int>` tracks its element type through the instance: `b.get()` is `int` (passes where an
     // `int` is wanted), while `Box<string>.get()` is `string` (a mismatch against `int`).
-    let cls = "class Box<T> { value: T\n  fn new(v: T): Box<T> { return Box { value: v }; }\n  fn get(): T { return self.value; } }\n\
+    let cls = "class Box<T> { value: T\n  pub fn new(v: T): Box<T> { return Box { value: v }; }\n  pub fn get(): T { return self.value; } }\n\
                fn need_int(n: int): int { return n; }\n";
     let ok = format!("{cls}b = Box.new(1);\necho need_int(b.get());\n");
     assert!(codes(&ok).is_empty());
@@ -368,8 +368,7 @@ fn instance_keeps_its_type_argument() {
 fn generic_class_enforces_its_bound_at_construction() {
     // `Pair<T: Comparable>` constructed with a non-`Comparable` struct is `E0025`; with an `int`,
     // clean. The class's bound is instantiated from the constructor argument.
-    let cls =
-        "class Pair<T: Comparable> { a: T\n  fn new(x: T): Pair<T> { return Pair { a: x }; } }\n";
+    let cls = "class Pair<T: Comparable> { a: T\n  pub fn new(x: T): Pair<T> { return Pair { a: x }; } }\n";
     let bad = format!("struct Bad {{ v: int }}\n{cls}p = Pair.new(Bad {{ v: 1 }});\n");
     assert_eq!(codes(&bad), ["E0025"]);
     let good = format!("{cls}p = Pair.new(7);\n");
@@ -401,7 +400,7 @@ fn arithmetic_on_a_concrete_type_without_the_trait_is_reported() {
     // "cannot apply"), now caught statically. A type that *does* `impl Add` is accepted.
     let bad = "struct P { x: int }\na = P { x: 1 };\nb = P { x: 2 };\necho a + b;\n";
     assert_eq!(codes(bad), ["E0007"]);
-    let good = "class M { pub n: int\n  impl Add { fn add(o: M): M { return o; } } }\n\
+    let good = "class M { pub n: int\n  impl Add { pub fn add(o: M): M { return o; } } }\n\
                 a = M { n: 1 };\nb = M { n: 2 };\necho a + b;\n";
     assert!(codes(good).is_empty());
 }
@@ -480,27 +479,27 @@ fn annotations_do_not_produce_false_positives() {
 
 #[test]
 fn valid_operator_impl_is_clean() {
-    let src = "class M {\n  amount: int\n  impl Add {\n    fn add(other: M): M { return other; }\n  }\n}\n";
+    let src = "class M {\n  amount: int\n  impl Add {\n    pub fn add(other: M): M { return other; }\n  }\n}\n";
     assert!(codes(src).is_empty());
 }
 
 #[test]
 fn impl_of_unknown_trait_is_reported() {
-    let src = "class W {\n  impl Frob {\n    fn frob(other: W): W { return other; }\n  }\n}\n";
+    let src = "class W {\n  impl Frob {\n    pub fn frob(other: W): W { return other; }\n  }\n}\n";
     assert_eq!(codes(src), ["E0014"]);
 }
 
 #[test]
 fn impl_missing_required_method_is_reported() {
     // `impl Add` without an `add` method does not satisfy the trait.
-    let src = "class M {\n  amount: int\n  impl Add {\n    fn plus(other: M): M { return other; }\n  }\n}\n";
+    let src = "class M {\n  amount: int\n  impl Add {\n    pub fn plus(other: M): M { return other; }\n  }\n}\n";
     assert_eq!(codes(src), ["E0015"]);
 }
 
 #[test]
 fn impl_with_wrong_arity_is_reported() {
     // `add` must take exactly one parameter besides the receiver.
-    let src = "class M {\n  amount: int\n  impl Add {\n    fn add(): M { return M { amount: 0 }; }\n  }\n}\n";
+    let src = "class M {\n  amount: int\n  impl Add {\n    pub fn add(): M { return M { amount: 0 }; }\n  }\n}\n";
     assert_eq!(codes(src), ["E0015"]);
 }
 
@@ -597,7 +596,7 @@ fn generic_hand_written_impl_stays_unconditional() {
     // An `impl Comparable` with a hand-written `compare` is the author's contract — no field
     // constraint applies, whatever the instantiation.
     let src = format!(
-        "struct Box<T> {{\n  value: T\n  impl Comparable {{\n    fn compare(other: Box<T>): \
+        "struct Box<T> {{\n  value: T\n  impl Comparable {{\n    pub fn compare(other: Box<T>): \
          Ordering {{ return Ordering.Less; }}\n  }}\n}}\n{MAX_FN}\
          echo max(Box {{ value: [1] }}, Box {{ value: [2] }}).value\n"
     );
@@ -653,13 +652,13 @@ fn deriving_the_same_trait_twice_is_conflicting() {
 fn deriving_and_impl_of_same_trait_conflict() {
     // `@derive(Display)` synthesizes `to_string`; an `impl Display` writes one by hand — two
     // competing implementations of one trait.
-    let src = "@derive(Display)\nclass P {\n  x: int\n  impl Display {\n    fn to_string(): string { return \"P\"; }\n  }\n}\n";
+    let src = "@derive(Display)\nclass P {\n  x: int\n  impl Display {\n    pub fn to_string(): string { return \"P\"; }\n  }\n}\n";
     assert_eq!(codes(src), ["E0027"]);
 }
 
 #[test]
 fn two_impl_blocks_for_same_trait_conflict() {
-    let src = "class P {\n  x: int\n  impl Add {\n    fn add(other: P): P { return other; }\n  }\n  impl Add {\n    fn add(other: P): P { return other; }\n  }\n}\n";
+    let src = "class P {\n  x: int\n  impl Add {\n    pub fn add(other: P): P { return other; }\n  }\n  impl Add {\n    pub fn add(other: P): P { return other; }\n  }\n}\n";
     assert_eq!(codes(src), ["E0027"]);
 }
 
@@ -755,7 +754,7 @@ fn a_coherence_conflict_labels_both_implementations() {
 #[test]
 fn standalone_impl_with_methods_is_unsupported() {
     // Pass 1 supports only empty-body capability impls; a body with methods is rejected (E0015).
-    let src = "struct Route { path: string }\nimpl Clone for Route {\n  fn extra(): int { return 1; }\n}\n";
+    let src = "struct Route { path: string }\nimpl Clone for Route {\n  pub fn extra(): int { return 1; }\n}\n";
     assert_eq!(codes(src), ["E0015"]);
 }
 
@@ -989,7 +988,7 @@ fn structured_attribute_arg_struct_field_mismatch() {
 fn invoke_checks_clean_and_yields_a_result() {
     // `invoke(recv, name, args)` synthesizes `Result<dyn, dyn>`, so its value matches `Ok`/`Err`
     // arms without diagnostics. The name/args are runtime-checked (no static constraint here).
-    let src = "class Shape {\n  w: int\n  fn new(w: int): Shape { return Shape { w: w }; }\n  fn area(): int { return self.w; }\n}\nr = invoke(Shape.new(2), \"area\", []);\necho match r { Ok(_) => \"y\", Err(_) => \"n\" };\n";
+    let src = "class Shape {\n  w: int\n  pub fn new(w: int): Shape { return Shape { w: w }; }\n  pub fn area(): int { return self.w; }\n}\nr = invoke(Shape.new(2), \"area\", []);\necho match r { Ok(_) => \"y\", Err(_) => \"n\" };\n";
     assert!(codes(src).is_empty());
 }
 
@@ -997,7 +996,7 @@ fn invoke_checks_clean_and_yields_a_result() {
 fn invoke_result_is_a_concrete_result_not_a_hole() {
     // The result is a concrete `Result<dyn, dyn>`, not a deferring hole, so passing it where an
     // `int` is expected is a static error (E0007) — proof the synth is precise, not gradual.
-    let src = "class Shape {\n  w: int\n  fn new(w: int): Shape { return Shape { w: w }; }\n  fn area(): int { return self.w; }\n}\nfn need_int(n: int): int { return n; }\necho need_int(invoke(Shape.new(1), \"area\", []));\n";
+    let src = "class Shape {\n  w: int\n  pub fn new(w: int): Shape { return Shape { w: w }; }\n  pub fn area(): int { return self.w; }\n}\nfn need_int(n: int): int { return n; }\necho need_int(invoke(Shape.new(1), \"area\", []));\n";
     assert_eq!(codes(src), ["E0007"]);
 }
 
@@ -1138,7 +1137,7 @@ fn a_non_exhaustive_match_on_a_prelude_enum_is_reported() {
 #[test]
 fn deriving_distinct_traits_with_an_impl_is_coherent() {
     // Different traits never conflict — only a repeated one does.
-    let src = "@derive(Equatable, Comparable)\nclass P {\n  x: int\n  impl Add {\n    fn add(other: P): P { return other; }\n  }\n}\n";
+    let src = "@derive(Equatable, Comparable)\nclass P {\n  x: int\n  impl Add {\n    pub fn add(other: P): P { return other; }\n  }\n}\n";
     assert!(codes(src).is_empty());
 }
 
@@ -1488,7 +1487,7 @@ fn indexing_is_typed() {
 
 #[test]
 fn user_method_returns_are_typed() {
-    let src = "class C {\n  x: int\n  fn label(): string { return \"c${self.x}\"; }\n}\n\
+    let src = "class C {\n  x: int\n  pub fn label(): string { return \"c${self.x}\"; }\n}\n\
                fn f(c: C): int { return c.label(); }\n";
     assert_eq!(codes(src), ["E0007"]); // label() -> string, not int
 }
@@ -1557,7 +1556,7 @@ fn argument_types_are_checked() {
 #[test]
 fn generic_method_arguments_are_not_false_positives() {
     // A generic parameter is erased to `dyn`, so any concrete argument is accepted.
-    let src = "class Box<T> {\n  mut value: T\n  fn set(v: T): void { self.value = v; }\n}\n\
+    let src = "class Box<T> {\n  mut value: T\n  pub fn set(v: T): void { self.value = v; }\n}\n\
                fn f(b: Box<int>): void { b.set(5); }\n";
     assert!(codes(src).is_empty());
 }
@@ -2008,7 +2007,7 @@ fn binding_consumes_labels_so_a_bound_call_is_not_rejected() {
                fn f(a: int, b: int = 2, c: int = 3): int { return a + b + c; }\n\
                echo sub(b: 1, a: 10);\necho f(1, c: 9);\necho 1 |> sub(a: 10);\n";
     assert!(codes(src).is_empty());
-    let method = "class Box { pub v: int\n  fn scale(k: int, off: int): int { return self.v * k + off } }\n\
+    let method = "class Box { pub v: int\n  pub fn scale(k: int, off: int): int { return self.v * k + off } }\n\
                   b = Box { v: 3 };\necho b.scale(off: 1, k: 2);\necho 2 |> b.scale(off: 1);\n";
     assert!(codes(method).is_empty());
 }
@@ -2054,8 +2053,8 @@ fn call_above_maximum_arity_is_rejected() {
 #[test]
 fn method_default_omitted_at_call_is_clean() {
     // An instance method may carry a default; omitting it at the call site is well-typed.
-    let src = "class C {\n  start: int\n  fn from(start: int): C { return C { start: start }; }\n  \
-               fn bump(by: int = 1): int { return self.start + by; }\n}\n\
+    let src = "class C {\n  start: int\n  pub fn from(start: int): C { return C { start: start }; }\n  \
+               pub fn bump(by: int = 1): int { return self.start + by; }\n}\n\
                d = C.from(10);\necho d.bump();\necho d.bump(5);\n";
     assert!(codes(src).is_empty());
 }
@@ -3171,7 +3170,7 @@ fn a_declared_type_is_not_callable() {
         codes(
             "struct S {\n  \
                pub n: int\n  \
-               fn make(): S { return S { n: 1 } }\n\
+               pub fn make(): S { return S { n: 1 } }\n\
              }\n\
              echo S.make().n\n"
         )
@@ -3669,14 +3668,14 @@ class Boxx {
   v: int
   impl Container {
     type Item = int
-    fn get(): Self::Item { return self.v; }
+    pub fn get(): Self::Item { return self.v; }
   }
 }
 class Tagg {
   s: string
   impl Container {
     type Item = string
-    fn get(): Self::Item { return self.s; }
+    pub fn get(): Self::Item { return self.s; }
   }
 }
 fn f(b: Boxx): int { return b.get(); }
@@ -3698,7 +3697,7 @@ class Boxx {
   v: int
   impl Container {
     type Item = int
-    fn get(): Self::Item { return self.v; }
+    pub fn get(): Self::Item { return self.v; }
   }
 }
 fn bad(b: Boxx): string { return b.get(); }
@@ -3739,7 +3738,7 @@ trait Container {
 class Boxx {
   v: int
   impl Container {
-    fn get(): int { return self.v; }
+    pub fn get(): int { return self.v; }
   }
 }
 ";
@@ -3757,7 +3756,7 @@ trait Container {
 class Boxx {
   v: int
   impl Container {
-    fn get(): int { return self.v; }
+    pub fn get(): int { return self.v; }
   }
 }
 fn f(b: Boxx): int { return b.get(); }
@@ -4347,9 +4346,9 @@ fn an_unrecordable_construction_names_the_type_parameter_not_erasure() {
 struct Todo { id: int }
 class Repository<T> {
   pub tbl: string
-  fn new(tbl: string): Repository<T> { return Repository { tbl: tbl }; }
-  fn label(): string { return \"${self.tbl}\" ~ type_name::<T>(); }
-  fn rebuild(): string {
+  pub fn new(tbl: string): Repository<T> { return Repository { tbl: tbl }; }
+  pub fn label(): string { return \"${self.tbl}\" ~ type_name::<T>(); }
+  pub fn rebuild(): string {
     r: Repository<T> = Repository.new(self.tbl ~ \"2\");
     return r.label();
   }

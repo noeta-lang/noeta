@@ -11,7 +11,7 @@ use std.http.server
 use std.http.{Request, Response}
 
 class Widgets {
-    fn new(): Widgets { return Widgets {} }
+    pub fn new(): Widgets { return Widgets {} }
     fn created(): Response { return server.response(201, "made", {"location": "/widgets/1"}) }
     fn greeting(): string { return "hello" }
 }

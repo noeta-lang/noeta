@@ -140,6 +140,19 @@ pub enum DiagnosticCode {
     /// through a method/constructor. (A value `struct`'s fields are always public, so this never
     /// fires for a struct.)
     PrivateField,
+    /// A **private** method is called — or bound as a handle — from outside its declaring type
+    /// (method-visibility arc). A method of a `struct`, `class`, or `enum` is private by default,
+    /// exactly like a `class`'s fields: the type's operations are its own until it says otherwise.
+    /// Expose one with `pub fn`, or reach it through a method that is already public.
+    ///
+    /// Symmetric with [`DiagnosticCode::PrivateField`] and enforced the same way — visible inside
+    /// the declaring type's own bodies (on `self` *and* on another value of that type), and inside
+    /// a dev-tier (`@test`) body, which is white-box over its module by design.
+    ///
+    /// A method that implements a `trait` is never private: a trait is an outward contract, so the
+    /// implementation is part of the type's public surface by construction. It must say so — see
+    /// [`DiagnosticCode::InvalidImpl`].
+    PrivateMethod,
     /// An `@name` resolves to nothing in the directive name-space: not a built-in directive, not a
     /// tier (extension-declared or program-declared), and not a directive any installed extension
     /// declares. A typo (`@tset { }`), or a tier the build target does not provide.
@@ -547,6 +560,7 @@ impl DiagnosticCode {
         DiagnosticCode::ModulePathCollision,
         DiagnosticCode::IllegalModulePath,
         DiagnosticCode::ShadowedTypeParameter,
+        DiagnosticCode::PrivateMethod,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -628,6 +642,7 @@ impl DiagnosticCode {
             DiagnosticCode::ModulePathCollision => "E0073",
             DiagnosticCode::IllegalModulePath => "E0074",
             DiagnosticCode::ShadowedTypeParameter => "E0075",
+            DiagnosticCode::PrivateMethod => "E0076",
         }
     }
 

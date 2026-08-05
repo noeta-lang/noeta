@@ -24,7 +24,7 @@ struct Dog {
 }
 
 impl Speaks for Dog {
-    fn speak(): string {
+    pub fn speak(): string {
         return "woof"
     }
 }
@@ -33,7 +33,7 @@ class Cart {
     pub total: int
 
     impl Display {
-        fn to_string(): string {
+        pub fn to_string(): string {
             return "cart(${self.total})"
         }
     }
@@ -44,7 +44,7 @@ enum Coin {
     Tails
 
     impl Speaks {
-        fn speak(): string {
+        pub fn speak(): string {
             return "clink"
         }
     }

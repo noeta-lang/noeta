@@ -8,7 +8,7 @@
 use std.task.{sleep, race}
 class Res {
     pub tag: string
-    fn new(t: string): Res { return Res { tag: t } }
+    pub fn new(t: string): Res { return Res { tag: t } }
     destruct { echo "drop ${self.tag}" }
 }
 async fn slow(): int {

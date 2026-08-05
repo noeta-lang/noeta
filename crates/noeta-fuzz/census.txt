@@ -50,7 +50,6 @@ TypeMismatch	`{}` expects a list, found {}
 TypeMismatch	`{}` expects a numeric argument
 TypeMismatch	`{}` is a {}, not a record or class type
 TypeMismatch	`{}` takes {} argument(s) but {} were supplied
-TypeMismatch	associated function
 TypeMismatch	bytes index must be an int, found {}
 TypeMismatch	cannot apply tuple index `.{}` to {}
 TypeMismatch	cannot compare {} and {}
@@ -78,6 +77,7 @@ TypeMismatch	no match arm matched the value {}
 TypeMismatch	packed-list push onto a non-list value `{}`
 TypeMismatch	range bounds must be ints, found {} and {}
 TypeMismatch	spread `..` expects an object, found {}
+TypeMismatch	static function
 TypeMismatch	string index must be an int, found {}
 TypeMismatch	this method takes {} argument(s) but 0 were supplied
 TypeMismatch	this method takes {} argument(s) but 1 were supplied
@@ -97,7 +97,7 @@ UnknownName	no field `{}` on {}
 UnknownName	no method `{}` on {}
 UnknownName	no native enum method `{}`
 UnknownName	no native fielded-type method `{}`
-UnknownName	type `{}` has no associated function `{}`
 UnknownName	type `{}` has no field `{}`
 UnknownName	type `{}` has no method `get`
 UnknownName	type `{}` has no method `{}`
+UnknownName	type `{}` has no static function `{}`

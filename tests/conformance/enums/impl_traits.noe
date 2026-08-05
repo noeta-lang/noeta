@@ -24,7 +24,7 @@ enum Level {
     }
 
     impl Display {
-        fn to_string(): string {
+        pub fn to_string(): string {
             return match self {
                 Level.Low  => "level low",
                 Level.Mid  => "level mid",
@@ -36,13 +36,13 @@ enum Level {
     impl Equatable {
         // Two levels are "equal" when they share a rank parity — a deliberately non-structural rule
         // to prove `==` dispatches to this `eq`, not to default variant equality.
-        fn eq(other: Level): bool {
+        pub fn eq(other: Level): bool {
             return self.rank() % 2 == other.rank() % 2;
         }
     }
 
     impl Comparable {
-        fn compare(other: Level): Ordering {
+        pub fn compare(other: Level): Ordering {
             return self.rank().compare(other.rank());
         }
     }
@@ -50,7 +50,7 @@ enum Level {
     // No restriction: an enum may implement `Add` even though it is unusual — `+` returns the
     // higher-ranked level.
     impl Add {
-        fn add(other: Level): Level {
+        pub fn add(other: Level): Level {
             return match self.rank() >= other.rank() {
                 true  => self,
                 false => other,

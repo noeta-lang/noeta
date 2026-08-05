@@ -13,7 +13,7 @@ trait Keyed<K> {
 struct Tag {
     name: string
     impl Keyed<string> {
-        fn key(): string {
+        pub fn key(): string {
             return self.name
         }
     }

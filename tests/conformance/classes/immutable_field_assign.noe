@@ -4,7 +4,7 @@
 // expect: error E0033 at 10:3
 class Counter {
     count: int
-    fn new(): Counter { return Counter { count: 0 }; }
+    pub fn new(): Counter { return Counter { count: 0 }; }
 }
 mut c = Counter.new();
 c.count = 5;

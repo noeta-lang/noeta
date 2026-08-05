@@ -9,7 +9,7 @@ trait Keyed<K> {
 struct A {
     x: int
     impl Keyed {
-        fn key(): int { return self.x }
+        pub fn key(): int { return self.x }
     }
 }
 @derive(Keyed)

@@ -191,8 +191,8 @@ struct Point { x: int  y: int }        // value type
 
 class Counter {
     pub mut n: int
-    fn new(): Counter { return Counter { n: 0 } }   // associated function (no self)
-    fn bump(): void { self.n = self.n + 1 }         // method; fields read through self
+    pub fn new(): Counter { return Counter { n: 0 } }   // static function (no self)
+    pub fn bump(): void { self.n = self.n + 1 }         // method; fields read through self
 }
 
 p = Point { x: 1, y: 2 }
@@ -203,7 +203,9 @@ c.bump()
 echo c.n                                // 1
 ```
 
-Fields are private by default; mark them `pub` to read from outside, `mut` to allow assignment. Fields can have defaults, and literals support shorthand (`Point { x, y }`) and spread (`Point { ...p, x: 9 }`).
+A `class`'s fields are private by default; mark them `pub` to read from outside, `mut` to allow assignment. (A `struct`'s fields are always public — a value *is* its contents.) Fields can have defaults, and literals support shorthand (`Point { x, y }`) and spread (`Point { ...p, x: 9 }`).
+
+**Methods are private by default in every kind**, and `pub` puts one on the type's surface — so a `struct` with public data can still keep a helper to itself. A method implementing a `trait` must be written `pub`, because a trait is an outward contract. See [Method visibility](Structs-Classes-and-Enums#method-visibility).
 
 **Enums** model a closed set of alternatives, optionally carrying data:
 
@@ -319,7 +321,7 @@ enum OrderError { Empty }
 
 class Order {
     pub items: List<Item>
-    fn new(items: List<Item>): Order { return Order { items: items } }
+    pub fn new(items: List<Item>): Order { return Order { items: items } }
 }
 
 // sample:start
@@ -370,7 +372,7 @@ Operators dispatch through a fixed set of built-in traits (`Equatable` → `==`,
 @derive(Equatable, Comparable, Display)
 class Money {
     amount: int
-    fn new(a: int): Money { return Money { amount: a } }
+    pub fn new(a: int): Money { return Money { amount: a } }
 }
 
 echo Money.new(5) < Money.new(9)     // true

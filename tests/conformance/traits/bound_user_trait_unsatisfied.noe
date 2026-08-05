@@ -7,7 +7,7 @@ trait Greeter {
 }
 
 class Plain {
-    fn new(): Plain { return Plain {} }
+    pub fn new(): Plain { return Plain {} }
 }
 
 fn welcome<G: Greeter>(g: G): string { return "x" }

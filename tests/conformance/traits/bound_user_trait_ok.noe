@@ -8,11 +8,11 @@ trait Greeter {
 }
 
 class Formal {
-    fn new(): Formal { return Formal {} }
+    pub fn new(): Formal { return Formal {} }
 }
 
 impl Greeter for Formal {
-    fn greet(who: string): string { return "Dear " ~ who }
+    pub fn greet(who: string): string { return "Dear " ~ who }
 }
 
 fn welcome<G: Greeter>(g: G): string {

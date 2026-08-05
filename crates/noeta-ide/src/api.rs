@@ -393,7 +393,9 @@ fn render_trait(t: &noeta_stdlib::ExtTrait) -> String {
     for m in t
         .methods
         .iter()
-        .filter(|m| m.receiver == BundleReceiver::Element)
+        // Element and Static both belong to the ordinary contract; only Bulk's `List<Self>`
+        // receiver is grouped apart below.
+        .filter(|m| m.receiver != BundleReceiver::Bulk)
     {
         sig.push_str(&format!("    {}{}", render_trait_method(m), body(m)));
     }
@@ -435,6 +437,9 @@ fn render_trait_method(m: &noeta_stdlib::ExtTraitMethod) -> String {
         RetTy::SameAsArg(0) => match m.receiver {
             BundleReceiver::Element => "Self".to_string(),
             BundleReceiver::Bulk => "List<Self>".to_string(),
+            // A static method binds no receiver, but slot 0 still denotes the implementing type —
+            // which is what a static constructor (`Syncable`'s decoder) returns.
+            BundleReceiver::Static => "Self".to_string(),
         },
         RetTy::SameAsArg(i) => m
             .sig

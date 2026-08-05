@@ -20,13 +20,13 @@
 class M {
     pub k: int
 
-    fn make(): M { return M { k: 0 }; }
+    pub fn make(): M { return M { k: 0 }; }
 
-    fn f(a: int, b: int = 2, c: int = 3): int {
+    pub fn f(a: int, b: int = 2, c: int = 3): int {
         return self.k + a * 100 + b * 10 + c;
     }
 
-    fn mk(a: int, b: int = 2, c: int = 3): M {
+    pub fn mk(a: int, b: int = 2, c: int = 3): M {
         return M { k: a * 100 + b * 10 + c };
     }
 }

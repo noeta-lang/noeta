@@ -1,10 +1,10 @@
 // A bare field name inside a method is a static unknown-name error with a targeted hint
 // (prelude-redesign EX.1): member access is explicit, so the field is only reachable as `self.n`.
-// expect: error E0005 at 8:31
+// expect: error E0005 at 8:35
 // expect: exit 1
 class Counter {
     n: int
-    fn new(): Counter { return Counter { n: 1 }; }
-    fn broken(): int { return n; }
+    pub fn new(): Counter { return Counter { n: 1 }; }
+    pub fn broken(): int { return n; }
 }
 echo Counter.new().broken();

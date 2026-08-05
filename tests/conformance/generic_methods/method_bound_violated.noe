@@ -6,8 +6,8 @@
 struct Plain { v: int }
 class Box<T> {
     value: T
-    fn new(v: T): Box<T> { return Box { value: v }; }
-    fn bigger<U: Comparable>(a: U, b: U): bool {
+    pub fn new(v: T): Box<T> { return Box { value: v }; }
+    pub fn bigger<U: Comparable>(a: U, b: U): bool {
         echo self.value;
         return a > b;
     }

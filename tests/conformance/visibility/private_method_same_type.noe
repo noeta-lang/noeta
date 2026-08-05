@@ -1,0 +1,23 @@
+// Encapsulation is per TYPE, not per instance — the method twin of `classes/private_field_same_type`
+// and deliberately written to mirror it. A method of `Point` may call a private method on ANOTHER
+// `Point`, exactly as it may read that other point's private field: the type is trusted with its
+// own kind. If this were per-instance, `eq`-shaped code could never be written without making every
+// helper public.
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: exit 0
+class Point {
+    x: int
+    y: int
+    pub fn new(x: int, y: int): Point { return Point { x: x, y: y }; }
+    fn key(): int { return self.x * 1000 + self.y; }
+    impl Equatable {
+        pub fn eq(other: Point): bool { return self.key() == other.key(); }
+    }
+}
+
+a = Point.new(1, 2);
+b = Point.new(1, 2);
+c = Point.new(3, 4);
+echo a == b;   // true — `eq` calls `other`'s PRIVATE `key` from inside `Point`
+echo a == c;   // false

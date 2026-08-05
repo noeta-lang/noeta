@@ -20,22 +20,22 @@ struct User {
 class Repo<T> {
     pub tbl: string
 
-    fn new(tbl: string): Repo<T> {
+    pub fn new(tbl: string): Repo<T> {
         return Repo { tbl: tbl };
     }
 
-    fn model(): string {
+    pub fn model(): string {
         return self.tbl ~ ":" ~ type_name::<T>();
     }
 }
 struct Holder<T> {
     pub label: string
 
-    fn new(label: string): Holder<T> {
+    pub fn new(label: string): Holder<T> {
         return Holder { label: label };
     }
 
-    fn model(): string {
+    pub fn model(): string {
         return self.label ~ "/" ~ type_name::<T>();
     }
 }

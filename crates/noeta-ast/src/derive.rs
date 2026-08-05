@@ -976,7 +976,13 @@ fn empty_fn(name: &str, span: Span) -> FnDecl {
     FnDecl {
         name: Name::canonical(name),
         name_span: span,
-        is_public: false,
+        // A synthesized method stands in for a TRAIT IMPLEMENTATION — a `@derive`'s bridge, a
+        // `via:` forward, a hoisted default — and a trait is an outward contract, so it is on the
+        // type's public surface by construction (method-visibility arc). The checker's own
+        // registration path never asks (`register_synth_method` records no privacy, which is the
+        // same answer said a different way); this is for everything that renders a plan back as
+        // source, where a method printed without `pub` would be one the checker then refuses.
+        is_public: true,
         type_params: Vec::new(),
         params: Vec::new(),
         ret: None,
@@ -984,6 +990,10 @@ fn empty_fn(name: &str, span: Span) -> FnDecl {
         directives: Vec::new(),
         is_dev_tier: false,
         is_async: false,
+        // A synthesized method is an IMPLEMENTATION, and an implementation never declares its
+        // receiver-ness — the body decides. (A trait's `static` declaration is checked against
+        // that body like any other contract term.)
+        is_static: false,
         tier: None,
         captures: Vec::new(),
         body: Vec::new(),

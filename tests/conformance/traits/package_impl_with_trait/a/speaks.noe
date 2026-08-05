@@ -10,5 +10,5 @@ pub trait Speaks {
 }
 
 impl Speaks for Thing {
-    fn speak(): string { return "a says ${self.id}" }
+    pub fn speak(): string { return "a says ${self.id}" }
 }

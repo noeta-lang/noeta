@@ -99,10 +99,10 @@ fn erroring_entries_agree_and_stay_out_of_the_accumulation() {
 #[test]
 fn methods_and_redeclared_types_agree() {
     assert_session_matches_oracle(&[
-        "struct Point {\n    x: int\n    fn mag2(): int { return self.x * self.x }\n}\n",
+        "struct Point {\n    x: int\n    pub fn mag2(): int { return self.x * self.x }\n}\n",
         "mut p = Point { x: 3 }\necho p.mag2()\n",
         // Redeclaring the type (legal at a prompt) and using the NEW shape.
-        "struct Point {\n    x: int\n    y: int\n    fn mag2(): int { return self.x * self.x + self.y * self.y }\n}\n",
+        "struct Point {\n    x: int\n    y: int\n    pub fn mag2(): int { return self.x * self.x + self.y * self.y }\n}\n",
         "mut q = Point { x: 3, y: 4 }\necho q.mag2()\n",
         // Wrong arity against a session-known method: same code, same span, both sides.
         "echo q.mag2(1)\n",

@@ -227,8 +227,13 @@ module.exports = grammar({
       $._expression,
     ),
 
+    // `static` is accepted here as well as on `trait_method` below, for the same reason the parser
+    // accepts it: it is meaningful only in a trait's contract, and everywhere else it is a CHECKER
+    // diagnostic (E0015) rather than a parse failure. An editor that could not parse the rejected
+    // form would lose highlighting for the whole file the moment somebody wrote it.
     function_declaration: $ => seq(
       optional('pub'),
+      optional('static'),
       optional('async'),
       'fn',
       $._function_rest,
@@ -286,7 +291,17 @@ module.exports = grammar({
       optional(seq('=', field('value', $._type))),
       optional($._terminator),
     ),
+    // A trait's method contract is the ONE place `static` means something: it declares that no
+    // implementation binds `self`, which is what lets a generic body call `T.m(…)` under a bound.
+    //
+    // `pub` is accepted for the same reason it is accepted by the parser and rejected by the
+    // checker (E0053 — a trait's methods are already its contract): an editor that could not
+    // PARSE the rejected form would lose highlighting for the whole file the moment somebody
+    // wrote it. In a type body `pub fn` needs nothing new here — a method IS a
+    // `function_declaration`, which has carried `optional('pub')` since top-level `fn` did.
     trait_method: $ => seq(
+      optional('pub'),
+      optional('static'),
       optional('async'),
       'fn',
       field('name', $.identifier),

@@ -35,24 +35,24 @@ trait Absent {
 }
 
 class SysClock {
-    fn new(): SysClock {
+    pub fn new(): SysClock {
         return SysClock {}
     }
 
     impl Clock {
-        fn tick(): string {
+        pub fn tick(): string {
             return "TICK"
         }
     }
 }
 
 class MemLedger {
-    fn new(): MemLedger {
+    pub fn new(): MemLedger {
         return MemLedger {}
     }
 
     impl Ledger {
-        fn note(): string {
+        pub fn note(): string {
             return "NOTE"
         }
     }
@@ -60,7 +60,7 @@ class MemLedger {
 
 // The handlers whose `dyn` parameters drive resolution — one per interface.
 class Handlers {
-    fn new(): Handlers {
+    pub fn new(): Handlers {
         return Handlers {}
     }
 
@@ -88,11 +88,11 @@ fn short_iface(name: string): string {
 class Container {
     mut services: Map<string, dyn>
 
-    fn new(): Container {
+    pub fn new(): Container {
         return Container { services: {} }
     }
 
-    fn bind(name: string, service: dyn): void {
+    pub fn bind(name: string, service: dyn): void {
         self.services = self.services.set(name, service)
     }
 
@@ -106,7 +106,7 @@ class Container {
     }
 
     // Reflect a single-parameter handler's one `dyn` argument and resolve it through the container.
-    fn arg_for(target: string): Result<dyn, string> {
+    pub fn arg_for(target: string): Result<dyn, string> {
         p = params_of(target)[0]
         return match p.type {
             DynTrait(n) => self.resolve(n),

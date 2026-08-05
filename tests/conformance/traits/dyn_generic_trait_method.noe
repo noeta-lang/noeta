@@ -13,7 +13,7 @@ trait Store<V> {
 
 struct Mem {
     impl Store<int> {
-        fn get(k: string): int { return 7 }
+        pub fn get(k: string): int { return 7 }
     }
 }
 

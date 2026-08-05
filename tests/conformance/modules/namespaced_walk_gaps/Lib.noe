@@ -19,5 +19,5 @@ pub trait Keyed<K> {
 
 pub class Limits {
     n: int
-    fn ceiling(): int { return 10; }
+    pub fn ceiling(): int { return 10; }
 }

@@ -122,7 +122,23 @@
 /// in the CLI's multi-core path — so its signature was three edits in two crates, and the copies
 /// were kept in step by a comment (audit-10). One declaration, passed down.
 ///
-/// **14** — [`registry::ExtTrait`], [`registry::ExtEnum`] and [`registry::ExtFielded`] each gained a
+/// **14** — [`host::RealP2pConfig`] gained `data_dir`, an exact directory for the `para.p2p` node's
+/// persistent identity and store, beside the `app_id` that could name only an app namespace. A host
+/// could say which *app* a node belonged to but never which *node*, which left the multi-tenant
+/// case inexpressible: a server running one isolate per signed-in user, each user with their own
+/// p2p identity and store. `RealHost::with_p2p_dir` fills it. Purely additive — the struct derives
+/// `Default` and nothing written for ABI 13 stops compiling — and counted anyway, per the rule
+/// above, because it widens what a host promises the extension side it can read.
+///
+/// The field's own doc carries the precedence this seam settled on, and that is the half worth
+/// repeating here: an explicitly named directory, whether from the host or from a program opening a
+/// node, beats `$NOETA_P2P_DIR`, which steers only the node nobody named. The ordering is a safety
+/// property rather than a tidiness one, and it is deliberately the opposite of the usual
+/// env-overrides-config reflex — a process-wide variable outranking a per-tenant directory would
+/// collapse every signed-in user onto one identity and store, silently mixing one user's data into
+/// another's.
+///
+/// **15** — [`registry::ExtTrait`], [`registry::ExtEnum`] and [`registry::ExtFielded`] each gained a
 /// `doc` (the declaration's own prose) and a `docs` (its per-member table, the field
 /// [`registry::ExtModule`] and [`registry::ExtType`] have carried since the docs-browser arc). A
 /// source break only for a literal that named every field rather than spreading `..DEFAULTS`; add
@@ -131,7 +147,7 @@
 /// `modules()`/`types()` alone — so a published package's docs named none of its traits, enums,
 /// classes or structs. Assembly also now holds a trait's `namespace` to its unit's root, the rule
 /// the other four nominal hooks were already held to and traits were not.
-pub const ABI_VERSION: u32 = 14;
+pub const ABI_VERSION: u32 = 15;
 
 pub mod args;
 pub mod channel;

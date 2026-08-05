@@ -8,8 +8,8 @@
 // comparison) fails here loudly, wherever it is reintroduced.
 // The two methods that re-spell the class's `T` are E0075 warnings — the identity rule makes the
 // shadowing sound, and the warning says it is still unreadable. Warnings do not stop the program.
-// expect: error E0075 at 49:14
-// expect: error E0075 at 55:23
+// expect: error E0075 at 49:18
+// expect: error E0075 at 55:27
 // expect: stdout "7Todo"
 // expect: stdout "7User"
 // expect: stdout "int"
@@ -34,30 +34,30 @@ struct T {
 class Repo<T> {
     pub tag: int
 
-    fn new(tag: int): Repo<T> {
+    pub fn new(tag: int): Repo<T> {
         return Repo { tag: tag };
     }
 
     // The class's `T` — reached off the receiver's reflected tag, which is why the body reads
     // `self`: a self-less member has no receiver to read the instantiation from.
-    fn outer(): string {
+    pub fn outer(): string {
         return "${self.tag}" ~ type_name::<T>();
     }
 
     // The method's OWN `T` — a different parameter under the same spelling, reached through the
     // call node's type arguments. Nothing here can tell them apart by name.
-    fn inner<T>(): string {
+    pub fn inner<T>(): string {
         return type_name::<T>();
     }
 
     // The same method reached on a VALUE, so the class's tag is live at the same time as the
     // method's own turbofish — the composed case where a shared key collided.
-    fn inner_on_value<T>(): string {
+    pub fn inner_on_value<T>(): string {
         return "${self.tag}" ~ type_name::<T>();
     }
 
     // Two parameters, different spellings, same declaration site each — the control.
-    fn both<U>(): string {
+    pub fn both<U>(): string {
         return type_name::<U>();
     }
 }

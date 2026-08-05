@@ -7,7 +7,7 @@ class Adder {
     pub base: int
 
     impl Callable {
-        fn call(x: int): int { return self.base + x }
+        pub fn call(x: int): int { return self.base + x }
     }
 }
 add10 = Adder { base: 10 }

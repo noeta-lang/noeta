@@ -342,3 +342,86 @@ b = Repo::<Todo>.blank::<int>()
       (identifier)
       (primitive_type)
       (arguments))))
+
+================================================================================
+Static trait method: required and defaulted
+================================================================================
+
+trait Codec {
+    static fn decode(raw: string): Self
+    static fn tag(): string { return "c" }
+    fn encode(): string
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (trait_declaration
+    name: (identifier)
+    body: (trait_body
+      (trait_method
+        name: (identifier)
+        parameters: (parameters
+          (parameter
+            name: (identifier)
+            type: (primitive_type)))
+        return_type: (identifier))
+      (trait_method
+        name: (identifier)
+        parameters: (parameters)
+        return_type: (primitive_type)
+        body: (block
+          (return_statement
+            (string_literal))))
+      (trait_method
+        name: (identifier)
+        parameters: (parameters)
+        return_type: (primitive_type)))))
+
+================================================================================
+Method visibility: pub in a type body, and beside static/async
+================================================================================
+
+class Account {
+    mut balance: int = 0
+    fn helper(): int { return self.balance }
+    pub fn show(): int { return self.helper() }
+    pub async fn sync(): int { return 1 }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (class_declaration
+    name: (identifier)
+    body: (type_body
+      (field_declaration
+        name: (identifier)
+        type: (primitive_type)
+        default: (integer_literal))
+      (function_declaration
+        name: (identifier)
+        parameters: (parameters)
+        return_type: (primitive_type)
+        body: (block
+          (return_statement
+            (field_expression
+              object: (self)
+              field: (identifier)))))
+      (function_declaration
+        name: (identifier)
+        parameters: (parameters)
+        return_type: (primitive_type)
+        body: (block
+          (return_statement
+            (method_call_expression
+              object: (self)
+              method: (identifier)
+              arguments: (arguments)))))
+      (function_declaration
+        name: (identifier)
+        parameters: (parameters)
+        return_type: (primitive_type)
+        body: (block
+          (return_statement
+            (integer_literal)))))))

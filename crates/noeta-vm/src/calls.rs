@@ -923,7 +923,7 @@ impl<'m> Vm<'m> {
                 return Err(self.error(
                     DiagnosticCode::UnknownName,
                     span,
-                    format!("type `{ty}` has no associated function `{method}`"),
+                    format!("type `{ty}` has no static function `{method}`"),
                 ));
             };
             let chunk = &self.module.protos[proto as usize];
@@ -948,7 +948,7 @@ impl<'m> Vm<'m> {
                 return Err(self.error(
                     DiagnosticCode::TypeMismatch,
                     span,
-                    arity_message("associated function", required, total, supplied),
+                    arity_message("static function", required, total, supplied),
                 ));
             }
             let n_args = args.len() + 1;

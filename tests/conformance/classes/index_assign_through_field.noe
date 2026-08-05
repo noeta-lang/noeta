@@ -11,8 +11,8 @@
 // expect: exit 0
 class Row {
     pub mut cells: List<int>
-    fn new(): Row { return Row { cells: [0, 0, 0] }; }
-    fn put(i: int, v: int): void { self.cells[i] = v; }   // self.f[i] = v inside a method
+    pub fn new(): Row { return Row { cells: [0, 0, 0] }; }
+    pub fn put(i: int, v: int): void { self.cells[i] = v; }   // self.f[i] = v inside a method
 }
 
 // Class: in-place through an alias.

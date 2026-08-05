@@ -603,6 +603,11 @@ fn fn_signature(f: &FnDecl) -> String {
         })
         .collect();
     let mut sig = String::new();
+    // `static` on a trait method is the promise that no implementation binds `self` — a contract
+    // term an implementor has to honour, so it belongs in the rendered signature.
+    if f.is_static {
+        sig.push_str("static ");
+    }
     if f.is_async {
         sig.push_str("async ");
     }
@@ -907,7 +912,8 @@ fn trait_docs(t: &TraitDecl, docs: &Docs) -> DeclDocs {
             })
             .collect();
         sig.push_str(&format!(
-            "    fn {}{}({})",
+            "    {}fn {}{}({})",
+            if m.sig.is_static { "static " } else { "" },
             m.sig.name,
             type_params(&m.sig.type_params),
             params.join(", ")

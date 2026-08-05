@@ -186,7 +186,7 @@ trait Speaks { fn speak(): string }
 
 @derive(Comparable)
 struct Dog { age: int }
-impl Speaks for Dog { fn speak(): string { return "woof" } }
+impl Speaks for Dog { pub fn speak(): string { return "woof" } }
 
 echo traits_of(Dog { age: 3 })   // ["Comparable", "Speaks"]
 echo traits_of(42)               // []
@@ -213,7 +213,7 @@ The payload-free cases are spelled **bare** here: the scrutinee is a `Type`, so 
 ```noeta
 trait Speaks { fn speak(): string }
 struct Dog { name: string }
-impl Speaks for Dog { fn speak(): string { return "woof" } }
+impl Speaks for Dog { pub fn speak(): string { return "woof" } }
 
 fn boom(): never { panic("unreachable") }
 fn handle(pet: dyn Speaks, n: int | string): void { return }
@@ -679,7 +679,7 @@ struct Slug {
     normalized: bool = false
 
     // A constructor by convention only. `construct` has no idea this is here.
-    fn new(text: string): Slug {
+    pub fn new(text: string): Slug {
         return Slug { text: text.trim().lower(), normalized: true }
     }
 }
@@ -714,7 +714,7 @@ struct Port {
     n: int
 
     impl Validate {
-        fn validate(): Result<void, string> {
+        pub fn validate(): Result<void, string> {
             if self.n < 1 || self.n > 65535 { return Err("port ${self.n} out of range") }
             return Ok()
         }
@@ -739,7 +739,7 @@ struct Email {
     addr: string
 
     impl Validate {
-        fn validate(): Result<void, string> {
+        pub fn validate(): Result<void, string> {
             if !self.addr.contains("@") { return Err("missing @: ${self.addr}") }
             return Ok()
         }
@@ -848,13 +848,13 @@ It reads the same manifest `attributes_of` does, so it has the same reach: every
 
 Fallible dispatch by name — and the one surface on this page that **consumes** a name rather than producing one. Reach for it when the callable's name arrives as *data*: a `#[Tool]` entry's `.target` off `attributes_of`, a router action, an argv subcommand. If you can write the call, write the call; `invoke` is not a faster way to do that, and there is deliberately no `invoke::<T>` turbofish arm to suggest otherwise.
 
-With three operands, `recv` is a value (→ an instance method) or a bare type name (→ an associated function):
+With three operands, `recv` is a value (→ an instance method) or a bare type name (→ a static function):
 
 ```noeta
 struct Rect {
     w: int
     h: int
-    fn new(w: int, h: int): Rect { return Rect { w: w, h: h } }
+    pub fn new(w: int, h: int): Rect { return Rect { w: w, h: h } }
     fn area(): int { return self.w * self.h }
 }
 
@@ -863,7 +863,7 @@ echo match invoke(Rect.new(2, 3), "area", []) {
     Err(e) => "no such method",
 }
 
-// A bare TYPE in receiver position reaches a self-less associated function — and
+// A bare TYPE in receiver position reaches a self-less static function — and
 // really runs its body, normalization and all.
 echo match invoke(Rect, "new", [2, 3]) {
     Ok(v)  => "made ${v.as<Rect>()?.w}x${v.as<Rect>()?.h}",   // made 2x3
@@ -887,7 +887,7 @@ echo match invoke(name, "new", [2, 3]) {
 }
 ```
 
-So there is no route from a *discovered* type name to that type's associated functions — only from one you wrote. That is the gap [`construct`](#constructtfields-resultdyn-string--constructname-fields-resultdyn-string) exists to fill: it takes a runtime type name, at the price of [not being the constructor](#construct-is-the-reflective-literal-not-your-constructor).
+So there is no route from a *discovered* type name to that type's static functions — only from one you wrote. That is the gap [`construct`](#constructtfields-resultdyn-string--constructname-fields-resultdyn-string) exists to fill: it takes a runtime type name, at the price of [not being the constructor](#construct-is-the-reflective-literal-not-your-constructor).
 
 With two, `name` is a **top-level function** — the same string `params_of` takes for a free fn, so reflecting a signature and then calling it round-trips on one name:
 

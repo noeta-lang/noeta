@@ -1,0 +1,22 @@
+// Modifier order is fixed: `pub` is the OUTERMOST modifier, then `static`, then `async`, then `fn`
+// — with any `@tier` directive ahead of all of them. That is the order every language pairing
+// visibility with the rest uses, and pinning it is what stops two spellings of the same declaration
+// existing. This case is the ACCEPTED order, end to end: it runs.
+// expect: stdout "c"
+// expect: stdout "7"
+// expect: exit 0
+trait Codec {
+    static fn tag(): string
+}
+
+class Account {
+    balance: int
+    pub fn new(): Account { return Account { balance: 7 }; }
+    pub async fn go(): int { return self.balance; }   // `pub` ahead of `async`
+    impl Codec {
+        pub fn tag(): string { return "c"; }
+    }
+}
+
+echo Account.tag();
+echo Account.new().go().await;

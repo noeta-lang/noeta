@@ -16,11 +16,11 @@ trait Peek { fn peek(): string }
 // `count` is private (no `pub`), and the impl below reads it through `self`.
 class Counter {
     count: int
-    fn new(count: int): Counter { return Counter { count: count } }
+    pub fn new(count: int): Counter { return Counter { count: count } }
 }
 
 impl Describe for Counter {
-    fn describe(): string {
+    pub fn describe(): string {
         return "counter=${self.count}"
     }
 }
@@ -32,11 +32,11 @@ echo Counter.new(7).describe()
 // here only because the target's parameters are put back in scope before its bodies are checked.
 class Holder<T> {
     item: T
-    fn new(item: T): Holder<T> { return Holder { item: item } }
+    pub fn new(item: T): Holder<T> { return Holder { item: item } }
 }
 
 impl Peek for Holder {
-    fn peek(): string {
+    pub fn peek(): string {
         held: T = self.item
         return "${held}"
     }

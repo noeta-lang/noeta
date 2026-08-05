@@ -21,11 +21,11 @@ struct Todo {
 class Repo<T> {
     pub tbl: string
 
-    fn new(tbl: string): Repo<T> {
+    pub fn new(tbl: string): Repo<T> {
         return Repo { tbl: tbl };
     }
 
-    fn model(): string {
+    pub fn model(): string {
         return self.tbl ~ ":" ~ type_name::<T>();
     }
 }

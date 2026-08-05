@@ -17,7 +17,7 @@ use std.{json};
 struct Point {
     x: int
     y: int
-    fn sum(): int { return self.x + self.y; }
+    pub fn sum(): int { return self.x + self.y; }
 }
 p = json.parse::<Point>("{\"x\": 1, \"y\": 2}");
 echo p.x;

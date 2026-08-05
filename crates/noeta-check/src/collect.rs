@@ -172,11 +172,27 @@ impl Checker {
         self.collect_method_sig_classified(type_name, m, type_params, false);
     }
 
+    /// Record a derived receiver discipline under **both** keys the two consumers ask by: the
+    /// `(type, method)` name the checker resolves calls with, and the declaration's name span the
+    /// IDE anchors its inlay hint to (see [`Symbols::method_receiver_spans`]). One writer, so the
+    /// two indexes cannot disagree about a method — the classification is computed once, by the
+    /// caller, and stored twice here rather than derived twice anywhere.
+    ///
+    /// A method whose `FnDecl` is *synthesized* (a hoisted trait default, a `@derive` bridge) writes
+    /// the span it was cloned from, or a dummy one; either is harmless, because the span index is
+    /// only ever read with a span taken from a parsed declaration.
+    fn record_receiver(&mut self, key: (String, String), m: &FnDecl, receiver: Receiver) {
+        self.symbols.method_receiver.insert(key, receiver);
+        self.symbols
+            .method_receiver_spans
+            .insert(m.name_span, receiver);
+    }
+
     /// [`Self::collect_method_sig`] with control over the receiver classification.
     ///
     /// `trait_provided` says whether a **trait's interface** supplies this method — an `impl Trait`
     /// block's own method, in-body or standalone. It changes what a *self-less* body means: an
-    /// inherent one is an associated function ([`Receiver::Associated`], `T.m(…)` only), a trait's
+    /// inherent one is an associated function ([`Receiver::Static`], `T.m(…)` only), a trait's
     /// is reachable either way ([`Receiver::Either`]), because the trait's contract puts it in the
     /// instance interface — `dyn Trait` dispatches it on a value — while its body needs no receiver.
     /// A body that *does* read `self` is [`Receiver::Instance`] either way; the trait cannot conjure
@@ -200,9 +216,26 @@ impl Checker {
         } else {
             Receiver::inherent(uses_self)
         };
-        self.symbols
-            .method_receiver
-            .insert((type_name.to_string(), m.name.to_string()), receiver);
+        // Method visibility, recorded at the ONE funnel every kind's methods pass through
+        // (struct/class/enum inherent bodies, in-body `impl` blocks, standalone `impl`s) — so the
+        // rule cannot be spelled once per kind and drift. A method is private unless declared
+        // `pub`; a TRAIT-supplied one is public by construction (`trait_provided`), because the
+        // trait's contract is what puts it on the outward surface.
+        if !trait_provided && !m.is_public {
+            self.symbols
+                .private_methods
+                .entry(type_name.to_string())
+                .or_default()
+                .insert(m.name.to_string());
+        } else {
+            // A later registration WINS over an earlier one for the same key (an `impl` method
+            // over an inherent of the same name), so a public one must clear a private entry
+            // rather than leave it standing.
+            if let Some(set) = self.symbols.private_methods.get_mut(type_name) {
+                set.remove(m.name.as_str());
+            }
+        }
+        self.record_receiver((type_name.to_string(), m.name.to_string()), m, receiver);
         let xt = &self.imports.extern_types;
         // The type's parameters, then the method's own LAYERED OVER them: a method `<T>` inside a
         // class `<T>` shadows, so an annotation in this signature resolves to the METHOD's `T`.
@@ -1164,8 +1197,9 @@ impl Checker {
         // plan's bridge/forward. So a self-less one is `Either` like any other trait method — an
         // omitted default is reachable as `T.m()` (the documented UT5 spelling) *and* on a value,
         // exactly as the same body written out in the `impl` block would be.
-        self.symbols.method_receiver.insert(
+        self.record_receiver(
             key.clone(),
+            m,
             Receiver::trait_method(m.body.iter().any(|s| s.mentions("self"))),
         );
         self.symbols.methods.insert(
@@ -1758,16 +1792,32 @@ fn subst_self_assoc_in_fn(m: &FnDecl, bindings: &HashMap<&str, &TypeRef>) -> FnD
 
 /// Whether an `impl <trait_name>` block's methods belong to the trait's **instance interface** —
 /// the question that decides whether a self-less one is [`Receiver::Either`] (reachable both ways)
-/// or [`Receiver::Associated`] (on the type only).
+/// or [`Receiver::Static`] (on the type only).
 ///
-/// True for every user, native, and built-in trait *except* one whose method is associated by
-/// contract ([`BuiltinTrait::associated_method`] — `From::from` builds a value rather than acting
-/// on one, and the checker already refuses a `from` body that mentions `self`). Deciding it from
-/// the closed built-in set rather than from `symbols.user_traits` keeps it independent of source
-/// order: an `impl` written above its `trait` must classify like one written below it, and during
-/// this walk the trait table is only half-populated.
+/// True for every user, native, and built-in trait *except* one whose contract declares its method
+/// **`static`** ([`BuiltinTrait::declares_static`] — `From::from` builds a value rather than acting
+/// on one, and the checker already refuses an implementation whose body mentions `self`). Deciding
+/// it from the closed built-in set rather than from `symbols.user_traits` keeps it independent of
+/// source order: an `impl` written above its `trait` must classify like one written below it, and
+/// during this walk the trait table is only half-populated.
+///
+/// A **user** trait's `static` declaration deliberately does NOT feed this, so a user static method
+/// stays `Receiver::Either` while `From`'s is `Receiver::Static`. Two reasons, and the asymmetry is
+/// a KNOWN one rather than an oversight:
+///
+///   * The arc is non-breaking by construction. An unmarked self-less trait method is `Either`
+///     today, so marking one `static` adds a promise (`T.m(…)` under a bound, and no `self` in any
+///     implementation) without withdrawing the `x.m(…)` spelling that already worked.
+///   * Reading `symbols.user_traits` here would reintroduce exactly the source-order dependence
+///     this function is written to avoid: this runs in the FIRST collect walk, the same one that
+///     registers `Stmt::Trait`, so a type declared above its trait would classify differently from
+///     one declared below it.
+///
+/// Closing the gap — making a declared-`static` user method type-only, as `From`'s is — needs a
+/// reclassification pass after `user_traits` is complete, not a lookup here. It is deliberately not
+/// done: it would be the one part of this arc that changes what an existing spelling means.
 fn trait_supplies_instance_interface(trait_name: &str) -> bool {
-    BuiltinTrait::from_name(trait_name).is_none_or(|t| !t.associated_method())
+    BuiltinTrait::from_name(trait_name).is_none_or(|t| !t.declares_static())
 }
 
 /// Every method of every in-body `impl Trait { … }` block, paired with whether its trait supplies an

@@ -8,11 +8,11 @@
 class Box<T> {
     pub value: T
 
-    fn new(v: T): Box<T> {
+    pub fn new(v: T): Box<T> {
         return Box { value: v };
     }
 
-    fn get(): T {
+    pub fn get(): T {
         return self.value;
     }
 }

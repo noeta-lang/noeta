@@ -10,9 +10,9 @@
 struct Words {
     mut data: List<u64>
     // `self.data[i]` is u64; the whole expression is u64 arithmetic/bitwise, no explicit conversion.
-    fn masked(i: int): u64 { return self.data[i] & 7u64; }
-    fn bit(i: int, b: int): bool { return (self.data[i] >> b) & 1u64 == 1u64; }
-    fn popcount(i: int): int { return self.data[i].count_ones(); }
+    pub fn masked(i: int): u64 { return self.data[i] & 7u64; }
+    pub fn bit(i: int, b: int): bool { return (self.data[i] >> b) & 1u64 == 1u64; }
+    pub fn popcount(i: int): int { return self.data[i].count_ones(); }
 }
 
 w = Words { data: [13u64, 0u64] };   // 13 = 0b1101

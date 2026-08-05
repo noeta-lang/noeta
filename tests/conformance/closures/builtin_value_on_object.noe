@@ -8,12 +8,12 @@
 class Stack {
     items: list
 
-    fn new(items: list): Stack {
+    pub fn new(items: list): Stack {
         return Stack { items: items };
     }
 
     impl Length {
-        fn len(): int {
+        pub fn len(): int {
             return self.items.len();
         }
     }

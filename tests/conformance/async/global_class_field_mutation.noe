@@ -7,7 +7,7 @@
 // expect: exit 0
 class G {
     pub mut n: int
-    fn new(): G { return G { n: 0 }; }
+    pub fn new(): G { return G { n: 0 }; }
 }
 g = G.new()
 async fn work(x: int) use (g): void {

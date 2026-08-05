@@ -201,16 +201,17 @@ impl BuiltinTrait {
         self.info().required_method
     }
 
-    /// Whether this trait's method is an **associated function** rather than part of the instance
-    /// interface — it builds a value instead of acting on one, so it takes no `self` and is called
-    /// on the type. Only [`BuiltinTrait::From`] today (`Money.from(cents)`); every other protocol —
-    /// `add`, `compare`, `to_string`, `call`, … — the runtime invokes *for a value*.
+    /// Whether this trait declares its method **`static`** — the built-in table's spelling of the
+    /// `static fn m(…)` a `.noe` `trait` writes (static-trait-methods arc). A static method takes no
+    /// `self`: it builds a value instead of acting on one, and is called on the type. Only
+    /// [`BuiltinTrait::From`] today (`Money.from(cents)`); every other protocol — `add`, `compare`,
+    /// `to_string`, `call`, … — the runtime invokes *for a value*.
     ///
-    /// Two rules read this, and each used to name `From` on its own: the checker rejects a `from`
-    /// body that mentions `self` (E0015), and method-receiver classification declines to put this
-    /// trait's methods in the instance interface (E0047). Stating it once, beside `required_method`,
-    /// is what keeps them agreeing about the next associated protocol.
-    pub fn associated_method(self) -> bool {
+    /// Two rules read this, and each used to name `From` on its own: the checker rejects an
+    /// implementation whose body mentions `self` (E0015), and method-receiver classification
+    /// declines to put this trait's methods in the instance interface (E0047). Stating it once,
+    /// beside `required_method`, is what keeps them agreeing about the next static protocol.
+    pub fn declares_static(self) -> bool {
         matches!(self, BuiltinTrait::From)
     }
 

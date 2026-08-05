@@ -25,11 +25,11 @@ struct User {
 class Inner<T> {
     pub tbl: string
 
-    fn new(tbl: string): Inner<T> {
+    pub fn new(tbl: string): Inner<T> {
         return Inner { tbl: tbl };
     }
 
-    fn model(): string {
+    pub fn model(): string {
         return self.tbl ~ ":" ~ type_name::<T>();
     }
 }
@@ -37,15 +37,15 @@ class Outer {
     inner: Inner<Todo>
     other: Inner<User>
 
-    fn new(): Outer {
+    pub fn new(): Outer {
         return Outer { inner: Inner.new("todos"), other: Inner.new("users") };
     }
 
-    fn go(): string {
+    pub fn go(): string {
         return self.inner.model();
     }
 
-    fn go_other(): string {
+    pub fn go_other(): string {
         return self.other.model();
     }
 }

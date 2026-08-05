@@ -31,23 +31,23 @@ struct Other {
 class Repo<T> {
     pub tbl: string
 
-    fn new(tbl: string): Repo<T> {
+    pub fn new(tbl: string): Repo<T> {
         return Repo { tbl: tbl };
     }
 
     // The name the narrow below keys on, read off the same receiver tag.
-    fn model(): string {
+    pub fn model(): string {
         return self.tbl ~ ":" ~ type_name::<T>();
     }
 
-    fn read(row: dyn): ?T {
+    pub fn read(row: dyn): ?T {
         if self.tbl == "" {
             return none;
         }
         return row.as<T>();
     }
 
-    fn holds(row: dyn): bool {
+    pub fn holds(row: dyn): bool {
         if self.tbl == "" {
             return false;
         }

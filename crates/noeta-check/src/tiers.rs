@@ -2388,13 +2388,13 @@ mod tests {
          class C {\n\
              impl T {\n\
                  @doc { An in-body impl method. }\n\
-                 fn area(): int { return 5; }\n\
+                 pub fn area(): int { return 5; }\n\
              }\n\
          }\n\
          struct P { y: int }\n\
          impl T for P {\n\
              @doc { A standalone impl method. }\n\
-             fn area(): int { return self.y; }\n\
+             pub fn area(): int { return self.y; }\n\
          }\n";
 
     /// Every `(target, prose)` pair the reflection manifest carries for the `Doc` attribute, which
@@ -2615,6 +2615,50 @@ mod tests {
         assert!(
             diags.iter().any(|d| d.code == DiagnosticCode::PrivateField),
             "ordinary code reading a private field must still be E0035: {diags:?}"
+        );
+    }
+
+    /// The method twin of [`dev_tier_fn_gets_white_box_field_access`] (method-visibility arc): a
+    /// private METHOD is reachable inside an active dev-tier fn body, for the same reason a private
+    /// field is — co-located tooling is inside the encapsulation boundary, not outside it. Written
+    /// beside the field case rather than somewhere else, because the two are one rule and a reader
+    /// who changes one must see the other.
+    ///
+    /// (This cannot live in the conformance corpus: that harness never activates a tier, so the
+    /// `@test` block is stripped before anything is checked.)
+    #[test]
+    fn dev_tier_fn_gets_white_box_method_access() {
+        let program = parse_program(
+            "class Account { balance: int  pub fn new(b: int): Account { return Account { balance: b }; }  fn fee(): int { return self.balance / 100; } }\n\
+             @test fn touches(): void { assert(Account.new(500).fee() == 5); }\n",
+        );
+        let active = crate::check_all(
+            &activate_tiers(&program, &["test"], &Provenance::unattributed()).program,
+        );
+        assert!(
+            active.diagnostics.is_empty(),
+            "white-box dev-tier fn must not raise E0076: {:?}",
+            active.diagnostics
+        );
+        let inactive =
+            crate::check_all(&activate_tiers(&program, &[], &Provenance::unattributed()).program);
+        assert!(inactive.diagnostics.is_empty());
+    }
+
+    /// The scoping half, mirroring [`ordinary_fn_cannot_read_private_field`]: ordinary same-module
+    /// code is still outside the type, so calling its private method is E0076.
+    #[test]
+    fn ordinary_fn_cannot_call_private_method() {
+        let program = parse_program(
+            "class Account { balance: int  pub fn new(b: int): Account { return Account { balance: b }; }  fn fee(): int { return self.balance / 100; } }\n\
+             fn reads(): int { a = Account.new(500); return a.fee(); }\n",
+        );
+        let diags = crate::check_all(&program).diagnostics;
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == DiagnosticCode::PrivateMethod),
+            "ordinary code calling a private method must be E0076: {diags:?}"
         );
     }
 

@@ -17,11 +17,11 @@
 struct P {
     host: string = "h"
 
-    fn local(): P {
+    pub fn local(): P {
         return P {};
     }
 
-    fn label(): string {
+    pub fn label(): string {
         return "p:" ~ self.host;
     }
 }

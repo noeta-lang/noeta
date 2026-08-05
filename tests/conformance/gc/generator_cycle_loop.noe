@@ -7,7 +7,7 @@
 // expect: exit 0
 class Node {
     pub mut next: ?Node
-    fn new(): Node { return Node { next: none } }
+    pub fn new(): Node { return Node { next: none } }
 }
 
 fn cycles(n: int): Iterator<int> {

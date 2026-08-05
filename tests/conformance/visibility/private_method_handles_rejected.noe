@@ -1,0 +1,33 @@
+// The rule holds at every spelling a private method could be REACHED through, not just the obvious
+// instance call — a handle is a way of calling the method later, so binding one is an access now.
+// Without this the rule would have a hole you could drive `f = Account.fee; f(a)` through.
+//   * an unbound handle off the type (`Account.fee`);
+//   * a handle bound through a value (`a.fee`);
+//   * an explicit instantiation (`b.pick::<int>(…)`) — spelling the type arguments does not widen
+//     the surface;
+//   * the `Callable` protocol (`a(1)` means `a.call(1)`), which is a use of the type from wherever
+//     it is written.
+// expect: error E0076 at 30:6
+// expect: error E0076 at 31:6
+// expect: error E0076 at 32:8
+// expect: error E0076 at 33:6
+// expect: exit 1
+class Account {
+    balance: int
+    pub fn new(): Account { return Account { balance: 5 }; }
+    fn fee(): int { return self.balance / 100; }
+    fn call(n: int): int { return n + self.balance; }
+}
+
+class Bag {
+    n: int
+    pub fn new(): Bag { return Bag { n: 2 }; }
+    fn pick<U>(u: U): U { mine = self.n; return u; }
+}
+
+a = Account.new();
+b = Bag.new();
+echo Account.fee;
+echo a.fee;
+echo b.pick::<int>(3);
+echo a(1);

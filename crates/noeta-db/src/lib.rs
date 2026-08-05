@@ -178,6 +178,9 @@ pub struct Checked {
     /// Every `@packed` struct's flat layout by type name — the IDE storage-fact index hover and
     /// inlay hints read (see [`noeta_check::Checked::packed_layouts`]).
     pub packed_layouts: std::collections::HashMap<String, noeta_ast::reflect::PackedLayout>,
+    /// Every method declaration's derived receiver discipline, keyed by its name span — the IDE's
+    /// receiver-hint index (see [`noeta_check::Checked::method_receivers`]).
+    pub method_receivers: std::collections::HashMap<Span, noeta_check::Receiver>,
 }
 
 /// Compiler output: a [`Module`], or the first construct outside the VM's subset.
@@ -433,6 +436,7 @@ fn from_check_output(out: noeta_check::Checked) -> Checked {
         sites: out.sites,
         bundle_bindings: out.bundle_bindings,
         packed_layouts: out.packed_layouts,
+        method_receivers: out.method_receivers,
     }
 }
 
@@ -1349,6 +1353,7 @@ pub fn linked_checked_from(
             sites: noeta_check::Sites::default(),
             bundle_bindings: std::collections::HashMap::new(),
             packed_layouts: std::collections::HashMap::new(),
+            method_receivers: std::collections::HashMap::new(),
         },
     }
 }
@@ -1381,6 +1386,7 @@ pub fn linked_checked_ide_from(
             sites: noeta_check::Sites::default(),
             bundle_bindings: std::collections::HashMap::new(),
             packed_layouts: std::collections::HashMap::new(),
+            method_receivers: std::collections::HashMap::new(),
         },
     }
 }
@@ -1519,6 +1525,7 @@ pub fn shape_checked_from(
             sites: noeta_check::Sites::default(),
             bundle_bindings: std::collections::HashMap::new(),
             packed_layouts: std::collections::HashMap::new(),
+            method_receivers: std::collections::HashMap::new(),
         };
     };
     let mut checked = from_check_output(noeta_check::check_all_cancellable(

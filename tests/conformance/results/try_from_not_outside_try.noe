@@ -10,7 +10,7 @@ struct HighError {
     detail: string
 
     impl From<LowError> {
-        fn from(e: LowError): HighError {
+        pub fn from(e: LowError): HighError {
             return HighError { detail: "wrapped ${e.code}" }
         }
     }

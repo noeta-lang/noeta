@@ -15,6 +15,6 @@ pub struct Wrap<T> {
 
 pub class Counter {
     n: int
-    fn new(n: int): Counter { return Counter { n: n }; }
-    fn bump(by: int): int { return self.n + by; }
+    pub fn new(n: int): Counter { return Counter { n: n }; }
+    pub fn bump(by: int): int { return self.n + by; }
 }
