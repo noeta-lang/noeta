@@ -152,7 +152,6 @@ pub enum DiagnosticCode {
     /// A method that implements a `trait` is never private: a trait is an outward contract, so the
     /// implementation is part of the type's public surface by construction. It must say so — see
     /// [`DiagnosticCode::InvalidImpl`].
-    PrivateMethod,
     /// An `@name` resolves to nothing in the directive name-space: not a built-in directive, not a
     /// tier (extension-declared or program-declared), and not a directive any installed extension
     /// declares. A typo (`@tset { }`), or a tier the build target does not provide.
@@ -493,6 +492,7 @@ pub enum DiagnosticCode {
     /// The trait twin of this rule is [`DiagnosticCode::InvalidTraitDeclaration`], where `pub` on a
     /// trait's own method is refused for the identical reason.
     RedundantVisibility,
+    PrivateMethod,
 }
 
 impl DiagnosticCode {
