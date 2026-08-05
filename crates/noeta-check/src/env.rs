@@ -46,17 +46,36 @@ pub enum Receiver {
     /// The body reads `self`, so a call must supply one: `x.m(…)` only. `T.m(…)` is E0047 — and
     /// really does fail at run time ("no field `f` on unit"), because nothing binds `self`.
     Instance,
-    /// A self-less **inherent** function: `T.m(…)` only. `x.m(…)` is E0047 — the receiver would be
-    /// evaluated and then silently discarded.
+    /// A self-less function reached on the type: `T.m(…)` only. `x.m(…)` is E0047 — `T.m(…)` and
+    /// `x.m(…)` reach the same prototype, so nothing binds the receiver and it would be evaluated
+    /// and then silently discarded.
     ///
-    /// **Derived**, never declared: `static` is a modifier only a `trait`'s method contract may
-    /// write, because only a contract needs to bind implementations it cannot see. An inherent
-    /// method's body is right there, so the body decides and writing the modifier is E0015.
+    /// Two ways in, and they are the same rule rather than two:
+    ///
+    ///   * an **inherent** self-less function, where the body decides. `static` is not writable
+    ///     here — a modifier beside a visible body would be a second source of truth that can drift
+    ///     from the first, so writing it is E0015.
+    ///   * a trait method the **contract declares `static`**, where the declaration decides. Only a
+    ///     contract needs the modifier, because only a contract binds implementations it cannot
+    ///     see; every implementation is then held to it (E0015 on a body that reads `self`).
+    ///
+    /// This does NOT narrow the `dyn Trait` path, and the two are consistent for the reason the
+    /// rule is worded about a *discarded* receiver rather than about `self`: this classification is
+    /// keyed by a concrete type name, and a trait object ([`Type::DynTrait`]) resolves against the
+    /// trait's declaration instead. It has to — a `dyn` has no type name to call the method on, so
+    /// its receiver is not a discarded value but the only thing selecting which implementation
+    /// runs. It is a dispatch token, never bound to `self`.
     Static,
-    /// A self-less method belonging to a **trait's interface**: reachable **both** ways. The trait's
-    /// contract puts it in the instance interface (`x.m(…)` — and that is how `dyn Trait` dispatches
-    /// it), while the body needs no receiver, so calling it on the type (`T.m(…)`) is equally
-    /// well-defined. Both spellings reach the same prototype at run time.
+    /// A self-less method belonging to a **trait's interface**, which the trait did not declare
+    /// `static`: reachable **both** ways. The trait's contract puts it in the instance interface
+    /// (`x.m(…)` — and that is how `dyn Trait` dispatches it), while the body needs no receiver, so
+    /// calling it on the type (`T.m(…)`) is equally well-defined. Both spellings reach the same
+    /// prototype at run time.
+    ///
+    /// The undeclared half is load-bearing. A self-less *implementation* says nothing about the
+    /// implementation written tomorrow, so nothing here may be tightened into a promise; only the
+    /// declaration can make one, and where it does the classification is [`Receiver::Static`]
+    /// instead (`Collector::narrow_declared_static`).
     Either,
 }
 
@@ -74,6 +93,12 @@ impl Receiver {
     /// The classification of a method a trait's interface supplies — an `impl Trait` block's own
     /// method (in-body or standalone) or a hoisted default. A body that reads `self` still needs a
     /// receiver; a self-less one is reachable either way.
+    ///
+    /// The trait's own contract has one further say, and it is deliberately not taken here: a
+    /// method the trait declares `static` narrows from `Either` back to `Static`. That question
+    /// cannot be asked at classification time — a method is classified inside the same walk that
+    /// registers `trait` declarations, so the answer would depend on source order — so it is asked
+    /// once afterwards, by `Collector::narrow_declared_static`.
     pub(crate) fn trait_method(uses_self: bool) -> Self {
         if uses_self {
             Receiver::Instance
@@ -97,6 +122,27 @@ impl Receiver {
     /// already meant, so a trait method's handle keeps its instance shape.
     pub(crate) fn handle_takes_receiver(self) -> bool {
         !matches!(self, Receiver::Static)
+    }
+}
+
+/// The E0047 help for reaching a [`Receiver::Static`] method the wrong way: the spelling that does
+/// work (`fix` — `T.m(...)` for a call, `T.m` for a handle), followed by the one reason there is,
+/// said the same way for both spellings and for both ways a method becomes static.
+///
+/// `declared_by` names the trait whose contract declared the method `static`, where one did. It is
+/// the difference between the two paths to the same rule and the only thing the message varies on:
+/// an *inherent* static function is right there in the source with no `self` in it, so the reader
+/// can see why; a *declared* one is type-only because a trait said so, possibly in another file,
+/// and the diagnostic has to say which trait or the reader is left looking at a self-less body
+/// wondering what forbade the receiver.
+///
+/// Written once because both call sites report the same rule. They used to phrase it twice, and
+/// only one of them explained the reason at all.
+pub(crate) fn static_receiver_help(fix: &str, method: &str, declared_by: Option<&str>) -> String {
+    let reason = "nothing binds the receiver, so it would be evaluated and then discarded";
+    match declared_by {
+        Some(tr) => format!("`{tr}` declares `{method}` static — {fix}; {reason}"),
+        None => format!("{fix} — {reason}"),
     }
 }
 

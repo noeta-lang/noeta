@@ -1,0 +1,77 @@
+// A trait's declared-`static` method is **type-only on a concrete type**, and still reachable
+// through `dyn Trait`. One declared property, one behaviour — the asymmetry the static-trait-methods
+// arc left open.
+//
+// The rule that decides it is the language's own, already spelled for inherent static functions: a
+// receiver is refused where it would be *evaluated and then discarded*. On a concrete type
+// `Thing.m(…)` and `x.m(…)` reach the same prototype, so `x` really is discarded and the call is
+// E0047 (`static_trait_method_on_value.noe` pins the rejection). A `dyn Trait` has no type name to
+// call on, and the receiver is the only thing selecting which implementation runs — it is not
+// discarded there, it IS the dispatch. So it stays legal, and this file is what pins that: `dyn`
+// is the case a narrowing rule is most likely to take out with it.
+//
+// Every shape of implementation is exercised, because the receiver rule must not depend on how the
+// implementation was spelled: an in-body `impl` block, a standalone `impl Trait for T`, a hoisted
+// default, and the built-in `From` — which is no longer an exception but the same rule applied to
+// the one built-in trait whose contract declares its method static.
+//
+// The last two echoes are the **non-breaking guarantee**: `note`, self-less but NOT declared
+// `static`, stays reachable both ways exactly as before. `static` is new syntax, so no program
+// written before it has one — which is what makes narrowing declared-static methods a change no
+// existing program can notice. Narrowing merely self-less ones would not be, and this pins that the
+// pass did not reach them.
+// expect: stdout "in-body"
+// expect: stdout "apart"
+// expect: stdout "codec"
+// expect: stdout "dyn in-body"
+// expect: stdout "dyn apart"
+// expect: stdout "dyn codec"
+// expect: stdout "9"
+// expect: stdout "note on the type"
+// expect: stdout "note on a value"
+// expect: exit 0
+trait Codec {
+    static fn tag(): string
+    static fn kind(): string { return "codec" }
+    fn note(): string
+    fn encode(): string
+}
+
+struct InBody {
+    v: string
+    impl Codec {
+        pub fn tag(): string { return "in-body" }
+        pub fn note(): string { return "note " ~ "on the type" }
+        pub fn encode(): string { return self.v }
+    }
+}
+
+struct Apart { v: string }
+impl Codec for Apart {
+    pub fn tag(): string { return "apart" }
+    pub fn note(): string { return "note on a value" }
+    pub fn encode(): string { return self.v }
+}
+
+struct Cents { n: int }
+struct Money {
+    n: int
+    impl From<Cents> {
+        pub fn from(c: Cents): Money { return Money { n: c.n } }
+    }
+}
+
+// The receiver here is a dispatch token, never bound to `self` — `tag`/`kind` take none, and the
+// two implementors below reach different code through the same call.
+fn dyn_tag(c: dyn Codec): string { return "dyn " ~ c.tag() }
+fn dyn_kind(c: dyn Codec): string { return "dyn " ~ c.kind() }
+
+echo InBody.tag()
+echo Apart.tag()
+echo InBody.kind()                      // the hoisted default, on the type
+echo dyn_tag(InBody { v: "a" })
+echo dyn_tag(Apart { v: "b" })
+echo dyn_kind(InBody { v: "a" })        // the hoisted default, through `dyn`
+echo Money.from(Cents { n: 9 }).n       // `From`, by the same rule rather than as a special case
+echo InBody.note()                      // undeclared + self-less: still reachable on the type …
+echo Apart { v: "c" }.note()            // … and still reachable on a value

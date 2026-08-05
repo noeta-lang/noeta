@@ -5,6 +5,24 @@
 
 use super::*;
 
+/// One method a **trait's interface** supplied to a type: where its classification was recorded
+/// ([`Symbols::method_receiver`] by name, [`Symbols::method_receiver_spans`] by declaration span)
+/// and which trait supplied it.
+///
+/// Recorded at the one funnel every trait-supplied method passes through — an in-body
+/// `impl Trait { … }` block, a standalone `impl Trait for T { … }`, a `@derive` bridge, a hoisted
+/// default — and replayed by [`Checker::narrow_declared_static`] after the trait table is complete.
+#[derive(Clone)]
+pub(crate) struct TraitSuppliedMethod {
+    /// The `(type, method)` key under which the classification was recorded.
+    pub(crate) key: (String, String),
+    /// The declaration's name span, the second key the same classification was recorded under.
+    pub(crate) name_span: Span,
+    /// The trait whose contract supplied this method — a user trait, a native trait seeded into
+    /// `user_traits`, or a [`BuiltinTrait`].
+    pub(crate) trait_name: String,
+}
+
 impl Checker {
     /// Pass 0: resolve every `use` import before any declaration is collected, so an annotation in a
     /// signature (`fn f(x: Uuid)`) sees the import map regardless of source order. Populates the four
@@ -169,7 +187,7 @@ impl Checker {
     /// parameters first (`class_params` many, seeded positionally by the receiver's type
     /// arguments), then the method's own (filled by turbofish/arguments/expectation).
     fn collect_method_sig(&mut self, type_name: &str, m: &FnDecl, type_params: &[TypeParam]) {
-        self.collect_method_sig_classified(type_name, m, type_params, false);
+        self.collect_method_sig_classified(type_name, m, type_params, None);
     }
 
     /// Record a derived receiver discipline under **both** keys the two consumers ask by: the
@@ -188,15 +206,34 @@ impl Checker {
             .insert(m.name_span, receiver);
     }
 
+    /// Note that `trait_name`'s interface supplied `type_name.m` — the worklist entry
+    /// [`Self::narrow_declared_static`] replays. Recorded beside every [`Self::record_receiver`]
+    /// call that classifies a trait-supplied method, and nowhere else.
+    fn note_trait_supplied(&mut self, type_name: &str, m: &FnDecl, trait_name: &str) {
+        self.symbols
+            .trait_supplied_methods
+            .push(TraitSuppliedMethod {
+                key: (type_name.to_string(), m.name.to_string()),
+                name_span: m.name_span,
+                trait_name: trait_name.to_string(),
+            });
+    }
+
     /// [`Self::collect_method_sig`] with control over the receiver classification.
     ///
-    /// `trait_provided` says whether a **trait's interface** supplies this method — an `impl Trait`
-    /// block's own method, in-body or standalone. It changes what a *self-less* body means: an
-    /// inherent one is an associated function ([`Receiver::Static`], `T.m(…)` only), a trait's
-    /// is reachable either way ([`Receiver::Either`]), because the trait's contract puts it in the
-    /// instance interface — `dyn Trait` dispatches it on a value — while its body needs no receiver.
-    /// A body that *does* read `self` is [`Receiver::Instance`] either way; the trait cannot conjure
-    /// a receiver for it, and calling such a method as `T.m(…)` aborts at run time.
+    /// `trait_provided` names the **trait whose interface** supplies this method — an `impl Trait`
+    /// block's own method, in-body or standalone — and is `None` for an inherent one. It changes
+    /// what a *self-less* body means: an inherent one is an associated function
+    /// ([`Receiver::Static`], `T.m(…)` only), a trait's is reachable either way
+    /// ([`Receiver::Either`]), because the trait's contract puts it in the instance interface —
+    /// `dyn Trait` dispatches it on a value — while its body needs no receiver. A body that *does*
+    /// read `self` is [`Receiver::Instance`] either way; the trait cannot conjure a receiver for it,
+    /// and calling such a method as `T.m(…)` aborts at run time.
+    ///
+    /// The trait's name, rather than a bare "yes it does", is what lets
+    /// [`Self::narrow_declared_static`] later ask the one further question this walk cannot answer
+    /// yet: whether that trait declares *this* method **`static`**, which narrows the `Either` back
+    /// to `Static`. See [`Symbols::trait_supplied_methods`] for why it has to be later.
     ///
     /// This flag used to be `classify_instance`, and `false` meant "record nothing" — leaving the
     /// third state to the accident of two call sites disagreeing about the default. Recording it
@@ -208,20 +245,23 @@ impl Checker {
         type_name: &str,
         m: &FnDecl,
         type_params: &[TypeParam],
-        trait_provided: bool,
+        trait_provided: Option<&str>,
     ) {
         let uses_self = m.body.iter().any(|s| s.mentions("self"));
-        let receiver = if trait_provided {
+        let receiver = if trait_provided.is_some() {
             Receiver::trait_method(uses_self)
         } else {
             Receiver::inherent(uses_self)
         };
+        if let Some(trait_name) = trait_provided {
+            self.note_trait_supplied(type_name, m, trait_name);
+        }
         // Method visibility, recorded at the ONE funnel every kind's methods pass through
         // (struct/class/enum inherent bodies, in-body `impl` blocks, standalone `impl`s) — so the
         // rule cannot be spelled once per kind and drift. A method is private unless declared
         // `pub`; a TRAIT-supplied one is public by construction (`trait_provided`), because the
         // trait's contract is what puts it on the outward surface.
-        if !trait_provided && !m.is_public {
+        if trait_provided.is_none() && !m.is_public {
             self.symbols
                 .private_methods
                 .entry(type_name.to_string())
@@ -436,12 +476,12 @@ impl Checker {
                     for m in &r.methods {
                         self.collect_method_sig(r.name.as_str(), m, &r.type_params);
                     }
-                    for (m, provided) in impl_block_methods(&r.impls) {
+                    for (m, from_trait) in impl_block_methods(&r.impls) {
                         self.collect_method_sig_classified(
                             r.name.as_str(),
                             m,
                             &r.type_params,
-                            provided,
+                            Some(from_trait),
                         );
                     }
                     self.bake_impl_assoc(r.name.as_str(), &r.impls, &r.type_params);
@@ -525,12 +565,12 @@ impl Checker {
                     for m in &c.methods {
                         self.collect_method_sig(c.name.as_str(), m, &c.type_params);
                     }
-                    for (m, provided) in impl_block_methods(&c.impls) {
+                    for (m, from_trait) in impl_block_methods(&c.impls) {
                         self.collect_method_sig_classified(
                             c.name.as_str(),
                             m,
                             &c.type_params,
-                            provided,
+                            Some(from_trait),
                         );
                     }
                     self.bake_impl_assoc(c.name.as_str(), &c.impls, &c.type_params);
@@ -605,12 +645,12 @@ impl Checker {
                     for m in &e.methods {
                         self.collect_method_sig(e.name.as_str(), m, &e.type_params);
                     }
-                    for (m, provided) in impl_block_methods(&e.impls) {
+                    for (m, from_trait) in impl_block_methods(&e.impls) {
                         self.collect_method_sig_classified(
                             e.name.as_str(),
                             m,
                             &e.type_params,
-                            provided,
+                            Some(from_trait),
                         );
                     }
                     self.bake_impl_assoc(e.name.as_str(), &e.impls, &e.type_params);
@@ -836,17 +876,23 @@ impl Checker {
                 user_traits: &self.symbols.user_traits,
                 registry: self.reg(),
             };
-            let plans: Vec<Vec<noeta_ast::FnDecl>> = derives
+            // Each plan is paired with the trait it derives, because a synthesized method is a
+            // TRAIT's method however it was spelled — the receiver rule asks the same question of
+            // it as of a written-out `impl` block's.
+            let plans: Vec<(String, Vec<noeta_ast::FnDecl>)> = derives
                 .iter()
                 .filter_map(|spec| {
                     noeta_ast::derive::plan_derive(&ctx, spec, type_name, fields, methods)
+                        // A plan error is ignored here; `check_derives` reports it.
+                        .and_then(|planned| planned.ok())
+                        .map(|ms| (spec.name.to_string(), ms))
                 })
-                // A plan error is ignored here; `check_derives` reports it.
-                .filter_map(|planned| planned.ok())
                 .collect();
             let type_name = type_name.to_string();
-            for m in plans.iter().flatten() {
-                self.register_synth_method(&type_name, m);
+            for (trait_name, ms) in &plans {
+                for m in ms {
+                    self.register_synth_method(&type_name, trait_name, m);
+                }
             }
         }
         // A STANDALONE `impl Trait for T { … }`'s method signatures. The in-body `impl` half was
@@ -879,14 +925,14 @@ impl Checker {
                 .iter()
                 .map(|(n, t)| (n.as_str(), t))
                 .collect();
-            let provided = trait_supplies_instance_interface(d.trait_name.as_str());
+            let from_trait = Some(d.trait_name.as_str());
             for m in &d.methods {
                 if assoc.is_empty() {
                     self.collect_method_sig_classified(
                         d.target.as_str(),
                         m,
                         &type_params,
-                        provided,
+                        from_trait,
                     );
                 } else {
                     let resolved = subst_self_assoc_in_fn(m, &assoc);
@@ -894,7 +940,7 @@ impl Checker {
                         d.target.as_str(),
                         &resolved,
                         &type_params,
-                        provided,
+                        from_trait,
                     );
                 }
             }
@@ -926,7 +972,7 @@ impl Checker {
                     for tm in concrete.methods.iter().filter(|tm| {
                         tm.has_default && !provided.iter().any(|m| m.name == tm.sig.name)
                     }) {
-                        self.register_synth_method(type_name, &tm.sig);
+                        self.register_synth_method(type_name, trait_name, &tm.sig);
                     }
                 };
             match stmt {
@@ -1046,7 +1092,7 @@ impl Checker {
                     // has a real owner, so this default is inert and nothing is contested; record
                     // ownership only where this default actually took an empty slot.
                     let taken = self.symbols.methods.contains_key(&key);
-                    self.register_synth_method(&type_name, &tm.sig);
+                    self.register_synth_method(&type_name, &trait_name, &tm.sig);
                     if !taken {
                         supplied_by.insert(key, trait_name.clone());
                     }
@@ -1104,6 +1150,119 @@ impl Checker {
                 }
             }
         }
+        // LAST — every trait is registered by now, which is the whole reason this is a pass and not
+        // a lookup at the classification site.
+        self.narrow_declared_static();
+    }
+
+    /// Narrow every **declared-`static`** trait method from [`Receiver::Either`] to
+    /// [`Receiver::Static`], so `static` means one thing rather than two.
+    ///
+    /// A trait's `static fn m(…)` is a term of its contract: no implementation binds `self`. On a
+    /// **concrete type** that makes `x.m(…)` exactly the shape E0047 exists for — `Thing.m(…)` and
+    /// `x.m(…)` reach the same prototype, so the receiver really is evaluated and then discarded,
+    /// which is the language's own stated reason for an inherent static function being type-only.
+    /// The declaration says the receiver is not part of the method's meaning; the call spelling
+    /// should not go on implying it is.
+    ///
+    /// **`dyn Trait` is untouched, and that is not an inconsistency.** This table is keyed by a
+    /// *concrete type name*; a `dyn Trait` receiver is [`Type::DynTrait`] and resolves against the
+    /// trait's declaration (`Checker::dyn_trait_method`), never through here. It has to: a trait
+    /// object has no type name to call the method on, so the receiver is not a discarded value there
+    /// — it is the only thing selecting which implementation runs. `Receiver::Either`'s own doc names
+    /// the instance interface as how `dyn Trait` dispatches, and that path keeps working; the
+    /// receiver is a dispatch token, never bound to `self`.
+    ///
+    /// **Scoped to a DECLARED `static`**, which is what makes it non-breaking rather than merely
+    /// justified: the modifier is new syntax, so no program predating it has one. A merely
+    /// self-less trait method — the far larger set — stays `Either` exactly as before, and nothing
+    /// that checked yesterday stops checking. The built-in `From` flows through this same rule
+    /// (`BuiltinTrait::declares_static`) rather than through a classification special case, so its
+    /// long-standing type-only `from` is now an instance of the general law instead of the exception
+    /// the general law was written around.
+    ///
+    /// Two guards, both about not overwriting someone else's answer:
+    ///
+    ///   * only an entry still reading `Either` is narrowed. `Either` is *only* ever written for a
+    ///     self-less trait-supplied method, so seeing it is proof this worklist entry is still the
+    ///     one standing — an inherent method that shadowed it (`Instance`/`Static`), or an
+    ///     implementation whose body reads `self` in violation of the contract (`Instance`, E0015),
+    ///     keeps the classification it earned.
+    ///   * the span index is guarded independently. It keys *declarations*, so it holds entries the
+    ///     name index no longer does, and the two must not fall out of agreement about the ones they
+    ///     share.
+    fn narrow_declared_static(&mut self) {
+        let narrow: Vec<((String, String), Span)> = self
+            .symbols
+            .trait_supplied_methods
+            .iter()
+            .filter(|e| self.trait_declares_static(&e.trait_name, &e.key.1))
+            .map(|e| (e.key.clone(), e.name_span))
+            .collect();
+        for (key, name_span) in narrow {
+            if let Some(r) = self.symbols.method_receiver.get_mut(&key)
+                && *r == Receiver::Either
+            {
+                *r = Receiver::Static;
+            }
+            if let Some(r) = self.symbols.method_receiver_spans.get_mut(&name_span)
+                && *r == Receiver::Either
+            {
+                *r = Receiver::Static;
+            }
+        }
+    }
+
+    /// Whether `trait_name`'s contract declares `method` **`static`** — the one question the
+    /// receiver rule asks of a trait, answered identically for all three kinds of trait.
+    ///
+    /// A user trait and a *native* trait share the answer by construction: a native trait is seeded
+    /// into `symbols.user_traits` as a synthesized [`noeta_ast::TraitDecl`] whose
+    /// [`noeta_ast::FnDecl::is_static`] carries its declared receiver-ness, so one lookup covers
+    /// both. A [`BuiltinTrait`] has no `TraitDecl` at all and answers from the closed table
+    /// ([`BuiltinTrait::declares_static`]), matched against the method it requires so a same-named
+    /// method of a *different* protocol is never caught by it.
+    /// The trait whose contract declared `type_name.method` **`static`** — its name, and the span
+    /// of the `static fn m(…)` line that said so where there is one (a [`BuiltinTrait`] has no
+    /// source to point at). `None` when the method is type-only for the ordinary reason: it is an
+    /// inherent function whose own body binds no `self`.
+    ///
+    /// What E0047 names, so the reader is sent to the *declaration* that made the method type-only
+    /// rather than left to wonder why an implementation with no `self` in it refuses a receiver.
+    pub(crate) fn static_declaring_trait(
+        &self,
+        type_name: &str,
+        method: &str,
+    ) -> Option<(String, Option<Span>)> {
+        let trait_name = self
+            .symbols
+            .trait_supplied_methods
+            .iter()
+            .find(|e| {
+                e.key.0 == type_name
+                    && e.key.1 == method
+                    && self.trait_declares_static(&e.trait_name, method)
+            })
+            .map(|e| e.trait_name.clone())?;
+        let at = self
+            .symbols
+            .user_traits
+            .get(&trait_name)
+            .and_then(|d| d.methods.iter().find(|tm| tm.sig.name.as_str() == method))
+            .map(|tm| tm.sig.name_span);
+        Some((trait_name, at))
+    }
+
+    fn trait_declares_static(&self, trait_name: &str, method: &str) -> bool {
+        if let Some(decl) = self.symbols.user_traits.get(trait_name) {
+            return decl
+                .methods
+                .iter()
+                .any(|tm| tm.sig.name.as_str() == method && tm.sig.is_static);
+        }
+        BuiltinTrait::from_name(trait_name).is_some_and(|t| {
+            t.declares_static() && t.required_method().is_some_and(|(name, _)| name == method)
+        })
     }
 
     /// Resolve a dotted trait path (`vec.Kernels`) to its registered kernel **trait** (ExtBundle→ExtTrait
@@ -1173,7 +1332,12 @@ impl Checker {
     /// `type_name`, unless the type already has one by that name — the registration UT5 default
     /// fallback and derive bridging share (the body itself is materialized by the backends'
     /// hoist; the checker needs the signature so member calls resolve and type).
-    fn register_synth_method(&mut self, type_name: &str, m: &noeta_ast::FnDecl) {
+    ///
+    /// `trait_name` is the trait the synthesized method stands in for — every caller has one, since
+    /// a synthesized method is by definition a trait's doing — and it goes on the same worklist an
+    /// `impl` block's method does, so a hoisted default of a `static fn` narrows exactly like a
+    /// written-out one.
+    fn register_synth_method(&mut self, type_name: &str, trait_name: &str, m: &noeta_ast::FnDecl) {
         let key = (type_name.to_string(), m.name.to_string());
         if self.symbols.methods.contains_key(&key) {
             return;
@@ -1196,12 +1360,14 @@ impl Checker {
         // Every method reaching here comes from a trait: a hoisted UT5 default, or a `@derive`
         // plan's bridge/forward. So a self-less one is `Either` like any other trait method — an
         // omitted default is reachable as `T.m()` (the documented UT5 spelling) *and* on a value,
-        // exactly as the same body written out in the `impl` block would be.
+        // exactly as the same body written out in the `impl` block would be, and narrowed back to
+        // `Static` by the same pass if the trait declared it so.
         self.record_receiver(
             key.clone(),
             m,
             Receiver::trait_method(m.body.iter().any(|s| s.mentions("self"))),
         );
+        self.note_trait_supplied(type_name, m, trait_name);
         self.symbols.methods.insert(
             key,
             FnSig {
@@ -1265,10 +1431,14 @@ impl Checker {
                 .iter()
                 .map(|(n, t)| (n.as_str(), t))
                 .collect();
-            let provided = trait_supplies_instance_interface(b.trait_name.as_str());
             for m in &b.methods {
                 let resolved = subst_self_assoc_in_fn(m, &map);
-                self.collect_method_sig_classified(type_name, &resolved, type_params, provided);
+                self.collect_method_sig_classified(
+                    type_name,
+                    &resolved,
+                    type_params,
+                    Some(b.trait_name.as_str()),
+                );
             }
         }
     }
@@ -1790,42 +1960,11 @@ fn subst_self_assoc_in_fn(m: &FnDecl, bindings: &HashMap<&str, &TypeRef>) -> FnD
     out
 }
 
-/// Whether an `impl <trait_name>` block's methods belong to the trait's **instance interface** —
-/// the question that decides whether a self-less one is [`Receiver::Either`] (reachable both ways)
-/// or [`Receiver::Static`] (on the type only).
-///
-/// True for every user, native, and built-in trait *except* one whose contract declares its method
-/// **`static`** ([`BuiltinTrait::declares_static`] — `From::from` builds a value rather than acting
-/// on one, and the checker already refuses an implementation whose body mentions `self`). Deciding
-/// it from the closed built-in set rather than from `symbols.user_traits` keeps it independent of
-/// source order: an `impl` written above its `trait` must classify like one written below it, and
-/// during this walk the trait table is only half-populated.
-///
-/// A **user** trait's `static` declaration deliberately does NOT feed this, so a user static method
-/// stays `Receiver::Either` while `From`'s is `Receiver::Static`. Two reasons, and the asymmetry is
-/// a KNOWN one rather than an oversight:
-///
-///   * The arc is non-breaking by construction. An unmarked self-less trait method is `Either`
-///     today, so marking one `static` adds a promise (`T.m(…)` under a bound, and no `self` in any
-///     implementation) without withdrawing the `x.m(…)` spelling that already worked.
-///   * Reading `symbols.user_traits` here would reintroduce exactly the source-order dependence
-///     this function is written to avoid: this runs in the FIRST collect walk, the same one that
-///     registers `Stmt::Trait`, so a type declared above its trait would classify differently from
-///     one declared below it.
-///
-/// Closing the gap — making a declared-`static` user method type-only, as `From`'s is — needs a
-/// reclassification pass after `user_traits` is complete, not a lookup here. It is deliberately not
-/// done: it would be the one part of this arc that changes what an existing spelling means.
-fn trait_supplies_instance_interface(trait_name: &str) -> bool {
-    BuiltinTrait::from_name(trait_name).is_none_or(|t| !t.declares_static())
-}
-
-/// Every method of every in-body `impl Trait { … }` block, paired with whether its trait supplies an
-/// instance interface ([`trait_supplies_instance_interface`]) — the one place the struct, class, and
-/// enum walks agree on how to classify a block's methods.
-fn impl_block_methods(impls: &[ImplBlock]) -> impl Iterator<Item = (&FnDecl, bool)> {
+/// Every method of every in-body `impl Trait { … }` block, paired with the **trait** that supplies
+/// it — the one place the struct, class, and enum walks agree on how to classify a block's methods.
+fn impl_block_methods(impls: &[ImplBlock]) -> impl Iterator<Item = (&FnDecl, &str)> {
     impls.iter().flat_map(|b| {
-        let provided = trait_supplies_instance_interface(b.trait_name.as_str());
-        b.methods.iter().map(move |m| (m, provided))
+        let trait_name = b.trait_name.as_str();
+        b.methods.iter().map(move |m| (m, trait_name))
     })
 }
