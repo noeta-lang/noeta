@@ -31,7 +31,7 @@ code:
     6  CallGlobal  r2 <- "fib"(r1)
     7  LoadConst   r3 <- k2
     8  Binary      r1 <- r0 - r3
-    9  Drop        r0 ~destruct
+    9  Drop        r0
    10  CallGlobal  r0 <- "fib"(r1)
    11  Binary      r1 <- r2 + r0
    12  Return      r1

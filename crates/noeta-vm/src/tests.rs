@@ -1655,7 +1655,7 @@ fn immutable_reassignment_is_e0006() {
 #[test]
 fn functions_calls_and_nested_calls() {
     let r = run(
-        "fn add(a, b) { return a + b; }\nfn dbl(n) { return n * 2; }\nfn quad(n) { return dbl(dbl(n)); }\necho add(2, 3);\necho quad(3);\n",
+        "fn add(a: int, b: int): int { return a + b; }\nfn dbl(n: int): int { return n * 2; }\nfn quad(n: int): int { return dbl(dbl(n)); }\necho add(2, 3);\necho quad(3);\n",
     );
     assert_eq!(r.stdout, "5\n12\n");
     assert_eq!(r.exit_code, 0);
@@ -1664,7 +1664,7 @@ fn functions_calls_and_nested_calls() {
 #[test]
 fn recursion_through_globals() {
     let r = run(
-        "fn fib(n) {\n  if n < 2 { return n; }\n  return fib(n - 1) + fib(n - 2);\n}\necho fib(10);\n",
+        "fn fib(n: int): int {\n  if n < 2 { return n; }\n  return fib(n - 1) + fib(n - 2);\n}\necho fib(10);\n",
     );
     assert_eq!(r.stdout, "55\n");
     assert_eq!(r.exit_code, 0);
@@ -1680,7 +1680,7 @@ fn closure_captures_global() {
 #[test]
 fn pipeline_threads_first_argument() {
     let r = run(
-        "fn inc(n) { return n + 1; }\nfn add(a, b) { return a + b; }\necho 5 |> inc |> inc;\necho 5 |> add(10);\n",
+        "fn inc(n: int): int { return n + 1; }\nfn add(a: int, b: int): int { return a + b; }\necho 5 |> inc |> inc;\necho 5 |> add(10);\n",
     );
     assert_eq!(r.stdout, "7\n15\n");
     assert_eq!(r.exit_code, 0);
@@ -1688,14 +1688,14 @@ fn pipeline_threads_first_argument() {
 
 #[test]
 fn parameter_shadows_global() {
-    let r = run("base = 100;\nfn f(base) { return base; }\necho f(5);\necho base;\n");
+    let r = run("base = 100;\nfn f(base: int): int { return base; }\necho f(5);\necho base;\n");
     assert_eq!(r.stdout, "5\n100\n");
     assert_eq!(r.exit_code, 0);
 }
 
 #[test]
 fn arity_mismatch_is_type_error() {
-    let r = run("fn add(a, b) { return a + b; }\necho add(1);\n");
+    let r = run("fn add(a: int, b: int): int { return a + b; }\necho add(1);\n");
     assert_eq!(r.exit_code, 1);
     assert_eq!(
         r.diagnostics[0].code,
@@ -1706,7 +1706,7 @@ fn arity_mismatch_is_type_error() {
 #[test]
 fn implicit_unit_return_displays_empty() {
     // A function with no `return` yields unit, which echoes as an empty line (M0 parity).
-    let r = run("fn noop(x) { x + 1; }\necho noop(5);\n");
+    let r = run("fn noop(x: int): void { x + 1; }\necho noop(5);\n");
     assert_eq!(r.stdout, "\n");
     assert_eq!(r.exit_code, 0);
 }
@@ -2183,7 +2183,7 @@ fn match_over_enums_binds_variant_data() {
 #[test]
 fn match_literals_and_wildcard() {
     let r = run(
-        "fn name(n) { return match n { 0 => \"zero\", 1 => \"one\", _ => \"many\" }; }\necho name(0);\necho name(5);\n",
+        "fn name(n: int): string { return match n { 0 => \"zero\", 1 => \"one\", _ => \"many\" }; }\necho name(0);\necho name(5);\n",
     );
     assert_eq!(r.stdout, "zero\nmany\n");
 }
@@ -2413,7 +2413,7 @@ fn disassembly_of_a_recursive_function_is_stable() {
     let source = Source::new(
         SourceId::FIRST,
         "t.noe",
-        "fn fib(n) {\n  if n < 2 { return n; }\n  return fib(n - 1) + fib(n - 2);\n}\necho fib(6);\n",
+        "fn fib(n: int): int {\n  if n < 2 { return n; }\n  return fib(n - 1) + fib(n - 2);\n}\necho fib(6);\n",
     );
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
@@ -2545,7 +2545,7 @@ fn disassembly_of_a_match_decision_tree_is_stable() {
     let source = Source::new(
         SourceId::FIRST,
         "t.noe",
-        "enum E { Empty; Code(n: int); }\nfn describe(e): string {\n  return match e {\n    E.Empty => \"empty\",\n    E.Code(n) => \"code ${n}\",\n  };\n}\necho describe(E.Code(7));\n",
+        "enum E { Empty; Code(n: int); }\nfn describe(e: E): string {\n  return match e {\n    E.Empty => \"empty\",\n    E.Code(n) => \"code ${n}\",\n  };\n}\necho describe(E.Code(7));\n",
     );
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
