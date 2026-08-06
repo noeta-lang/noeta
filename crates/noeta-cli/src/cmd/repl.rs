@@ -5,9 +5,15 @@ use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+/// The interactive line editor, engaged when the prompt has a terminal on both ends. Behind a
+/// feature so a `--no-default-features` build stays free of the terminal stack; without it every
+/// session takes the plain reader, which is what a pipe gets in either build.
+#[cfg(feature = "repl-tty")]
+mod line;
+
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
-use noeta_lexer::{TokenKind, lex};
-use noeta_parser::{parse, parse_fragment};
+use noeta_lexer::TokenKind;
+use noeta_parser::parse_fragment;
 use noeta_pm::manifest;
 use noeta_span::{Source, SourceId, SourceMap};
 use noeta_vm::{SessionOutput, VmSession};
@@ -126,7 +132,6 @@ pub(crate) fn cmd_repl(check: bool, load: Option<PathBuf>) -> ExitCode {
             Ok(graph) => resolved = graph,
         }
     }
-    let stdin = io::stdin();
     // The edition prompt entries lex/parse under (editions arc): the `--load` file's package
     // edition when bootstrapped, else the enclosing project's (a bare prompt in a package dir
     // tinkers in that package's dialect); a manifest-less cwd is the default edition.
@@ -148,79 +153,136 @@ pub(crate) fn cmd_repl(check: bool, load: Option<PathBuf>) -> ExitCode {
     // imports resolved — and the prompt opens over its final state. Its sources seed the entry
     // list so later `SourceId`s continue past them (a trace into a bootstrap function renders
     // against its real text).
-    let (mut session, preloaded_sources) = match &load {
+    let (session, preloaded_sources) = match &load {
         None => (VmSession::new(real_repl_env()), Vec::new()),
         Some(path) => match repl_bootstrap(path, &mut checker, resolved) {
             Ok(booted) => booted,
             Err(code) => return code,
         },
     };
-    // Whether SITE-DRIVEN codegen is still sound (session-checker C5): true only while the checker
-    // has seen every entry of the session. `:check off` clears it PERMANENTLY — precise destructor
-    // relevance derived from a registry that missed an unchecked entry's `destruct` class could
-    // skip a destructor, so once any entry runs unchecked the session stays on conservative
-    // codegen even if checking is turned back on (diagnostics return; the codegen upgrade doesn't).
-    let mut precise_codegen = check;
-    let mut buffer = String::new();
-    // Each evaluated entry is parsed with a **distinct** `SourceId` (its index here) and kept, so a
-    // stack trace into a function defined in an *earlier* entry renders against that entry's real text
-    // and line — rather than degrading to name-only, as it did when every entry reused
-    // `SourceId::FIRST` (REPL-on-VM follow-on). Only entries that actually run are kept; a syntax-error
-    // entry compiles nothing, so no future trace can reference it.
-    let mut sources: Vec<Source> = preloaded_sources;
-    eprint!("noeta repl — type a statement, Ctrl-D to exit\n» ");
-    let _ = io::stderr().flush();
+    // `precise_codegen`: whether SITE-DRIVEN codegen is still sound (session-checker C5) — true only
+    // while the checker has seen every entry of the session. `:check off` clears it PERMANENTLY —
+    // precise destructor relevance derived from a registry that missed an unchecked entry's
+    // `destruct` class could skip a destructor, so once any entry runs unchecked the session stays
+    // on conservative codegen even if checking is turned back on (diagnostics return; the codegen
+    // upgrade doesn't).
+    //
+    // `sources`: each evaluated entry is parsed with a **distinct** `SourceId` (its index here) and
+    // kept, so a stack trace into a function defined in an *earlier* entry renders against that
+    // entry's real text and line — rather than degrading to name-only, as it did when every entry
+    // reused `SourceId::FIRST` (REPL-on-VM follow-on). Only entries that actually run are kept; a
+    // syntax-error entry compiles nothing, so no future trace can reference it.
+    let mut state = ReplState {
+        session,
+        checker,
+        precise_codegen: check,
+        buffer: String::new(),
+        sources: preloaded_sources,
+        edition,
+    };
 
+    // An interactive terminal gets the line editor — history, in-place syntax colouring, and TAB
+    // completion off the IDE engine. A pipe gets the plain reader below, unchanged: raw mode is
+    // meaningless without a terminal, and a script piping entries in wants exactly the old
+    // behaviour. Everything downstream of the read is the same `ReplState` either way.
+    #[cfg(feature = "repl-tty")]
+    if line::interactive()
+        && let Some(code) = line::run(&mut state)
+    {
+        return code;
+    }
+
+    eprintln!("noeta repl — type a statement, Ctrl-D to exit");
     eprintln!("type :help for commands");
-    for line in stdin.lock().lines() {
+    eprint!("» ");
+    let _ = io::stderr().flush();
+    for line in io::stdin().lock().lines() {
         let Ok(line) = line else { break };
-        // Skip blank lines when nothing is pending.
-        if buffer.is_empty() && line.trim().is_empty() {
-            eprint!("» ");
-            let _ = io::stderr().flush();
-            continue;
-        }
-        // A `:`-prefixed line (when nothing is pending) is a REPL meta-command — tooling that lives
-        // outside the language grammar (`:type`, `:drop`, `:bindings`, `:reset`, `:help`, `:quit`).
-        if buffer.is_empty() && line.trim_start().starts_with(':') {
-            if repl_meta(
-                &mut session,
-                &mut checker,
-                &mut precise_codegen,
-                line.trim(),
-                &sources,
-            ) == MetaOutcome::Quit
-            {
-                break;
-            }
-            eprint!("» ");
-            let _ = io::stderr().flush();
-            continue;
-        }
-        if !buffer.is_empty() {
-            buffer.push('\n');
-        }
-        buffer.push_str(&line);
-
-        match repl_step(
-            &mut session,
-            &mut checker,
-            precise_codegen,
-            &buffer,
-            &mut sources,
-            edition,
-        ) {
-            ReplStep::Consumed => {
-                buffer.clear();
-                eprint!("» ");
-            }
+        match state.feed(&line) {
+            Feed::Quit => break,
+            Feed::Ready => eprint!("» "),
             // Keep the buffer and read another line; show a continuation prompt.
-            ReplStep::Incomplete => eprint!("… "),
+            Feed::Continue => eprint!("… "),
         }
         let _ = io::stderr().flush();
     }
     eprintln!();
     ExitCode::SUCCESS
+}
+
+/// The live prompt: the VM session, the optional per-entry checker, and the accumulated entry
+/// sources every diagnostic and stack trace renders against.
+///
+/// Both input loops — the piped reader and the interactive line editor — drive this one state
+/// through [`ReplState::feed`]. Nothing about what an entry *means* lives in either loop, so the
+/// two cannot answer differently; they differ only in how a line is read.
+pub(crate) struct ReplState {
+    pub(crate) session: VmSession,
+    pub(crate) checker: Option<noeta_check::SessionChecker>,
+    /// Whether SITE-DRIVEN codegen is still sound (session-checker C5) — see [`cmd_repl`].
+    pub(crate) precise_codegen: bool,
+    /// The multi-line entry still being gathered. Only the piped reader accumulates here: the
+    /// interactive editor gathers continuation lines itself (its validator asks
+    /// [`buffer_incomplete`]) and feeds whole entries, so this stays empty there.
+    pub(crate) buffer: String,
+    pub(crate) sources: Vec<Source>,
+    pub(crate) edition: noeta_lexer::Edition,
+}
+
+/// What the prompt should do after a line has been fed.
+#[derive(PartialEq, Eq, Clone, Copy)]
+pub(crate) enum Feed {
+    /// Ready for a new entry (`» `).
+    Ready,
+    /// The entry is unfinished; the next line continues it (`… `).
+    Continue,
+    /// `:quit` — leave the prompt.
+    Quit,
+}
+
+impl ReplState {
+    /// Feed one line (or, from the interactive editor, one whole multi-line entry) to the session.
+    pub(crate) fn feed(&mut self, line: &str) -> Feed {
+        // Skip blank lines when nothing is pending.
+        if self.buffer.is_empty() && line.trim().is_empty() {
+            return Feed::Ready;
+        }
+        // A `:`-prefixed line (when nothing is pending) is a REPL meta-command — tooling that lives
+        // outside the language grammar (`:type`, `:drop`, `:bindings`, `:reset`, `:help`, `:quit`).
+        if self.buffer.is_empty() && line.trim_start().starts_with(':') {
+            let outcome = repl_meta(
+                &mut self.session,
+                &mut self.checker,
+                &mut self.precise_codegen,
+                line.trim(),
+                &self.sources,
+            );
+            return if outcome == MetaOutcome::Quit {
+                Feed::Quit
+            } else {
+                Feed::Ready
+            };
+        }
+        if !self.buffer.is_empty() {
+            self.buffer.push('\n');
+        }
+        self.buffer.push_str(line);
+
+        match repl_step(
+            &mut self.session,
+            &mut self.checker,
+            self.precise_codegen,
+            &self.buffer,
+            &mut self.sources,
+            self.edition,
+        ) {
+            ReplStep::Consumed => {
+                self.buffer.clear();
+                Feed::Ready
+            }
+            ReplStep::Incomplete => Feed::Continue,
+        }
+    }
 }
 
 /// Whether a meta-command asked to leave the REPL.
@@ -352,15 +414,99 @@ pub(crate) fn repl_type(session: &mut VmSession, expr: &str, sources: &[Source])
     }
 }
 
+/// One `:`-meta command, as both the help screen and the prompt's TAB completion see it.
+///
+/// The completion-only fields go unread in a build without the interactive prompt; the table is
+/// still the single description of the command set, which is the point of it.
+#[cfg_attr(not(feature = "repl-tty"), allow(dead_code))]
+pub(crate) struct MetaCommand {
+    pub(crate) name: &'static str,
+    /// Alternative spellings [`repl_meta`] also accepts.
+    pub(crate) aliases: &'static [&'static str],
+    /// The argument placeholder shown in help, `""` for a command that takes none.
+    pub(crate) args: &'static str,
+    pub(crate) help: &'static str,
+    /// The fixed words this command's argument can be, for completion. Empty when the argument is
+    /// open-ended (an expression) or comes from the session (a binding name — see
+    /// [`MetaCommand::completes_bindings`]).
+    pub(crate) arg_words: &'static [&'static str],
+    /// Whether the argument is a live binding name, so completion offers `:bindings`.
+    pub(crate) completes_bindings: bool,
+}
+
+/// The `:`-meta commands. The help screen and the interactive prompt's completion both read this
+/// one table, so a command cannot be offered but undocumented, or documented but unofferable.
+pub(crate) const META_COMMANDS: &[MetaCommand] = &[
+    MetaCommand {
+        name: "type",
+        aliases: &["t"],
+        args: "<expr>",
+        help: "show the runtime type of an expression (evaluates it)",
+        arg_words: &[],
+        completes_bindings: true,
+    },
+    MetaCommand {
+        name: "drop",
+        aliases: &["free"],
+        args: "<name>",
+        help: "run a binding's destructor now and unbind it (alias :free)",
+        arg_words: &[],
+        completes_bindings: true,
+    },
+    MetaCommand {
+        name: "bindings",
+        aliases: &["b"],
+        args: "",
+        help: "list the live bindings",
+        arg_words: &[],
+        completes_bindings: false,
+    },
+    MetaCommand {
+        name: "reset",
+        aliases: &[],
+        args: "",
+        help: "clear all bindings and start fresh",
+        arg_words: &[],
+        completes_bindings: false,
+    },
+    MetaCommand {
+        name: "check",
+        aliases: &[],
+        args: "on|off",
+        help: "type-check entries before running them (skip on error)",
+        arg_words: &["on", "off"],
+        completes_bindings: false,
+    },
+    MetaCommand {
+        name: "help",
+        aliases: &["h", "?"],
+        args: "",
+        help: "show this help",
+        arg_words: &[],
+        completes_bindings: false,
+    },
+    MetaCommand {
+        name: "quit",
+        aliases: &["q"],
+        args: "",
+        help: "exit the REPL (or Ctrl-D)",
+        arg_words: &[],
+        completes_bindings: false,
+    },
+];
+
 pub(crate) fn print_repl_help() {
     eprintln!("REPL commands:");
-    eprintln!("  :type <expr>   show the runtime type of an expression (evaluates it)");
-    eprintln!("  :drop <name>   run a binding's destructor now and unbind it (alias :free)");
-    eprintln!("  :bindings      list the live bindings");
-    eprintln!("  :reset         clear all bindings and start fresh");
-    eprintln!("  :check on|off  type-check entries before running them (skip on error)");
-    eprintln!("  :help          show this help");
-    eprintln!("  :quit          exit the REPL (or Ctrl-D)");
+    // Width of the widest `:name <args>` so the help column lines up without a hand-counted table.
+    let width = META_COMMANDS
+        .iter()
+        .map(|c| c.name.len() + c.args.len() + if c.args.is_empty() { 1 } else { 2 })
+        .max()
+        .unwrap_or(0);
+    for command in META_COMMANDS {
+        let spelling = format!(":{} {}", command.name, command.args);
+        eprintln!("  {:width$} {}", spelling.trim_end(), command.help);
+    }
 }
 
 /// Evaluate one checked-clean entry: with the checker on AND every prior entry checked
@@ -404,28 +550,43 @@ pub(crate) fn check_entry_gate(
         .any(|d| d.severity == noeta_diagnostics::Severity::Error)
 }
 
-/// Try to evaluate the accumulated REPL buffer. Statements ending in `;`/`}` evaluate as-is;
-/// a bare expression (no trailing `;`) is retried with a `;` appended so its value can be
-/// printed. If the only parse problem is hitting end-of-input, the entry is treated as
-/// incomplete and more input is requested (multiline). Any other error is reported, and the
-/// buffer is reset so one bad entry cannot wedge the session.
+/// What one accumulated prompt buffer turned out to be, before anything is checked or run.
 ///
-/// With a `checker` present (`--check` / `:check on`, session-checker C2), a parsed entry is
-/// type-checked against the accumulated session first: an entry with errors prints its `E0xxx`
-/// diagnostics (rendered against the entry's own source) and is **skipped** — and `check_entry`'s
-/// transactionality means it commits nothing, so the checker stays aligned with what actually ran.
-/// Warning-only entries print the warnings and run.
-pub(crate) fn repl_step(
-    session: &mut VmSession,
-    checker: &mut Option<noeta_check::SessionChecker>,
-    precise_codegen: bool,
+/// This is the *whole* syntactic verdict on an entry, and deliberately the only place that verdict
+/// is reached: [`repl_step`] evaluates on it, and the interactive line editor's validator asks it
+/// whether to keep reading lines. A second implementation of "is this finished?" living beside the
+/// editor is exactly how the two would drift — the editor would hand `repl_step` a buffer it thinks
+/// is complete and `repl_step` would sit waiting for more.
+pub(crate) enum Entry {
+    /// Parsed. Carries the source that actually parsed — the buffer as typed, or the
+    /// bare-expression retry with its terminating `;` appended.
+    Parsed {
+        source: Source,
+        program: noeta_ast::Program,
+    },
+    /// Still being typed: unclosed delimiters, or nothing wrong but running out of input.
+    Incomplete,
+    /// A genuine syntax error, against the buffer as typed.
+    Failed {
+        source: Source,
+        diags: Vec<Diagnostic>,
+    },
+}
+
+/// Parse one accumulated prompt buffer. Statements ending in `;`/`}` parse as-is; a bare expression
+/// (no trailing `;`) is retried with a `;` appended so its value can be printed. If the only parse
+/// problem is hitting end-of-input — or the buffer has unclosed delimiters — the entry is
+/// [`Entry::Incomplete`] and more input is wanted. Any other error is [`Entry::Failed`].
+///
+/// `id`/`name` identify the entry for diagnostics and stack traces; only one of the two parse
+/// attempts is ever kept, so both are built with the same id.
+pub(crate) fn parse_entry(
+    id: SourceId,
+    name: String,
     buffer: &str,
-    sources: &mut Vec<Source>,
     edition: noeta_lexer::Edition,
-) -> ReplStep {
-    // The next evaluated entry's `SourceId` is its index in the persistent `sources` vector.
-    let id = SourceId(sources.len() as u32);
-    let source = Source::new(id, format!("<repl:{}>", sources.len()), buffer.to_string());
+) -> Entry {
+    let source = Source::new(id, name.clone(), buffer.to_string());
     // Prompt entries lex/parse under the enclosing package's edition (editions arc) — the same
     // edition a `--load` bootstrap checked and compiled under, so an entry can't parse under
     // different rules than the program it extends.
@@ -444,32 +605,29 @@ pub(crate) fn repl_step(
         .collect();
 
     if diags.is_empty() {
-        if !check_entry_gate(checker, &parsed.program, &source) {
-            return ReplStep::Consumed;
-        }
-        sources.push(source);
-        let out = eval_entry(session, checker, precise_codegen, &parsed.program);
-        emit_session(sources, out);
-        return ReplStep::Consumed;
+        return Entry::Parsed {
+            source,
+            program: parsed.program,
+        };
     }
 
     // A bare expression needs a terminating `;`; retry with one appended (same id — only one of the
-    // two sources is ever kept, whichever compiled).
-    let psource = Source::new(
-        id,
-        format!("<repl:{}>", sources.len()),
-        format!("{buffer};"),
+    // two sources is ever kept, whichever parsed). The retry runs under the entry's edition too:
+    // a dialect that changes how an *expression* lexes must not be silently dropped just because
+    // the user left the semicolon off.
+    let psource = Source::new(id, name, format!("{buffer};"));
+    let plexed = noeta_lexer::lex_in(&psource, edition, &noeta_lexer::TextTiers::default());
+    let pparsed = noeta_parser::parse_in(
+        &psource,
+        &plexed.tokens,
+        edition,
+        &noeta_lexer::TextTiers::default(),
     );
-    let plexed = lex(&psource);
-    let pparsed = parse(&psource, &plexed.tokens);
     if plexed.diagnostics.is_empty() && pparsed.diagnostics.is_empty() {
-        if !check_entry_gate(checker, &pparsed.program, &psource) {
-            return ReplStep::Consumed;
-        }
-        sources.push(psource);
-        let out = eval_entry(session, checker, precise_codegen, &pparsed.program);
-        emit_session(sources, out);
-        return ReplStep::Consumed;
+        return Entry::Parsed {
+            source: psource,
+            program: pparsed.program,
+        };
     }
 
     // An entry with unclosed `(`/`{`/`[` is a multi-line definition still being typed (a `class`,
@@ -479,7 +637,7 @@ pub(crate) fn repl_step(
     // count is over lexer tokens, so braces inside string/template literals (a single token) and
     // `${…}` interpolation never miscount.
     if unclosed_delimiters(&lexed.tokens) {
-        return ReplStep::Incomplete;
+        return Entry::Incomplete;
     }
 
     // Only end-of-input errors → the entry is unfinished; gather more lines.
@@ -487,13 +645,59 @@ pub(crate) fn repl_step(
         .iter()
         .all(|d| d.code == DiagnosticCode::UnexpectedEndOfInput)
     {
-        return ReplStep::Incomplete;
+        return Entry::Incomplete;
     }
 
-    // A genuine syntax error: report it against the original buffer and reset. The entry compiled
-    // nothing, so its source is *not* kept — its id is reused by the next entry.
-    emit_diagnostics(&source, diags.iter());
-    ReplStep::Consumed
+    Entry::Failed { source, diags }
+}
+
+/// Whether `buffer` is an entry still being typed — the [`parse_entry`] verdict, for a caller that
+/// only wants the yes/no. This is what the interactive editor's multi-line validator asks; without
+/// that editor compiled in, nothing asks, because the piped reader reads [`parse_entry`] directly.
+#[cfg_attr(not(feature = "repl-tty"), allow(dead_code))]
+pub(crate) fn buffer_incomplete(buffer: &str, edition: noeta_lexer::Edition) -> bool {
+    matches!(
+        parse_entry(SourceId::FIRST, "<repl-validate>".into(), buffer, edition),
+        Entry::Incomplete
+    )
+}
+
+/// Try to evaluate the accumulated REPL buffer. The syntactic verdict is [`parse_entry`]'s; this is
+/// the half that checks and runs. A genuine syntax error is reported and the buffer reset, so one
+/// bad entry cannot wedge the session.
+///
+/// With a `checker` present (`--check` / `:check on`, session-checker C2), a parsed entry is
+/// type-checked against the accumulated session first: an entry with errors prints its `E0xxx`
+/// diagnostics (rendered against the entry's own source) and is **skipped** — and `check_entry`'s
+/// transactionality means it commits nothing, so the checker stays aligned with what actually ran.
+/// Warning-only entries print the warnings and run.
+pub(crate) fn repl_step(
+    session: &mut VmSession,
+    checker: &mut Option<noeta_check::SessionChecker>,
+    precise_codegen: bool,
+    buffer: &str,
+    sources: &mut Vec<Source>,
+    edition: noeta_lexer::Edition,
+) -> ReplStep {
+    // The next evaluated entry's `SourceId` is its index in the persistent `sources` vector.
+    let id = SourceId(sources.len() as u32);
+    match parse_entry(id, format!("<repl:{}>", sources.len()), buffer, edition) {
+        Entry::Incomplete => ReplStep::Incomplete,
+        // The entry compiled nothing, so its source is *not* kept — its id is reused by the next.
+        Entry::Failed { source, diags } => {
+            emit_diagnostics(&source, diags.iter());
+            ReplStep::Consumed
+        }
+        Entry::Parsed { source, program } => {
+            if !check_entry_gate(checker, &program, &source) {
+                return ReplStep::Consumed;
+            }
+            sources.push(source);
+            let out = eval_entry(session, checker, precise_codegen, &program);
+            emit_session(sources, out);
+            ReplStep::Consumed
+        }
+    }
 }
 
 /// Whether `tokens` has more opening than closing delimiters — i.e. a `(`/`{`/`[` left unclosed, the
@@ -533,6 +737,7 @@ pub(crate) fn emit_session(sources: &[Source], out: SessionOutput) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use noeta_lexer::lex;
 
     fn toks(src: &str) -> Vec<noeta_lexer::Token> {
         lex(&Source::new(SourceId::FIRST, "<t>", src.to_string())).tokens

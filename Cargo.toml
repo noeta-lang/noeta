@@ -236,6 +236,17 @@ toml = "0.9"
 ec4rs = "1"
 # Text diffing for `noeta fmt --diff` (the unified-diff renderer). Already in the tree via `insta`.
 similar = "2"
+# Raw-mode line editing for the interactive `noeta repl` prompt (behind noeta-cli's `repl-tty`).
+# Chosen for the seam, not the feature list: its `Highlighter`/`Completer`/`Validator` traits are
+# each a question the toolchain can already answer — how a token colours (`noeta_ide::highlight`),
+# what completes at the cursor (the IDE `DocumentStore`), and whether an entry is finished (the
+# prompt's own `parse_entry`) — so the editor supplies terminal mechanics and no language knowledge.
+# Default features minus `custom-bindings`: the prompt binds no keys of its own, so the radix trie
+# that indexes custom bindings is dead weight.
+rustyline = { version = "18", default-features = false, features = [
+    "with-dirs",
+    "with-file-history",
+] }
 # The package manager's SemVer vocabulary (Phase 2): `[package] version` + `[dependencies]` version
 # requirements, and the PubGrub resolver's version type. The de-facto Cargo/crates.io implementation.
 semver = "1"
