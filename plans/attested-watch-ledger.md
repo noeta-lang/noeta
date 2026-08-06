@@ -5,7 +5,7 @@ recommendation so the residual can close to a decision rather than an open quest
 
 ## The problem with the local file
 
-`noeta watch-scope` (advisory-intake tier 6) defends against a registry silently **suppressing** or
+`noeta advisory watch` (advisory-intake tier 6) defends against a registry silently **suppressing** or
 **rewriting** a scope's advisories over time. It does this by pinning a baseline — the advisory feed
 head, the transparency-log checkpoint, and the set of advisory ids ever seen for the scope — in a small
 local TOML file, then on each run checking the log only grew (append-only) and nothing previously seen
@@ -54,7 +54,7 @@ observations between watchers surface a split view.
   improvement over the per-machine file for a *team*: the baseline becomes shared, reviewable, and
   survives ephemeral runners. It also produces exactly the attested observation records the later
   options consume, so it is not throwaway.
-- **Long term — option 3 (witness cosigning).** The threat `watch-scope` exists to counter — a registry
+- **Long term — option 3 (witness cosigning).** The threat `advisory watch` exists to counter — a registry
   serving a split view or suppressing to one consumer — is *exactly* what cosigning defeats, and it is
   the design the whole ecosystem has converged on (Certificate Transparency, Sigsum, the Go checksum
   database). Option 2 is subsumed by 3 (a witness log is just how cosigners publish), so it is not worth

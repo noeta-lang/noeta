@@ -29,8 +29,7 @@ The compiler, the runtime, and the package surface — every one of these is bui
 | [`noeta publish`](#noeta-publish) | Publish a tagged release of your package to the registry, signed ([provenance](Package-Provenance)). |
 | [`noeta scope`](#noeta-scope) | Manage a scope you own — e.g. require verified provenance on every release. |
 | [`noeta audit`](#noeta-audit) | Report the dependency tree's trust footprint — native/command grants, pinned provenance, and advisory hits by tier. |
-| [`noeta advisory`](#noeta-advisory) | Issue a publisher advisory for a scope you own, file a public report, or list/promote the report queue. |
-| [`noeta watch-scope`](#noeta-watch-scope) | Monitor a scope's advisory transparency log for silent suppression or rewrite. |
+| [`noeta advisory`](#noeta-advisory) | Issue a publisher advisory for a scope you own, file a public report, list/promote the report queue, or `watch` a scope's transparency log for silent suppression. |
 | [`noeta key`](#noeta-key) | Manage the Ed25519 signing key (the key-based provenance path). |
 | [`noeta upgrade`](#noeta-upgrade) | Self-update the toolchain binary to the latest release. |
 | [`noeta ide`](#noeta-ide) | Install the matching editor extension — the VS Code/VSCodium `.vsix` at this binary's version. |
@@ -471,7 +470,7 @@ All three accept `--target <NAME>`, which acts as a **gate**: if the named `noet
 
 ---
 
-## Packages: `add`, `update`, `claim`, `publish`, `scope`, `audit`, `key`
+## Packages: `add`, `update`, `claim`, `publish`, `scope`, `audit`, `advisory`, `key`
 
 Dependencies are declared in `noeta.toml` (`[dependencies]`, with elevated grants in `[trust]`) and resolve automatically on `run`/`build`/`check` — there is no separate install step; the resolved pins live in `noeta.lock` (commit it). These verbs are the *publisher/consumer trust* surface. The trust model behind them — attestations, the two signing roots, pinning, downgrade protection — is documented on [Package Provenance](Package-Provenance); the end-to-end submission walkthrough on [Package Registries](Package-Registries#publishing-to-the-hosted-registry).
 
@@ -580,6 +579,7 @@ noeta advisory publish <ID> <PACKAGE> <RANGES> <SEVERITY> <SUMMARY> [--details �
 noeta advisory report  <PACKAGE> <SUMMARY> [--ranges …] [--details …] [--url …] [--reporter …]
 noeta advisory reports [--scope <SCOPE>] [--status <pending|promoted|dismissed>] [--all]
 noeta advisory promote <REPORT-ID> --id <ID> --severity <SEVERITY> [--ranges …] [--summary …] [--details …] [--url …] [--patched …] [--operator] [--interactive [--oob]]
+noeta advisory watch   [SCOPE] [--state <DIR>]
 ```
 
 `advisory publish` issues (or updates) a **publisher**-tier advisory for a package in a scope you own — keyless-signed with your OIDC identity, sent with the scope's publish token (`NOETA_REGISTRY_TOKEN`), so consumers verify it offline. `advisory report` files a **public report** against any package (unauthenticated, rate-limited): not an advisory, but queued for an operator or the scope owner to triage.
@@ -588,13 +588,22 @@ noeta advisory promote <REPORT-ID> --id <ID> --severity <SEVERITY> [--ranges …
 
 `advisory promote` turns a queued report into a signed advisory. The advisory is **prefilled from the report** (package, ranges, summary, details, url) and finalised with the triaged `--id` and `--severity`. As an **operator** (`--operator`, `NOETA_REGISTRY_ADMIN_TOKEN`) it becomes an `operator`-tier advisory; otherwise the report package's **scope owner** promotes it into a keyless-signed `publisher`-tier advisory — the same keyless Sigstore bundle a fresh `advisory publish` produces, prefilled from the report. See [Package Provenance](Package-Provenance#issuing-and-reporting-from-the-client).
 
-### `noeta watch-scope`
+### `noeta advisory watch`
 
 ```text
-noeta watch-scope <SCOPE> [--state <PATH>]
+noeta advisory watch [SCOPE] [--state <DIR>]
 ```
 
-Monitors a scope's advisory **transparency log** over time for silent suppression or history rewrite: it pins the feed head, the log checkpoint, and the advisory ids seen for the scope, then on each run verifies the log only grew (append-only) and that no previously-seen advisory disappeared. A rewrite, key change, feed rollback, or disappearance exits non-zero — ideal as a CI cron. See [Package Provenance](Package-Provenance#noeta-watch-scope-scope--suppression-monitoring).
+`noeta audit` asks *does the advisory feed verify right now*; `advisory watch` asks *has anything been rewritten since*, which is the question a registry silently withholding an advisory from you can only be caught by. It pins the feed head, the transparency-log checkpoint, and the advisory ids seen for a scope, then on each run verifies the log only grew (append-only) and that no previously-seen advisory disappeared. A rewrite, key change, feed rollback, or disappearance exits non-zero.
+
+**With no `SCOPE` it watches every scope your `noeta.lock` pins** — which is what a CI cron wants, since the list then keeps itself current as dependencies come and go. Name a scope to watch just that one. State lives in `--state <DIR>` (default: `watch/` under the noeta cache), one `<scope>.toml` per scope, so it survives between runs; commit it or cache it in CI, because a baseline that resets on every run detects nothing.
+
+```yaml
+# a daily GitHub Actions job — the whole gate
+- run: noeta advisory watch --state .noeta-watch
+```
+
+The scope set is deliberately not filtered by source: an advisory names a *package*, so one against `acme/http` applies whether you resolved it from the registry or from git. See [Package Provenance](Package-Provenance#noeta-advisory-watch--suppression-monitoring).
 
 ### `noeta key`
 

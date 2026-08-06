@@ -738,8 +738,8 @@ fn noeta_advisory_report_posts_a_public_report() {
 }
 
 #[test]
-fn noeta_watch_scope_pins_a_baseline_and_reports_clean() {
-    // advisory-intake arc, tier 6: `noeta watch-scope <scope>` verifies the advisory feed + transparency
+fn noeta_advisory_watch_pins_a_baseline_and_reads_its_scopes_from_the_lock() {
+    // advisory-intake arc, tier 6: `noeta advisory watch [<scope>]` verifies the advisory feed + transparency
     // log and pins a baseline on the first run. Here the mock serves a verifiable *empty* feed and log
     // (an empty tree's root and an empty feed's digest are both sha256 of nothing), so the first run
     // establishes the baseline and reports clean, writing a state file.
@@ -776,20 +776,22 @@ fn noeta_watch_scope_pins_a_baseline_and_reports_clean() {
         _ => (404, r#"{"error":"not found"}"#.to_string()),
     });
 
-    let state = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("watch_acme.toml");
-    let _ = std::fs::remove_file(&state);
+    // `--state` names the *directory* the watch state lives in, one `<scope>.toml` per scope — so the
+    // lockfile-derived form below can watch a whole set without the flag changing meaning.
+    let state_dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("watch_state_one");
+    let _ = std::fs::remove_dir_all(&state_dir);
     lang()
         .env("NOETA_REGISTRY_URL", &base)
-        .args(["watch-scope", "acme", "--state"])
-        .arg(&state)
+        .args(["advisory", "watch", "acme", "--state"])
+        .arg(&state_dir)
         .assert()
         .success()
         .stdout(predicate::str::contains("baseline pinned"))
         .stdout(predicate::str::contains(
             "no suppression or rewrite detected",
         ));
-    // The baseline is now pinned in the state file for the next run to diff against.
-    let pinned = std::fs::read_to_string(&state).unwrap();
+    // The baseline is now pinned in the scope's state file for the next run to diff against.
+    let pinned = std::fs::read_to_string(state_dir.join("acme.toml")).unwrap();
     assert!(
         pinned.contains(&adv_pub),
         "state pins the advisory key:\n{pinned}"
@@ -797,6 +799,49 @@ fn noeta_watch_scope_pins_a_baseline_and_reports_clean() {
     assert!(
         pinned.contains("log_tree_size"),
         "state pins the log checkpoint:\n{pinned}"
+    );
+
+    // With no scope argument, the set to watch is read from the project's `noeta.lock` — the form a CI
+    // cron wants, since it never has to be told which scopes the project depends on. Two pinned
+    // packages under two scopes, and both are watched — the scope set is deduped from the pins and
+    // never filtered by source, because an advisory is about a package *name*, not where it came from.
+    let project = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("watch_from_lock");
+    let _ = std::fs::remove_dir_all(&project);
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("noeta.toml"),
+        "[package]\nname = \"me/app\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("noeta.lock"),
+        "version = 2\n\n\
+         [[package]]\nname = \"acme/widgets\"\nversion = \"1.0.0\"\nhash = \"abc\"\n\n\
+         [[package]]\nname = \"beta/util\"\nversion = \"0.2.0\"\nhash = \"def\"\n",
+    )
+    .unwrap();
+    let state_dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("watch_state_lock");
+    let _ = std::fs::remove_dir_all(&state_dir);
+    lang()
+        .env("NOETA_REGISTRY_URL", &base)
+        .current_dir(&project)
+        .args(["advisory", "watch", "--state"])
+        .arg(&state_dir)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "watching 2 scopes from `noeta.lock`: acme, beta",
+        ))
+        .stdout(predicate::str::contains("watch `acme`"))
+        .stdout(predicate::str::contains("watch `beta`"));
+    // Each watched scope pinned its own baseline, so one scope's history can never be read as another's.
+    assert!(
+        state_dir.join("acme.toml").is_file(),
+        "acme baseline pinned"
+    );
+    assert!(
+        state_dir.join("beta.toml").is_file(),
+        "beta baseline pinned"
     );
 }
 

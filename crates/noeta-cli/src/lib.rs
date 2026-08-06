@@ -57,7 +57,7 @@ use cmd::ide::cmd_ide;
 use cmd::init::cmd_init;
 use cmd::pm::{
     cmd_add, cmd_advisory_promote, cmd_advisory_publish, cmd_advisory_report, cmd_advisory_reports,
-    cmd_audit, cmd_claim, cmd_key, cmd_publish, cmd_scope, cmd_update, cmd_watch_scope,
+    cmd_advisory_watch, cmd_audit, cmd_claim, cmd_key, cmd_publish, cmd_scope, cmd_update,
 };
 use cmd::repl::cmd_repl;
 use cmd::run::{cmd_run, execute_real_host, try_run_stapled};
@@ -655,25 +655,14 @@ enum Command {
         #[command(subcommand)]
         action: ScopeAction,
     },
-    /// Issue or file security advisories (advisory-intake arc). `publish` issues a **publisher**-tier
-    /// advisory for a package in a scope you own — keyless-signed with your OIDC identity, so consumers
-    /// verify it offline. `report` files a **public report** against any package (unauthenticated,
-    /// rate-limited) for an operator or the scope owner to triage.
+    /// Issue, file, or monitor security advisories (advisory-intake arc). `publish` issues a
+    /// **publisher**-tier advisory for a package in a scope you own — keyless-signed with your OIDC
+    /// identity, so consumers verify it offline. `report` files a **public report** against any package
+    /// (unauthenticated, rate-limited) for an operator or the scope owner to triage. `watch` monitors
+    /// the advisory transparency log over time for suppression or rewrite.
     Advisory {
         #[command(subcommand)]
         action: AdvisoryCommand,
-    },
-    /// Monitor a scope's advisory **transparency log** over time (advisory-intake arc, tier 6): verify
-    /// the log is an append-only extension of the last run's checkpoint and that no advisory previously
-    /// seen for the scope has silently disappeared — so a registry can't quietly suppress or rewrite a
-    /// scope's advisories after first use. State is pinned in a small file between runs (ideal for a CI
-    /// cron); a detected suppression or rewrite exits non-zero.
-    WatchScope {
-        /// The scope (`company`) to monitor.
-        scope: String,
-        /// Where to keep the pinned watch state between runs (default: under the noeta cache).
-        #[arg(long)]
-        state: Option<PathBuf>,
     },
     // `noeta migrate` is NOT a core verb: it is an `ExtCommand` the `para/db` package contributes
     // (para-extraction) — a consumer that depends on `para/db` and trusts its commands
@@ -796,6 +785,21 @@ enum AdvisoryCommand {
         /// With `--interactive`: print the sign-in URL and prompt for the code (SSH sessions, containers).
         #[arg(long, requires = "interactive")]
         oob: bool,
+    },
+    /// Monitor a scope's advisory **transparency log** over time (advisory-intake arc, tier 6): verify
+    /// the log is an append-only extension of the last run's checkpoint and that no advisory previously
+    /// seen for the scope has silently disappeared — so a registry can't quietly suppress or rewrite a
+    /// scope's advisories after first use. `noeta audit` answers "does the feed verify *now*"; this
+    /// answers "has anything been rewritten since", which needs state pinned between runs (ideal for a
+    /// CI cron). A detected suppression or rewrite exits non-zero.
+    Watch {
+        /// The scope (`company`) to monitor. Omit to watch **every scope this project depends on**,
+        /// read from `noeta.lock` — the form a CI cron wants, since it needs no scope names.
+        scope: Option<String>,
+        /// Directory holding the pinned watch state between runs, one `<scope>.toml` per scope
+        /// (default: `watch/` under the noeta cache).
+        #[arg(long, value_name = "DIR")]
+        state: Option<PathBuf>,
     },
 }
 
@@ -1434,8 +1438,10 @@ pub fn run_cli(
                 interactive,
                 oob,
             ),
+            AdvisoryCommand::Watch { scope, state } => {
+                cmd_advisory_watch(scope.as_deref(), state.as_deref())
+            }
         },
-        Command::WatchScope { scope, state } => cmd_watch_scope(&scope, state.as_deref()),
     }
 }
 
