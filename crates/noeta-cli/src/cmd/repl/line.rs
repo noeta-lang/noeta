@@ -150,8 +150,19 @@ impl NoetaHelper {
     /// Completion for a `:`-meta line: the command names, or the argument vocabulary of the command
     /// already typed. Read off [`META_COMMANDS`], the same table `:help` prints.
     fn complete_meta(&self, line: &str, pos: usize) -> (usize, Vec<Pair>) {
-        let body = &line[1..pos.max(1)];
-        let mut parts = body.splitn(2, char::is_whitespace);
+        // The `:` is not necessarily at byte 0 — the line may be indented, and `repl_meta` trims
+        // before dispatching, so an indented meta-command is a real one. Found rather than assumed:
+        // a fixed `line[1..]` would misread every indented line, and would *panic* on one indented
+        // with a multi-byte space (U+00A0 is whitespace, so `trim_start` accepts it, and byte 1
+        // lands inside it).
+        let Some(colon) = line.find(':') else {
+            return (pos, Vec::new());
+        };
+        let name = colon + 1;
+        if pos < name {
+            return (pos, Vec::new());
+        }
+        let mut parts = line[name..pos].splitn(2, char::is_whitespace);
         let head = parts.next().unwrap_or("");
         let Some(rest) = parts.next() else {
             // Still typing the command name — offer the canonical spellings (not the aliases: they
@@ -161,7 +172,7 @@ impl NoetaHelper {
                 .filter(|c| c.name.starts_with(head))
                 .map(|c| pair(c.name))
                 .collect();
-            return (1, names);
+            return (name, names);
         };
 
         let Some(command) = META_COMMANDS
@@ -230,7 +241,7 @@ impl NoetaHelper {
         // [`PromptView::bindings`]). Only in a plain identifier position — after a `.` or inside a
         // directive's parens a session binding is not what the user is reaching for, and the engine
         // deliberately returned a narrow set there.
-        if prefix == &line[start..pos] && !ends_with_member_access(line, start) {
+        if !ends_with_member_access(line, start) {
             let view = self.view.borrow();
             for binding in view.bindings.iter().filter(|b| b.starts_with(prefix)) {
                 if !pairs.iter().any(|p| p.replacement == *binding) {
@@ -478,6 +489,71 @@ mod tests {
         let pos = "mut π".len();
         let start = NoetaHelper::word_start(line, pos);
         assert_eq!(&line[start..pos], "π");
+    }
+
+    /// A helper with no session behind it — enough to exercise the meta-command completion, which
+    /// reads only [`META_COMMANDS`] and the (here empty) binding list.
+    fn bare_helper() -> NoetaHelper {
+        NoetaHelper {
+            view: Rc::new(RefCell::new(PromptView::default())),
+            store: RefCell::new(DocumentStore::default()),
+            edition: noeta_lexer::Edition::default(),
+            colour: false,
+        }
+    }
+
+    #[test]
+    fn meta_completion_offers_the_command_names() {
+        let helper = bare_helper();
+        let (start, candidates) = helper.complete_meta(":", 1);
+        assert_eq!(start, 1, "the name replaces everything after the colon");
+        let names: Vec<&str> = candidates.iter().map(|p| p.replacement.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["type", "drop", "bindings", "reset", "check", "help", "quit"]
+        );
+        // A partial name filters.
+        let (_, candidates) = helper.complete_meta(":ch", 3);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].replacement, "check");
+    }
+
+    #[test]
+    fn meta_completion_offers_a_commands_argument_words() {
+        let helper = bare_helper();
+        let (start, candidates) = helper.complete_meta(":check o", 8);
+        assert_eq!(start, 7, "only the argument is replaced");
+        let words: Vec<&str> = candidates.iter().map(|p| p.replacement.as_str()).collect();
+        assert_eq!(words, vec!["on", "off"]);
+        // An alias resolves to the same command.
+        let (_, candidates) = helper.complete_meta(":t x", 4);
+        assert!(
+            candidates.is_empty(),
+            "`:type` takes an expression, not a fixed word"
+        );
+    }
+
+    #[test]
+    fn meta_completion_survives_an_indented_line() {
+        // `repl_meta` trims before dispatching, so an indented `:help` is a real meta-command and
+        // completion has to read it as one. The multi-byte case is the one that used to panic:
+        // U+00A0 is whitespace, so `trim_start` accepts it and the line reaches this function with
+        // a two-byte character where a fixed `line[1..]` slice would split it.
+        let helper = bare_helper();
+        let (start, candidates) = helper.complete_meta("   :qu", 6);
+        assert_eq!(start, 4);
+        assert_eq!(candidates[0].replacement, "quit");
+        let line = "\u{a0}:qu";
+        let (start, candidates) = helper.complete_meta(line, line.len());
+        assert_eq!(start, "\u{a0}:".len());
+        assert_eq!(candidates[0].replacement, "quit");
+    }
+
+    #[test]
+    fn meta_completion_of_an_unknown_command_offers_nothing() {
+        let helper = bare_helper();
+        let (_, candidates) = helper.complete_meta(":nonsense x", 11);
+        assert!(candidates.is_empty());
     }
 
     #[test]
