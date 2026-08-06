@@ -1311,7 +1311,15 @@ impl Checker {
                     && let Some((trait_name, declared_static)) =
                         self.type_param_static_trait(&scoped.param, name)
                 {
-                    let (params, required, ret) = self
+                    // Destructured rather than carried as a `TraitCall`: this path REFUSES labels
+                    // (see `reject_unbound_labels` below), so it wants the contract's types and
+                    // nothing the binder would use.
+                    let crate::expr::member::TraitCall {
+                        params,
+                        required,
+                        ret,
+                        ..
+                    } = self
                         .type_param_trait_method(&scoped.param, name)
                         .expect("the bound that supplies the method also types it");
                     // The receiver rule (E0047), asked of the trait's DECLARATION — the one place
@@ -1484,10 +1492,19 @@ impl Checker {
                 // `x.same(other: int)`); a method no bound declares falls through and stays
                 // lenient as before (dispatch may still resolve at runtime).
                 if let Type::Param(p) = &recv
-                    && let Some((params, required, ret)) = self.type_param_trait_method(p, name)
+                    && let Some(call) = self.type_param_trait_method(p, name)
                 {
-                    self.finalize_closure_args(&params, args, arg_exprs, env);
-                    self.check_args(&params, required, args, arg_exprs, span, name);
+                    // The contract binds labels, exactly as the concrete implementor's own method
+                    // does — a `T: Knob` receiver and a `C` receiver must not disagree about what
+                    // `tune(n: 3)` means. A binding that failed has already reported precisely, so
+                    // the call is left unchecked rather than re-reported against the written order.
+                    let ret = call.ret.clone();
+                    if let Some((bound, params, required)) =
+                        self.bind_trait_args(&call, arg_exprs, args, name, span, call_span)
+                    {
+                        self.finalize_closure_args(&params, args, &bound, env);
+                        self.check_args(&params, required, args, &bound, span, name);
+                    }
                     return ret;
                 }
                 // THE dyn-closure gap's primary site: a builtin method's parameter types carry
@@ -1498,7 +1515,7 @@ impl Checker {
                 let builtin_params =
                     stdlib::method_params(self.reg(), &recv, name).unwrap_or_default();
                 self.finalize_closure_args(&builtin_params, args, arg_exprs, env);
-                self.check_method_args(&recv, name, args, arg_exprs, span);
+                self.check_method_args(&recv, name, args, arg_exprs, span, call_span);
                 // A bit intrinsic on a fixed-width receiver (Tier W5) must act within the width, not
                 // the erased i64 (`(1u8).leading_zeros() == 7`), so mark the **call** span (the one
                 // lowering's `Method` carries) — lowering then emits the width-carrying
@@ -1791,7 +1808,7 @@ impl Checker {
         // and assignability — then sees a plain positional call. Lowering keys the permutation off
         // the call span, so a call with no span to key (a synthesized or forwarded one) keeps its
         // written order and its labels are refused rather than silently ignored.
-        let permuted;
+        let (permuted, supplied_params);
         let mut supplied_at: Vec<usize> = Vec::new();
         let arg_exprs = if noeta_ast::CallArg::any_named(arg_exprs) {
             let Some(call_span) = call_span else {
@@ -1813,14 +1830,16 @@ impl Checker {
                 span,
                 call_span,
             ) {
-                Some((a, _, at)) => {
+                Some((a, p, at)) => {
                     permuted = a;
+                    supplied_params = Some(p);
                     supplied_at = at;
                     &permuted[..]
                 }
                 None => return sig.ret.clone(),
             }
         } else {
+            supplied_params = None;
             arg_exprs
         };
         if let Some(generic) = &sig.generic {
@@ -1869,9 +1888,22 @@ impl Checker {
                 env,
             );
         }
-        let params = sig.params.clone();
+        // The SUPPLIED parameters, compacted parallel to the arguments — the free-function twin's
+        // rule, and for the same reason. A label that skips a defaulted parameter (`m(on_tick: f)`
+        // over `m(layers = [], every_ms = 500, on_tick = …)`) leaves the arguments shorter than the
+        // parameter list and no longer aligned with it, so checking against the full list compares
+        // each value with whatever parameter shares its index — `f` against `layers`. Binding
+        // already worked out which parameter each value fills; this is that answer being used.
+        // Every required parameter is present by then, so the compacted list is entirely required.
+        let (params, required) = match supplied_params {
+            Some(p) => {
+                let n = p.len();
+                (p, n)
+            }
+            None => (sig.params.clone(), sig.required),
+        };
         self.finalize_closure_args(&params, args, arg_exprs, env);
-        self.check_args(&params, sig.required, args, arg_exprs, span, name);
+        self.check_args(&params, required, args, arg_exprs, span, name);
         sig.ret.clone()
     }
 
@@ -2183,9 +2215,10 @@ impl Checker {
         &mut self,
         recv: &Type,
         name: &str,
-        args: &[Type],
+        args: &mut [Type],
         arg_exprs: &[CallArg],
         span: Span,
+        call_span: Span,
     ) {
         if let Some(params) = stdlib::method_params(self.reg(), recv, name) {
             let required = stdlib::method_required(self.reg(), recv, name).unwrap_or(params.len());
@@ -2197,13 +2230,20 @@ impl Checker {
             let required = sig.required;
             self.check_args(&params, required, args, arg_exprs, span, name);
         } else if let Type::DynTrait(tr) = recv
-            && let Some((params, required, _)) = self.dyn_trait_method(tr, name)
+            && let Some(call) = self.dyn_trait_method(tr, name)
         {
             // A `dyn Trait` call is typed by the trait's contract on the way out (`method_call_return`)
             // — so its arguments are checked against the same contract on the way in, exactly as the
             // bound receiver's are. Without this a trait object was the one receiver whose arguments
             // nothing checked: `g.greet(42)` against `fn greet(who: string)` passed `noeta check`.
-            self.check_args(&params, required, args, arg_exprs, span, name);
+            //
+            // Including its labels: the contract carries parameter names, so `g.greet(who: "x")`
+            // binds here rather than being refused as a call that "does not take named arguments".
+            if let Some((bound, params, required)) =
+                self.bind_trait_args(&call, arg_exprs, args, name, span, call_span)
+            {
+                self.check_args(&params, required, args, &bound, span, name);
+            }
         }
     }
 

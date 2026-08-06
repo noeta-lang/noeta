@@ -294,6 +294,45 @@ impl Checker {
         })
     }
 
+    /// Bind a labelled call against a **trait contract** — a `dyn Trait` receiver or a bounded type
+    /// parameter — and compact the parameters it actually supplies.
+    ///
+    /// Returns the arguments in parameter order with the parameter list to check them against, or
+    /// `None` when binding failed and has already said so precisely (checking on would only add
+    /// noise). An unlabelled call comes back as written.
+    ///
+    /// It exists so the two trait receivers reach the same binding as a concrete method call. They
+    /// used to reach none: the contract was read for its parameter *types* only, so a label had
+    /// nothing to bind against and `check_args` refused it as "does not take named arguments" — for
+    /// a method the same trait's concrete implementor honoured by name.
+    pub(crate) fn bind_trait_args(
+        &mut self,
+        call: &crate::expr::member::TraitCall,
+        args: &[CallArg],
+        arg_types: &mut [crate::Type],
+        callee: &str,
+        span: Span,
+        call_span: Span,
+    ) -> Option<(Vec<CallArg>, Vec<crate::Type>, usize)> {
+        if !CallArg::any_named(args) {
+            return Some((args.to_vec(), call.params.clone(), call.required));
+        }
+        let (ordered, supplied, _) = self.order_arguments(
+            args,
+            &call.param_names,
+            &call.params,
+            call.required,
+            callee,
+            arg_types,
+            span,
+            call_span,
+        )?;
+        // Every required parameter is supplied by the time binding succeeds, so the compacted list
+        // is entirely required — the same reading the concrete-method path takes.
+        let required = supplied.len();
+        Some((ordered, supplied, required))
+    }
+
     /// Normalize a written argument list into **parameter order**, reporting any label that cannot
     /// be honoured, and record the permutation for the backends.
     ///

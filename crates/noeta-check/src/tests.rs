@@ -1929,6 +1929,105 @@ fn a_skipping_named_call_is_bounded_by_the_parameter_it_names() {
     assert!(codes(&wide("f(1, p2: 7)")).is_empty());
 }
 
+/// A label that SKIPS a defaulted parameter is checked against the parameter it NAMED — on a
+/// method exactly as on a free function.
+///
+/// Regression: `call_user_method` bound the labels (so lowering and the runtime ran the right call)
+/// and then threw away the compacted parameter list that binding produced, checking each argument
+/// against the parameter sharing its INDEX. `t.m(n: 3)` over `m(items: List<string> = [], n: int =
+/// 7)` compared `3` with `items` and reported E0007 naming a parameter the author never wrote, so
+/// the call was unusable; where the two parameters happened to share a type it was worse than
+/// unusable, because the wrong parameter was checked and nothing said so.
+///
+/// The free-function twin has been right since the arc landed and the generic paths were fixed with
+/// `supplied_at` — this was the one non-generic method path left checking positionally. Both halves
+/// are asserted together here: the point is that the two spellings agree.
+#[test]
+fn a_labelled_method_call_checks_the_parameter_it_named() {
+    let decl = "class T {\n\
+                \x20   pub tag: string\n\
+                \x20   pub fn new(): T {\n        return T { tag: \"t\" }\n    }\n\
+                \x20   pub fn m(items: List<string> = [], n: int = 7): int {\n        return n + items.len() + self.tag.len()\n    }\n\
+                \x20   pub fn s(items: List<string> = [], n: int = 7): int {\n        return n + items.len()\n    }\n\
+                }\n\
+                fn f(items: List<string> = [], n: int = 7): int {\n    return n + items.len()\n}\n\
+                t = T.new();\n";
+    // The free function, the instance method and the self-less one all skip `items` by naming `n`.
+    assert!(codes(&format!("{decl}echo f(n: 3);\n")).is_empty());
+    assert!(codes(&format!("{decl}echo t.m(n: 3);\n")).is_empty());
+    assert!(codes(&format!("{decl}echo T.s(n: 3);\n")).is_empty());
+    // A dense prefix and a pure reordering were never affected, and still are not.
+    assert!(codes(&format!("{decl}echo t.m([\"a\"], 3);\n")).is_empty());
+    assert!(codes(&format!("{decl}echo t.m(n: 3, items: [\"a\"]);\n")).is_empty());
+    // A genuinely wrong value still fails — against the parameter the label NAMED, not the one it
+    // skipped past. Checking the message, not just the code: naming `items` here is precisely the
+    // bug, and a code-only assertion would have passed throughout.
+    let wrong = format!("{decl}echo t.m(n: \"three\");\n");
+    assert_eq!(codes(&wrong), ["E0007"]);
+    let text = messages(&wrong).join("\n");
+    assert!(
+        text.contains("int"),
+        "the mismatch names `n`'s type: {text}"
+    );
+    assert!(
+        !text.contains("List<string>"),
+        "the mismatch must not name the skipped parameter's type: {text}"
+    );
+}
+
+/// A call through a **trait** — a `dyn Trait` receiver or a bounded type parameter — binds labels
+/// against the contract, exactly as a call on the concrete implementor does.
+///
+/// Regression: both receivers read the contract for its parameter *types* only, so a label had
+/// nothing to bind against and `check_args` refused it — "does not take named arguments", for a
+/// method whose own implementor honoured the same label. The two receivers are written as mirror
+/// images precisely so they cannot disagree about one method; this is that rule applied to labels.
+///
+/// The static-trait-method rewrite (`T.assoc(…)` on a type parameter) still refuses them, and that
+/// is deliberate: it dispatches by name at runtime through a positional list, so a label there
+/// could only be ignored.
+#[test]
+fn a_trait_dispatched_call_binds_labels_like_its_implementor() {
+    let decl = "trait Knob {\n\
+                \x20   fn tune(items: List<string> = [], n: int = 7): int\n\
+                }\n\
+                class C {\n\
+                \x20   pub fn new(): C {\n        return C {}\n    }\n\
+                \x20   impl Knob {\n        pub fn tune(items: List<string> = [], n: int = 7): int {\n            return n + items.len()\n        }\n    }\n\
+                }\n\
+                c = C.new();\n";
+    // The concrete receiver, the trait object, and the bounded parameter — one method, one label,
+    // three spellings that must agree.
+    assert!(codes(&format!("{decl}echo c.tune(n: 3);\n")).is_empty());
+    assert!(
+        codes(&format!(
+            "{decl}fn via(k: dyn Knob): int {{\n    return k.tune(n: 3)\n}}\necho via(c);\n"
+        ))
+        .is_empty()
+    );
+    assert!(
+        codes(&format!(
+            "{decl}fn via<T: Knob>(k: T): int {{\n    return k.tune(n: 3)\n}}\necho via(c);\n"
+        ))
+        .is_empty()
+    );
+    // A label naming no parameter of the contract is caught through a trait object, and caught
+    // ONCE — the old refusal path would add "does not take named arguments" on top.
+    assert_eq!(
+        codes(&format!(
+            "{decl}fn via(k: dyn Knob): int {{\n    return k.tune(zzz: 3)\n}}\necho via(c);\n"
+        )),
+        ["E0061"]
+    );
+    // And a wrong type is still a mismatch, against the named parameter.
+    assert_eq!(
+        codes(&format!(
+            "{decl}fn via(k: dyn Knob): int {{\n    return k.tune(n: \"three\")\n}}\necho via(c);\n"
+        )),
+        ["E0007"]
+    );
+}
+
 #[test]
 fn a_named_native_signature_binds_labels() {
     // `math.pow` declares `param_names: &["base", "exp"]`, so it accepts labels and REORDERS by
