@@ -35,6 +35,26 @@ pub enum ArgKind {
     /// the command body validates the combination (which words go together is grammar the
     /// command owns, not the parser).
     Word,
+    /// An optional integer flag with **no** default (`noeta test --jobs <N>`): absent means
+    /// [`ParsedArgs::get_int`] returns `None`, which is what a command distinguishing "not given"
+    /// from "given the default value" needs — `--jobs` unset means *the machine's parallelism*,
+    /// a number the spec cannot name.
+    OptInt,
+    /// An optional float flag with no default (`noeta bench --max-regress <PCT>`). Negative values
+    /// are accepted, since a threshold may legitimately be one.
+    OptFloat,
+    /// A **repeatable** string flag collecting every occurrence (`--name a --name b`), read with
+    /// [`ParsedArgs::strs`]. Absent yields an empty slice, so a command filters on "non-empty"
+    /// rather than on an `Option` around a list.
+    Strings,
+    /// An optional positional path that **defaults** when omitted (`noeta test [PATH]`, default
+    /// `.`). Distinct from [`ArgKind::Path`], which is required, and from [`ArgKind::OptPath`],
+    /// which is a `--flag` with no default: this one is always readable with
+    /// [`ParsedArgs::path`].
+    PathDefault {
+        /// The path used when the positional is omitted.
+        default: &'static str,
+    },
 }
 
 /// One argument a command declares; the CLI builds the real parser (help text, validation)
@@ -53,6 +73,11 @@ pub struct ParsedArgs {
     ints: Vec<(&'static str, i64)>,
     strs: Vec<(&'static str, String)>,
     bools: Vec<(&'static str, bool)>,
+    floats: Vec<(&'static str, f64)>,
+    /// [`ArgKind::Strings`] values, kept as a list per name rather than as repeated `strs` entries:
+    /// `get_str` finds the *first* match, so folding a repeatable flag in there would silently
+    /// answer a one-value question with one of several values.
+    lists: Vec<(&'static str, Vec<String>)>,
 }
 
 impl ParsedArgs {
@@ -67,6 +92,28 @@ impl ParsedArgs {
     }
     pub fn push_bool(&mut self, name: &'static str, value: bool) {
         self.bools.push((name, value));
+    }
+    pub fn push_float(&mut self, name: &'static str, value: f64) {
+        self.floats.push((name, value));
+    }
+    pub fn push_strs(&mut self, name: &'static str, values: Vec<String>) {
+        self.lists.push((name, values));
+    }
+    /// The parsed [`ArgKind::OptFloat`] argument `name`, or `None` when it was not given.
+    pub fn get_float(&self, name: &str) -> Option<f64> {
+        self.floats
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, v)| *v)
+    }
+    /// Every value of the [`ArgKind::Strings`] argument `name`, in the order given — empty when the
+    /// flag was not passed (or was never declared).
+    pub fn strs(&self, name: &str) -> &[String] {
+        self.lists
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, v)| v.as_slice())
+            .unwrap_or(&[])
     }
     /// The parsed [`ArgKind::Str`] argument `name`, or `None` when no string argument of that
     /// name was declared/parsed — the honest probe behind [`ParsedArgs::str`].

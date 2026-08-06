@@ -38,7 +38,7 @@ Run `noeta --help` or `noeta <command> --help` for the authoritative flag list.
 
 ## Commands the standard library provides
 
-These need no opt-in — `std` ships with the toolchain — but what they *do* belongs to the standard library rather than the compiler: `test`, `bench`, and `doc` each run one of the dev tiers `std` declares, dispatched to that tier's runner, and `serve` is an [extension command](#commands-a-package-contributes) `std` registers. It is the same machinery a package uses, which is why this list is extensible at all.
+These need no opt-in — `std` ships with the toolchain — but every one of them is an [extension command](#commands-a-package-contributes) `std` contributes, not a verb the binary hardcodes. They are here by default because std is the *default* provider, not a privileged one.
 
 | Command | Purpose |
 |---|---|
@@ -47,7 +47,16 @@ These need no opt-in — `std` ships with the toolchain — but what they *do* b
 | [`noeta doc`](Documentation-and-Tiers) | Extract `@doc { … }` prose to stdout, or generate the package's documentation artifact. |
 | [`noeta serve`](#noeta-serve-and---watch) | Run a program's HTTP handler as a server (`fn fetch(req: Request): Response`). |
 
-A package that declares its own `@tier` earns `noeta <tier> <FILE>` the same way — see [Extending Tiers](Extending-Tiers).
+**So any of them can be replaced.** A [`[trust.commands]`](Manifest#trustcommands--contributed-subcommands) binding under one of these names takes the name over, and the new provider owns the whole verb — its own flags, its own `--help`, its own exit codes:
+
+```toml
+[trust.commands]
+test = "thirdparty/ExcellentTesting"   # `noeta test` now runs theirs
+```
+
+You get the batteries out of the box, and swapping one out is a line of manifest rather than a fork. The core toolchain verbs above are not replaceable this way — `run`/`build`/`check` are the compiler.
+
+A package that declares its own `@tier` earns `noeta <tier> <FILE>` the same way — see [Extending Tiers](Extending-Tiers). That is a different seam from this one, and worth keeping straight: a [`[directives]`](Manifest#directives--where-each-name-comes-from) binding decides what `@test` *means* at compile time (and so what `noeta check` verifies), while the command binding decides what *runs* it. A framework that runs your existing `@test` blocks its own way needs only the command binding.
 
 ## Commands a package contributes
 
@@ -60,6 +69,8 @@ undo    = "para/db:rollback"  # the key is the name you type, so this is `noeta 
 ```
 
 The binding *is* the grant: one entry both authorizes the package to contribute the command and fixes the name it appears under, so two packages exporting the same name coexist and nothing is registered you did not ask for. [`noeta audit`](#noeta-audit) reports every command grant in the tree.
+
+`noeta --help` inside such a project lists these commands, and `noeta <cmd> --help` renders the package's own arguments — but only once the project's toolchain has been composed, since a package's commands live in that build and not in the `noeta` on your `PATH`. Any command run in the project composes it (the first one pays a build and says so); after that, help describes what will actually run. A `--help` on a cold cache prints the stock list rather than disappearing into a multi-minute build.
 
 The canonical example is [para/db](para-db)'s `noeta migrate` — forward-only migrations from a `migrations/` directory, re-runnable seeds from `seeds/` — whose full reference lives on that package's own page. Writing one is on [Native Extensions](Native-Extensions#extension-commands).
 

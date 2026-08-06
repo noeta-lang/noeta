@@ -135,138 +135,6 @@ enum Command {
         #[arg(last = true)]
         args: Vec<String>,
     },
-    /// Discover and run a program's `@test` blocks (object-model slice 6).
-    Test {
-        /// File or directory to test (default: the current directory, walked recursively for
-        /// `.noe` files). A directory runs every file's `@test` blocks as its own entry and
-        /// aggregates one report — the only way a multi-module project's tests all run, since an
-        /// entry links a sibling's declarations but never its test blocks. A file tests just that
-        /// one.
-        #[arg(default_value = ".")]
-        file: PathBuf,
-        /// Stop after the first failing test instead of running them all.
-        #[arg(long)]
-        fail_fast: bool,
-        /// Number of tests to run concurrently (default: the machine's parallelism).
-        #[arg(long, short)]
-        jobs: Option<usize>,
-        /// Run only tests tagged `#[Group("<name>")]` with this group.
-        #[arg(long)]
-        group: Option<String>,
-        /// Run only the test fn(s) with these names (repeatable; exact fn-name match). Composes
-        /// with `--group`. Used by editor test explorers to run a single test.
-        #[arg(long = "name")]
-        names: Vec<String>,
-        /// Report outcomes as one JSON object on stdout instead of the human report — the
-        /// machine-readable seam editor integrations parse. The tests' own stdout is captured into
-        /// the JSON (failures carry it), never interleaved.
-        #[arg(long)]
-        json: bool,
-        /// Only run when the `test` tier is live in this `noeta.toml` build target; otherwise the
-        /// runner does nothing.
-        #[arg(long)]
-        target: Option<String>,
-        /// Per-test deadline in seconds (default: 60). A test that does not finish within it is
-        /// reported `TIME` — it is neither a pass nor an assertion failure — and the rest of the
-        /// suite still runs and reports. Raise it for one test with `#[std.test.Timeout(N)]`
-        /// instead; `--timeout 0` removes the bound for the whole run.
-        #[arg(long, value_name = "SECONDS")]
-        timeout: Option<u64>,
-    },
-    /// Discover and run a program's `@bench` blocks, measuring each (object-model slice 6).
-    Bench {
-        /// File or directory to benchmark (default: the current directory, walked recursively for
-        /// `.noe` files). A directory measures every file's `@bench` blocks as its own entry and
-        /// aggregates one report — an entry does not carry its modules' benchmarks. Baselines stay
-        /// keyed per entry file, so a directory run compares like with like.
-        #[arg(default_value = ".")]
-        file: PathBuf,
-        /// Override the iteration count for every benchmark, taking precedence over a per-bench
-        /// `@bench(iterations: N)` directive. Without either, the count is **calibrated**: a
-        /// short probe estimates per-iteration cost and the count is sized so one measurement
-        /// takes roughly 50ms.
-        #[arg(long)]
-        iterations: Option<u64>,
-        /// Run only the bench fn(s) with these names (repeatable; exact fn-name match). Used by
-        /// editor integrations to run a single benchmark, and the impact-filtered `--watch` seam
-        /// (server-hmr W3), symmetric with `noeta test --name`.
-        #[arg(long = "name")]
-        names: Vec<String>,
-        /// Report results as one JSON object on stdout instead of the human report — the
-        /// machine-readable seam editors and CI parse.
-        #[arg(long)]
-        json: bool,
-        /// After measuring, save the results as the named baseline (in the noeta cache dir,
-        /// per-entry-file — timings are machine-local).
-        #[arg(long, value_name = "NAME")]
-        save_baseline: Option<String>,
-        /// Compare each result against the named baseline: the report gains a delta column
-        /// (`+5.2% vs NAME`), the JSON a `baselineDeltaPct` field.
-        #[arg(long, value_name = "NAME")]
-        baseline: Option<String>,
-        /// The CI regression gate: with `--baseline`, fail (exit 1) when any bench regresses more
-        /// than this percentage against it (e.g. `10` allows up to +10%). Exits 2 when it could
-        /// not judge a bench at all — a run that measured nothing must not pass a gate.
-        #[arg(
-            long,
-            value_name = "PCT",
-            requires = "baseline",
-            allow_negative_numbers = true
-        )]
-        max_regress: Option<f64>,
-        /// Only run when the `bench` tier is live in this `noeta.toml` build target; otherwise the
-        /// runner does nothing.
-        #[arg(long)]
-        target: Option<String>,
-    },
-    /// Extract a program's `@doc { … }` text blocks to stdout, or — with `--out` — generate the
-    /// package's documentation artifact (a registry-ready `docs.json` plus a Markdown tree).
-    Doc {
-        /// File or directory to document (default: the current directory when no `--package`
-        /// is given). A directory extracts every `.noe` beneath it; a file extracts that file
-        /// **and its sibling modules**, since a `@doc` block belongs to the file it sits in and
-        /// linking merges declarations without them.
-        file: Option<PathBuf>,
-        /// Fetch a **published** package's stored documentation from the registry instead of
-        /// reading local source: `company/package` (highest published version) or
-        /// `company/package@1.2.0`. Prints the `docs.json` to stdout; with `--out`, writes it and
-        /// renders the Markdown tree.
-        #[arg(long, value_name = "NAME[@VERSION]", conflicts_with = "file")]
-        package: Option<String>,
-        /// Generate the documentation artifact into this directory instead of extracting to
-        /// stdout: `docs.json` (schema-versioned, keyed by the package's `[package]` identity —
-        /// the canonical form a registry indexes) plus `index.md` and one Markdown page per
-        /// module, woven from `@doc` prose and the public API's signatures.
-        #[arg(long, value_name = "DIR")]
-        out: Option<PathBuf>,
-        /// Only extract when the `doc` tier is live in this `noeta.toml` build target; otherwise
-        /// nothing is emitted.
-        #[arg(long)]
-        target: Option<String>,
-        /// Generate the **API reference** from the intrinsic registry (the stdlib and any composed
-        /// native modules) instead of from `.noe` source — a registry-ready `docs.json` (schema 1)
-        /// organized by module, with signatures and any registered doc prose. Prints to stdout, or
-        /// writes the artifact + Markdown tree with `--out`.
-        #[arg(long, conflicts_with_all = ["file", "package"])]
-        api: bool,
-        /// With `--api`, document only the extensions whose namespace root is this — an explicit
-        /// single-namespace filter, excluding `std`. Omit to document the whole registry.
-        #[arg(long, requires = "api", value_name = "NAMESPACE", group = "api_scope")]
-        root: Option<String>,
-        /// With `--api`, document every registered NON-BUILTIN extension — in a package's
-        /// composed toolchain, exactly the package's own surface under its real namespace
-        /// root(s). This is what `noeta publish` uses: unlike `--root`, it never guesses the
-        /// namespace from the package name, so an extension whose `root()` diverges from its
-        /// package segment (or a package registering several extensions) documents correctly.
-        #[arg(long, requires = "api", group = "api_scope")]
-        non_builtin: bool,
-        /// With `--api --root` or `--api --non-builtin`, fail (before emitting docs) if the
-        /// scoped extensions register any surface outside their own namespace root(s) — the
-        /// publish quality gate against a type that leaked into `std` (a missing `namespace:`)
-        /// or an extension squatting a toolchain-owned root. Exit 2 lists the offenders.
-        #[arg(long, requires = "api_scope")]
-        lint: bool,
-    },
     /// Compile a program to a self-contained `.noeb` bundle (P-AOT L1): the versioned bytecode a
     /// `noeta run app.noeb` executes directly, so a program ships **without its `.noe` source**.
     /// Uses the same compile pipeline as `run`; dev-tier blocks are stripped unless made live by
@@ -1047,7 +915,6 @@ pub fn run_cli(
         <Cli as clap::CommandFactory>::command()
             .get_subcommands()
             .map(|c| c.get_name().to_string())
-            .chain(trusted_commands.iter().map(|(name, _)| name.to_string()))
             .collect()
     };
     for binding in command_bindings {
@@ -1064,15 +931,31 @@ pub fn run_cli(
             );
             return ExitCode::from(2);
         };
+        // The **toolchain's own** verbs stay reserved: `run`, `build`, `check` and their siblings
+        // are the compiler, and a project silently redefining what `noeta build` means is not a
+        // capability anyone asked for.
         if reserved.contains(binding.local) {
             eprintln!(
-                "noeta: `[trust.commands]` binds `{}`, but that is already a built-in `noeta` \
-                 command — pick another local name (the `[trust.commands]` key)",
+                "noeta: `[trust.commands]` binds `{}`, but that is a core `noeta` verb — pick \
+                 another local name (the `[trust.commands]` key)",
                 binding.local
             );
             return ExitCode::from(2);
         }
-        trusted_commands.push((binding.local, ext));
+        // A **std** command of the same name is REPLACED, not refused. `test`/`bench`/`doc`/`serve`
+        // are contributed by `std` exactly as this binding's command is contributed by its package
+        // (they register through `Extension::commands` from the `std` root), and std is the default
+        // provider rather than a privileged one — so binding a third-party test runner under `test`
+        // puts that runner behind `noeta test`, with its own flags and its own `--help`, instead of
+        // forcing every project to invent a second name for the verb it already has. Two subcommands
+        // of one name would also be a clap ambiguity, so replacement is the only coherent reading.
+        match trusted_commands
+            .iter_mut()
+            .find(|(local, _)| *local == binding.local)
+        {
+            Some(slot) => slot.1 = ext,
+            None => trusted_commands.push((binding.local, ext)),
+        }
     }
     // P-AOT L2: if this executable is a `noeta build --exe` artifact (a bundle stapled onto a copy
     // of the runtime), run the embedded program directly — the shipped app is not the toolchain, so
@@ -1126,6 +1009,19 @@ pub fn run_cli(
     let matches = match cli.try_get_matches() {
         Ok(matches) => matches,
         Err(err) => {
+            // Help must describe the toolchain that will actually run, not the stock one. In a
+            // project with native dependencies the commands its `[trust.commands]` bind — including
+            // any that REPLACE one of std's — exist only in the composed binary, so stock help would
+            // omit them and, worse, describe std's `test` for a verb the project has rebound. Hand
+            // the help request to that toolchain when it is already built; on a cold cache, print
+            // the stock help rather than disappear into a cargo build for a `--help`.
+            if matches!(
+                err.kind(),
+                clap::error::ErrorKind::DisplayHelp
+                    | clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+            ) {
+                compose::delegate_cwd_if_composed();
+            }
             if err.kind() == clap::error::ErrorKind::InvalidSubcommand {
                 // A command contributed by a *native dependency* exists only inside the app's
                 // composed toolchain — compose from the cwd manifest first.
@@ -1171,79 +1067,6 @@ pub fn run_cli(
             jit_stats,
             args,
         } => cmd_run(&file, &tier, &target, no_cache, jit_stats, &args),
-        // The three std dev-tier verbs are thin aliases that enter the shared registry-seam dispatch
-        // (Part B): each stashes its parsed flags, then resolves std's native runner by identity and
-        // invokes it — so `noeta test` reaches `cmd_test` exactly as a program `@tier` runner and a
-        // third-party tier reach theirs, through `find_tier_runner_scoped`. `cmd_test`/`cmd_bench`/
-        // `cmd_doc` keep their bodies (including honoring a `--target` provider override).
-        Command::Test {
-            file,
-            fail_fast,
-            jobs,
-            group,
-            names,
-            json,
-            target,
-            timeout,
-        } => {
-            tier_runner::set_test_opts(tier_runner::TestOpts {
-                fail_fast,
-                jobs,
-                group,
-                names,
-                json,
-                target,
-                timeout,
-            });
-            tier_runner::dispatch_std_tier("test", &file)
-        }
-        Command::Bench {
-            file,
-            iterations,
-            names,
-            json,
-            save_baseline,
-            baseline,
-            max_regress,
-            target,
-        } => {
-            tier_runner::set_bench_opts(tier_runner::BenchOpts {
-                iterations,
-                names,
-                json,
-                save_baseline,
-                baseline,
-                max_regress,
-                target,
-            });
-            tier_runner::dispatch_std_tier("bench", &file)
-        }
-        Command::Doc {
-            file,
-            package,
-            out,
-            target,
-            api,
-            root,
-            non_builtin,
-            lint,
-        } => {
-            // `doc`'s file argument is optional; the runner reads it back from the stashed opts (its
-            // `--api`/`--package`/directory variants are not file-driven), so the seam's `TierRun`
-            // carries the entry (or `.`) only for contract fidelity.
-            let file_arg = file.clone().unwrap_or_else(|| PathBuf::from("."));
-            tier_runner::set_doc_opts(tier_runner::DocOpts {
-                file,
-                package,
-                out,
-                target,
-                api,
-                root,
-                non_builtin,
-                lint,
-            });
-            tier_runner::dispatch_std_tier("doc", &file_arg)
-        }
         Command::Build {
             file,
             out,
