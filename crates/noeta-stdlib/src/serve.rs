@@ -198,21 +198,25 @@ pub const SERVE_COMMAND: ExtCommand = ExtCommand {
             name: "file",
             help: "Path to a `.noe` file exporting a `fetch` handler",
             kind: ArgKind::Path,
+            ..ArgSpec::DEFAULTS
         },
         ArgSpec {
             name: "port",
             help: "The TCP port to bind, default 8080",
             kind: ArgKind::Int { default: 8080 },
+            short: Some('p'),
         },
         ArgSpec {
             name: "host",
             help: "The bind address, default 0.0.0.0 (all interfaces); e.g. 127.0.0.1 for local-only",
             kind: ArgKind::Str { default: "0.0.0.0" },
+            ..ArgSpec::DEFAULTS
         },
         ArgSpec {
             name: "parallel",
             help: "Number of worker isolates to serve across (default 1); N>1 uses multiple CPU cores",
             kind: ArgKind::Int { default: 1 },
+            ..ArgSpec::DEFAULTS
         },
     ],
     run: |ctx, args| {
