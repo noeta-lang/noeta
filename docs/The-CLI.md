@@ -1,6 +1,10 @@
 # The `noeta` CLI
 
-The `noeta` binary is the whole toolchain. Its main subcommands:
+The `noeta` binary is the whole toolchain. Its subcommands come from three places: the toolchain's own verbs, the standard library, and — in a project that asks for them — your dependencies.
+
+## Toolchain verbs
+
+The compiler, the runtime, and the package surface — every one of these is built into the binary and always available.
 
 | Command | Purpose |
 |---|---|
@@ -10,18 +14,15 @@ The `noeta` binary is the whole toolchain. Its main subcommands:
 | [`noeta check`](#noeta-check) | Parse and type-check without running or building (exit 0/1/2). |
 | [`noeta explain`](#noeta-explain) | Explain a diagnostic code — what `E0xxx` means and how to fix it. |
 | [`noeta expand`](#noeta-expand) | Print the source that compile-time `@`-directive expansions generated. |
-| [`noeta migrate`](#noeta-migrate) | Apply database schema migrations — an extension command the [para/db](para-db) package provides. |
-| [`noeta serve`](#noeta-serve-and---watch) | Run a program's HTTP handler as a server (`fn fetch(req: Request): Response`). |
 | [`noeta repl`](#noeta-repl) | Interactive REPL. |
 | [`noeta dump`](#noeta-dump) | Disassemble a program to its VM bytecode (a debugging aid). |
-| [`noeta test`](Testing) | Discover and run `@test` blocks. |
-| [`noeta bench`](Benchmarking) | Discover and measure `@bench` blocks. |
-| [`noeta doc`](Documentation-and-Tiers) | Extract `@doc { … }` prose to stdout. |
+| [`noeta fmt`](#noeta-fmt) | Format `.noe` source into the canonical style (files/dirs, `--check`, `--stdin`). |
+| [`noeta profile`](Profiling) | Profile a program — a hot-function table or a flamegraph. |
+| [`noeta cache`](#noeta-cache) | Inspect or clean the per-user cache — compilations, composed toolchains, fetched sources. |
+| [`noeta grammar`](Extending-Tiers) | Generate the editor grammar overlay for a project's own [text tiers](Extending-Tiers). |
 | [`noeta lsp`](Editor-and-AI-Tooling) | The language server, over stdio (started by your editor, not by hand). |
 | [`noeta dap`](Debugging) | The debug adapter, over stdio (started by your editor's debug UI, not by hand). |
 | [`noeta mcp`](Editor-and-AI-Tooling) | The agent-native MCP server, over stdio (for AI tooling; see [Editor & AI Tooling](Editor-and-AI-Tooling)). |
-| [`noeta profile`](Profiling) | Profile a program — a hot-function table or a flamegraph. |
-| [`noeta fmt`](#noeta-fmt) | Format `.noe` source into the canonical style (files/dirs, `--check`, `--stdin`). |
 | [`noeta add`](#noeta-add) | Add a dependency to `noeta.toml` and resolve it into `noeta.lock`. |
 | [`noeta update`](#noeta-update) | Re-resolve the dependency graph, re-pinning moved refs and refreshed versions. |
 | [`noeta claim`](#noeta-claim) | Claim a registry scope self-service — prove your GitHub identity (or a domain) and get the publish token. |
@@ -36,11 +37,35 @@ The `noeta` binary is the whole toolchain. Its main subcommands:
 
 Run `noeta --help` or `noeta <command> --help` for the authoritative flag list.
 
-> [!NOTE]
-> **Observability.** There is no telemetry subcommand or flag — production tracing rides `noeta run` and the server, configured by the standard `OTEL_EXPORTER_OTLP_ENDPOINT` env var and off until you set it. See [Observability](Observability). (The dev-time flamegraph tool is [`noeta profile`](Profiling).)
+## Commands the standard library provides
+
+These need no opt-in — `std` ships with the toolchain — but what they *do* belongs to the standard library rather than the compiler: `test`, `bench`, and `doc` each run one of the dev tiers `std` declares, dispatched to that tier's runner, and `serve` is an [extension command](#commands-a-package-contributes) `std` registers. It is the same machinery a package uses, which is why this list is extensible at all.
+
+| Command | Purpose |
+|---|---|
+| [`noeta test`](Testing) | Discover and run `@test` blocks. |
+| [`noeta bench`](Benchmarking) | Discover and measure `@bench` blocks. |
+| [`noeta doc`](Documentation-and-Tiers) | Extract `@doc { … }` prose to stdout, or generate the package's documentation artifact. |
+| [`noeta serve`](#noeta-serve-and---watch) | Run a program's HTTP handler as a server (`fn fetch(req: Request): Response`). |
+
+A package that declares its own `@tier` earns `noeta <tier> <FILE>` the same way — see [Extending Tiers](Extending-Tiers).
+
+## Commands a package contributes
+
+A dependency can add subcommands to the toolchain — the `cargo clippy` model. They are **not** part of the CLI, and are documented by the package that ships them: such a command exists only inside a project whose manifest depends on the providing package *and* binds the command in [`[trust.commands]`](Manifest#trustcommands--contributed-subcommands), dispatched through that app's composed toolchain. In any other directory the verb does not exist, and `noeta --help` there never mentions it.
+
+```toml
+[trust.commands]
+migrate = "para/db"           # `noeta migrate` — apply this project's schema migrations
+undo    = "para/db:rollback"  # the key is the name you type, so this is `noeta undo`
+```
+
+The binding *is* the grant: one entry both authorizes the package to contribute the command and fixes the name it appears under, so two packages exporting the same name coexist and nothing is registered you did not ask for. [`noeta audit`](#noeta-audit) reports every command grant in the tree.
+
+The canonical example is [para/db](para-db)'s `noeta migrate` — forward-only migrations from a `migrations/` directory, re-runnable seeds from `seeds/` — whose full reference lives on that package's own page. Writing one is on [Native Extensions](Native-Extensions#extension-commands).
 
 > [!NOTE]
-> The language-conformance/differential harness that developers use is a *separate* dev binary (`noeta-conformance`), deliberately kept out of the shipped CLI so the `test` verb stays free for your program's own tests. Editor tooling is on [Editor & AI Tooling](Editor-and-AI-Tooling); the debugger on [Debugging](Debugging).
+> **Observability.** There is no telemetry subcommand or flag — production tracing rides `noeta run` and the server, configured by the standard `OTEL_EXPORTER_OTLP_ENDPOINT` env var and off until you set it. See [Observability](Observability). (The dev-time flamegraph tool is [`noeta profile`](Profiling).)
 
 ## `noeta init`
 
@@ -265,12 +290,6 @@ expanded 1 declaration
 The generated source goes to stdout and the summary to stderr, so `noeta expand > expanded.noe` yields a file to check in and diff — a change to the spec then shows up in review as a delta in the code it generates, instead of silently changing what the program means. A program with no expanding directive prints `no directive expansions` and exits 0.
 
 Exit codes match `check`: **0** on success, **1** if any expansion failed (a hook that returned `Err`, or generated code that does not parse — reported as **E0062**, blamed on the directive) or the sources otherwise failed to load, **2** if a file could not be read at all.
-
-## `noeta migrate`
-
-Applies a project's **schema migrations**. `migrate` is **not a core verb** — it is an extension-contributed command the **para/db package** provides (the `cargo clippy` model): it is available in a project whose manifest depends on `para/db` and binds the command ([`[trust.commands]`](Manifest#trustcommands--contributed-subcommands) / `migrate = "para/db"` — the key is the name you type, so `undo = "para/db:rollback"` would make it `noeta undo`), dispatched through the app's composed toolchain like any other extension subcommand.
-
-Forward-only migrations apply from a `migrations/` directory in filename order, re-runnable seeds from `seeds/`, and the connection string resolves from `--db`, then `DATABASE_URL`, then the manifest's [`[db]` table](Manifest#db--database-connection). A migration's **extension picks its body language**, and both kinds share one ordering: a `.noe` migration is a Noeta program declaring `migrate(): List<Statement>`, whose returned statements are lowered to the connected driver's DDL, while a `.sql` migration runs verbatim — the escape hatch for whatever a backend spells its own way. The full command reference — every invocation, seed semantics, `--reset`, and exit codes — is on the [para/db](para-db) page.
 
 ## `noeta serve` and `--watch`
 
