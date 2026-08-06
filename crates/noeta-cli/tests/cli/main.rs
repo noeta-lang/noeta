@@ -28,6 +28,9 @@ mod namespace;
 mod pm;
 mod pm_native;
 mod repl;
+/// The interactive prompt, driven on a pty — unix-only, and only when it is compiled in.
+#[cfg(all(unix, feature = "repl-tty"))]
+mod repl_tty;
 mod run;
 mod run_tail;
 mod targets;

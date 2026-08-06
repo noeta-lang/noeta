@@ -110,5 +110,11 @@ flate2 = { workspace = true }
 tar = { workspace = true }
 sha2 = { workspace = true }
 
+# The interactive prompt opens only when stdin and stderr are a terminal, so the only way to test it
+# is to give it one. `tests/cli/repl_tty.rs` drives `noeta repl` on a real pty. Unix-only — a pty is
+# a unix object — and a dev-dependency, so none of it reaches the shipped binary.
+[target.'cfg(unix)'.dev-dependencies]
+rexpect = { workspace = true }
+
 [lints]
 workspace = true
