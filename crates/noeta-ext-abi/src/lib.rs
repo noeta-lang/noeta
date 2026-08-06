@@ -158,7 +158,15 @@
 /// a defaulted positional had to exist first. What that buys is replaceability — a
 /// `[trust.commands]` binding under one of those names now takes the whole verb over, flags and
 /// help included, so a third-party test runner can *be* `noeta test`.
-pub const ABI_VERSION: u32 = 16;
+/// **17** — [`command::ArgSpec`] gained `short` (a one-letter alias, `-j` for `--jobs`) and, with it,
+/// an `ArgSpec::DEFAULTS` to spread. A **source break** for every existing `ArgSpec` literal, which
+/// named all three fields: add `..ArgSpec::DEFAULTS` and nothing else changes. That break is the
+/// reason the field waited — ABI 16 shipped `test`/`bench`/`doc` as declared commands *without* the
+/// `-j` the clap derive had offered, because adding the field then would have broken every
+/// out-of-tree literal in the same release that moved the verbs. Doing it as its own version keeps
+/// the two diagnosable apart. A `short` on a positional kind is ignored rather than fatal, since a
+/// package's slip should not abort the CLI for everyone who installed it.
+pub const ABI_VERSION: u32 = 17;
 
 pub mod args;
 pub mod channel;
