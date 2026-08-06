@@ -150,6 +150,29 @@ pub(crate) fn ext_command_clap(
             noeta_stdlib::ArgKind::Word => clap::Arg::new(spec.name)
                 .help(spec.help)
                 .value_parser(clap::value_parser!(String)),
+            noeta_stdlib::ArgKind::OptInt => clap::Arg::new(spec.name)
+                .long(spec.name)
+                .help(spec.help)
+                .value_parser(clap::value_parser!(i64)),
+            // `allow_negative_numbers`: a threshold may legitimately be negative, and without it
+            // clap reads the leading `-` as an unknown flag.
+            noeta_stdlib::ArgKind::OptFloat => clap::Arg::new(spec.name)
+                .long(spec.name)
+                .help(spec.help)
+                .allow_negative_numbers(true)
+                .value_parser(clap::value_parser!(f64)),
+            // Repeatable: `Append` keeps every occurrence, which is what `ParsedArgs::strs` hands
+            // back in order.
+            noeta_stdlib::ArgKind::Strings => clap::Arg::new(spec.name)
+                .long(spec.name)
+                .help(spec.help)
+                .action(clap::ArgAction::Append)
+                .value_parser(clap::value_parser!(String)),
+            // Like `Word`, an optional positional — the default is applied at dispatch, for the
+            // same owned-string reason `Int`'s is.
+            noeta_stdlib::ArgKind::PathDefault { .. } => clap::Arg::new(spec.name)
+                .help(spec.help)
+                .value_parser(clap::value_parser!(PathBuf)),
         });
     }
     cmd
@@ -240,6 +263,32 @@ pub(crate) fn ext_command_dispatch(
                     parsed.push_path(spec.name, value.clone());
                 }
             }
+            noeta_stdlib::ArgKind::OptInt => {
+                if let Some(value) = matches.get_one::<i64>(spec.name) {
+                    parsed.push_int(spec.name, *value);
+                }
+            }
+            noeta_stdlib::ArgKind::OptFloat => {
+                if let Some(value) = matches.get_one::<f64>(spec.name) {
+                    parsed.push_float(spec.name, *value);
+                }
+            }
+            // Always recorded, empty when the flag never appeared: a repeatable filter asks "which
+            // names were named", and no names is an answer rather than a missing one.
+            noeta_stdlib::ArgKind::Strings => parsed.push_strs(
+                spec.name,
+                matches
+                    .get_many::<String>(spec.name)
+                    .map(|vs| vs.cloned().collect())
+                    .unwrap_or_default(),
+            ),
+            noeta_stdlib::ArgKind::PathDefault { default } => parsed.push_path(
+                spec.name,
+                matches
+                    .get_one::<PathBuf>(spec.name)
+                    .cloned()
+                    .unwrap_or_else(|| PathBuf::from(default)),
+            ),
         }
     }
     ExitCode::from((ext.run)(&mut CliCommandCtx, &parsed))

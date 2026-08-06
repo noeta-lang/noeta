@@ -1789,4 +1789,73 @@ pub fn triple(args: &[NativeValue]) -> Result<NativeOut, StdError> {
         .stdout(predicate::str::contains(
             "imgfx: registry-index native extension ok",
         ));
+
+    // 6. A binding may take over a **std** command's name. `test`/`bench`/`doc`/`serve` are
+    //    contributed by `std` through the same `Extension::commands` seam this package uses, so std
+    //    is the default provider rather than a privileged one: bound under `test`, the package's
+    //    command IS `noeta test` — the whole verb, not a foreign body wearing std's flags. This is
+    //    what makes "ship the batteries, and let a project replace one" true rather than aspirational.
+    std::fs::write(
+        app.join("noeta.toml"),
+        manifest(
+            "\n[trust]\nnative = [\"acme/imgfx\"]\n[trust.commands]\ntest = \"acme/imgfx:imgfx-info\"\n",
+        ),
+    )
+    .unwrap();
+    composed_env(&mut lang())
+        .current_dir(&app)
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .env("NOETA_CACHE_DIR", &cache)
+        .env("NOETA_TOOLCHAIN_REPO", &repo_url)
+        .env("NOETA_TOOLCHAIN_SRC", &workspace)
+        .arg("test")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "imgfx: registry-index native extension ok",
+        ))
+        // std's runner is not merely shadowed in the help text — it never ran.
+        .stdout(predicate::str::contains("passed").not());
+
+    // …and `--help` says so. Help that described std's `test` for a verb the project has rebound
+    // would be worse than help that merely omitted a command: it would be *wrong*, and confidently.
+    // `--help` is a clap `DisplayHelp` exit rather than an unknown-subcommand error, so it used to
+    // miss the compose delegation entirely; it now hands off to the project's composed toolchain
+    // whenever that toolchain is already built (which it is, one line above).
+    composed_env(&mut lang())
+        .current_dir(&app)
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .env("NOETA_CACHE_DIR", &cache)
+        .env("NOETA_TOOLCHAIN_REPO", &repo_url)
+        .env("NOETA_TOOLCHAIN_SRC", &workspace)
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Prove a registry-resolved extension command dispatches only when command-trusted",
+        ))
+        .stdout(predicate::str::contains("Discover and run a program's `@test` blocks").not())
+        // The other three std commands are untouched — replacement is per name, not wholesale.
+        .stdout(predicate::str::contains("`@bench` blocks"));
+
+    // …but a **core toolchain verb** is still refused: `run`/`build`/`check` are the compiler, and
+    // a project silently redefining what `noeta build` means is not a capability anyone asked for.
+    std::fs::write(
+        app.join("noeta.toml"),
+        manifest(
+            "\n[trust]\nnative = [\"acme/imgfx\"]\n[trust.commands]\nbuild = \"acme/imgfx:imgfx-info\"\n",
+        ),
+    )
+    .unwrap();
+    composed_env(&mut lang())
+        .current_dir(&app)
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .env("NOETA_CACHE_DIR", &cache)
+        .env("NOETA_TOOLCHAIN_REPO", &repo_url)
+        .env("NOETA_TOOLCHAIN_SRC", &workspace)
+        .arg("build")
+        .arg(app.join("main.noe"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("core `noeta` verb"));
 }

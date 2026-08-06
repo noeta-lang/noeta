@@ -176,6 +176,17 @@ The binding *is* the grant. One entry both authorizes the provider to contribute
 
 Because the local name is yours, two packages exporting the same command name coexist: bind one of them under a different key. The first `:` splits the identity from the exported name — a package identity always contains a `/` and never a `:` — so the exported half may contain any character, including a space (`remote-add = "acme/tools:remote add"`).
 
+**A binding may take over one of `std`'s commands.** `test`, `bench`, `doc`, and `serve` are contributed through this same mechanism — `std` ships with the toolchain, so they are registered by default rather than by a grant — which means binding a package under one of those names *replaces* it:
+
+```toml
+[trust.commands]
+test = "thirdparty/ExcellentTesting"   # `noeta test` is now theirs — their flags, their --help
+```
+
+That is the whole point of std holding no privilege here: you get the batteries out of the box, and swapping one out is one line rather than a fork. The replacement owns the verb completely, so its own arguments and exit codes apply — `noeta test --json` means whatever the new provider says it means.
+
+The **core toolchain verbs** are still reserved: `run`, `build`, `check`, `fmt` and their siblings are the compiler, and a binding that names one is refused. Note the difference from [`[directives]`](#directives--where-each-name-comes-from): binding `test` there changes what the `@test` *directive* means at compile time (and therefore what `noeta check` verifies); binding it here changes which *command* runs. A framework that runs your existing `@test` blocks its own way needs only this table.
+
 Unlike [`[directives]`](#directives--where-each-name-comes-from), which is per-package and may be keyed by the using package's own dependency keys, this table is **root-only** and keyed by full package **identity**: it is a capability grant, and a grant is the top-level project's alone to make. A dependency's own `[trust.commands]` is not read.
 
 A bare `commands = ["company/package"]` array — granting every command a package ships, rather than binding them one at a time — is refused with a message naming this table as its replacement.

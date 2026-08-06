@@ -49,6 +49,18 @@ bench = "acme/fuzzkit"      # this package's `@bench` is fuzzkit's `@tier(bench,
 
 A provider is a **package identity** (`acme/fuzzkit`), the built-in `"std"`, or a `[dependencies]` key. Prefer the identity: a key bound to a *scope* covers several member packages at once (`para` → `para/aether` + `para/db`) and cannot say which one you meant.
 
+### The tier, or the command?
+
+This binding retargets the **tier** — what `@bench` means, which config attribute its blocks stamp, and which runner receives the roots. The verb you type is a separate, replaceable thing: `noeta test`/`bench`/`doc` are commands `std` contributes, and a [`[trust.commands]`](Manifest#trustcommands--contributed-subcommands) binding replaces one wholesale, flags and help included. Which you want depends on what the package redefines:
+
+| The package… | Bind it in |
+|---|---|
+| runs your existing `@test` blocks its own way (a better runner, different reporting) | `[trust.commands]` |
+| defines its own block semantics or config attribute (`@fuzz(cases: 500)`) | `[directives]` |
+| does both — its own tier *and* the verb that drives it | both, under the same name |
+
+The distinction is real work, not bookkeeping: `[directives]` is part of the compile, so it changes what [`noeta check`](The-CLI#noeta-check) verifies inside those blocks; `[trust.commands]` changes only who is invoked.
+
 ---
 
 ## Expression tiers — embedded languages as values

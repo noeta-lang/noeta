@@ -133,13 +133,19 @@ By default every tier **warns**: `noeta audit` prints a matched advisory but doe
 
 In the audit report a `fail`-level hit is marked `✗` (and fails the run); a `warn`-level hit is marked `⚠`. A publisher advisory's line also shows the verified signing identity (`[publisher-verified: …]`).
 
-### `noeta watch-scope <scope>` — suppression monitoring
+### `noeta advisory watch` — suppression monitoring
 
-A compromised registry's subtlest attack is to *withhold* an advisory from you specifically. `noeta watch-scope` defends against it over time: it pins the advisory feed head, the transparency-log checkpoint, and the set of advisory ids ever seen for a scope, then on each run verifies the log is an **append-only extension** of the last checkpoint (no history rewrite), that the feed key and log key are unchanged, and that **no previously-seen advisory has disappeared**. A rewrite, key change, feed rollback, or disappearance exits non-zero. State is kept in a small file (`--state <path>`, else under the noeta cache), so it is ideal as a CI cron:
+A compromised registry's subtlest attack is to *withhold* an advisory from you specifically. `noeta advisory watch` defends against it over time: it pins the advisory feed head, the transparency-log checkpoint, and the set of advisory ids ever seen for a scope, then on each run verifies the log is an **append-only extension** of the last checkpoint (no history rewrite), that the feed key and log key are unchanged, and that **no previously-seen advisory has disappeared**. A rewrite, key change, feed rollback, or disappearance exits non-zero.
+
+Where `noeta audit` proves the feed verifies *now*, this proves nothing has been rewritten *since* — which is why it is the one verb here that carries state between runs. It keeps one `<scope>.toml` per watched scope under `--state <dir>` (else the noeta cache); in CI, cache or commit that directory, because a baseline that resets every run detects nothing.
 
 ```sh
-noeta watch-scope acme            # first run pins the baseline; later runs detect drift
+noeta advisory watch                     # every scope `noeta.lock` pins — the CI cron form
+noeta advisory watch acme                # just one scope
+noeta advisory watch --state .noeta-watch  # keep the baseline somewhere CI can cache
 ```
+
+Watching the whole lockfile is the intended default: the set worth monitoring is the set you depend on, and it should not have to be maintained by hand in a cron file. The scope set is not filtered by source — an advisory names a *package*, so one against `acme/http` applies whether you resolved it from the registry or straight from git.
 
 ## Environment reference
 

@@ -1276,7 +1276,7 @@ pub(crate) fn cmd_audit(path: &std::path::Path) -> ExitCode {
     // a 200 whose body is not the shape `test_data/wire` pins (a cross-repo protocol drift, which is
     // the *cause* the fixtures exist to catch — see `registry::shape_drift`): never routine, and every
     // one of them means *no dependency was checked against the feed at all*. That is reported
-    // on stderr and exits non-zero, the same answer `noeta watch-scope` already gives to the same call
+    // on stderr and exits non-zero, the same answer `noeta advisory watch` already gives to the same call
     // and the same answer resolution gives to a bad release signature. The `[trust.advisories]` policy
     // is deliberately NOT consulted: it selects which *intake tier's* hits fail a build, and an
     // unverifiable feed has no tier — nothing was read to have one.
@@ -2099,7 +2099,7 @@ pub(crate) fn toml_string(s: &str) -> String {
     noeta_pm::toml_quote(s)
 }
 
-/// The pinned state `noeta watch-scope` carries between runs (advisory-intake arc, tier 6): the keys it
+/// The pinned state `noeta advisory watch` carries between runs (advisory-intake arc, tier 6): the keys it
 /// trusts (advisory feed + transparency log), the last checkpoint it saw, and the set of advisory ids
 /// it has ever seen for the scope. Persisted as TOML so a later run can prove the log only grew
 /// (append-only) and no previously-seen advisory silently vanished.
@@ -2118,38 +2118,132 @@ struct WatchState {
     seen: Vec<String>,
 }
 
-/// `noeta watch-scope <scope>` — the transparency-log suppression monitor (advisory-intake arc,
-/// tier 6). Verifies, against the state pinned by the previous run, that the registry's advisory log is
-/// an append-only extension (no history rewrite) and that no advisory previously seen for the scope has
-/// disappeared from the feed (silent suppression). A detected rewrite, key change, feed rollback, or
-/// disappearance exits non-zero; the first run establishes the baseline. Ideal as a CI cron.
-pub(crate) fn cmd_watch_scope(scope: &str, state_path: Option<&std::path::Path>) -> ExitCode {
+/// `noeta advisory watch [scope]` — the transparency-log suppression monitor (advisory-intake arc,
+/// tier 6). Watches the scope named, or — the form a CI cron wants — **every scope this project's
+/// `noeta.lock` pins**, since the set worth watching is the set you depend on and nobody should have
+/// to keep that list current in a cron file by hand. Exits non-zero if any watched scope drifted.
+///
+/// Each scope is fetched separately even when several route to the same registry: the feed is verified
+/// against *that scope's* pinned advisory key, and two scopes can legitimately sit on different sides
+/// of a key rotation, so one shared fetch would have to be re-verified per scope anyway. The cost is a
+/// few small requests per cron run, which is the right side of that trade.
+pub(crate) fn cmd_advisory_watch(
+    scope: Option<&str>,
+    state_dir: Option<&std::path::Path>,
+) -> ExitCode {
+    let scopes: Vec<String> = match scope {
+        Some(one) => vec![one.to_string()],
+        None => match lockfile_scopes() {
+            Ok(scopes) if scopes.is_empty() => {
+                println!(
+                    "noeta: nothing to watch — this project's `noeta.lock` pins no dependencies. \
+                     Name a scope to watch it anyway: `noeta advisory watch <scope>`."
+                );
+                return ExitCode::SUCCESS;
+            }
+            Ok(scopes) => scopes,
+            Err(code) => return code,
+        },
+    };
+    let dir = match state_dir {
+        Some(p) => p.to_path_buf(),
+        None => match noeta_cache::Cache::locate() {
+            Some(cache) => cache.join("watch"),
+            None => {
+                eprintln!("noeta: cannot locate a state directory — pass `--state <dir>`");
+                return ExitCode::from(2);
+            }
+        },
+    };
+
+    if scope.is_none() {
+        println!(
+            "watching {} scope{} from `noeta.lock`: {}\n",
+            scopes.len(),
+            plural(scopes.len()),
+            scopes.join(", ")
+        );
+    }
+
+    // The exit code is the *worst* outcome across the set, not the last one: a misconfigured scope
+    // (2) outranks a detected drift (1), because it means that scope was never actually checked.
+    let mut drifted = 0usize;
+    let mut unusable = 0usize;
+    for scope in &scopes {
+        // One state file per scope, so a set read from the lockfile grows and shrinks with the
+        // dependency list without a scope's pinned baseline ever being confused for another's.
+        match watch_one_scope(scope, &dir.join(format!("{scope}.toml"))) {
+            code if code == ExitCode::SUCCESS => {}
+            code if code == ExitCode::from(1) => drifted += 1,
+            _ => unusable += 1,
+        }
+    }
+    if scopes.len() > 1 && (drifted + unusable) > 0 {
+        eprintln!(
+            "\n{} of {} watched scopes reported a problem.",
+            drifted + unusable,
+            scopes.len()
+        );
+    }
+    match (unusable, drifted) {
+        (0, 0) => ExitCode::SUCCESS,
+        (0, _) => ExitCode::from(1),
+        _ => ExitCode::from(2),
+    }
+}
+
+/// The distinct scopes of every dependency the nearest project's `noeta.lock` pins — what a bare
+/// `noeta advisory watch` watches. Deliberately **not** filtered to registry-sourced pins: an advisory
+/// is a statement about a package *name*, so one against `acme/http` applies whether you resolved it
+/// from the registry or straight from git. That is exactly the set [`cmd_audit`] cross-references
+/// against the feed, and the two verbs must not disagree about which packages a feed speaks for.
+fn lockfile_scopes() -> Result<Vec<String>, ExitCode> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let Some(manifest_path) = manifest::find(&cwd) else {
+        eprintln!(
+            "noeta: no `{}` found at or above `{}` — run `noeta advisory watch` inside a project, \
+             or name the scope to watch",
+            manifest::MANIFEST_NAME,
+            cwd.display()
+        );
+        return Err(ExitCode::from(2));
+    };
+    let dir = manifest_path
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .to_path_buf();
+    let lock = lock::Lock::read(&dir);
+    let scopes: std::collections::BTreeSet<String> = lock
+        .locked_versions()
+        .filter_map(|(identity, _)| identity.split('/').next())
+        .filter(|scope| !scope.is_empty())
+        .map(str::to_string)
+        .collect();
+    Ok(scopes.into_iter().collect())
+}
+
+/// Watch one scope, diffing against `state_file` and rewriting it. Verifies, against the state pinned
+/// by the previous run, that the registry's advisory log is an append-only extension (no history
+/// rewrite) and that no advisory previously seen for the scope has disappeared from the feed (silent
+/// suppression). A detected rewrite, key change, feed rollback, or disappearance exits non-zero; the
+/// first run establishes the baseline.
+fn watch_one_scope(scope: &str, state_file: &std::path::Path) -> ExitCode {
     use noeta_pm::transparency;
 
     let base = match scope_registry_base(scope) {
         Ok(Some(base)) => base,
         Ok(None) => {
             eprintln!(
-                "noeta: watch-scope needs the hosted registry, but `NOETA_REGISTRY_DIR` routes to \
-                 the file-backed local index — unset it, set `NOETA_REGISTRY_URL`, or map \
+                "noeta: watching `{scope}` needs the hosted registry, but `NOETA_REGISTRY_DIR` \
+                 routes to the file-backed local index — unset it, set `NOETA_REGISTRY_URL`, or map \
                  `{scope}` under `[registries]`"
             );
             return ExitCode::from(2);
         }
         Err(code) => return code,
     };
-    let state_file = match state_path {
-        Some(p) => p.to_path_buf(),
-        None => match noeta_cache::Cache::locate() {
-            Some(dir) => dir.join("watch").join(format!("{scope}.toml")),
-            None => {
-                eprintln!("noeta: cannot locate a state directory — pass `--state <path>`");
-                return ExitCode::from(2);
-            }
-        },
-    };
     // Load prior state, but only if it is for this same base (a different registry is a fresh anchor).
-    let prior: Option<WatchState> = std::fs::read_to_string(&state_file)
+    let prior: Option<WatchState> = std::fs::read_to_string(state_file)
         .ok()
         .and_then(|t| toml::from_str::<WatchState>(&t).ok())
         .filter(|s| s.base == base);
@@ -2162,7 +2256,7 @@ pub(crate) fn cmd_watch_scope(scope: &str, state_path: Option<&std::path::Path>)
         }
     };
 
-    println!("watch-scope `{scope}` — {base}");
+    println!("watch `{scope}` — {base}");
     let mut drift = 0usize;
 
     // 1) The advisory feed, verified against the pinned advisory key (TOFU). This checks every
@@ -2334,7 +2428,7 @@ pub(crate) fn cmd_watch_scope(scope: &str, state_path: Option<&std::path::Path>)
     }
     match toml::to_string_pretty(&next) {
         Ok(text) => {
-            if let Err(err) = std::fs::write(&state_file, text) {
+            if let Err(err) = std::fs::write(state_file, text) {
                 eprintln!(
                     "noeta: could not write watch state `{}`: {err}",
                     state_file.display()

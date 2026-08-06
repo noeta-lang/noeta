@@ -147,7 +147,18 @@
 /// `modules()`/`types()` alone — so a published package's docs named none of its traits, enums,
 /// classes or structs. Assembly also now holds a trait's `namespace` to its unit's root, the rule
 /// the other four nominal hooks were already held to and traits were not.
-pub const ABI_VERSION: u32 = 15;
+///
+/// **16** — [`command::ArgKind`] gained `OptInt`, `OptFloat`, `Strings` (a repeatable flag) and
+/// `PathDefault`, with [`command::ParsedArgs::get_float`] and [`command::ParsedArgs::strs`] to read
+/// the two new shapes. A source break only for code that *matches* `ArgKind` exhaustively — the
+/// CLI does, an extension declaring commands does not. The reason they exist is that `noeta test`,
+/// `noeta bench` and `noeta doc` stopped being clap variants the binary hardcodes and became
+/// ordinary [`command::ExtCommand`]s std contributes: an argument list rich enough to say
+/// `--jobs <N>` (unset ≠ zero), `--max-regress <PCT>` (negative allowed), `--name a --name b`, and
+/// a defaulted positional had to exist first. What that buys is replaceability — a
+/// `[trust.commands]` binding under one of those names now takes the whole verb over, flags and
+/// help included, so a third-party test runner can *be* `noeta test`.
+pub const ABI_VERSION: u32 = 16;
 
 pub mod args;
 pub mod channel;

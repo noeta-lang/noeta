@@ -236,6 +236,19 @@ pub fn maybe_delegate_cwd() -> Option<ExitCode> {
 /// stock server running, which is correct: none of those is composable, and the per-request check
 /// still speaks for anything that needed a composition it did not get.
 pub fn delegate_server_if_composed() {
+    delegate_cwd_if_composed()
+}
+
+/// Hand this invocation to the working directory's composed toolchain **if that toolchain is
+/// already built** — the cache-hit-only delegation. Returns (having done nothing) when there is no
+/// project, no native dependency, or no composition on disk; on a hit it `exec`s and never returns.
+///
+/// Two callers, for the same reason in different clothes: a long-lived server ([`delegate_server_if_composed`])
+/// cannot link a native package's registrations without being the composed toolchain, and `--help`
+/// cannot *describe* the composed toolchain's commands without being it. Neither may pay a cold
+/// compose — a server would blow its client's `initialize` timeout, and a help request that
+/// disappeared into a multi-minute cargo build would be a worse answer than a slightly short list.
+pub fn delegate_cwd_if_composed() {
     if std::env::var_os(COMPOSED_GUARD).is_some() {
         return;
     }
