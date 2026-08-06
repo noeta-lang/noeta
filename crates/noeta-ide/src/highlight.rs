@@ -96,6 +96,26 @@ fn is_keyword(kind: TokenKind) -> bool {
 /// offsets. Unclassified tokens (operators, punctuation, plain identifiers) get no span — they
 /// render in the default code foreground.
 pub fn highlight_code(text: &str) -> Vec<HlSpan> {
+    to_utf16(text, classify(text))
+}
+
+/// [`highlight_code`] in **byte** offsets — the lexer's own units, before the UTF-16 conversion the
+/// webview consumer needs. The classification is identical; only the offset basis differs.
+///
+/// This is the form a *terminal* consumer wants (the `noeta repl` prompt highlighter): it slices
+/// the line with `&line[start..end]` and counts columns in bytes, so handing it UTF-16 offsets
+/// would desynchronise the colouring the moment a line contains a non-ASCII character.
+pub fn highlight_code_bytes(text: &str) -> Vec<HlSpan> {
+    classify(text)
+        .into_iter()
+        .map(|(start, end, class)| HlSpan { start, end, class })
+        .collect()
+}
+
+/// The shared classifier: the lexical + heuristic pass, in the lexer's own **byte** spans. Both
+/// public entry points are this one walk — the UTF-16 form only post-converts — so a doc page and
+/// a terminal prompt can never disagree about what is a keyword.
+fn classify(text: &str) -> Vec<(u32, u32, HlClass)> {
     let source = Source::new(SourceId::FIRST, "snippet.noe", text);
     let lexed = lex_with_trivia(&source);
     let toks = &lexed.tokens;
@@ -145,8 +165,7 @@ pub fn highlight_code(text: &str) -> Vec<HlSpan> {
         spans.push((c.span.start, c.span.end, HlClass::Comment));
     }
     spans.sort_by_key(|s| s.0);
-
-    to_utf16(text, spans)
+    spans
 }
 
 /// Convert byte-offset spans to UTF-16 code-unit spans by one walk over the text. Span boundaries
@@ -220,6 +239,38 @@ mod tests {
             .expect("return classified");
         // In UTF-16 units: x(0) space(1) =(2) space(3) "(4) π(5) "(6) \n(7) → return at 8..14.
         assert_eq!((ret.start, ret.end), (8, 14));
+    }
+
+    #[test]
+    fn byte_offsets_slice_the_original_text() {
+        // The same snippet as the UTF-16 test: "π" is 2 bytes but 1 UTF-16 unit, so the byte form
+        // must place `return` one unit later (9..15 against 8..14) — and, being byte offsets, must
+        // slice `text` directly.
+        let text = "x = \"π\"\nreturn x";
+        let spans = highlight_code_bytes(text);
+        let ret = spans
+            .iter()
+            .find(|s| s.class == HlClass::Keyword)
+            .expect("return classified");
+        assert_eq!((ret.start, ret.end), (9, 15));
+        assert_eq!(&text[ret.start as usize..ret.end as usize], "return");
+        // Every span must be a valid `str` boundary pair — the terminal highlighter slices on them.
+        for s in &spans {
+            assert!(text.is_char_boundary(s.start as usize));
+            assert!(text.is_char_boundary(s.end as usize));
+        }
+    }
+
+    #[test]
+    fn byte_and_utf16_forms_classify_identically() {
+        // The two entry points differ only in offset basis — never in what they classify.
+        let text = "@test fn f(a: int): int { return a + 1 } // note";
+        let bytes = highlight_code_bytes(text);
+        let utf16 = highlight_code(text);
+        assert_eq!(bytes.len(), utf16.len());
+        for (b, u) in bytes.iter().zip(&utf16) {
+            assert_eq!(b.class, u.class);
+        }
     }
 
     #[test]
