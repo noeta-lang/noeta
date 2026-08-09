@@ -1008,6 +1008,17 @@ const TABLE: &[Row] = &[
     Row("ArgSpec", "help", Prose("the argument's help text")),
     Row(
         "ArgSpec",
+        "short",
+        Constraint(
+            Anchor(CLI_SERVE, "arg.short(c)"),
+            Anchor(
+                "crates/noeta-cli/tests/cli/test_runner.rs",
+                "short_flags_alias_their_long_forms",
+            ),
+        ),
+    ),
+    Row(
+        "ArgSpec",
         "kind",
         Constraint(
             Anchor(CLI_SERVE, "ArgKind::Path =>"),

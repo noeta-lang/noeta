@@ -118,41 +118,84 @@ pub(crate) fn ext_command_clap(
 ) -> clap::Command {
     let mut cmd = clap::Command::new(name).about(ext.about);
     for spec in ext.args {
+        let arg = clap::Arg::new(spec.name);
+        // A short alias applies to the flag kinds only — a positional has no `-x` form to alias, and
+        // clap would panic on one rather than ignore it. Declaring `short` on a positional is an
+        // author slip, so it is dropped here (with the help text unchanged) instead of aborting the
+        // whole CLI for every user of that package.
+        let arg = match (spec.short, positional_kind(&spec.kind)) {
+            (Some(c), false) => arg.short(c),
+            _ => arg,
+        };
         cmd = cmd.arg(match spec.kind {
-            noeta_stdlib::ArgKind::Path => clap::Arg::new(spec.name)
+            noeta_stdlib::ArgKind::Path => arg
                 .help(spec.help)
                 .required(true)
                 .value_parser(clap::value_parser!(PathBuf)),
             // The default is applied at dispatch (clap's builder `default_value` wants an
             // owned-string feature we don't enable); the spec's help text names it.
-            noeta_stdlib::ArgKind::Int { .. } => clap::Arg::new(spec.name)
+            noeta_stdlib::ArgKind::Int { .. } => arg
                 .long(spec.name)
                 .help(spec.help)
                 .value_parser(clap::value_parser!(i64)),
-            noeta_stdlib::ArgKind::Str { .. } => clap::Arg::new(spec.name)
+            noeta_stdlib::ArgKind::Str { .. } => arg
                 .long(spec.name)
                 .help(spec.help)
                 .value_parser(clap::value_parser!(String)),
-            noeta_stdlib::ArgKind::Bool => clap::Arg::new(spec.name)
+            noeta_stdlib::ArgKind::Bool => arg
                 .long(spec.name)
                 .help(spec.help)
                 .action(clap::ArgAction::SetTrue),
-            noeta_stdlib::ArgKind::OptStr => clap::Arg::new(spec.name)
+            noeta_stdlib::ArgKind::OptStr => arg
                 .long(spec.name)
                 .help(spec.help)
                 .value_parser(clap::value_parser!(String)),
-            noeta_stdlib::ArgKind::OptPath => clap::Arg::new(spec.name)
+            noeta_stdlib::ArgKind::OptPath => arg
                 .long(spec.name)
                 .help(spec.help)
                 .value_parser(clap::value_parser!(PathBuf)),
             // An optional positional word: no `.long`, not required — clap fills declared
             // positionals left-to-right, matching `ArgKind::Word`'s declaration-order contract.
-            noeta_stdlib::ArgKind::Word => clap::Arg::new(spec.name)
+            noeta_stdlib::ArgKind::Word => arg
                 .help(spec.help)
                 .value_parser(clap::value_parser!(String)),
+            noeta_stdlib::ArgKind::OptInt => arg
+                .long(spec.name)
+                .help(spec.help)
+                .value_parser(clap::value_parser!(i64)),
+            // `allow_negative_numbers`: a threshold may legitimately be negative, and without it
+            // clap reads the leading `-` as an unknown flag.
+            noeta_stdlib::ArgKind::OptFloat => arg
+                .long(spec.name)
+                .help(spec.help)
+                .allow_negative_numbers(true)
+                .value_parser(clap::value_parser!(f64)),
+            // Repeatable: `Append` keeps every occurrence, which is what `ParsedArgs::strs` hands
+            // back in order.
+            noeta_stdlib::ArgKind::Strings => arg
+                .long(spec.name)
+                .help(spec.help)
+                .action(clap::ArgAction::Append)
+                .value_parser(clap::value_parser!(String)),
+            // Like `Word`, an optional positional — the default is applied at dispatch, for the
+            // same owned-string reason `Int`'s is.
+            noeta_stdlib::ArgKind::PathDefault { .. } => arg
+                .help(spec.help)
+                .value_parser(clap::value_parser!(PathBuf)),
         });
     }
     cmd
+}
+
+/// Whether a kind is a **positional** — one clap fills by position rather than by a `--flag`, and
+/// so one a short alias cannot apply to.
+fn positional_kind(kind: &noeta_stdlib::ArgKind) -> bool {
+    matches!(
+        kind,
+        noeta_stdlib::ArgKind::Path
+            | noeta_stdlib::ArgKind::Word
+            | noeta_stdlib::ArgKind::PathDefault { .. }
+    )
 }
 
 /// Install the SIGINT graceful-drain handler for a serving process (server-hmr S0): the first
@@ -240,6 +283,32 @@ pub(crate) fn ext_command_dispatch(
                     parsed.push_path(spec.name, value.clone());
                 }
             }
+            noeta_stdlib::ArgKind::OptInt => {
+                if let Some(value) = matches.get_one::<i64>(spec.name) {
+                    parsed.push_int(spec.name, *value);
+                }
+            }
+            noeta_stdlib::ArgKind::OptFloat => {
+                if let Some(value) = matches.get_one::<f64>(spec.name) {
+                    parsed.push_float(spec.name, *value);
+                }
+            }
+            // Always recorded, empty when the flag never appeared: a repeatable filter asks "which
+            // names were named", and no names is an answer rather than a missing one.
+            noeta_stdlib::ArgKind::Strings => parsed.push_strs(
+                spec.name,
+                matches
+                    .get_many::<String>(spec.name)
+                    .map(|vs| vs.cloned().collect())
+                    .unwrap_or_default(),
+            ),
+            noeta_stdlib::ArgKind::PathDefault { default } => parsed.push_path(
+                spec.name,
+                matches
+                    .get_one::<PathBuf>(spec.name)
+                    .cloned()
+                    .unwrap_or_else(|| PathBuf::from(default)),
+            ),
         }
     }
     ExitCode::from((ext.run)(&mut CliCommandCtx, &parsed))

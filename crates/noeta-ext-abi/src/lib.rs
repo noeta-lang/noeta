@@ -147,7 +147,26 @@
 /// `modules()`/`types()` alone — so a published package's docs named none of its traits, enums,
 /// classes or structs. Assembly also now holds a trait's `namespace` to its unit's root, the rule
 /// the other four nominal hooks were already held to and traits were not.
-pub const ABI_VERSION: u32 = 15;
+///
+/// **16** — [`command::ArgKind`] gained `OptInt`, `OptFloat`, `Strings` (a repeatable flag) and
+/// `PathDefault`, with [`command::ParsedArgs::get_float`] and [`command::ParsedArgs::strs`] to read
+/// the two new shapes. A source break only for code that *matches* `ArgKind` exhaustively — the
+/// CLI does, an extension declaring commands does not. The reason they exist is that `noeta test`,
+/// `noeta bench` and `noeta doc` stopped being clap variants the binary hardcodes and became
+/// ordinary [`command::ExtCommand`]s std contributes: an argument list rich enough to say
+/// `--jobs <N>` (unset ≠ zero), `--max-regress <PCT>` (negative allowed), `--name a --name b`, and
+/// a defaulted positional had to exist first. What that buys is replaceability — a
+/// `[trust.commands]` binding under one of those names now takes the whole verb over, flags and
+/// help included, so a third-party test runner can *be* `noeta test`.
+/// **17** — [`command::ArgSpec`] gained `short` (a one-letter alias, `-j` for `--jobs`) and, with it,
+/// an `ArgSpec::DEFAULTS` to spread. A **source break** for every existing `ArgSpec` literal, which
+/// named all three fields: add `..ArgSpec::DEFAULTS` and nothing else changes. That break is the
+/// reason the field waited — ABI 16 shipped `test`/`bench`/`doc` as declared commands *without* the
+/// `-j` the clap derive had offered, because adding the field then would have broken every
+/// out-of-tree literal in the same release that moved the verbs. Doing it as its own version keeps
+/// the two diagnosable apart. A `short` on a positional kind is ignored rather than fatal, since a
+/// package's slip should not abort the CLI for everyone who installed it.
+pub const ABI_VERSION: u32 = 17;
 
 pub mod args;
 pub mod channel;

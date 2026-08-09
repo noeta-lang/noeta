@@ -1,6 +1,10 @@
 # The `noeta` CLI
 
-The `noeta` binary is the whole toolchain. Its main subcommands:
+The `noeta` binary is the whole toolchain. Its subcommands come from three places: the toolchain's own verbs, the standard library, and — in a project that asks for them — your dependencies.
+
+## Toolchain verbs
+
+The compiler, the runtime, and the package surface — every one of these is built into the binary and always available.
 
 | Command | Purpose |
 |---|---|
@@ -10,37 +14,68 @@ The `noeta` binary is the whole toolchain. Its main subcommands:
 | [`noeta check`](#noeta-check) | Parse and type-check without running or building (exit 0/1/2). |
 | [`noeta explain`](#noeta-explain) | Explain a diagnostic code — what `E0xxx` means and how to fix it. |
 | [`noeta expand`](#noeta-expand) | Print the source that compile-time `@`-directive expansions generated. |
-| [`noeta migrate`](#noeta-migrate) | Apply database schema migrations — an extension command the [para/db](para-db) package provides. |
-| [`noeta serve`](#noeta-serve-and---watch) | Run a program's HTTP handler as a server (`fn fetch(req: Request): Response`). |
 | [`noeta repl`](#noeta-repl) | Interactive REPL. |
 | [`noeta dump`](#noeta-dump) | Disassemble a program to its VM bytecode (a debugging aid). |
-| [`noeta test`](Testing) | Discover and run `@test` blocks. |
-| [`noeta bench`](Benchmarking) | Discover and measure `@bench` blocks. |
-| [`noeta doc`](Documentation-and-Tiers) | Extract `@doc { … }` prose to stdout. |
+| [`noeta fmt`](#noeta-fmt) | Format `.noe` source into the canonical style (files/dirs, `--check`, `--stdin`). |
+| [`noeta profile`](Profiling) | Profile a program — a hot-function table or a flamegraph. |
+| [`noeta cache`](#noeta-cache) | Inspect or clean the per-user cache — compilations, composed toolchains, fetched sources. |
+| [`noeta grammar`](Extending-Tiers) | Generate the editor grammar overlay for a project's own [text tiers](Extending-Tiers). |
 | [`noeta lsp`](Editor-and-AI-Tooling) | The language server, over stdio (started by your editor, not by hand). |
 | [`noeta dap`](Debugging) | The debug adapter, over stdio (started by your editor's debug UI, not by hand). |
 | [`noeta mcp`](Editor-and-AI-Tooling) | The agent-native MCP server, over stdio (for AI tooling; see [Editor & AI Tooling](Editor-and-AI-Tooling)). |
-| [`noeta profile`](Profiling) | Profile a program — a hot-function table or a flamegraph. |
-| [`noeta fmt`](#noeta-fmt) | Format `.noe` source into the canonical style (files/dirs, `--check`, `--stdin`). |
 | [`noeta add`](#noeta-add) | Add a dependency to `noeta.toml` and resolve it into `noeta.lock`. |
 | [`noeta update`](#noeta-update) | Re-resolve the dependency graph, re-pinning moved refs and refreshed versions. |
 | [`noeta claim`](#noeta-claim) | Claim a registry scope self-service — prove your GitHub identity (or a domain) and get the publish token. |
 | [`noeta publish`](#noeta-publish) | Publish a tagged release of your package to the registry, signed ([provenance](Package-Provenance)). |
 | [`noeta scope`](#noeta-scope) | Manage a scope you own — e.g. require verified provenance on every release. |
 | [`noeta audit`](#noeta-audit) | Report the dependency tree's trust footprint — native/command grants, pinned provenance, and advisory hits by tier. |
-| [`noeta advisory`](#noeta-advisory) | Issue a publisher advisory for a scope you own, file a public report, or list/promote the report queue. |
-| [`noeta watch-scope`](#noeta-watch-scope) | Monitor a scope's advisory transparency log for silent suppression or rewrite. |
+| [`noeta advisory`](#noeta-advisory) | Issue a publisher advisory for a scope you own, file a public report, list/promote the report queue, or `watch` a scope's transparency log for silent suppression. |
 | [`noeta key`](#noeta-key) | Manage the Ed25519 signing key (the key-based provenance path). |
 | [`noeta upgrade`](#noeta-upgrade) | Self-update the toolchain binary to the latest release. |
 | [`noeta ide`](#noeta-ide) | Install the matching editor extension — the VS Code/VSCodium `.vsix` at this binary's version. |
 
 Run `noeta --help` or `noeta <command> --help` for the authoritative flag list.
 
-> [!NOTE]
-> **Observability.** There is no telemetry subcommand or flag — production tracing rides `noeta run` and the server, configured by the standard `OTEL_EXPORTER_OTLP_ENDPOINT` env var and off until you set it. See [Observability](Observability). (The dev-time flamegraph tool is [`noeta profile`](Profiling).)
+## Commands the standard library provides
+
+These need no opt-in — `std` ships with the toolchain — but every one of them is an [extension command](#commands-a-package-contributes) `std` contributes, not a verb the binary hardcodes. They are here by default because std is the *default* provider, not a privileged one.
+
+| Command | Purpose |
+|---|---|
+| [`noeta test`](Testing) | Discover and run `@test` blocks. |
+| [`noeta bench`](Benchmarking) | Discover and measure `@bench` blocks. |
+| [`noeta doc`](Documentation-and-Tiers) | Extract `@doc { … }` prose to stdout, or generate the package's documentation artifact. |
+| [`noeta serve`](#noeta-serve-and---watch) | Run a program's HTTP handler as a server (`fn fetch(req: Request): Response`). |
+
+**So any of them can be replaced.** A [`[trust.commands]`](Manifest#trustcommands--contributed-subcommands) binding under one of these names takes the name over, and the new provider owns the whole verb — its own flags, its own `--help`, its own exit codes:
+
+```toml
+[trust.commands]
+test = "thirdparty/ExcellentTesting"   # `noeta test` now runs theirs
+```
+
+You get the batteries out of the box, and swapping one out is a line of manifest rather than a fork. The core toolchain verbs above are not replaceable this way — `run`/`build`/`check` are the compiler.
+
+A package that declares its own `@tier` earns `noeta <tier> <FILE>` the same way — see [Extending Tiers](Extending-Tiers). That is a different seam from this one, and worth keeping straight: a [`[directives]`](Manifest#directives--where-each-name-comes-from) binding decides what `@test` *means* at compile time (and so what `noeta check` verifies), while the command binding decides what *runs* it. A framework that runs your existing `@test` blocks its own way needs only the command binding.
+
+## Commands a package contributes
+
+A dependency can add subcommands to the toolchain — the `cargo clippy` model. They are **not** part of the CLI, and are documented by the package that ships them: such a command exists only inside a project whose manifest depends on the providing package *and* binds the command in [`[trust.commands]`](Manifest#trustcommands--contributed-subcommands), dispatched through that app's composed toolchain. In any other directory the verb does not exist, and `noeta --help` there never mentions it.
+
+```toml
+[trust.commands]
+migrate = "para/db"           # `noeta migrate` — apply this project's schema migrations
+undo    = "para/db:rollback"  # the key is the name you type, so this is `noeta undo`
+```
+
+The binding *is* the grant: one entry both authorizes the package to contribute the command and fixes the name it appears under, so two packages exporting the same name coexist and nothing is registered you did not ask for. [`noeta audit`](#noeta-audit) reports every command grant in the tree.
+
+`noeta --help` inside such a project lists these commands, and `noeta <cmd> --help` renders the package's own arguments — but only once the project's toolchain has been composed, since a package's commands live in that build and not in the `noeta` on your `PATH`. Any command run in the project composes it (the first one pays a build and says so); after that, help describes what will actually run. A `--help` on a cold cache prints the stock list rather than disappearing into a multi-minute build.
+
+The canonical example is [para/db](para-db)'s `noeta migrate` — forward-only migrations from a `migrations/` directory, re-runnable seeds from `seeds/` — whose full reference lives on that package's own page. Writing one is on [Native Extensions](Native-Extensions#extension-commands).
 
 > [!NOTE]
-> The language-conformance/differential harness that developers use is a *separate* dev binary (`noeta-conformance`), deliberately kept out of the shipped CLI so the `test` verb stays free for your program's own tests. Editor tooling is on [Editor & AI Tooling](Editor-and-AI-Tooling); the debugger on [Debugging](Debugging).
+> **Observability.** There is no telemetry subcommand or flag — production tracing rides `noeta run` and the server, configured by the standard `OTEL_EXPORTER_OTLP_ENDPOINT` env var and off until you set it. See [Observability](Observability). (The dev-time flamegraph tool is [`noeta profile`](Profiling).)
 
 ## `noeta init`
 
@@ -266,15 +301,9 @@ The generated source goes to stdout and the summary to stderr, so `noeta expand 
 
 Exit codes match `check`: **0** on success, **1** if any expansion failed (a hook that returned `Err`, or generated code that does not parse — reported as **E0062**, blamed on the directive) or the sources otherwise failed to load, **2** if a file could not be read at all.
 
-## `noeta migrate`
-
-Applies a project's **schema migrations**. `migrate` is **not a core verb** — it is an extension-contributed command the **para/db package** provides (the `cargo clippy` model): it is available in a project whose manifest depends on `para/db` and binds the command ([`[trust.commands]`](Manifest#trustcommands--contributed-subcommands) / `migrate = "para/db"` — the key is the name you type, so `undo = "para/db:rollback"` would make it `noeta undo`), dispatched through the app's composed toolchain like any other extension subcommand.
-
-Forward-only migrations apply from a `migrations/` directory in filename order, re-runnable seeds from `seeds/`, and the connection string resolves from `--db`, then `DATABASE_URL`, then the manifest's [`[db]` table](Manifest#db--database-connection). A migration's **extension picks its body language**, and both kinds share one ordering: a `.noe` migration is a Noeta program declaring `migrate(): List<Statement>`, whose returned statements are lowered to the connected driver's DDL, while a `.sql` migration runs verbatim — the escape hatch for whatever a backend spells its own way. The full command reference — every invocation, seed semantics, `--reset`, and exit codes — is on the [para/db](para-db) page.
-
 ## `noeta serve` and `--watch`
 
-`noeta serve app.noe --port 8080` serves the file's top-level `fn fetch(req: Request): Response` handler (see [std.http](std-http)); the app defines the handler and must **not** call `server.serve(...)` itself — the command runs the file's top-level setup, then drives the handler on the given port. `--host` sets the bind address (default `0.0.0.0`, all interfaces; pass `--host 127.0.0.1` for local-only). **Ctrl-C** drains gracefully: the server stops accepting, finishes the requests already in flight, closes the listener, and exits — a second Ctrl-C forces an immediate stop.
+`noeta serve app.noe --port 8080` serves the file's top-level `fn fetch(req: Request): Response` handler (see [std.http](std-http)); the app defines the handler and must **not** call `server.serve(...)` itself — the command runs the file's top-level setup, then drives the handler on the given port. `fetch` need only *be* a handler, not be spelled as a `fn`: any top-level binding of that shape serves, so an app that already has a router hands it over directly — `fetch = app.route` — instead of writing a wrapper that forwards to it. Hot reload works either way; the swap follows the definitions the handler reaches, not the name it was bound under. `--host` sets the bind address (default `0.0.0.0`, all interfaces; pass `--host 127.0.0.1` for local-only). **Ctrl-C** drains gracefully: the server stops accepting, finishes the requests already in flight, closes the listener, and exits — a second Ctrl-C forces an immediate stop.
 
 `--parallel N` serves across **N worker isolates** for true multi-core throughput: the listener is bound once and each worker inherits a cloned handle to it, so the kernel load-balances connections across cores (no `SO_REUSEPORT`, no extra dependency). All workers share the process and drain together on Ctrl-C. `--parallel --watch` hot-reloads across the whole fleet — a swap **broadcasts** to every worker's live session, so all cores serve the new code without a restart. (Reactive/LiveView state is per-worker: signals and WebSocket subscribers live in the worker that handled the connection. That is a constraint on where an app's **source of truth** sits, not a bar on serving a LiveView across cores — an app backed by a database serves fine on all of them, since each worker opens its own connection and drains its own change notifications, while an app whose truth is an in-memory signal wants a single worker until session state is shared.)
 
@@ -462,7 +491,7 @@ All three accept `--target <NAME>`, which acts as a **gate**: if the named `noet
 
 ---
 
-## Packages: `add`, `update`, `claim`, `publish`, `scope`, `audit`, `key`
+## Packages: `add`, `update`, `claim`, `publish`, `scope`, `audit`, `advisory`, `key`
 
 Dependencies are declared in `noeta.toml` (`[dependencies]`, with elevated grants in `[trust]`) and resolve automatically on `run`/`build`/`check` — there is no separate install step; the resolved pins live in `noeta.lock` (commit it). These verbs are the *publisher/consumer trust* surface. The trust model behind them — attestations, the two signing roots, pinning, downgrade protection — is documented on [Package Provenance](Package-Provenance); the end-to-end submission walkthrough on [Package Registries](Package-Registries#publishing-to-the-hosted-registry).
 
@@ -571,6 +600,7 @@ noeta advisory publish <ID> <PACKAGE> <RANGES> <SEVERITY> <SUMMARY> [--details �
 noeta advisory report  <PACKAGE> <SUMMARY> [--ranges …] [--details …] [--url …] [--reporter …]
 noeta advisory reports [--scope <SCOPE>] [--status <pending|promoted|dismissed>] [--all]
 noeta advisory promote <REPORT-ID> --id <ID> --severity <SEVERITY> [--ranges …] [--summary …] [--details …] [--url …] [--patched …] [--operator] [--interactive [--oob]]
+noeta advisory watch   [SCOPE] [--state <DIR>]
 ```
 
 `advisory publish` issues (or updates) a **publisher**-tier advisory for a package in a scope you own — keyless-signed with your OIDC identity, sent with the scope's publish token (`NOETA_REGISTRY_TOKEN`), so consumers verify it offline. `advisory report` files a **public report** against any package (unauthenticated, rate-limited): not an advisory, but queued for an operator or the scope owner to triage.
@@ -579,13 +609,22 @@ noeta advisory promote <REPORT-ID> --id <ID> --severity <SEVERITY> [--ranges …
 
 `advisory promote` turns a queued report into a signed advisory. The advisory is **prefilled from the report** (package, ranges, summary, details, url) and finalised with the triaged `--id` and `--severity`. As an **operator** (`--operator`, `NOETA_REGISTRY_ADMIN_TOKEN`) it becomes an `operator`-tier advisory; otherwise the report package's **scope owner** promotes it into a keyless-signed `publisher`-tier advisory — the same keyless Sigstore bundle a fresh `advisory publish` produces, prefilled from the report. See [Package Provenance](Package-Provenance#issuing-and-reporting-from-the-client).
 
-### `noeta watch-scope`
+### `noeta advisory watch`
 
 ```text
-noeta watch-scope <SCOPE> [--state <PATH>]
+noeta advisory watch [SCOPE] [--state <DIR>]
 ```
 
-Monitors a scope's advisory **transparency log** over time for silent suppression or history rewrite: it pins the feed head, the log checkpoint, and the advisory ids seen for the scope, then on each run verifies the log only grew (append-only) and that no previously-seen advisory disappeared. A rewrite, key change, feed rollback, or disappearance exits non-zero — ideal as a CI cron. See [Package Provenance](Package-Provenance#noeta-watch-scope-scope--suppression-monitoring).
+`noeta audit` asks *does the advisory feed verify right now*; `advisory watch` asks *has anything been rewritten since*, which is the question a registry silently withholding an advisory from you can only be caught by. It pins the feed head, the transparency-log checkpoint, and the advisory ids seen for a scope, then on each run verifies the log only grew (append-only) and that no previously-seen advisory disappeared. A rewrite, key change, feed rollback, or disappearance exits non-zero.
+
+**With no `SCOPE` it watches every scope your `noeta.lock` pins** — which is what a CI cron wants, since the list then keeps itself current as dependencies come and go. Name a scope to watch just that one. State lives in `--state <DIR>` (default: `watch/` under the noeta cache), one `<scope>.toml` per scope, so it survives between runs; commit it or cache it in CI, because a baseline that resets on every run detects nothing.
+
+```yaml
+# a daily GitHub Actions job — the whole gate
+- run: noeta advisory watch --state .noeta-watch
+```
+
+The scope set is deliberately not filtered by source: an advisory names a *package*, so one against `acme/http` applies whether you resolved it from the registry or from git. See [Package Provenance](Package-Provenance#noeta-advisory-watch--suppression-monitoring).
 
 ### `noeta key`
 
