@@ -76,13 +76,22 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 # `noeta fmt --diff` renders unified diffs of the pending reformat.
 similar = { workspace = true }
+# The interactive `noeta repl` line editor (`repl-tty`): raw-mode editing, history, in-place
+# highlighting and TAB completion. Only the editing *mechanics* come from here — what a token is
+# coloured as and what completes at the cursor are the compiler's own lexer and the IDE engine,
+# through `noeta-ide`. The feature selection is on the workspace entry.
+rustyline = { workspace = true, optional = true }
 
 [features]
 # The shipped `noeta` binary is JIT-enabled by default (milestone P-JIT): real-host `noeta run`/
 # `bench` drive the tier-1 JIT under hot-counter promotion. `--no-default-features` builds a
 # Cranelift-free interpreter-only binary (identical behaviour, smaller build).
-default = ["jit"]
+default = ["jit", "repl-tty"]
 jit = ["noeta-vm/jit", "noeta-runner/jit", "noeta-prof/jit"]
+# The interactive prompt. Off, `noeta repl` still works — it reads lines exactly as it does from a
+# pipe, which is the behaviour every non-terminal caller gets anyway. So a `--no-default-features`
+# build loses editing comfort and nothing else.
+repl-tty = ["dep:rustyline"]
 
 [dev-dependencies]
 assert_cmd = { workspace = true }
@@ -100,6 +109,12 @@ ed25519-dalek = { workspace = true }
 flate2 = { workspace = true }
 tar = { workspace = true }
 sha2 = { workspace = true }
+
+# The interactive prompt opens only when stdin and stderr are a terminal, so the only way to test it
+# is to give it one. `tests/cli/repl_tty.rs` drives `noeta repl` on a real pty. Unix-only — a pty is
+# a unix object — and a dev-dependency, so none of it reaches the shipped binary.
+[target.'cfg(unix)'.dev-dependencies]
+rexpect = { workspace = true }
 
 [lints]
 workspace = true

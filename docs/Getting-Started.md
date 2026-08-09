@@ -114,7 +114,9 @@ A bare expression prints its value. The REPL keeps your bindings alive between e
 | `:help` / `:h` / `:?` | Show help. |
 | `:quit` / `:q` (or Ctrl-D) | Exit. |
 
-Multi-line input is detected automatically — an unclosed `{`, `(`, or `[` continues onto the next line (`… ` prompt).
+Multi-line input is detected automatically — Enter inside an unclosed `{`, `(`, or `[` continues the entry instead of submitting it.
+
+At a terminal you also get a real line editor: history (persistent across sessions), arrow keys, syntax colouring as you type, and TAB completion drawn from the same engine that powers the editor integration — so `x.` offers the receiver's methods and a type you declared earlier completes by name. See [The CLI](The-CLI#noeta-repl).
 
 ## 5 · Start a real project
 

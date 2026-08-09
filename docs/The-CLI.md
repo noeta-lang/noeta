@@ -394,7 +394,17 @@ The startup cache never grows without bound: once it exceeds `NOETA_CACHE_MAX_BY
 noeta repl [--no-check] [--load <FILE>]
 ```
 
-Starts an interactive session. The prompt is `» `; a continuation line (inside an unclosed delimiter) shows `… `. Multi-line input is detected by counting unclosed `(`/`[`/`{` across lexer tokens, so braces inside strings and `${…}` never miscount.
+Starts an interactive session. The prompt is `» `. An entry that is still being typed — an unclosed `(`/`[`/`{`, or a statement that simply runs out of input — is not submitted; the delimiter count is over lexer tokens, so braces inside strings and `${…}` never miscount.
+
+### At a terminal
+
+When both stdin and stderr are a terminal, the prompt opens a full line editor: arrow keys and the usual editing bindings, Ctrl-R history search, persistent history, and Ctrl-C to abandon the entry you are typing without losing the session. Pressing Enter inside an unfinished block opens a new line **within the same entry**, so a `class` or `fn` body is edited as one unit and recalled from history as one; a multi-line paste arrives as a single entry the same way. Piped input — `noeta repl < script.noe`, or a script driving the prompt — reads lines exactly as before, and a continuation line then shows `… `.
+
+Your entry is **syntax-coloured as you type**, and **TAB completes**. Neither is a separate implementation of Noeta: the colouring classifies with the compiler's own lexer (the same function that highlights code in `noeta doc`), and completion is the engine behind [`noeta lsp`](Editor-and-AI-Tooling), asked about the whole accumulated session rather than the line — so a type declared three entries ago completes like one written in a file, `x.` offers the receiver's fields and methods, and `@` offers the directives. TAB after `:` completes the meta-commands below, including live binding names for `:drop` and `:type`.
+
+Colour honours `NO_COLOR` and `TERM=dumb`. History is written to `$XDG_STATE_HOME/noeta/repl-history` (`~/.local/state/noeta/repl-history` by default), or to `NOETA_REPL_HISTORY` if you set it.
+
+### Sessions
 
 `--load <FILE>` opens a **bootstrapped session**: the program runs to completion first — fully checked, imports resolved, output printed — and the prompt opens with everything it declared and bound live. This is the mechanism behind a framework "tinker" command: point it at your app's bootstrap script and explore the running app interactively, with entries type-checked against the app's real signatures. A bootstrap that fails to load, check, or run exits with its diagnostics instead of opening a broken prompt. (Isolates in a bootstrapped session run cooperatively.)
 
