@@ -135,6 +135,33 @@ fn test_fail_fast_stops_early() {
 }
 
 #[test]
+fn short_flags_alias_their_long_forms() {
+    // `ArgSpec::short` (ABI 17). `-j` is the one the clap derive offered before `test` became a
+    // declared command, so this is the assertion that it came back rather than a new convenience:
+    // the same run as `test_fail_fast_stops_early` above, spelled short.
+    let file = temp_program("test_short_jobs", MIXED_TESTS);
+    lang()
+        .arg("test")
+        .arg(&file)
+        .arg("--fail-fast")
+        .args(["-j", "1"])
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(predicate::str::contains("not run (stopped early)"));
+
+    // A short belongs to the command that declared it, not to the CLI: `bench` never declared `-j`,
+    // so it stays an unknown argument there rather than leaking across commands.
+    lang()
+        .arg("bench")
+        .arg(&file)
+        .args(["-j", "1"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unexpected argument"));
+}
+
+#[test]
 fn test_no_tests_is_success() {
     let file = temp_program("test_none", "echo \"hi\";\n");
     lang()

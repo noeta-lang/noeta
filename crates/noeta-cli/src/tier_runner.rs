@@ -168,44 +168,52 @@ const TEST_COMMAND: ExtCommand = ExtCommand {
                    for `.noe` files). A directory runs every file's `@test` blocks as its own entry \
                    and aggregates one report; a file tests just that one",
             kind: ArgKind::PathDefault { default: "." },
+            ..ArgSpec::DEFAULTS
         },
         ArgSpec {
             name: "fail-fast",
             help: "Stop after the first failing test instead of running them all",
             kind: ArgKind::Bool,
+            ..ArgSpec::DEFAULTS
         },
         ArgSpec {
             name: "jobs",
             help: "Number of tests to run concurrently (default: the machine's parallelism)",
             kind: ArgKind::OptInt,
+            short: Some('j'),
         },
         ArgSpec {
             name: "group",
             help: "Run only tests tagged `#[Group(\"<name>\")]` with this group",
             kind: ArgKind::OptStr,
+            ..ArgSpec::DEFAULTS
         },
         ArgSpec {
             name: "name",
             help: "Run only the test fn(s) with these names (repeatable; exact fn-name match). \
                    Composes with --group",
             kind: ArgKind::Strings,
+            ..ArgSpec::DEFAULTS
         },
         ArgSpec {
             name: "json",
             help: "Report outcomes as one JSON object on stdout instead of the human report",
             kind: ArgKind::Bool,
+            ..ArgSpec::DEFAULTS
         },
         ArgSpec {
             name: "target",
             help: "Only run when the `test` tier is live in this `noeta.toml` build target; \
                    otherwise the runner does nothing",
             kind: ArgKind::OptStr,
+            ..ArgSpec::DEFAULTS
         },
         ArgSpec {
             name: "timeout",
             help: "Per-test deadline in seconds (default: 60). A test that overruns is reported \
                    `TIME`; `--timeout 0` removes the bound for the whole run",
             kind: ArgKind::OptInt,
+            ..ArgSpec::DEFAULTS
         },
     ],
     run: |_ctx, args| {
@@ -236,46 +244,54 @@ const BENCH_COMMAND: ExtCommand = ExtCommand {
                    recursively for `.noe` files). Baselines stay keyed per entry file, so a \
                    directory run compares like with like",
             kind: ArgKind::PathDefault { default: "." },
+            ..ArgSpec::DEFAULTS
         },
         ArgSpec {
             name: "iterations",
             help: "Override the iteration count for every benchmark, taking precedence over a \
                    per-bench `@bench(iterations: N)`. Without either, the count is calibrated",
             kind: ArgKind::OptInt,
+            ..ArgSpec::DEFAULTS
         },
         ArgSpec {
             name: "name",
             help: "Run only the bench fn(s) with these names (repeatable; exact fn-name match)",
             kind: ArgKind::Strings,
+            ..ArgSpec::DEFAULTS
         },
         ArgSpec {
             name: "json",
             help: "Report results as one JSON object on stdout instead of the human report",
             kind: ArgKind::Bool,
+            ..ArgSpec::DEFAULTS
         },
         ArgSpec {
             name: "save-baseline",
             help: "After measuring, save the results as the named baseline (in the noeta cache \
                    dir, per-entry-file — timings are machine-local)",
             kind: ArgKind::OptStr,
+            ..ArgSpec::DEFAULTS
         },
         ArgSpec {
             name: "baseline",
             help: "Compare each result against the named baseline: the report gains a delta \
                    column, the JSON a `baselineDeltaPct` field",
             kind: ArgKind::OptStr,
+            ..ArgSpec::DEFAULTS
         },
         ArgSpec {
             name: "max-regress",
             help: "The CI regression gate: with --baseline, fail (exit 1) when any bench regresses \
                    more than this percentage against it. Exits 2 when it could not judge a bench",
             kind: ArgKind::OptFloat,
+            ..ArgSpec::DEFAULTS
         },
         ArgSpec {
             name: "target",
             help: "Only run when the `bench` tier is live in this `noeta.toml` build target; \
                    otherwise the runner does nothing",
             kind: ArgKind::OptStr,
+            ..ArgSpec::DEFAULTS
         },
     ],
     run: |_ctx, args| {
@@ -313,46 +329,54 @@ const DOC_COMMAND: ExtCommand = ExtCommand {
             help: "File or directory to document (default: the current directory when no \
                    --package is given). A file extracts that file and its sibling modules",
             kind: ArgKind::Word,
+            ..ArgSpec::DEFAULTS
         },
         ArgSpec {
             name: "package",
             help: "Fetch a published package's stored documentation from the registry instead of \
                    reading local source: `company/package[@1.2.0]`",
             kind: ArgKind::OptStr,
+            ..ArgSpec::DEFAULTS
         },
         ArgSpec {
             name: "out",
             help: "Generate the documentation artifact into this directory instead of extracting \
                    to stdout: `docs.json` plus `index.md` and one Markdown page per module",
             kind: ArgKind::OptPath,
+            short: Some('o'),
         },
         ArgSpec {
             name: "target",
             help: "Only extract when the `doc` tier is live in this `noeta.toml` build target",
             kind: ArgKind::OptStr,
+            ..ArgSpec::DEFAULTS
         },
         ArgSpec {
             name: "api",
             help: "Generate the API reference from the intrinsic registry (the stdlib and any \
                    composed native modules) instead of from `.noe` source",
             kind: ArgKind::Bool,
+            ..ArgSpec::DEFAULTS
         },
         ArgSpec {
             name: "root",
             help: "With --api, document only the extensions whose namespace root is this",
             kind: ArgKind::OptStr,
+            ..ArgSpec::DEFAULTS
         },
         ArgSpec {
             name: "non-builtin",
             help: "With --api, document every registered NON-BUILTIN extension — in a package's \
                    composed toolchain, exactly the package's own surface",
             kind: ArgKind::Bool,
+            ..ArgSpec::DEFAULTS
         },
         ArgSpec {
             name: "lint",
             help: "With --api --root or --api --non-builtin, fail (before emitting docs) if the \
                    scoped extensions register any surface outside their own namespace root(s)",
             kind: ArgKind::Bool,
+            ..ArgSpec::DEFAULTS
         },
     ],
     run: |_ctx, args| {

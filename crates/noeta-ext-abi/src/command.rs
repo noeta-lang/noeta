@@ -59,11 +59,31 @@ pub enum ArgKind {
 
 /// One argument a command declares; the CLI builds the real parser (help text, validation)
 /// from these specs.
+///
+/// Spread [`ArgSpec::DEFAULTS`] rather than naming every field — `ArgSpec { name, help, kind,
+/// ..ArgSpec::DEFAULTS }` — so a later optional field lands here once instead of in every
+/// registration in every package.
 #[derive(Debug, Clone, Copy)]
 pub struct ArgSpec {
     pub name: &'static str,
     pub help: &'static str,
     pub kind: ArgKind,
+    /// A single-letter alias (`-j` for `--jobs`), or `None` for a long-only flag. Ignored on the
+    /// positional kinds ([`ArgKind::Path`], [`ArgKind::PathDefault`], [`ArgKind::Word`]), which
+    /// have no flag to alias. Two args of one command declaring the same letter is an author bug
+    /// the CLI reports rather than a silent last-one-wins.
+    pub short: Option<char>,
+}
+
+impl ArgSpec {
+    /// Field defaults for additive evolution, mirroring [`ExtCommand::DEFAULTS`]. `name`/`help`/
+    /// `kind` have no meaningful default — always name them.
+    pub const DEFAULTS: ArgSpec = ArgSpec {
+        name: "",
+        help: "",
+        kind: ArgKind::Bool,
+        short: None,
+    };
 }
 
 /// The parsed argument values, by declared name — what a command's `run` receives.
