@@ -1,0 +1,93 @@
+// A label on a METHOD is checked against the parameter it NAMED, not the one sharing its index.
+//
+// The sibling case (`named_arguments_methods.noe`) covers the same shapes with every parameter an
+// `int`, and that is why this one exists: with one type throughout, binding the wrong parameter is
+// invisible to the checker, so the case passed while `t.m(n: 3)` over differently-typed parameters
+// was rejected outright — `argument of type int is not assignable to List<string>`, naming a
+// parameter the author never wrote. The runtime was right the whole time (the permutation reached
+// lowering), so nothing observable disagreed; only the check did.
+//
+// Every receiver a label can reach is exercised, because they were fixed as one rule: an instance
+// method, a self-less one called on the type, a struct's, an enum's, a trait method on its
+// concrete implementor, and the same trait method through a `dyn` receiver and a bounded type
+// parameter. A closure-typed parameter named past two skipped ones is the shape that started it —
+// `LiveMount.new(base, title, page, on_tick: refresh)` — and the one where a mis-bound argument
+// would land a function on a list.
+// expect: stdout "31"
+// expect: stdout "30"
+// expect: stdout "34"
+// expect: stdout "33"
+// expect: stdout "30"
+// expect: stdout "30"
+// expect: stdout "30"
+// expect: stdout "ticked"
+// expect: exit 0
+trait Knob {
+    fn tune(items: List<string> = [], n: int = 7): int
+}
+
+class C {
+    pub tag: string
+
+    pub fn make(): C {
+        return C { tag: "c" };
+    }
+
+    pub fn inst(items: List<string> = [], n: int = 7): int {
+        return n * 10 + items.len() + self.tag.len();
+    }
+
+    pub fn assoc(items: List<string> = [], n: int = 7): int {
+        return n * 10 + items.len();
+    }
+
+    impl Knob {
+        pub fn tune(items: List<string> = [], n: int = 7): int {
+            return n * 10 + items.len();
+        }
+    }
+}
+
+struct S {
+    w: int
+
+    pub fn go(items: List<string> = [], n: int = 7): int {
+        return n * 10 + items.len() + self.w;
+    }
+}
+
+enum E {
+    One
+    Two
+
+    pub fn pick(items: List<string> = [], n: int = 7): int {
+        return n * 10 + items.len();
+    }
+}
+
+class Mount {
+    pub fn wire(layers: List<string> = [], every_ms: int = 500, on_tick: () -> string = fn() => ""): void {
+        echo on_tick();
+    }
+}
+
+fn through_dyn(k: dyn Knob): int {
+    return k.tune(n: 3);
+}
+
+fn through_bound<T: Knob>(k: T): int {
+    return k.tune(n: 3);
+}
+
+c = C.make();
+echo c.inst(n: 3);          // 30 + 0 items + 1 tag
+echo C.assoc(n: 3);
+echo S { w: 4 }.go(n: 3);
+echo E.pick(n: 3, items: ["x", "y", "z"]);   // a reorder alongside the skip
+echo c.tune(n: 3);
+echo through_dyn(c);
+echo through_bound(c);
+
+// Two parameters skipped, and the one named holds a closure — the argument a positional check
+// would have compared with `List<string>`.
+Mount.wire(on_tick: fn() => "ticked");

@@ -5,6 +5,21 @@
 use crate::expr::calls::closed_to_new_methods;
 use crate::*;
 
+/// A **trait contract read at a call site** — what typing a call through a `dyn Trait` or a bounded
+/// type parameter needs, resolved at that receiver's instantiation.
+///
+/// `param_names` is here for the same reason the parameter *types* are: a label names a parameter of
+/// the contract, so a call through a trait binds one exactly as a call on a concrete method does.
+/// Without the names the two receivers disagreed about the same method — the concrete spelling
+/// honoured `k.tune(n: 3)` and the `dyn` one refused it as "does not take named arguments", which is
+/// precisely the divergence the rest of this pair is written to prevent.
+pub(crate) struct TraitCall {
+    pub(crate) params: Vec<Type>,
+    pub(crate) required: usize,
+    pub(crate) ret: Type,
+    pub(crate) param_names: Vec<String>,
+}
+
 impl Checker {
     /// Type-check a field assignment `x.f = v` (Phase 5.2): the receiver must be a class instance,
     /// the field must be declared `mut` (else E0033), and the value must be assignable to the
@@ -326,7 +341,7 @@ impl Checker {
         &self,
         param: &ParamRef,
         name: &str,
-    ) -> Option<(Vec<Type>, usize, Type)> {
+    ) -> Option<TraitCall> {
         let bounds = self.param_bounds(param)?.to_vec();
         for b in &bounds {
             let Some(decl) = self.symbols.user_traits.get(&b.name) else {
@@ -370,7 +385,12 @@ impl Checker {
                 m.sig.ret.as_ref().map(&sig_ty).unwrap_or(Type::Unknown),
                 m.sig.is_async,
             );
-            return Some((params, required_params(&m.sig.params), inst(ret)));
+            return Some(TraitCall {
+                param_names: m.sig.params.iter().map(|p| p.name.clone()).collect(),
+                params,
+                required: required_params(&m.sig.params),
+                ret: inst(ret),
+            });
         }
         None
     }
@@ -397,11 +417,7 @@ impl Checker {
     ///   into the call's type and mismatched everything. Here it resolves to `dyn Trait` — the
     ///   receiver *is* some implementor and `Self` names that implementor, so the trait object is
     ///   the most precise answer this side of the erasure.
-    pub(crate) fn dyn_trait_method(
-        &self,
-        tr: &str,
-        name: &str,
-    ) -> Option<(Vec<Type>, usize, Type)> {
+    pub(crate) fn dyn_trait_method(&self, tr: &str, name: &str) -> Option<TraitCall> {
         let decl = self.symbols.user_traits.get(tr)?;
         let m = decl.methods.iter().find(|m| m.sig.name == name)?;
         // Resolved in the TRAIT's scope, like the bound path above — see the note there.
@@ -430,7 +446,12 @@ impl Checker {
             m.sig.ret.as_ref().map(&sig_ty).unwrap_or(Type::Unknown),
             m.sig.is_async,
         );
-        Some((params, required_params(&m.sig.params), inst(ret)))
+        Some(TraitCall {
+            param_names: m.sig.params.iter().map(|p| p.name.clone()).collect(),
+            params,
+            required: required_params(&m.sig.params),
+            ret: inst(ret),
+        })
     }
 
     /// How `type_name.name` may be reached ([`Receiver`]) — the one place the table is consulted,
@@ -466,9 +487,9 @@ impl Checker {
         // A method call on a trait object (L1 user traits, UT4) resolves against the trait's declared
         // signatures — dispatched dynamically at runtime, but statically typed by the contract.
         if let Type::DynTrait(tr) = recv
-            && let Some((_, _, ret)) = self.dyn_trait_method(tr, name)
+            && let Some(call) = self.dyn_trait_method(tr, name)
         {
-            return ret;
+            return call.ret;
         }
         // `@derive(Serialize<Json>)` synthesizes a structural `to_json(): string`, and it is the one
         // derive-provided member with no entry anywhere else here: `BuiltinTrait::Serialize` has no
