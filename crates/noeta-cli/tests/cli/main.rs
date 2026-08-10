@@ -15,6 +15,8 @@ mod build;
 mod cache;
 mod capture;
 mod check;
+/// Coloured diagnostics — when the toolchain paints its errors, and when it must not.
+mod color;
 mod derivation;
 mod doc;
 mod expand;

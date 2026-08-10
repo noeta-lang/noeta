@@ -131,11 +131,31 @@ impl RunTail {
     ///
     /// A traceback renders only when the chain has **two or more** frames: a single-frame trace
     /// repeats what the diagnostic's own span already says, so printing it is noise.
+    ///
+    /// Colour-free. A [`RunTail`] is read two ways — [`emit`](RunTail::emit) writes it to the
+    /// process streams, while [`parts`](RunTail::parts) hands the same components to a `wasi:http`
+    /// body or a serve worker's line attribution — and only the first of those is a terminal. The
+    /// surfaces that emit use [`render_colored`](RunTail::render_colored).
     pub fn render(result: &RunResult, trace: &[TraceFrame], sources: &SourceMap) -> Self {
+        Self::render_colored(result, trace, sources, false)
+    }
+
+    /// [`render`](RunTail::render) with ANSI colour on the diagnostics when `color` — for a tail
+    /// that is on its way to a terminal.
+    pub fn render_colored(
+        result: &RunResult,
+        trace: &[TraceFrame],
+        sources: &SourceMap,
+        color: bool,
+    ) -> Self {
         RunTail {
             stdout: result.stdout.clone(),
             program_stderr: result.stderr.clone(),
-            diagnostics: noeta_diagnostics::render_mapped(sources, result.diagnostics.iter()),
+            diagnostics: noeta_diagnostics::render_mapped_colored(
+                sources,
+                result.diagnostics.iter(),
+                color,
+            ),
             traceback: if trace.len() >= 2 {
                 render_trace(trace, sources)
             } else {

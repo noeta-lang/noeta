@@ -23,7 +23,6 @@
 static GLOBAL: noeta_alloc_probe::TrackingAlloc<mimalloc::MiMalloc> =
     noeta_alloc_probe::TrackingAlloc(mimalloc::MiMalloc);
 
-use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -998,6 +997,21 @@ pub fn run_cli(
                 .global(true)
                 .hide(true)
                 .action(clap::ArgAction::SetTrue),
+        )
+        // Added here rather than on the derived `Cli` so it reaches **every** subcommand, including
+        // the extension-contributed ones augmented in below — a package's own `noeta test` prints
+        // diagnostics through the same renderer and has the same reason to honour the flag.
+        .arg(
+            clap::Arg::new("color")
+                .long("color")
+                .global(true)
+                .value_name("WHEN")
+                .value_parser(["auto", "always", "never"])
+                .default_value("auto")
+                .help(
+                    "When to colour diagnostics: auto (a terminal, unless NO_COLOR or TERM=dumb), \
+                     always, or never",
+                ),
         );
     for (local, ext) in &trusted_commands {
         cli = cli.subcommand(ext_command_clap(local, ext));
@@ -1050,6 +1064,16 @@ pub fn run_cli(
             err.exit()
         }
     };
+    // Record `--color` before anything can render: every diagnostic below reaches stderr through
+    // `output::emit_diagnostics*`, which asks `noeta_diagnostics::stderr_color()` for the answer.
+    // A global arg is readable from the top-level matches whichever subcommand carried it.
+    noeta_diagnostics::set_choice(
+        match matches.get_one::<String>("color").map(String::as_str) {
+            Some("always") => noeta_diagnostics::ColorChoice::Always,
+            Some("never") => noeta_diagnostics::ColorChoice::Never,
+            _ => noeta_diagnostics::ColorChoice::Auto,
+        },
+    );
     if let Some((name, sub)) = matches.subcommand()
         && let Some((_, ext)) = trusted_commands.iter().find(|(local, _)| *local == name)
     {
@@ -1616,17 +1640,16 @@ pub(crate) fn run_declared_tier(
         // The shared run epilogue (audit row 1). This tail used to write stdout, diagnostics and
         // the traceback but *not* the program's own `stderr` stream, so a declared-tier run silently
         // swallowed every `std.io` `err`/`errln` byte.
-        Ok((result, trace)) => {
-            noeta_backend::RunTail::render(&result, &trace, &linked.sources).emit_status()
-        }
+        Ok((result, trace)) => noeta_backend::RunTail::render_colored(
+            &result,
+            &trace,
+            &linked.sources,
+            noeta_diagnostics::stderr_color(),
+        )
+        .emit_status(),
         // `to_text` yields the pre-rendered failure and its `u8` code — the tier subsystem's exit
         // type — where `CompileFailure::report` would hand back a `std::process::ExitCode`.
-        Err(u) => {
-            let failure = noeta_runner::CompileFailure::from_unsupported(&linked.sources, &u);
-            let (text, code) = failure.to_text();
-            let _ = io::stderr().write_all(text.as_bytes());
-            code
-        }
+        Err(u) => noeta_runner::CompileFailure::from_unsupported(&linked.sources, &u).report_u8(),
     }
 }
 

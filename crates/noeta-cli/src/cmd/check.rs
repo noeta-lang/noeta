@@ -4,7 +4,7 @@
 use std::io::{self, Write};
 use std::process::ExitCode;
 
-use noeta_diagnostics::render_mapped;
+use noeta_diagnostics::render_mapped_colored;
 use noeta_pm::manifest;
 use noeta_project::{ProjectCheckOptions, project_check};
 
@@ -139,12 +139,19 @@ pub(crate) fn cmd_check(
 
     match format {
         OutputFormat::Human => {
-            // Render each unique diagnostic against its pool's sources (color disabled), then a
-            // summary line — all to stderr, as the other commands do.
+            // Render each unique diagnostic against its pool's sources, then a summary line — all
+            // to stderr, as the other commands do. `--format json` renders through `to_json` and
+            // never reaches here, so the machine-readable form cannot pick up escape sequences.
+            let color = noeta_diagnostics::stderr_color();
             let mut stderr = io::stderr();
             for entry in &checked.diagnostics {
                 let _ = stderr.write_all(
-                    render_mapped(&entry.sources, std::iter::once(&entry.diagnostic)).as_bytes(),
+                    render_mapped_colored(
+                        &entry.sources,
+                        std::iter::once(&entry.diagnostic),
+                        color,
+                    )
+                    .as_bytes(),
                 );
             }
             let files = if n == 1 { "file" } else { "files" };

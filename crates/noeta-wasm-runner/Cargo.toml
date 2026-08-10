@@ -12,6 +12,9 @@ publish = false
 [dependencies]
 noeta-backend = { workspace = true }
 noeta-bundle = { workspace = true }
+# Already in the tree through `noeta-backend`; named directly so the runner can ask whether its
+# stderr should carry colour, the same question the native runner asks.
+noeta-diagnostics = { workspace = true }
 noeta-span = { workspace = true }
 noeta-stdlib = { workspace = true }
 noeta-vm = { workspace = true }

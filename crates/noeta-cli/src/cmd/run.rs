@@ -42,15 +42,20 @@ pub(crate) fn run_program(loaded: &Loaded, args: Vec<String>) -> i32 {
         // traceback — one rendering, used by every execution surface. This returns the program's
         // *unclamped* exit code (the caller converts), not the process status.
         Ok((result, trace)) => {
-            noeta_backend::RunTail::render(&result, &trace, &loaded.sources).emit_status();
+            noeta_backend::RunTail::render_colored(
+                &result,
+                &trace,
+                &loaded.sources,
+                noeta_diagnostics::stderr_color(),
+            )
+            .emit_status();
             result.exit_code
         }
         // An internal compile failure renders like any other diagnostic when the compiler knew
         // where it stopped — the source map is right here.
         Err(u) => {
-            let (text, code) =
-                noeta_runner::CompileFailure::from_unsupported(&loaded.sources, &u).to_text();
-            eprint!("{text}");
+            let code =
+                noeta_runner::CompileFailure::from_unsupported(&loaded.sources, &u).report_u8();
             let _ = io::stderr().flush();
             i32::from(code)
         }

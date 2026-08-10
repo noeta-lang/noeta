@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use noeta_bytecode::Module;
-use noeta_diagnostics::render_mapped;
+use noeta_diagnostics::{render_mapped_colored, stderr_color};
 use noeta_span::SourceMap;
 use noeta_vm::{ProfileHook, VmBackend};
 
@@ -81,7 +81,9 @@ pub fn compile_file(path: &Path) -> Result<Compiled, RunOutput> {
     let loaded = match noeta_runner::compile::load_default_project(path) {
         Ok(loaded) => loaded,
         Err(failure) => {
-            let (text, code) = failure.to_text();
+            // Replayed to stderr by `noeta profile` itself — a terminal, like every other sink in
+            // this crate.
+            let (text, code) = failure.to_text_colored(stderr_color());
             return Err(RunOutput::failed(text, i32::from(code)));
         }
     };
@@ -90,11 +92,14 @@ pub fn compile_file(path: &Path) -> Result<Compiled, RunOutput> {
     // Errors only — a warning is advisory and must not cost you the profile.
     if noeta_diagnostics::has_errors(&checked.diagnostics) {
         return Err(RunOutput::failed(
-            render_mapped(&loaded.sources, checked.diagnostics.iter()),
+            render_mapped_colored(&loaded.sources, checked.diagnostics.iter(), stderr_color()),
             1,
         ));
     }
-    let warnings = render_mapped(&loaded.sources, checked.diagnostics.iter());
+    // `noeta profile` replays these to stderr itself — the only consumer of this crate is the CLI,
+    // so the terminal is the destination and `stderr_color` is the right question.
+    let warnings =
+        render_mapped_colored(&loaded.sources, checked.diagnostics.iter(), stderr_color());
 
     match noeta_compiler::compile_with_sites(
         &loaded.program,
@@ -113,9 +118,11 @@ pub fn compile_file(path: &Path) -> Result<Compiled, RunOutput> {
         }),
         Err(u) => Err(RunOutput::failed(
             match u.diagnostic() {
-                Some(diagnostic) => {
-                    noeta_diagnostics::render_mapped(&loaded.sources, std::iter::once(&diagnostic))
-                }
+                Some(diagnostic) => render_mapped_colored(
+                    &loaded.sources,
+                    std::iter::once(&diagnostic),
+                    stderr_color(),
+                ),
                 None => format!("noeta: {u}\n"),
             },
             1,
@@ -223,7 +230,11 @@ pub fn run(
     if !result.diagnostics.is_empty() {
         chunks.push(OutputChunk {
             category: "stderr",
-            text: render_mapped(&compiled.sources, result.diagnostics.iter()),
+            text: render_mapped_colored(
+                &compiled.sources,
+                result.diagnostics.iter(),
+                stderr_color(),
+            ),
         });
     }
     if trace.len() >= 2 {

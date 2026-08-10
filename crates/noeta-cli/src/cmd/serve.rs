@@ -750,7 +750,12 @@ fn emit_run_tail(
     sources: &SourceMap,
     label: Option<&str>,
 ) -> u8 {
-    let tail = noeta_backend::RunTail::render(result, trace, sources);
+    let tail = noeta_backend::RunTail::render_colored(
+        result,
+        trace,
+        sources,
+        noeta_diagnostics::stderr_color(),
+    );
     let (mut out, mut err) = (io::stdout(), io::stderr());
     for part in tail.parts_for(noeta_backend::Stream::Stdout) {
         let _ = out.write_all(part.text.as_bytes());
@@ -888,7 +893,7 @@ mod tests {
         ),
         ("run_module_hot(", 1, "step 9a: the hot VM run itself"),
         (
-            "RunTail::render(",
+            "RunTail::render_colored(",
             1,
             "step 9b: the run tail (audit row 1's chokepoint)",
         ),

@@ -3,16 +3,21 @@
 
 use std::io::{self, Write};
 
-use noeta_diagnostics::{Diagnostic, render, render_mapped};
+use noeta_diagnostics::{Diagnostic, render_colored, render_mapped_colored, stderr_color};
 use noeta_span::{Source, SourceMap};
 
+/// The two functions below are the CLI's whole diagnostic funnel — `run`, `build`, `test`, `check`,
+/// `serve` and the REPL all print through them — which is why the colour decision is made here and
+/// not at each of their call sites. [`stderr_color`] resolves the process's `--color` against
+/// stderr, so a pipe or a redirect gets exactly the bytes it always did.
 pub(crate) fn emit_diagnostics<'a>(
     source: &Source,
     diagnostics: impl Iterator<Item = &'a Diagnostic>,
 ) {
+    let color = stderr_color();
     let mut stderr = io::stderr();
     for diagnostic in diagnostics {
-        let _ = stderr.write_all(render(source, diagnostic).as_bytes());
+        let _ = stderr.write_all(render_colored(source, diagnostic, color).as_bytes());
     }
 }
 
@@ -22,7 +27,8 @@ pub(crate) fn emit_diagnostics_mapped<'a>(
     sources: &SourceMap,
     diagnostics: impl Iterator<Item = &'a Diagnostic>,
 ) {
-    let _ = io::stderr().write_all(render_mapped(sources, diagnostics).as_bytes());
+    let _ = io::stderr()
+        .write_all(render_mapped_colored(sources, diagnostics, stderr_color()).as_bytes());
 }
 
 pub(crate) fn plural(n: usize) -> &'static str {

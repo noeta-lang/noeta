@@ -11,8 +11,6 @@
 //! per-test case, a bench loop, a tier-dispatch call) through [`check_under`] — the crate's one
 //! remaining hand-paired `check_all_with_editions` call.
 
-use std::io::Write;
-
 use noeta_runner::compile::Loaded;
 
 use crate::output::emit_diagnostics_mapped;
@@ -24,9 +22,7 @@ use crate::{compose, run_declared_tier};
 /// seam cannot read) is unwrapped to the code here. `ExitCode` reappears only at the CLI's outer
 /// clap boundary, where a verb wraps this crate's `u8` back into one.
 pub(crate) fn report_u8(f: &noeta_runner::CompileFailure) -> u8 {
-    let (text, code) = f.to_text();
-    let _ = std::io::stderr().write_all(text.as_bytes());
-    code
+    f.report_u8()
 }
 
 /// For a tier runner: whether its `tier` is live under `--target`. `Ok(true)` when no target was

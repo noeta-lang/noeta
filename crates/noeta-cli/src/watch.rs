@@ -489,23 +489,25 @@ fn hot_watcher(
         // The transactional gate: red code never swaps; the old version keeps serving. The
         // rendered diagnostics also ride the channel's error slot to live LiveView clients
         // (the browser overlay, server-hmr L3) — waking the run thread to deliver promptly.
-        let (new_unit, sites) = match relink_entry_unit(&entry, &tail, &front) {
-            Ok(checked) => checked,
-            Err(err) => {
-                eprint!("{}", err.text());
-                // Red code: report, keep serving, and put the diagnostics under the browser's
-                // overlay. An unreadable project (a half-written file mid-save) is no verdict at
-                // all — the next event carries the finished text.
-                if let RelinkError::Diagnostics(rendered) = err {
-                    eprintln!("[hot] check failed — still serving the old version");
-                    if let Ok(mut slot) = mailbox.error.lock() {
-                        *slot = Some(rendered);
+        let (new_unit, sites) =
+            match relink_entry_unit(&entry, &tail, &front, noeta_diagnostics::stderr_color()) {
+                Ok(checked) => checked,
+                Err(err) => {
+                    eprint!("{}", err.text());
+                    // Red code: report, keep serving, and put the diagnostics under the browser's
+                    // overlay. An unreadable project (a half-written file mid-save) is no verdict at
+                    // all — the next event carries the finished text.
+                    if let RelinkError::Diagnostics { plain, .. } = err {
+                        eprintln!("[hot] check failed — still serving the old version");
+                        if let Ok(mut slot) = mailbox.error.lock() {
+                            // The overlay's copy is the plain one: it ends up in an HTTP body.
+                            *slot = Some(plain);
+                        }
+                        wake_all(&wake);
                     }
-                    wake_all(&wake);
+                    continue;
                 }
-                continue;
-            }
-        };
+            };
         // Diff against the last version this watcher DEPOSITED (server-hmr F5). The watcher is the
         // single depositor, so `applied` is the exact baseline of the append-only broadcast
         // queue: each plan is diffed against its predecessor, and every worker applies the queue
@@ -615,18 +617,30 @@ impl EntryUnit {
 }
 
 /// Why a re-link produced no candidate to diff.
+///
+/// A red-code failure has **two** destinations that disagree about colour: it is printed to the
+/// developer's terminal, and it is also handed to live clients for the browser overlay, where it
+/// ends up inside an HTTP response body. So the diagnostics are rendered both ways and each
+/// consumer takes the one it can use — one rendering would have to be wrong for one of them.
 enum RelinkError {
     /// The project could not be read or its graph not resolved — no verdict, wait for the next edit.
+    /// Prose, not a diagnostic, so there is nothing to colour.
     Unreadable(String),
     /// Rendered lex/parse/link/type diagnostics: red code, which never swaps.
-    Diagnostics(String),
+    Diagnostics {
+        /// For the terminal — coloured when this process's stderr is one.
+        printed: String,
+        /// For the overlay — always plain.
+        plain: String,
+    },
 }
 
 impl RelinkError {
     /// What to print either way — diagnostics, or the reason the project could not be read.
     pub(crate) fn text(&self) -> &str {
         match self {
-            RelinkError::Unreadable(text) | RelinkError::Diagnostics(text) => text,
+            RelinkError::Unreadable(text) => text,
+            RelinkError::Diagnostics { printed, .. } => printed,
         }
     }
 
@@ -636,11 +650,15 @@ impl RelinkError {
     /// (report, keep serving the old version, put them under the browser overlay); everything else
     /// is a project that could not be read at all — a half-written file mid-save, an unresolvable
     /// graph — which is no verdict, so the next event's finished text decides.
-    fn from_link(failure: noeta_runner::CompileFailure) -> RelinkError {
+    fn from_link(failure: noeta_runner::CompileFailure, color: bool) -> RelinkError {
         let (text, _) = failure.to_text();
+        let (printed, _) = failure.to_text_colored(color);
         match failure {
             noeta_runner::CompileFailure::Load(_)
-            | noeta_runner::CompileFailure::Diagnostics { .. } => RelinkError::Diagnostics(text),
+            | noeta_runner::CompileFailure::Diagnostics { .. } => RelinkError::Diagnostics {
+                printed,
+                plain: text,
+            },
             noeta_runner::CompileFailure::Message(_)
             | noeta_runner::CompileFailure::Unreadable(_) => {
                 RelinkError::Unreadable(format!("[hot] {text}"))
@@ -683,31 +701,44 @@ impl RelinkError {
 /// Checking the whole program (not the entry alone) is the same trade the other way: package
 /// provenance, per-source editions, and every module's diagnostics are what the transactional gate
 /// is supposed to gate on.
+///
+/// `color` is whether the *printed* half of a red verdict carries ANSI. It is a parameter rather
+/// than a `stderr_color()` call inside because the two halves of that split are the whole point of
+/// [`RelinkError::Diagnostics`], and a process-global would leave them untestable.
 fn relink_entry_unit(
     entry: &Path,
     tail: &[noeta_ast::Stmt],
     front: &std::sync::Arc<noeta_runner::compile::FrontFacts>,
+    color: bool,
 ) -> Result<(EntryUnit, noeta_check::Sites), RelinkError> {
     let program = crate::context::load_entry_with_tail(
         entry,
         tail,
         crate::context::Front::Given(std::sync::Arc::clone(front)),
     )
-    .map_err(RelinkError::from_link)?;
+    .map_err(|failure| RelinkError::from_link(failure, color))?;
     let (loaded, entry_source, _) = program.into_loaded();
     let checked = loaded.check();
     // Only errors block a hot swap. A warning still reaches the developer — printed here, since the
     // edit that introduced it is the moment it is worth seeing — but the edit swaps in regardless.
     if noeta_diagnostics::has_errors(&checked.diagnostics) {
-        return Err(RelinkError::Diagnostics(noeta_diagnostics::render_mapped(
-            &loaded.sources,
-            checked.diagnostics.iter(),
-        )));
+        return Err(RelinkError::Diagnostics {
+            printed: noeta_diagnostics::render_mapped_colored(
+                &loaded.sources,
+                checked.diagnostics.iter(),
+                color,
+            ),
+            plain: noeta_diagnostics::render_mapped(&loaded.sources, checked.diagnostics.iter()),
+        });
     }
     if !checked.diagnostics.is_empty() {
         eprint!(
             "{}",
-            noeta_diagnostics::render_mapped(&loaded.sources, checked.diagnostics.iter())
+            noeta_diagnostics::render_mapped_colored(
+                &loaded.sources,
+                checked.diagnostics.iter(),
+                color
+            )
         );
     }
     Ok((EntryUnit::of(&loaded.program, &entry_source), checked.sites))
@@ -802,10 +833,11 @@ mod tests {
         )
         .unwrap();
 
-        let (unit, _sites) = match relink_entry_unit(&entry, &fake_tail(), &boot_front(&entry)) {
-            Ok(checked) => checked,
-            Err(err) => panic!("the fixture should link green, got:\n{}", err.text()),
-        };
+        let (unit, _sites) =
+            match relink_entry_unit(&entry, &fake_tail(), &boot_front(&entry), false) {
+                Ok(checked) => checked,
+                Err(err) => panic!("the fixture should link green, got:\n{}", err.text()),
+            };
         assert_eq!(
             fn_names(&unit.program),
             vec!["hotpkg.main.body".to_string()]
@@ -824,10 +856,11 @@ mod tests {
         let entry = dir.join("app.noe");
         std::fs::write(&entry, "fn body(): int {\n    return 1\n}\n").unwrap();
 
-        let (unit, _sites) = match relink_entry_unit(&entry, &fake_tail(), &boot_front(&entry)) {
-            Ok(checked) => checked,
-            Err(err) => panic!("the fixture should link green, got:\n{}", err.text()),
-        };
+        let (unit, _sites) =
+            match relink_entry_unit(&entry, &fake_tail(), &boot_front(&entry), false) {
+                Ok(checked) => checked,
+                Err(err) => panic!("the fixture should link green, got:\n{}", err.text()),
+            };
         assert!(
             !unit
                 .program
@@ -849,10 +882,44 @@ mod tests {
         let entry = dir.join("app.noe");
         std::fs::write(&entry, "fn body(): int {\n    return nope\n}\n").unwrap();
 
-        match relink_entry_unit(&entry, &[], &boot_front(&entry)) {
-            Err(RelinkError::Diagnostics(rendered)) => assert!(rendered.contains("nope")),
+        match relink_entry_unit(&entry, &[], &boot_front(&entry), false) {
+            Err(RelinkError::Diagnostics { plain, .. }) => assert!(plain.contains("nope")),
             Err(RelinkError::Unreadable(text)) => panic!("expected diagnostics, got: {text}"),
             Ok(_) => panic!("red code linked green"),
+        }
+    }
+
+    /// A red verdict goes two places at once — the developer's terminal and, through the mailbox,
+    /// an HTTP response body under the browser's overlay. One rendering cannot serve both: colour
+    /// belongs on the first and is garbage in the second.
+    #[test]
+    fn a_red_verdict_is_coloured_for_the_terminal_and_plain_for_the_overlay() {
+        let dir = noeta_test_temp::TempDir::new("hot-relink-red-color");
+        let entry = dir.join("app.noe");
+        std::fs::write(&entry, "fn body(): int {\n    return nope\n}\n").unwrap();
+
+        match relink_entry_unit(&entry, &[], &boot_front(&entry), true) {
+            Err(RelinkError::Diagnostics { printed, plain }) => {
+                assert!(
+                    printed.contains('\u{1b}'),
+                    "the printed half carries colour:\n{printed:?}"
+                );
+                assert!(
+                    !plain.contains('\u{1b}'),
+                    "the overlay's half never does:\n{plain:?}"
+                );
+                assert!(
+                    printed.contains("nope") && plain.contains("nope"),
+                    "both still report the error"
+                );
+            }
+            other => panic!(
+                "expected diagnostics, got {}",
+                match other {
+                    Err(RelinkError::Unreadable(text)) => text,
+                    _ => "a green link".to_string(),
+                }
+            ),
         }
     }
 
