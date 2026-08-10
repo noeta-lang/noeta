@@ -883,7 +883,7 @@ mod color;
 mod explain;
 mod json;
 mod render;
-pub use color::{ColorChoice, set_choice, stderr_color};
+pub use color::{ColorChoice, DIM, RESET, set_choice, stderr_color};
 pub use explain::{Explanation, GROUPS};
 pub use json::{JsonDiagnostic, JsonLabel, JsonSpan, to_json};
 pub use render::{render, render_colored, render_mapped, render_mapped_colored};

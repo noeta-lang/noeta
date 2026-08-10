@@ -617,7 +617,7 @@ struct Vm<'m> {
 
 /// The traceback vocabulary is shared with the tree-walker oracle through the backend contract
 /// crate, so both backends produce the same `TraceFrame` shape (and can eventually be compared).
-pub use noeta_backend::{RunResult, TraceFrame, render_trace};
+pub use noeta_backend::{RunResult, TraceFrame, render_trace, render_trace_colored};
 
 /// Tier-1 promotion threshold: a prototype interprets until it has been entered this many times,
 /// then the JIT compiles it (P-JIT). The `--jit-differential` oracle bypasses this via `force_jit`.
