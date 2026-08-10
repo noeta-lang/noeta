@@ -61,15 +61,15 @@ A package depends on the contract crate from **crates.io**, by range:
 ```toml
 # the package's native/Cargo.toml
 [dependencies]
-noeta-ext-abi = "0.5"
+noeta-ext-abi = "0.6"
 ```
 
-A range rather than an exact version because a *patch* release of the toolchain does not change the contract — so `0.5.1` should not cost every package a manifest edit. A **minor** bump still does, deliberately: pre-1.0 a minor may break you (below), and that is a change worth looking at.
+A range rather than an exact version because a *patch* release of the toolchain does not change the contract — so `0.6.1` should not cost every package a manifest edit. A **minor** bump still does, deliberately: pre-1.0 a minor may break you (below), and that is a change worth looking at.
 
 A git pin on the toolchain repository also still works, and is what a package reaching past the contract must use, since the internal crates are not published:
 
 ```toml
-noeta-ext-abi = { git = "https://github.com/noeta-lang/noeta", tag = "v0.5.0" }
+noeta-ext-abi = { git = "https://github.com/noeta-lang/noeta", tag = "v0.6.0" }
 ```
 
 That pin governs **only the package's own repository**: `cargo test` in your CI, your local builds. When a *consumer* depends on your package, toolchain composition builds your crate again—from source, inside the consumer's composed shim—and resolves every toolchain crate to **the consumer's own toolchain version**, not your tag:
@@ -77,7 +77,7 @@ That pin governs **only the package's own repository**: `cargo test` in your CI,
 - With a **workspace (local-path) toolchain**, the composer injects a `[patch]` section keyed on the canonical toolchain repository URL that rewrites *every* `crates/*` member to the consumer's exact toolchain source (the key is this build's `repository`, overridable with `NOETA_TOOLCHAIN_REPO`—it must equal the URL your `Cargo.toml` declares). Your git pin is overridden wholesale.
 - With a **released (git-tag) toolchain**, the shim's own dependencies use the running binary's version tag, and the composer injects the same `[patch]` section, redirecting every toolchain crate to a cached checkout of the **binary's own release tag**—regardless of the tag your package pins. A package pinned at an older tag (say `v0.2.0`) still composes under a newer binary (say `v0.2.1`): your pin is overridden to the consumer's toolchain, exactly as in the workspace case. That is the whole one-toolchain-wins guarantee—without it, your pin and the shim's tag would be two different sources, two compiled copies of `noeta-ext-abi`, and a type error instead of a build.
 
-The composer emits **two** patch tables, one keyed on the toolchain repository URL and one on `crates-io`, because a package may name the contract crate either way. A version requirement is patched exactly like a git pin: without that, `noeta-ext-abi = "0.5"` would resolve the real published crate, which is a *second* copy of the ABI, and your `dyn Extension` would not match the shim's.
+The composer emits **two** patch tables, one keyed on the toolchain repository URL and one on `crates-io`, because a package may name the contract crate either way. A version requirement is patched exactly like a git pin: without that, `noeta-ext-abi = "0.6"` would resolve the real published crate, which is a *second* copy of the ABI, and your `dyn Extension` would not match the shim's.
 
 Either way the whole graph resolves to **one copy** of each toolchain crate—necessary for Rust type identity (a second compiled copy of `noeta-ext-abi` would make your `dyn Extension` a different type than the shim's)—and that copy is the consumer's. Three consequences worth internalizing:
 

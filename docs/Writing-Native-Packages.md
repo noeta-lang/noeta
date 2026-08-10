@@ -50,7 +50,7 @@ A standalone package repo can't path-depend the noeta monorepo, so its entry cra
 ```toml
 # a standalone package's native/Cargo.toml
 [dependencies]
-noeta-ext-abi = "0.5"
+noeta-ext-abi = "0.6"
 ```
 
 `noeta-ext-abi` and `noeta-reactive-abi` are the only toolchain crates published there — they are the whole stable surface (see [Extension Compatibility](Extension-Compatibility)). A range rather than an exact version, because a *patch* toolchain release does not change the contract and should not cost you a manifest edit.
@@ -67,7 +67,7 @@ The subtlety is a Rust one: a type's identity includes *which compiled copy of t
 - **The consumer runs a released (git-tag) toolchain.** The shim pins the toolchain by the binary's own release tag, and the composer injects a **`[patch]`** on the canonical repo URL that rewrites every `crates/*` member to a cached checkout of that same tag — so the package's pin collapses onto the consumer's toolchain *whatever tag the package declares*. A package pinned at an older release still composes under a newer binary; the pin governs only the package's own repository CI.
 - **The consumer runs a workspace (local-path) toolchain** — the development norm, and while iterating on the toolchain itself. Now the shim's `noeta-ext-abi` is a *path* and the package's is *git* — two sources. The composer closes this by injecting a **`[patch]`** into the shim that rewrites every `crates/*` member of the noeta repo to the consumer's exact path, so the package's git-deps (and their transitive `workspace = true` deps) all collapse onto the one local copy. The patch key is the toolchain's own `repository`, overridable with **`NOETA_TOOLCHAIN_REPO`** for a fork, a private mirror, or a local `file://` clone (it must equal the URL the package's `Cargo.toml` declares). Cargo *does* fetch the git source before applying the patch, so the toolchain repo must be reachable — fine for a public repo.
 
-Both cases above describe a **git** dependency, and the composer emits a matching `[patch."<repo url>"]`. A **crates.io** dependency needs its own table, so the composer emits `[patch.crates-io]` alongside it with the same redirects — without that, `noeta-ext-abi = "0.5"` would resolve the real published crate and you would be back to two compiled copies and a `dyn Extension` that does not match. Whichever form you write, the graph collapses onto the consumer's one toolchain.
+Both cases above describe a **git** dependency, and the composer emits a matching `[patch."<repo url>"]`. A **crates.io** dependency needs its own table, so the composer emits `[patch.crates-io]` alongside it with the same redirects — without that, `noeta-ext-abi = "0.6"` would resolve the real published crate and you would be back to two compiled copies and a `dyn Extension` that does not match. Whichever form you write, the graph collapses onto the consumer's one toolchain.
 
 So an out-of-tree package (the `para` family, and any third-party one) depends on the contract crate by version and lets composition redirect it; a package that git-depends an internal crate is served by the same machinery. In-tree packages keep a path dep and never touch any of this.
 
