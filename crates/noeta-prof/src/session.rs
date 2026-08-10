@@ -240,7 +240,7 @@ pub fn run(
     if trace.len() >= 2 {
         chunks.push(OutputChunk {
             category: "stderr",
-            text: noeta_vm::render_trace(&trace, &compiled.sources),
+            text: noeta_vm::render_trace_colored(&trace, &compiled.sources, stderr_color()),
         });
     }
     (

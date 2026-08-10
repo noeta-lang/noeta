@@ -107,6 +107,47 @@ fn a_run_failure_is_coloured_too() {
         .stderr(predicate::str::contains("\u{1b}[31m"));
 }
 
+/// A program that aborts two calls deep, so the run has a traceback worth rendering.
+fn aborts(name: &str) -> std::path::PathBuf {
+    temp_program(
+        name,
+        "fn inner(): int {\n    return panic(\"boom\")\n}\nfn outer(): int {\n    return inner()\n}\necho outer()\n",
+    )
+}
+
+#[test]
+fn an_abort_traceback_is_coloured_with_the_diagnostic() {
+    // The traceback prints directly under the panic diagnostic and is rendered by a different
+    // function in a different crate — so it is its own chance to be the one plain thing in a
+    // coloured report.
+    let mut cmd = lang();
+    cmd.arg("run").arg(aborts("color_trace"));
+    cmd.env_remove("NO_COLOR");
+    cmd.env_remove("CLICOLOR_FORCE");
+    cmd.arg("--color")
+        .arg("always")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("stack trace"))
+        // Dimmed frame furniture, with the function name left out of the dim run.
+        .stderr(predicate::str::contains(
+            "\u{1b}[38;5;246m  at \u{1b}[0minner",
+        ));
+}
+
+#[test]
+fn a_piped_traceback_stays_plain() {
+    let mut cmd = lang();
+    cmd.arg("run").arg(aborts("color_trace_pipe"));
+    cmd.env_remove("NO_COLOR");
+    cmd.env_remove("CLICOLOR_FORCE");
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("stack trace"))
+        .stderr(predicate::str::contains("at inner"))
+        .stderr(predicate::str::contains(ESC).not());
+}
+
 /// A real terminal, which is the only way to test the default: `auto` resolves against whether
 /// stderr *is* one, and every other test here has to say so out loud because a pipe never is.
 #[cfg(unix)]

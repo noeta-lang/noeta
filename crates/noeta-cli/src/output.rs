@@ -57,6 +57,9 @@ pub(crate) fn human_bytes(n: u64) -> String {
 /// function defined in an earlier entry now shows that entry's real file and line.
 pub(crate) fn emit_trace(trace: &[noeta_vm::TraceFrame], map: &SourceMap) {
     if trace.len() >= 2 {
-        eprint!("{}", noeta_vm::render_trace(trace, map));
+        eprint!(
+            "{}",
+            noeta_vm::render_trace_colored(trace, map, stderr_color())
+        );
     }
 }

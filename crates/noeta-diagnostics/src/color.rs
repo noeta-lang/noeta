@@ -83,6 +83,16 @@ impl ColorChoice {
     }
 }
 
+/// The SGR sequence for de-emphasised text, and its reset.
+///
+/// This is the 256-colour grey `ariadne` paints a report's gutter with, and it is shared because a
+/// traceback prints *directly underneath* a diagnostic: two different greys an inch apart read as a
+/// rendering bug rather than a distinction. Anything that dims text in the same output should use
+/// these rather than pick its own.
+pub const DIM: &str = "\x1b[38;5;246m";
+/// The reset that closes [`DIM`].
+pub const RESET: &str = "\x1b[0m";
+
 /// The process-wide choice, set once from a `--color` flag.
 static CHOICE: OnceLock<ColorChoice> = OnceLock::new();
 

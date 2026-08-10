@@ -66,11 +66,31 @@ pub struct TraceFrame {
 /// output. Innermost frame first. Deep stacks (runaway recursion) are capped, with the elided count
 /// noted.
 pub fn render_trace(trace: &[TraceFrame], sources: &noeta_span::SourceMap) -> String {
+    render_trace_colored(trace, sources, false)
+}
+
+/// [`render_trace`] with ANSI colour when `color`.
+///
+/// What gets painted is everything *except* the function names: the header, the `at`, each
+/// `(file:line)`, and the elision note are dimmed, so the names — the one column you actually read
+/// a traceback for — stand out by being left alone. A traceback is printed directly under a
+/// diagnostic, so the grey is [`noeta_diagnostics::DIM`], the same one `ariadne` uses for a
+/// report's gutter.
+pub fn render_trace_colored(
+    trace: &[TraceFrame],
+    sources: &noeta_span::SourceMap,
+    color: bool,
+) -> String {
     use std::fmt::Write as _;
     /// The most frames a rendered traceback shows — enough for any legitimate stack, while a
     /// stack-overflow abort with thousands of identical frames stays readable.
     const MAX_FRAMES: usize = 64;
-    let mut out = String::from("stack trace (most recent call first):\n");
+    let (dim, reset) = if color {
+        (noeta_diagnostics::DIM, noeta_diagnostics::RESET)
+    } else {
+        ("", "")
+    };
+    let mut out = format!("{dim}stack trace (most recent call first):{reset}\n");
     for frame in trace.iter().take(MAX_FRAMES) {
         let name = frame.name.as_deref().unwrap_or("<anonymous>");
         // A span that does not fit its resolved source renders name-only rather than panicking the
@@ -83,15 +103,126 @@ pub fn render_trace(trace: &[TraceFrame], sources: &noeta_span::SourceMap) -> St
         });
         match located {
             Some((file, line)) => {
-                let _ = writeln!(out, "  at {name} ({file}:{line})");
+                let _ = writeln!(out, "{dim}  at {reset}{name}{dim} ({file}:{line}){reset}");
             }
             None => {
-                let _ = writeln!(out, "  at {name}");
+                let _ = writeln!(out, "{dim}  at {reset}{name}");
             }
         }
     }
     if trace.len() > MAX_FRAMES {
-        let _ = writeln!(out, "  … and {} more frames", trace.len() - MAX_FRAMES);
+        let _ = writeln!(
+            out,
+            "{dim}  … and {} more frames{reset}",
+            trace.len() - MAX_FRAMES
+        );
     }
     out
+}
+
+#[cfg(test)]
+mod trace_tests {
+    use super::{TraceFrame, render_trace, render_trace_colored};
+    use noeta_span::{Source, SourceId, SourceMap, Span};
+
+    /// Drop every SGR sequence, so the coloured rendering can be compared against the plain one.
+    fn strip_ansi(text: &str) -> String {
+        let mut out = String::new();
+        let mut chars = text.chars();
+        while let Some(c) = chars.next() {
+            if c != '\u{1b}' {
+                out.push(c);
+                continue;
+            }
+            for c in chars.by_ref() {
+                if c.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    fn two_frames() -> (SourceMap, Vec<TraceFrame>) {
+        let text = "fn inner() {\n    boom()\n}\nfn outer() {\n    inner()\n}\n";
+        let sources = SourceMap::new(vec![Source::new(SourceId::FIRST, "app.noe", text)]);
+        let at = |needle: &str| {
+            let start = text.find(needle).expect("the fixture contains it") as u32;
+            Some(Span::new(start, start + needle.len() as u32))
+        };
+        (
+            sources,
+            vec![
+                TraceFrame {
+                    name: Some("inner".into()),
+                    span: at("boom()"),
+                },
+                TraceFrame {
+                    name: Some("outer".into()),
+                    span: at("inner()"),
+                },
+            ],
+        )
+    }
+
+    #[test]
+    fn the_plain_rendering_has_no_escape_sequences() {
+        // The DAP, the MCP server and the playground all put this text in a JSON string or a
+        // browser, and none of them ask for colour.
+        let (sources, trace) = two_frames();
+        let rendered = render_trace(&trace, &sources);
+        assert!(
+            !rendered.contains('\u{1b}'),
+            "plain traceback must stay plain:\n{rendered:?}"
+        );
+    }
+
+    #[test]
+    fn colour_adds_colour_and_nothing_else() {
+        let (sources, trace) = two_frames();
+        let plain = render_trace(&trace, &sources);
+        let colored = render_trace_colored(&trace, &sources, true);
+        assert!(colored.contains('\u{1b}'), "the coloured form carries it");
+        assert_eq!(
+            strip_ansi(&colored),
+            plain,
+            "stripping the colour gives back the plain traceback exactly"
+        );
+    }
+
+    #[test]
+    fn the_function_names_are_the_part_left_undimmed() {
+        // The design: everything around a name is dimmed so the names are what your eye lands on.
+        // If a name were dimmed too, the traceback would be uniformly grey and the colour would be
+        // costing escape sequences for nothing.
+        let (sources, trace) = two_frames();
+        let colored = render_trace_colored(&trace, &sources, true);
+        let line = colored
+            .lines()
+            .find(|l| l.contains("inner"))
+            .expect("the innermost frame is rendered");
+        assert!(
+            line.contains(&format!("{}inner", noeta_diagnostics::RESET)),
+            "the name follows a reset rather than sitting inside the dim run:\n{line:?}"
+        );
+        assert!(
+            line.contains(&format!("{}  at ", noeta_diagnostics::DIM)),
+            "the `at` and the location around it are dimmed:\n{line:?}"
+        );
+    }
+
+    #[test]
+    fn a_frame_with_no_location_still_renders() {
+        let sources = SourceMap::new(vec![Source::new(SourceId::FIRST, "app.noe", "")]);
+        let trace = vec![TraceFrame {
+            name: None,
+            span: None,
+        }];
+        let colored = render_trace_colored(&trace, &sources, true);
+        assert!(
+            colored.contains("<anonymous>"),
+            "names the frame: {colored}"
+        );
+        assert_eq!(strip_ansi(&colored), render_trace(&trace, &sources));
+    }
 }

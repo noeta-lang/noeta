@@ -50,6 +50,8 @@ Two environment variables move that line without a flag: `NO_COLOR` (set to anyt
 A `TERM` of `dumb` also disables it.
 Passing `--color` explicitly overrides all three, so `--color always` still colours output you are piping into a pager like `less -R`.
 
+An abort **traceback** follows the same flag as the diagnostic it prints under: the frame locations are dimmed and the function names are left bright, so the names are what your eye lands on.
+
 The flag describes the *human* rendering only.
 `noeta check --format json` emits the same diagnostics as machine-readable JSON, and that never carries escape sequences whatever you ask for — nor do the diagnostics the [language server](Editor-and-AI-Tooling), the [debug adapter](Debugging) and the MCP server send to their clients.
 

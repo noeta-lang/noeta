@@ -35,7 +35,7 @@ use std::process::ExitCode;
 
 use noeta_span::SourceMap;
 
-use crate::{RunResult, TraceFrame, render_trace};
+use crate::{RunResult, TraceFrame, render_trace_colored};
 
 /// Which process stream a rendered component belongs on.
 ///
@@ -127,7 +127,7 @@ pub struct RunTail {
 impl RunTail {
     /// Render a finished run: the program's two streams verbatim, its recorded diagnostics through
     /// [`render_mapped`](noeta_diagnostics::render_mapped), and its abort traceback through
-    /// [`render_trace`].
+    /// [`render_trace`](crate::render_trace).
     ///
     /// A traceback renders only when the chain has **two or more** frames: a single-frame trace
     /// repeats what the diagnostic's own span already says, so printing it is noise.
@@ -157,7 +157,7 @@ impl RunTail {
                 color,
             ),
             traceback: if trace.len() >= 2 {
-                render_trace(trace, sources)
+                render_trace_colored(trace, sources, color)
             } else {
                 String::new()
             },
