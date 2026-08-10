@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use noeta_backend::{RunResult, RunTail};
 use noeta_bytecode::Module;
-use noeta_diagnostics::render_mapped;
+use noeta_diagnostics::{render_mapped_colored, stderr_color};
 use noeta_span::{Source, SourceId, SourceMap};
 use noeta_vm::{JitReport, TraceFrame, VmBackend};
 
@@ -100,7 +100,7 @@ pub fn run_compiled_module(
     // streamed has left the buffer, so the tail renders only the unterminated remainder.
     let (result, trace, report) =
         run_module_real_host(Arc::clone(&module), args, app_id, jit_stats, true, None);
-    RunTail::render(&result, &trace, sources)
+    RunTail::render_colored(&result, &trace, sources, stderr_color())
         .with_report(jit_stats_report(
             report.as_ref(),
             &module,
@@ -196,8 +196,10 @@ pub fn run_source_file(
         Ok(compiled) => {
             // Any warning the compile produced goes out first — before the program's own output, so
             // a compile-time fact is not mistaken for something the program said.
-            let _ = std::io::stderr()
-                .write_all(render_mapped(&compiled.sources, compiled.warnings.iter()).as_bytes());
+            let _ = std::io::stderr().write_all(
+                render_mapped_colored(&compiled.sources, compiled.warnings.iter(), stderr_color())
+                    .as_bytes(),
+            );
             run_compiled_module(compiled.module, &compiled.sources, args, app_id, jit_stats)
         }
         Err(failure) => failure.report(),

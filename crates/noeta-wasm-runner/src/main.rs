@@ -127,5 +127,11 @@ fn run(bytes: &[u8], name: &str, program_argv: Vec<String>, sandbox: bool) -> Ex
     // diagnostics, then the traceback. This tail used to hand-write that order; it is now the same
     // rendering every other execution surface uses, so the next component added to a run reaches
     // this binary without anyone editing it.
-    noeta_backend::RunTail::render(&result, &trace, &sources).emit()
+    noeta_backend::RunTail::render_colored(
+        &result,
+        &trace,
+        &sources,
+        noeta_diagnostics::stderr_color(),
+    )
+    .emit()
 }

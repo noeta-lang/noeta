@@ -62,6 +62,9 @@ noeta-span = { workspace = true }
 # execution surface: this staticlib reaches it without acquiring the compiler front-end that
 # `noeta-runner` (where the CLI's copy of the tail lives) would drag in.
 noeta-backend = { workspace = true }
+# Already linked through `noeta-backend`; named directly so a stapled binary can ask whether its
+# stderr should carry colour, the same question the toolchain's own runner asks.
+noeta-diagnostics = { workspace = true }
 
 # Only to restore the signal disposition Rust's own startup would have set. This crate exports a
 # C-ABI `main`, so `std::rt::lang_start` — and with it `sys::unix::init`, which sets `SIGPIPE` to

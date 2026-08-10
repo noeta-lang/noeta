@@ -154,7 +154,13 @@ fn run() -> u8 {
     // through `render` instead of `render_mapped` (so a multi-source span resolved against the
     // wrong file), and it converted the exit code with `as u8` — which made a program exiting 256
     // exit **0**, a failure reported as a success.
-    noeta_backend::RunTail::render(&result, &trace, &sources).emit_status()
+    noeta_backend::RunTail::render_colored(
+        &result,
+        &trace,
+        &sources,
+        noeta_diagnostics::stderr_color(),
+    )
+    .emit_status()
 }
 
 /// Read this executable's stapled trailer to recover the embedded bundle, and decode it to a

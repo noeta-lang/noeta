@@ -9,7 +9,7 @@ use std::io::Write as _;
 use std::path::Path;
 use std::sync::Arc;
 
-use noeta_diagnostics::{Diagnostic, has_errors, render, render_mapped};
+use noeta_diagnostics::{Diagnostic, has_errors, render_colored, render_mapped_colored};
 use noeta_pm::manifest;
 use noeta_span::{Source, SourceMap};
 
@@ -74,27 +74,36 @@ impl CompileFailure {
 
     /// The failure as renderable text plus its process exit code — for front-ends that replay
     /// failures over a wire (the DAP's `output` events, MCP tool results) instead of printing.
+    ///
+    /// Colour-free, and deliberately so: every caller of *this* form puts the text somewhere that
+    /// is not a terminal — a JSON string, or `--watch`'s mailbox, whose contents end up under a
+    /// browser overlay. [`report`](CompileFailure::report) is the printing form.
     pub fn to_text(&self) -> (String, u8) {
+        self.to_text_colored(false)
+    }
+
+    /// [`to_text`](CompileFailure::to_text) with ANSI colour when `color`.
+    pub fn to_text_colored(&self, color: bool) -> (String, u8) {
         match self {
             CompileFailure::Message(msg) => (format!("noeta: {msg}\n"), 1),
             CompileFailure::Unreadable(msg) => (format!("noeta: {msg}\n"), 2),
             CompileFailure::Load(diagnostics) => {
                 let mut text = String::new();
                 for ld in diagnostics {
-                    text.push_str(&render(&ld.source, &ld.diagnostic));
+                    text.push_str(&render_colored(&ld.source, &ld.diagnostic, color));
                 }
                 (text, 1)
             }
             CompileFailure::Diagnostics {
                 sources,
                 diagnostics,
-            } => (render_mapped(sources, diagnostics.iter()), 1),
+            } => (render_mapped_colored(sources, diagnostics.iter(), color), 1),
         }
     }
 
     /// Print the failure to stderr and return the process exit code.
     pub fn report(&self) -> std::process::ExitCode {
-        let (text, code) = self.to_text();
+        let (text, code) = self.to_text_colored(noeta_diagnostics::stderr_color());
         let _ = std::io::stderr().write_all(text.as_bytes());
         std::process::ExitCode::from(code)
     }

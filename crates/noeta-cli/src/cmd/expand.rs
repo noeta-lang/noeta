@@ -17,7 +17,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use noeta_diagnostics::render_mapped;
+use noeta_diagnostics::{render_mapped_colored, stderr_color};
 use noeta_pm::{graph, manifest};
 
 use crate::compose;
@@ -186,9 +186,11 @@ pub(crate) fn cmd_expand(path: &std::path::Path) -> ExitCode {
         }
     }
 
+    let color = stderr_color();
     let mut stderr = io::stderr();
     for (sources, diag) in diags.values() {
-        let _ = stderr.write_all(render_mapped(sources, std::iter::once(diag)).as_bytes());
+        let _ = stderr
+            .write_all(render_mapped_colored(sources, std::iter::once(diag), color).as_bytes());
     }
 
     // The generated code goes to stdout on its own, so `noeta expand > expanded.noe` is a file a

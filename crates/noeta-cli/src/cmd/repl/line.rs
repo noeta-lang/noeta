@@ -51,25 +51,16 @@ pub(crate) fn interactive() -> bool {
     std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
 }
 
-/// Whether to emit colour, from the two environment variables that decide it.
-fn colour_enabled() -> bool {
-    colour_from(
-        std::env::var_os("NO_COLOR").as_deref(),
-        std::env::var_os("TERM").as_deref(),
-    )
-}
-
-/// Honours `NO_COLOR` — any **non-empty** value disables colour, the informal standard being
-/// explicit that an empty value is not the signal — and `TERM=dumb`, which promises no
-/// escape-sequence support at all.
+/// Whether to emit colour — the same question, and the same answer, that a diagnostic printed to
+/// this prompt's stderr gets.
 ///
-/// Split from the environment read so it can be tested as the decision it is; the workspace forbids
-/// `unsafe`, and mutating the process environment to test it would need exactly that.
-fn colour_from(no_color: Option<&OsStr>, term: Option<&OsStr>) -> bool {
-    if no_color.is_some_and(|v| !v.is_empty()) {
-        return false;
-    }
-    term != Some(OsStr::new("dumb"))
+/// [`noeta_diagnostics::stderr_color`] owns the rule (`--color`, `CLICOLOR_FORCE`, `NO_COLOR`,
+/// `TERM=dumb`). This module used to carry its own copy of the environment half, which was one rule
+/// spelled twice: a prompt that highlighted `1 + 1` in colour while the type error underneath it
+/// came out plain is the drift that shape produces. The editor only opens when stderr is a
+/// terminal, so the destination half agrees by construction.
+fn colour_enabled() -> bool {
+    noeta_diagnostics::stderr_color()
 }
 
 // The SGR codes for the highlighter's classes. Deliberately the basic 8/16-colour set rather than
@@ -603,15 +594,6 @@ mod tests {
         assert_eq!(history_path_from(Some(os("")), None, Some(os(""))), None);
     }
 
-    #[test]
-    fn no_colour_is_honoured() {
-        assert!(!colour_from(Some(os("1")), Some(os("xterm"))));
-        assert!(!colour_from(None, Some(os("dumb"))));
-        assert!(colour_from(None, Some(os("xterm-256color"))));
-        // An *empty* `NO_COLOR` does not disable colour — the standard is explicit that presence
-        // alone is not the signal.
-        assert!(colour_from(Some(os("")), Some(os("xterm"))));
-        // No `TERM` at all is not `dumb`.
-        assert!(colour_from(None, None));
-    }
+    // The colour rule itself is tested where it now lives, in `noeta_diagnostics::color` — this
+    // module holds no copy of it to test.
 }

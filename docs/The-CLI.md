@@ -36,6 +36,23 @@ The compiler, the runtime, and the package surface — every one of these is bui
 
 Run `noeta --help` or `noeta <command> --help` for the authoritative flag list.
 
+## Global flags
+
+A few flags apply to every command, including the ones your dependencies contribute.
+
+| Flag | Purpose |
+|---|---|
+| `--color <when>` | Whether diagnostics are printed in colour: `auto` (the default), `always`, or `never`. |
+| [`--watch`](#noeta-serve-and---watch) | Restart the command whenever project sources change. |
+
+Under `--color auto`, diagnostics are coloured when the toolchain is writing to a terminal and plain otherwise, so a pipe, a redirect and a CI log capture get exactly the text they always did.
+Two environment variables move that line without a flag: `NO_COLOR` (set to anything non-empty) turns colour off, and `CLICOLOR_FORCE` turns it on even when the destination is not a terminal — which is what you want for a CI system whose log viewer renders ANSI.
+A `TERM` of `dumb` also disables it.
+Passing `--color` explicitly overrides all three, so `--color always` still colours output you are piping into a pager like `less -R`.
+
+The flag describes the *human* rendering only.
+`noeta check --format json` emits the same diagnostics as machine-readable JSON, and that never carries escape sequences whatever you ask for — nor do the diagnostics the [language server](Editor-and-AI-Tooling), the [debug adapter](Debugging) and the MCP server send to their clients.
+
 ## Commands the standard library provides
 
 These need no opt-in — `std` ships with the toolchain — but every one of them is an [extension command](#commands-a-package-contributes) `std` contributes, not a verb the binary hardcodes. They are here by default because std is the *default* provider, not a privileged one.
@@ -402,7 +419,7 @@ When both stdin and stderr are a terminal, the prompt opens a full line editor: 
 
 Your entry is **syntax-coloured as you type**, and **TAB completes**. Neither is a separate implementation of Noeta: the colouring classifies with the compiler's own lexer (the same function that highlights code in `noeta doc`), and completion is the engine behind [`noeta lsp`](Editor-and-AI-Tooling), asked about the whole accumulated session rather than the line — so a type declared three entries ago completes like one written in a file, `x.` offers the receiver's fields and methods, and `@` offers the directives. TAB after `:` completes the meta-commands below, including live binding names for `:drop` and `:type`.
 
-Colour honours `NO_COLOR` and `TERM=dumb`. History is written to `$XDG_STATE_HOME/noeta/repl-history` (`~/.local/state/noeta/repl-history` by default), or to `NOETA_REPL_HISTORY` if you set it.
+The prompt's colour follows the same [`--color`](#global-flags) rule as diagnostics, so `--color never` (or `NO_COLOR`, or `TERM=dumb`) turns off the highlighting and the error underneath it together. History is written to `$XDG_STATE_HOME/noeta/repl-history` (`~/.local/state/noeta/repl-history` by default), or to `NOETA_REPL_HISTORY` if you set it.
 
 ### Sessions
 
