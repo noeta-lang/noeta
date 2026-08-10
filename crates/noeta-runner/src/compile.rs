@@ -103,9 +103,19 @@ impl CompileFailure {
 
     /// Print the failure to stderr and return the process exit code.
     pub fn report(&self) -> std::process::ExitCode {
+        std::process::ExitCode::from(self.report_u8())
+    }
+
+    /// [`report`](CompileFailure::report) for the seams that speak the native runner's `u8` exit
+    /// codes (0 ok, 1 program error, 2 setup failure) rather than an `ExitCode` they cannot read.
+    ///
+    /// Every "print this failure and tell me the code" site goes through one of these two. They
+    /// used to be hand-rolled — `to_text()` plus a `write_all` — in four places, and each was a
+    /// place to forget that stderr may be a terminal.
+    pub fn report_u8(&self) -> u8 {
         let (text, code) = self.to_text_colored(noeta_diagnostics::stderr_color());
         let _ = std::io::stderr().write_all(text.as_bytes());
-        std::process::ExitCode::from(code)
+        code
     }
 }
 

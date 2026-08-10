@@ -23,7 +23,6 @@
 static GLOBAL: noeta_alloc_probe::TrackingAlloc<mimalloc::MiMalloc> =
     noeta_alloc_probe::TrackingAlloc(mimalloc::MiMalloc);
 
-use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -1650,12 +1649,7 @@ pub(crate) fn run_declared_tier(
         .emit_status(),
         // `to_text` yields the pre-rendered failure and its `u8` code — the tier subsystem's exit
         // type — where `CompileFailure::report` would hand back a `std::process::ExitCode`.
-        Err(u) => {
-            let failure = noeta_runner::CompileFailure::from_unsupported(&linked.sources, &u);
-            let (text, code) = failure.to_text();
-            let _ = io::stderr().write_all(text.as_bytes());
-            code
-        }
+        Err(u) => noeta_runner::CompileFailure::from_unsupported(&linked.sources, &u).report_u8(),
     }
 }
 

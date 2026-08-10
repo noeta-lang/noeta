@@ -54,9 +54,8 @@ pub(crate) fn run_program(loaded: &Loaded, args: Vec<String>) -> i32 {
         // An internal compile failure renders like any other diagnostic when the compiler knew
         // where it stopped — the source map is right here.
         Err(u) => {
-            let (text, code) =
-                noeta_runner::CompileFailure::from_unsupported(&loaded.sources, &u).to_text();
-            eprint!("{text}");
+            let code =
+                noeta_runner::CompileFailure::from_unsupported(&loaded.sources, &u).report_u8();
             let _ = io::stderr().flush();
             i32::from(code)
         }

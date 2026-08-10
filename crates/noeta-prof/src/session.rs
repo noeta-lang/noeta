@@ -81,7 +81,9 @@ pub fn compile_file(path: &Path) -> Result<Compiled, RunOutput> {
     let loaded = match noeta_runner::compile::load_default_project(path) {
         Ok(loaded) => loaded,
         Err(failure) => {
-            let (text, code) = failure.to_text();
+            // Replayed to stderr by `noeta profile` itself — a terminal, like every other sink in
+            // this crate.
+            let (text, code) = failure.to_text_colored(stderr_color());
             return Err(RunOutput::failed(text, i32::from(code)));
         }
     };
