@@ -305,7 +305,7 @@ A registry source is one of: an `http(s)://` URL (a hosted registry service), `g
 
 ## `[db]` — database connection
 
-The project's database connection and migration layout, read by the [para/db](para-db) extension's [`noeta migrate`](The-CLI#noeta-migrate) command (and by an app migrating itself at boot). All three keys are optional strings — but a present key of the wrong type is a manifest error:
+The project's database connection and migration layout, read by the [para/db](para-db) extension's [`noeta migrate`](The-CLI#commands-a-package-contributes) command (and by an app migrating itself at boot). All three keys are optional strings — but a present key of the wrong type is a manifest error:
 
 ```toml
 [db]
