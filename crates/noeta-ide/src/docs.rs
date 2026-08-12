@@ -542,10 +542,11 @@ fn guide_search(query: &str) -> Vec<DocHit> {
     let mut best: Vec<DocHit> = Vec::new();
     for hit in guide::search(query, SEARCH_LIMIT) {
         let id = DocId::new(format!("{GUIDE_ROOT}/{}", hit.page));
+        let score = guide_score_to_doc_scale(hit.score);
         match best.iter_mut().find(|h| h.id == id) {
             Some(existing) => {
-                if (hit.score as i32) > existing.score {
-                    existing.score = hit.score as i32;
+                if score > existing.score {
+                    existing.score = score;
                     existing.snippet = hit.snippet;
                 }
             }
@@ -554,11 +555,19 @@ fn guide_search(query: &str) -> Vec<DocHit> {
                 title: hit.title,
                 kind: DocKind::Guide,
                 snippet: hit.snippet,
-                score: hit.score as i32,
+                score,
             }),
         }
     }
     best
+}
+
+/// Put a BM25F score on the integer scale [`score_tree_into`] ranks the project corpus with (an
+/// exact title match is 100 there). BM25F lands in roughly 0–30 for this corpus, so ×10 makes a
+/// strong guide hit compete with a project title hit instead of rounding away to 0 — which is what
+/// a bare `as i32` would do to every score below 1.
+fn guide_score_to_doc_scale(score: f32) -> i32 {
+    (score * 10.0).round() as i32
 }
 
 // ---- The API-reference corpus dispatch (Arc 2). Static, workspace-independent. ----------------

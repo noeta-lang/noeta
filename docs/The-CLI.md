@@ -12,6 +12,7 @@ The compiler, the runtime, and the package surface — every one of these is bui
 | [`noeta run`](#noeta-run) | Type-check and execute a program. |
 | [`noeta build`](#noeta-build) | Compile to a standalone artifact (`--exe`, `--native` for machine code, `--wasm`/`--serve` for [WebAssembly](WebAssembly-and-the-Edge)). |
 | [`noeta check`](#noeta-check) | Parse and type-check without running or building (exit 0/1/2). |
+| [`noeta docs`](#noeta-docs) | Search and read this guide offline — it is embedded in the binary. |
 | [`noeta explain`](#noeta-explain) | Explain a diagnostic code — what `E0xxx` means and how to fix it. |
 | [`noeta expand`](#noeta-expand) | Print the source that compile-time `@`-directive expansions generated. |
 | [`noeta repl`](#noeta-repl) | Interactive REPL. |
@@ -267,6 +268,41 @@ checked 3 files (tiers: test, debug): 0 error(s), 0 warning(s)
 ```
 
 `--tier <NAME>`/`--target <NAME>` still select a shape explicitly, checked as one program the way that build would compile it; the per-tier sweep then covers whatever the selection left out. See [Dev Tiers](Dev-Tiers#checking-is-not-building) for why one tier at a time.
+
+## `noeta docs`
+
+```text
+noeta docs <QUERY>...              # rank this guide's sections against a query
+noeta docs --page <SLUG>           # print one page
+noeta docs --page <SLUG>#<SECTION> # print just one section of it
+noeta docs --list                  # every page, slug and title
+noeta docs … --format json         # machine-readable hits, page, or index
+```
+
+This whole guide is compiled into the binary, so it is searchable with no network and no repository beside it — and it documents *the toolchain you are running*, not whatever version the website is serving.
+
+```console
+$ noeta docs packed struct --limit 2
+1. Fixed-Width Ints & Packed Types › Packed value types — `@packed`
+   The `@packed` directive marks a **struct** as a *packed value type*: a `List` of it is stored…
+   noeta docs --page Fixed-Width-Integers#packed-value-types--packed
+
+2. Fixed-Width Ints & Packed Types › `bytes` — serialize a packed list
+   A `List` of a packed type round-trips through an opaque `bytes` buffer with `.to_bytes()`…
+   noeta docs --page Fixed-Width-Integers#bytes--serialize-a-packed-list
+
+2 results.
+```
+
+Every hit prints the exact command that reads it. **Prefer the `#section` form**: guide pages run to hundreds of lines, and a section is typically one or two percent of one — the difference between reading a paragraph and reading a chapter.
+
+A page resolves by slug or title, exactly or by substring, so `--page types` finds `Type-System`. Asking for a section that does not exist lists the ones that do.
+
+Search is BM25F over heading-delimited sections, weighting a term by where it appears (page title, heading, prose) and discounting it by how many sections use it — so a query's rare word decides the answer rather than its common one. Identifiers are matched whole *and* by their parts, so `read_line_async`, `try_parse` and `E0059` each find the sections that name them.
+
+Exit `0` on a hit, `1` when nothing matches or the page does not exist, `2` when no query, `--page`, or `--list` was given.
+
+The corpus, the ranker, and the `#section` addressing are shared with the editor's docs browser (`noeta lsp`) and the [`docs_search`/`docs_get`](Editor-and-AI-Tooling#the-agent-surface-noeta-mcp) tools `noeta mcp` serves, so no two surfaces can disagree about what the guide says.
 
 ## `noeta explain`
 

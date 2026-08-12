@@ -6,6 +6,7 @@ pub(crate) mod build;
 pub(crate) mod cache;
 pub(crate) mod check;
 pub(crate) mod doc;
+pub(crate) mod docs;
 pub(crate) mod expand;
 pub(crate) mod explain;
 pub(crate) mod fmt;

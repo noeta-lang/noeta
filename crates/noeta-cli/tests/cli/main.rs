@@ -19,6 +19,8 @@ mod check;
 mod color;
 mod derivation;
 mod doc;
+/// `noeta docs` — searching and reading the embedded language guide.
+mod docs;
 mod expand;
 mod fmt;
 mod grammar;

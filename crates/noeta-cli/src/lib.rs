@@ -224,6 +224,29 @@ enum Command {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
+    /// Search and read the language guide, offline — the `docs/*.md` wiki embedded in this binary,
+    /// so it documents exactly the toolchain you are running. `noeta docs pattern matching` ranks
+    /// the guide's sections; `noeta docs --page Type-System` prints one page, and
+    /// `--page Type-System#inference` prints just that section.
+    Docs {
+        /// What to search for. Free text — every word is a search term, and an identifier
+        /// (`read_line_async`, `E0059`) is matched whole as well as by its parts.
+        query: Vec<String>,
+        /// Print a page instead of searching: a slug or title (`Type-System`, `types`), optionally
+        /// narrowed to one section by its heading anchor (`Type-System#inference`).
+        #[arg(long, value_name = "SLUG[#SECTION]", conflicts_with_all = ["query", "list"])]
+        page: Option<String>,
+        /// List every guide page (slug and title) instead of searching.
+        #[arg(long, conflicts_with = "query")]
+        list: bool,
+        /// How many search results to print.
+        #[arg(long, default_value_t = cmd::docs::DEFAULT_LIMIT)]
+        limit: usize,
+        /// Output format. `json` emits a machine-readable object (hits, page, or index) for tools
+        /// and agent harnesses.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        format: OutputFormat,
+    },
     /// Explain a diagnostic code: what `E0xxx` means, how to fix it, and where the rule is
     /// documented. The catalog every rendered diagnostic's code refers to — `noeta explain E0059`.
     /// `--all` lists every code; `--format json` emits the machine-readable catalog.
@@ -1118,6 +1141,13 @@ pub fn run_cli(
             format,
         } => cmd_check(&path, &tier, &target, format),
         Command::Expand { path } => cmd_expand(&path),
+        Command::Docs {
+            query,
+            page,
+            list,
+            limit,
+            format,
+        } => cmd::docs::cmd_docs(&query, &page, list, limit, format),
         Command::Explain { code, all, format } => cmd_explain(code, all, format),
         Command::Repl { no_check, load } => cmd_repl(!no_check, load),
         Command::Lsp => cmd_lsp(),
