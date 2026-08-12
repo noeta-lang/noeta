@@ -170,6 +170,7 @@ fn tokenize(text: &str) -> Vec<String> {
         if run.is_empty() {
             return;
         }
+        let start = out.len();
         let whole = run.to_lowercase();
         if whole.len() >= MIN_TOKEN {
             out.push(whole.clone());
@@ -189,6 +190,15 @@ fn tokenize(text: &str) -> Vec<String> {
                 out.push(part);
             }
         }
+        // Stems last, and *in addition to* the exact forms above: an exact match stays the rarer
+        // term, so it still outranks a stem-only one.
+        let exact: Vec<String> = out[start..].to_vec();
+        for t in exact {
+            let s = stem(&t);
+            if s != t {
+                out.push(s);
+            }
+        }
         run.clear();
     };
     for ch in text.chars() {
@@ -200,6 +210,41 @@ fn tokenize(text: &str) -> Vec<String> {
     }
     flush(&mut run, &mut out);
     out
+}
+
+/// Suffixes stripped by [`stem`], longest first so `interpolation` loses `ation` rather than `ion`.
+const SUFFIXES: &[&str] = &[
+    "ization", "ational", "ations", "ation", "ities", "ility", "ically", "ingly", "ables", "ible",
+    "able", "ings", "ing", "ions", "ion", "ies", "ers", "ed", "es", "er", "ly", "s",
+];
+
+/// The shortest stem worth producing. Below this, stripping turns distinct words into the same
+/// two or three letters.
+const MIN_STEM: usize = 4;
+
+/// Reduce a word to a crude stem, so a query finds the sections that inflect it differently.
+///
+/// The ranker this replaced matched *substrings*, which was wrong in general — `int` matched
+/// *print* — but was accidentally right about morphology: `derive` found `derivable`, `test` found
+/// `testing`. Tokenized matching is precise and loses that, and losing it measurably hurt: on a
+/// fourteen-query set the substring ranker beat exact-token BM25F on `derive Display`, `string
+/// interpolation` and `error propagation operator`, every one a query whose answer inflects the
+/// term. This recovers the recall without the false positives.
+///
+/// Identifiers are left alone — a token holding `_` or a digit is a name (`try_parse`, `E0059`),
+/// where English suffix rules mean nothing.
+fn stem(token: &str) -> String {
+    if token.len() < MIN_STEM || token.contains('_') || token.chars().any(|c| c.is_ascii_digit()) {
+        return token.to_string();
+    }
+    for suffix in SUFFIXES {
+        if let Some(base) = token.strip_suffix(suffix)
+            && base.len() >= MIN_STEM
+        {
+            return base.to_string();
+        }
+    }
+    token.to_string()
 }
 
 /// The lowercased camel-case segments of one word run: a segment break falls where a
@@ -343,6 +388,62 @@ const K1: f32 = 1.2;
 /// terms, so this is a nudge rather than an override.
 const PHRASE_BOOST: f32 = 1.6;
 
+/// A length floor for normalization, as a fraction of the corpus average.
+///
+/// BM25 reads "short document containing the term" as "document about the term". That is wrong for
+/// the boilerplate sections a wiki is full of: a **See also** list is 19 tokens against a corpus
+/// average of 179, so its terms were scored ~3× and a five-line list of cross-links outranked every
+/// section that explains the `?` operator. Treating anything shorter than this fraction of the
+/// average as if it were that long removes the windfall, while leaving normalization to do its real
+/// work — separating a focused section from a sprawling one.
+const LENGTH_FLOOR_RATIO: f32 = 0.6;
+
+/// Strip markdown link *targets* before indexing, keeping the link text.
+///
+/// `[Error Handling](Error-Handling)` is one mention of "error handling", but naively it indexes
+/// as two — the label and the slug both tokenize. A wiki page is dense with cross-links and a
+/// **See also** section is nothing else, so the doubling made link lists the highest-scoring
+/// sections in the corpus: `error propagation operator` returned a five-line list of links ahead
+/// of every section that explains the `?` operator. The target is addressing, not content.
+///
+/// Only indexing is affected; [`GuideSection::text`] keeps its markdown, so snippets and the
+/// rendered page are unchanged.
+fn strip_link_targets(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("](") {
+        out.push_str(&rest[..at + 1]);
+        // Skip to the matching `)`, allowing the one nesting level a markdown target can carry
+        // (a URL with parentheses); an unclosed target means malformed markup, so keep the rest
+        // verbatim rather than swallowing the remainder of the section.
+        let after = &rest[at + 2..];
+        let mut depth = 1usize;
+        let mut end = None;
+        for (i, c) in after.char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        match end {
+            Some(i) => rest = &after[i + 1..],
+            None => {
+                out.push_str(after);
+                return out;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// One section, reduced to what scoring needs.
 struct IndexedSection {
     /// Per-field term frequencies, indexed by [`Field`] — `tf["packed"][Field::Body as usize]`.
@@ -382,11 +483,11 @@ impl SearchIndex {
                 std::collections::HashMap::new();
             let mut len = [0.0f32; Field::ALL.len()];
             for (field, text) in [
-                (Field::Title, &s.page_title),
-                (Field::Heading, &s.heading),
-                (Field::Body, &s.text),
+                (Field::Title, s.page_title.clone()),
+                (Field::Heading, strip_link_targets(&s.heading)),
+                (Field::Body, strip_link_targets(&s.text)),
             ] {
-                let tokens = tokenize(text);
+                let tokens = tokenize(&text);
                 len[field as usize] = tokens.len() as f32;
                 for t in tokens {
                     tf.entry(t).or_default()[field as usize] += 1;
@@ -436,7 +537,8 @@ impl SearchIndex {
                 if raw == 0.0 {
                     continue;
                 }
-                let norm = 1.0 - field.b() + field.b() * doc.len[f] / self.avg_len[f];
+                let len = doc.len[f].max(self.avg_len[f] * LENGTH_FLOOR_RATIO);
+                let norm = 1.0 - field.b() + field.b() * len / self.avg_len[f];
                 pseudo_tf += field.weight() * raw / norm;
             }
             score += self.idf(term) * pseudo_tf / (K1 + pseudo_tf);
@@ -741,6 +843,159 @@ mod tests {
             window_on_match("a short line", &["short".to_string()]),
             "a short line"
         );
+    }
+
+    /// A relevance set: what a reader types, and the page(s) that genuinely answer it.
+    ///
+    /// Retrieval quality is not self-evident from the code — a scoring change can look principled
+    /// and rank worse. This is the oracle that says which. Targets are *pages*, not sections,
+    /// because which section of the right page wins is a judgement call while the page is not.
+    /// Several entries list alternatives where the guide legitimately covers a topic twice (the
+    /// tour and the reference page).
+    const RELEVANCE: &[(&str, &[&str])] = &[
+        ("how do I write a test", &["Testing", "Dev-Tiers"]),
+        ("async await", &["Concurrency"]),
+        (
+            "string interpolation",
+            &["Syntax-Basics", "Language-Tour", "Standard-Library"],
+        ),
+        ("map over a list", &["Standard-Library", "Language-Tour"]),
+        ("error propagation operator", &["Error-Handling"]),
+        ("derive Display", &["Derives", "Generics-and-Traits"]),
+        ("import a module", &["Modules"]),
+        ("named arguments", &["Functions-and-Closures"]),
+        ("trait bound", &["Generics-and-Traits"]),
+        ("packed struct", &["Fixed-Width-Integers"]),
+        (
+            "pattern matching",
+            &["Control-Flow-and-Pattern-Matching", "Language-Tour"],
+        ),
+        ("try_parse", &["Error-Handling", "Validation"]),
+        ("reference counting", &["Memory-Management"]),
+        ("closures", &["Functions-and-Closures", "Language-Tour"]),
+        ("run a benchmark", &["Benchmarking", "Dev-Tiers"]),
+        ("format source code", &["The-CLI"]),
+        (
+            "publish a package",
+            &["Package-Registries", "Package-Provenance", "The-CLI"],
+        ),
+        (
+            "build for wasm",
+            &["WebAssembly-and-the-Edge", "Edge-Deployment", "The-CLI"],
+        ),
+        ("type inference", &["Type-System", "Type-Checker-Internals"]),
+        ("mutable binding", &["Syntax-Basics", "Language-Tour"]),
+        (
+            "enum with payload",
+            &["Structs-Classes-and-Enums", "Language-Tour"],
+        ),
+        (
+            "what does E0059 mean",
+            &["Syntax-Basics", "Functions-and-Closures"],
+        ),
+    ];
+
+    /// Top-1 and top-3 accuracy over [`RELEVANCE`], counting a hit when a ranked page is one the
+    /// query's answer legitimately lives on. Section hits collapse to their page first, so a page
+    /// that owns three of the top hits still counts once.
+    fn accuracy(rank: impl Fn(&str, usize) -> Vec<String>) -> (usize, usize) {
+        let (mut top1, mut top3) = (0, 0);
+        for (query, want) in RELEVANCE {
+            let hits = rank(query, 3);
+            if hits.first().is_some_and(|p| want.contains(&p.as_str())) {
+                top1 += 1;
+            }
+            if hits.iter().any(|p| want.contains(&p.as_str())) {
+                top3 += 1;
+            }
+        }
+        (top1, top3)
+    }
+
+    /// Where retrieval stands today, as a ratchet. Not a target that was aimed at — the measured
+    /// result, pinned so it cannot quietly erode. Raise these when a change earns it.
+    const TOP1_FLOOR: usize = 16;
+    const TOP3_FLOOR: usize = 21;
+
+    /// Retrieval quality is not visible in the code: a scoring change can be principled and rank
+    /// worse. This is the oracle that decides. It asserts two things — that the current ranker
+    /// beats the weighted-substring one it replaced, and that it holds its measured floor.
+    ///
+    /// Both matter. Without the comparison a rewrite can regress against what was already there
+    /// (this one did, before stemming was added back: exact-token matching lost the accidental
+    /// morphology that substring matching had been providing). Without the floor, "no worse than
+    /// legacy" could ratchet downward forever.
+    #[test]
+    fn retrieval_answers_the_relevance_set() {
+        let pages_of = |q: &str, n: usize| -> Vec<String> {
+            search(q, n * 4)
+                .into_iter()
+                .map(|h| h.page)
+                .fold(Vec::new(), |mut acc, p| {
+                    if !acc.contains(&p) {
+                        acc.push(p);
+                    }
+                    acc
+                })
+                .into_iter()
+                .take(n)
+                .collect()
+        };
+        let (new1, new3) = accuracy(pages_of);
+        let (old1, old3) = accuracy(legacy_ranked_pages);
+        let total = RELEVANCE.len();
+        assert!(
+            new1 > old1 && new3 >= old3,
+            "retrieval must beat the ranker it replaced: BM25F top1 {new1}/{total} top3 \
+             {new3}/{total} vs legacy top1 {old1}/{total} top3 {old3}/{total}"
+        );
+        assert!(
+            new1 >= TOP1_FLOOR && new3 >= TOP3_FLOOR,
+            "retrieval regressed: top1 {new1}/{total} (floor {TOP1_FLOOR}), \
+             top3 {new3}/{total} (floor {TOP3_FLOOR})"
+        );
+    }
+
+    /// The ranker this replaced: raw weighted substring counts, no IDF, no length normalization.
+    /// Kept in the tests only, as the baseline [`retrieval_answers_the_relevance_set`] judges
+    /// against — a scoring change has to beat what was already there, not merely look better.
+    fn legacy_ranked_pages(query: &str, limit: usize) -> Vec<String> {
+        let mut terms: Vec<String> = Vec::new();
+        for raw in query.split(|c: char| !c.is_alphanumeric()) {
+            let t = raw.to_lowercase();
+            if t.len() >= 2 && !terms.contains(&t) {
+                terms.push(t);
+            }
+        }
+        let mut scored: Vec<(u32, &str)> = guide()
+            .sections
+            .iter()
+            .filter_map(|s| {
+                let (tl, hl, xl) = (
+                    s.page_title.to_lowercase(),
+                    s.heading.to_lowercase(),
+                    s.text.to_lowercase(),
+                );
+                let mut score = 0u32;
+                for t in &terms {
+                    score += tl.matches(t.as_str()).count() as u32 * 4;
+                    score += hl.matches(t.as_str()).count() as u32 * 3;
+                    score += xl.matches(t.as_str()).count() as u32;
+                }
+                (score > 0).then_some((score, s.page_slug.as_str()))
+            })
+            .collect();
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(b.1)));
+        let mut pages: Vec<String> = Vec::new();
+        for (_, page) in scored {
+            if !pages.iter().any(|p| p == page) {
+                pages.push(page.to_string());
+            }
+            if pages.len() == limit {
+                break;
+            }
+        }
+        pages
     }
 
     #[test]
