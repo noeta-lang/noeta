@@ -193,6 +193,46 @@ fn init_ignores_name_for_an_existing_package() {
     assert!(manifest.contains("name = \"acme/webapp\""), "{manifest}");
 }
 
+/// The scaffolded agent surface has to be *readable*, not exhaustive. `SYNTAX.md` used to be the
+/// whole language half of the wiki — ~340 KB, which no agent can afford to load — so the depth now
+/// lives behind `noeta docs`, and both files must actually say so.
+#[test]
+fn init_scaffolds_a_readable_agent_surface() {
+    let dir = scratch("init_agent_surface");
+    init_in(&dir, &[]).success();
+
+    let syntax = std::fs::read_to_string(dir.join("SYNTAX.md")).unwrap();
+    assert!(
+        syntax.len() < 64 * 1024,
+        "SYNTAX.md is {} bytes; it is the short version by design",
+        syntax.len()
+    );
+    assert!(
+        syntax.contains("noeta docs --page"),
+        "SYNTAX.md must name the command that fetches what it leaves out"
+    );
+    // The closing index has to reach pages the bundle does not carry, or the trim lost them.
+    for slug in ["Error-Handling", "Generics-and-Traits", "Testing"] {
+        assert!(
+            syntax.contains(&format!("`{slug}`")),
+            "SYNTAX.md's index is missing `{slug}`"
+        );
+    }
+
+    let agents = std::fs::read_to_string(dir.join("AGENTS.md")).unwrap();
+    for expected in ["noeta docs", "noeta explain", "noeta check", "noeta test"] {
+        assert!(
+            agents.contains(expected),
+            "AGENTS.md must teach `{expected}`"
+        );
+    }
+    assert!(
+        agents.lines().count() < 200,
+        "AGENTS.md is {} lines; instruction files lose adherence past ~200",
+        agents.lines().count()
+    );
+}
+
 #[test]
 fn init_never_overwrites_existing_files() {
     let dir = scratch("init_preserve");

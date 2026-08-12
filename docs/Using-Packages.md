@@ -33,7 +33,7 @@ noeta init
 initialized Noeta package `local/hello_cli` in .
 ```
 
-`noeta.toml` is the manifest and `src/main.noe` is a runnable entry point with example tests and benchmarks. `AGENTS.md` and `SYNTAX.md` teach coding agents the language, so they are productive in the project from the first prompt. `noeta init` never overwrites an existing file, so it is safe to re-run in a project that already has some of them.
+`noeta.toml` is the manifest and `src/main.noe` is a runnable entry point with example tests and benchmarks. `AGENTS.md` and `SYNTAX.md` teach coding agents how to drive the project and enough of the language to be productive from the first prompt; `noeta docs` fetches the rest on demand. `noeta init` never overwrites an existing file, so it is safe to re-run in a project that already has some of them.
 
 The project runs before you edit anything, and a program with no dependencies needs none of what follows — the whole standard library is built in. Packages are for everything beyond it.
 

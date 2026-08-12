@@ -113,8 +113,8 @@ What it writes — never overwriting a file that already exists, so it is safe i
 - **`src/main.noe`** — a fmt-canonical entry file exercising every tier: a documented function with a `@debug` trace, a two-case `@test` block, and a `@bench`.
 - **`.vscode/`** — the run/debug profiles the [Noeta extension](Editor-and-AI-Tooling) picks up (F5 debugging over `noeta dap`), plus the extension recommendation.
 - **`.gitignore`** — build/profiler artifacts ignored; `noeta.lock` deliberately not (commit it).
-- **`AGENTS.md`** — how an AI agent should drive this project: the CLI feedback loop and the [`noeta mcp`](Editor-and-AI-Tooling) tool surface.
-- **`SYNTAX.md`** — the full language reference, assembled from the same embedded guide `noeta mcp`'s `docs_search` serves, so it always matches the installed compiler. Delete and re-run `noeta init` after upgrading to refresh it.
+- **`AGENTS.md`** — how an AI agent should drive this project: the layout, the CLI feedback loop, the naming conventions nothing lints, and the [`noeta mcp`](Editor-and-AI-Tooling) tool surface if the harness speaks MCP.
+- **`SYNTAX.md`** — a short language reference: the [tour](Language-Tour), the [tier model](Dev-Tiers), the [conventions](Conventions), and an index of every remaining guide page. It is deliberately *not* the whole guide — [`noeta docs`](#noeta-docs) searches that on demand, so an agent spends context on the answer instead of the library. Assembled from the same embedded pages, so it matches the installed compiler; delete and re-run `noeta init` after upgrading to refresh it.
 
 A fresh directory also gets `git init` (skipped inside an existing repository, or with `--no-git`).
 

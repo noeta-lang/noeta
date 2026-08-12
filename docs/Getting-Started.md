@@ -145,7 +145,7 @@ The scaffold works before you edit a line:
 
 - **`noeta.toml`** — the package identity, the `[dependencies]` table (add one with `noeta add`), and two build targets: `development` with the dev tiers live (`tiers = ["test", "bench", "doc", "debug"]` — a bare name turns a tier on, a `-name` turns one off) — the `@test`/`@bench`/`@doc`/`@debug` blocks that sit beside your code and are stripped from a production build (see [Dev Tiers](Dev-Tiers)) — and `production` as an explicit name for the tier-free baseline.
 - **`src/main.noe`** — a small entry file that exercises all four tiers, so `run`, `test`, `bench`, and `doc` each have something to do immediately.
-- **`.vscode/`, `AGENTS.md`, `SYNTAX.md`** — run/debug profiles for the [editor extension](Editor-and-AI-Tooling), and the docs an AI agent needs to drive the project.
+- **`.vscode/`, `AGENTS.md`, `SYNTAX.md`** — run/debug profiles for the [editor extension](Editor-and-AI-Tooling), and the docs an AI agent needs to drive the project. `SYNTAX.md` is a short reference on purpose; [`noeta docs`](The-CLI#noeta-docs) searches the full guide, which is embedded in the binary.
 
 `noeta init` never overwrites an existing file, so it is also safe to run in a directory that already has code — and safe to re-run inside a project it already scaffolded, where it fills in whatever is missing (delete `SYNTAX.md` after a toolchain upgrade and re-run to regenerate it). The full scaffold is documented at [The CLI](The-CLI#noeta-init); the manifest it writes on the [`noeta.toml` Manifest](Manifest) page.
 
