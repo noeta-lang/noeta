@@ -3754,115 +3754,82 @@ fn a_folded_true_test_still_narrows_its_branch() {
     assert!(codes(src).is_empty(), "{:?}", codes(src));
 }
 
-// ----- associated types on traits (ExtBundle→ExtTrait convergence, slice 1a) -----
+// ----- associated types: the native, derived form -----
+//
+// A trait's associated type is a **native** mechanism: an `ExtAssocType` names an
+// `AssocDerivation` (`Element`/`Widen`/`FloatPromote`) computed from the implementing type's packed
+// element, and `impl vec.Kernels for V3 {}` binds it with nothing for the author to write. That is
+// the thing a type parameter cannot express, and it is why the mechanism exists.
+//
+// A `.noe` trait declaring `type Name` is refused (E0053, `assoc_type_declaration_rejected`), so
+// these drive the surface that survives. **Three properties the source form pinned have no native
+// counterpart**, and are recorded here rather than quietly dropped:
+//
+//   * a **required** binding an impl must supply (E0015), and
+//   * a **defaulted** one it may omit —
+//     both gone because `AssocDerivation` is mandatory: every native associated type is derived, so
+//     there is no unbound case to report and no author choice to omit. The empty `impl` below is
+//     both at once.
+//   * **degradation under `dyn`** — a native kernel trait carries a packed `self_constraint`, so
+//     `dyn vec.Kernels` is not a trait object at all (E0014). The `SigType::Assoc` contract still
+//     says an unbound projection degrades to a gradual hole rather than a wrong concrete type;
+//     nothing in the native surface can reach that state to assert it.
 
 #[test]
-fn assoc_type_projects_per_impl() {
-    // `Self::Item` in a trait method signature resolves, on a concrete receiver, to the impl's
-    // bound associated type — independently per implementor (int for Boxx, string for Tagg).
-    let src = "\
-trait Container {
-  type Item
-  fn get(): Self::Item
-}
-class Boxx {
-  v: int
-  impl Container {
-    type Item = int
-    pub fn get(): Self::Item { return self.v; }
-  }
-}
-class Tagg {
-  s: string
-  impl Container {
-    type Item = string
-    pub fn get(): Self::Item { return self.s; }
-  }
-}
-fn f(b: Boxx): int { return b.get(); }
-fn g(t: Tagg): string { return t.get(); }
-";
+fn assoc_type_projects_per_element() {
+    // `Self::Wide` resolves per implementor, from that type's element: an `f32` element widens to
+    // `f32`, an `i8` element widens to `int`. One trait, one `dot` signature, two answers.
+    let src = "use std.vec;\n\
+               @packed struct V3 { x: f32; y: f32; z: f32 }\n\
+               @packed struct I3 { x: i8; y: i8; z: i8 }\n\
+               impl vec.Kernels for V3 {}\n\
+               impl vec.Kernels for I3 {}\n\
+               a = V3 { x: 1.0f32, y: 2.0f32, z: 3.0f32 };\n\
+               b = V3 { x: 4.0f32, y: 5.0f32, z: 6.0f32 };\n\
+               p = I3 { x: 1i8, y: 2i8, z: 3i8 };\n\
+               q = I3 { x: 4i8, y: 5i8, z: 6i8 };\n\
+               f: f32 = a.dot(b);\n\
+               n: int = p.dot(q);\n";
     assert!(codes(src).is_empty(), "{:?}", codes(src));
 }
 
 #[test]
 fn assoc_type_projection_is_concrete_not_a_hole() {
-    // Proves the projection resolves to the impl's bound type (int) rather than degrading to a
-    // gradual hole: using `Boxx::get()` where a string is expected is a real mismatch (E0007).
-    let src = "\
-trait Container {
-  type Item
-  fn get(): Self::Item
-}
-class Boxx {
-  v: int
-  impl Container {
-    type Item = int
-    pub fn get(): Self::Item { return self.v; }
-  }
-}
-fn bad(b: Boxx): string { return b.get(); }
-";
+    // The projection resolves to a real type rather than degrading to a gradual hole: binding an
+    // `f32` element's `Self::Wide` to a `string` is a genuine mismatch, not a silent pass.
+    let src = "use std.vec;\n\
+               @packed struct V3 { x: f32; y: f32; z: f32 }\n\
+               impl vec.Kernels for V3 {}\n\
+               a = V3 { x: 1.0f32, y: 2.0f32, z: 3.0f32 };\n\
+               b = V3 { x: 4.0f32, y: 5.0f32, z: 6.0f32 };\n\
+               bad: string = a.dot(b);\n";
     assert_eq!(codes(src), ["E0007"]);
 }
 
 #[test]
-fn assoc_type_under_dyn_degrades_to_hole() {
-    // Under `dyn Container` the implementor is unknown, so `Self::Item` cannot resolve statically;
-    // it degrades to a gradual hole (`Unknown`) — no error at either use, whatever the expected type.
-    let as_int = "\
-trait Container {
-  type Item
-  fn get(): Self::Item
-}
-fn h(c: dyn Container): int { return c.get(); }
-";
-    let as_string = "\
-trait Container {
-  type Item
-  fn get(): Self::Item
-}
-fn h(c: dyn Container): string { return c.get(); }
-";
-    assert!(codes(as_int).is_empty(), "{:?}", codes(as_int));
-    assert!(codes(as_string).is_empty(), "{:?}", codes(as_string));
-}
-
-#[test]
-fn assoc_type_unbound_non_default_is_coherence_error() {
-    // An impl that omits an associated type with NO default fails coherence (E0015).
-    let src = "\
-trait Container {
-  type Item
-  fn get(): Self::Item
-}
-class Boxx {
-  v: int
-  impl Container {
-    pub fn get(): int { return self.v; }
-  }
-}
-";
-    assert_eq!(codes(src), ["E0015"]);
-}
-
-#[test]
-fn assoc_type_defaulted_binding_is_omittable() {
-    // A defaulted associated type may be left unbound — no coherence error, and the type still checks.
-    let src = "\
-trait Container {
-  type Item = int
-  fn get(): Self::Item
-}
-class Boxx {
-  v: int
-  impl Container {
-    pub fn get(): int { return self.v; }
-  }
-}
-fn f(b: Boxx): int { return b.get(); }
-";
-    assert!(codes(src).is_empty(), "{:?}", codes(src));
+fn assoc_type_float_promotion_differs_from_widening() {
+    // Two derivations on one implementor, and they are not the same answer: an `i8` element widens
+    // to `int` for `dot` (a cross-lane sum must not wrap) and promotes to `float` for `length` (a
+    // magnitude is not an integer). Binding either to the other's type is E0007.
+    let prelude = "use std.vec;\n\
+                   @packed struct I3 { x: i8; y: i8; z: i8 }\n\
+                   impl vec.Kernels for I3 {}\n\
+                   p = I3 { x: 1i8, y: 2i8, z: 3i8 };\n\
+                   q = I3 { x: 4i8, y: 5i8, z: 6i8 };\n";
+    assert!(
+        codes(&format!(
+            "{prelude}n: int = p.dot(q);\nm: float = p.length();\n"
+        ))
+        .is_empty(),
+        "{:?}",
+        codes(&format!(
+            "{prelude}n: int = p.dot(q);\nm: float = p.length();\n"
+        ))
+    );
+    assert_eq!(
+        codes(&format!("{prelude}bad: int = p.length();\n")),
+        ["E0007"]
+    );
 }
 
 // ----- E0065 / E0007: reified containers are not their payloads (dev-story sweep) -----

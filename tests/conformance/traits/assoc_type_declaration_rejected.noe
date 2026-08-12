@@ -1,0 +1,19 @@
+// A trait cannot declare an associated type in source — a type parameter says the same thing with
+// one concept instead of two, and is strictly the more capable of the pair here: a type may
+// implement a trait once (a second `impl` is E0027), so there is no ambiguity for the associated
+// form to resolve, and the projection that carries it in other languages — `T::Item` through a
+// bound — is not expressible.
+//
+// The mechanism itself is not gone. A NATIVE trait derives its associated types from the
+// implementing type's element, which is the one thing a type parameter cannot express because
+// there is nothing for the author to write: `impl vec.Kernels for V3 {}` binds `Self::Wide` and
+// `Self::Float` from the packed element (see `bundles/kernel_override_body.noe`). That path
+// synthesizes its declaration rather than parsing one, so it is untouched by this rule.
+// expect: error E0053 at 15:10
+// expect: exit 1
+trait Container {
+    type Item
+    fn first(): Item
+}
+
+echo 1

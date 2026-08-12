@@ -813,6 +813,37 @@ impl Checker {
                 format!("trait `{}` is declared more than once", decl.name),
             );
         }
+        // **An associated type declared in source is refused**, and a type parameter is the answer.
+        //
+        // The two say the same thing here — `trait Container { type Item }` and
+        // `trait Container<Item>` both let each implementor fix the type, and the parameter form is
+        // one concept instead of two. What makes associated types worth their weight elsewhere does
+        // not apply: a type may implement a trait once (a second `impl` is a coherence conflict,
+        // E0027), so there is no ambiguity for the associated form to resolve, and `T::Item` — the
+        // projection through a bound that carries Rust's version — is not expressible, so the
+        // parameter form is also strictly the more capable one.
+        //
+        // The mechanism itself stays, for the one thing only it can do: a **native** trait derives
+        // its associated types from the implementing type's element (`AssocDerivation`), so
+        // `impl vec.Kernels for V3 {}` binds `Self::Wide` and `Self::Float` with nothing for the
+        // author to write. That path synthesizes its `TraitDecl` rather than parsing one, so it
+        // never reaches here.
+        for assoc in &decl.assoc_types {
+            self.error(
+                DiagnosticCode::InvalidTraitDeclaration,
+                assoc.name_span,
+                format!(
+                    "trait `{}` cannot declare the associated type `{}` — declare a type \
+                     parameter instead",
+                    decl.name, assoc.name
+                ),
+            )
+            .help(format!(
+                "write `trait {}<{}>` and refer to `{}` directly in the method signatures; each \
+                 implementor fixes it at its `impl {}<Concrete>`",
+                decl.name, assoc.name, assoc.name, decl.name
+            ));
+        }
         // A trait accepts `#[...]` data attributes only; the `@`-directives are type-only and do
         // not apply to a trait (UT6). That is checked by the shared placement walk, which reaches
         // a trait through `Stmt::decorated` like every other decorated declaration — this used to
