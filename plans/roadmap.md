@@ -50,7 +50,9 @@ or trigger-gated**:
    and measured, not built), the fmt safety gate's `Pretty`-proxy replacement, and the small
    remaining tooling rows — each fires on its stated trigger, none on its own.
 
-**An arc is open against the un-gated remainder:** [`backlog-burndown/`](backlog-burndown/README.md). The audit below found that the "exclusively decision-gated or trigger-gated" claim holds for 45 of the 56 open rows and not for the other eleven — correctness holes found while doing something else, and doors that shipped on one side only. Neither shape has a trigger to wait for, because finding them *was* the trigger. Its slice 2 (the oracles) goes first: the conformance single-file path does not link, so a case can pass while the behavior it pins is broken.
+**An arc is open against the un-gated remainder:** [`backlog-burndown/`](backlog-burndown/README.md). Of the 55 open rows it claims thirteen — correctness holes found while doing something else, and doors that shipped on one side only, neither with a trigger to wait for because finding them *was* the trigger. Its slice 2 (the oracles) goes first: the conformance single-file path does not link, so a case can pass while the behavior it pins is broken.
+
+**The "exclusively decision-gated or trigger-gated" claim above is half true**, and the arc's [Gates](backlog-burndown/README.md#gates) section is the audit. Of the other 42 rows, **25 state no condition at all** — their trigger column records where the row came from, not what would start it. Of the 17 that do state one, five (the whole performance cluster) wait on a profile of user workloads that nobody runs, and one has already fired without being noticed: `para/ai` funnels two error types into one wrapper and documents its workaround for the missing multi-source `From`.
 
 **Publishing is done, and is no longer the keystone it was written as.** Both repos are public and
 level with `origin/main` (`noeta-lang/noeta`, `noeta-lang/noeta-registry`), the nine `para`

@@ -4,7 +4,7 @@ Status: proposed. Slices 1–4 are ready to start; slice 5 is ready but larger; 
 
 ## How this list was derived
 
-Every one of the 97 rows in [`backlog.md`](../backlog.md) was checked against the tree on 2026-08-12. Five had shipped without being closed and are now struck. Of the 56 that remain open, the roadmap's claim — that what is left is "exclusively decision-gated or trigger-gated" — holds for **45 of them**. This arc is the other eleven.
+Every one of the 97 rows in [`backlog.md`](../backlog.md) was checked against the tree on 2026-08-12. Five had shipped without being closed and are now struck. **55 remain open; this arc claims thirteen of them, and the other 42 are examined in [Gates](#gates) below** — where the roadmap's claim that everything left is "decision-gated or trigger-gated" turns out to be half true.
 
 They fall into two shapes, and neither is a feature request:
 
@@ -13,15 +13,26 @@ They fall into two shapes, and neither is a feature request:
 
 Neither shape has a trigger to wait for, because the trigger already fired — that is *how they were found*. They sit in the backlog because the session that found them was doing something else and closed its own scope honestly.
 
-## What is not here, and why
+## Gates
 
-The 45 gated rows stay gated, and this arc does not touch them. They divide as:
+The 42 rows outside this arc are not touched by it, but they were examined, because "gated" is a claim that decays: a gate is only real if someone would notice it opening.
 
-- **Waiting on a real use case** (~28 rows) — payload-carrying variant constructors, `Members`/`DynamicCall`, trait-method generics, multi-source `From`, const-generic SIMD, the perf cluster, the OTEL residuals, CRDTs, kernel bundles, raw TCP/UDP. Each names the demand that would justify it. Building them first is how a language grows surface nobody asked for.
-- **Waiting on a decision that is the owner's** (6 rows) — editions S3/S4 (needs a deliberate breaking change), Tauri packaging, capability enforcement, the synced store, `TaskScope` patterns, the attested watch ledger.
-- **Waiting on an action only the owner can take** (1 row) — the Spin/Fastly edge deploy needs an account.
-- **Blocked upstream** (1 row) — salsa 0.27 has no public input-delete API.
-- **Design notes already written, awaiting their trigger** (3 rows) — [`interruptible-host-io.md`](../interruptible-host-io.md), [`fmt-structural-safety-gate.md`](../fmt-structural-safety-gate.md), [`attested-watch-ledger.md`](../attested-watch-ledger.md). Two of these are slices 5 and 6 below, because their triggers are arguably already met.
+**25 of the 42 state no condition at all.** Their trigger column holds *provenance* — `native-otel metrics-logs, §deferred`, `keyless-signing v-next`, `p2p arc`, `crypto arc scope cuts` — which records where the row came from, not what would start it. That is not a gate; it is a deferral with a citation. Nothing about these rows will ever change on its own, and nobody is watching them. They need a condition written, or a decision to drop them.
+
+**17 state a real condition**, and they divide by whether anyone is positioned to observe it:
+
+- **Already fired, unnoticed — 1.** Multi-source `From` waits for "a real pipeline funneling ≥2 error types into one wrapper". `para/ai` is that pipeline: it funnels `HttpError` and `JsonError` into `AiError`, hit the one-`From` coherence limit, and worked around it by mapping `JsonError` by hand at every decode point. Its source says so, and closes with *"the first contributor who reaches for a second `From` should know why it is not there"* (`para-ai/ai.noe:287`). The condition is met in first-party code and the row never learned.
+- **Fires as a diagnostic the moment someone writes the natural thing — 4.** Payload-carrying variant constructors (`map(Shape.Circle)` is `E0007`), trait-method generics (`E0058`), `From<Source>` as a bound, checked narrowing. These are sound gates *provided somebody is writing Noeta and reporting what they hit* — today that is this repo's own example and `test-*` apps.
+- **Fires only if a profiling practice exists — 5.** The whole performance cluster: "a workload demonstrating its value", "a checker profile showing clone cost", "a hot extern-method workload", "keyed-lookup profile", "packed bulk math in user code as a demonstrated bottleneck". Nobody profiles *user* workloads today; the instructions-retired ratchet guards the VM against regression, which is a different question. **These five cannot fire as written.** Either something starts measuring user-shaped programs, or they should say "not before real users" and stop pretending to be triggered.
+- **Fires only with an ecosystem — 4.** User-code SIMD demand, "a plugin that can't be compiled in", an ORM-style consumer for `Members`/`DynamicCall`, a second `[suggests]` use case. Correctly YAGNI, and correctly out of reach until there are third-party authors.
+- **Fires on a deliberate decision — 2.** Editions S3/S4 (needs a breaking change worth shipping), per-dialect migrations (needs a project targeting SQLite and Postgres at once).
+- **Vague — 1.** REPL JIT says "demand", which is not observable. Give it a number or drop it.
+
+Three follow-ups fall out of this, and none is in the slices below because they are bookkeeping rather than code:
+
+1. **Re-check multi-source `From`** — its gate is met; it belongs in a slice or needs a stated reason to keep waiting.
+2. **Give the 25 provenance-only rows a condition**, or drop them. A row nobody will ever notice is not a backlog item.
+3. **Decide what the performance cluster is really waiting for.** "A profile" is only a gate if profiling happens.
 
 ## Slices
 
@@ -30,7 +41,7 @@ The 45 gated rows stay gated, and this arc does not touch them. They divide as:
 | 1 | Visibility holds at the reflection boundary | 3 | yes |
 | 2 | The oracles see what they claim to see | 2 | yes — do first |
 | 3 | Doors that exist on one side only | 4 | yes |
-| 4 | Two small identity guards | 2 | yes |
+| 4 | Two small identity guards | 1 | yes |
 | 5 | Cancellation reaches blocking work | 2 | yes, larger |
 | 6 | The fmt safety gate stops being a proxy | 1 | needs a decision |
 
