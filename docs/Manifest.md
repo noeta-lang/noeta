@@ -236,7 +236,7 @@ Binding a `@name` does **not** authorize the provider's native code. That stays 
 
 ## `[targets]` — build recipes
 
-A target is a named build recipe: an **activation live-set** of the local tier names (from `[directives]`) that are live in the build, plus its own dependencies (dev-dependencies) and an optional base to inherit from. The live-set no longer names a provider (that is `[directives]`'s job) — it is an array of tier names where a bare name is live and a `-`-prefixed name turns an inherited tier off.
+A target is a named build recipe: an **activation live-set** of the local tier names (from `[directives]`) that are live in the build, plus its own dependencies (dev-dependencies) and an optional base to inherit from. The live-set names tiers, not providers — providers are `[directives]`'s job. It is an array of tier names where a bare name is live and a `-`-prefixed name turns an inherited tier off.
 
 ```toml
 [targets.test]

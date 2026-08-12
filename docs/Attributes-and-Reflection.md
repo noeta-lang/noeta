@@ -327,7 +327,7 @@ echo attrs_of::<Route>()        // 1
 echo roles_in::<Semantic>()     // 1
 ```
 
-The one surface that stays turbofish-only is **`from_bytes::<T>(blob)`**, and the reason is the operand rather than the machinery. The others key on a *name*, which is exactly what the two channels deliver; decoding an opaque byte buffer needs `T`'s packed **layout** — its field kinds and bit widths — and neither channel carries one. So a type parameter there is `E0058` with a message saying so, rather than the "requires a packable element type" it used to report about a `T` that really was `@packed`.
+The one surface that stays turbofish-only is **`from_bytes::<T>(blob)`**, and the reason is the operand rather than the machinery. The others key on a *name*, which is exactly what the two channels deliver; decoding an opaque byte buffer needs `T`'s packed **layout** — its field kinds and bit widths — and neither channel carries one. So a type parameter there is `E0058`, with a message naming the missing layout rather than blaming the element type.
 
 ### The prelude enums are ordinary enums
 

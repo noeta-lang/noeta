@@ -109,8 +109,8 @@ enum Command {
         /// Path to a `.noe` file.
         file: PathBuf,
         /// Activate a dev-tier for this run, e.g. `--tier debug` to compile in `@debug { … }`
-        /// blocks (object-model slice 6). Repeatable. Without it, every tier block is stripped.
-        /// (The interim active-set interface, complementary to `--target`.)
+        /// blocks. Repeatable. Without it, every tier block is stripped.
+        /// (Names tiers directly, where `--target` names a recipe of them.)
         #[arg(long)]
         tier: Vec<String>,
         /// Activate the tiers a build target makes live (from `noeta.toml`), e.g.
@@ -134,7 +134,7 @@ enum Command {
         #[arg(last = true)]
         args: Vec<String>,
     },
-    /// Compile a program to a self-contained `.noeb` bundle (P-AOT L1): the versioned bytecode a
+    /// Compile a program to a self-contained `.noeb` bundle: the versioned bytecode a
     /// `noeta run app.noeb` executes directly, so a program ships **without its `.noe` source**.
     /// Uses the same compile pipeline as `run`; dev-tier blocks are stripped unless made live by
     /// `--tier`/`--target`, so a production build never carries `@test`/`@debug`/`@doc` content.
@@ -145,30 +145,30 @@ enum Command {
         /// its extension stripped, e.g. `app.noe` → `app`).
         #[arg(long, short)]
         out: Option<PathBuf>,
-        /// Emit a self-contained executable (P-AOT L2) instead of a `.noeb`: the bundle is stapled
+        /// Emit a self-contained executable instead of a `.noeb`: the bundle is stapled
         /// onto a copy of this runtime binary, so the artifact runs the program on its own with no
         /// separate `.noeb` or interpreter alongside it.
         #[arg(long)]
         exe: bool,
-        /// Emit a **native** executable (P-AOT L3): every eligible prototype is compiled ahead of
+        /// Emit a **native** executable: every eligible prototype is compiled ahead of
         /// time to machine code and linked into the binary (the rest interpret), then the bundle is
         /// stapled on as with `--exe`. Requires a C toolchain (`cc`); the AOT runtime archive is
-        /// located via `NOETA_AOT_RUNTIME_LIB`, else built from the workspace (interim).
+        /// located via `NOETA_AOT_RUNTIME_LIB`, else built from the workspace.
         #[arg(long)]
         native: bool,
-        /// Emit a single **wasm** artifact (P-WASM W1.2): the bundle is injected into the
+        /// Emit a single **wasm** artifact: the bundle is injected into the
         /// `noeta-wasm-runner` wasm32-wasip1 binary's data section, producing one `.wasm` that
         /// runs the program under any WASI runtime (`wasmtime run app.wasm`). The runner is
         /// located via `NOETA_WASM_RUNNER`, next to this binary, else built from the workspace
-        /// (interim; needs cargo + the `wasm32-wasip1` target).
+        /// (needs cargo + the `wasm32-wasip1` target).
         #[arg(long)]
         wasm: bool,
-        /// Emit a **wasi:http serve component** (P-WASM W4): the program is baked into the
+        /// Emit a **wasi:http serve component**: the program is baked into the
         /// `noeta-wasm-serve` component (wasm32-wasip2), whose `wasi:http/incoming-handler`
         /// export runs the program's `http.serve` handler once per request. Deploy on any
         /// component host: `wasmtime serve -S cli=y app.serve.wasm`. The generic component is
-        /// located via `NOETA_WASM_SERVE`, next to this binary, else built from the workspace
-        /// (interim) — then the bundle is stapled in (~1 ms, no per-app cargo build).
+        /// located via `NOETA_WASM_SERVE`, next to this binary, else built from the workspace —
+        /// then the bundle is stapled in (~1 ms, no per-app cargo build).
         #[arg(long)]
         serve: bool,
         /// Activate a dev-tier for this build, e.g. `--tier debug`. Repeatable.

@@ -32,7 +32,7 @@ There is an equivalent **annotation form** — `@test fn …` is exactly a one-i
 @test fn adds(): void { assert(add(1, 2) == 3) }
 ```
 
-A test is a named function like any other, so it needs its return type — `fn adds(): void`. (This page used to say the annotation was optional; it never was. Nothing reported the difference until `noeta check` started reading inside tier blocks, because a stripped `@test` body reaches no checker and the docs gate runs its samples with `noeta run`, which strips them.)
+A test is a named function like any other, so it needs its return type — `fn adds(): void`. `noeta check` reads inside tier blocks, so a missing annotation is an error there rather than a surprise at `noeta test`.
 
 - `assert(cond)` and `assert(cond, msg)` are built in. A test **fails** when its function aborts — a false `assert`, a `panic`, or any runtime error — and **passes** when it returns normally.
 - Dev-tier functions get **white-box access to private fields** of the module (read, write, construct) — you can test a type's internals without making them `pub`. This access is scoped to dev-tier functions only; ordinary code still cannot touch a private field.

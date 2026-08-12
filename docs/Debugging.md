@@ -148,7 +148,7 @@ Threads come and go as isolates spawn and finish; the Threads view updates with 
 - **Tier-0 execution.** A debug session never arms the JIT; the interpreter exposes a real program counter to pause at. This is the standard `-O0`-style trade: identical semantics, full observability.
 - **Debug info is a side table.** A debug compile records `register → name` for every named local (pinned through register coalescing so the mapping stays 1:1) plus per-statement line tables. Production compiles carry none of this; the hot path is untouched.
 - **Types come from values.** A variable's displayed type is its value's reified runtime type tag — correct even through `dyn` — rendered with the same spelling the type checker uses.
-- **Console fragments are session compiles.** The launch compile keeps its compiler alive as an incremental session (the same machinery as the REPL); each console entry appends new code with stable ids and the running VM atomically adopts the extended program. (Detailed design record: the tooling-unification arc, in `plans/` git history.)
+- **Console fragments are session compiles.** The launch compile keeps its compiler alive as an incremental session (the same machinery as the REPL); each console entry appends new code with stable ids and the running VM atomically adopts the extended program.
 
 ## Current limitations
 

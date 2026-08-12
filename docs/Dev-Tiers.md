@@ -129,7 +129,7 @@ crit  = "criterion:bench"   # a dependency's `bench` tier, named `@crit` locally
                             # collide with std's `@bench`
 ```
 
-**Which of those tiers are *live* in a build** is a named target's `tiers` — an activation live-set of your local tier names, written as an array on the target: a bare name turns a tier on, a `-name` turns one off (to drop a tier an `extends` base left live). It no longer names a provider (that moved to `[directives]`); a tier's provider is package-level, the same in every build:
+**Which of those tiers are *live* in a build** is a named target's `tiers` — an activation live-set of your local tier names, written as an array on the target: a bare name turns a tier on, a `-name` turns one off (to drop a tier an `extends` base left live). The live-set names tiers, never providers: a tier's provider is package-level, declared once in `[directives]` and the same in every build.
 
 ```toml
 [targets.dev]
