@@ -1,6 +1,6 @@
 # Baseline for scripts/perf-ratchet.sh — INSTRUCTIONS RETIRED, min of 5.
 #
-# Recorded 2026-08-10T13:22:04Z from /home/niklas/Code/lang/target/release/noeta
+# Recorded 2026-08-12T10:59:19Z from /home/niklas/.cargo-targets/agent-docs-surface/release/noeta
 # Re-record with:  scripts/perf-ratchet.sh --record
 #
 # Read the diff, do not just accept it: numbers DOWN is an improvement worth keeping
@@ -13,8 +13,8 @@
 
 machine AMD Ryzen AI 9 365 w/ Radeon 880M | ldd (GNU libc) 2.44 | rustc 1.97.0 (2d8144b78 2026-07-07)
 
-row version             2342079
-row startup             3261233
-row arith             560531761
-row map               118609053
-row loop_jit         1149275453
+row version             2360597
+row startup             3289495
+row arith             560558543
+row map               117133867
+row loop_jit         1131704103
