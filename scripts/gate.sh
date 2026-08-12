@@ -437,6 +437,15 @@ step 2 test "shape: noeta-stdlib (no default)" -- \
 step 2 docs "doc samples (docs/*.md)" -- \
     "${CARGO[@]}" test -p noeta-cli --test doc_samples --no-default-features --locked
 
+# --- docs: the wiki describes the present, and --help speaks to users --------------------------
+#
+# The step above proves the samples still compile; nothing checked the prose around them. Docs
+# drift into changelog one sentence at a time ("this page used to say…", "the old advice is
+# retired"), and internal milestone labels leak into user-facing `--help`. Cheap enough to run in
+# the quick tier: it reads files and matches strings, no build of its own beyond the test binary.
+step 1 docs "docs style (no history, no milestone vocabulary)" -- \
+    "${CARGO[@]}" test -p noeta-cli --test docs_style --no-default-features --locked
+
 # --- docs: rustdoc's own links, for the crate whose product IS its documentation ---------------
 #
 # The step above runs the ```noeta samples in docs/*.md. Nothing ran rustdoc, so a broken

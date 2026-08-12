@@ -49,6 +49,21 @@ This project is developed primarily by coding agents, so the test suite is the t
 
 `cargo bench -p noeta-vm` runs the `criterion` benches over the VM hot paths (dispatch loop, inline-cached property access, allocation) in `crates/noeta-vm/benches/vm.rs`; a VM-touching change should check them.
 
+## Writing docs
+
+`docs/` is the wiki, and it describes what Noeta **is** — for a reader using the toolchain today, who never saw any earlier version. Three rules follow, each of which has had to be repaired at least once:
+
+- **No history.** Not "this used to", "was previously", "the old advice", a before/after measurement, a retracted recommendation, or a note that a setting moved from one table to another. The reader never knew the old behavior, and a changelog sentence inside a reference page reads as a live rule. State the current rule; git carries the rest.
+- **No milestone vocabulary.** Arc, slice and phase labels (`P-AOT L1`, `P-WASM W4`, `object-model slice 6`, `(interim)`) mean nothing outside this repo. **This covers `--help` text and diagnostics, not just `docs/`** — a clap `///` doc comment is user-facing, and four `noeta build` flags shipped announcing their internal milestone.
+- **No links into `plans/`.** The wiki must not send a reader to a roadmap document, or to git history for a design record. (`docs/Contributing.md` is the one exception: pointing a *contributor* at the roadmap is its job.)
+
+Rationale is welcome where it helps a reader *use* the thing — explaining that acronyms are words because `HTTPSURLParser` has no readable boundaries is what makes the rule stick. It is not welcome as a defense of a decision against alternatives nobody proposed.
+
+`cargo test -p noeta-cli --test docs_style` enforces the mechanical half (the phrasings and labels above, in `docs/` and in the CLI's user-facing help). It is a lint over a small set of high-precision patterns, not a proof — the judgment half is yours, and a wiki page written as a changelog will pass it.
+
+> [!NOTE]
+> **Markdown in this repo never uses hard line wrap** — one line per paragraph.
+
 ## Working alongside other agents
 
 > [!IMPORTANT]
@@ -101,7 +116,4 @@ This project is developed primarily by coding agents, so the test suite is the t
 
 - Zero compiler warnings — `cargo build` produces no `warning:` lines.
 - New functionality has tests; a coverage drop on a touched file is a regression.
-- Architectural or feature changes update the docs *in the same commit*. Keep aligned: `README.md` (newcomer entry), `ARCHITECTURE.md` (technical overview), `CONTRIBUTING.md` (developer entry, references rather than repeats), `AGENTS.md` (this file — conventions and workflow, **not** an architecture dump), `docs/` (the wiki page for the feature, with roadmap-only items marked as such), and the touched crate's `README.md`.
-
-> [!NOTE]
-> **Markdown in this repo never uses hard line wrap** — one line per paragraph.
+- Architectural or feature changes update the docs *in the same commit*, following [Writing docs](#writing-docs). Keep aligned: `README.md` (newcomer entry), `ARCHITECTURE.md` (technical overview), `CONTRIBUTING.md` (developer entry, references rather than repeats), `AGENTS.md` (this file — conventions and workflow, **not** an architecture dump), `docs/` (the wiki page for the feature, with roadmap-only items marked as such), and the touched crate's `README.md`.

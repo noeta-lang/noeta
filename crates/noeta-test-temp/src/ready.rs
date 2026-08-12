@@ -439,23 +439,41 @@ mod tests {
     ///
     /// Before the capture existed this same message ended at `(last connect error: Connection
     /// refused …)`, and three separate investigations started there.
+    /// The retry is not flake-tolerance for the behavior under test — it is for the *port*.
+    /// [`crate::free_port`] draws a port by binding `:0` and dropping the socket, and its claim
+    /// registry only serializes ports drawn through it; a process outside the registry can take
+    /// the port in that window. When one does, `wait_until_listening_or_child_exits` connects
+    /// successfully and returns `Ok` — a true observation about a foreign listener and nothing to
+    /// do with this test. Seen for real on a gate run where socket-heavy suites ran alongside.
     #[test]
     fn a_dying_server_is_quoted_in_the_message_that_reports_it() {
-        let log = ServerLog::new("dying-words");
-        let mut child = log
-            .spawn(std::process::Command::new("sh").args([
-                "-c",
-                "echo '[E0021] cannot bind 127.0.0.1:1: Address already in use' >&2; exit 1",
-            ]))
-            .expect("spawn sh");
-        let port = crate::free_port();
-        let err =
-            wait_until_listening_or_child_exits(&mut child, &format!("127.0.0.1:{port}"), &log)
-                .expect_err("that server binds nothing");
-        assert!(
-            err.contains("E0021") && err.contains("Address already in use"),
-            "the server's own words are missing from the failure it caused: {err}"
-        );
+        let mut contended = Vec::new();
+        for attempt in 0..4 {
+            let log = ServerLog::new(&format!("dying-words-{attempt}"));
+            let mut child = log
+                .spawn(std::process::Command::new("sh").args([
+                    "-c",
+                    "echo '[E0021] cannot bind 127.0.0.1:1: Address already in use' >&2; exit 1",
+                ]))
+                .expect("spawn sh");
+            let port = crate::free_port();
+            match wait_until_listening_or_child_exits(
+                &mut child,
+                &format!("127.0.0.1:{port}"),
+                &log,
+            ) {
+                Err(err) => {
+                    assert!(
+                        err.contains("E0021") && err.contains("Address already in use"),
+                        "the server's own words are missing from the failure it caused: {err}"
+                    );
+                    return;
+                }
+                // Somebody else is listening on the port we were just handed. Draw another.
+                Ok(_stream) => contended.push(port),
+            }
+        }
+        panic!("every drawn port was already listening (foreign binders on {contended:?})");
     }
 
     /// The shutdown direction, both ways round.
