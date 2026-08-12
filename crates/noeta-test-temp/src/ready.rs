@@ -375,6 +375,26 @@ mod tests {
         assert_eq!(at(400.0), BASE * 4, "and the scaling is capped");
     }
 
+    /// An address on which nothing can be listening, for the tests that assert a *failure* to
+    /// connect.
+    ///
+    /// Not [`crate::free_port`]: that hands out a port for a server to **bind**, and it cannot
+    /// promise the port stays empty. It draws by binding `:0` and dropping the socket, and its
+    /// claim registry is a marker *file* — which stops another `free_port` caller from being handed
+    /// the same port, and says nothing to the kernel, which will hand that port to anyone who binds
+    /// `:0` next. The tests below then poll the address for the whole grace window
+    /// ([`GRACE_AFTER_EXIT`], two seconds), so *any* listener appearing anywhere in those two
+    /// seconds — a sibling test in this binary, another crate's tests under `cargo test
+    /// --workspace`, another process on the machine — makes the connect succeed and the assertion
+    /// fail. Reproduced at 30 runs in 40 by modelling that window under port churn; the merge gate
+    /// hit it for real once, and it reads as a failure in whatever crate happens to be named.
+    ///
+    /// Port 1 removes the race rather than narrowing it: it is privileged, so no unprivileged
+    /// process on the machine can bind it, and the connect is refused in microseconds instead of
+    /// polling a port that might fill. (Running the suite as root would forfeit that, and nothing
+    /// here does.)
+    const DEAD_ADDR: &str = "127.0.0.1:1";
+
     /// A listening socket is seen immediately, and the connection comes back for the caller to use.
     #[test]
     fn a_bound_port_is_ready_at_once() {
@@ -391,19 +411,13 @@ mod tests {
     /// `Connection refused`.
     #[test]
     fn a_dead_address_times_out_with_the_budget_in_the_message() {
-        let port = crate::free_port();
         let started = Instant::now();
         // Straight to the inner wait so the budget can be one second: a test that asserts on a
         // *timeout* must not sit out the real one.
-        let err = wait_to_listen(
-            &format!("127.0.0.1:{port}"),
-            None,
-            None,
-            Duration::from_secs(1),
-        )
-        .expect_err("nothing is bound to that port");
+        let err = wait_to_listen(DEAD_ADDR, None, None, Duration::from_secs(1))
+            .expect_err("nothing is bound to that port");
         assert!(started.elapsed() < Duration::from_secs(10), "it hung");
-        for expected in ["waited", "1.0s", "load", BUDGET_ENV, &port.to_string()] {
+        for expected in ["waited", "1.0s", "load", BUDGET_ENV, DEAD_ADDR] {
             assert!(err.contains(expected), "{expected:?} missing from: {err}");
         }
     }
@@ -416,11 +430,9 @@ mod tests {
         let mut child = log
             .spawn(&mut std::process::Command::new("true"))
             .expect("spawn /bin/true");
-        let port = crate::free_port();
         let started = Instant::now();
-        let err =
-            wait_until_listening_or_child_exits(&mut child, &format!("127.0.0.1:{port}"), &log)
-                .expect_err("/bin/true binds nothing");
+        let err = wait_until_listening_or_child_exits(&mut child, DEAD_ADDR, &log)
+            .expect_err("/bin/true binds nothing");
         assert!(
             started.elapsed() < GRACE_AFTER_EXIT + Duration::from_secs(3),
             "a dead server must not consume the readiness budget: {:?}",
@@ -439,41 +451,21 @@ mod tests {
     ///
     /// Before the capture existed this same message ended at `(last connect error: Connection
     /// refused …)`, and three separate investigations started there.
-    /// The retry is not flake-tolerance for the behavior under test — it is for the *port*.
-    /// [`crate::free_port`] draws a port by binding `:0` and dropping the socket, and its claim
-    /// registry only serializes ports drawn through it; a process outside the registry can take
-    /// the port in that window. When one does, `wait_until_listening_or_child_exits` connects
-    /// successfully and returns `Ok` — a true observation about a foreign listener and nothing to
-    /// do with this test. Seen for real on a gate run where socket-heavy suites ran alongside.
     #[test]
     fn a_dying_server_is_quoted_in_the_message_that_reports_it() {
-        let mut contended = Vec::new();
-        for attempt in 0..4 {
-            let log = ServerLog::new(&format!("dying-words-{attempt}"));
-            let mut child = log
-                .spawn(std::process::Command::new("sh").args([
-                    "-c",
-                    "echo '[E0021] cannot bind 127.0.0.1:1: Address already in use' >&2; exit 1",
-                ]))
-                .expect("spawn sh");
-            let port = crate::free_port();
-            match wait_until_listening_or_child_exits(
-                &mut child,
-                &format!("127.0.0.1:{port}"),
-                &log,
-            ) {
-                Err(err) => {
-                    assert!(
-                        err.contains("E0021") && err.contains("Address already in use"),
-                        "the server's own words are missing from the failure it caused: {err}"
-                    );
-                    return;
-                }
-                // Somebody else is listening on the port we were just handed. Draw another.
-                Ok(_stream) => contended.push(port),
-            }
-        }
-        panic!("every drawn port was already listening (foreign binders on {contended:?})");
+        let log = ServerLog::new("dying-words");
+        let mut child = log
+            .spawn(std::process::Command::new("sh").args([
+                "-c",
+                "echo '[E0021] cannot bind 127.0.0.1:1: Address already in use' >&2; exit 1",
+            ]))
+            .expect("spawn sh");
+        let err = wait_until_listening_or_child_exits(&mut child, DEAD_ADDR, &log)
+            .expect_err("that server binds nothing");
+        assert!(
+            err.contains("E0021") && err.contains("Address already in use"),
+            "the server's own words are missing from the failure it caused: {err}"
+        );
     }
 
     /// The shutdown direction, both ways round.
