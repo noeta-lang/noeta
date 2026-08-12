@@ -41,16 +41,23 @@ seeds). Several latent compiler/VM/parser bugs were found and fixed en route. CU
 reverse debugging, down migrations. What remains in `backlog.md` is exclusively **decision-gated
 or trigger-gated**:
 
-1. **Publish the toolchain + registry repos** — the keystone; a user decision (naming, visibility,
-   push policy), then mechanical follow-through. Local `main` (both repos) carries everything,
-   unpushed.
-2. **User-action items**: the Spin/Fastly edge deploy (account + one deploy; the guide + verified
+1. **User-action items**: the Spin/Fastly edge deploy (account + one deploy; the guide + verified
    local proof are done), and editions S3/S4 (awaits a deliberate post-1.0 breaking change).
-3. **Design-gated**: Tauri packaging, capability-enforcement (static effect analysis — deferred by
+2. **Design-gated**: Tauri packaging, capability-enforcement (static effect analysis — deferred by
    the owner), synced store R&D, TaskScope patterns.
-4. **Trigger-gated tails**: the perf cluster, stdlib follow-ons, OTEL residuals, the attested watch
-   ledger (design note filed), the wasm-serve component packaging, and the small remaining tooling
-   rows — each fires on its stated trigger, none on its own.
+3. **Trigger-gated tails**: the perf cluster, stdlib follow-ons, OTEL residuals, the attested watch
+   ledger (design note filed), the wasm-serve component packaging, interruptible host IO (designed
+   and measured, not built), the fmt safety gate's `Pretty`-proxy replacement, and the small
+   remaining tooling rows — each fires on its stated trigger, none on its own.
+
+**Publishing is done, and is no longer the keystone it was written as.** Both repos are public and
+level with `origin/main` (`noeta-lang/noeta`, `noeta-lang/noeta-registry`), the nine `para`
+packages are in their own repos depending on each other through the registry, and the reservation
+stubs are on crates.io and npm. An audit on 2026-08-12 struck it along with four other rows that
+had shipped without being closed — the MCP/LSP composition gap, the `@validated` hover asymmetry,
+the two unrecoverable process doors, and `std.tracing`'s active-span annotators (which shipped as
+free functions rather than the `current_span()` the row proposed). Read a row's evidence before
+picking it up: **the backlog closes rows late**, and the roadmap inherits whatever it says.
 
 ## Working discipline (unchanged)
 
