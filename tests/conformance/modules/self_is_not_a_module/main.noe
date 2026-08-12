@@ -1,0 +1,10 @@
+// `self` is the method receiver, so it cannot also name a module. Before it was reserved, a
+// `self.noe` derived the module `lib.self`, and importing it bound the handle `self` — after which
+// `self.n` inside a method read the receiver's field while `self.hi()` read the module's function,
+// in one expression, silently. That is the "one name, one meaning" rule (E0020) failing to fire,
+// because a receiver is bound by the method rather than by a `use` or a binding.
+// expect: error E0074 at 1:1
+// expect: exit 1
+use lib.ok;
+
+echo fine()

@@ -63,13 +63,27 @@ The walk stops at three kinds of directory, none of which are your package's sou
 
 ### Importing your own package's modules
 
-Inside a package, **write the import the way your own package derives it — lead with the `package` half of your `[package] name`.** For `para/db` that is `db`, whatever a consumer keys the package as:
+Inside a package, lead with **`_self_`** — "a module of the package this file belongs to":
 
 ```noeta ignore
 // para-db/query.noe — inside the package `para/db`
-use db.open              // ✅ resolves standalone AND as a dependency
+use _self_.open          // ✅ resolves standalone AND as a dependency
+use db.open              // ✅ also works — the `package` half of your `[package] name`
 use para.db.open         // ❌ only ever resolved when a consumer keyed it `para`
 ```
+
+`_self_` is the spelling to reach for. It says what you mean without naming the package, so renaming the package does not touch a single import, and a reader never has to check the manifest to know what the leading segment refers to. The `package`-half spelling keeps working — `_self_` re-roots to exactly the same thing.
+
+The underscores are what make it safe rather than decorative: `_self_` cannot be confused with `self` (the method receiver), cannot collide with a binding, and cannot be a module somebody named — a `_self_.noe`, like a `self.noe`, is refused. It is the convention Perl spells `__PACKAGE__`, Elixir `__MODULE__` and Scala `_root_`.
+
+It works in a qualified reference too, not only after `use`:
+
+```noeta ignore
+use _self_.models
+u = _self_.models.User { name: "Ada" }     // the spelled-out FQN, same identity
+```
+
+A file that is **not in a package** — a lone script with no `noeta.toml` — derives no prefix, so `_self_` has nothing to stand for and says so (E0019) rather than reporting a missing module.
 
 That one spelling works in both builds because it is what the compiler derives for your files when the package is built **on its own** — running your tests, `noeta check .`, an example app — and because a consumer's build rewrites that leading segment to whatever prefix your modules derive under there. Standalone the prefix *is* that segment, so nothing changes; under `para = [{ package = "para/db" }, …]` your `use db.open` becomes `para.db.open`; under `mydb = { package = "para/db" }` it becomes `mydb.open`. You never write the consumer's key, and you never write your own scope.
 
@@ -90,6 +104,8 @@ Two segments are *not* rewritten, which is what you want in both cases: a `use s
 ```
 
 The hint is advice; nothing is applied silently. Mapping `my-utils` → `my_utils` behind your back would give one module two spellings, which is precisely what deriving the path exists to remove. A keyword is refused for the same reason (`class.noe` — no `use` could name it), as is a stem starting with a digit (`2fa.noe` → `_2fa`).
+
+**Two names are reserved**, and they are refused with the same code for a different reason — they spell perfectly well, the language has simply already taken them. **`self`** is the method receiver, and a module of that name would collide with it: importing `pkg.self` binds the handle `self`, so inside a method `self.n` would read the receiver's field while `self.hi()` read the module's function — two meanings for one name, which the [one name, one meaning](#qualified-references) rule cannot catch, because a receiver is bound by the method rather than by a `use`. **`_self_`** is the [intra-package prefix](#importing-your-own-packages-modules) above.
 
 ### One path, one module
 

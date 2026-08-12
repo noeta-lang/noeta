@@ -1,0 +1,16 @@
+// `_self_` is the intra-package import prefix: "a module of the package this file belongs to",
+// without naming the package.
+//
+// The subdirectory `para.db/` is the package `para/db` reached through a scope array, so its
+// modules derive under the two-segment prefix `para.db` while its own root segment is `db`. Its
+// files import each other as `use _self_.…` and the loader re-roots that leading segment to the
+// whole prefix — the same source resolves standalone, where the prefix *is* `db`, and here.
+//
+// That is the property worth pinning: one spelling that survives being keyed anything by a
+// consumer, and that does not have to change when the package is renamed.
+// expect: stdout "[conn:rows] conn:rows"
+// expect: exit 0
+use para.db.nested.repo.all;
+use para.db.query.run;
+
+echo "${all()} ${run()}"

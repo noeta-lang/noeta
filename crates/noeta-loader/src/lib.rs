@@ -355,6 +355,22 @@ impl DepPackage {
     }
 }
 
+/// The **intra-package import prefix**: `use _self_.models` means "a module of the package this
+/// file belongs to", whatever that package is called and however a consumer keys it.
+///
+/// Without it a package's own imports must lead with the `package` half of its identity
+/// (`use db.query` inside `para/db`), which couples every file to the manifest's name and is what
+/// forces that half to be a single identifier. `_self_` says the same thing without naming it.
+///
+/// Underscore-wrapped deliberately, and it is the only reason this reads as machinery rather than
+/// as somebody's variable: it cannot be confused with `self` (the method receiver), cannot collide
+/// with a binding, and cannot be a module somebody named — [`RESERVED_SEGMENTS`] refuses a
+/// `_self_.noe`. The convention is Perl's `__PACKAGE__`, Elixir's `__MODULE__` and Scala's
+/// `_root_`, applied to the same job.
+///
+/// [`RESERVED_SEGMENTS`]: derive::RESERVED_SEGMENTS
+pub const SELF_PREFIX: &str = "_self_";
+
 /// Re-root a namespace/use path in place: replace its leading segment per the rules
 /// (package-manager P2.1/P2.4).
 ///
@@ -392,7 +408,9 @@ pub fn reroot_path(
     let Some(head) = path.first() else {
         return;
     };
-    if head.as_str() == root {
+    // `_self_` is the package's own root said without naming it, so it re-roots exactly as the
+    // root segment does — one spelling that survives being keyed anything by a consumer.
+    if head.as_str() == root || head.as_str() == SELF_PREFIX {
         // The whole prefix, not one segment: a scope member's is two segments deep.
         path.splice(0..1, prefix.iter().cloned());
     } else if let Some(global) = renames.get(head.as_str()) {
@@ -1949,6 +1967,38 @@ pub struct DerivedUnit<'a> {
 ///
 /// Called **after** dependency re-rooting ([`reroot_program`]), because that is what puts a declared
 /// namespace into the consumer's own naming space, which is the space the derivation is in.
+/// Replace a leading [`SELF_PREFIX`] with `root` in every path this program spells.
+///
+/// Only the *leading* segment: everything after it is the author's own spelling of their module
+/// tree, exactly as with the root segment `_self_` stands in for.
+fn rewrite_self_prefix(program: &mut Program, root: &str) {
+    for stmt in &mut program.stmts {
+        // The import's own path is a `Vec<String>`, not a `Name` — the walk below cannot see it.
+        if let Stmt::Namespace { path, .. } | Stmt::Use { path, .. } = stmt
+            && path.first().is_some_and(|head| head == SELF_PREFIX)
+        {
+            path[0] = root.to_string();
+        }
+        // …and every *qualified reference* that spells the prefix — a struct literal's head, an
+        // annotation, a pattern — so `_self_` resolves in both positions rather than only after
+        // `use`. The docs promise a spelled-out FQN works once a module is in scope; a prefix that
+        // worked in one position and not the other would be a special case in a rule that has none.
+        qualify::rewrite_leading_segment(stmt, SELF_PREFIX, root);
+    }
+}
+
+/// The span of the first path leading with [`SELF_PREFIX`], for the "not in a package" report.
+fn first_self_prefix(program: &Program) -> Option<noeta_span::Span> {
+    program.stmts.iter().find_map(|stmt| match stmt {
+        Stmt::Namespace { path, span, .. } | Stmt::Use { path, span, .. }
+            if path.first().is_some_and(|head| head == SELF_PREFIX) =>
+        {
+            Some(*span)
+        }
+        _ => None,
+    })
+}
+
 pub fn apply_derived_paths(units: Vec<DerivedUnit<'_>>) -> Vec<LoadDiagnostic> {
     let mut diagnostics = Vec::new();
     // Derived path → the file that claimed it first (both are named when a second one does).
@@ -1956,25 +2006,81 @@ pub fn apply_derived_paths(units: Vec<DerivedUnit<'_>>) -> Vec<LoadDiagnostic> {
         std::collections::HashMap::new();
     for unit in units {
         let derived = match unit.path {
-            ModulePath::Declared => continue,
-            ModulePath::Illegal { segment, rename_to } => {
+            // No package, so `_self_` names nothing — say that here rather than let it fall
+            // through to "no module `_self_`", which describes the symptom and not the cause.
+            ModulePath::Declared => {
+                if let Some(span) = first_self_prefix(unit.program) {
+                    diagnostics.push(LoadDiagnostic {
+                        source: unit.source.clone(),
+                        diagnostic: Diagnostic::error(
+                            DiagnosticCode::UnresolvedImport,
+                            span,
+                            format!(
+                                "`{SELF_PREFIX}` means \"this package\", and this file is not in \
+                                 one — it was reached without a `noeta.toml`, so nothing derives \
+                                 a package prefix for it to stand for"
+                            ),
+                        )
+                        .with_help(
+                            "add a `noeta.toml` to make this directory a package, or import the \
+                             module by the path it actually derives",
+                        ),
+                    });
+                }
+                continue;
+            }
+            ModulePath::Illegal {
+                segment,
+                rename_to,
+                fault,
+            } => {
+                let message = match fault {
+                    derive::SegmentFault::NotAnIdentifier => format!(
+                        "`{segment}` cannot be part of a module path — a module's path is \
+                         derived from where its file sits, and every segment of it has to be \
+                         spellable in a `use`"
+                    ),
+                    derive::SegmentFault::Reserved => format!(
+                        "`{segment}` is reserved and cannot name a module — a module's path is \
+                         derived from where its file sits, so a file called `{segment}.noe` would \
+                         claim a segment the language already uses"
+                    ),
+                };
+                let help = match fault {
+                    derive::SegmentFault::NotAnIdentifier => {
+                        format!("rename it to `{rename_to}`")
+                    }
+                    derive::SegmentFault::Reserved => format!(
+                        "rename it to `{rename_to}` — `self` is the method receiver and `_self_` \
+                         is the prefix that imports this package's own modules (`use \
+                         _self_.{rename_to}`)"
+                    ),
+                };
                 diagnostics.push(LoadDiagnostic {
                     source: unit.source.clone(),
                     diagnostic: Diagnostic::error(
                         DiagnosticCode::IllegalModulePath,
                         first_line(unit.source),
-                        format!(
-                            "`{segment}` cannot be part of a module path — a module's path is \
-                             derived from where its file sits, and every segment of it has to be \
-                             spellable in a `use`"
-                        ),
+                        message,
                     )
-                    .with_help(format!("rename it to `{rename_to}`")),
+                    .with_help(help),
                 });
                 continue;
             }
             ModulePath::Derived(derived) => derived,
         };
+        // Resolve `use _self_.…` against the package this file belongs to. The package's own root
+        // segment leads every path it derives, so `derived[0]` *is* that segment — and the segment
+        // is all this needs, because `_self_` is defined to behave exactly as the root segment
+        // does: standalone it already is the prefix, and in a consumer's build `reroot_path`
+        // rewrites it to whatever the package derives under there.
+        //
+        // A dependency's modules never reach this with a `_self_` left in them: re-rooting runs
+        // first and resolves theirs, which is why one rule can serve both without knowing whose
+        // package it is looking at.
+        if let Some(root) = derived.first() {
+            rewrite_self_prefix(unit.program, root);
+        }
         if let Some(first) = claimed.get(derived) {
             diagnostics.push(LoadDiagnostic {
                 source: unit.source.clone(),

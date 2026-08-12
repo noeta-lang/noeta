@@ -171,8 +171,36 @@ pub enum ModulePath {
         segment: String,
         /// A legal spelling of it, to rename to.
         rename_to: String,
+        /// Why the segment cannot stand — the two faults read differently to an author.
+        fault: SegmentFault,
     },
 }
+
+/// Why a file's location cannot be a module path.
+///
+/// Two different problems wear the same outcome, and an author fixes them differently: a segment
+/// that *cannot be spelled* needs different characters, while one that is **reserved** is spelled
+/// perfectly well and is simply claimed by the language.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SegmentFault {
+    /// The segment does not lex as one identifier (`my-utils`, `2fast`, `class`).
+    NotAnIdentifier,
+    /// The segment lexes fine but is a [reserved path segment](RESERVED_SEGMENTS).
+    Reserved,
+}
+
+/// Segments the language claims, which therefore cannot name a module.
+///
+/// - **`self`** is the method receiver. Before this list, a `self.noe` was a legal module, and a
+///   `use pkg.self` bound the handle `self` — so inside a method `self.n` read the receiver's field
+///   while `self.hi()` read the module's function, in one expression, silently. That contradicts
+///   the language's own "one name, one meaning" rule (E0020), which never saw it because a receiver
+///   is bound by the method rather than by a `use` or a binding.
+/// - **`_self_`** is the [intra-package import prefix](super::SELF_PREFIX): `use _self_.models`
+///   means "a module of the package this file belongs to". Underscore-wrapped so it can never be
+///   confused with the receiver, a user's variable, or a module somebody named — the convention
+///   Perl (`__PACKAGE__`), Elixir (`__MODULE__`) and Scala (`_root_`) use for the same job.
+pub const RESERVED_SEGMENTS: &[&str] = &["self", "_self_"];
 
 impl ModulePath {
     /// The derived path, if one was derived.
@@ -246,6 +274,16 @@ pub fn derive_module_path(prefix: &[String], relative: &Path) -> ModulePath {
             return ModulePath::Illegal {
                 rename_to: legalize(segment),
                 segment: segment.clone(),
+                fault: SegmentFault::NotAnIdentifier,
+            };
+        }
+        if RESERVED_SEGMENTS.contains(&segment.as_str()) {
+            return ModulePath::Illegal {
+                // A reserved segment already spells fine, so the hint is a *different* name rather
+                // than a legal spelling of this one.
+                rename_to: format!("{segment}_module"),
+                segment: segment.clone(),
+                fault: SegmentFault::Reserved,
             };
         }
     }
@@ -450,6 +488,7 @@ mod tests {
             ModulePath::Illegal {
                 segment: "my-utils".to_string(),
                 rename_to: "my_utils".to_string(),
+                fault: SegmentFault::NotAnIdentifier,
             }
         );
         // A keyword cannot be a segment either — nothing could `use` it.
@@ -464,6 +503,29 @@ mod tests {
         ));
     }
 
+    /// `self` and `_self_` spell fine and are refused anyway: the language has taken both, so a
+    /// module of either name would be a second meaning for a name that already has one.
+    #[test]
+    fn a_reserved_stem_is_refused_as_reserved() {
+        for name in RESERVED_SEGMENTS {
+            let fault =
+                match derive_module_path(&prefix(&["pkg"]), Path::new(&format!("{name}.noe"))) {
+                    ModulePath::Illegal { fault, .. } => fault,
+                    other => panic!("`{name}.noe` should be refused, got {other:?}"),
+                };
+            assert_eq!(
+                fault,
+                SegmentFault::Reserved,
+                "`{name}` is spellable — it is refused for being claimed, not for being unspellable"
+            );
+        }
+        // A reserved word is only reserved as a WHOLE segment; it may sit inside one.
+        assert!(matches!(
+            derive_module_path(&prefix(&["pkg"]), Path::new("self_test.noe")),
+            ModulePath::Derived(_)
+        ));
+    }
+
     #[test]
     fn a_digit_leading_stem_gains_an_underscore() {
         assert_eq!(
@@ -471,6 +533,7 @@ mod tests {
             ModulePath::Illegal {
                 segment: "2fa".to_string(),
                 rename_to: "_2fa".to_string(),
+                fault: SegmentFault::NotAnIdentifier,
             }
         );
     }
