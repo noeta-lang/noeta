@@ -19,7 +19,19 @@
 //!   stands alone.
 //! * ```` ```noeta error ```` — a sample that is *meant* to fail (an error demo); it must exit non-zero.
 //!
-//! ```` ```console ````, ```` ```toml ````, and other languages are ignored entirely.
+//! ```` ```console ```` and other languages are ignored entirely.
+//!
+//! ## `toml` blocks
+//!
+//! A ```` ```toml ```` block is checked too, by a separate test: it must parse as a manifest this
+//! toolchain accepts. The code samples were gated and the *configuration* was not, which is the
+//! half a reader copies verbatim into `noeta.toml` — and the parser is strict enough to be worth
+//! asking (`reject_unknown_tables` refuses a table the schema does not define, and a provider must
+//! name a real dependency). `[package]` is optional, so a page's fragment — `[directives]` alone,
+//! a lone `[targets.dev]` — is a valid manifest and is checked as written.
+//!
+//! Tag a block ```` ```toml ignore ```` when it is deliberately **not** a `noeta.toml`: a
+//! `Cargo.toml` for a native package, a Spin manifest, a `noeta.lock` excerpt.
 //!
 //! When you add or edit a sample, run `cargo test -p noeta-cli --test doc_samples`. If a genuinely
 //! complete example fails, fix the example (or the code it documents); only tag `ignore` when the
@@ -44,30 +56,35 @@ struct Sample {
 
 /// Pull every ```` ```noeta[ tag] ```` block out of a markdown source.
 fn extract(file: &str, text: &str) -> Vec<Sample> {
+    extract_fenced(file, text, "noeta")
+}
+
+/// Pull every ```` ```<lang>[ tag] ```` block out of a markdown source. Shared by the `noeta`
+/// gate below and the `toml` one, so the two cannot disagree about what a fenced block is.
+fn extract_fenced(file: &str, text: &str, lang: &str) -> Vec<Sample> {
+    let fence = format!("```{lang}");
     let lines: Vec<&str> = text.lines().collect();
     let mut out = Vec::new();
     let mut i = 0;
     while i < lines.len() {
         let trimmed = lines[i].trim_start();
-        if let Some(rest) = trimmed.strip_prefix("```noeta") {
-            // A real `noeta` fence: nothing after `noeta` (untagged) or a whitespace-separated tag.
-            // Guards against `noeta`-prefixed info strings (a defensive check, as with `language`).
-            if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-                let tag = rest.trim().to_string();
-                let open = i + 1;
-                let mut body = Vec::new();
+        if let Some(rest) = trimmed.strip_prefix(fence.as_str())
+            && (rest.is_empty() || rest.starts_with(char::is_whitespace))
+        {
+            let tag = rest.trim().to_string();
+            let open = i + 1;
+            let mut body = Vec::new();
+            i += 1;
+            while i < lines.len() && !lines[i].trim_start().starts_with("```") {
+                body.push(lines[i]);
                 i += 1;
-                while i < lines.len() && !lines[i].trim_start().starts_with("```") {
-                    body.push(lines[i]);
-                    i += 1;
-                }
-                out.push(Sample {
-                    file: file.to_string(),
-                    line: open,
-                    tag,
-                    code: body.join("\n"),
-                });
             }
+            out.push(Sample {
+                file: file.to_string(),
+                line: open,
+                tag,
+                code: body.join("\n"),
+            });
         }
         i += 1;
     }
@@ -156,6 +173,66 @@ fn check(sample: &Sample, idx: usize) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// Every ```` ```toml ```` block in the wiki must be a manifest the toolchain accepts.
+///
+/// The `noeta` gate proves the *code* in the docs still works and said nothing about the
+/// *configuration*, which is the half a reader copies verbatim into `noeta.toml`. A stale
+/// `[targets]` shape or a table that no longer exists reads exactly like a working one, and the
+/// manifest parser is strict enough to catch both: `reject_unknown_tables` refuses a table the
+/// schema does not define, and `[package]` is optional, so a page's fragment — `[directives]` on
+/// its own, a lone `[targets.dev]` — is a valid manifest and parses as written.
+///
+/// Blocks that are not Noeta manifests (a `Cargo.toml` for a native package, a Spin manifest)
+/// carry ```` ```toml ignore ````, the same escape the `noeta` fences use.
+#[test]
+fn doc_toml_blocks_are_valid_manifests() {
+    let dir = docs_dir();
+    let mut blocks = Vec::new();
+    for entry in std::fs::read_dir(&dir).expect("read docs/") {
+        let path = entry.expect("dir entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        let text = std::fs::read_to_string(&path).expect("read markdown");
+        blocks.extend(extract_fenced(&name, &text, "toml"));
+    }
+    assert!(!blocks.is_empty(), "found no `toml` blocks in {dir:?}");
+
+    let mut failures = Vec::new();
+    let (mut checked, mut ignored) = (0, 0);
+    for block in &blocks {
+        if block.tag == "ignore" {
+            ignored += 1;
+            continue;
+        }
+        if !block.tag.is_empty() {
+            failures.push(format!(
+                "{}:{} — unknown toml fence tag {:?} (only `ignore` is defined)",
+                block.file, block.line, block.tag
+            ));
+            continue;
+        }
+        checked += 1;
+        if let Err(err) = noeta_pm::manifest::Manifest::parse(&block.code) {
+            failures.push(format!(
+                "{}:{} is not a manifest this toolchain accepts — {err}\n    tag it \
+                 ```toml ignore` if it is deliberately not a `noeta.toml`",
+                block.file, block.line
+            ));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "{} of {} toml blocks are not valid manifests:\n\n{}\n",
+        failures.len(),
+        blocks.len(),
+        failures.join("\n")
+    );
+    eprintln!("doc toml: {checked} manifests checked, {ignored} ignored");
 }
 
 #[test]

@@ -85,91 +85,6 @@ struct Outcome {
     errors: Vec<ErrorExpectation>,
 }
 
-/// Run a source string through the pipeline up to `stage` and capture its outcome.
-fn run_source(name: &str, text: &str, stage: Stage) -> Outcome {
-    let source = Source::new(SourceId::FIRST, name, text);
-
-    // Seed the lexer with the installed extensions' verbatim-body tiers (`doc`, native `@json`) so
-    // a native tier's `@<name> { … }` body captures — the loader/pipeline does this too; the
-    // conformance single-file path must match or the differential would lex a native tier's body
-    // as code. The lexer's own two-pass covers a program's `@tier(…, text/expr)` declarations.
-    let mut tier_names: Vec<String> = noeta_stdlib::registry::ext_verbatim_tier_names()
-        .into_iter()
-        .map(str::to_string)
-        .collect();
-    let lexed = noeta_lexer::lex_in(
-        &source,
-        noeta_lexer::Edition::DEFAULT,
-        &noeta_lexer::TextTiers::with(tier_names.clone()),
-    );
-    // Union the file's own `@tier(…, text/expr)` declarations (the lexer's two-pass discovered
-    // them) so a `${…}` hole's re-lex knows *this* file's tiers too — an inline `@t { … }` loop
-    // body inside a hole. Re-lexing is idempotent, so a second pass with the full set is safe.
-    tier_names.extend(lexed.text_tier_decls.iter().cloned());
-    let ext_tiers = noeta_lexer::TextTiers::with(tier_names);
-    let lexed = noeta_lexer::lex_in(&source, noeta_lexer::Edition::DEFAULT, &ext_tiers);
-    let mut diagnostics = lexed.diagnostics.clone();
-
-    let mut stdout = String::new();
-    let mut stderr = String::new();
-    let mut exit_code;
-
-    if stage == Stage::Lexer {
-        exit_code = if has_error(&diagnostics) { 1 } else { 0 };
-    } else {
-        let parsed = noeta_parser::parse_in(
-            &source,
-            &lexed.tokens,
-            noeta_lexer::Edition::DEFAULT,
-            &ext_tiers,
-        );
-        diagnostics.extend(parsed.diagnostics);
-
-        // The type checker (M1.7) is the front-end gate for the eval stage: a program with type
-        // errors is rejected before it runs, exactly as the bytecode pipeline gates it. Running
-        // it here (not only on the VM path) is what lets a negative type-error case assert via
-        // `// expect: error E00xx`, and keeps the tree-walker and VM observably identical.
-        // One `check_all` yields both the gate diagnostics and the site bundle the eval backend
-        // needs, so the checker runs once per case instead of again inside the backend.
-        let mut sites = noeta_check::Sites::default();
-        if stage == Stage::Eval && !has_error(&diagnostics) {
-            let checked = noeta_check::check_all(&parsed.program);
-            diagnostics.extend(checked.diagnostics);
-            sites = checked.sites;
-        }
-
-        // Only evaluate a program that checked cleanly and only when asked to. The reference is the
-        // Core-IR interpreter (the migration's Phase-4 reference semantics), so conformance pins the
-        // same last-use destruction the VM produces.
-        //
-        // "Cleanly" means **no errors**, not "no diagnostics": a warning says the program is
-        // well-formed and compiles, so a case that trips one still runs and still exits 0. Gating on
-        // emptiness made every warning a silent hard stop with no output at all, which is the one
-        // thing a warning must not be.
-        if stage == Stage::Eval && !has_error(&diagnostics) {
-            let result = reference::reference_run(&parsed.program, sites);
-            stdout = result.stdout;
-            stderr = result.stderr;
-            diagnostics.extend(result.diagnostics);
-            exit_code = result.exit_code;
-        } else {
-            exit_code = if has_error(&diagnostics) { 1 } else { 0 };
-        }
-    }
-
-    // A compile error always means a failing exit, even if a stage stopped early.
-    if has_error(&diagnostics) && exit_code == 0 {
-        exit_code = 1;
-    }
-
-    Outcome {
-        stdout,
-        stderr,
-        exit_code,
-        errors: errors_of(&source, &diagnostics),
-    }
-}
-
 /// Whether any diagnostic is an **error** — the gate on running a program and on a failing exit.
 ///
 /// A [`Severity::Warning`](noeta_diagnostics::Severity::Warning) is by definition compatible with
@@ -221,7 +136,7 @@ pub fn run_case(name: &str, text: &str, stage: Stage) -> CaseResult {
         Ok(expectations) => expectations,
         Err(message) => return CaseResult::malformed(name, message),
     };
-    let outcome = run_source(name, text, stage);
+    let outcome = run_linked_source(name, text, stage);
     compare(name, &expectations, &outcome, stage)
 }
 
@@ -436,6 +351,48 @@ pub(crate) fn dep_sources(entry: &Path, next_id: u32) -> Vec<noeta_db::DepSource
 
 /// Load + link `entry` and run the merged program to an [`Outcome`]. Lex/parse errors render
 /// against the source they came from; check/runtime diagnostics against the entry source.
+/// Run a case from source text alone, linked **with no siblings**.
+///
+/// This is the single-file path, and it goes through [`noeta_loader::link`] for one reason: the
+/// linker is where a program's names are resolved against the extension registry. Its rewrite
+/// tables — `add_native_type_aliases` and friends — are what make `use std.http` bind `http.Frame`,
+/// so a harness that lexes, parses and checks *without* linking is asking a different question than
+/// `noeta run` asks. Measured before this path existed: `variants_of::<http.Framing>()` answered
+/// correctly under `noeta run` and `[]` in the harness, and a conformance case could pin the wrong
+/// answer and pass.
+///
+/// **The sibling pool is deliberately empty.** A single-file case's directory holds dozens of
+/// unrelated cases, several of them deliberately malformed, and the loader fails every entry in a
+/// directory when one module there is broken — so reading siblings would make one negative case
+/// poison its neighbours. Linking the entry alone runs the rewrite tables and merges nothing.
+fn run_linked_source(name: &str, text: &str, stage: Stage) -> Outcome {
+    let linked = match noeta_loader::link(
+        name,
+        text,
+        noeta_lexer::Edition::DEFAULT,
+        &[],
+        noeta_loader::ModulePath::Declared,
+    ) {
+        Ok(linked) => linked,
+        Err(load_diagnostics) => return load_failure(&load_diagnostics),
+    };
+    outcome_of_linked(linked, stage)
+}
+
+/// The outcome of a load that never produced a program: its diagnostics, rendered against whichever
+/// source each one belongs to.
+fn load_failure(load_diagnostics: &[noeta_loader::LoadDiagnostic]) -> Outcome {
+    Outcome {
+        stdout: String::new(),
+        stderr: String::new(),
+        exit_code: 1,
+        errors: load_diagnostics
+            .iter()
+            .flat_map(|ld| errors_of(&ld.source, std::slice::from_ref(&ld.diagnostic)))
+            .collect(),
+    }
+}
+
 fn run_linked(entry: &Path, stage: Stage) -> Outcome {
     // A case with package subdirectories links through the dependency-aware path so its sources
     // carry real package provenance; one without keeps the deps-free path byte-for-byte.
@@ -458,18 +415,7 @@ fn run_linked(entry: &Path, stage: Stage) -> Outcome {
     };
     let linked = match load {
         Ok(Ok(linked)) => linked,
-        Ok(Err(load_diagnostics)) => {
-            let errors = load_diagnostics
-                .iter()
-                .flat_map(|ld| errors_of(&ld.source, std::slice::from_ref(&ld.diagnostic)))
-                .collect();
-            return Outcome {
-                stdout: String::new(),
-                stderr: String::new(),
-                exit_code: 1,
-                errors,
-            };
-        }
+        Ok(Err(load_diagnostics)) => return load_failure(&load_diagnostics),
         Err(err) => {
             return Outcome {
                 stdout: format!("could not read: {err}"),
@@ -479,7 +425,13 @@ fn run_linked(entry: &Path, stage: Stage) -> Outcome {
             };
         }
     };
+    outcome_of_linked(linked, stage)
+}
 
+/// Check and run an already-linked program. Shared by both case paths — the multi-file one that
+/// loads a directory and the single-file one that links an entry alone — so the two cannot drift
+/// into disagreeing about what a case means.
+fn outcome_of_linked(linked: noeta_loader::Linked, stage: Stage) -> Outcome {
     // The loader already lexed + parsed cleanly; the lexer/parser stages have nothing more to do.
     if stage != Stage::Eval {
         return Outcome {
@@ -635,6 +587,58 @@ pub(crate) fn collect_cases(dir: &Path, out: &mut Vec<Case>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The pipeline the single-file path used to run: lex, parse, check, evaluate — no linking.
+    ///
+    /// It survives **only here**, as the control for
+    /// [`linking_is_what_resolves_a_module_qualified_native_type`]. A claim that linking matters is
+    /// worth nothing without the measurement that it does, and this is that measurement: the same
+    /// source, both ways, one answer each.
+    fn run_unlinked_control(name: &str, text: &str) -> String {
+        ensure_std_registry();
+        let source = Source::new(SourceId::FIRST, name, text);
+        let lexed = noeta_lexer::lex_in(
+            &source,
+            noeta_lexer::Edition::DEFAULT,
+            &noeta_lexer::TextTiers::default(),
+        );
+        let parsed = noeta_parser::parse_in(
+            &source,
+            &lexed.tokens,
+            noeta_lexer::Edition::DEFAULT,
+            &noeta_lexer::TextTiers::default(),
+        );
+        let checked = noeta_check::check_all(&parsed.program);
+        reference::reference_run(&parsed.program, checked.sites).stdout
+    }
+
+    /// **Why the harness links.** `use std.http` then `http.Framing` is a module-qualified native
+    /// name, and the loader's rewrite tables are what bind it to the registry's `ExtEnum`. Skip
+    /// linking and the name resolves to nothing — `variants_of` answers with an empty list rather
+    /// than an error, so a conformance case could assert the empty answer and pass while
+    /// `noeta run` on the same file printed three variants.
+    ///
+    /// This is the difference, measured. If the single-file path ever stops linking, the two
+    /// numbers converge and this test says so.
+    #[test]
+    fn linking_is_what_resolves_a_module_qualified_native_type() {
+        let source = "use std.http\necho variants_of::<http.Framing>().len()\n";
+
+        let linked = run_linked_source("linked", source, Stage::Eval);
+        assert_eq!(
+            linked.stdout.trim(),
+            "3",
+            "linked, the module-qualified native enum resolves to its three variants"
+        );
+
+        let unlinked = run_unlinked_control("unlinked", source);
+        assert_eq!(
+            unlinked.trim(),
+            "0",
+            "unlinked, the same name resolves to nothing — silently, which is what made this \
+             worth a test rather than a comment"
+        );
+    }
 
     #[test]
     fn passing_case_passes() {

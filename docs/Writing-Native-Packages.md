@@ -47,7 +47,7 @@ The consumed crates (`noeta-ext-abi`, `noeta-reactive-abi`, `noeta-cli` as a lib
 
 A standalone package repo can't path-depend the noeta monorepo, so its entry crate names the contract crate from **crates.io**:
 
-```toml
+```toml ignore
 # a standalone package's native/Cargo.toml
 [dependencies]
 noeta-ext-abi = "0.6"
@@ -57,7 +57,7 @@ noeta-ext-abi = "0.6"
 
 Reaching past the contract means git-depending instead, since the internal crates are unpublished:
 
-```toml
+```toml ignore
 # only if you need something the contract does not expose
 noeta-loader = { git = "https://github.com/…/noeta", tag = "vX" }
 ```
@@ -88,7 +88,7 @@ Each composition carries your extension's **runtime** capabilities (modules, typ
 
 An `Extension`'s capabilities split by *kind*: `modules`/`types`/`tiers`/`commands` are **runtime** (needed to run the program); `body_formatters` (the tier-body formatter `noeta fmt` uses) is **dev-only** — it and its parser (a CSS/HTML/… reformatter is a *parser*, i.e. attack surface) must never ride into a production binary. A single crate that ships both a runtime tier handler *and* its formatter is a **mixed package**; keep the formatter out of shipped artifacts by gating it — and any heavy formatting dependency — behind a Cargo feature:
 
-```toml
+```toml ignore
 # the native crate's Cargo.toml
 [dependencies]
 malva = { version = "…", optional = true }   # a CSS reformatter — a parser

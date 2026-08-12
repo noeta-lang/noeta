@@ -214,6 +214,7 @@ para = [
     { version = "^0.2", package = "para/api" },
     { version = "^0.4", package = "para/db" },
 ]
+criterion = { version = "^1.0", package = "acme/criterion" }
 
 [directives]
 test    = "std"             # std's `@test { … }`

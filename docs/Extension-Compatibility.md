@@ -58,7 +58,7 @@ The rule of thumb: if the crate name does not end in `-abi`, treat every use of 
 
 A package depends on the contract crate from **crates.io**, by range:
 
-```toml
+```toml ignore
 # the package's native/Cargo.toml
 [dependencies]
 noeta-ext-abi = "0.6"
@@ -68,7 +68,7 @@ A range rather than an exact version because a *patch* release of the toolchain 
 
 A git pin on the toolchain repository also still works, and is what a package reaching past the contract must use, since the internal crates are not published:
 
-```toml
+```toml ignore
 noeta-ext-abi = { git = "https://github.com/noeta-lang/noeta", tag = "v0.6.0" }
 ```
 
@@ -93,7 +93,7 @@ The consumed crates (`noeta-ext-abi`, `noeta-reactive-abi`, `noeta-cli` as the c
 - **Breaking ABI changes are listed in the release notes** of the release that ships them, with the mechanical fix alongside.
 - **The conformance harness is the recommended tripwire.** The toolchain's executable-spec runner ships as the `noeta-conformance` crate; a package takes it as a dev-dependency, keeps a corpus of `.noe` fixtures with `// expect:` headers, and runs them with its own extension installed. This is exactly how `para/p2p` guards its surface: its test installs `std` plus `ParaP2pExtension` into the process registry (`noeta_stdlib::registry::install_with_extras`), asserts every fixture's expectation with `run_corpus`, and then asserts the two backends agree byte-for-byte with `run_differential`. When you bump your toolchain pin—or when CI's current-release run goes red—a conformance failure tells you *which fixture, which stage* drifted, before any consumer sees it.
 
-```toml
+```toml ignore
 # the package's native crate — test-only, does not ship
 [dev-dependencies]
 noeta-conformance = { git = "https://github.com/noeta-lang/noeta", tag = "v0.2.0" }

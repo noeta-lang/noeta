@@ -1,0 +1,18 @@
+// A native type reached through its **module** — `use std.http` then `http.Framing` — is the
+// spelling that only resolves once the program has been *linked*: the loader's rewrite tables are
+// what bind a module-qualified native name to the registry's `ExtEnum`.
+//
+// This case exists to keep the conformance harness honest about that. The single-file path used to
+// lex, parse and check without linking, so `variants_of::<http.Framing>()` answered `[]` here while
+// `noeta run` on the same file answered all three variants — a case could pin the wrong answer and
+// pass. Both paths link now, and this case fails if that is ever undone.
+//
+// expect: stdout "3"
+// expect: stdout "Sse"
+// expect: exit 0
+
+use std.http
+
+variants = variants_of::<http.Framing>()
+echo variants.len()
+echo variants[0].name

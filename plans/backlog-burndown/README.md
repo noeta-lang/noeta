@@ -1,6 +1,6 @@
 # Arc — Backlog burndown (2026-08)
 
-Status: proposed. Slices 1–4 are ready to start; slice 5 is ready but larger; slice 6 needs a decision that is not mine.
+Status: in progress. Slice 2 is done; slices 1, 3 and 4 are ready; slice 5 is ready but larger; slice 6 needs a decision that is not mine.
 
 ## How this list was derived
 
@@ -39,7 +39,7 @@ Three follow-ups fall out of this, and none is in the slices below because they 
 | # | Slice | Rows | Ready? |
 |---|---|---|---|
 | 1 | Visibility holds at the reflection boundary | 3 | yes |
-| 2 | The oracles see what they claim to see | 2 | yes — do first |
+| 2 | The oracles see what they claim to see | 2 | ✅ **done** |
 | 3 | Doors that exist on one side only | 4 | yes |
 | 4 | Two small identity guards | 1 | yes |
 | 5 | Cancellation reaches blocking work | 2 | yes, larger |
@@ -51,7 +51,7 @@ Three follow-ups fall out of this, and none is in the slices below because they 
 
 ## Slice 2 — The oracles see what they claim to see
 
-Status: todo
+Status: **done** (2026-08-12)
 
 ### Goal
 
@@ -70,14 +70,14 @@ The `toml` half is the same failure in the docs gate: fenced ` ```toml ` blocks 
 
 ### Checklist
 
-- [ ] `run_case` links, or the corpus stops using it and the in-Rust callers move to `run_case_path`
-- [ ] a conformance case that *only* passes when linked (the `variants_of::<http.Framing>()` shape) — it must fail before the fix
-- [ ] the docs gate parses ` ```toml ` blocks as manifests through `noeta_pm::manifest::Manifest::parse`, with a `toml ignore` escape for deliberate fragments
-- [ ] a deliberately broken manifest block in a scratch page fails the gate, proving it looks
+- [x] `run_case` links — through `noeta_loader::link` with an empty sibling pool; both paths now share `outcome_of_linked` and the divergent 87-line pipeline is deleted
+- [x] `tests/conformance/reflection/native_enum_through_module_import.noe`, plus `linking_is_what_resolves_a_module_qualified_native_type` — the same source both ways, 3 linked against 0 unlinked, so the claim is measured rather than asserted
+- [x] `doc_toml_blocks_are_valid_manifests`, with a ` ```toml ignore ` escape
+- [x] a misspelled `[targests]` table fails the gate (verified, then reverted)
 
-### Done when
+### Outcome
 
-The linking case fails on `main` before the change and passes after; a malformed `[targets]` table in any wiki page fails `cargo test -p noeta-cli --test doc_samples`.
+Both met. The corpus went 1193 → 1194 cases with **0 failures**, so linking every single-file case regressed nothing. The toml gate found **three real doc bugs** on its first run: an illegal package name (`acme/noeta-lint` — a hyphen is not an identifier) and two `[directives]` examples naming a provider their own `[dependencies]` never declared, one of them two lines below the sentence saying that is a manifest error.
 
 ---
 

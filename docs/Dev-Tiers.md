@@ -121,6 +121,9 @@ A tier directive can take arguments — `@bench(iterations: 1000)` (or positiona
 Two separate axes. **Which provider supplies each `@name` your source writes** is the `[directives]` table — a local `@name` → `"provider[:exported]"`. One table for directives and tiers alike: source cannot tell them apart until resolution, so the manifest does not make you. There are no ambient built-in tiers: `test`/`bench`/`doc`/`debug` are ordinary `std` tiers you name here like any other provider's, and `:exported` renames one (to dodge a collision between two providers' same-named tiers):
 
 ```toml
+[dependencies]
+criterion = { version = "^1.0", package = "acme/criterion" }
+
 [directives]
 test  = "std"
 bench = "std"
@@ -163,7 +166,7 @@ A target can also carry its own dependencies, which **layer on top of** the glob
 http = { version = "^1.0", package = "acme/http" }
 
 [targets.dev.dependencies]              # layered on only when this target is selected
-lint = { version = "^0.3", package = "acme/noeta-lint" }
+lint = { version = "^0.3", package = "acme/lint" }
 ```
 
 The **global config is the default**: omit `--target` and a command sees `[dependencies]` and no tiers — the minimal, safe baseline. Put your shipping dependencies in the global config and keep dev-only tools/tiers in a `[targets.dev]` overlay you opt into with `--target dev`. There is no separate "dev vs prod" concept baked into the language — *you* decide what each target contains; the default build simply excludes anything you scoped under a target.

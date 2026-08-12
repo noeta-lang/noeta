@@ -59,7 +59,7 @@ curl localhost:8080/health                  # ok
 
 ### The manifest (`spin.toml`)
 
-```toml
+```toml ignore
 spin_manifest_version = 2
 
 [application]
