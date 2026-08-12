@@ -1,0 +1,190 @@
+# Arc — Backlog burndown (2026-08)
+
+Status: proposed. Slices 1–4 are ready to start; slice 5 is ready but larger; slice 6 needs a decision that is not mine.
+
+## How this list was derived
+
+Every one of the 97 rows in [`backlog.md`](../backlog.md) was checked against the tree on 2026-08-12. Five had shipped without being closed and are now struck. Of the 56 that remain open, the roadmap's claim — that what is left is "exclusively decision-gated or trigger-gated" — holds for **45 of them**. This arc is the other eleven.
+
+They fall into two shapes, and neither is a feature request:
+
+- **Correctness holes found while doing something else.** A visibility rule enforced on one door and not on its siblings; an identity that is qualified in one direction and short in the other. Each was measured when found, and each row carries its reproduction.
+- **Doors that exist on one side only.** A registry endpoint with no client verb. A published feature whose output never names the thing a reader needs next.
+
+Neither shape has a trigger to wait for, because the trigger already fired — that is *how they were found*. They sit in the backlog because the session that found them was doing something else and closed its own scope honestly.
+
+## What is not here, and why
+
+The 45 gated rows stay gated, and this arc does not touch them. They divide as:
+
+- **Waiting on a real use case** (~28 rows) — payload-carrying variant constructors, `Members`/`DynamicCall`, trait-method generics, multi-source `From`, const-generic SIMD, the perf cluster, the OTEL residuals, CRDTs, kernel bundles, raw TCP/UDP. Each names the demand that would justify it. Building them first is how a language grows surface nobody asked for.
+- **Waiting on a decision that is the owner's** (6 rows) — editions S3/S4 (needs a deliberate breaking change), Tauri packaging, capability enforcement, the synced store, `TaskScope` patterns, the attested watch ledger.
+- **Waiting on an action only the owner can take** (1 row) — the Spin/Fastly edge deploy needs an account.
+- **Blocked upstream** (1 row) — salsa 0.27 has no public input-delete API.
+- **Design notes already written, awaiting their trigger** (3 rows) — [`interruptible-host-io.md`](../interruptible-host-io.md), [`fmt-structural-safety-gate.md`](../fmt-structural-safety-gate.md), [`attested-watch-ledger.md`](../attested-watch-ledger.md). Two of these are slices 5 and 6 below, because their triggers are arguably already met.
+
+## Slices
+
+| # | Slice | Rows | Ready? |
+|---|---|---|---|
+| 1 | Visibility holds at the reflection boundary | 3 | yes |
+| 2 | The oracles see what they claim to see | 2 | yes — do first |
+| 3 | Doors that exist on one side only | 4 | yes |
+| 4 | Two small identity guards | 2 | yes |
+| 5 | Cancellation reaches blocking work | 2 | yes, larger |
+| 6 | The fmt safety gate stops being a proxy | 1 | needs a decision |
+
+**Slice 2 goes first.** It is the only one that changes what the *other* slices can prove.
+
+---
+
+## Slice 2 — The oracles see what they claim to see
+
+Status: todo
+
+### Goal
+
+Close the two places where a gate reports a pass over something it never examined.
+
+### Scope
+
+- In: the conformance single-file path not linking; the docs gate ignoring ` ```toml ` blocks.
+- Out: any new oracle. This is about the two that already exist lying by omission.
+
+### Why first
+
+`run_case` (the in-memory single-file path) calls `run_source`; only `run_case_path` calls `run_linked`. Anything the loader's rewrite tables decide is therefore invisible to a single-file case — measured, `variants_of::<http.Framing>()` answers correctly under `noeta run` and `[]` in the harness, because `add_native_type_aliases` never ran. Every slice below lands conformance cases under the iron rule, and a case that cannot see linking is a case that can pass while the behavior it pins is broken. Fixing the harness first is what makes slices 1, 3 and 4 provable.
+
+The `toml` half is the same failure in the docs gate: fenced ` ```toml ` blocks are explicitly ignored, so every manifest example in the wiki — the `[directives]`, `[targets.*]` and `[dependencies]` shapes a reader copies — is unverified prose. This is what let `[trust.commands]` and the tier live-set drift into the docs unchecked.
+
+### Checklist
+
+- [ ] `run_case` links, or the corpus stops using it and the in-Rust callers move to `run_case_path`
+- [ ] a conformance case that *only* passes when linked (the `variants_of::<http.Framing>()` shape) — it must fail before the fix
+- [ ] the docs gate parses ` ```toml ` blocks as manifests through `noeta_pm::manifest::Manifest::parse`, with a `toml ignore` escape for deliberate fragments
+- [ ] a deliberately broken manifest block in a scratch page fails the gate, proving it looks
+
+### Done when
+
+The linking case fails on `main` before the change and passes after; a malformed `[targets]` table in any wiki page fails `cargo test -p noeta-cli --test doc_samples`.
+
+---
+
+## Slice 1 — Visibility holds at the reflection boundary
+
+Status: todo (after slice 2)
+
+### Goal
+
+A private field is private through every door, not just the ones that were checked when the rule landed.
+
+### Scope
+
+- In: the three reflection/JSON doors that still cross the boundary.
+- Out: the visibility rule itself (E0035/E0076/E0077 shipped and are not in question).
+
+### The rows
+
+- **`fields_of(value)` reads a private field's value** — verified by running it: on `class Box { pub label: string; secret: int }`, `fields_of(b)` from outside answers `[FieldEntry {name: "label", value: "hi"}, FieldEntry {name: "secret", value: 42}]`. `b.secret` is an error; the reflective read is not. This is the read half of the hole the construct-guards work closed on the write side.
+- **A JSON decode of a native fielded struct sets its private fields** — `type_to_recipe` builds its `TypeRecipe::Struct` from `symbols.records`, which carries every field regardless of visibility, so `json.try_parse::<T>` writes a field a source literal may not (E0035) and `construct` now refuses.
+- **A native fielded value's narrowing identity is its short name** — `d.as<std.http.Frame>()` answers `none` while `d.as<Frame>()` answers `some`, and `type_of` reports the qualified name. Consistent across both backends, so this is a decision to make once, not a divergence to chase.
+
+Grouped because they are one question asked at three doors: *does the visibility rule survive the trip through reflection?* Answering it once, at the recipe/entry seam, is the fix; answering it three times is the bug returning.
+
+### Checklist
+
+- [ ] Decide the rule: does reflection observe visibility, and is the answer the same for `fields_of` (read), `json.try_parse` (write) and `as<T>` (identity)?
+- [ ] Checker/runtime change at the shared seam, not per-door
+- [ ] Conformance cases per door, negative cases included
+- [ ] Both backends, differential green
+- [ ] `docs/Attributes-and-Reflection.md` states the rule
+
+### Done when
+
+A private field is unreadable through `fields_of`, unwritable through a JSON decode, and `as<T>` accepts exactly one spelling of a native type's identity — each pinned by a conformance case that fails before the change.
+
+---
+
+## Slice 3 — Doors that exist on one side only
+
+Status: todo
+
+### Goal
+
+Four places where a feature shipped without the surface a user reaches it through.
+
+### The rows
+
+- **`noeta rotate`** — `POST /v1/scopes/{scope}/rotate` shipped with the registry hardening and has no client verb; rotating a token today means calling the endpoint by hand. Promote its wire shape into the canonical fixtures while adding it, as the other registry verbs did.
+- **`noeta add` should print the full import path** — it reports ``using import root `para` `` and leaves the reader to guess `use para.cli.{…}`, which is the quickstart's #3 friction point.
+- **`noeta publish` never opens the tag it releases** — a publish that pushes a tag should be able to show you what it pushed.
+- **Out-of-order migration detection** (para/db) — the runner gates history by checksum and deleted-file checks but says nothing when a newly added migration sorts *before* an applied one, which is what a rebase produces. A warning, deliberately not an error.
+
+### Done when
+
+Each has its verb or its line of output, with a CLI test driving the real binary; `noeta rotate`'s wire shape is in the canonical fixtures.
+
+---
+
+## Slice 4 — Two small identity guards
+
+Status: todo
+
+### Goal
+
+Two places where a guard exists but is not applied on every path.
+
+- **A path/git dependency may declare a built-in scope for itself.** `reserved::is_builtin` guards the registry *selector* and the import-root key, never the identity a local tree declares — so a tree saying `[package] name = "std/fs"` resolves without complaint. Low urgency (pointing a `path` at a tree is already a trust decision), but the guard exists and simply is not asked here.
+- **The `@validated` / native-narrowing residual** from slice 1, if the identity decision leaves one.
+
+### Done when
+
+A local tree declaring a reserved scope is refused with the same diagnostic the registry selector gives, pinned by a `noeta-pm` test.
+
+---
+
+## Slice 5 — Cancellation reaches blocking work
+
+Status: todo, larger. Design already written: [`interruptible-host-io.md`](../interruptible-host-io.md)
+
+### Goal
+
+Close the last two places a cancel cannot reach, using the seam that already shipped for the third.
+
+### Why now
+
+The design note is finished and its two measurements are the load-bearing part: the headline example blocks on **our own `Condvar`**, not a syscall, so it needs a flag check and a `notify_all` rather than a self-pipe; and **ending the wait is not ending the work** — a `spawn_blocking` body outlives the runtime drop, so a leaf must *return* `Interrupted` rather than be abandoned (abandoning is what segfaulted the allocator, and there is a regression guard for it).
+
+The trigger reads "a caller that must bound a hostile native read without killing the process". para/ai's MCP client is that caller — the row itself records it working around both holes in `mcp.noe`. The sibling row (`noeta test` cases parked in a long `sleep` leak a thread each) shares the `CancelWake` seam and should ride along: `CancelFlag` is still a bare `Arc<AtomicBool>`, which is the plumbing the row names as its only blocker.
+
+### Slice order (from the design note)
+
+process reads → sync http + streaming → `os_proc_wait` → `fs` (the last needs a stated decision between leaving it, chunking, and non-blocking opens)
+
+### Done when
+
+A worker blocked in a host read stops at the next safepoint after a cancel, with the leaf returning `Interrupted` rather than being abandoned; a timed-out `@test` case is joined rather than detached; the existing allocator-segfault regression guard stays green.
+
+---
+
+## Slice 6 — The fmt safety gate stops being a proxy
+
+Status: needs a decision. Design already written: [`fmt-structural-safety-gate.md`](../fmt-structural-safety-gate.md)
+
+### The decision
+
+`noeta fmt` promises its output re-parses to the same AST modulo spans. It checks that the output re-parses to the same **`Pretty` rendering** — a hand-written S-expression dump written for snapshot legibility, where every field it forgets to print is a field the gate cannot see. Two real defects have gone through it.
+
+The design note's option B is a span normalizer plus a derived `PartialEq`, which is complete without maintenance. The stated trigger is "the next substantial pass through `noeta-ast`", and there is no such pass scheduled — but there is an **open formatter defect** (`~/.claude/notes/fmt-printer-bug-2026-08-05.txt`, with a saved proptest seed) whose whole class is what the proxy cannot see.
+
+So the question is whether that open defect counts as the trigger. It is a judgement call about cost: option B touches every AST node's derive.
+
+### Done when
+
+Either the replacement lands and the open defect's seed passes, or the row records the decision to wait and names what would change it.
+
+---
+
+## Working discipline
+
+Unchanged, and it applies to every slice above: implement as a vertical slice, land conformance cases with each behavior change (the iron rule), keep the differential oracle and leak gate green, update `backlog.md` in the **same commit** that closes a row, and delete this directory when the arc ships — moving any new deferrals into `backlog.md` first.
