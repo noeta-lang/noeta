@@ -1848,9 +1848,12 @@ fn parse_trust(table: &toml::Table) -> Result<Trust, String> {
                     let s = entry.as_str().ok_or(
                         "`trust.require_provenance` entries must be scope strings (a `company`)",
                     )?;
-                    if !is_identifier(s) {
+                    // Same shape as an identity's company half: a scope this names must be one a
+                    // dependency can actually carry, and those accept `-`.
+                    if !is_registry_name(s) {
                         return Err(format!(
-                            "`trust.require_provenance`: `{s}` is not a scope (a `company` identifier)"
+                            "`trust.require_provenance`: `{s}` is not a scope (the `company` half \
+                             of an identity)"
                         ));
                     }
                     scopes.insert(s.to_string());
@@ -2207,11 +2210,12 @@ fn parse_registries(table: &toml::Table) -> Result<Registries, String> {
         if key == "default" {
             registries.default = Some(source);
         } else {
-            // A scope key must be a bare `company` identifier (not `company/package`).
-            if !is_identifier(key) {
+            // A scope key is a bare `company` — the same shape as an identity's company half, so
+            // an org a forge accepts (`my-company`) can be mapped here. Not `company/package`.
+            if !is_registry_name(key) {
                 return Err(format!(
-                    "`registries.{key}`: a registry key must be a scope (`company`) identifier or \
-                     `default`"
+                    "`registries.{key}`: a registry key must be a scope (the `company` half of an \
+                     identity) or `default`"
                 ));
             }
             registries.by_scope.insert(key.clone(), source);
@@ -2428,8 +2432,6 @@ fn parse_declared_package(key: &str, table: &toml::Table) -> Result<Option<Packa
     ))
 }
 
-/// Whether `s` is a Noeta identifier (`[A-Za-z_][A-Za-z0-9_]*`) — the shape a package-name segment
-/// and a dependency import-root key must both have.
 /// Whether `s` is a **registry name** — what a forge, a URL path segment and an index key accept:
 /// alphanumerics and `_`, plus `-` anywhere except the first or last character.
 ///
@@ -2447,6 +2449,8 @@ fn is_registry_name(s: &str) -> bool {
     edge(first) && edge(last) && s.chars().all(|c| edge(c) || c == '-')
 }
 
+/// Whether `s` is a Noeta identifier (`[A-Za-z_][A-Za-z0-9_]*`) — the shape a name spelled in
+/// *source* must have: a dependency import-root key, a `[package] root`, a tier name.
 fn is_identifier(s: &str) -> bool {
     let mut chars = s.chars();
     match chars.next() {
@@ -2617,6 +2621,36 @@ mod tests {
         assert!(Manifest::parse("[registries]\nacme = \"github:\"\n").is_err());
         assert!(Manifest::parse("[registries]\n\"a/b\" = \"github:acme\"\n").is_err());
         assert!(Manifest::parse("[registries]\nacme = 5\n").is_err());
+        // A scope is one segment, so an edge `-` (what a forge owner also refuses) is not one.
+        assert!(Manifest::parse("[registries]\n\"-acme\" = \"github:acme\"\n").is_err());
+    }
+
+    #[test]
+    fn a_scope_key_takes_whatever_a_company_half_takes() {
+        // The key and the `company` half of an identity are the same thing named twice, so they
+        // must accept the same shapes — a rule that binds only one of them makes a mapping that
+        // can never match (or an identity no mapping can reach).
+        let m = Manifest::parse(
+            "[registries]\n\
+             \"my-company\" = \"github:my-company\"\n",
+        )
+        .unwrap();
+        let name = PackageName::parse("my-company/toolkit").unwrap();
+        assert_eq!(
+            m.registries().source_for(&name.company),
+            Some(&RegistrySource::GitForge(
+                "https://github.com/my-company".to_string()
+            )),
+            "a hyphenated org's mapping must be reachable from its own packages"
+        );
+        // The same shape is a scope wherever a scope is named.
+        assert!(
+            Manifest::parse("[trust]\nrequire_provenance = [\"my-company\"]\n")
+                .unwrap()
+                .trust()
+                .require_provenance
+                .requires("my-company")
+        );
     }
 
     #[test]

@@ -27,11 +27,14 @@ You can mix public and private freely:
 
 ```toml
 [registries]
-default   = "https://registry.noeta.dev"   # override the fallback for unmapped scopes
-acme      = "github:acme"                   # a GitHub org
-widgets   = "gitlab:widgets-inc/oss"        # a GitLab group (nesting allowed)
-internal  = "git:https://git.corp.example/tools"  # a self-hosted forge
+default    = "https://registry.noeta.dev"  # override the fallback for unmapped scopes
+acme       = "github:acme"                 # a GitHub org
+my-company = "github:my-company"           # an org whose name has a hyphen
+widgets    = "gitlab:widgets-inc/oss"      # a GitLab group (nesting allowed)
+internal   = "git:https://git.corp.example/tools"  # a self-hosted forge
 ```
+
+A scope takes exactly what the `company` half of an identity takes — letters, digits, `_`, and `-` between them — so any org a forge accepts can be mapped and depended on (`my-company/logger`).
 
 The scope key is only a **routing alias** — it need not equal the forge owner. Mapping `internal = "git:https://git.corp.example/tools"` and depending on `internal/logger` resolves `https://git.corp.example/tools/logger`. Reserved namespaces (`std`, `noeta`, `core`) are never resolved from any registry, so a `[registries]` entry can't shadow the toolchain.
 
