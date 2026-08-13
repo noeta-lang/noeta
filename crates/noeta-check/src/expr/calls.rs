@@ -779,9 +779,8 @@ impl Checker {
         ret
     }
 
-    /// **`Target.from(x)` where `Target` declares several conversions** — the explicit twin of the
-    /// `?` conversion rule ([`Checker::check_try_error`]), and the one call site that has to
-    /// *choose* between them.
+    /// **`Target.from(x)` where `Target` declares conversions** — the explicit twin of the `?`
+    /// conversion rule ([`Checker::check_try_error`]), and the call site that says *which* one.
     ///
     /// One rule, evaluated with the source in hand: the candidates are the target's declared
     /// conversions, filtered by the argument's type, and the call resolves when exactly one
@@ -790,10 +789,17 @@ impl Checker {
     /// of them, and the language does not guess: E0023, the same answer the checker gives anywhere
     /// else it is asked to pick without evidence.
     ///
+    /// **An enum's built-in backing conversion is a candidate too**, and the reason this arm runs
+    /// before the arm that types it. `Plan.from("free")` and `Plan.from(raw)` are different
+    /// operations on one enum — the first reads a backing value, the second runs a declared
+    /// `impl From<Raw>` — and each resolves by its argument. They can coexist because a declared
+    /// conversion is named after its source ([`noeta_ast::conversion`]), leaving the plain `from`
+    /// to the built-in; deciding between them here is what makes both reachable rather than one
+    /// shadowing the other.
+    ///
     /// Returns `None` when this is not that call — a different method, a receiver that does not name
-    /// a type (or is shadowed by a local), or a target declaring a **single** conversion, whose
-    /// `from` needs no choosing and resolves through the ordinary associated-call arm like every
-    /// other method.
+    /// a type (or is shadowed by a local), a target declaring no conversion at all, or an argument
+    /// the enum's built-in conversion accepts, which the arm below types.
     #[allow(clippy::too_many_arguments)]
     fn check_from_conversion_call(
         &mut self,
@@ -814,18 +820,24 @@ impl Checker {
         if lookup(env, tn.as_str()).is_some() {
             return None;
         }
-        let convs = self.symbols.from_impls.get(tn.as_str())?;
-        if convs.len() < 2 {
+        let convs = self.symbols.from_impls.get(tn.as_str())?.clone();
+        if convs.is_empty() {
             return None;
         }
-        let convs = convs.clone();
         let target = Type::Named(tn.to_string(), Vec::new());
+        // An enum also carries the built-in wire→case conversion, which reads a **backing value**
+        // rather than a declared source. `None` for every other kind.
+        let backing = self
+            .symbols
+            .enums
+            .contains_key(tn.as_str())
+            .then(|| self.enum_probe_type(tn.as_str()));
         let sources = || {
-            convs
-                .iter()
-                .map(|c| format!("`{}`", c.source))
-                .collect::<Vec<_>>()
-                .join(", ")
+            let mut names: Vec<String> = convs.iter().map(|c| format!("`{}`", c.source)).collect();
+            if let Some(backing) = &backing {
+                names.push(format!("`{backing}` (its backing value)"));
+            }
+            names.join(", ")
         };
         // Arity first: a conversion takes exactly the value it converts, and without an argument
         // there is nothing to choose by.
@@ -842,23 +854,28 @@ impl Checker {
             return Some(target);
         };
         let arg = arg.clone();
-        if arg.defers_to_runtime() {
-            self.error(
-                DiagnosticCode::CannotInfer,
-                span,
-                format!(
-                    "cannot tell which `{target}` conversion `from` means: the argument's type is \
-                     `{arg}`"
-                ),
-            )
-            .help(format!(
-                "`{target}` declares a conversion from each of {} — narrow the argument to one of \
-                 them (`if x is …`) or annotate it, so the conversion is decided here",
-                sources()
-            ));
-            return Some(target);
-        }
-        let Some(conv) = convs.iter().find(|c| c.source == arg) else {
+        // An argument whose type is not resolved names no source, so **every** candidate is still in
+        // play — the target's conversions, plus an enum's built-in. That is only a question when
+        // there is more than one: a single candidate is what the call must mean whatever the
+        // argument turns out to be, and deferring it to the runtime is what every other gradual
+        // judgement does. More than one and the language does not guess.
+        let candidates = convs.len() + usize::from(backing.is_some());
+        // A resolved argument selects by type identity; an unresolved one selects nothing, so every
+        // candidate is still in play and the first stands in for "some conversion".
+        let selected = if arg.defers_to_runtime() {
+            convs.first()
+        } else {
+            convs.iter().find(|c| c.source == arg)
+        };
+        let Some(conv) = selected else {
+            // The enum's built-in conversion takes it: not this arm's call. The arm below types it,
+            // reporting the argument mismatch in the built-in's own words if it does not fit.
+            if backing
+                .as_ref()
+                .is_some_and(|backing| self.assignable(&arg, backing))
+            {
+                return None;
+            }
             self.error(
                 DiagnosticCode::TypeMismatch,
                 span,
@@ -871,6 +888,26 @@ impl Checker {
             ));
             return Some(target);
         };
+        // An unresolved argument is only a *question* where there is more than one candidate. A
+        // single one is what the call must mean whatever the argument turns out to be, so it defers
+        // to the runtime like every other gradual judgement; several, and the language does not
+        // guess.
+        if arg.defers_to_runtime() && candidates > 1 {
+            self.error(
+                DiagnosticCode::CannotInfer,
+                span,
+                format!(
+                    "cannot tell which `{target}` conversion `from` means: the argument's type is \
+                     `{arg}`"
+                ),
+            )
+            .help(format!(
+                "`{target}` converts {} — narrow the argument to one of them (`if x is …`) or \
+                 annotate it, so the conversion is decided here",
+                sources()
+            ));
+            return Some(target);
+        }
         // Resolved. Lowering cannot re-ask a typing question, so the selection is recorded at the
         // call span and substituted for the `from` the source wrote.
         let method = conv.method.clone();
@@ -1161,10 +1198,9 @@ impl Checker {
                 Type::Unknown
             }
             Expr::Member { receiver, name, .. } => {
-                // `Target.from(x)` where `Target` declares **several** conversions: which one runs is
-                // decided here, by the argument's type, before any other reading of the name. A
-                // target declaring a single conversion is not here at all — its `from` is an
-                // ordinary associated function and resolves through the arms below, unchanged.
+                // `Target.from(x)` where `Target` declares a conversion: which one runs is decided
+                // here, by the argument's type, before any other reading of the name — including an
+                // enum's built-in `from`, which is one of the candidates rather than a rival.
                 if let Some(ty) = self.check_from_conversion_call(
                     receiver, name, args, arg_exprs, span, call_span, env,
                 ) {
@@ -1178,10 +1214,11 @@ impl Checker {
                 // case-name spelling — so a `enum Code: int { Ok = 200 }` accepts `Code.try_from(200)`,
                 // the value its schema advertises and the value that comes off a wire.
                 //
-                // A **declared** method of that name wins. An `impl From<Source>` in an enum's body
-                // hoists a `from`, and the `?` conversion already resolves it there, so reserving the
-                // name unconditionally would reject the matching explicit call (`AppError.from(e)`)
-                // as "not assignable to `string`" while `?` accepted the same conversion.
+                // A **declared inherent** method of that name wins — an enum writing its own
+                // `fn from(…)` means that one. An `impl From<Source>` block does not contend for the
+                // name: its body is named after the source it converts, so a backed enum keeps
+                // `Plan.from("free")` while also declaring `impl From<Raw>`, and the arm above has
+                // already routed the call that meant the declared conversion.
                 if let Expr::Ident { name: tn, .. } = receiver.as_ref()
                     && (name == "try_from" || name == "from")
                     && lookup(env, tn.as_str()).is_none()

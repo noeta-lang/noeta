@@ -1,0 +1,51 @@
+// A backed enum's **built-in backing conversion** and a declared `impl From<Source>` are different
+// operations, and an enum may carry both.
+//
+// `Plan.from("free")` reads a backing value — the conversion every backed enum reserves, the one a
+// wire format needs — while `Plan.from(raw)` runs the enum's own declared conversion. They coexist
+// because a declared conversion is named after the source it converts (`from<Raw>`), leaving the
+// plain `from` to the built-in; the call site decides which is meant by the argument's type. A `?`
+// propagating a `Raw` into a `Result<_, Plan>` reaches the declared one the same way.
+//
+// Without that, the two contend for one slot and the declared one wins: `Plan.from("free")` is then
+// checked against `Raw` and rejected (E0007) by adding an `impl From<Raw>` elsewhere in the body —
+// a conversion the reader never asked to have anything to do with the string form.
+// expect: stdout "backing: Plan.Free"
+// expect: stdout "backing try: some(Plan.Pro)"
+// expect: stdout "backing try miss: none"
+// expect: stdout "declared: Plan.Pro"
+// expect: stdout "propagated: Err(Plan.Free)"
+// expect: stdout "ok: Ok(1)"
+// expect: exit 0
+struct Raw { code: string }
+
+enum Plan: string {
+    Free = "free"
+    Pro = "pro"
+
+    impl From<Raw> {
+        pub fn from(r: Raw): Plan {
+            if r.code == "p" { return Plan.Pro }
+            return Plan.Free
+        }
+    }
+}
+
+fn low(fail: bool): Result<int, Raw> {
+    if fail { return Err(Raw { code: "f" }) }
+    return Ok(1)
+}
+
+fn wrap(fail: bool): Result<int, Plan> {
+    n = low(fail)?     // Raw → Plan, through the declared conversion
+    return Ok(n)
+}
+
+// The built-in, by backing value and by case name.
+echo "backing: ${Plan.from("free")}"
+echo "backing try: ${Plan.try_from("pro")}"
+echo "backing try miss: ${Plan.try_from("nope")}"
+// The declared conversion, chosen by the argument's type.
+echo "declared: ${Plan.from(Raw { code: "p" })}"
+echo "propagated: ${wrap(true)}"
+echo "ok: ${wrap(false)}"

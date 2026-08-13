@@ -1951,11 +1951,9 @@ impl<'m> Vm<'m> {
                             }
                             return Ok(Some(ColdStep::Next(pc + 1)));
                         }
-                        return Err(self.error(
-                            DiagnosticCode::UnknownName,
-                            *span,
-                            format!("type `{}` has no method `{method}`", shape.name),
-                        ));
+                        // A bare `from` names no single conversion; say which ones exist.
+                        let message = self.missing_method_message(&shape.name, method, false);
+                        return Err(self.error(DiagnosticCode::UnknownName, *span, message));
                     };
                     caches[ci] = Some((shape, proto));
                     proto
@@ -3779,9 +3777,10 @@ impl<'m> Vm<'m> {
                             "method"
                         };
                         let Some(proto) = self.method_proto(&type_name, &method) else {
-                            break 'resolve Err(format!(
-                                "type `{type_name}` has no {kind} `{method}`"
-                            ));
+                            // A bare `from` names no single conversion; say which ones exist.
+                            break 'resolve Err(
+                                self.missing_method_message(&type_name, &method, is_assoc)
+                            );
                         };
                         // The prototype reserves register 0 for `self` (unit for an associated
                         // call), so its declared arity is one more than the supplied args; trailing

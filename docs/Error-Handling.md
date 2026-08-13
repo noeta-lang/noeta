@@ -259,6 +259,7 @@ The rules keep the language explicit:
 - **No conversion, no propagation.** A `?` whose `Err` type neither matches the declared error type nor has a `From` conversion is E0057. (A `dyn`/unannotated context defers to runtime, as everywhere in the gradual checker.)
 - `from` is an **associated** conversion: it builds a new target value from its argument, so a body referencing `self` is rejected (E0015), as is a parameter that disagrees with the declared source.
 - **A conversion is never guessed.** Where a target declares several, `Target.from(x)` needs `x`'s type to name one of them. An argument typed `dyn` leaves every conversion a candidate and is E0023 — narrow it (`if x is HttpError { … }`) or annotate it; an argument whose type names no declared source is E0007, and the diagnostic lists what the target does convert.
+- **The conversion's own name carries its source.** A declared conversion answers to `from<HttpError>` rather than to `from`, which is what lets an enum keep its [wire-value conversion](Structs-Classes-and-Enums#converting-a-wire-value-to-a-case) — `Plan.from("free")` — while also declaring `impl From<Raw>`. Writing the call never needs the built name — `Target.from(x)` and `?` both pick by type — but reaching one by name does; see [A declared conversion is named after its source](Attributes-and-Reflection#a-declared-conversion-is-named-after-its-source).
 
 ## `??` — coalesce
 

@@ -310,6 +310,8 @@ A **plain** enum has no backings, so its case names are what select — which is
 
 Payload-carrying variants are never selected: there is no payload to supply. Build those with [`construct("Enum.Variant", payload)`](Attributes-and-Reflection#constructing-an-enum-case).
 
+This pair stays available on an enum that also declares an [`impl From<Source>`](Error-Handling#converting-errors-at---impl-fromsource): reading a wire value and running a declared conversion are different operations, and a declared conversion carries its source in its name, so `Plan.from("free")` and `Plan.from(raw)` both mean what they say.
+
 To decode an enum sitting inside a larger document, derive [`Deserialize<Json>`](Derives#enum-typed-fields) on the enclosing type instead — the same backing-versus-name rule applies there, with path-carrying errors.
 
 ## Tuples

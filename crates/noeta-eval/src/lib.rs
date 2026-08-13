@@ -3021,11 +3021,11 @@ impl Interpreter {
             // string (the PHP `tryFrom`/`from` pair). Intercepted before variant construction so the
             // built-in names cannot be shadowed by a same-named variant lookup.
             //
-            // A **declared** method of that name wins, though: an `impl From<Source>` in the enum's
-            // body hoists a `from` the checker already resolves — for the `?` conversion and for an
-            // explicit `Enum.from(e)` — so routing it to the name-string builtin would type-check
-            // clean and then abort at runtime with "expects a string". The builtin applies only when
-            // the enum declares no such method.
+            // A **declared inherent** method of that name wins, though: an enum writing its own
+            // `fn from(…)` means that one. An `impl From<Source>` block does not contend — its body
+            // is named after the source it converts (`noeta_ast::conversion`), so a backed enum
+            // keeps this built-in conversion while also declaring one, and the checker has already
+            // routed the call that meant the declared one.
             if (name == "try_from" || name == "from") && def.method(name).is_none() {
                 return self.enum_from_string(&Rc::clone(def), name, args, span);
             }
@@ -3050,7 +3050,15 @@ impl Interpreter {
                 None => Err(self.runtime_error(
                     DiagnosticCode::UnknownName,
                     span,
-                    format!("type `{}` has no static function `{name}`", def.name()),
+                    // A bare `from` names no single conversion; say which ones exist.
+                    noeta_ast::conversion::missing_from_message(
+                        def.name(),
+                        name,
+                        def.methods.keys().map(String::as_str),
+                    )
+                    .unwrap_or_else(|| {
+                        format!("type `{}` has no static function `{name}`", def.name())
+                    }),
                 )),
             };
         }
@@ -3088,7 +3096,15 @@ impl Interpreter {
                 None => Err(self.runtime_error(
                     DiagnosticCode::UnknownName,
                     span,
-                    format!("type `{}` has no method `{name}`", object.def.name()),
+                    // A bare `from` names no single conversion; say which ones exist.
+                    noeta_ast::conversion::missing_from_message(
+                        object.def.name(),
+                        name,
+                        object.def.methods.keys().map(String::as_str),
+                    )
+                    .unwrap_or_else(|| {
+                        format!("type `{}` has no method `{name}`", object.def.name())
+                    }),
                 )),
             };
         }
@@ -3611,10 +3627,17 @@ impl Interpreter {
             // A type handle → an associated function (no receiver).
             Value::Type(def) => {
                 let Some(closure) = def.methods.get(method) else {
-                    return Ok(invoke_err(format!(
-                        "type `{}` has no static function `{method}`",
-                        def.name()
-                    )));
+                    // A bare `from` names no single conversion; say which ones exist.
+                    return Ok(invoke_err(
+                        noeta_ast::conversion::missing_from_message(
+                            def.name(),
+                            method,
+                            def.methods.keys().map(String::as_str),
+                        )
+                        .unwrap_or_else(|| {
+                            format!("type `{}` has no static function `{method}`", def.name())
+                        }),
+                    ));
                 };
                 let closure = Rc::clone(closure);
                 let target = format!("{}.{method}", def.name());
@@ -3634,10 +3657,17 @@ impl Interpreter {
             // A value → an instance method (the instance's fields are in scope).
             Value::Object(object) => {
                 let Some(method_closure) = object.def.methods.get(method) else {
-                    return Ok(invoke_err(format!(
-                        "type `{}` has no method `{method}`",
-                        object.def.name()
-                    )));
+                    // A bare `from` names no single conversion; say which ones exist.
+                    return Ok(invoke_err(
+                        noeta_ast::conversion::missing_from_message(
+                            object.def.name(),
+                            method,
+                            object.def.methods.keys().map(String::as_str),
+                        )
+                        .unwrap_or_else(|| {
+                            format!("type `{}` has no method `{method}`", object.def.name())
+                        }),
+                    ));
                 };
                 let target = format!("{}.{method}", object.def.name());
                 let object = Rc::clone(object);

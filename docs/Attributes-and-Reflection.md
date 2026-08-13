@@ -937,6 +937,57 @@ Unlike `construct`, the named form does **not** type-check an argument against i
 
 A parameter with a default may be omitted from either shape, exactly as at a direct call site — the pair to `ParamInfo.optional`. A panic *inside* the invoked body is a normal abort; only the by-name resolution is caught.
 
+### A declared conversion is named after its source
+
+One method name is built rather than written: an [`impl From<Source>`](Error-Handling#converting-errors-at---impl-fromsource) conversion answers to **`from<Source>`**, not to `from`.
+
+A conversion's identity is the pair of types it goes between, and a type may declare one per source, so `from` alone names a *set* — which is exactly the question a by-name lookup cannot answer. Asking for it is a miss, and the message names the alternatives:
+
+```noeta
+struct HttpError { status: int }
+struct JsonError { line: int }
+
+struct AppError {
+    detail: string
+
+    impl From<HttpError> {
+        pub fn from(e: HttpError): AppError { return AppError { detail: "http" } }
+    }
+
+    impl From<JsonError> {
+        pub fn from(e: JsonError): AppError { return AppError { detail: "json" } }
+    }
+}
+
+echo invoke(AppError, "from", [HttpError { status: 404 }])
+// Err(type `AppError` declares conversions from `HttpError` and `JsonError`; call `from<HttpError>` or `from<JsonError>`)
+
+echo invoke(AppError, "from<HttpError>", [HttpError { status: 404 }])   // Ok(AppError {detail: "http"})
+echo params_of("AppError.from<JsonError>").len()                        // 1
+```
+
+The source is spelled as the `impl` writes it, qualified where the type is (`from<std.json.JsonError>`); `type_name::<T>()` produces the same spelling, so a caller holding a type can build the name. Discovery and dispatch agree — `params_of("AppError.from")` describes nothing, because there is nothing there to call.
+
+Writing the call directly needs none of this: `AppError.from(e)` picks the conversion by `e`'s type at compile time, and so does a `?`. The built name matters only where the name itself is data.
+
+This is also why a **backed enum** keeps its built-in conversion after declaring one of its own — the two never contend for a slot:
+
+```noeta
+struct Raw { code: string }
+
+enum Plan: string {
+    Free = "free"
+    Pro = "pro"
+
+    impl From<Raw> {
+        pub fn from(r: Raw): Plan { return Plan.Free }
+    }
+}
+
+echo Plan.from("free")                  // Plan.Free — the backing value
+echo Plan.from(Raw { code: "p" })       // Plan.Free — the declared conversion
+```
+
 ## The manifest outside the language
 
 The reflection manifest — declarations, their `#[…]` attributes, and their `@role`/`@semantic` tags — also backs the agentic tooling surface: `noeta mcp` serves it over stdio (roles, attributes, and the architectural graph) to MCP clients, so an agent asks the same index `roles_of()` and `attributes_of` answer in-language. See [Editor & AI Tooling](Editor-and-AI-Tooling) for the tool inventory.

@@ -1,19 +1,23 @@
-// What several conversions look like to a **by-name** lookup, which carries no source type and so
-// cannot choose between them.
+// What a declared conversion looks like to a **by-name** lookup, which carries no source type.
 //
-// A type declaring one conversion has a plain `from`: `invoke` calls it and `params_of` describes
-// it, exactly as for any other associated function. A type declaring several has no single `from` —
-// each conversion is named after the source it converts — so a lookup for the bare name finds
-// nothing (`invoke` fails the way it fails for any missing name, and `params_of` gives the same
-// "nothing to report" answer it gives an unknown target), while the conversion's own name reaches
-// it. The discovery surface and the dispatch surface agree by construction: whatever `params_of`
-// describes is what `invoke` calls.
-// expect: stdout "one: Ok(One {m: \"from a\"})"
-// expect: stdout "many bare: Err(type `Many` has no static function `from`)"
-// expect: stdout "many named: Ok(Many {m: \"from a\"})"
-// expect: stdout "params one: 1"
+// A conversion is named after the source it converts, so the bare `from` names none of them and a
+// lookup for it misses — with a message that names what the type does declare and how to reach it,
+// because the `impl From<…>` blocks are right there in the source. The conversion's own name reaches
+// it. That holds whether the type declares one conversion or several: the answer never depends on
+// how many SIBLING conversions a type happens to have, so adding a second one cannot change how the
+// first is reached.
+//
+// Discovery and dispatch agree by construction — whatever `params_of` describes is what `invoke`
+// calls — because both read the same name.
+// expect: stdout "one bare: Err(type `One` declares a conversion from `A`; call `from<A>`)"
+// expect: stdout "one named: Ok(One {m: \"from a\"})"
+// expect: stdout "many bare: Err(type `Many` declares conversions from `A` and `B`; call `from<A>` or `from<B>`)"
+// expect: stdout "many named: Ok(Many {m: \"from b\"})"
+// expect: stdout "params one bare: 0"
+// expect: stdout "params one named: 1"
 // expect: stdout "params many bare: 0"
 // expect: stdout "params many named: 1"
+// expect: stdout "on a value: Err(type `One` declares a conversion from `A`; call `from<A>`)"
 // expect: exit 0
 struct A { n: int }
 struct B { s: string }
@@ -38,9 +42,14 @@ struct Many {
     }
 }
 
-echo "one: ${invoke(One, "from", [A { n: 1 }])}"
+echo "one bare: ${invoke(One, "from", [A { n: 1 }])}"
+echo "one named: ${invoke(One, "from<A>", [A { n: 1 }])}"
 echo "many bare: ${invoke(Many, "from", [A { n: 1 }])}"
-echo "many named: ${invoke(Many, "from<A>", [A { n: 1 }])}"
-echo "params one: ${params_of("One.from").len()}"
+echo "many named: ${invoke(Many, "from<B>", [B { s: "x" }])}"
+echo "params one bare: ${params_of("One.from").len()}"
+echo "params one named: ${params_of("One.from<A>").len()}"
 echo "params many bare: ${params_of("Many.from").len()}"
 echo "params many named: ${params_of("Many.from<A>").len()}"
+// A VALUE receiver reaches the same rule through the instance path, and reports it identically.
+value: dyn = One { m: "held" }
+echo "on a value: ${invoke(value, "from", [A { n: 1 }])}"

@@ -1,9 +1,9 @@
 // `?`-boundary error conversion into an **enum** target. An `impl From<Source>` in an enum's body
-// hoists a `from` exactly as it does on a struct — and it must win over the name-string builtin
-// `Enum.from(s)`/`Enum.try_from(s)`, which every enum also carries. Before this was fixed the
-// program type-checked clean and then aborted at runtime with "`AppError.from` expects a string,
-// found LowError", because both backends intercepted the name before consulting the declared
-// methods. An enum WITHOUT such an impl keeps the builtin, which the `Status` half pins.
+// converts exactly as it does on a struct, at a `?` and at an explicit `AppError.from(e)` — resolved
+// by the argument's type, not by the name alone, which is what keeps it distinct from the name-string
+// builtin `Enum.from(s)`/`Enum.try_from(s)` every enum also carries. The `Status` half pins that an
+// enum declaring no conversion keeps that builtin; `from_enum_backing_and_conversion` pins that an
+// enum declaring one keeps it too.
 // expect: stdout "Ok(42)"
 // expect: stdout "Err(AppError.Wrapped(7))"
 // expect: stdout "explicit: 1"

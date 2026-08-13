@@ -1222,7 +1222,15 @@ impl Interpreter {
                 None => Err(self.runtime_error(
                     DiagnosticCode::UnknownName,
                     span,
-                    format!("type `{}` has no static function `{name}`", def.name()),
+                    // A bare `from` names no single conversion; say which ones exist.
+                    noeta_ast::conversion::missing_from_message(
+                        def.name(),
+                        name,
+                        def.methods.keys().map(String::as_str),
+                    )
+                    .unwrap_or_else(|| {
+                        format!("type `{}` has no static function `{name}`", def.name())
+                    }),
                 )),
             },
             other => Err(self.runtime_error(

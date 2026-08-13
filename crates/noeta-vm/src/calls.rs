@@ -36,6 +36,32 @@ impl<'m> Vm<'m> {
             .copied()
     }
 
+    /// The message a **by-name miss** on `type_name.method` reports. A bare `from` names no single
+    /// conversion, so it names the ones the type declares
+    /// ([`noeta_ast::conversion::missing_from_message`]) — the same function the IR interpreter
+    /// calls with the same inputs, which is what keeps the two backends' text identical.
+    pub(crate) fn missing_method_message(
+        &self,
+        type_name: &str,
+        method: &str,
+        associated: bool,
+    ) -> String {
+        let names = self
+            .methods
+            .get(type_name)
+            .into_iter()
+            .flat_map(|m| m.keys());
+        noeta_ast::conversion::missing_from_message(type_name, method, names.map(String::as_str))
+            .unwrap_or_else(|| {
+                let kind = if associated {
+                    "static function"
+                } else {
+                    "method"
+                };
+                format!("type `{type_name}` has no {kind} `{method}`")
+            })
+    }
+
     /// Whether a value is a user object exposing a `next` member — a declared method, or a field
     /// slot (whose value the drain calls through the ordinary indirect-call path; a non-callable
     /// one raises its error there). The gate for `next`-driven user iteration, mirroring the
@@ -923,7 +949,7 @@ impl<'m> Vm<'m> {
                 return Err(self.error(
                     DiagnosticCode::UnknownName,
                     span,
-                    format!("type `{ty}` has no static function `{method}`"),
+                    self.missing_method_message(ty, method, true),
                 ));
             };
             let chunk = &self.module.protos[proto as usize];

@@ -1,15 +1,19 @@
-// A type declaring SEVERAL conversions has no single `from`: `Target.from(x)` names one of them,
-// and which one is decided statically by `x`'s type. Two ways that can fail, both refused here
-// rather than guessed:
+// `Target.from(x)` names ONE conversion, decided statically by `x`'s type. Where more than one
+// candidate survives that, the language refuses rather than guessing:
 //
-//   * the argument's type is not resolved (`dyn`), so every declared conversion is a candidate —
-//     E0023, the same answer the checker gives anywhere it is asked to pick without evidence;
-//   * the argument's type names no declared source — E0007, naming what the target does convert.
+//   * the argument's type is not resolved (`dyn`), so every candidate is still in play — E0023, the
+//     same answer the checker gives anywhere it is asked to pick without evidence;
+//   * the argument's type names no candidate at all — E0007, naming what the target does convert.
 //
-// A target declaring ONE conversion has neither problem (its `from` needs no choosing), which is
-// why the rule reads "resolves when the source names exactly one" rather than "always annotate".
-// expect: error E0023 at 31:6
-// expect: error E0007 at 32:6
+// An **enum** counts its built-in backing conversion among the candidates, so an unresolved argument
+// is ambiguous there from the first declared conversion onward: `Plan.from(d)` could mean the
+// backing value or the declared `Raw`.
+//
+// One candidate is never a question, whatever the argument's type: `try_from_conversion` pins that
+// a target declaring a single conversion takes a `dyn` argument and defers the check to the runtime.
+// expect: error E0023 at 35:6
+// expect: error E0007 at 36:6
+// expect: error E0023 at 49:6
 // expect: exit 1
 struct A { n: int }
 struct B { s: string }
@@ -30,3 +34,16 @@ struct Wrapped {
 anything: dyn = A { n: 1 }
 echo Wrapped.from(anything)
 echo Wrapped.from(C { f: 1.0 })
+
+struct Raw { code: string }
+
+enum Plan: string {
+    Free = "free"
+
+    impl From<Raw> {
+        pub fn from(r: Raw): Plan { return Plan.Free }
+    }
+}
+
+wire: dyn = "free"
+echo Plan.from(wire)

@@ -6,6 +6,7 @@
 // expect: stdout "Ok(42)"
 // expect: stdout "Err(HighError {detail: \"wrapped 7\"})"
 // expect: stdout "explicit: wrapped 1"
+// expect: stdout "deferred: wrapped 9"
 // expect: exit 0
 struct LowError { code: int }
 
@@ -32,3 +33,8 @@ fn high(fail: bool): Result<int, HighError> {
 echo high(false)
 echo high(true)
 echo "explicit: ${HighError.from(LowError { code: 1 }).detail}"
+// A target declaring ONE conversion takes an argument whose type is not resolved: there is nothing
+// to choose between, so the call means that conversion whatever the value turns out to be, and the
+// argument is checked at the runtime like every other gradual judgement.
+deferred: dyn = LowError { code: 9 }
+echo "deferred: ${HighError.from(deferred).detail}"

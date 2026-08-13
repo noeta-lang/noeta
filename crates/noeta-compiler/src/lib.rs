@@ -4456,10 +4456,11 @@ impl<'m> FnCompiler<'m> {
                 // `Enum.try_from(s)` / `Enum.from(s)` — string→case conversion (intercepted before
                 // variant construction, mirroring the checker and the IR interpreter).
                 //
-                // A **declared** method of that name wins: an `impl From<Source>` in the enum's body
-                // hoists a `from` the checker resolves for the `?` conversion (and for an explicit
-                // `Enum.from(e)`), so lowering it to the name-string op would type-check clean and
-                // then abort at runtime with "expects a string".
+                // A **declared inherent** method of that name wins: an enum writing its own
+                // `fn from(…)` means that one. An `impl From<Source>` block does not contend — its
+                // body is named after the source it converts (`noeta_ast::conversion`), so a backed
+                // enum keeps this built-in conversion while also declaring one, and the checker has
+                // already routed the call that meant the declared one.
                 if (name == "try_from" || name == "from") && !fns.contains_key(name) {
                     return self.lower_enum_from_str(type_name, name == "from", args, dst, span);
                 }
