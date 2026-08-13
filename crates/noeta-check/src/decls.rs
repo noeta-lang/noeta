@@ -41,7 +41,7 @@ impl Checker {
     pub(crate) fn param_bounds(&self, p: &ParamRef) -> Option<&[BoundReq]> {
         self.coloring
             .type_params
-            .values()
+            .params()
             .find(|s| s.param.id == p.id)
             .map(|s| s.bounds.as_slice())
     }
@@ -175,7 +175,10 @@ impl Checker {
     }
 
     pub(crate) fn check_struct(&mut self, r: &StructDecl, env: &mut Env) {
-        let saved = self.enter_type_params(&r.type_params);
+        let saved = self.enter_type_body(
+            Some(self_type(r.name.as_str(), &r.type_params)),
+            &r.type_params,
+        );
         // Only `self` is bound in a method body (prelude-redesign EX.1 — member access is
         // explicit): `self.field` types through `synth_member`; a bare field name is an unknown
         // name with a targeted hint (see the `Expr::Ident` fallback in `synth`).
@@ -249,7 +252,10 @@ impl Checker {
     }
 
     pub(crate) fn check_class(&mut self, c: &ClassDecl, env: &mut Env) {
-        let saved = self.enter_type_params(&c.type_params);
+        let saved = self.enter_type_body(
+            Some(self_type(c.name.as_str(), &c.type_params)),
+            &c.type_params,
+        );
         // Only `self` is bound in a method body (prelude-redesign EX.1 — member access is
         // explicit): `self.field` types through `synth_member`; a bare field name is an unknown
         // name with a targeted hint (see the `Expr::Ident` fallback in `synth`).
@@ -298,7 +304,10 @@ impl Checker {
     }
 
     pub(crate) fn check_enum(&mut self, e: &EnumDecl, env: &mut Env) {
-        let saved = self.enter_type_params(&e.type_params);
+        let saved = self.enter_type_body(
+            Some(self_type(e.name.as_str(), &e.type_params)),
+            &e.type_params,
+        );
         self.check_type_opt(&e.backing);
         for variant in &e.variants {
             // Both payload spellings annotate their type — `Leaf(Item)` no less than
@@ -344,12 +353,27 @@ impl Checker {
 
     // ----- unknown-type resolution (E0013) -----
 
-    /// Install `params` as the in-scope generic type parameters and return the previous set (to
-    /// restore once the declaration is checked). Generic parameters are erased at runtime but are
-    /// legal referents for annotations within their declaration. Each parameter's trait bounds are
-    /// validated here (an unknown trait in a bound is `E0014`).
-    pub(crate) fn enter_type_params(&mut self, params: &[TypeParam]) -> ParamScope {
-        let scope = param_scope(params, &self.imports.extern_types);
+    /// Enter the scope of a **declaration with a body**: its `<…>` generic parameters, and the type
+    /// `Self` names inside it. Returns the previous scope, to restore once the body is checked.
+    ///
+    /// The one entry point every kind funnels through — struct, class, enum, standalone `impl`,
+    /// trait — which is what stops `Self` from working in four of them and silently naming nothing
+    /// in the fifth. Generic parameters are erased at runtime but are legal referents for
+    /// annotations within their declaration, and each parameter's trait bounds are validated here
+    /// (an unknown trait in a bound is `E0014`).
+    ///
+    /// `self_ty` is `None` only where there is genuinely no type to name — an `impl` block whose
+    /// target this program does not declare, where binding `Self` to it would report the author's
+    /// one misspelling again at every annotation that mentions `Self`. A free function never comes
+    /// through here at all: it layers its parameters over whatever scope encloses it
+    /// ([`Checker::check_fn`]), so a nested `fn` inside a method keeps the method's `Self` and a
+    /// top-level one has none.
+    pub(crate) fn enter_type_body(
+        &mut self,
+        self_ty: Option<Type>,
+        params: &[TypeParam],
+    ) -> TypeScope {
+        let scope = param_scope(params, &self.imports.extern_types).with_self(self_ty);
         let saved = std::mem::replace(&mut self.coloring.type_params, scope);
         // Validated AFTER the parameters enter scope: a bound argument may name a sibling
         // parameter (`<K, T: Keyed<K>>`), which is a legal annotation referent here.
@@ -468,7 +492,13 @@ impl Checker {
             TypeRef::Named { name, args, span } => {
                 if !Type::is_builtin_name(name.as_str())
                     && !PRELUDE_TYPES.contains(&name.as_str())
-                    && !self.coloring.type_params.contains_key(name.as_str())
+                    && !self.coloring.type_params.binds_param(name.as_str())
+                    // `Self` resolves wherever the enclosing declaration binds it — the same
+                    // condition [`resolve_type_names`] rewrites it under, so what checks and what
+                    // resolves cannot disagree. Outside any type body it names nothing and falls
+                    // through to the E0013 below, which is the honest answer there.
+                    && !(name.as_str() == SELF_TYPE
+                        && self.coloring.type_params.self_ty().is_some())
                     && !self.symbols.types.contains(name.as_str())
                     // A native extern type is a valid annotation only when `use`-imported into this
                     // file (`use std.id.Uuid` → `extern_types["Uuid"]`), like a user type — it is no

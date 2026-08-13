@@ -697,6 +697,7 @@ pub fn lower_with_sites_opts(
         real_isolates,
         synth_step_name: None,
         synth_step_captures: None,
+        self_type_name: None,
         // What this lowering knows about the program: the code in hand, folded over whatever the
         // caller says encloses it (empty for a whole program — see `LowerOptions::ambient`).
         facts: ambient.under(program, registry),
@@ -738,6 +739,15 @@ struct Lowerer<'a> {
     synth_step_name: Option<String>,
     /// The armed seal for the synthesized generator/async step closure (see `synth_step_name`).
     synth_step_captures: Option<Vec<String>>,
+    /// The type whose body is being lowered — what a written `Self` denotes here. Set around a
+    /// type's methods, destructor and field defaults; `None` at top level and inside a free `fn`.
+    ///
+    /// Per-NODE state, not program-derived: it is a property of where the lowering currently is,
+    /// so a fragment lowering (a hot swap, a REPL entry) computes it from the very declaration it
+    /// is handed rather than needing to see the whole program. It carries the declaration's name
+    /// as the linker left it, so `Self` folds to the same qualified identity the type's own
+    /// spelling would.
+    self_type_name: Option<String>,
     /// Everything lowering knows about the **program** rather than about the node in hand — see
     /// [`ProgramFacts`], which is the one place such state may live. There is exactly one field of
     /// this kind, and `tests/lowerer_field_census.rs` is what keeps it that way: a second
@@ -777,6 +787,7 @@ fn every_lowerer_field_is_named_by_the_census() {
         real_isolates: false,
         synth_step_name: None,
         synth_step_captures: None,
+        self_type_name: None,
         facts: ProgramFacts::default(),
         registry,
     };
@@ -790,6 +801,7 @@ fn every_lowerer_field_is_named_by_the_census() {
         real_isolates: _,
         synth_step_name: _,
         synth_step_captures: _,
+        self_type_name: _,
         facts: _,
         registry: _,
     } = lowerer;
@@ -1261,12 +1273,13 @@ fn collect_native_type_imports(
 }
 
 impl Lowerer<'_> {
-    /// Rewrite a narrowing target's [`TypeRef`] so any import **alias** resolves to the imported
-    /// type's own name (`MyId` → `Uuid`) — recursively, so `List<MyId>` / `?MyId` are covered too —
-    /// making `is`/`as`/`type_of` match a value's runtime tag. A no-op (plain clone) when the file
-    /// declared no aliases, which is the overwhelmingly common case.
-    fn resolve_type_aliases(&self, ty: &TypeRef) -> TypeRef {
-        if self.facts.type_aliases.is_empty() {
+    /// Rewrite a narrowing target's [`TypeRef`] so every **written spelling** becomes the name a
+    /// value's runtime tag actually carries — recursively, so `List<MyId>` / `?Self` are covered
+    /// too. Two spellings differ from the tag: an import **alias** (`MyId` → `Uuid`) and `Self`
+    /// (→ the type whose body this is). A no-op (plain clone) when neither is in play, which is the
+    /// overwhelmingly common case.
+    fn resolve_type_spelling(&self, ty: &TypeRef) -> TypeRef {
+        if self.facts.type_aliases.is_empty() && self.self_type_name.is_none() {
             return ty.clone();
         }
         match ty {
@@ -1276,34 +1289,41 @@ impl Lowerer<'_> {
                     .type_aliases
                     .get(name.as_str())
                     .map(noeta_ast::Name::canonical)
-                    .unwrap_or_else(|| name.clone()),
-                args: args.iter().map(|a| self.resolve_type_aliases(a)).collect(),
+                    .unwrap_or_else(|| {
+                        // `x is Self` matches the enclosing type's runtime tag. Applied after the
+                        // alias lookup, which cannot hold a `Self` key — a `use … as Self` names a
+                        // type `Self`, and declaring one is refused.
+                        noeta_ast::Name::canonical(
+                            self.resolve_self_spelling(name.as_str().to_string()),
+                        )
+                    }),
+                args: args.iter().map(|a| self.resolve_type_spelling(a)).collect(),
                 span: *span,
             },
             TypeRef::Union { members, span } => TypeRef::Union {
                 members: members
                     .iter()
-                    .map(|m| self.resolve_type_aliases(m))
+                    .map(|m| self.resolve_type_spelling(m))
                     .collect(),
                 span: *span,
             },
             TypeRef::Tuple { elements, span } => TypeRef::Tuple {
                 elements: elements
                     .iter()
-                    .map(|e| self.resolve_type_aliases(e))
+                    .map(|e| self.resolve_type_spelling(e))
                     .collect(),
                 span: *span,
             },
             TypeRef::Fn { params, ret, span } => TypeRef::Fn {
                 params: params
                     .iter()
-                    .map(|p| self.resolve_type_aliases(p))
+                    .map(|p| self.resolve_type_spelling(p))
                     .collect(),
-                ret: Box::new(self.resolve_type_aliases(ret)),
+                ret: Box::new(self.resolve_type_spelling(ret)),
                 span: *span,
             },
             TypeRef::Optional { inner, span } => TypeRef::Optional {
-                inner: Box::new(self.resolve_type_aliases(inner)),
+                inner: Box::new(self.resolve_type_spelling(inner)),
                 span: *span,
             },
             // A trait object's trait name resolves like a nominal leaf: a native trait's local
@@ -1606,37 +1626,29 @@ impl Lowerer<'_> {
                 Ok(())
             }
             AstStmt::Class(decl) => {
-                let mut methods = Vec::with_capacity(decl.methods.len());
-                for m in &decl.methods {
-                    let func = self.lower_func(
-                        &m.params,
-                        BodyKind::Block(&m.body),
-                        m.span,
-                        true,
-                        m.is_async,
-                        // Methods trace as `Type.method` (the VM's chunk naming).
-                        Some(format!("{}.{}", decl.name, m.name)),
-                        Some(m.captures.iter().map(|(n, _)| n.clone()).collect()),
-                    )?;
-                    methods.push((m.name.to_string(), Rc::new(func)));
-                }
-                // The `destruct` block lowers to a parameterless block [`Func`] (fields resolve
-                // against the receiver, like a method), so the VM can compile it to a prototype.
-                let destructor = match &decl.destructor {
-                    Some(body) => Some(Rc::new(self.lower_func(
-                        &[],
-                        BodyKind::Block(body),
-                        decl.span,
-                        false,
-                        false,
-                        // The VM's destructor-prototype naming.
-                        Some(format!("{}::destruct", decl.name)),
-                        // A destructor touches only `self` — fully sealed.
-                        Some(Vec::new()),
-                    )?)),
-                    None => None,
-                };
-                let field_defaults = self.lower_field_defaults(&decl.fields)?;
+                let (methods, destructor, field_defaults) =
+                    self.lower_type_body(&decl.name, |lw| {
+                        let methods = lw.lower_type_methods(&decl.name, &decl.methods)?;
+                        // The `destruct` block lowers to a parameterless block [`Func`] (fields
+                        // resolve against the receiver, like a method), so the VM can compile it to
+                        // a prototype.
+                        let destructor = match &decl.destructor {
+                            Some(body) => Some(Rc::new(lw.lower_func(
+                                &[],
+                                BodyKind::Block(body),
+                                decl.span,
+                                false,
+                                false,
+                                // The VM's destructor-prototype naming.
+                                Some(format!("{}::destruct", decl.name)),
+                                // A destructor touches only `self` — fully sealed.
+                                Some(Vec::new()),
+                            )?)),
+                            None => None,
+                        };
+                        let field_defaults = lw.lower_field_defaults(&decl.fields)?;
+                        Ok((methods, destructor, field_defaults))
+                    })?;
                 out.push(Stmt::Decl(Decl::Class(ClassDef {
                     decl: Rc::new(decl.clone()),
                     methods,
@@ -1650,20 +1662,9 @@ impl Lowerer<'_> {
                 // An enum carries inherent methods and `impl`-block methods (the unified body,
                 // object-model slice 3), lowered to IR funcs exactly like a struct's. Variant/derive
                 // data stays on the surface `decl`.
-                let mut methods = Vec::with_capacity(decl.methods.len());
-                for m in &decl.methods {
-                    let func = self.lower_func(
-                        &m.params,
-                        BodyKind::Block(&m.body),
-                        m.span,
-                        true,
-                        m.is_async,
-                        // Methods trace as `Type.method` (the VM's chunk naming).
-                        Some(format!("{}.{}", decl.name, m.name)),
-                        Some(m.captures.iter().map(|(n, _)| n.clone()).collect()),
-                    )?;
-                    methods.push((m.name.to_string(), Rc::new(func)));
-                }
+                let methods = self.lower_type_body(&decl.name, |lw| {
+                    lw.lower_type_methods(&decl.name, &decl.methods)
+                })?;
                 out.push(Stmt::Decl(Decl::Enum(EnumDef {
                     decl: Rc::new(decl.clone()),
                     methods,
@@ -1675,21 +1676,11 @@ impl Lowerer<'_> {
                 // A struct carries inherent methods and `impl`-block methods (the unified body),
                 // lowered to IR funcs exactly like a class's — minus any `destruct` (structs have
                 // none). Field/derive data stays on the surface `decl`.
-                let mut methods = Vec::with_capacity(decl.methods.len());
-                for m in &decl.methods {
-                    let func = self.lower_func(
-                        &m.params,
-                        BodyKind::Block(&m.body),
-                        m.span,
-                        true,
-                        m.is_async,
-                        // Methods trace as `Type.method` (the VM's chunk naming).
-                        Some(format!("{}.{}", decl.name, m.name)),
-                        Some(m.captures.iter().map(|(n, _)| n.clone()).collect()),
-                    )?;
-                    methods.push((m.name.to_string(), Rc::new(func)));
-                }
-                let field_defaults = self.lower_field_defaults(&decl.fields)?;
+                let (methods, field_defaults) = self.lower_type_body(&decl.name, |lw| {
+                    let methods = lw.lower_type_methods(&decl.name, &decl.methods)?;
+                    let field_defaults = lw.lower_field_defaults(&decl.fields)?;
+                    Ok((methods, field_defaults))
+                })?;
                 out.push(Stmt::Decl(Decl::Struct(StructDef {
                     decl: Rc::new(decl.clone()),
                     methods,
@@ -1776,6 +1767,47 @@ impl Lowerer<'_> {
                 name: hidden_param_name(*slot),
                 span: *span,
             })
+    }
+
+    /// Lower everything inside a type's own body — methods, a `destruct` block, field defaults —
+    /// with `Self` bound to that type for the duration.
+    ///
+    /// One scoping site per declaration kind, wrapping the *whole* body rather than the method
+    /// loop: a destructor and a field default are as much inside the type as a method is, and a
+    /// `Self` in one of them would otherwise fold to the literal word.
+    fn lower_type_body<T>(
+        &mut self,
+        type_name: &noeta_ast::Name,
+        body: impl FnOnce(&mut Self) -> Result<T, Unsupported>,
+    ) -> Result<T, Unsupported> {
+        let saved = self.self_type_name.replace(type_name.to_string());
+        let lowered = body(self);
+        self.self_type_name = saved;
+        lowered
+    }
+
+    /// Lower a type's own methods. The three declaration kinds ran identical loops; sharing them is
+    /// what keeps their naming and sealing from drifting apart.
+    fn lower_type_methods(
+        &mut self,
+        type_name: &noeta_ast::Name,
+        methods: &[FnDecl],
+    ) -> Result<Vec<(String, Rc<Func>)>, Unsupported> {
+        let mut out = Vec::with_capacity(methods.len());
+        for m in methods {
+            let func = self.lower_func(
+                &m.params,
+                BodyKind::Block(&m.body),
+                m.span,
+                true,
+                m.is_async,
+                // Methods trace as `Type.method` (the VM's chunk naming).
+                Some(format!("{type_name}.{}", m.name)),
+                Some(m.captures.iter().map(|(n, _)| n.clone()).collect()),
+            )?;
+            out.push((m.name.to_string(), Rc::new(func)));
+        }
+        Ok(out)
     }
 
     // The lowering inputs for one function/closure body — a bundle, not a signature worth a struct.
@@ -2243,12 +2275,28 @@ impl Lowerer<'_> {
     /// hand that name to the others — so the two agree by construction rather than by convention,
     /// and `variants_of(type_name::<Framing>())` answers what `variants_of::<Framing>()` does.
     fn reflection_head_name(&self, ty: &TypeRef) -> String {
-        let name = ty.head_name();
+        let name = self.resolve_self_spelling(ty.head_name());
         self.facts
             .native_type_imports
             .get(name.as_str())
             .cloned()
             .unwrap_or(name)
+    }
+
+    /// `Self` written as a type's **head** denotes the type whose body is being lowered.
+    ///
+    /// Both surfaces that turn a written head into a runtime name go through here — the reflection
+    /// queries ([`Self::reflection_head_name`]) and the narrows ([`Self::resolve_type_spelling`]) —
+    /// because they are asking one question, and an answer given to only one of them is the shape
+    /// where `type_name::<Self>()` reports `Todo` while `x is Self` matches nothing.
+    ///
+    /// Outside any type body `Self` names nothing and is passed through unchanged; the checker has
+    /// already refused it there (E0013), so there is no reachable program this decides for.
+    fn resolve_self_spelling(&self, name: String) -> String {
+        match &self.self_type_name {
+            Some(ty) if name == noeta_ast::SELF_TYPE => ty.clone(),
+            _ => name,
+        }
     }
 
     /// The **run-time name atom** of a target type whose head the checker resolved to a
@@ -3260,7 +3308,7 @@ impl Lowerer<'_> {
                     out,
                     Rvalue::As {
                         operand,
-                        ty: self.resolve_type_aliases(ty),
+                        ty: self.resolve_type_spelling(ty),
                         dynamic,
                         span: *span,
                     },
@@ -3286,7 +3334,7 @@ impl Lowerer<'_> {
                     out,
                     Rvalue::TypeTest {
                         operand,
-                        ty: self.resolve_type_aliases(ty),
+                        ty: self.resolve_type_spelling(ty),
                         dynamic,
                         span: *span,
                     },

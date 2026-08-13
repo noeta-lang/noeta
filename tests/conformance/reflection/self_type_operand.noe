@@ -1,0 +1,19 @@
+// `Self` as a reflection/narrow operand answers with the declaring type's RUNTIME name, not the
+// literal word — the three surfaces that turn a written type into a runtime name all resolve it,
+// so `type_name::<Self>()`, `x is Self` and a name-keyed query cannot disagree about what `Self` is.
+// expect: stdout "Node"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "1"
+// expect: exit 0
+struct Node {
+    x: int
+    pub fn label(): string { return type_name::<Self>() }
+    pub fn same_kind(v: dyn): bool { return v is Self }
+    pub fn field_count(): int { return field_specs_of::<Self>().len() }
+}
+
+echo Node.label();
+echo Node.same_kind(Node { x: 1 });
+echo Node.same_kind(3);
+echo Node.field_count();

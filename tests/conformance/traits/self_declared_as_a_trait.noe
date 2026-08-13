@@ -1,0 +1,7 @@
+// The same rule a type declaration gets: a trait may not be named `Self`, which its own signatures
+// already use for the implementing type.
+// expect: error E0053 at 5:7
+// expect: exit 1
+trait Self { fn f(): int }
+
+echo 1;

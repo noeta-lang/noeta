@@ -1,0 +1,17 @@
+// Inside a generic type `Self` is that type at its OWN instantiation (`Box<T>`, not a bare `Box`),
+// so a method returning `Self` keeps the element type its receiver had — `b.same().value` is an
+// `int` here, not a hole.
+// expect: stdout "3"
+// expect: stdout "4"
+// expect: exit 0
+class Box<T> {
+    pub value: T
+    pub fn new(v: T): Self { return Box { value: v }; }
+    pub fn same(): Self { return self; }
+}
+
+fn twice(n: int): int { return n + n; }
+
+b = Box.new(3);
+echo b.same().value;
+echo twice(b.same().value) - 2;

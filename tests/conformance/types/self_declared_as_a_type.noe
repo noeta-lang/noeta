@@ -1,0 +1,8 @@
+// `Self` is the word for "the type this declaration is", so nothing may BE a type by that name:
+// inside any type body the spelling already resolves to the enclosing type, and a declared `Self`
+// would mean one thing there and another at top level.
+// expect: error E0020 at 6:1
+// expect: exit 1
+struct Self { x: int }
+
+echo 1;

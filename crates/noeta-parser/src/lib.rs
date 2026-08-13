@@ -2160,7 +2160,7 @@ where
         // legal only in a trait/impl method signature. Tried before `named` so `Self::Item` is not
         // mis-parsed as a bare `Self` type; a bare `Self` (no `::`) still falls through to `named`.
         let assoc_projection = ident_parser(ctx)
-            .filter(|(name, _): &(String, Span)| name == "Self")
+            .filter(|(name, _): &(String, Span)| name == noeta_ast::SELF_TYPE)
             .ignore_then(just(T::ColonColon))
             .ignore_then(ident_parser(ctx))
             .map_with(move |(name, _), e| TypeRef::AssocProjection {

@@ -1,0 +1,15 @@
+// `Self` resolves everywhere inside a type's body, not only in its methods: a field default and a
+// `destruct` block are as much inside the type as a method is, and each is lowered through the
+// same scope.
+// expect: stdout "Tracked"
+// expect: stdout "dropping Tracked"
+// expect: exit 0
+class Tracked {
+    pub n: int
+    pub tag: string = type_name::<Self>()
+    pub fn new(): Self { return Tracked { n: 1 }; }
+    destruct { echo "dropping " ~ type_name::<Self>(); }
+}
+
+t = Tracked.new();
+echo t.tag;

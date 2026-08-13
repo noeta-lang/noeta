@@ -149,6 +149,36 @@ c.set_then_read()   // method
 
 **A field holding a function is callable through the receiver**: `obj.f(args)` means `(obj.f)(args)` when `f` is a field of function type (see [Functions & Closures](Functions-and-Closures#calling-a-closure-valued-field)). If a method and a field share a name, the method wins in call position and the field in value position — `g = obj.f; g(x)` always reaches the field.
 
+## `Self` — the type in hand
+
+Inside a type body, `Self` names the type it is the body of. Write it anywhere a type goes — a return, a parameter, a field, an enum payload, and at any depth (`List<Self>`, `?Self`):
+
+```noeta
+class Counter {
+    pub mut n: int
+    pub fn new(): Self { return Counter { n: 0 } }
+    pub fn bump(): Self { self.n = self.n + 1; return self }
+}
+
+class Link {
+    pub mut next: ?Self          // a self-referential field
+    pub fn new(): Self { return Link { next: none } }
+}
+
+enum Tree {
+    Leaf(int);
+    Node(Self, Self);            // a recursive payload
+}
+```
+
+`self` and `Self` are the two halves of the same idea and the capital is the whole difference: `self` is the **value** the method was called on, `Self` is its **type**. So `self.n` reads a field and `fn bump(): Self` declares what comes back.
+
+Inside a generic type, `Self` is that type at its own instantiation — `Self` in `class Box<T>` is `Box<T>`, so a method returning `Self` keeps the element type its receiver had.
+
+Reflection and narrowing resolve it to the same type everything else does: `type_name::<Self>()` answers with the declaring type's name, and `v is Self` matches its values.
+
+Nothing may be *declared* `Self` — no struct, class, enum or trait may take the name, because inside any type body the spelling already means the enclosing type. In a trait declaration `Self` means the implementing type; see [Generics & Traits](Generics-and-Traits#traits).
+
 ## Method visibility
 
 A method is **private by default** and `pub` puts it on the type's surface. This is one rule for `class`, `struct` and `enum` alike — unlike fields, whose default is per kind.

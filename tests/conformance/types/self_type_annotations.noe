@@ -1,0 +1,36 @@
+// `Self` names the type whose body it is written in — so a declaration never has to repeat its own
+// name, and renaming the type leaves its own signatures alone. Legal at any depth (`List<Self>`,
+// `?Self`) and in every declaration kind that has a body.
+// expect: stdout "1"
+// expect: stdout "2"
+// expect: stdout "true"
+// expect: stdout "Color.Red"
+// expect: exit 0
+class Counter {
+    pub mut n: int
+    pub fn new(): Self { return Counter { n: 0 } }
+    pub fn bump(): Self { self.n = self.n + 1; return self }
+}
+
+struct Node {
+    x: int
+    // A parameter and a nested position, both naming the declaring type.
+    pub fn pair(other: Self): List<Self> { return [self, other] }
+}
+
+class Link {
+    // A self-referential FIELD: the type is not yet fully collected when this is read, which is
+    // exactly the case a nominal `Self` has to survive.
+    pub mut next: ?Self
+    pub fn new(): Self { return Link { next: none } }
+}
+
+enum Color: string {
+    Red = "red";
+    pub fn same(): Self { return self }
+}
+
+echo Counter.new().bump().n;
+echo Node { x: 1 }.pair(Node { x: 2 }).len();
+echo Link.new().next == none;
+echo Color.Red.same();

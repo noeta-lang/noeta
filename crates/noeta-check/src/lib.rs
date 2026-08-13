@@ -638,7 +638,7 @@ impl SessionChecker {
     fn reset_scratch(&mut self) {
         self.checker.coloring.current_type = None;
         self.checker.coloring.dev_tier_at = None;
-        self.checker.coloring.type_params.clear();
+        self.checker.coloring.type_params = TypeScope::new();
         self.checker.coloring.current_ret = Type::Unknown;
         self.checker.coloring.collected_returns = None;
         self.checker.coloring.current_yield = None;
@@ -1330,7 +1330,7 @@ struct Coloring {
     /// call on a `T`-typed receiver resolves through a bound's trait at the bound's instantiation
     /// (`x.key(): int` under `T: Keyed<int>` — [`Checker::type_param_trait_method`]).
     /// Keyed by the SPELLING that resolves to each parameter — a resolver, not a membership set.
-    type_params: ParamScope,
+    type_params: TypeScope,
     /// While checking a **generic type's instance method** body: the enclosing type's own type
     /// parameters, in DECLARATION order, with any name the method's own `<…>` shadows replaced by
     /// the empty string (which no identifier can equal). Empty everywhere else — at top level, in a
@@ -2747,7 +2747,7 @@ impl Checker {
             let Some(outer) = self
                 .coloring
                 .type_params
-                .get(&p.name)
+                .param(&p.name)
                 .map(|s| s.param.clone())
             else {
                 continue;

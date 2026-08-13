@@ -155,14 +155,17 @@ pub(crate) fn param_ref(p: &TypeParam) -> ParamRef {
 /// Built in **two passes**: every parameter's identity enters scope first, then the bounds are
 /// resolved against the completed scope — a bound may name a sibling (`<K, T: Keyed<K>>`), and in
 /// one pass that sibling would still be an unresolved nominal name.
+///
+/// `outer`'s `Self` carries through unchanged — a method's own `<…>` does not change which type
+/// `Self` names.
 pub(crate) fn extend_param_scope(
-    outer: &ParamScope,
+    outer: &TypeScope,
     params: &[TypeParam],
     xt: &HashMap<String, String>,
-) -> ParamScope {
+) -> TypeScope {
     let mut scope = outer.clone();
     for p in params {
-        scope.insert(
+        scope.insert_param(
             p.name.clone(),
             ScopedParam {
                 param: param_ref(p),
@@ -172,21 +175,32 @@ pub(crate) fn extend_param_scope(
     }
     for p in params {
         let bounds = bound_reqs(&p.bounds, xt, &scope);
-        if let Some(entry) = scope.get_mut(&p.name) {
+        if let Some(entry) = scope.param_mut(&p.name) {
             entry.bounds = bounds;
         }
     }
     scope
 }
 
-/// The scope a declaration's `<…>` list introduces on its own (no enclosing parameters).
-pub(crate) fn param_scope(params: &[TypeParam], xt: &HashMap<String, String>) -> ParamScope {
-    extend_param_scope(&ParamScope::new(), params, xt)
+/// The scope a declaration's `<…>` list introduces on its own (no enclosing parameters, no `Self`).
+pub(crate) fn param_scope(params: &[TypeParam], xt: &HashMap<String, String>) -> TypeScope {
+    extend_param_scope(&TypeScope::new(), params, xt)
+}
+
+/// The scope inside a **type's own body**: its `<…>` parameters, plus `Self` bound to the type at
+/// its own instantiation (`Repo<T>` inside `class Repo<T>`). The one constructor every declaration
+/// kind funnels through, so no kind can acquire parameters without acquiring a `Self` to match.
+pub(crate) fn type_body_scope(
+    name: &str,
+    params: &[TypeParam],
+    xt: &HashMap<String, String>,
+) -> TypeScope {
+    param_scope(params, xt).with_self(Some(self_type(name, params)))
 }
 
 /// The identities in a scope — what erasure and binding quantify over.
-pub(crate) fn scope_ids(scope: &ParamScope) -> ParamSet {
-    scope.values().map(|s| s.param.id).collect()
+pub(crate) fn scope_ids(scope: &TypeScope) -> ParamSet {
+    scope.params().map(|s| s.param.id).collect()
 }
 
 /// The identities of a declaration's own `<…>` list.
@@ -194,27 +208,41 @@ pub(crate) fn param_ids(params: &[TypeParam]) -> ParamSet {
     params.iter().map(|p| ParamId::at(p.span)).collect()
 }
 
-/// Resolve a written annotation's parameter references: a bare [`Type::Named`] whose spelling the
-/// scope binds becomes the [`Type::Param`] it names, deeply.
+/// Resolve a written annotation's **scoped names**, deeply: a bare [`Type::Named`] whose spelling
+/// the scope binds as a parameter becomes the [`Type::Param`] it names, and `Self` becomes the type
+/// the enclosing declaration binds it to.
 ///
-/// **This is the only place a spelling becomes a parameter.** Everything downstream — erasure,
-/// binding, substitution, bound enforcement, forwarding templates, reflection — reads the lattice
-/// variant, so no other site needs to know what names are in scope. Applied right after
+/// **This is the only place a spelling becomes a parameter or a `Self`.** Everything downstream —
+/// erasure, binding, substitution, bound enforcement, forwarding templates, reflection — reads the
+/// lattice variant, so no other site needs to know what names are in scope. Applied right after
 /// [`from_ref_q`], which is the same boundary extern-type qualification already sits at.
 ///
 /// A parameter written *with* arguments (`T<int>`) drops them, exactly as erasure always did: a
 /// parameter is not a constructor, and the surface offers no higher-kinded form to mean anything
-/// else by it.
-pub(crate) fn resolve_params(ty: Type, scope: &ParamScope) -> Type {
+/// else by it. `Self<…>` is not a form the surface has either, and the arity guard keeps the
+/// rewrite to the exact bare spelling — the same guard [`subst_self`] uses.
+///
+/// A parameter wins over `Self` for one spelling only if a declaration writes `<Self>`, which the
+/// declaration rules refuse; the order below states the precedence rather than leaving it to which
+/// lookup happens to run first.
+pub(crate) fn resolve_type_names(ty: Type, scope: &TypeScope) -> Type {
     if scope.is_empty() {
         return ty;
     }
-    let r = |t: Type| resolve_params(t, scope);
+    let r = |t: Type| resolve_type_names(t, scope);
     match ty {
-        Type::Named(n, args) => match scope.get(&n) {
-            Some(s) => Type::Param(s.param.clone()),
-            None => Type::Named(n, args.into_iter().map(r).collect()),
-        },
+        Type::Named(n, args) => {
+            if let Some(s) = scope.param(&n) {
+                return Type::Param(s.param.clone());
+            }
+            if n == SELF_TYPE
+                && args.is_empty()
+                && let Some(self_ty) = scope.self_ty()
+            {
+                return self_ty.clone();
+            }
+            Type::Named(n, args.into_iter().map(r).collect())
+        }
         Type::List(t) => Type::List(Box::new(r(*t))),
         Type::Set(t) => Type::Set(Box::new(r(*t))),
         Type::Map(k, v) => Type::Map(Box::new(r(*k)), Box::new(r(*v))),
@@ -406,10 +434,9 @@ pub(crate) fn subst_or_dyn(ty: &Type, subst: &Subst, tps: &ParamSet) -> Type {
     apply_subst(ty, &full)
 }
 
-/// The spelling a trait declaration uses for "the implementing type". It is a trait-DECLARATION
-/// word only: it never names a declared type (writing it as an impl's return is E0013), so a
-/// [`Type::Named`] carrying it is always the contract's `Self` and never a nominal collision.
-pub(crate) const SELF_TYPE: &str = "Self";
+/// The spelling for "the type this declaration is" — re-exported from the AST, which is where the
+/// parser, the lowerer and this crate all read it from.
+pub(crate) use noeta_ast::SELF_TYPE;
 
 /// Substitute a trait contract's `Self` for the type the **receiver** actually has, deeply — the
 /// half of trait-signature instantiation that [`apply_subst`] cannot do, because `Self` is not a
@@ -842,8 +869,8 @@ pub(crate) fn reassigns(stmts: &[Stmt], name: &str) -> bool {
 /// `T` into the [`Type::Param`] it names — see [`resolve_params`]. Pass an empty scope only where
 /// there genuinely is none (a top-level position outside any generic declaration); every site that
 /// *has* one must pass it, which is why the argument is required rather than defaulted.
-pub(crate) fn from_ref_q(ty: &TypeRef, xt: &HashMap<String, String>, scope: &ParamScope) -> Type {
-    resolve_params(qualify_externs(Type::from_ref(ty), xt), scope)
+pub(crate) fn from_ref_q(ty: &TypeRef, xt: &HashMap<String, String>, scope: &TypeScope) -> Type {
+    resolve_type_names(qualify_externs(Type::from_ref(ty), xt), scope)
 }
 
 /// Convert a declaration's surface trait bounds into their checker-side [`BoundReq`]s: names
@@ -852,7 +879,7 @@ pub(crate) fn from_ref_q(ty: &TypeRef, xt: &HashMap<String, String>, scope: &Par
 pub(crate) fn bound_reqs(
     bounds: &[noeta_ast::TraitBound],
     xt: &HashMap<String, String>,
-    scope: &ParamScope,
+    scope: &TypeScope,
 ) -> Vec<crate::env::BoundReq> {
     bounds
         .iter()
@@ -895,7 +922,7 @@ pub(crate) fn qualify_externs(t: Type, xt: &HashMap<String, String>) -> Type {
 pub(crate) fn field_type(
     ty: &Option<TypeRef>,
     xt: &HashMap<String, String>,
-    scope: &ParamScope,
+    scope: &TypeScope,
 ) -> Type {
     ty.as_ref()
         .map(|t| from_ref_q(t, xt, scope))
@@ -1050,7 +1077,7 @@ pub(crate) fn self_type(name: &str, type_params: &[TypeParam]) -> Type {
 }
 
 /// The declared type of a parameter, or `Unknown` when unannotated.
-pub(crate) fn param_type(p: &Param, xt: &HashMap<String, String>, scope: &ParamScope) -> Type {
+pub(crate) fn param_type(p: &Param, xt: &HashMap<String, String>, scope: &TypeScope) -> Type {
     p.ty.as_ref()
         .map(|t| from_ref_q(t, xt, scope))
         .unwrap_or(Type::Unknown)

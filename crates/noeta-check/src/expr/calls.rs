@@ -1307,7 +1307,7 @@ impl Checker {
                     span: tn_span,
                 } = receiver.as_ref()
                     && lookup(env, tn.as_str()).is_none()
-                    && let Some(scoped) = self.coloring.type_params.get(tn.as_str()).cloned()
+                    && let Some(scoped) = self.coloring.type_params.param(tn.as_str()).cloned()
                     && let Some((trait_name, declared_static)) =
                         self.type_param_static_trait(&scoped.param, name)
                 {

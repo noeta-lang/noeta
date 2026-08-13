@@ -1,0 +1,16 @@
+// A trait contract written with `Self` means "the implementing type", and an implementation may
+// write `Self` back rather than repeating its own name — the two meet at the conformance check,
+// which resolves both sides to the concrete target.
+// expect: stdout "5"
+// expect: exit 0
+trait Dup {
+    fn dup(): Self
+}
+
+struct P { x: int }
+
+impl Dup for P {
+    pub fn dup(): Self { return P { x: self.x } }
+}
+
+echo P { x: 5 }.dup().x;

@@ -282,7 +282,11 @@ impl Checker {
         // Both remain in `generic.params` below — they are different parameters with different
         // identities, and each is seeded from its own channel (the receiver's type arguments for
         // the class's, the turbofish/arguments for the method's).
-        let type_scope = param_scope(type_params, xt);
+        // `Self` in a signature names the declaring type, and it is resolved HERE rather than at
+        // the body-checking pass: a recorded signature is what every call site, `dyn` dispatch and
+        // reflection reads, so a `Self` left standing in one would meet the concrete argument at
+        // the call and mismatch it.
+        let type_scope = type_body_scope(type_name, type_params, xt);
         let scope = extend_param_scope(&type_scope, &m.type_params, xt);
         let type_generics: Vec<(ParamRef, Vec<BoundReq>)> = type_params
             .iter()
@@ -329,6 +333,24 @@ impl Checker {
                 generic,
             },
         );
+    }
+
+    /// The scope a type's own `impl` arguments and annotations resolve in: its generic parameters,
+    /// and `Self` bound to the type at its own instantiation.
+    ///
+    /// Read from the registered parameters rather than from the declaration in hand, so the
+    /// standalone and in-body `impl` spellings resolve their arguments identically — the pair that
+    /// otherwise records `Self` for one and the target for the other. A target this program does
+    /// not declare has no parameters registered and resolves to itself, which is what the E0013
+    /// reported elsewhere is about.
+    fn target_scope(&self, target: &str) -> TypeScope {
+        let params = self
+            .symbols
+            .type_params
+            .get(target)
+            .cloned()
+            .unwrap_or_default();
+        type_body_scope(target, &params, &self.imports.extern_types)
     }
 
     /// Pass 1: register every top-level declaration so forward references resolve before any
@@ -384,6 +406,21 @@ impl Checker {
                 _ => continue,
             };
             let local = name.rsplit('.').next().unwrap_or(name).to_string();
+            // `Self` is the word for "the type this declaration is", so nothing may *be* a type by
+            // that name: inside any type body the spelling already resolves to the enclosing type,
+            // and a declared `Self` would mean one thing there and another at top level — one name
+            // with two meanings, decided by where it is written.
+            if local == SELF_TYPE {
+                self.error(
+                    DiagnosticCode::NameCollision,
+                    span,
+                    format!("`{SELF_TYPE}` cannot be declared as {what}"),
+                )
+                .help(
+                    "`Self` names the enclosing type inside any `struct`/`class`/`enum`/`trait` \
+                     body — pick another name for this declaration",
+                );
+            }
             self.note_static(span, &local, what);
             if let Some(first) = declared.insert((name, span.source), span) {
                 self.error(
@@ -399,8 +436,14 @@ impl Checker {
             match stmt {
                 Stmt::Struct(r) => {
                     // Field types resolve against the type's OWN parameters, so a `T`-typed field
-                    // is a `Type::Param` a later instantiation substitutes by identity.
-                    let scope = param_scope(&r.type_params, &self.imports.extern_types);
+                    // is a `Type::Param` a later instantiation substitutes by identity — and
+                    // against its `Self`, so a self-referential field (`next: ?Self`) records the
+                    // declaring type rather than a nominal name nothing resolves.
+                    let scope = type_body_scope(
+                        r.name.as_str(),
+                        &r.type_params,
+                        &self.imports.extern_types,
+                    );
                     let fields = r
                         .fields
                         .iter()
@@ -487,9 +530,13 @@ impl Checker {
                     self.bake_impl_assoc(r.name.as_str(), &r.impls, &r.type_params);
                 }
                 Stmt::Class(c) => {
-                    // Field types resolve against the type's OWN parameters, so a `T`-typed field
-                    // is a `Type::Param` a later instantiation substitutes by identity.
-                    let scope = param_scope(&c.type_params, &self.imports.extern_types);
+                    // Field types resolve against the type's OWN parameters and its `Self`, exactly
+                    // as a struct's do.
+                    let scope = type_body_scope(
+                        c.name.as_str(),
+                        &c.type_params,
+                        &self.imports.extern_types,
+                    );
                     let fields = c
                         .fields
                         .iter()
@@ -576,8 +623,13 @@ impl Checker {
                     self.bake_impl_assoc(c.name.as_str(), &c.impls, &c.type_params);
                 }
                 Stmt::Enum(e) => {
-                    // As for a struct's fields: a payload naming the enum's `T` is a parameter.
-                    let scope = param_scope(&e.type_params, &self.imports.extern_types);
+                    // As for a struct's fields: a payload naming the enum's `T` is a parameter, and
+                    // one naming `Self` is the enum itself (`Cons(int, Self)`).
+                    let scope = type_body_scope(
+                        e.name.as_str(),
+                        &e.type_params,
+                        &self.imports.extern_types,
+                    );
                     let variants = e
                         .variants
                         .iter()
@@ -753,10 +805,15 @@ impl Checker {
                             .user_traits
                             .contains_key(decl.trait_name.as_str()) =>
                     {
+                        // The arguments are written in the TARGET's scope, so `impl Keyed<Self>
+                        // for P` records `P` — the same thing the in-body spelling records, which
+                        // is what stops a bound (`<T: Keyed<P>>`) from matching one and not the
+                        // other.
+                        let scope = self.target_scope(decl.target.as_str());
                         let args: Vec<Type> = decl
                             .trait_args
                             .iter()
-                            .map(|t| from_ref_q(t, &self.imports.extern_types, &ParamScope::new()))
+                            .map(|t| from_ref_q(t, &self.imports.extern_types, &scope))
                             .collect();
                         self.symbols
                             .user_trait_impls
@@ -781,9 +838,11 @@ impl Checker {
                 .chain(derives.iter().map(|d| (&d.name, d.args.as_slice(), d.span)))
             {
                 if self.symbols.user_traits.contains_key(trait_name.as_str()) {
+                    // In the type's own scope, exactly as a standalone impl's arguments are.
+                    let scope = self.target_scope(type_name);
                     let args: Vec<Type> = trait_args
                         .iter()
-                        .map(|t| from_ref_q(t, &self.imports.extern_types, &ParamScope::new()))
+                        .map(|t| from_ref_q(t, &self.imports.extern_types, &scope))
                         .collect();
                     self.symbols
                         .user_trait_impls
@@ -1343,8 +1402,14 @@ impl Checker {
             return;
         }
         // Hoisted from a trait, whose methods declare no type parameters of their own (E0058) —
-        // so there is nothing here for a scope to resolve.
-        let scope = param_scope(&m.type_params, &self.imports.extern_types);
+        // so the layering below adds nothing. What the scope IS for is `Self`: a trait's
+        // `fn me(): Self` hoisted onto an implementor returns that implementor, and recording the
+        // literal word instead would make the signature uncallable at every one of them.
+        let scope = extend_param_scope(
+            &self.target_scope(type_name),
+            &m.type_params,
+            &self.imports.extern_types,
+        );
         let params: Vec<Type> = m
             .params
             .iter()
@@ -1396,19 +1461,21 @@ impl Checker {
             return;
         }
         let mut map: HashMap<String, Type> = HashMap::new();
+        // Bound in the implementing type's scope, so `type Item = Self;` names that type.
+        let scope = self.target_scope(type_name);
         // Defaults first, so an explicit binding below overrides.
         for a in &decl.assoc_types {
             if let Some(default) = &a.default {
                 map.insert(
                     a.name.clone(),
-                    from_ref_q(default, &self.imports.extern_types, &ParamScope::new()),
+                    from_ref_q(default, &self.imports.extern_types, &scope),
                 );
             }
         }
         for (name, ty) in bindings {
             map.insert(
                 name.clone(),
-                from_ref_q(ty, &self.imports.extern_types, &ParamScope::new()),
+                from_ref_q(ty, &self.imports.extern_types, &scope),
             );
         }
         self.symbols
@@ -1586,10 +1653,11 @@ impl Checker {
     pub(crate) fn record_from_impls(&mut self, target: &str, impls: &[noeta_ast::ImplBlock]) {
         for block in impls {
             if block.trait_name == BuiltinTrait::From.name() && block.trait_args.len() == 1 {
+                // In the target's scope, like every other in-body `impl` argument.
                 let source = from_ref_q(
                     &block.trait_args[0],
                     &self.imports.extern_types,
-                    &ParamScope::new(),
+                    &self.target_scope(target),
                 );
                 self.symbols
                     .from_impls

@@ -3775,6 +3775,51 @@ fn a_folded_true_test_still_narrows_its_branch() {
 //     says an unbound projection degrades to a gradual hole rather than a wrong concrete type;
 //     nothing in the native surface can reach that state to assert it.
 
+// --- `Self` (the type in hand) ------------------------------------------------------------------
+//
+// The corpus covers what `Self` *does* end to end; these pin the two seams a corpus case cannot
+// see, because both are about a program the checker must REFUSE and about the one place the answer
+// is decided.
+
+#[test]
+fn self_is_the_enclosing_type_not_a_nominal_name() {
+    // Resolved, not merely accepted: a `Self` return must mismatch a wrong value exactly as the
+    // spelled-out type would. If `Self` stayed a nominal `Named("Self")` this would pass silently,
+    // which is how it read before — E0013 on the annotation, then E0007 against every real type.
+    let ok = "struct P { x: int\n pub fn me(): Self { return self; } }\n";
+    assert!(codes(ok).is_empty(), "{:?}", codes(ok));
+    let bad = "struct P { x: int\n pub fn me(): Self { return 1; } }\n";
+    assert_eq!(codes(bad), vec!["E0007"]);
+}
+
+#[test]
+fn what_checks_self_and_what_resolves_it_read_one_binding() {
+    // The rule is stated in two places — the E0013 validation walk and the resolution boundary —
+    // and they must agree on WHERE `Self` is bound, or a program checks clean and then resolves to
+    // nothing (or the reverse). Outside any type body there is no binding, so both must refuse.
+    let free = "fn f(): Self { return 1; }\n";
+    assert!(
+        codes(free).contains(&"E0013".to_string()),
+        "a free function has no `Self` to name: {:?}",
+        codes(free)
+    );
+    // A nested `fn` inside a method keeps the method's, because it layers over the enclosing scope
+    // rather than replacing it.
+    let nested = "struct P { x: int\n pub fn me(): P { fn inner(v: Self): Self { return v; }\n                   return inner(self); } }\n";
+    assert!(codes(nested).is_empty(), "{:?}", codes(nested));
+}
+
+#[test]
+fn nothing_may_be_declared_self() {
+    // Each declaration kind, because the rule lives in two passes (the type kinds share `collect`'s
+    // funnel; a trait is refused in `check_trait_decl`) and a kind missed in one of them would make
+    // `Self` mean the declaration at top level and the enclosing type inside one.
+    assert_eq!(codes("struct Self { x: int }\n"), vec!["E0020"]);
+    assert_eq!(codes("class Self { x: int }\n"), vec!["E0020"]);
+    assert_eq!(codes("enum Self { A; }\n"), vec!["E0020"]);
+    assert_eq!(codes("trait Self { fn f(): int }\n"), vec!["E0053"]);
+}
+
 #[test]
 fn assoc_type_projects_per_element() {
     // `Self::Wide` resolves per implementor, from that type's element: an `f32` element widens to

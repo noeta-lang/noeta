@@ -1,0 +1,17 @@
+// A recursive enum names itself in a payload as `Self` — the case where repeating the type's own
+// name is most obviously noise.
+// expect: stdout "3"
+// expect: exit 0
+enum Tree {
+    Leaf(int);
+    Node(Self, Self);
+}
+
+fn total(t: Tree): int {
+    return match t {
+        Tree.Leaf(v) => v,
+        Tree.Node(l, r) => total(l) + total(r),
+    };
+}
+
+echo total(Tree.Node(Tree.Leaf(1), Tree.Leaf(2)));

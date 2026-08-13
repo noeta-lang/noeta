@@ -2967,6 +2967,17 @@ impl BinaryOp {
     }
 }
 
+/// **The spelling for "the type this declaration is"** — legal wherever a type is written inside a
+/// `struct`/`class`/`enum`/`trait` body, and in an `impl … for T` block, where it names that body's
+/// type. It is an ordinary identifier rather than a keyword, and it is refused as a declared type
+/// name, so a [`TypeRef::Named`] carrying it always means this and never a nominal collision.
+///
+/// Shared rather than spelled per crate because four of them decide something by it: the parser
+/// (`Self::Item` splits here), the checker (resolution, and the rule refusing the name), the
+/// lowerer (a written `Self` becomes the declaring type's runtime name), and the trait-conformance
+/// comparison. Four literals would be four chances to disagree about one word.
+pub const SELF_TYPE: &str = "Self";
+
 /// The three `Ordering` variant names a `compare` method returns. The built-in `Ordering` enum is
 /// constructed on the fly by the `.compare()` primitive method and by `Comparable` dispatch; this
 /// is the canonical spelling shared by both backends so their values display and match identically.

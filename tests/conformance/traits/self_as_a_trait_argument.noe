@@ -1,0 +1,26 @@
+// A trait's own arguments are written in the implementing type's scope, so `impl Keyed<Self>`
+// records that type — and a bound naming it (`<T: Keyed<P>>`) is satisfied. Both `impl` spellings
+// record the same thing: the standalone form and the in-body form are one rule, and a bound that
+// matched only one of them would make where you put an impl decide whether your program compiles.
+// expect: stdout "4"
+// expect: stdout "6"
+// expect: exit 0
+trait Keyed<K> {
+    fn key(): K
+}
+
+struct P { x: int }
+impl Keyed<Self> for P {
+    pub fn key(): Self { return self; }
+}
+
+struct Q {
+    x: int
+    impl Keyed<Self> { pub fn key(): Self { return self; } }
+}
+
+fn read_p<T: Keyed<P>>(v: T): int { return v.key().x; }
+fn read_q<T: Keyed<Q>>(v: T): int { return v.key().x; }
+
+echo read_p(P { x: 4 });
+echo read_q(Q { x: 6 });

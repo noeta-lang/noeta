@@ -191,7 +191,7 @@ struct Point { x: int  y: int }        // value type
 
 class Counter {
     pub mut n: int
-    pub fn new(): Counter { return Counter { n: 0 } }   // static function (no self)
+    pub fn new(): Self { return Counter { n: 0 } }      // static function (no self)
     pub fn bump(): void { self.n = self.n + 1 }         // method; fields read through self
 }
 
@@ -224,6 +224,8 @@ enum Direction: string {               // string-backed
 ```
 
 All three kinds share the same body grammar — they can hold methods and `impl Trait { }` blocks.
+
+**`Self` names the type in hand.** Inside any type body it stands for the type it is the body of, so a declaration never repeats its own name — `fn new(): Self` above, a self-referential field (`next: ?Self`), a recursive payload (`Node(Self, Self)`). It is `self`'s type: lowercase is the value, capitalized is what that value is.
 
 → [Structs, Classes & Enums](Structs-Classes-and-Enums).
 

@@ -493,13 +493,12 @@ impl Checker {
             .get(decl.target.as_str())
             .cloned()
             .unwrap_or_default();
-        let saved_params = self.enter_type_params(&type_params);
-        let self_ty = if known {
-            self_type(decl.target.as_str(), &type_params)
-        } else {
-            Type::Unknown
-        };
-        let bindings = vec![("self".to_string(), self_ty)];
+        // `Self` binds to the target for the same reason and under the same condition `self` does:
+        // an orphan target names no type, so binding `Self` to it would turn one misspelling into a
+        // type error at every annotation that mentions it.
+        let self_ty = known.then(|| self_type(decl.target.as_str(), &type_params));
+        let saved_params = self.enter_type_body(self_ty.clone(), &type_params);
+        let bindings = vec![("self".to_string(), self_ty.unwrap_or(Type::Unknown))];
         let saved_type = if known {
             self.coloring.current_type.replace(decl.target.to_string())
         } else {
@@ -778,7 +777,19 @@ impl Checker {
     pub(crate) fn check_trait_decl(&mut self, decl: &noeta_ast::TraitDecl, env: &mut Env) {
         // A user trait may not shadow a built-in trait name — an `impl`/bound naming it would be
         // ambiguous against the closed built-in set.
-        if BuiltinTrait::from_name(decl.name.as_str()).is_some() {
+        if decl.name.as_str() == SELF_TYPE {
+            // The same rule the type declarations get (`Checker::collect`): `Self` is the word for
+            // the enclosing type, and a trait's own signatures are where it is used most.
+            self.error(
+                DiagnosticCode::InvalidTraitDeclaration,
+                decl.name_span,
+                format!("`{SELF_TYPE}` cannot be declared as a trait"),
+            )
+            .help(
+                "`Self` names the implementing type inside a trait's own signatures — pick another \
+                 name for this trait",
+            );
+        } else if BuiltinTrait::from_name(decl.name.as_str()).is_some() {
             self.error(
                 DiagnosticCode::InvalidTraitDeclaration,
                 decl.name_span,
@@ -937,8 +948,13 @@ impl Checker {
         if defaults.is_empty() {
             return;
         }
-        let saved_params = self.enter_type_params(&decl.type_params);
-        let bindings = vec![("self".to_string(), Type::DynTrait(decl.name.to_string()))];
+        // In a default body `Self` is only known to be *some* implementor — which is exactly what
+        // `self` is bound to here — so the two agree by construction, and `fn dup(): Self { return
+        // self }` checks. An implementor's own `Self` is its concrete type, resolved where the two
+        // signatures are compared ([`Checker::assoc_resolved_type`]).
+        let self_ty = Type::DynTrait(decl.name.to_string());
+        let saved_params = self.enter_type_body(Some(self_ty.clone()), &decl.type_params);
+        let bindings = vec![("self".to_string(), self_ty)];
         // These bodies are the trait's OWN contract, the one place `static` is a legal declaration
         // (static-trait-methods arc) — so the general rejection in `check_fn` stands down here.
         let saved_contract = std::mem::replace(&mut self.coloring.in_trait_contract, true);

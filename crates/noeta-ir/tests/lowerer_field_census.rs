@@ -179,6 +179,14 @@ const TABLE: &[Row] = &[
             "let captures = self.synth_step_captures.take();",
         )),
     ),
+    // What `Self` denotes. Scoped around a type's own members and restored on the way out, exactly
+    // as `temps` is scoped around a frame — a property of where the lowering is, not of the
+    // program. A fragment lowering derives it from the declaration it is handed, which is why it
+    // does not belong in `ProgramFacts`.
+    Row(
+        "self_type_name",
+        PerNode(Anchor(LOWER, "let saved = self.self_type_name.replace(")),
+    ),
     // --- environment / config -------------------------------------------------------------------
     // Whether `isolate f(args)` lowers to the real OS-thread spawn. A property of who is running the
     // lowering (only the CLI's VM path sets it), not of the code being lowered.

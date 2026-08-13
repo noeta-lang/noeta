@@ -506,7 +506,7 @@ impl Checker {
         let in_scope: Vec<ParamRef> = self
             .coloring
             .type_params
-            .values()
+            .params()
             .map(|s| s.param.clone())
             .collect();
         let Type::Named(_, args) = ret else { return };

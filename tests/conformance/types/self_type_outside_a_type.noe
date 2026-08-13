@@ -1,0 +1,11 @@
+// Outside any type body `Self` names nothing, so it stays an unknown type. The rule is stated once:
+// what the checker resolves and what it validates read the same binding, so there is no position
+// where `Self` checks clean and then resolves to nothing.
+// expect: error E0013 at 7:12
+// expect: error E0007 at 8:12
+// expect: exit 1
+fn free(): Self {
+    return 1;
+}
+
+echo free();

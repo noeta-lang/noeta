@@ -833,7 +833,7 @@ impl Checker {
                     // unlike the whole target's head, which the caller resolves through a channel.
                     TypeRef::Named { name, args, .. }
                         if args.is_empty()
-                            && self.coloring.type_params.contains_key(name.as_str()) =>
+                            && self.coloring.type_params.binds_param(name.as_str()) =>
                     {
                         Some(name.to_string())
                     }
@@ -841,13 +841,13 @@ impl Checker {
                 }
             }),
             TypeRef::Named { name, args, .. } => {
-                if !args.is_empty() && self.coloring.type_params.contains_key(name.as_str()) {
+                if !args.is_empty() && self.coloring.type_params.binds_param(name.as_str()) {
                     return Some(name.to_string());
                 }
                 args.iter().find_map(|a| match a {
                     TypeRef::Named { name, args, .. }
                         if args.is_empty()
-                            && self.coloring.type_params.contains_key(name.as_str()) =>
+                            && self.coloring.type_params.binds_param(name.as_str()) =>
                     {
                         Some(name.to_string())
                     }
@@ -949,7 +949,7 @@ impl Checker {
     pub(crate) fn reject_type_param_pattern(&mut self, ty: &TypeRef) {
         let param = match ty {
             TypeRef::Named { name, args, .. }
-                if args.is_empty() && self.coloring.type_params.contains_key(name.as_str()) =>
+                if args.is_empty() && self.coloring.type_params.binds_param(name.as_str()) =>
             {
                 name.to_string()
             }

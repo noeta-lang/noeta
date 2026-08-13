@@ -199,16 +199,88 @@ pub(crate) struct ScopedParam {
     pub(crate) bounds: Vec<BoundReq>,
 }
 
-/// The generic type parameters in scope, keyed by the **spelling** that resolves to each.
+/// The **type-level names in scope** at an annotation: the generic type parameters, keyed by the
+/// spelling that resolves to each, and the type `Self` names here.
 ///
-/// A *resolver*, not a membership set — and the distinction is the whole point of this arc. The
-/// old `HashSet<String>` answered "is `T` a parameter here?", a question with no useful answer
-/// once two declarations both spell one `T`; this answers "*which* parameter does `T` name here?",
-/// and an inner declaration's entry simply replaces the outer's, which is what shadowing is. It is
-/// consulted at exactly one boundary — turning a written annotation into a [`Type`]
-/// ([`crate::subst::resolve_params`]) — after which identity travels in the lattice itself and
-/// nothing downstream needs the map at all.
-pub(crate) type ParamScope = HashMap<String, ScopedParam>;
+/// The parameter half is a *resolver*, not a membership set. A `HashSet<String>` could only answer
+/// "is `T` a parameter here?", a question with no useful answer once two declarations both spell
+/// one `T`; this answers "*which* parameter does `T` name here?", and an inner declaration's entry
+/// simply replaces the outer's, which is what shadowing is.
+///
+/// Both halves are consulted at exactly one boundary — turning a written annotation into a [`Type`]
+/// ([`crate::subst::resolve_type_names`]) — after which identity travels in the lattice itself and
+/// nothing downstream needs this at all. They travel *together* because they are the same fact
+/// about a program point ("what may a type annotation here name?") and because a site that passed
+/// one and forgot the other would resolve `T` and silently leave `Self` a nominal type nothing can
+/// satisfy.
+#[derive(Clone, Default)]
+pub(crate) struct TypeScope {
+    params: HashMap<String, ScopedParam>,
+    /// What `Self` means here — `Repo<T>` inside `class Repo<T>`, `dyn Greeter` inside a `trait
+    /// Greeter` default body (there, `Self` is only known to be *some* implementor, which is
+    /// exactly what the receiver is bound to). `None` outside any type body, where `Self` names
+    /// nothing and is reported as an unknown type.
+    self_ty: Option<Type>,
+}
+
+impl TypeScope {
+    /// An empty scope: no parameters, no `Self`. For a genuinely top-level position.
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Nothing to resolve — neither a parameter spelling nor a `Self`.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.params.is_empty() && self.self_ty.is_none()
+    }
+
+    /// Whether `name` is a generic parameter's spelling here.
+    pub(crate) fn binds_param(&self, name: &str) -> bool {
+        self.params.contains_key(name)
+    }
+
+    /// Whether this scope declares no generic parameters (`Self` aside).
+    pub(crate) fn has_no_params(&self) -> bool {
+        self.params.is_empty()
+    }
+
+    /// The parameter `name` resolves to here, if any.
+    pub(crate) fn param(&self, name: &str) -> Option<&ScopedParam> {
+        self.params.get(name)
+    }
+
+    /// Every parameter in scope, in no particular order.
+    pub(crate) fn params(&self) -> impl Iterator<Item = &ScopedParam> {
+        self.params.values()
+    }
+
+    /// The type `Self` names here.
+    pub(crate) fn self_ty(&self) -> Option<&Type> {
+        self.self_ty.as_ref()
+    }
+
+    /// Bind (or rebind) one parameter spelling.
+    pub(crate) fn insert_param(&mut self, name: String, param: ScopedParam) {
+        self.params.insert(name, param);
+    }
+
+    /// The entry for `name`, mutably — used to fill in bounds once every sibling is in scope.
+    pub(crate) fn param_mut(&mut self, name: &str) -> Option<&mut ScopedParam> {
+        self.params.get_mut(name)
+    }
+
+    /// Drop one parameter spelling (a nested declaration's `<…>` going out of view).
+    pub(crate) fn remove_param(&mut self, name: &str) {
+        self.params.remove(name);
+    }
+
+    /// The same scope with `Self` bound to `self_ty`. A nested declaration inherits it by cloning,
+    /// which is what makes `Self` mean the *enclosing type* inside a method's own `<…>`.
+    pub(crate) fn with_self(mut self, self_ty: Option<Type>) -> Self {
+        self.self_ty = self_ty;
+        self
+    }
+}
 
 /// A set of type parameters identified by **declaration**, never by spelling — what erasure and
 /// binding quantify over ("the callee's own parameters", "this class's parameters").

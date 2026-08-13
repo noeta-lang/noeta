@@ -43,7 +43,7 @@
 //! rejected at the call site with a "spell the turbofish" help.
 
 use crate::constructors::FreshConstructors;
-use crate::env::{ParamScope, ParamSet, Subst};
+use crate::env::{ParamSet, Subst, TypeScope};
 use crate::subst::{
     apply_subst, bind_type_params, extend_param_scope, from_ref_q, mentions_param, param_ref,
     param_scope, scope_ids,
@@ -326,7 +326,7 @@ pub(crate) fn compute_forwarding(
     }
     // The reflective-type set rides along: it needs the same walk over a *type's* parameters, and
     // computing it here keeps "a site that consumes a bare parameter" one definition.
-    let empty = ParamScope::new();
+    let empty = TypeScope::new();
     let cx = WalkCx {
         params: &empty,
         map: &map,
@@ -352,7 +352,7 @@ pub(crate) fn compute_forwarding(
 struct Candidate<'a> {
     key: String,
     decl: &'a FnDecl,
-    own: ParamScope,
+    own: TypeScope,
 }
 
 /// Every method the fixpoint walks, as `(owning type name, declaration, forwardable parameters)`.
@@ -362,8 +362,8 @@ struct Candidate<'a> {
 fn method_candidates<'a>(
     program: &'a Program,
     xt: &HashMap<String, String>,
-) -> Vec<(&'a str, &'a FnDecl, ParamScope)> {
-    let mut out: Vec<(&str, &FnDecl, ParamScope)> = Vec::new();
+) -> Vec<(&'a str, &'a FnDecl, TypeScope)> {
+    let mut out: Vec<(&str, &FnDecl, TypeScope)> = Vec::new();
     for stmt in &program.stmts {
         let (name, type_params, methods, impls) = match stmt {
             Stmt::Class(d) => (d.name.as_str(), &d.type_params, &d.methods, &d.impls),
@@ -390,7 +390,7 @@ fn method_candidates<'a>(
                 &m.type_params,
                 xt,
             );
-            if !own.is_empty() {
+            if !own.has_no_params() {
                 out.push((name, m, own));
             }
         }
@@ -483,7 +483,7 @@ fn declared_type_params(program: &Program) -> HashMap<&str, Vec<ParamRef>> {
 struct WalkCx<'a> {
     /// The type parameters the walked body may forward — a SCOPE, so a written `T` resolves to the
     /// parameter it names rather than merely being recognized as "some parameter".
-    params: &'a ParamScope,
+    params: &'a TypeScope,
     map: &'a ForwardingMap,
     decl_params: &'a HashMap<&'a str, Vec<ParamRef>>,
     sigs: &'a HashMap<&'a str, (Vec<Type>, Type)>,
@@ -740,7 +740,7 @@ fn walk_stmt(stmt: &Stmt, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
             // checker rejects it) instead of silently reading the enclosing slot.
             let mut visible = extend_param_scope(cx.params, &decl.type_params, cx.xt);
             for p in &decl.type_params {
-                visible.remove(&p.name);
+                visible.remove_param(&p.name);
             }
             if visible.is_empty() {
                 return;

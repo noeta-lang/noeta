@@ -1,0 +1,17 @@
+// In a trait's DEFAULT body `Self` is only known to be some implementor — the same thing `self` is
+// bound to there — so a default may name it, and the body checks against the trait's own contract
+// rather than once per implementor.
+// expect: stdout "9"
+// expect: exit 0
+trait Echoable {
+    fn me(): Self { return self }
+    fn value(): int
+}
+
+struct V { n: int }
+
+impl Echoable for V {
+    pub fn value(): int { return self.n }
+}
+
+echo V { n: 9 }.me().value();

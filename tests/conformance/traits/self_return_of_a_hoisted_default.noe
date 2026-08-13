@@ -1,0 +1,16 @@
+// A trait default's `Self` return is recorded per implementor, so the chain is typed rather than
+// deferred to a gradual hole: `me()` on a `V` is a `V`, and reaching for a method `V` does not have
+// is caught here instead of at run time.
+// expect: error E0007 at 16:6
+// expect: exit 1
+trait Chain {
+    fn me(): Self { return self }
+    fn n(): int
+}
+
+struct V { k: int }
+impl Chain for V {
+    pub fn n(): int { return self.k; }
+}
+
+echo V { k: 8 }.me().no_such_method();
