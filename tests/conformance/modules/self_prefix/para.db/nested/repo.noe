@@ -1,7 +1,0 @@
-// Only the LEADING segment is the prefix, so everything after it is the author's own spelling —
-// `_self_.query` addresses this file's sibling one directory up.
-use _self_.query.run;
-
-pub fn all(): string {
-    return "[${run()}]";
-}

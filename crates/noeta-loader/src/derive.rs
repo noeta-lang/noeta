@@ -196,11 +196,7 @@ pub enum SegmentFault {
 ///   while `self.hi()` read the module's function, in one expression, silently. That contradicts
 ///   the language's own "one name, one meaning" rule (E0020), which never saw it because a receiver
 ///   is bound by the method rather than by a `use` or a binding.
-/// - **`_self_`** is the [intra-package import prefix](super::SELF_PREFIX): `use _self_.models`
-///   means "a module of the package this file belongs to". Underscore-wrapped so it can never be
-///   confused with the receiver, a user's variable, or a module somebody named — the convention
-///   Perl (`__PACKAGE__`), Elixir (`__MODULE__`) and Scala (`_root_`) use for the same job.
-pub const RESERVED_SEGMENTS: &[&str] = &["self", "_self_"];
+pub const RESERVED_SEGMENTS: &[&str] = &["self"];
 
 impl ModulePath {
     /// The derived path, if one was derived.
@@ -503,8 +499,8 @@ mod tests {
         ));
     }
 
-    /// `self` and `_self_` spell fine and are refused anyway: the language has taken both, so a
-    /// module of either name would be a second meaning for a name that already has one.
+    /// `self` spells fine and is refused anyway: the language has taken it, so a module of that
+    /// name would be a second meaning for a name that already has one.
     #[test]
     fn a_reserved_stem_is_refused_as_reserved() {
         for name in RESERVED_SEGMENTS {

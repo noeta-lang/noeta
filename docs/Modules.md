@@ -40,7 +40,7 @@ The walk stops at three kinds of directory, none of which are your package's sou
 **Module path = the package's import prefix + the file's path inside the package.** The rule in full:
 
 - **The prefix** is how the *importing* program addresses the package:
-  - the package you are running — your own — contributes the `package` half of its `[package] name`, so `local/hello` gives `hello`;
+  - the package you are running — your own — contributes its `[package] root`, or the `package` half of its `[package] name` when it declares none, so `local/hello` gives `hello`;
   - a plain `[dependencies]` entry contributes **the key** you wrote (`codec = { … }` → `codec.…`);
   - a **scope-array** member contributes `{key}.{the package's own root segment}` (`para = [{ package = "para/db" }, …]` → `para.db.…`).
 - **The relative path** is the file's path below the package root: every directory, then the file stem, becomes a segment, `/` becomes `.`, and **case is preserved verbatim** (`Helpers/URI.noe` → `Helpers.URI`).
@@ -50,9 +50,9 @@ The walk stops at three kinds of directory, none of which are your package's sou
 
 | Package | Prefix from | File | Module |
 |---|---|---|---|
-| your own, `local/hello` | `[package] name` | `src/main.noe` | `hello.main` |
-| your own, `local/hello` | `[package] name` | `src/deep/nested.noe` | `hello.deep.nested` |
-| your own, `local/hello` | `[package] name` | `src/hello.noe` | `hello` |
+| your own, `local/hello` | `[package] root` | `src/main.noe` | `hello.main` |
+| your own, `local/hello` | `[package] root` | `src/deep/nested.noe` | `hello.deep.nested` |
+| your own, `local/hello` | `[package] root` | `src/hello.noe` | `hello` |
 | `geometry = { path = "../geometry" }` | the key | `src/vec.noe` | `geometry.vec` |
 | `para = [{ package = "para/db" }]` | key + root segment | `query.noe` | `para.db.query` |
 | `para = [{ package = "para/db" }]` | key + root segment | `db.noe` | `para.db` |
@@ -63,29 +63,19 @@ The walk stops at three kinds of directory, none of which are your package's sou
 
 ### Importing your own package's modules
 
-Inside a package, lead with **`_self_`** — "a module of the package this file belongs to":
+Inside a package, **lead with your `[package] root`** — the segment your own modules derive under:
 
 ```noeta ignore
-// para-db/query.noe — inside the package `para/db`
-use _self_.open          // ✅ resolves standalone AND as a dependency
-use db.open              // ✅ also works — the `package` half of your `[package] name`
+// para-db/query.noe — in a package whose manifest says `root = "db"`
+use db.open              // ✅ resolves standalone AND as a dependency
 use para.db.open         // ❌ only ever resolved when a consumer keyed it `para`
 ```
 
-`_self_` is the spelling to reach for. It says what you mean without naming the package, so renaming the package does not touch a single import, and a reader never has to check the manifest to know what the leading segment refers to. The `package`-half spelling keeps working — `_self_` re-roots to exactly the same thing.
+That one spelling works in both builds because it is what your files derive under when the package is built **on its own** — running your tests, `noeta check .`, an example app — and because a consumer's build rewrites that leading segment to whatever your modules derive under there. Standalone the prefix *is* that segment, so nothing changes; under `para = [{ package = "para/db" }, …]` your `use db.open` becomes `para.db.open`; under `mydb = { package = "para/db" }` it becomes `mydb.open`. You never write the consumer's key, and you never write your own scope.
 
-The underscores are what make it safe rather than decorative: `_self_` cannot be confused with `self` (the method receiver), cannot collide with a binding, and cannot be a module somebody named — a `_self_.noe`, like a `self.noe`, is refused. It is the convention Perl spells `__PACKAGE__`, Elixir `__MODULE__` and Scala `_root_`.
+`root` is declared rather than derived because it is a **naming choice, not a fact about the filesystem** — which is the line derivation draws. A module's *path* is derived and cannot be declared ([E0072](#a-modules-path-cannot-be-declared)); the prefix it derives *under* is your package's name for itself, and nothing on disk knows what that should be.
 
-It works in a qualified reference too, not only after `use`:
-
-```noeta ignore
-use _self_.models
-u = _self_.models.User { name: "Ada" }     // the spelled-out FQN, same identity
-```
-
-A file that is **not in a package** — a lone script with no `noeta.toml` — derives no prefix, so `_self_` has nothing to stand for and says so (E0019) rather than reporting a missing module.
-
-That one spelling works in both builds because it is what the compiler derives for your files when the package is built **on its own** — running your tests, `noeta check .`, an example app — and because a consumer's build rewrites that leading segment to whatever prefix your modules derive under there. Standalone the prefix *is* that segment, so nothing changes; under `para = [{ package = "para/db" }, …]` your `use db.open` becomes `para.db.open`; under `mydb = { package = "para/db" }` it becomes `mydb.open`. You never write the consumer's key, and you never write your own scope.
+Declaring it separately from `[package] name` is what lets each be what it is. The name is a **registry coordinate** — indexed, claimed, resolved from a URL — so it may look like one: `noeta-lang/my-toolkit`. The root is a **token spelled in source**, so it must lex as one identifier. Omit `root` and the `package` half is used instead, which then has to lex.
 
 The rewrite touches the **leading segment only**, so everything after it is yours to spell: `use db.query.run` from a file three directories deep still names the module `query.noe` derives.
 
@@ -105,7 +95,7 @@ Two segments are *not* rewritten, which is what you want in both cases: a `use s
 
 The hint is advice; nothing is applied silently. Mapping `my-utils` → `my_utils` behind your back would give one module two spellings, which is precisely what deriving the path exists to remove. A keyword is refused for the same reason (`class.noe` — no `use` could name it), as is a stem starting with a digit (`2fa.noe` → `_2fa`).
 
-**Two names are reserved**, and they are refused with the same code for a different reason — they spell perfectly well, the language has simply already taken them. **`self`** is the method receiver, and a module of that name would collide with it: importing `pkg.self` binds the handle `self`, so inside a method `self.n` would read the receiver's field while `self.hi()` read the module's function — two meanings for one name, which the [one name, one meaning](#qualified-references) rule cannot catch, because a receiver is bound by the method rather than by a `use`. **`_self_`** is the [intra-package prefix](#importing-your-own-packages-modules) above.
+**One name is reserved**, and it is refused with the same code for a different reason — it spells perfectly well, the language has simply already taken it. **`self`** is the method receiver, and a module of that name would collide with it: importing `pkg.self` binds the handle `self`, so inside a method `self.n` would read the receiver's field while `self.hi()` read the module's function — two meanings for one name, which the [one name, one meaning](#qualified-references) rule cannot catch, because a receiver is bound by the method rather than by a `use`. 
 
 ### One path, one module
 

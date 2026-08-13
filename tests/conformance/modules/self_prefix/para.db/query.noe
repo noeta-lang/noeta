@@ -1,6 +1,0 @@
-// The intra-package import, written without naming the package at all.
-use _self_.open;
-
-pub fn run(): string {
-    return "${open()}:rows";
-}

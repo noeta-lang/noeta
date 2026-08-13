@@ -1,0 +1,6 @@
+// Leads with this package's declared `root`, never with its identity or the consumer's key.
+use toolkit.text.shout;
+
+pub fn greet(name: string): string {
+    return "${shout("hi")} ${name}";
+}

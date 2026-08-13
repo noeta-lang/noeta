@@ -234,7 +234,6 @@ pub(crate) fn case_root(entry: &Path) -> Option<noeta_loader::PackageRoot> {
     let name = noeta_pm::manifest::Manifest::parse(&text)
         .ok()?
         .package()?
-        .name
         .root()
         .to_string();
     Some(noeta_loader::PackageRoot::new(dir, vec![name]))
@@ -272,6 +271,17 @@ pub(crate) fn read_case_workspace(entry: &Path) -> std::io::Result<noeta_loader:
 /// **Empty for every existing case**, and callers must keep the deps-free path when it is: linking
 /// *with* a resolved dependency graph is deliberately stricter about foreign import roots than
 /// sibling-only linking, so routing a package-less case through it would change its meaning.
+/// The root segment a dependency fixture's own `noeta.toml` declares, if it has one.
+///
+/// `None` covers both "no manifest" (the common fixture shape, where the directory name is the
+/// whole story) and "a manifest that does not parse" — a broken one is the case's own business to
+/// fail on, not something to guess a root from.
+fn dep_declared_root(package_dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(package_dir.join(noeta_loader::MANIFEST_NAME)).ok()?;
+    let manifest = noeta_pm::manifest::Manifest::parse(&text).ok()?;
+    Some(manifest.package()?.root().to_string())
+}
+
 fn dep_packages(dir: &Path) -> Vec<noeta_loader::DepPackage> {
     // A case that is *itself* a package ([`case_root`]) owns its subdirectories — they are its own
     // module tree, walked recursively under its prefix. Treating them as separate packages too would
@@ -294,9 +304,14 @@ fn dep_packages(dir: &Path) -> Vec<noeta_loader::DepPackage> {
             // A case's package subdirectory IS a package root: walked recursively, every module
             // deriving its path under the prefix the directory name spells.
             let prefix: Vec<String> = name.split('.').map(str::to_string).collect();
-            // The package's own root segment is the LAST prefix segment — the package half of the
-            // identity, which is what a single-segment name gives too.
-            let root = prefix.last().cloned().unwrap_or_default();
+            // The package's own root segment — what its intra-package `use`s lead with, and what
+            // `reroot_path` rewrites to the prefix above. Its **own manifest** decides that when it
+            // has one, exactly as a real dependency's does; a fixture without a manifest keeps the
+            // directory-derived answer (the last prefix segment, which a single-segment name gives
+            // too). Without reading it, a fixture could declare `root` and the harness would ignore
+            // it — the case would test the directory name and quietly claim to test the manifest.
+            let root = dep_declared_root(&package_dir)
+                .unwrap_or_else(|| prefix.last().cloned().unwrap_or_default());
             let modules = noeta_loader::read_package_modules(&noeta_loader::PackageRoot::new(
                 &package_dir,
                 prefix.clone(),

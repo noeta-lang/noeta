@@ -1,0 +1,15 @@
+// A **dependency** declares its own `[package] root`, and its intra-package imports lead with that
+// rather than with its identity.
+//
+// The subdirectory `kit/` is a package keyed `kit` here. Its manifest names it
+// `noeta-lang/my-toolkit` — a registry coordinate whose halves no `use` could spell — and declares
+// `root = "toolkit"`. So `toolkit.noe` writes `use toolkit.text`, which resolves when that package
+// is built standalone AND re-roots to `kit` in this build.
+//
+// This is the pairing that makes a hyphenated identity workable: the coordinate stays a coordinate,
+// and every import on both sides of the dependency stays a legal identifier.
+// expect: stdout "HI ada"
+// expect: exit 0
+use kit.toolkit.greet;
+
+echo greet("ada")

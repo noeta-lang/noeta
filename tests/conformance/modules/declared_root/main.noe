@@ -1,0 +1,12 @@
+// `[package] root` is the segment a package's modules derive under, declared separately from its
+// `[package] name`. This case's identity is `noeta-lang/my-toolkit` — a registry coordinate whose
+// halves no `use` could spell — and `root = "toolkit"` says what its files derive under instead.
+//
+// So `text.noe` is the module `toolkit.text`, imported by that name. Separating the two is what
+// lets an identity look like the forge name it already is while every import stays a legal
+// identifier; without the `root`, this manifest is refused for exactly that reason.
+// expect: stdout "HI ada"
+// expect: exit 0
+use toolkit.text.shout;
+
+echo "${shout("hi")} ada"

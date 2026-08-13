@@ -855,11 +855,14 @@ impl Walker<'_> {
         }
         let pkg = package_of(&child_manifest, key, &dir)?;
         check_toolchain_req(pkg, &format!("dependency `{key}` (`{identity}`)"))?;
+        // The segment this dependency's own modules derive under — its declared `[package] root`,
+        // else its identity's package half. What `reroot_path` rewrites to the consumer's prefix,
+        // so it must be the same answer the package itself derives under when built standalone.
         let root_segment = match root {
-            ScopeRoot::Package => pkg.name.root().to_string(),
+            ScopeRoot::Package => pkg.root().to_string(),
             ScopeRoot::Scope => pkg.name.company.clone(),
         };
-        let package_segment = pkg.name.root().to_string();
+        let package_segment = pkg.root().to_string();
         let scoped = matches!(root, ScopeRoot::Scope);
 
         if let Some(existing) = self.instances.get(&identity) {

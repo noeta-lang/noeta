@@ -208,27 +208,6 @@ fn q_opt_typeref(ty: &mut Option<TypeRef>, visit: &mut NameVisitor) {
 /// Qualify one statement in place: rewrite a declaration's own name and every type/value reference
 /// it and its nested expressions/bodies carry, through `map`. A no-op when the map is empty (a
 /// non-namespaced file stays byte-identical).
-/// Replace a **leading path segment** in every qualifiable name this statement spells.
-///
-/// One caller: resolving [`SELF_PREFIX`](crate::SELF_PREFIX) to the package's own root segment,
-/// before qualification runs. `use _self_.models` is handled by the loader's own path rewrite, but
-/// a *qualified reference* — `_self_.models.User { … }` in a struct literal, an annotation, a
-/// pattern head — is a [`Name`], and names are this walk's business.
-///
-/// It rides [`walk_stmt`] rather than repeating the traversal because that walk is the one
-/// `ast_walk_coverage` gates: a `Name` position added to the AST and forgotten here fails that gate
-/// rather than silently going unrewritten. A prefix that resolved in `use` and not in an FQN would
-/// be exactly the kind of "works in one position, not the other" seam this language keeps removing.
-pub fn rewrite_leading_segment(stmt: &mut Stmt, from: &str, to: &str) {
-    let dotted_from = format!("{from}.");
-    walk_stmt(stmt, &mut |name: &mut Name, _kind, _span| {
-        if let Some(rest) = name.as_str().strip_prefix(dotted_from.as_str()) {
-            name.qualify_to(format!("{to}.{rest}"));
-        }
-        false
-    });
-}
-
 pub fn qualify_stmt(stmt: &mut Stmt, map: &UnitMap) {
     // Nothing to rewrite and no caller interested in misses: skip the walk, keeping the
     // non-namespaced-file byte-identity fast path.

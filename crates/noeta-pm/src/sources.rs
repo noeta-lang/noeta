@@ -43,7 +43,7 @@ pub fn package_root_of(dir: &Path) -> Option<PackageRoot> {
     let manifest_path = manifest::find(dir)?;
     let text = std::fs::read_to_string(&manifest_path).ok()?;
     let parsed = manifest::Manifest::parse(&text).ok()?;
-    let name = parsed.package()?.name.root().to_string();
+    let name = parsed.package()?.root().to_string();
     // `find` returns the manifest file; the package is the directory holding it. An empty parent
     // (the manifest is in the current directory, reached from a bare relative entry) stays empty:
     // the walk scans `.` but keeps its paths bare, so module names stay byte-equal to how the

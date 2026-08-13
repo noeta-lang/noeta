@@ -403,6 +403,20 @@ impl RequireProvenance {
 pub struct PackageMeta {
     /// The global identity `company/package` — what the registry indexes and git coords map to.
     pub name: PackageName,
+    /// The **root segment this package's modules derive under** — the leading segment of every
+    /// module path, and therefore of every intra-package `use`. `None` falls back to the `package`
+    /// half of [`name`](Self::name); [`root`](Self::root) is the one place that decision is made.
+    ///
+    /// Declared rather than derived because it is a **naming choice, not a fact about the
+    /// filesystem** — which is the line the derivation rules draw. A module's *path* is derived and
+    /// cannot be declared (E0072); the prefix it derives *under* is the package's own name for
+    /// itself, and nothing on disk knows what that should be.
+    ///
+    /// Separating it from the identity is what makes each free to be what it is. The identity is a
+    /// registry coordinate — indexed, claimed, resolved from a URL. The root is a token spelled in
+    /// source, so it must lex as one identifier. Tying them made every package pay the source
+    /// constraint on its registry name, and made every source file spell the registry name.
+    pub root: Option<String>,
     pub version: semver::Version,
     /// The pinned language [`Edition`] (follow-on arc F1). `None` when the package omits `edition`,
     /// which the toolchain treats as [`Edition::DEFAULT`]; the value is validated at parse time
@@ -461,6 +475,16 @@ pub struct PackageMeta {
 }
 
 impl PackageMeta {
+    /// **The segment this package's modules derive under** — its declared
+    /// [`root`](Self::root), else the `package` half of its identity.
+    ///
+    /// The one place the fallback is applied, so no surface can disagree about which segment a
+    /// package's paths lead with — and so a package that declares nothing behaves exactly as it
+    /// did when the identity was the only answer.
+    pub fn root(&self) -> &str {
+        self.root.as_deref().unwrap_or_else(|| self.name.root())
+    }
+
     /// The **effective** language edition this package compiles under — its pinned [`Edition`], or
     /// [`Edition::DEFAULT`] when it declared none. The one place the rest of the toolchain reads an
     /// edition, so the default is applied consistently.
@@ -479,9 +503,18 @@ pub struct PackageName {
 }
 
 impl PackageName {
-    /// Parse `company/package`: exactly one `/`, each side a non-empty identifier
-    /// (`[A-Za-z_][A-Za-z0-9_]*`). The `package` half is the package's **root namespace segment** —
-    /// what a consumer's dep-key re-roots at the package boundary (see phase-2 plan).
+    /// Parse `company/package`: exactly one `/`, each side a non-empty **registry name**
+    /// ([`is_registry_name`]).
+    ///
+    /// A registry name is what a forge, a URL path and an index key accept — alphanumerics, `_`,
+    /// and interior `-`. It is deliberately looser than an identifier, because an identity is a
+    /// *coordinate*, not a token anybody spells in source: `noeta-lang/aether` is a GitHub org and
+    /// a package, and neither half of it is ever lexed.
+    ///
+    /// What a package's modules derive under is [`PackageMeta::root`], declared separately. When a
+    /// package declares none, the `package` half is the fallback and must therefore lex as one
+    /// identifier — [`parse_package`] enforces that pairing, so a hyphenated identity is legal
+    /// exactly when it says what to derive under instead.
     pub fn parse(s: &str) -> Result<PackageName, PmError> {
         let (company, package) = s.split_once('/').ok_or_else(|| {
             PmError::Manifest(format!(
@@ -493,10 +526,10 @@ impl PackageName {
                 "package name `{s}` must have exactly one `/` (found more)"
             )));
         }
-        if !is_identifier(company) || !is_identifier(package) {
+        if !is_registry_name(company) || !is_registry_name(package) {
             return Err(PmError::Manifest(format!(
-                "package name `{s}`: `company` and `package` must each be identifiers \
-                 (letters, digits, `_`; not starting with a digit)"
+                "package name `{s}`: `company` and `package` must each be registry names \
+                 (letters, digits, `_`, and `-` between them)"
             )));
         }
         Ok(PackageName {
@@ -1499,6 +1532,32 @@ fn parse_package(table: &toml::Table) -> Result<Option<PackageMeta>, String> {
             })?)
         }
     };
+    let root = match pkg.get("root") {
+        None => None,
+        Some(v) => {
+            let segment = v
+                .as_str()
+                .ok_or("`package.root` must be a string (the segment your modules derive under)")?;
+            if !is_identifier(segment) {
+                return Err(format!(
+                    "`package.root` `{segment}` must be an identifier (letters, digits, `_`; not \
+                     starting with a digit) — it is the leading segment of every module path this \
+                     package derives, so it is spelled out in every `use`"
+                ));
+            }
+            Some(segment.to_string())
+        }
+    };
+    // An identity may be a registry name (`noeta-lang/aether`); the segment modules derive under
+    // must lex. When `root` is absent the `package` half is that segment, so the two rules meet
+    // here: a hyphenated identity is legal exactly when it says what to derive under instead.
+    if root.is_none() && !is_identifier(&name.package) {
+        return Err(format!(
+            "package `{name}` needs a `root`: without one its modules derive under `{}`, which \
+             is not an identifier and so cannot be spelled in a `use`",
+            name.package
+        ));
+    }
     let native = match pkg.get("native") {
         None => None,
         Some(v) => {
@@ -1552,6 +1611,7 @@ fn parse_package(table: &toml::Table) -> Result<Option<PackageMeta>, String> {
     };
     Ok(Some(PackageMeta {
         name,
+        root,
         version,
         edition,
         toolchain,
@@ -2370,6 +2430,23 @@ fn parse_declared_package(key: &str, table: &toml::Table) -> Result<Option<Packa
 
 /// Whether `s` is a Noeta identifier (`[A-Za-z_][A-Za-z0-9_]*`) — the shape a package-name segment
 /// and a dependency import-root key must both have.
+/// Whether `s` is a **registry name** — what a forge, a URL path segment and an index key accept:
+/// alphanumerics and `_`, plus `-` anywhere except the first or last character.
+///
+/// A strict superset of [`is_identifier`], so every name that was ever legal still is. It is looser
+/// on purpose: an identity is a coordinate rather than a token in source, and the two namespaces
+/// barely overlap otherwise — a forge takes `noeta-lang` and refuses `my_company`, while an
+/// identifier takes `my_company` and refuses `noeta-lang`, leaving only the purely alphanumeric
+/// names usable as both.
+fn is_registry_name(s: &str) -> bool {
+    let mut chars = s.chars();
+    let (Some(first), Some(last)) = (chars.next(), s.chars().next_back()) else {
+        return false;
+    };
+    let edge = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    edge(first) && edge(last) && s.chars().all(|c| edge(c) || c == '-')
+}
+
 fn is_identifier(s: &str) -> bool {
     let mut chars = s.chars();
     match chars.next() {
@@ -3073,7 +3150,44 @@ mod tests {
     fn package_name_requires_company_slash_package() {
         assert!(Manifest::parse("[package]\nname = \"widgets\"\nversion = \"1.0.0\"\n").is_err());
         assert!(Manifest::parse("[package]\nname = \"a/b/c\"\nversion = \"1.0.0\"\n").is_err());
-        assert!(Manifest::parse("[package]\nname = \"1bad/x\"\nversion = \"1.0.0\"\n").is_err());
+        // A registry name is a coordinate, not a token in source: a forge accepts a leading digit
+        // and interior hyphens, so both halves do too.
+        assert!(Manifest::parse("[package]\nname = \"3m/tape\"\nversion = \"1.0.0\"\n").is_ok());
+        // …but not a leading or trailing hyphen, which no forge accepts either.
+        assert!(Manifest::parse("[package]\nname = \"-acme/x\"\nversion = \"1.0.0\"\n").is_err());
+        assert!(Manifest::parse("[package]\nname = \"acme/x-\"\nversion = \"1.0.0\"\n").is_err());
+    }
+
+    /// The identity may be a registry name; the segment modules derive under must lex. When `root`
+    /// is absent the `package` half is that segment, so the two rules meet: a hyphenated identity
+    /// is legal exactly when it declares what to derive under instead.
+    #[test]
+    fn a_hyphenated_identity_needs_a_root() {
+        let without = "[package]\nname = \"noeta-lang/my-toolkit\"\nversion = \"1.0.0\"\n";
+        let err = Manifest::parse(without).expect_err("no root, and `my-toolkit` cannot be one");
+        assert!(format!("{err}").contains("needs a `root`"), "{err}");
+
+        let with = "[package]\nname = \"noeta-lang/my-toolkit\"\nroot = \"toolkit\"\n\
+                    version = \"1.0.0\"\n";
+        let m = Manifest::parse(with).expect("a declared root settles it");
+        assert_eq!(m.package().expect("package").root(), "toolkit");
+    }
+
+    /// `root` is spelled in every `use` of the package's own modules, so it must lex as one
+    /// identifier — the constraint the identity is now free of.
+    #[test]
+    fn a_root_must_be_an_identifier() {
+        let src = "[package]\nname = \"acme/x\"\nroot = \"my-app\"\nversion = \"1.0.0\"\n";
+        assert!(Manifest::parse(src).is_err());
+    }
+
+    /// A package that declares no `root` derives under its identity's package half, exactly as
+    /// before the key existed.
+    #[test]
+    fn root_falls_back_to_the_package_half() {
+        let m = Manifest::parse("[package]\nname = \"local/shop\"\nversion = \"1.0.0\"\n")
+            .expect("valid");
+        assert_eq!(m.package().expect("package").root(), "shop");
     }
 
     #[test]

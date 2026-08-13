@@ -1,9 +1,16 @@
-# The package manifest. `name` is `company/package`: the `company` half is your registry
-# scope (change `local` before publishing); the `package` half is this package's own root
-# segment — the module paths its files derive, and the key consumers conventionally
-# import it under.
+# The package manifest. `name` is the package's **identity** — `company/package`, what a registry
+# indexes and a git coordinate resolves to. The `company` half is your scope (change `local` before
+# publishing). An identity is a coordinate rather than something you spell in source, so it may look
+# like one: `noeta-lang/my-toolkit` is a fine name.
+#
+# `root` is the segment your own modules derive under, and it IS spelled in source — `src/models.noe`
+# becomes the module `app.models`, imported as `use app.models`. Keeping it separate from the identity
+# is what lets each be what it is: rename the package and no import changes; give the package a
+# hyphenated name and your imports stay legal. Omit `root` and the `package` half is used instead,
+# which then has to lex as one identifier.
 [package]
 name = "@PACKAGE_NAME@"
+root = "app"
 version = "0.1.0"
 
 # Dependencies live here — add one with `noeta add` (see `noeta add --help`).

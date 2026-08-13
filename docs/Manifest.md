@@ -18,7 +18,8 @@ A manifest with no `[package]` at all is a **bare script** — valid to build an
 
 | Key | Required | Value | Notes |
 |-----|----------|-------|-------|
-| `name` | **yes** | `"company/package"` | Two identifiers joined by a single `/`. |
+| `name` | **yes** | `"company/package"` | Two registry names joined by a single `/`. |
+| `root` | no | `"app"` | The segment this package's modules derive under. Defaults to the `package` half. |
 | `version` | **yes** | SemVer string | A concrete version like `"1.2.0"`, not a range. |
 | `edition` | no | `"2026"` | The language edition. Defaults to the current edition when omitted. |
 | `toolchain` | no | SemVer requirement | The minimum `noeta` this package works with, e.g. `">=0.2"`. |
@@ -38,7 +39,11 @@ keywords = ["image", "simd"]                 # optional — up to 5 discovery ta
 description = "Fast image effects for Noeta" # optional — one-line search blurb
 ```
 
-**`name`** is a global identity `company/package`. Each half is an identifier — a letter or `_`, then letters, digits, or `_` (no leading digit, no hyphens). The `package` half is the *import root* a consumer re-binds the dependency under; see `[dependencies]` below.
+**`name`** is a global identity `company/package` — what a registry indexes and a git coordinate resolves to. Each half is a **registry name**: letters, digits and `_`, with `-` allowed between them. It is a coordinate rather than something spelled in source, so it may look like one — `noeta-lang/my-toolkit` is a legal identity, and the `company` half is the scope a forge already knows you by.
+
+**`root`** is the segment this package's own modules derive under, and unlike the identity it *is* spelled in source: with `root = "app"`, `src/models.noe` is the module `app.models` and the package's own files import it as `use app.models`. It must therefore lex as one identifier.
+
+Keeping the two apart is what lets each be what it is — rename the package and no import changes; give the package a hyphenated name and its imports stay legal. **Omit `root` and the `package` half is used instead**, which then has to lex as an identifier; a hyphenated identity without a `root` is a manifest error saying exactly that. See [importing your own package's modules](Modules#importing-your-own-packages-modules).
 
 **`toolchain`** declares the minimum `noeta` version the package works with, as a SemVer requirement the *running binary's* version must satisfy (`toolchain = ">=0.2"`). It is enforced at resolve time — for your own package and for every dependency — so a consumer on an older toolchain gets "requires noeta >=0.2 … run `noeta upgrade`" instead of a compile error deep inside a native build. Omit it and the package makes no claim. It is a courtesy floor, not the compatibility contract itself (that is the extension ABI): declare the oldest toolchain you actually test against, typically the release current when you publish.
 
@@ -88,7 +93,7 @@ Optional keys never carry their weight unless something reads them, and this one
 
 **The key is the prefix its modules derive under.** A dependency's module paths are not declared by the dependency — they are derived from where its files sit, under the key *you* wrote (see [Modules](Modules#where-a-modules-path-comes-from)). So `codec = { … }` puts a `parse.noe` at `codec.parse`, and renaming the key renames every import path, with nothing inside the package able to override it.
 
-**A dependency's own internal imports are rewritten to match.** A package's files import each other by the `package` half of its identity (`use codec.parse` inside `acme/codec`), which is what they derive under when the package is built on its own; a consumer's build rewrites that leading segment to whatever prefix the package derives under here. So the key is free to be anything, and the package's author never writes it. If you are *writing* a package, see [importing your own package's modules](Modules#importing-your-own-packages-modules).
+**A dependency's own internal imports are rewritten to match.** A package's files import each other by its `[package] root` (`use codec.parse` inside a package whose root is `codec`), which is what they derive under when the package is built on its own; a consumer's build rewrites that leading segment to whatever prefix the package derives under here. So the key is free to be anything, and the package's author never writes it. If you are *writing* a package, see [importing your own package's modules](Modules#importing-your-own-packages-modules).
 
 **Scope dependencies.** An array value binds several packages that share one `company` scope under a single import root:
 

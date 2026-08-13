@@ -1,8 +1,0 @@
-// `_self_` means "this package", so a lone script — reached without a `noeta.toml`, deriving no
-// package prefix — has nothing for it to stand for. Reported as that, rather than as the "no module
-// `_self_`" it would otherwise cascade into, which describes the symptom and not the cause.
-// expect: error E0019 at 6:1
-// expect: exit 1
-use _self_.models
-
-echo 1
