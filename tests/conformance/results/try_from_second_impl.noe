@@ -1,9 +1,9 @@
-// A type carries at most ONE `From` conversion: impl-block methods flatten into the type's
-// method table by name (no overloading), so a second `From` impl — whatever its source — would
-// make both the `from` dispatch and the `?` conversion path ambiguous. The textually-later impl
-// is a coherence conflict (E0027), keeping "exactly one declared conversion path" true by
-// construction.
-// expect: error E0027 at 18:10
+// A type carries at most one conversion FROM EACH SOURCE. `impl From<A>` twice on one type declares
+// two paths from one source into one target, which is exactly the ambiguity a `?` conversion must
+// never see, so the textually-later one is a coherence conflict (E0027). Coherence keys `From` on
+// the source rather than on the trait name, so the collision is reported for the repeated source
+// only — `impl From<B>` beside them is a different conversion and is accepted.
+// expect: error E0027 at 22:10
 // expect: exit 1
 struct A { n: int }
 struct B { s: string }
@@ -17,6 +17,10 @@ struct C {
 
     impl From<B> {
         pub fn from(e: B): C { return C { m: "b${e.s}" } }
+    }
+
+    impl From<A> {
+        pub fn from(e: A): C { return C { m: "again${e.n}" } }
     }
 }
 

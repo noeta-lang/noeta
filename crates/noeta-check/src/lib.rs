@@ -1127,14 +1127,29 @@ struct Symbols {
     /// derivation over `T`'s `@packed` element into `trait_assoc[(T, trait)]` so `Self::Name` resolves.
     /// Empty for a `.noe` trait or a native trait with no associated types (ExtBundle→ExtTrait fold-in).
     native_derived_assoc: HashMap<String, Vec<(String, noeta_ext_abi::AssocDerivation)>>,
-    /// Declared `From` conversions (error-ergonomics): target type name → the source types its
-    /// in-body `impl From<Source>` blocks declare, resolved at collection so a `?` site can consult
-    /// them regardless of statement order. Coherence allows at most one `From` impl per type (the
-    /// `from` method flattens into the method table by name; no overloading), so a well-formed
-    /// program has at most one source here and a `(source → target)` lookup is unambiguous by
-    /// construction (a duplicate is E0027 and records both — harmlessly, since the program is
-    /// rejected).
-    from_impls: HashMap<String, Vec<Type>>,
+    /// Declared `From` conversions (error-ergonomics): target type name → one entry per in-body
+    /// `impl From<Source>` block, resolved at collection so a `?` site can consult them regardless
+    /// of statement order.
+    ///
+    /// A type may declare **one conversion per distinct source**; coherence keys `From` on the
+    /// source it names rather than on the trait name, so a repeated source is E0027 and the sources
+    /// recorded here are distinct in a well-formed program. A `(source → target)` lookup is
+    /// therefore unambiguous by construction, and it yields the method-table key
+    /// ([`noeta_ast::conversion::from_conversion_keys`]) the call site must dispatch through.
+    from_impls: HashMap<String, Vec<FromConversion>>,
+    /// The **method-table key** each `impl From<Source>` block's `from` occupies, keyed by that
+    /// method's name span ([`noeta_ast::conversion::from_conversion_keys`]). Written by
+    /// [`Checker::record_from_impls`] before the owning type's methods are walked, and read by the
+    /// one funnel every method registration passes through
+    /// ([`Checker::collect_method_sig_classified`]) — so a conversion is registered under the key
+    /// its call sites dispatch through, whether the walk reaches it through the type's flattened
+    /// `methods` or through the `impl` block itself.
+    ///
+    /// Span-keyed rather than `(type, method)`-keyed because that pair is exactly what is ambiguous
+    /// here: two conversions on one type share the name the parser flattened them under, and the
+    /// declaration span is what tells them apart. Empty for every type declaring fewer than two
+    /// conversions — those keep the plain `from`.
+    from_method_keys: HashMap<Span, String>,
     /// The subset of [`Checker::trait_impls`] that came from `@derive(...)` (not a hand-written
     /// `impl`). A **generic** type's derive is conditional on its instantiated fields
     /// (derive-soundness S4); a hand-written impl is unconditional. Keyed like `trait_impls`.
@@ -1172,8 +1187,12 @@ struct Symbols {
     /// built-in trait gets.
     native_traits: HashSet<String>,
     /// Standalone `impl Trait for T {}` declarations, grouped by target type name, as
-    /// `(trait_name, trait_span)` occurrences. Collected in pass 1 so each type's coherence check
+    /// `(coherence key, trait_span)` occurrences. Collected in pass 1 so each type's coherence check
     /// (`check_coherence`) counts standalone impls alongside its `@derive`s and in-body `impl`s.
+    ///
+    /// The key is the trait's name for every trait but `From`, which is keyed on the source it
+    /// converts (`crate::traits::coherence_key`) — so the two spellings of one implementation
+    /// collide here on the same terms an in-body block does.
     standalone_impls: HashMap<String, Vec<(String, Span)>>,
     /// Method-bundle bindings (kernel-methods K1): target type name → the native bundles it
     /// explicitly bound via `impl <module>.<Bundle> for T {}`, each with the module's

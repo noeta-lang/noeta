@@ -170,6 +170,20 @@ pub(crate) struct FnSig {
     pub(crate) generic: Option<GenericInfo>,
 }
 
+/// One declared `From` conversion into a target type — the resolved source it converts, and the
+/// **method-table key** that conversion's body occupies on the target
+/// ([`noeta_ast::conversion::from_conversion_keys`]: the plain `from` when the target declares a single
+/// conversion, `from<Source>` when it declares several).
+///
+/// The two travel together because every consumer needs both halves and neither can be derived from
+/// the other at the point of use: the source is what a `?` site or an argument type is matched
+/// against, and the key is what the call must then dispatch through.
+#[derive(Clone)]
+pub(crate) struct FromConversion {
+    pub(crate) source: Type,
+    pub(crate) method: String,
+}
+
 /// What a generic free function needs at its call sites: the type parameters with their bounds, and
 /// the **un-erased** parameter/return types (with `Named("T")` preserved) so the checker can bind
 /// each `T` from the argument types, check arguments against the substituted parameters, enforce

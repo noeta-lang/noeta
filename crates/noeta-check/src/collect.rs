@@ -190,6 +190,20 @@ impl Checker {
         self.collect_method_sig_classified(type_name, m, type_params, None);
     }
 
+    /// The **method-table key** a declaration occupies on its type: its declared name, except for
+    /// one of several `From` conversions on a single type ([`Symbols::from_method_keys`]).
+    ///
+    /// Both walks that reach a conversion resolve it here — the type's flattened `methods` and the
+    /// `impl` block itself hold the *same* `FnDecl`, so the span they share is what makes the two
+    /// register one entry rather than two.
+    fn method_key(&self, m: &FnDecl) -> String {
+        self.symbols
+            .from_method_keys
+            .get(&m.name_span)
+            .cloned()
+            .unwrap_or_else(|| m.name.to_string())
+    }
+
     /// Record a derived receiver discipline under **both** keys the two consumers ask by: the
     /// `(type, method)` name the checker resolves calls with, and the declaration's name span the
     /// IDE anchors its inlay hint to (see [`Symbols::method_receiver_spans`]). One writer, so the
@@ -209,11 +223,11 @@ impl Checker {
     /// Note that `trait_name`'s interface supplied `type_name.m` — the worklist entry
     /// [`Self::narrow_declared_static`] replays. Recorded beside every [`Self::record_receiver`]
     /// call that classifies a trait-supplied method, and nowhere else.
-    fn note_trait_supplied(&mut self, type_name: &str, m: &FnDecl, trait_name: &str) {
+    fn note_trait_supplied(&mut self, type_name: &str, key: &str, m: &FnDecl, trait_name: &str) {
         self.symbols
             .trait_supplied_methods
             .push(TraitSuppliedMethod {
-                key: (type_name.to_string(), m.name.to_string()),
+                key: (type_name.to_string(), key.to_string()),
                 name_span: m.name_span,
                 trait_name: trait_name.to_string(),
             });
@@ -253,8 +267,14 @@ impl Checker {
         } else {
             Receiver::inherent(uses_self)
         };
+        // The key this method occupies in the type's table. It is the declared name for everything
+        // except one of **several** `From` conversions on one type, which the parser flattened
+        // under a shared `from` and which [`Symbols::from_method_keys`] tells apart by span. Read
+        // once, here, so every index below — visibility, receiver discipline, the signature itself
+        // — is written under the same key the call site resolves.
+        let key = self.method_key(m);
         if let Some(trait_name) = trait_provided {
-            self.note_trait_supplied(type_name, m, trait_name);
+            self.note_trait_supplied(type_name, &key, m, trait_name);
         }
         // Method visibility, recorded at the ONE funnel every kind's methods pass through
         // (struct/class/enum inherent bodies, in-body `impl` blocks, standalone `impl`s) — so the
@@ -266,16 +286,16 @@ impl Checker {
                 .private_methods
                 .entry(type_name.to_string())
                 .or_default()
-                .insert(m.name.to_string(), Some(m.name_span));
+                .insert(key.clone(), Some(m.name_span));
         } else {
             // A later registration WINS over an earlier one for the same key (an `impl` method
             // over an inherent of the same name), so a public one must clear a private entry
             // rather than leave it standing.
             if let Some(set) = self.symbols.private_methods.get_mut(type_name) {
-                set.remove(m.name.as_str());
+                set.remove(key.as_str());
             }
         }
-        self.record_receiver((type_name.to_string(), m.name.to_string()), m, receiver);
+        self.record_receiver((type_name.to_string(), key.clone()), m, receiver);
         let xt = &self.imports.extern_types;
         // The type's parameters, then the method's own LAYERED OVER them: a method `<T>` inside a
         // class `<T>` shadows, so an annotation in this signature resolves to the METHOD's `T`.
@@ -324,7 +344,7 @@ impl Checker {
                 raw_ret,
             });
         self.symbols.methods.insert(
-            (type_name.to_string(), m.name.to_string()),
+            (type_name.to_string(), key),
             FnSig {
                 params,
                 param_names: m.params.iter().map(|p| p.name.clone()).collect(),
@@ -771,7 +791,13 @@ impl Checker {
                         .standalone_impls
                         .entry(decl.target.to_string())
                         .or_default()
-                        .push((decl.trait_name.to_string(), decl.trait_span));
+                        .push((
+                            crate::traits::coherence_key(
+                                decl.trait_name.as_str(),
+                                &decl.trait_args,
+                            ),
+                            decl.trait_span,
+                        ));
                 }
                 // A user-defined trait (L1) is registered up front so forward references (an `impl`
                 // or `<T: Trait>` bound textually above the `trait`) resolve. A duplicate declaration
@@ -1432,7 +1458,7 @@ impl Checker {
             m,
             Receiver::trait_method(m.body.iter().any(|s| s.mentions("self"))),
         );
-        self.note_trait_supplied(type_name, m, trait_name);
+        self.note_trait_supplied(type_name, &key.1.clone(), m, trait_name);
         self.symbols.methods.insert(
             key,
             FnSig {
@@ -1647,10 +1673,17 @@ impl Checker {
     }
 
     /// Record a type's declared `From` conversions (error-ergonomics): each in-body
-    /// `impl From<Source>` block registers its resolved source type under the target, so a `?`
-    /// site can look up `(source → target)` regardless of statement order. Arity/validity of the
-    /// block is checked in pass 2 (`check_trait_impl`); a malformed block records nothing.
+    /// `impl From<Source>` block registers its resolved source type — and the method-table key its
+    /// `from` occupies — under the target, so a `?` site can look up `(source → target)` regardless
+    /// of statement order and then dispatch through the right one. Arity/validity of the block is
+    /// checked in pass 2 (`check_trait_impl`); a malformed block records nothing.
     pub(crate) fn record_from_impls(&mut self, target: &str, impls: &[noeta_ast::ImplBlock]) {
+        let keys = noeta_ast::conversion::from_conversion_keys(impls);
+        self.symbols.from_method_keys.extend(
+            keys.iter()
+                .map(|(span, key)| (*span, key.clone()))
+                .collect::<Vec<_>>(),
+        );
         for block in impls {
             if block.trait_name == BuiltinTrait::From.name() && block.trait_args.len() == 1 {
                 // In the target's scope, like every other in-body `impl` argument.
@@ -1659,11 +1692,22 @@ impl Checker {
                     &self.imports.extern_types,
                     &self.target_scope(target),
                 );
+                let Some(m) = block
+                    .methods
+                    .iter()
+                    .find(|m| Some(m.name.as_str()) == BuiltinTrait::From.required_method_name())
+                else {
+                    continue;
+                };
+                let method = keys
+                    .get(&m.name_span)
+                    .cloned()
+                    .unwrap_or_else(|| m.name.to_string());
                 self.symbols
                     .from_impls
                     .entry(target.to_string())
                     .or_default()
-                    .push(source);
+                    .push(FromConversion { source, method });
             }
         }
     }

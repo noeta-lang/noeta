@@ -779,6 +779,120 @@ impl Checker {
         ret
     }
 
+    /// **`Target.from(x)` where `Target` declares several conversions** — the explicit twin of the
+    /// `?` conversion rule ([`Checker::check_try_error`]), and the one call site that has to
+    /// *choose* between them.
+    ///
+    /// One rule, evaluated with the source in hand: the candidates are the target's declared
+    /// conversions, filtered by the argument's type, and the call resolves when exactly one
+    /// remains. An argument naming no declared source leaves none — E0007, naming what the target
+    /// *does* convert. An argument whose type is not resolved (`dyn`, an inference hole) leaves all
+    /// of them, and the language does not guess: E0023, the same answer the checker gives anywhere
+    /// else it is asked to pick without evidence.
+    ///
+    /// Returns `None` when this is not that call — a different method, a receiver that does not name
+    /// a type (or is shadowed by a local), or a target declaring a **single** conversion, whose
+    /// `from` needs no choosing and resolves through the ordinary associated-call arm like every
+    /// other method.
+    #[allow(clippy::too_many_arguments)]
+    fn check_from_conversion_call(
+        &mut self,
+        receiver: &Expr,
+        name: &str,
+        args: &mut [Type],
+        arg_exprs: &[CallArg],
+        span: Span,
+        call_span: Span,
+        env: &mut Env,
+    ) -> Option<Type> {
+        if Some(name) != BuiltinTrait::From.required_method_name() {
+            return None;
+        }
+        let Expr::Ident { name: tn, .. } = receiver.peel_instantiation() else {
+            return None;
+        };
+        if lookup(env, tn.as_str()).is_some() {
+            return None;
+        }
+        let convs = self.symbols.from_impls.get(tn.as_str())?;
+        if convs.len() < 2 {
+            return None;
+        }
+        let convs = convs.clone();
+        let target = Type::Named(tn.to_string(), Vec::new());
+        let sources = || {
+            convs
+                .iter()
+                .map(|c| format!("`{}`", c.source))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        // Arity first: a conversion takes exactly the value it converts, and without an argument
+        // there is nothing to choose by.
+        let [arg] = args else {
+            self.error(
+                DiagnosticCode::TypeMismatch,
+                span,
+                format!(
+                    "`{target}.from` converts one value, found {} argument(s)",
+                    args.len()
+                ),
+            )
+            .help(format!("`{target}` converts {}", sources()));
+            return Some(target);
+        };
+        let arg = arg.clone();
+        if arg.defers_to_runtime() {
+            self.error(
+                DiagnosticCode::CannotInfer,
+                span,
+                format!(
+                    "cannot tell which `{target}` conversion `from` means: the argument's type is \
+                     `{arg}`"
+                ),
+            )
+            .help(format!(
+                "`{target}` declares a conversion from each of {} — narrow the argument to one of \
+                 them (`if x is …`) or annotate it, so the conversion is decided here",
+                sources()
+            ));
+            return Some(target);
+        }
+        let Some(conv) = convs.iter().find(|c| c.source == arg) else {
+            self.error(
+                DiagnosticCode::TypeMismatch,
+                span,
+                format!("`{target}` declares no conversion from `{arg}`"),
+            )
+            .help(format!(
+                "it converts {} — add `impl From<{arg}> {{ … }}` inside `{target}` to convert this \
+                 one too",
+                sources()
+            ));
+            return Some(target);
+        };
+        // Resolved. Lowering cannot re-ask a typing question, so the selection is recorded at the
+        // call span and substituted for the `from` the source wrote.
+        let method = conv.method.clone();
+        let sig = self
+            .symbols
+            .methods
+            .get(&(tn.to_string(), method.clone()))
+            .cloned()?;
+        self.sites.from_call_sites.insert(call_span, method.clone());
+        Some(self.call_user_method(
+            &method,
+            Some(tn.as_str()),
+            &sig,
+            args,
+            arg_exprs,
+            span,
+            &[],
+            Some(call_span),
+            env,
+        ))
+    }
+
     pub(crate) fn synth_call_inner(
         &mut self,
         callee: &Expr,
@@ -1047,6 +1161,15 @@ impl Checker {
                 Type::Unknown
             }
             Expr::Member { receiver, name, .. } => {
+                // `Target.from(x)` where `Target` declares **several** conversions: which one runs is
+                // decided here, by the argument's type, before any other reading of the name. A
+                // target declaring a single conversion is not here at all — its `from` is an
+                // ordinary associated function and resolves through the arms below, unchanged.
+                if let Some(ty) = self.check_from_conversion_call(
+                    receiver, name, args, arg_exprs, span, call_span, env,
+                ) {
+                    return ty;
+                }
                 // `Enum.try_from(v)` → `?Enum` / `Enum.from(v)` → `Enum` — the built-in wire→case
                 // conversions (PHP `tryFrom`/`from`), reserved on every enum type. Checked before the
                 // variant constructor so the names cannot be captured by a same-named variant.

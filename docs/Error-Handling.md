@@ -218,12 +218,47 @@ fn load(text: string): Result<string, AppError> {
 echo load("{ nope")
 ```
 
+A pipeline usually crosses more than one, so a target declares a conversion from **each** source it absorbs — one `impl From<Source>` block per source, and each `?` converts through the one its own error type names:
+
+```noeta
+struct HttpError { status: int }
+struct JsonError { line: int }
+
+struct AppError {
+    detail: string
+
+    impl From<HttpError> {
+        pub fn from(e: HttpError): AppError {
+            return AppError { detail: "request failed: ${e.status}" }
+        }
+    }
+
+    impl From<JsonError> {
+        pub fn from(e: JsonError): AppError {
+            return AppError { detail: "bad body at line ${e.line}" }
+        }
+    }
+}
+
+fn fetch(id: string): Result<string, HttpError> { return Err(HttpError { status: 503 }) }
+fn decode(body: string): Result<string, JsonError> { return Err(JsonError { line: 1 }) }
+
+fn load(id: string): Result<string, AppError> {
+    body = fetch(id)?          // HttpError → AppError
+    return Ok(decode(body)?)   // JsonError → AppError
+}
+
+echo load("7")
+```
+
 The rules keep the language explicit:
 
 - **`?` is the only implicit conversion position.** A `return Err(jsonErr)` or an assignment with a mismatched error type stays the plain type mismatch (E0007) it always was; write `Err(AppError.from(e))` there — `from` is an ordinary static function, callable anywhere as `Target.from(x)`.
-- **Exactly one conversion path.** The conversion is declared on the target (`impl From<Source>` names the source; the source may be an extern type like `JsonError`, which could not carry your impl anyway — an `impl` targets a struct, class, or enum the program [declares](Generics-and-Traits#implementing-a-trait), never a built-in or an extern). A type carries at most one `From` impl — a second, whatever its source, is a coherence conflict (E0027) — and conversions never chain. Declaring it on the target is also what satisfies the [orphan rule](Generics-and-Traits#the-orphan-rule): `From` is built into the language and so belongs to no package, which means the `impl` must live in the target type's own package. A conversion *into* a dependency's error type therefore goes on your own wrapper, never on theirs.
+- **One conversion per source.** The conversion is declared on the target (`impl From<Source>` names the source; the source may be an extern type like `JsonError`, which could not carry your impl anyway — an `impl` targets a struct, class, or enum the program [declares](Generics-and-Traits#implementing-a-trait), never a built-in or an extern). A type may declare a conversion from each of several sources — that is how one application error type absorbs a transport failure and a decode failure — but only one from each: a repeated source is a coherence conflict (E0027). Declaring it on the target is also what satisfies the [orphan rule](Generics-and-Traits#the-orphan-rule): `From` is built into the language and so belongs to no package, which means the `impl` must live in the target type's own package. A conversion *into* a dependency's error type therefore goes on your own wrapper, never on theirs.
+- **Exactly one conversion path.** Which conversion runs is decided where the call is written, never at run time: a `?` converts through the one its propagated `Err` type names, and `Target.from(x)` through the one `x`'s type names. Sources are matched by type identity, so a site sees exactly one candidate — and **conversions never chain**. `A → B` and `B → C` do not make `A → C`; write the conversion you want.
 - **No conversion, no propagation.** A `?` whose `Err` type neither matches the declared error type nor has a `From` conversion is E0057. (A `dyn`/unannotated context defers to runtime, as everywhere in the gradual checker.)
 - `from` is an **associated** conversion: it builds a new target value from its argument, so a body referencing `self` is rejected (E0015), as is a parameter that disagrees with the declared source.
+- **A conversion is never guessed.** Where a target declares several, `Target.from(x)` needs `x`'s type to name one of them. An argument typed `dyn` leaves every conversion a candidate and is E0023 — narrow it (`if x is HttpError { … }`) or annotate it; an argument whose type names no declared source is E0007, and the diagnostic lists what the target does convert.
 
 ## `??` — coalesce
 

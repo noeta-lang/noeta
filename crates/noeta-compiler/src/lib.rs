@@ -1393,13 +1393,23 @@ impl ModuleCompiler {
                     // Reserve a prototype per method, shared by associated-fn and instance-method
                     // dispatch (a struct `fn` is callable both ways, exactly like a class method).
                     let mut fns = HashMap::new();
+                    // A type declaring several `From` conversions carries several `from` bodies
+                    // under the one name they were written with; each reserves the prototype its
+                    // source-named key addresses, from the same rule the checker resolved the call
+                    // site with (`noeta_ast::conversion::from_conversion_keys`). Every other method is its
+                    // own name.
+                    let keys = noeta_ast::conversion::from_conversion_keys(&decl.impls);
                     for method in &decl.methods {
+                        let key = keys
+                            .get(&method.name_span)
+                            .cloned()
+                            .unwrap_or_else(|| method.name.to_string());
                         let proto = self.protos.len() as u32;
                         self.protos.push(Chunk::placeholder());
-                        fns.insert(method.name.to_string(), proto);
+                        fns.insert(key.clone(), proto);
                         self.methods.push(MethodEntry {
                             type_name: decl.name.to_string(),
-                            method: method.name.to_string(),
+                            method: key,
                             proto,
                         });
                     }
@@ -1429,13 +1439,23 @@ impl ModuleCompiler {
                         self.tojson_derives.push(decl.name.to_string());
                     }
                     let mut fns = HashMap::new();
+                    // A type declaring several `From` conversions carries several `from` bodies
+                    // under the one name they were written with; each reserves the prototype its
+                    // source-named key addresses, from the same rule the checker resolved the call
+                    // site with (`noeta_ast::conversion::from_conversion_keys`). Every other method is its
+                    // own name.
+                    let keys = noeta_ast::conversion::from_conversion_keys(&decl.impls);
                     for method in &decl.methods {
+                        let key = keys
+                            .get(&method.name_span)
+                            .cloned()
+                            .unwrap_or_else(|| method.name.to_string());
                         let proto = self.protos.len() as u32;
                         self.protos.push(Chunk::placeholder());
-                        fns.insert(method.name.to_string(), proto);
+                        fns.insert(key.clone(), proto);
                         self.methods.push(MethodEntry {
                             type_name: decl.name.to_string(),
-                            method: method.name.to_string(),
+                            method: key,
                             proto,
                         });
                     }
@@ -1484,13 +1504,23 @@ impl ModuleCompiler {
                     // Reserve a prototype per method, shared by associated-fn and instance-method
                     // dispatch (the unified body, object-model slice 3).
                     let mut fns = HashMap::new();
+                    // A type declaring several `From` conversions carries several `from` bodies
+                    // under the one name they were written with; each reserves the prototype its
+                    // source-named key addresses, from the same rule the checker resolved the call
+                    // site with (`noeta_ast::conversion::from_conversion_keys`). Every other method is its
+                    // own name.
+                    let keys = noeta_ast::conversion::from_conversion_keys(&decl.impls);
                     for method in &decl.methods {
+                        let key = keys
+                            .get(&method.name_span)
+                            .cloned()
+                            .unwrap_or_else(|| method.name.to_string());
                         let proto = self.protos.len() as u32;
                         self.protos.push(Chunk::placeholder());
-                        fns.insert(method.name.to_string(), proto);
+                        fns.insert(key.clone(), proto);
                         self.methods.push(MethodEntry {
                             type_name: decl.name.to_string(),
-                            method: method.name.to_string(),
+                            method: key,
                             proto,
                         });
                     }

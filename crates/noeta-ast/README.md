@@ -7,7 +7,9 @@ The abstract syntax tree: pure data, no behavior.
 
 ## Shared derivations over the AST
 
-Being the bottom of the stack, this is also where a few **pure derivations** live once, so the crates above cannot each grow their own: `derive` (the shared derive planner), `reflect` (the reflection manifest), `desugar`, and `shape`.
+Being the bottom of the stack, this is also where a few **pure derivations** live once, so the crates above cannot each grow their own: `derive` (the shared derive planner), `reflect` (the reflection manifest), `desugar`, `shape`, and `conversion`.
+
+`conversion` names a declared conversion's body. A type may carry one `impl From<Source>` block per source and a method table has one slot per name, so a type declaring several names each conversion after the source it converts and a type declaring one leaves it under the plain `from`. Everything that builds or resolves a method table asks that one function — the checker's signature registration, IR lowering, the bytecode compiler's prototype reservation, and the reflection manifest — so the four agree by construction rather than by four walks written to match.
 
 `shape` answers "what is this declaration made of?" as `(member name, declared type spelling)` pairs, in declaration order — a `struct`'s or `class`'s fields, an `enum`'s variants with their payload spellings, and nothing for a declaration with no typed members. Two seams hand that answer to a native extension: the checker's `ExtDerive::validate` and the loader's `DirectiveCtx::fields` for an expanding directive. Both read the one walk, so a derive recipe and an expansion hook in the same extension can never see the same declaration differently. Spellings are the *declared surface* ones at full fidelity — `List<int>`, `?User`, no lattice normalization — with namespace-qualified identities shortened back to the name the author wrote, since the linker has already qualified them by the time either consumer runs.
 

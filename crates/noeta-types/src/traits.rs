@@ -25,6 +25,7 @@
 //! method: `a.try_add(b)?`, no operator wiring.)
 
 use noeta_ast::BinaryOp;
+use noeta_ast::conversion::{FROM_METHOD, FROM_TRAIT};
 
 /// One built-in trait — the fixed vocabulary an `impl`/`@derive(...)` may name. A fieldless enum so
 /// trait identity is a value the checker matches exhaustively; the per-variant metadata is reached
@@ -59,9 +60,13 @@ pub enum BuiltinTrait {
     /// associated function `from(value: Source): Target`. The **only generic built-in trait whose
     /// argument is a real type** (`Serialize`/`Deserialize` take a format token). Declared on the
     /// **target** (the orphan rule means the source may be an extern type — `impl From<JsonError>`
-    /// on a user error type). A type carries at most ONE `From` impl — impl-block methods flatten
-    /// into the type's method table by name and there is no overloading, so a second `From` (any
-    /// source) is a coherence conflict (E0027); that also keeps the `?` conversion path unique by
+    /// on a user error type). A type carries one conversion **per source**: coherence keys this
+    /// trait on the source it names rather than on the trait name, so `impl From<HttpError>` beside
+    /// `impl From<JsonError>` declares two conversions while a repeated source is a conflict
+    /// (E0027). Which conversion a site means is decided statically, from the source in hand — the
+    /// propagated `Err` type at a `?`, the argument's type at an explicit call — and the body each
+    /// occupies is named by [`noeta_ast::conversion::from_conversion_keys`], so a method table with
+    /// one slot per name still holds them all. That is what keeps the `?` conversion path unique by
     /// construction. `from` is an ordinary associated function, explicitly callable as
     /// `Target.from(x)`; the single *implicit* application in the language is the `?` error
     /// position: a `?` whose `Err` payload type differs from the enclosing function's declared
@@ -156,7 +161,10 @@ impl BuiltinTrait {
             Error => ("Error", Some(("message", Some(0))), None, true),
             // The declared-conversion protocol: one associated function `from(value: Source):
             // Target`. Not derivable (a conversion body cannot be synthesized from fields).
-            From => ("From", Some(("from", Some(1))), None, false),
+            // Spelled in `noeta_ast::conversion`, which is also where a conversion's method-table
+            // key is derived — the compiler reads that module and depends on no type-system crate,
+            // so the trait's two words live there and are read here.
+            From => (FROM_TRAIT, Some((FROM_METHOD, Some(1))), None, false),
             Clone => ("Clone", None, None, true),
             Serialize => ("Serialize", None, None, true),
             Deserialize => ("Deserialize", None, None, true),
@@ -199,6 +207,13 @@ impl BuiltinTrait {
     /// count is not pinned (`Callable`'s `call` takes whatever the object needs).
     pub fn required_method(self) -> RequiredMethod {
         self.info().required_method
+    }
+
+    /// Just the **name** of [`Self::required_method`] — what a caller comparing a declaration's
+    /// name against the trait's contract needs, without restating the method's spelling as a
+    /// literal.
+    pub fn required_method_name(self) -> Option<&'static str> {
+        self.required_method().map(|(name, _)| name)
     }
 
     /// Whether this trait declares its method **`static`** — the built-in table's spelling of the

@@ -210,10 +210,15 @@ pub struct LoweringSites<'a> {
     /// emitted as an [`Rvalue::NativeModule`] instead of a field load.
     pub namespace_module_sites: &'a HashMap<Span, String>,
     /// `?`-conversion sites (error-ergonomics): `Expr::Try` spans whose `Err` payload converts
-    /// through the enclosing function's error type → that target type's name. The `?` operand is
-    /// rewritten to `match v { Ok($t) => Ok($t), Err($t) => Err(Target.from($t)) }` — ordinary IR,
-    /// so both backends (and the JIT) convert identically by construction.
-    pub try_conversion_sites: &'a HashMap<Span, String>,
+    /// through the enclosing function's error type → that target type's name, and the method-table
+    /// key of the conversion its `Err` type selected. The `?` operand is rewritten to
+    /// `match v { Ok($t) => Ok($t), Err($t) => Err(Target.from($t)) }` — ordinary IR, so both
+    /// backends (and the JIT) convert identically by construction.
+    pub try_conversion_sites: &'a HashMap<Span, (String, String)>,
+    /// Explicit `Target.from(x)` spans on a target declaring several conversions → the method-table
+    /// key the argument's type selected. Lowering substitutes it for the `from` the source wrote, so
+    /// the call reaches the one body the checker resolved.
+    pub from_call_sites: &'a HashMap<Span, String>,
     /// The program-wide type-argument table (poly-values F2b) — embedded into
     /// [`Program::type_args`] so both backends resolve a hidden slot's instantiation identically.
     pub type_arg_table: &'a Vec<noeta_ext_abi::TypeArgInfo>,
@@ -296,7 +301,8 @@ impl LoweringSites<'static> {
             f32_literal_sites: SPANS.get_or_init(HashSet::new),
             trait_call_sites: PAIRS.get_or_init(HashMap::new),
             namespace_module_sites: NAMES.get_or_init(HashMap::new),
-            try_conversion_sites: NAMES.get_or_init(HashMap::new),
+            try_conversion_sites: PAIRS.get_or_init(HashMap::new),
+            from_call_sites: NAMES.get_or_init(HashMap::new),
             type_arg_table: TYPE_ARGS.get_or_init(Vec::new),
             type_arg_reprs: TYPE_ARG_REPRS.get_or_init(Vec::new),
             dynamic_construction_sites: SLOTS.get_or_init(HashMap::new),
@@ -343,6 +349,7 @@ macro_rules! lowering_sites {
             trait_call_sites: &$s.trait_call_sites,
             namespace_module_sites: &$s.namespace_module_sites,
             try_conversion_sites: &$s.try_conversion_sites,
+            from_call_sites: &$s.from_call_sites,
             type_arg_table: &$s.type_arg_table,
             type_arg_reprs: &$s.type_arg_reprs,
             dynamic_construction_sites: &$s.dynamic_construction_sites,
@@ -960,7 +967,7 @@ fn own_destructor_class_names(program: &AstProgram) -> HashSet<String> {
 /// scrutinee); the `$try` binding name cannot collide with user bindings (`$` is not writable in
 /// source), and every synthetic node reuses the `?`'s span so diagnostics and tracebacks keep
 /// pointing at the `?`.
-fn try_conversion_match(operand: &Expr, target: &str, span: Span) -> Expr {
+fn try_conversion_match(operand: &Expr, target: &str, method: &str, span: Span) -> Expr {
     let ident = |name: &str| Expr::Ident {
         name: noeta_ast::Name::canonical(name),
         span,
@@ -991,7 +998,11 @@ fn try_conversion_match(operand: &Expr, target: &str, span: Span) -> Expr {
     let from_call = call(
         Expr::Member {
             receiver: Box::new(ident(target)),
-            name: "from".to_string(),
+            // The conversion the checker selected — `from`, or the source-named key one of several
+            // conversions on this target occupies. Written here rather than looked up again,
+            // because "which conversion does this `Err` type select" is a typing question and this
+            // is lowering.
+            name: method.to_string(),
             name_span: span,
             span,
         },
@@ -1628,7 +1639,8 @@ impl Lowerer<'_> {
             AstStmt::Class(decl) => {
                 let (methods, destructor, field_defaults) =
                     self.lower_type_body(&decl.name, |lw| {
-                        let methods = lw.lower_type_methods(&decl.name, &decl.methods)?;
+                        let methods =
+                            lw.lower_type_methods(&decl.name, &decl.methods, &decl.impls)?;
                         // The `destruct` block lowers to a parameterless block [`Func`] (fields
                         // resolve against the receiver, like a method), so the VM can compile it to
                         // a prototype.
@@ -1663,7 +1675,7 @@ impl Lowerer<'_> {
                 // object-model slice 3), lowered to IR funcs exactly like a struct's. Variant/derive
                 // data stays on the surface `decl`.
                 let methods = self.lower_type_body(&decl.name, |lw| {
-                    lw.lower_type_methods(&decl.name, &decl.methods)
+                    lw.lower_type_methods(&decl.name, &decl.methods, &decl.impls)
                 })?;
                 out.push(Stmt::Decl(Decl::Enum(EnumDef {
                     decl: Rc::new(decl.clone()),
@@ -1677,7 +1689,7 @@ impl Lowerer<'_> {
                 // lowered to IR funcs exactly like a class's — minus any `destruct` (structs have
                 // none). Field/derive data stays on the surface `decl`.
                 let (methods, field_defaults) = self.lower_type_body(&decl.name, |lw| {
-                    let methods = lw.lower_type_methods(&decl.name, &decl.methods)?;
+                    let methods = lw.lower_type_methods(&decl.name, &decl.methods, &decl.impls)?;
                     let field_defaults = lw.lower_field_defaults(&decl.fields)?;
                     Ok((methods, field_defaults))
                 })?;
@@ -1752,6 +1764,21 @@ impl Lowerer<'_> {
             .collect()
     }
 
+    /// The **method-table name** a call site dispatches through: the name the source wrote, unless
+    /// the checker resolved it to something else at this span.
+    ///
+    /// One resolution does that today — `Target.from(x)` on a target declaring several `From`
+    /// conversions, where the argument's type selects one of them and the plain `from` names none
+    /// ([`LoweringSites::from_call_sites`]). Applied at every form a method call takes, the piped
+    /// spellings included, because the choice belongs to the call and not to how it was written.
+    fn method_name(&self, span: &Span, written: &str) -> String {
+        self.sites
+            .from_call_sites
+            .get(span)
+            .cloned()
+            .unwrap_or_else(|| written.to_string())
+    }
+
     /// The **dynamic construction tag** operand for a call span (generic-in-generic construction):
     /// the enclosing body's `$ty<i>` hidden local whose table entry names the instantiation to stamp
     /// on the freshly-built object. `None` at every ordinary call — the overwhelming majority.
@@ -1792,9 +1819,20 @@ impl Lowerer<'_> {
         &mut self,
         type_name: &noeta_ast::Name,
         methods: &[FnDecl],
+        impls: &[noeta_ast::ImplBlock],
     ) -> Result<Vec<(String, Rc<Func>)>, Unsupported> {
+        // A type declaring several `From` conversions carries several `from` bodies, which the
+        // parser flattened into `methods` under the one name they were written with. Each takes the
+        // key named after the source it converts, so the table both backends build from this list
+        // has one entry per conversion — and it is the same key the checker registered the
+        // signature under, because both ask [`noeta_ast::conversion::from_conversion_keys`].
+        let keys = noeta_ast::conversion::from_conversion_keys(impls);
         let mut out = Vec::with_capacity(methods.len());
         for m in methods {
+            let key = keys
+                .get(&m.name_span)
+                .cloned()
+                .unwrap_or_else(|| m.name.to_string());
             let func = self.lower_func(
                 &m.params,
                 BodyKind::Block(&m.body),
@@ -1802,10 +1840,10 @@ impl Lowerer<'_> {
                 true,
                 m.is_async,
                 // Methods trace as `Type.method` (the VM's chunk naming).
-                Some(format!("{type_name}.{}", m.name)),
+                Some(format!("{type_name}.{key}")),
                 Some(m.captures.iter().map(|(n, _)| n.clone()).collect()),
             )?;
-            out.push((m.name.to_string(), Rc::new(func)));
+            out.push((key, Rc::new(func)));
         }
         Ok(out)
     }
@@ -2874,7 +2912,7 @@ impl Lowerer<'_> {
                         out,
                         Rvalue::Method {
                             receiver,
-                            name: name.clone(),
+                            name: self.method_name(span, name),
                             name_span: *name_span,
                             args: arg_atoms,
                             reuse: false,
@@ -3204,8 +3242,8 @@ impl Lowerer<'_> {
                 // conversion is identical by construction. The ordinary propagation then applies
                 // unchanged to the converted `Result`.
                 let operand = match self.sites.try_conversion_sites.get(span) {
-                    Some(target) => {
-                        let converted = try_conversion_match(expr, target, *span);
+                    Some((target, method)) => {
+                        let converted = try_conversion_match(expr, target, method, *span);
                         self.lower_expr(&converted, out)?
                     }
                     None => self.lower_expr(expr, out)?,
@@ -3573,7 +3611,7 @@ impl Lowerer<'_> {
                         out,
                         Rvalue::Method {
                             receiver,
-                            name: name.clone(),
+                            name: self.method_name(span, name),
                             name_span: *name_span,
                             args: arg_atoms,
                             reuse: false,
@@ -3623,7 +3661,7 @@ impl Lowerer<'_> {
                     out,
                     Rvalue::Method {
                         receiver,
-                        name: name.clone(),
+                        name: self.method_name(span, name),
                         name_span: *name_span,
                         args: vec![left_atom],
                         reuse: false,

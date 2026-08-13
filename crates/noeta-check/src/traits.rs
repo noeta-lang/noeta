@@ -1192,8 +1192,8 @@ impl Checker {
     // (constraint_mismatch, the bundle-constraint comparison, is a free function below the impl.)
 
     /// Enforce **trait coherence** (overlap/uniqueness) on a single type: a trait may be
-    /// implemented at most once, counting both a `@derive(T)` directive and an `impl T { }` block
-    /// as implementations. A second implementation of an already-implemented trait — whether
+    /// implemented at most once — `From` once per source type it converts — counting both a
+    /// `@derive(T)` directive and an `impl T { }` block as implementations. A second implementation of an already-implemented trait — whether
     /// `@derive(T)` twice, two `impl T` blocks, or a `@derive(T)` alongside an `impl T` — is
     /// reported as `E0027 ConflictingTraitImpl`, **labelling both sites**: the primary span on the
     /// later occurrence, a secondary label on the one it collides with. This keeps each
@@ -1222,21 +1222,23 @@ impl Checker {
         standalone: &[(String, Span)],
     ) {
         // Source order is derives, then in-body impls, then standalone impls: this scan reports the
-        // textually-later duplicate and labels the one it collides with. `From` is deliberately
-        // covered by the same name-keyed rule: an impl block's methods flatten into the type's
-        // method table by NAME (there is no overloading), so a type can carry exactly one `from` —
-        // one declared conversion. A second `From` impl (same source or another) is exactly the
-        // ambiguity the `?` conversion must never see — two declared paths into the target — and
-        // collides here (E0027).
+        // textually-later duplicate and labels the one it collides with. Every trait is keyed by
+        // name — except `From`, which is keyed by the SOURCE it converts ([`coherence_key`]),
+        // because that is what a type may declare only once. Two `impl From<A>` blocks are the
+        // ambiguity a `?` conversion must never see (two declared paths from one source into one
+        // target) and collide here; `impl From<A>` beside `impl From<B>` declares two different
+        // conversions and does not.
         let mut seen: HashMap<String, (Span, ImplForm)> = HashMap::new();
         let occurrences: Vec<(String, Span, ImplForm)> = derives
             .iter()
             .map(|d| (d.name.to_string(), d.span, ImplForm::Derive))
-            .chain(
-                impls
-                    .iter()
-                    .map(|b| (b.trait_name.to_string(), b.trait_span, ImplForm::InBody)),
-            )
+            .chain(impls.iter().map(|b| {
+                (
+                    coherence_key(b.trait_name.as_str(), &b.trait_args),
+                    b.trait_span,
+                    ImplForm::InBody,
+                )
+            }))
             .chain(
                 standalone
                     .iter()
@@ -1257,10 +1259,23 @@ impl Checker {
                     // non-rendered consumer of the diagnostic — reports.
                     .label(span, format!("implemented again here, {form}"))
                     .label(first_span, format!("first implemented here, {first_form}"))
-                    .help(format!(
-                        "a type may implement each trait only once — remove one of the two \
-                         implementations of `{name}`, or merge them into a single one"
-                    ));
+                    // A conversion's key carries its source in angle brackets, which no trait NAME
+                    // can contain — so this recognizes the one contest whose fix is not "implement
+                    // it once" but "one per source".
+                    .help(
+                        if name.starts_with(&format!("{}<", BuiltinTrait::From.name())) {
+                            format!(
+                                "a type declares one conversion per source — remove one of the two \
+                             `{name}` blocks, or merge them into a single one. A conversion from a \
+                             DIFFERENT source is a different conversion and may sit beside this one"
+                            )
+                        } else {
+                            format!(
+                                "a type may implement each trait only once — remove one of the two \
+                             implementations of `{name}`, or merge them into a single one"
+                            )
+                        },
+                    );
                 }
                 None => {
                     seen.insert(name, (span, form));
@@ -1365,8 +1380,11 @@ impl Checker {
     /// `E0057`. That judgement runs only when both sides are resolved: a `dyn`/hole on either side or
     /// a type parameter in scope defers to runtime, and an assignable error (a union member, for
     /// instance) propagates unconverted. Exactly-one-path is by construction: sources are matched by
-    /// type equality, and coherence admits at most one `From` impl per target type, so no `?` site
-    /// ever sees two candidate conversions.
+    /// type **equality**, and coherence admits at most one `From` impl per (target, source) pair, so
+    /// no `?` site ever sees two candidate conversions — a target declaring several conversions has
+    /// one per distinct source, and the propagated `Err` type equals at most one of them. The site
+    /// records the conversion's method-table key beside the target, which is what tells lowering
+    /// *which* of them to call.
     pub(crate) fn check_try_error(&mut self, err: &Type, span: Span) {
         let Type::Result(_, declared) = self.coloring.current_ret.clone() else {
             self.reject_try_position(err, span);
@@ -1385,13 +1403,15 @@ impl Checker {
             return;
         }
         if let Type::Named(target, _) = &declared
-            && self
+            && let Some(conv) = self
                 .symbols
                 .from_impls
                 .get(target)
-                .is_some_and(|sources| sources.iter().any(|s| s == err))
+                .and_then(|convs| convs.iter().find(|c| c.source == *err))
         {
-            self.sites.try_conversion_sites.insert(span, target.clone());
+            self.sites
+                .try_conversion_sites
+                .insert(span, (target.clone(), conv.method.clone()));
             return;
         }
         let d = self.error(
@@ -2674,6 +2694,30 @@ fn bound_display(name: &str, args: &[Type]) -> String {
         let args: Vec<String> = args.iter().map(Type::to_string).collect();
         format!("{name}<{}>", args.join(", "))
     }
+}
+
+/// **What a type may implement only once** — the key [`Checker::check_coherence`] counts
+/// occurrences under, and the name its diagnostic calls the contest by.
+///
+/// For every trait that is the trait's own name. `From` is the exception, and the only one: it is
+/// the single built-in whose `impl` carries a type argument, and that argument is part of what is
+/// being implemented — `impl From<HttpError>` and `impl From<JsonError>` are two different
+/// conversions into one target, not two implementations of one contract. Keying `From` on the
+/// source is what lets a type declare one conversion per source while a repeated source stays the
+/// conflict it is (E0027).
+///
+/// A **generic user trait** is deliberately still keyed by name: `impl Cache<string>` beside
+/// `impl Cache<int>` would hand the type two `get`s with no way to choose between them at a call
+/// site, which is the ambiguity coherence exists to refuse. `From` escapes that because its call
+/// sites carry the source type — a `?`'s propagated `Err`, an argument's type — and so can say
+/// which conversion they mean.
+pub(crate) fn coherence_key(trait_name: &str, trait_args: &[noeta_ast::TypeRef]) -> String {
+    if trait_name == BuiltinTrait::From.name()
+        && let [source] = trait_args
+    {
+        return format!("{trait_name}<{}>", noeta_ast::shape::type_source(source));
+    }
+    trait_name.to_string()
 }
 
 /// How one implementation of a trait was **written** — the three spellings [`Checker::check_coherence`]

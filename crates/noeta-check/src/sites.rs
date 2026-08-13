@@ -211,11 +211,25 @@ pub struct Sites {
     pub f32_literal_sites: HashSet<Span>,
     /// `?`-conversion sites (error-ergonomics): each `Expr::Try` span whose `Err` payload type
     /// differs from the enclosing function's declared error type **and** converts through that
-    /// target's `impl From<Source>` → the target error type's name. Lowering rewrites the `?`
-    /// operand at these spans to convert the `Err` payload (`Err(e)` → `Err(Target.from(e))`)
-    /// before the ordinary propagation, so both backends convert identically by construction. A
-    /// pure function of the program, like the other site maps.
-    pub try_conversion_sites: HashMap<Span, String>,
+    /// target's `impl From<Source>` → the target error type's name and the **method-table key** of
+    /// the conversion the propagated `Err` type selected. Lowering rewrites the `?` operand at these
+    /// spans to convert the `Err` payload (`Err(e)` → `Err(Target.from(e))`) before the ordinary
+    /// propagation, so both backends convert identically by construction. A pure function of the
+    /// program, like the other site maps.
+    ///
+    /// The key travels with the target because the target alone does not determine the conversion:
+    /// a type declaring several names each of them after its source
+    /// ([`noeta_ast::conversion::from_conversion_keys`]), and matching the source against them is a typing
+    /// question lowering cannot re-ask.
+    pub try_conversion_sites: HashMap<Span, (String, String)>,
+    /// Explicit `Target.from(x)` call spans on a type declaring **several** conversions → the
+    /// method-table key the argument's type selected. The static twin of
+    /// [`Sites::try_conversion_sites`]: same resolution rule, same reason lowering cannot redo it,
+    /// and lowering substitutes the recorded name for the `from` the source wrote.
+    ///
+    /// Absent for a target declaring a single conversion, which keeps the plain `from` its call
+    /// site already names.
+    pub from_call_sites: HashMap<Span, String>,
     /// The program-wide **type-argument table** (poly-values F2b): every concrete instantiation a
     /// call of a forwarding generic fn resolved, interned by structural equality. Lowering embeds
     /// it into the IR `Program` (and the VM `Module`), and a hidden call argument indexes it at
@@ -412,7 +426,8 @@ pub(crate) const SITE_POLICIES: &[(&str, SiteClass, &str)] = &[
     ("trait_call_sites", SiteClass::SpanKeyed, "span → (trait qualified identity, method)"),
     ("namespace_module_sites", SiteClass::SpanKeyed, "span → the root-qualified module identity"),
     ("f32_literal_sites", SiteClass::SpanKeyed, "a bare span set"),
-    ("try_conversion_sites", SiteClass::SpanKeyed, "span → the target error type's name"),
+    ("try_conversion_sites", SiteClass::SpanKeyed, "span → (target error type name, the conversion's method-table key)"),
+    ("from_call_sites", SiteClass::SpanKeyed, "span → the conversion's method-table key an explicit `Target.from(x)` selected"),
     ("type_arg_table", SiteClass::TheTable, "the table itself; absorb_type_args REPLACES it with the session's merged superset"),
     ("type_arg_reprs", SiteClass::TheTable, "the table's reflection projection, indexed in lockstep; replaced with it"),
     ("hidden_arg_sites", SiteClass::TableIndexed, "HiddenArg::Table(TypeArgIndex) — the one carrier; the Forward(j) beside it is a slot ordinal and passes through"),
@@ -479,6 +494,7 @@ impl Sites {
             namespace_module_sites: _,
             f32_literal_sites: _,
             try_conversion_sites: _,
+            from_call_sites: _,
             forwarded_slot_sites: _,
             self_type_arg_sites: _,
             forwarding_fns: _,
@@ -675,7 +691,9 @@ pub(crate) struct SiteMaps {
     /// Namespace-group member-access sites — see [`Sites::namespace_module_sites`].
     pub(crate) namespace_module_sites: HashMap<Span, String>,
     /// `?`-conversion sites (error-ergonomics) — see [`Sites::try_conversion_sites`].
-    pub(crate) try_conversion_sites: HashMap<Span, String>,
+    pub(crate) try_conversion_sites: HashMap<Span, (String, String)>,
+    /// Explicit `Target.from(x)` conversion-selection sites — see [`Sites::from_call_sites`].
+    pub(crate) from_call_sites: HashMap<Span, String>,
     /// The type-argument table (poly-values F2b) — see [`Sites::type_arg_table`].
     pub(crate) type_arg_table: Vec<noeta_ext_abi::TypeArgInfo>,
     /// The type-argument table's reflection projection — see [`Sites::type_arg_reprs`].
@@ -730,6 +748,7 @@ impl SiteMaps {
             trait_call_sites: self.trait_call_sites,
             namespace_module_sites: self.namespace_module_sites,
             try_conversion_sites: self.try_conversion_sites,
+            from_call_sites: self.from_call_sites,
             type_arg_table: self.type_arg_table,
             type_arg_reprs: self.type_arg_reprs,
             hidden_arg_sites: self.hidden_arg_sites,

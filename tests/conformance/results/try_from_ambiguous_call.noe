@@ -1,0 +1,32 @@
+// A type declaring SEVERAL conversions has no single `from`: `Target.from(x)` names one of them,
+// and which one is decided statically by `x`'s type. Two ways that can fail, both refused here
+// rather than guessed:
+//
+//   * the argument's type is not resolved (`dyn`), so every declared conversion is a candidate —
+//     E0023, the same answer the checker gives anywhere it is asked to pick without evidence;
+//   * the argument's type names no declared source — E0007, naming what the target does convert.
+//
+// A target declaring ONE conversion has neither problem (its `from` needs no choosing), which is
+// why the rule reads "resolves when the source names exactly one" rather than "always annotate".
+// expect: error E0023 at 31:6
+// expect: error E0007 at 32:6
+// expect: exit 1
+struct A { n: int }
+struct B { s: string }
+struct C { f: float }
+
+struct Wrapped {
+    m: string
+
+    impl From<A> {
+        pub fn from(e: A): Wrapped { return Wrapped { m: "a" } }
+    }
+
+    impl From<B> {
+        pub fn from(e: B): Wrapped { return Wrapped { m: "b" } }
+    }
+}
+
+anything: dyn = A { n: 1 }
+echo Wrapped.from(anything)
+echo Wrapped.from(C { f: 1.0 })

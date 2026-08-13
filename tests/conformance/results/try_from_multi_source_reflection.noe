@@ -1,0 +1,46 @@
+// What several conversions look like to a **by-name** lookup, which carries no source type and so
+// cannot choose between them.
+//
+// A type declaring one conversion has a plain `from`: `invoke` calls it and `params_of` describes
+// it, exactly as for any other associated function. A type declaring several has no single `from` —
+// each conversion is named after the source it converts — so a lookup for the bare name finds
+// nothing (`invoke` fails the way it fails for any missing name, and `params_of` gives the same
+// "nothing to report" answer it gives an unknown target), while the conversion's own name reaches
+// it. The discovery surface and the dispatch surface agree by construction: whatever `params_of`
+// describes is what `invoke` calls.
+// expect: stdout "one: Ok(One {m: \"from a\"})"
+// expect: stdout "many bare: Err(type `Many` has no static function `from`)"
+// expect: stdout "many named: Ok(Many {m: \"from a\"})"
+// expect: stdout "params one: 1"
+// expect: stdout "params many bare: 0"
+// expect: stdout "params many named: 1"
+// expect: exit 0
+struct A { n: int }
+struct B { s: string }
+
+struct One {
+    m: string
+
+    impl From<A> {
+        pub fn from(e: A): One { return One { m: "from a" } }
+    }
+}
+
+struct Many {
+    m: string
+
+    impl From<A> {
+        pub fn from(e: A): Many { return Many { m: "from a" } }
+    }
+
+    impl From<B> {
+        pub fn from(e: B): Many { return Many { m: "from b" } }
+    }
+}
+
+echo "one: ${invoke(One, "from", [A { n: 1 }])}"
+echo "many bare: ${invoke(Many, "from", [A { n: 1 }])}"
+echo "many named: ${invoke(Many, "from<A>", [A { n: 1 }])}"
+echo "params one: ${params_of("One.from").len()}"
+echo "params many bare: ${params_of("Many.from").len()}"
+echo "params many named: ${params_of("Many.from<A>").len()}"

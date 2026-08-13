@@ -889,7 +889,7 @@ pub fn build(
                 // well-formed `#[Get("/users")]` on a struct method type-check and then vanish from
                 // `attributes_of::<Get>()` with no diagnostic.
                 for method in &decl.methods {
-                    let target = format!("{}.{}", decl.name, method.name);
+                    let target = method_target(decl.name.as_str(), method, &decl.impls);
                     push_attrs(&mut manifest, &target, method.name_span, &method.attrs);
                     push_params(&mut manifest, &mut params, target, method);
                 }
@@ -915,7 +915,7 @@ pub fn build(
                 // A method's attributes are keyed by its qualified `Class.method` name, so a
                 // `#[...]` on a method surfaces distinctly from the same name on another class.
                 for method in &decl.methods {
-                    let target = format!("{}.{}", decl.name, method.name);
+                    let target = method_target(decl.name.as_str(), method, &decl.impls);
                     push_attrs(&mut manifest, &target, method.name_span, &method.attrs);
                     push_params(&mut manifest, &mut params, target, method);
                 }
@@ -984,7 +984,7 @@ pub fn build(
                 // An enum method's attributes are keyed by its qualified `Enum.method` name, the same
                 // convention class/struct methods use (object-model slice 3).
                 for method in &decl.methods {
-                    let target = format!("{}.{}", decl.name, method.name);
+                    let target = method_target(decl.name.as_str(), method, &decl.impls);
                     push_attrs(&mut manifest, &target, method.name_span, &method.attrs);
                     push_params(&mut manifest, &mut params, target, method);
                 }
@@ -1180,6 +1180,25 @@ fn collect_trait_impls(program: &Program, native: &NativeTraitImpls) -> Vec<Trai
         }
     }
     records
+}
+
+/// The `Type.method` key one of a type's methods is discoverable under — what `params_of(target)`
+/// takes and what an attribute row on that method is keyed by.
+///
+/// Its declared name, except for one of **several** `From` conversions on a single type, which take
+/// the source-named keys they dispatch under ([`crate::conversion::from_conversion_keys`]). Keying
+/// them by the shared `from` would put two different signatures under one name and answer for
+/// whichever the walk reached last — and would name something `invoke` cannot reach either, since
+/// the runtime method table has no plain `from` for such a type. The discovery surface and the
+/// dispatch surface therefore say the same thing: `params_of("AppError.from<JsonError>")` describes
+/// exactly what `invoke(AppError, "from<JsonError>", …)` calls.
+///
+/// A type declaring one conversion is unaffected — its `from` is `from` everywhere.
+fn method_target(type_name: &str, method: &crate::FnDecl, impls: &[crate::ImplBlock]) -> String {
+    match crate::conversion::from_conversion_keys(impls).get(&method.name_span) {
+        Some(key) => format!("{type_name}.{key}"),
+        None => format!("{type_name}.{}", method.name),
+    }
 }
 
 /// Record one callable's **signature** — its parameters (in both of the renderings they have) and

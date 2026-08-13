@@ -1,0 +1,57 @@
+// A type carries ONE `From` conversion PER SOURCE: `impl From<A>` beside `impl From<B>` declares
+// two different conversions into one target, and each `?` converts through the one its propagated
+// `Err` type names. Resolution is static on both paths — the checker matches the source by type
+// identity and records which conversion the site calls — so neither backend ever chooses at run
+// time, and the two agree by construction.
+//
+// The explicit spelling picks the same way, by the argument's type (`AppError.from(e)`), which is
+// what keeps `?` and a hand-written conversion the same conversion.
+// expect: stdout "Ok(3)"
+// expect: stdout "Err(AppError {detail: \"http 404\"})"
+// expect: stdout "Err(AppError {detail: \"json at line 7\"})"
+// expect: stdout "explicit http: http 500"
+// expect: stdout "explicit json: json at line 1"
+// expect: stdout "piped: http 502"
+// expect: exit 0
+struct HttpError { status: int }
+struct JsonError { line: int }
+
+struct AppError {
+    detail: string
+
+    impl From<HttpError> {
+        pub fn from(e: HttpError): AppError {
+            return AppError { detail: "http ${e.status}" }
+        }
+    }
+
+    impl From<JsonError> {
+        pub fn from(e: JsonError): AppError {
+            return AppError { detail: "json at line ${e.line}" }
+        }
+    }
+}
+
+fn fetch(fail: bool): Result<int, HttpError> {
+    if fail { return Err(HttpError { status: 404 }) }
+    return Ok(1)
+}
+
+fn decode(fail: bool): Result<int, JsonError> {
+    if fail { return Err(JsonError { line: 7 }) }
+    return Ok(2)
+}
+
+// Both `?`s live in ONE function, so both conversions are reachable from one declared error type.
+fn work(http_fails: bool, json_fails: bool): Result<int, AppError> {
+    a = fetch(http_fails)?
+    b = decode(json_fails)?
+    return Ok(a + b)
+}
+
+echo work(false, false)
+echo work(true, false)
+echo work(false, true)
+echo "explicit http: ${AppError.from(HttpError { status: 500 }).detail}"
+echo "explicit json: ${AppError.from(JsonError { line: 1 }).detail}"
+echo "piped: ${(HttpError { status: 502 } |> AppError.from).detail}"

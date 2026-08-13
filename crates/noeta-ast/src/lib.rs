@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod bodies;
 pub mod builtin_ty;
+pub mod conversion;
 pub mod derive;
 pub mod desugar;
 mod name;
