@@ -4,13 +4,14 @@
 //! A type may declare one conversion per distinct source, and a method table has one slot per name.
 //! Those two facts meet here: this module is the single rule for naming a conversion's body, asked
 //! by everything that builds or resolves a method table — the checker's signature registration, IR
-//! lowering, and the bytecode compiler's prototype reservation. They agree because they ask the same
-//! function about the same declaration, not because three walks were written to match.
+//! lowering, the bytecode compiler's prototype reservation, and the reflection manifest. They agree
+//! because they ask the same function about the same declaration, not because four walks were
+//! written to match.
 //!
-//! It lives in the AST crate rather than beside [`BuiltinTrait`](noeta_types::BuiltinTrait) because
-//! the compiler is one of those askers and depends on no type-system crate; the trait's own
-//! spellings ([`FROM_TRAIT`], [`FROM_METHOD`]) are declared here and read *by* the built-in trait
-//! table, so there is still exactly one place either word is written.
+//! It lives in the AST crate rather than beside `BuiltinTrait` because the compiler is one of those
+//! askers and depends on no type-system crate; the trait's own spellings ([`FROM_TRAIT`],
+//! [`FROM_METHOD`]) are declared here and read *by* the built-in trait table, so there is still
+//! exactly one place either word is written.
 
 use std::collections::HashMap;
 

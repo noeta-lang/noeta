@@ -1458,7 +1458,7 @@ impl Checker {
             m,
             Receiver::trait_method(m.body.iter().any(|s| s.mentions("self"))),
         );
-        self.note_trait_supplied(type_name, &key.1.clone(), m, trait_name);
+        self.note_trait_supplied(type_name, &key.1, m, trait_name);
         self.symbols.methods.insert(
             key,
             FnSig {

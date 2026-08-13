@@ -1193,7 +1193,8 @@ impl Checker {
 
     /// Enforce **trait coherence** (overlap/uniqueness) on a single type: a trait may be
     /// implemented at most once — `From` once per source type it converts — counting both a
-    /// `@derive(T)` directive and an `impl T { }` block as implementations. A second implementation of an already-implemented trait — whether
+    /// `@derive(T)` directive and an `impl T { }` block as implementations. A second implementation
+    /// of an already-implemented trait — whether
     /// `@derive(T)` twice, two `impl T` blocks, or a `@derive(T)` alongside an `impl T` — is
     /// reported as `E0027 ConflictingTraitImpl`, **labelling both sites**: the primary span on the
     /// later occurrence, a secondary label on the one it collides with. This keeps each
