@@ -43,6 +43,14 @@ impl Checker {
 
     pub(crate) fn collect_imports(&mut self, program: &Program) {
         use noeta_ext_abi::registry::UseKind;
+        // The spellings this program may write `#[Transient]` as — resolved once, from the shared
+        // `noeta_ast` projection both backends resolve it with, so nothing downstream has to repeat
+        // the import reasoning (or drift from it).
+        self.transient_names
+            .extend(noeta_ast::attribute_local_names(
+                program,
+                noeta_ast::reflect::JSON_ATTR_TRANSIENT,
+            ));
         for stmt in &program.stmts {
             let Stmt::Use {
                 path, names, span, ..
@@ -601,6 +609,12 @@ impl Checker {
                     self.symbols
                         .type_kinds
                         .insert(c.name.to_string(), noeta_types::TypeKind::Class);
+                    // A class's field defaults and transient markers, exactly as a struct's — the
+                    // same call, because they answer the same questions for both kinds. It ran only
+                    // for structs while only a struct could decode, so a class's literal default
+                    // never reached its recipe and an omitted defaulted field decoded as a missing
+                    // one; that stopped being invisible the moment a class gained a decode.
+                    self.record_optional_fields(c.name.as_str(), &c.fields);
                     // A class with a `destruct { ... }` block seeds destruct-reachability (Phase 3.2b).
                     if c.destructor.is_some() {
                         self.symbols.destructor_classes.insert(c.name.to_string());
@@ -1401,6 +1415,19 @@ impl Checker {
             self.symbols
                 .field_defaults
                 .insert(type_name.to_string(), decode_defaults);
+        }
+        // And which fields left the serialized shape (`#[std.json.Transient]`), resolved through the
+        // program's own imports — the same set the backends resolve, so the checker's rules and the
+        // shapes they build cannot disagree about which fields are transient.
+        let transient: HashSet<String> = fields
+            .iter()
+            .filter(|f| noeta_ast::has_attribute(&f.attrs, &self.transient_names))
+            .map(|f| f.name.clone())
+            .collect();
+        if !transient.is_empty() {
+            self.symbols
+                .transient_fields
+                .insert(type_name.to_string(), transient);
         }
     }
 

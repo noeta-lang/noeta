@@ -1,0 +1,51 @@
+// `#[Transient]` takes a field out of the type's serialized shape — the encoder never writes it, the
+// decoder never reads it. The field still exists in every other respect: it is constructed, read,
+// mutated, and compared like any other.
+//
+// **Both directions, not just one.** A marker that only suppressed the write would leave a document
+// whose `hits` key decoded into the value, so the round trip would depend on who produced the input;
+// here a supplied `hits` is ignored, and the slot is filled from the declaration whatever the
+// document contains. That is what makes "not part of the shape" mean the same thing at both ends.
+//
+// **The fill comes from the declaration**, which is why a transient field must be able to supply one
+// — a literal default here, `none` for a `?T` (`std/json_transient_optional.noe`). A field that could
+// supply neither is refused at the derive (`diagnostics/transient_field_not_fillable.noe`) rather
+// than at the first parse.
+// expect: stdout "{\"id\":\"abc\"}"
+// expect: stdout "filled: abc / 0"
+// expect: stdout "ignored: 0"
+// expect: stdout "struct too: {\"n\":1}"
+// expect: stdout "live: 7"
+// expect: exit 0
+use std.json
+use std.json.Transient
+
+@derive(Serialize<Json>, Deserialize<Json>)
+class Basket {
+    pub id: string
+    #[Transient] pub mut hits: int = 0
+}
+
+@derive(Serialize<Json>, Deserialize<Json>)
+struct Counter {
+    n: int
+    #[Transient] seen: bool = false
+}
+
+b = Basket { id: "abc", hits: 7 };
+echo json.stringify(b);
+
+// An omitted transient key fills from the declared default.
+back = json.parse::<Basket>("{\"id\":\"abc\"}");
+echo "filled: ${back.id} / ${back.hits}";
+
+// A document that *does* carry the key is not consulted for it.
+noisy = json.parse::<Basket>("{\"id\":\"z\",\"hits\":99}");
+echo "ignored: ${noisy.hits}";
+
+// The marker is about the shape, not the kind: a value `struct` behaves identically.
+echo "struct too: ${json.stringify(Counter { n: 1, seen: true })}";
+
+// And the field is entirely ordinary in the program — the marker governs only what leaves it.
+b.hits = b.hits + 0;
+echo "live: ${b.hits}";

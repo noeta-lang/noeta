@@ -477,6 +477,8 @@ const TABLE_POLICIES: &[(&str, Policy, &str)] = &[
     ("type_args", Policy::MergeByContent, "absorb_type_args — live values index it, so it may only grow"),
     ("type_arg_reprs", Policy::MergeByContent, "absorb_type_args, in lockstep with type_args"),
     ("structural_eq_types", Policy::Append, "register_types"),
+    ("transient_slots", Policy::MergeByKey, "register_types"),
+    ("transient_names", Policy::Append, "register_types — a later entry's `use` adds spellings, never retracts one"),
     ("native_type_names", Policy::MergeByKey, "register_types"),
     ("packed_fields", Policy::MergeByKey, "register_types"),
     ("key_capable_types", Policy::Recomputed, "register_types' fixpoint over the accumulated packed_fields"),
@@ -582,6 +584,8 @@ impl SessionCompiler {
             type_args: Vec::new(),
             type_arg_reprs: Vec::new(),
             structural_eq_types: HashSet::new(),
+            transient_slots: HashMap::new(),
+            transient_names: HashSet::new(),
             native_type_names: HashMap::new(),
             packed_fields: HashMap::new(),
             key_capable_types: HashSet::new(),
@@ -1175,6 +1179,15 @@ struct ModuleCompiler {
     /// `class` absent here compares by reference identity. Mirrors the tree-walker's
     /// `TypeDef::structural_eq` so both backends agree (object-model slice 2).
     structural_eq_types: HashSet<String>,
+    /// Per declared struct/class, the slot indices of its `#[Transient]` fields (baked into each
+    /// instance's `Shape::transient_slots`, which the deep marshal reads). Only types that mark a
+    /// field appear. Mirrors the tree-walker's `FieldSpec::transient`, resolved from the same
+    /// declaration through the same [`noeta_ast::attribute_local_names`] projection so the two
+    /// backends cannot disagree about which fields leave the program.
+    transient_slots: HashMap<String, Vec<u32>>,
+    /// The spellings this program may write the transient marker as, resolved once from its `use`
+    /// statements — see [`Self::transient_slots`].
+    transient_names: HashSet<String>,
     /// For a **native** type registered under a key that is not its own name — an aliased leaf
     /// import (`use std.http.Framing as F`) or a group import's qualified identity
     /// (`http.Framing`) — the canonical short name a value of it carries in its shape.
@@ -1351,6 +1364,20 @@ impl ModuleCompiler {
         fns
     }
 
+    /// Record which of `type_name`'s slots are `#[Transient]`, for the `Shape` every literal of it
+    /// interns. Nothing is stored for a type that marks none, which is nearly all of them.
+    fn record_transient_slots(&mut self, type_name: &str, fields: &[noeta_ast::FieldDecl]) {
+        let slots: Vec<u32> = fields
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| noeta_ast::has_attribute(&f.attrs, &self.transient_names))
+            .map(|(i, _)| i as u32)
+            .collect();
+        if !slots.is_empty() {
+            self.transient_slots.insert(type_name.to_string(), slots);
+        }
+    }
+
     /// Pass 1: register every top-level `type`/`class`/`enum`/`use` so bodies compiled later
     /// can resolve them, and reserve a placeholder prototype for each class `fn`.
     fn register_types(&mut self, program: &Program) {
@@ -1401,12 +1428,20 @@ impl ModuleCompiler {
                 },
             );
         }
+        // The spellings this program may write `#[Transient]` as, resolved once from its own `use`
+        // statements through the projection the checker and the tree-walker share.
+        self.transient_names
+            .extend(noeta_ast::attribute_local_names(
+                program,
+                noeta_ast::reflect::JSON_ATTR_TRANSIENT,
+            ));
         for stmt in &program.stmts {
             match stmt {
                 noeta_ast::Stmt::Struct(decl) => {
                     let fields = decl.fields.iter().map(|f| f.name.clone()).collect();
                     // A value `struct` always compares structurally.
                     self.structural_eq_types.insert(decl.name.to_string());
+                    self.record_transient_slots(decl.name.as_str(), &decl.fields);
                     // A `@packed` struct feeds the key-capability fixpoint (P-PKEY, below).
                     if let Some(named) = noeta_ast::packed_named_fields(decl) {
                         self.packed_fields.insert(decl.name.to_string(), named);
@@ -1433,6 +1468,7 @@ impl ModuleCompiler {
                 }
                 noeta_ast::Stmt::Class(decl) => {
                     let fields: Vec<String> = decl.fields.iter().map(|f| f.name.clone()).collect();
+                    self.record_transient_slots(decl.name.as_str(), &decl.fields);
                     // A reference `class` compares structurally only if it is `Equatable` — derives
                     // it or hand-`impl`s `eq`; otherwise `==` falls back to reference identity.
                     if noeta_ast::derives_trait(&decl.decorators.derives, "Equatable")
@@ -1929,6 +1965,11 @@ impl ModuleCompiler {
             // before `make_record` arrives with the key-capable flag (P-PKEY), or vice versa.
             if shape.key_capable {
                 self.shapes[i].key_capable = true;
+            }
+            // Same reason, same direction: the transient list is only ever *known* by the site that
+            // has the declaration in hand, so whichever site arrives with it wins over an empty one.
+            if !shape.transient_slots.is_empty() {
+                self.shapes[i].transient_slots = shape.transient_slots;
             }
             return i as u32;
         }
@@ -4784,6 +4825,12 @@ impl<'m> FnCompiler<'m> {
     ) -> Result<(), Unsupported> {
         let structural_eq = self.module.structural_eq_types.contains(type_name);
         let key_capable = self.module.key_capable_types.contains(type_name);
+        let transient = self
+            .module
+            .transient_slots
+            .get(type_name)
+            .cloned()
+            .unwrap_or_default();
         let shape = self.module.intern_shape(
             Shape::object_equatable(
                 kind,
@@ -4791,7 +4838,8 @@ impl<'m> FnCompiler<'m> {
                 decl_fields.to_vec(),
                 structural_eq,
             )
-            .with_key_capable(key_capable),
+            .with_key_capable(key_capable)
+            .with_transient_slots(transient),
         );
         // In-place reuse (Phase 5): a self-update `acc = Type { ...acc, f: v }` whose spread base is a
         // directly-held **local** (Phase 5.1a) or a top-level **global** (Phase 5.1b) reuses that

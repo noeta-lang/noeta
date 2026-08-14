@@ -41,6 +41,11 @@ fn default_out(recipe: &TypeRecipe) -> NativeOut {
         TypeRecipe::Str => NativeOut::Str(String::new()),
         TypeRecipe::Unit => NativeOut::Unit,
         TypeRecipe::Option(_) => NativeOut::None,
+        // A `#[Transient]` field's type has no wire form, so there is no default to build for it —
+        // a producer walking a recipe for such a field has nothing to produce. It cannot be reached
+        // from a turbofish (`make_default::<T>()` takes a *type*, and no type is transient), only as
+        // a field of one, where this stands in for the slot the caller will not use.
+        TypeRecipe::Transient => NativeOut::Unit,
         TypeRecipe::List(_) => NativeOut::List(Vec::new()),
         TypeRecipe::Map(_) => NativeOut::Map(Vec::new()),
         TypeRecipe::Fielded {

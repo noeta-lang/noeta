@@ -215,7 +215,18 @@ pub const MAGIC: &[u8; 4] = b"NOEB";
 /// The kind cannot be re-derived on the reading side — a recipe carries the type's *name*, and the
 /// backend interns a shape from it without ever consulting a declaration — which is precisely why
 /// it had to enter the artifact rather than be looked up.
-pub const FORMAT_VERSION: u8 = 19;
+/// Bumped to 20 by `#[Transient]`: [`noeta_object::Shape`] gained `transient_slots` (the slots the
+/// deep marshal omits) and [`noeta_ext_abi::FieldRecipe`] gained `skipped`, so both the shape table
+/// and every baked deserialize recipe grew a field. postcard writes a struct's fields back to back
+/// with no tags, so a version-19 reader reads the new field's bytes as whatever follows it — and
+/// silently, since the values stay well-formed. `TypeRecipe` also gained a `Transient` arm, which
+/// appends to the variant-index space rather than shifting it; the field additions are what require
+/// the bump.
+///
+/// Neither can be re-derived on the reading side: a shape carries slot *names* and a recipe carries
+/// the type's name, and nothing downstream of the compiler ever sees the declaration that said which
+/// fields do not leave the program.
+pub const FORMAT_VERSION: u8 = 20;
 
 /// The SHA-256 of one canonical [`Module`]'s postcard encoding — the *other* half of
 /// [`FORMAT_VERSION`], and the thing that makes the changelog above enforceable.
@@ -239,7 +250,7 @@ pub const FORMAT_VERSION: u8 = 19;
 /// pair exists to prevent. The test's message says so; this doc says so; the changelog paragraph
 /// you are about to write is the third place.
 pub const MODULE_LAYOUT_DIGEST: &str =
-    "e3aa9a499b3d11692f0b1e11008e0d9da555e960d3614447dd1e0f2722ffcd4e";
+    "8d39c60b95b4f94ae0178c0f1e4c71f8ae73d16f1a601d5e3f3abb2e9be1b779";
 
 /// The runtime version stamped into and checked against artifacts — the building crate's
 /// package version. Any release that changes the serialized [`Module`] layout bumps this, so a

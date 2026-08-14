@@ -9,6 +9,7 @@
 
 use noeta_span::Span;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 pub mod bodies;
 pub mod builtin_ty;
@@ -965,6 +966,60 @@ pub struct MemberBinding {
 /// synthesizes structural ordering). Matches on the trait name regardless of its generic arguments.
 pub fn derives_trait(derives: &[DeriveSpec], trait_name: &str) -> bool {
     derives.iter().any(|d| d.name == trait_name)
+}
+
+/// Every spelling that denotes the attribute whose **qualified identity** is `qualified`, as this
+/// program may write it.
+///
+/// Always the qualified identity itself — what a fully-qualified `#[std.json.Transient]` is written
+/// as, and what the loader rewrites an imported one to — plus whatever each `use` binds it to:
+/// `use std.json.Transient` binds `Transient`, `use std.json.{Transient as Skipped}` binds
+/// `Skipped`, and a namespace import `use std.json` binds the qualified-through-the-namespace
+/// `json.Transient`.
+///
+/// **Import-driven, not a bare short-name match**, and that is the whole point. A program that
+/// declares its own `@attribute struct Transient` and never imports std's gets a set that does not
+/// contain its name, so the two are never confused — the same discipline the lowerer's native-type
+/// import table applies to type names, for the same reason. It is also why the answer is computed
+/// per program rather than assumed: the checker resolves `#[Foo]` through the import projection, so
+/// anything reading attributes *outside* the checker has to resolve them the same way or the two
+/// disagree about which fields a rule covers.
+pub fn attribute_local_names(program: &Program, qualified: &str) -> HashSet<String> {
+    let mut names = HashSet::from([qualified.to_string()]);
+    let Some((namespace, short)) = qualified.rsplit_once('.') else {
+        return names;
+    };
+    for stmt in &program.stmts {
+        let Stmt::Use {
+            path,
+            names: imported,
+            ..
+        } = stmt
+        else {
+            continue;
+        };
+        // Every `use` puts its final segment in `names` (`use std.json` is path `std` + name
+        // `json`), so both shapes fall out of one comparison against the imported leaf's own
+        // qualified identity.
+        let prefix = path.join(".");
+        for n in imported {
+            let leaf = format!("{prefix}.{}", n.name);
+            if leaf == qualified {
+                // The attribute itself: `#[Transient]`, or `#[Skipped]` under an alias.
+                names.insert(n.local().to_string());
+            } else if leaf == namespace {
+                // Its namespace: `#[json.Transient]`, through whatever the module is bound as.
+                names.insert(format!("{}.{short}", n.local()));
+            }
+        }
+    }
+    names
+}
+
+/// Whether `attrs` carries an attribute written as one of `names` — the spellings
+/// [`attribute_local_names`] resolved for one qualified identity.
+pub fn has_attribute(attrs: &[Attribute], names: &HashSet<String>) -> bool {
+    attrs.iter().any(|a| names.contains(a.name.as_str()))
 }
 
 /// The named field types of a `@packed` struct, for the key-capability fixpoint (P-PKEY):

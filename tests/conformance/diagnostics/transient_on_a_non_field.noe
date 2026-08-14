@@ -1,0 +1,20 @@
+// `#[Transient]` says something about a **field** — that it is not part of its type's serialized
+// shape — so it attaches to nothing else. The restriction is what makes a misplaced one visible: an
+// attribute nobody reads at a site is silent, not wrong-looking, so `#[Transient]` on a function
+// would otherwise check clean, run clean, and mean nothing at all.
+//
+// It is the ordinary placement gate (E0030), the same one an `@attribute(Field)` record of your own
+// gets — std's attributes declare their sites through the same channel rather than a rule of their
+// own, and the diagnostic names them: it is restricted to Field.
+// expect: error E0030 at 14:3
+// expect: error E0030 at 17:3
+// expect: exit 1
+use std.json.Transient
+
+#[Transient]
+fn helper(): int { return 1; }
+
+#[Transient]
+struct Order { id: string }
+
+echo helper();

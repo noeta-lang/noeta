@@ -2814,6 +2814,18 @@ pub const TIER_ATTR_BENCH: &str = "std.bench.Bench";
 /// production carries no doc text. One mandatory `text: string` field.
 pub const TIER_ATTR_DOC: &str = "std.doc.Doc";
 
+/// `#[Transient]` — the field marker that takes a field **out of the serialized shape**: the encoder
+/// never writes it and the decoder never reads it, so the slot is filled from its declared default
+/// (or `none`) on every decode. A marker, so it has no fields; field-only, so writing it anywhere
+/// else is E0030 rather than a line that quietly means nothing.
+///
+/// Under `std.json` because that is where a reader looking for it will be, but what it governs is
+/// every boundary a value crosses out of the program — [`crate::Program`] values reach a native
+/// function, an isolate, and a database bind through one deep marshal, and a transient field is
+/// absent from all of them. That is the point of it: the field holds something with no meaning
+/// outside this process (a cache, a live handle, a memo), so there is nothing to send.
+pub const JSON_ATTR_TRANSIENT: &str = "std.json.Transient";
+
 /// The prelude struct a declared tier's runner receives its roots as (tier-providers T2):
 /// `TierRoot { name: string, run: () -> void }` — one per activated fn. The checker registers it
 /// as a prelude type; dispatch constructs instances in the synthesized runner-call fragment.

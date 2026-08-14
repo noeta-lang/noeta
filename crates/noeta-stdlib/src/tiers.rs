@@ -12,7 +12,8 @@
 //! the two spellings together so they cannot drift.
 
 use noeta_ext_abi::registry::{
-    AttrFieldDefault, AttrFieldType, BodyFormatter, ExtAttrField, ExtAttribute, ExtTier, TierSite,
+    AttrFieldDefault, AttrFieldType, AttrTarget, BodyFormatter, ExtAttrField, ExtAttribute,
+    ExtTier, TierSite,
 };
 
 /// std's **tier-body formatters** keyed by body language (extension-driven tier-body formatting).
@@ -176,13 +177,14 @@ fn json_reindent(
     Some(format!("{base}{}", out.trim()))
 }
 
-/// The attributes the built-in tiers own, each under its **tier's namespace** (D2 — no global
+/// The attributes std declares, each under its owning module's **namespace** (D2 — no global
 /// attribute namespace): the test runner's metadata set under `std.test`
 /// (`Skip`/`Name`/`Group`/`Data`/`Timeout`), `bench`'s knob under `std.bench`
-/// (`Bench { iterations }`), and
+/// (`Bench { iterations }`),
 /// the doc tier's stamped text carrier under `std.doc` (`Doc { text }` — written by `@doc` activation
-/// with its qualified name, never by hand). A consumer imports them like any attribute:
-/// `use std.test.{Skip, Name}` then `#[Skip]`, or qualified `#[std.test.Skip]`.
+/// with its qualified name, never by hand), and serialization's `std.json.Transient`. A consumer
+/// imports them like any attribute: `use std.test.{Skip, Name}` then `#[Skip]`, or qualified
+/// `#[std.test.Skip]`.
 pub const ATTRIBUTES: &[ExtAttribute] = &[
     ExtAttribute {
         name: "Skip",
@@ -193,6 +195,7 @@ pub const ATTRIBUTES: &[ExtAttribute] = &[
             // Optional: both `#[Skip]` and `#[Skip("flaky")]` construct it.
             default: Some(AttrFieldDefault::Str("")),
         }],
+        targets: &[],
     },
     ExtAttribute {
         name: "Name",
@@ -202,6 +205,7 @@ pub const ATTRIBUTES: &[ExtAttribute] = &[
             ty: AttrFieldType::Str,
             default: None,
         }],
+        targets: &[],
     },
     ExtAttribute {
         name: "Group",
@@ -211,6 +215,7 @@ pub const ATTRIBUTES: &[ExtAttribute] = &[
             ty: AttrFieldType::Str,
             default: None,
         }],
+        targets: &[],
     },
     ExtAttribute {
         name: "Data",
@@ -220,6 +225,7 @@ pub const ATTRIBUTES: &[ExtAttribute] = &[
             ty: AttrFieldType::Dyn,
             default: None,
         }],
+        targets: &[],
     },
     // The per-test deadline override. Mandatory field: `#[Timeout]` with no number would have to
     // mean *something* about a bound, and every reading of it (the default? none?) is a guess the
@@ -232,6 +238,7 @@ pub const ATTRIBUTES: &[ExtAttribute] = &[
             ty: AttrFieldType::Int,
             default: None,
         }],
+        targets: &[],
     },
     ExtAttribute {
         name: "Bench",
@@ -241,6 +248,7 @@ pub const ATTRIBUTES: &[ExtAttribute] = &[
             ty: AttrFieldType::Int,
             default: None,
         }],
+        targets: &[],
     },
     ExtAttribute {
         name: "Doc",
@@ -250,5 +258,18 @@ pub const ATTRIBUTES: &[ExtAttribute] = &[
             ty: AttrFieldType::Str,
             default: None,
         }],
+        targets: &[],
+    },
+    // `#[Transient]` — the field is not part of the type's serialized shape. A marker (no fields),
+    // and the one std attribute that restricts its placement: it means something only on a field, so
+    // writing it on a function is E0030 rather than a line that silently does nothing.
+    //
+    // Under `std.json` because that is where a reader looking for it will be, though what it governs
+    // is every boundary the value crosses, not JSON alone — see `Value::to_native_deep`.
+    ExtAttribute {
+        name: "Transient",
+        namespace: "std.json",
+        fields: &[],
+        targets: &[AttrTarget::Field],
     },
 ];

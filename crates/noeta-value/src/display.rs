@@ -233,12 +233,20 @@ impl Value {
                             .collect(),
                     )
                 }
+                // A `#[Transient]` slot is dropped here, which is the single point that takes it out
+                // of *every* boundary the value crosses: `json.stringify`, a native call's
+                // arguments, a SQL bind, an isolate's output. That breadth is the meaning of the
+                // marker — a field holding something with no sense outside this process has nothing
+                // to send anywhere — and it is why the rule lives in the deep marshal rather than in
+                // the JSON serializer that sits on top of it.
                 Payload::Object { shape, slots } => NativeValue::Map(
                     shape
                         .fields
                         .iter()
                         .zip(slots)
-                        .map(|(name, v)| (name.clone(), v.to_native_deep()))
+                        .enumerate()
+                        .filter(|(i, _)| !shape.is_transient_slot(*i))
+                        .map(|(_, (name, v))| (name.clone(), v.to_native_deep()))
                         .collect(),
                 ),
                 Payload::Closure { .. }

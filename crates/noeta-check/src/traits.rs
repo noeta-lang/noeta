@@ -1766,6 +1766,7 @@ impl Checker {
             // both the field-constraint check and the recipe the runtime registry needs. On success the
             // `(type_name, recipe)` pair is recorded for the backends to bake; on failure it is E0050.
             if spec.name == "Deserialize" {
+                self.check_transient_fields_fillable(type_name, spec.span);
                 match self.type_to_recipe(&Type::Named(type_name.to_string(), Vec::new())) {
                     Some(recipe) => {
                         self.sites
@@ -1861,6 +1862,59 @@ impl Checker {
         }
     }
 
+    /// Every `#[Transient]` field of a type deriving `Deserialize<Format>` must be fillable
+    /// **without the wire** (E0050) — the rule that makes the round trip total.
+    ///
+    /// A transient field is absent from the encoded form by construction, so a decode of that form
+    /// has nothing to read for it and must fill the slot from the declaration alone. Two things
+    /// can: a `?T` (an absent optional is `none`, always), and a default the checker folded to a
+    /// literal — which the decoder bakes and decodes through the field's own recipe, the same walk a
+    /// supplied value would take. A default it could not fold (`= now()`, `= other()`) cannot,
+    /// because the decoder is a data walk with no way to run an expression; neither can a literal
+    /// default whose *type* has no JSON form (a `Set`, a tuple), since there is no `NativeOut` shape
+    /// to fill the slot with.
+    ///
+    /// Asked here, at the declaration, rather than left to the first parse. A field marked transient
+    /// and then never fillable is a program that encodes fine and fails to decode its own output —
+    /// the failure would surface at whichever runtime first round-trips it, naming a field the
+    /// author deliberately removed from the wire, which reads as a decoder bug rather than as the
+    /// missing default it is.
+    fn check_transient_fields_fillable(&mut self, type_name: &str, span: Span) {
+        let Some(transient) = self.symbols.transient_fields.get(type_name).cloned() else {
+            return;
+        };
+        let defaults = self.symbols.field_defaults.get(type_name);
+        let offender = self.symbols.records.get(type_name).and_then(|fields| {
+            fields
+                .iter()
+                .filter(|(fname, _)| transient.contains(fname))
+                .find(|(fname, fty)| {
+                    let optional = matches!(fty, Type::Option(_));
+                    let bakeable = matches!(
+                        defaults.and_then(|d| d.get(fname)),
+                        Some(noeta_ext_abi::FieldDefault::Literal(_))
+                    ) && self.type_to_recipe(fty).is_some();
+                    !optional && !bakeable
+                })
+                .cloned()
+        });
+        if let Some((fname, fty)) = offender {
+            self.error(
+                DiagnosticCode::UnderivableTrait,
+                span,
+                format!(
+                    "cannot derive `Deserialize` for `{type_name}`: field `{fname}` is \
+                     `#[Transient]`, so a decode never reads it, and nothing can fill it"
+                ),
+            )
+            .help(format!(
+                "give `{fname}` a literal default (`{fname}: {fty} = …`) or make it optional \
+                 (`?{fty}`) — a transient field is absent from the wire, so its value has to come \
+                 from the declaration"
+            ));
+        }
+    }
+
     /// The field constraint behind a derive (E0050): every field (struct/class) or variant payload
     /// (enum) must be able to support the derived behavior at runtime — `Comparable` needs an
     /// ordering, `Serialize` needs a JSON form. Rejects only what can **never** work (a `List` field
@@ -1886,10 +1940,22 @@ impl Checker {
                 .get(type_name)
                 .map(|ps| ps.iter().map(|p| p.id).collect())
                 .unwrap_or_default();
+            // A `#[Transient]` field is exempt from `Serialize`'s constraint: it is not part of the
+            // serialized form, so whether it *has* one is not this derive's question. That is the
+            // point of the marker — a class holding a live handle beside its data becomes
+            // serializable by saying which field does not travel, rather than being refused whole.
+            // `Comparable` is unaffected: ordering happens in-process, where every field is present.
+            let transient = match t {
+                BuiltinTrait::Serialize => self.symbols.transient_fields.get(type_name),
+                _ => None,
+            };
+            let exempt = |fname: &String| transient.is_some_and(|t| t.contains(fname));
             let offender = if let Some(fields) = self.symbols.records.get(type_name) {
                 fields
                     .iter()
-                    .find(|(_, ty)| !mentions_param(ty, &params) && !ok(self, ty))
+                    .find(|(fname, ty)| {
+                        !exempt(fname) && !mentions_param(ty, &params) && !ok(self, ty)
+                    })
                     .map(|(fname, ty)| (format!("field `{fname}`"), ty.clone()))
             } else {
                 self.symbols.enums.get(type_name).and_then(|variants| {
@@ -2020,8 +2086,13 @@ impl Checker {
                 }
                 visited.push(name.clone());
                 let subst = self.type_arg_subst(name, args);
+                // A `#[Transient]` field is not part of the serialized form, so it does not have to
+                // have one — the same exemption `check_derive_field_constraint` applies at the
+                // declaration, applied here so a *containing* type is serializable too.
+                let transient = self.symbols.transient_fields.get(name);
                 let fields_ok = self.symbols.records.get(name).is_none_or(|fs| {
                     fs.iter()
+                        .filter(|(fname, _)| !transient.is_some_and(|t| t.contains(fname)))
                         .all(|(_, t)| self.type_serializable(&apply_subst(t, &subst), visited))
                 }) && self.symbols.enums.get(name).is_none_or(|vs| {
                     vs.iter().all(|v| {

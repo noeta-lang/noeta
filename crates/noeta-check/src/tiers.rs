@@ -1843,15 +1843,20 @@ impl Checker {
                     ) =>
             {
                 let defaults = self.symbols.field_defaults.get(name);
+                let transient = self.symbols.transient_fields.get(name);
                 let fields = self
                     .symbols
                     .records
                     .get(name)?
                     .iter()
                     .map(|(fname, fty)| {
+                        let skipped = transient.is_some_and(|t| t.contains(fname));
                         Some(noeta_ext_abi::FieldRecipe {
                             name: fname.clone(),
-                            recipe: self.type_to_recipe(fty)?,
+                            recipe: match skipped {
+                                true => self.transient_field_recipe(fty),
+                                false => self.type_to_recipe(fty)?,
+                            },
                             // What an omitted field means (json-defaults): a declared LITERAL
                             // default is baked in and fills the field; any other default is
                             // `Dynamic` and stays required. Absent from the table ⇒ `Required`.
@@ -1859,6 +1864,11 @@ impl Checker {
                                 .and_then(|d| d.get(fname))
                                 .cloned()
                                 .unwrap_or_default(),
+                            // A `#[Transient]` field is absent from the wire in both directions, so
+                            // the decoder fills it the way it fills an omission — from the default
+                            // above, or `none` for a `?T`. That the fill can succeed is the derive
+                            // gate's question, asked at the declaration; here it is just recorded.
+                            skipped,
                         })
                     })
                     .collect::<Option<Vec<_>>>()?;
@@ -1893,6 +1903,29 @@ impl Checker {
             }
             _ => return None,
         })
+    }
+
+    /// The recipe recorded for a `#[Transient]` field — the one place a field's type is allowed to
+    /// have **no** JSON form without declining the whole type.
+    ///
+    /// A transient field is never decoded from the wire, so its recipe is not a description of a
+    /// wire value; it exists only insofar as the decoder's fill path reads it. Two shapes matter:
+    /// a `?T` fills with `none`, which reads the *option* node and never its payload — so an
+    /// unrecipeable payload is fine, and its place is held by
+    /// [`noeta_ext_abi::TypeRecipe::Transient`]; and a literal default decodes through the field's
+    /// own recipe, which therefore has to be the real one. Everything else says outright that it has
+    /// no wire form, and [`Checker::check_transient_fields_fillable`] has already refused the
+    /// declaration that would need it.
+    fn transient_field_recipe(&self, fty: &Type) -> noeta_ext_abi::TypeRecipe {
+        use noeta_ext_abi::TypeRecipe;
+        match fty {
+            Type::Option(inner) => TypeRecipe::Option(Box::new(
+                self.type_to_recipe(inner).unwrap_or(TypeRecipe::Transient),
+            )),
+            _ => self
+                .type_to_recipe(fty)
+                .unwrap_or(noeta_ext_abi::TypeRecipe::Transient),
+        }
     }
 
     /// The [`noeta_ext_abi::TypeRecipe::Enum`] for the declared enum `name`, or `None` if it has no
@@ -2207,8 +2240,8 @@ mod tests {
     #[test]
     fn extension_declarations_match_the_reflect_constants() {
         use noeta_ast::reflect::{
-            TEST_ATTR_DATA, TEST_ATTR_GROUP, TEST_ATTR_NAME, TEST_ATTR_SKIP, TEST_ATTR_TIMEOUT,
-            TIER_ATTR_BENCH, TIER_ATTR_DOC,
+            JSON_ATTR_TRANSIENT, TEST_ATTR_DATA, TEST_ATTR_GROUP, TEST_ATTR_NAME, TEST_ATTR_SKIP,
+            TEST_ATTR_TIMEOUT, TIER_ATTR_BENCH, TIER_ATTR_DOC,
         };
         // The contract is the **qualified** identity now (D2b): the reflect constants are FQNs, so
         // pin them against each declaration's `qualified()`, not its short `name`.
@@ -2223,12 +2256,24 @@ mod tests {
             TEST_ATTR_TIMEOUT,
             TIER_ATTR_BENCH,
             TIER_ATTR_DOC,
+            JSON_ATTR_TRANSIENT,
         ] {
             assert!(
                 declared.iter().any(|d| d == name),
                 "`{name}` missing from std's declarations"
             );
         }
+        // `Transient` is the one std attribute that restricts where it may be written, and the
+        // restriction is the whole reason a misplaced one is a diagnostic rather than a no-op — so
+        // the declaration is pinned, not just the spelling.
+        let transient = noeta_stdlib::registry::ext_attributes()
+            .find(|a| a.is_qualified(JSON_ATTR_TRANSIENT))
+            .expect("Transient declaration");
+        assert!(transient.fields.is_empty(), "`Transient` is a marker");
+        assert_eq!(
+            transient.targets,
+            [noeta_ext_abi::registry::AttrTarget::Field]
+        );
         use noeta_stdlib::registry::find_ext_tier;
         for tier in ["test", "bench", "doc", "debug"] {
             assert!(

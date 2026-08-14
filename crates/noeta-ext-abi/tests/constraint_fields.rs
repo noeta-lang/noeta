@@ -154,6 +154,20 @@ const TABLE: &[Row] = &[
             ),
         ),
     ),
+    // Transience is a rule about every document decoded into the type, and about every one encoded
+    // out of it: the field is not consulted in either direction, so the decoder fills it exactly as
+    // it fills an absent one whatever the input holds.
+    Row(
+        "FieldRecipe",
+        "skipped",
+        Constraint(
+            Anchor(STDLIB_JSON, "match field.skipped"),
+            Anchor(
+                "tests/conformance/std/json_transient_field.noe",
+                "ignored: ${noisy.hits}",
+            ),
+        ),
+    ),
     // --- ExtFn: one native function's static signature -------------------------------------------
     Row(
         "ExtFn",
@@ -806,6 +820,20 @@ const TABLE: &[Row] = &[
         "ExtAttribute",
         "namespace",
         Data(Anchor(REGISTRY, "let attributes = e.attributes()")),
+    ),
+    // Placement is a rule about every site the attribute is written at — the same E0030 gate an
+    // `@attribute(Field, …)` record of your own gets, so a native attribute and a `.noe` one are
+    // enforced by one path rather than two.
+    Row(
+        "ExtAttribute",
+        "targets",
+        Constraint(
+            Anchor(CHECK_PRELUDE, "if !attr.targets.is_empty()"),
+            Anchor(
+                "tests/conformance/diagnostics/transient_on_a_non_field.noe",
+                "it is restricted to Field",
+            ),
+        ),
     ),
     // --- ExtTier: the original instance of this bug class -----------------------------------------
     Row(

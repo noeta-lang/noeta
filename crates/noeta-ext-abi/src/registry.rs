@@ -574,6 +574,16 @@ pub enum TypeRecipe {
         /// freshly decoded variant runs `validate()` before it escapes the door.
         has_validator: bool,
     },
+    /// **No wire form** — the placeholder recipe of a [`FieldRecipe::skipped`] field whose type has
+    /// no JSON encoding at all (a live handle, a `Set`, a function).
+    ///
+    /// A transient field is never decoded from the wire, so it needs a recipe only where the fill
+    /// path reads one, and the fill paths that reach this never look through it: an absent `?T` is
+    /// `none` without decoding its payload. Reaching it *as a decode* means a value was supplied for
+    /// a field that has no way to read one, which is an error the decoder states rather than
+    /// guesses at — for a `.noe` declaration the checker has already refused that shape at the
+    /// derive, so this is the native-declaration backstop.
+    Transient,
 }
 
 /// One payload-free variant of a [`TypeRecipe::Enum`]: its case name, its declaration index, and the
@@ -645,6 +655,18 @@ pub struct FieldRecipe {
     pub recipe: TypeRecipe,
     /// What an *omitted* field means: required, or filled from a baked-in literal default.
     pub default: FieldDefault,
+    /// Whether the field is **transient** (`#[std.json.Transient]`): it is not part of the type's
+    /// serialized shape, so the encoder never writes it and the decoder never reads it — an input
+    /// supplying the key is ignored rather than honored, and the slot is always filled the way an
+    /// absent field is (`noeta_stdlib::json`'s `fill_absent_field`, the one place that rule lives).
+    ///
+    /// That is what makes the round trip total: a field the encoder omits must be fillable without
+    /// the wire, so a transient field must be `?T` or carry a literal default. The checker enforces
+    /// that at the declaration (E0080) rather than leaving it to the first parse; a *native*
+    /// declaration is not checked there, so the decoder's own missing-field error stands as the
+    /// backstop.
+    #[serde(default)]
+    pub skipped: bool,
 }
 
 impl FieldRecipe {
@@ -654,6 +676,7 @@ impl FieldRecipe {
             name: name.into(),
             recipe,
             default: FieldDefault::Required,
+            skipped: false,
         }
     }
 
@@ -669,6 +692,22 @@ impl FieldRecipe {
             name: name.into(),
             recipe,
             default: FieldDefault::Literal(json.into()),
+            skipped: false,
+        }
+    }
+
+    /// A **transient** field ([`Self::skipped`]): absent from the wire in both directions, filled
+    /// from `default` (or `none`, for a `?T`) on every decode.
+    pub fn transient(
+        name: impl Into<String>,
+        recipe: TypeRecipe,
+        default: FieldDefault,
+    ) -> FieldRecipe {
+        FieldRecipe {
+            name: name.into(),
+            recipe,
+            default,
+            skipped: true,
         }
     }
 }
@@ -1969,6 +2008,14 @@ pub struct ExtAttribute {
     /// `namespace.name`, mirroring [`ExtType::namespace`] / [`ExtFielded::namespace`].
     pub namespace: &'static str,
     pub fields: &'static [ExtAttrField],
+    /// Where this attribute may **attach**, or empty for "anywhere" — the same placement list a
+    /// `.noe` `@attribute(Field, Method, …)` declares, enforced by the same E0030 gate (the checker
+    /// seeds it into `symbols.attachable`).
+    ///
+    /// An attribute nothing reads at a site is silent, not wrong-looking, which is why this matters
+    /// for a *marker*: `#[Transient]` on a function would otherwise check clean and mean nothing.
+    /// Restricting it makes the misplacement a diagnostic that names the permitted sites.
+    pub targets: &'static [AttrTarget],
 }
 
 impl ExtAttribute {

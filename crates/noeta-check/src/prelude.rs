@@ -506,8 +506,18 @@ impl Checker {
             self.symbols
                 .type_kinds
                 .insert(qualified.clone(), noeta_types::TypeKind::Struct);
-            // Mark `@attribute` (bare — attachable anywhere) so the E0029 capability gate passes.
+            // Mark `@attribute` so the E0029 capability gate passes, and — when the declaration
+            // restricts its placement — seed the same `attachable` set an `@attribute(Field, …)`
+            // struct seeds, so E0030 fires on a misplaced native attribute exactly as on a `.noe`
+            // one. An empty `targets` is "attachable anywhere", which is what every tier-metadata
+            // attribute wants (a `#[Name("…")]` is meaningful wherever its runner looks).
             self.record_attribute(&qualified, Some(&[]));
+            if !attr.targets.is_empty() {
+                self.symbols.attachable.insert(
+                    qualified.clone(),
+                    attr.targets.iter().map(|t| attr_target_kind(*t)).collect(),
+                );
+            }
             let optional: HashSet<String> = attr
                 .fields
                 .iter()

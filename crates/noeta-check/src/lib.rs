@@ -1244,6 +1244,15 @@ struct Symbols {
     /// fields)` gives a dynamic construction. Only non-[`noeta_ext_abi::FieldDefault::Required`]
     /// fields are stored; an absent entry *is* `Required`.
     field_defaults: HashMap<String, HashMap<String, noeta_ext_abi::FieldDefault>>,
+    /// Per struct/class, the fields marked `#[std.json.Transient]` — type name → field names, absent
+    /// for the overwhelmingly common type that has none.
+    ///
+    /// Written by [`Checker::record_optional_fields`] from [`Checker::transient_names`], so a
+    /// *user's* own `Transient` is never mistaken for std's and std's is recognized under whatever
+    /// local name a `use` bound it to. Read by [`Checker::type_to_recipe`] (which marks the field
+    /// [`noeta_ext_abi::FieldRecipe::skipped`]) and by the derive gate that requires a transient
+    /// field to be fillable without the wire.
+    transient_fields: HashMap<String, HashSet<String>>,
     /// Class names that declare a `destruct { ... }` block — the seeds of destruct-reachability.
     destructor_classes: HashSet<String>,
     /// The **type-param forwarding table** (poly-values F2b + composite slots D2a): top-level
@@ -1528,6 +1537,13 @@ struct Checker {
     symbols: Symbols,
     /// The `use`-import bindings (see [`Imports`]).
     imports: Imports,
+    /// Every spelling this program may write the transient-field marker as
+    /// ([`noeta_ast::reflect::JSON_ATTR_TRANSIENT`]), resolved once by
+    /// [`noeta_ast::attribute_local_names`] at import time. Read where a field's attributes are
+    /// walked — deliberately the *shared* projection rather than [`Checker::attr_key`], because both
+    /// backends resolve the marker with it too and the three must agree on which fields are out of
+    /// the wire form.
+    transient_names: std::collections::HashSet<String>,
     /// The effect/scope coloring state (see [`Coloring`]).
     coloring: Coloring,
     /// The run configuration (see [`Config`]).

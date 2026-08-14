@@ -413,6 +413,11 @@ fn decode(json: &Json, recipe: &TypeRecipe, path: &mut String) -> Result<NativeO
             Json::Null => Ok(NativeOut::Unit),
             _ => Err(JsonError::mismatch(path, "unit", json)),
         },
+        // A transient field's type has no wire form, so no JSON value decodes through it. The fill
+        // paths that legitimately reach a transient field never call this (an absent `?T` answers
+        // `none` without looking at its payload); arriving here means something asked to decode a
+        // value into a slot that has no encoding, which is stated rather than approximated.
+        TypeRecipe::Transient => Err(JsonError::mismatch(path, "a non-serialized field", json)),
         TypeRecipe::Option(inner) => match json {
             Json::Null => Ok(NativeOut::None),
             value => Ok(NativeOut::Some(Box::new(decode(value, inner, path)?))),
@@ -453,7 +458,16 @@ fn decode(json: &Json, recipe: &TypeRecipe, path: &mut String) -> Result<NativeO
                 let mut slots = Vec::with_capacity(fields.len());
                 for field in fields {
                     let key = field.name.as_str();
-                    match entries.iter().find(|(k, _)| k == key) {
+                    // A **transient** field is not part of this type's serialized shape, so the
+                    // input is not consulted for it at all: it fills exactly as an absent field
+                    // does, whatever the document happens to contain. Looking the key up first and
+                    // ignoring a hit would be the same behavior with a worse failure mode — a
+                    // document carrying the key would round-trip through a value nothing wrote.
+                    let supplied = match field.skipped {
+                        true => None,
+                        false => entries.iter().find(|(k, _)| k == key),
+                    };
+                    match supplied {
                         Some((_, value)) => {
                             let mark = push_member(path, key);
                             let decoded = decode(value, &field.recipe, path)?;
@@ -883,6 +897,7 @@ mod tests {
                 name: "at".into(),
                 recipe: TypeRecipe::Int,
                 default: FieldDefault::Dynamic,
+                skipped: false,
             }],
             kind: FieldedKind::Struct,
             has_validator: false,

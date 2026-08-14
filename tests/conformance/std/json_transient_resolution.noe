@@ -1,0 +1,43 @@
+// Which field is transient is decided by **what the name resolves to**, not by what it is spelled —
+// the same import projection that decides whether `#[Foo]` is an attribute at all decides whether
+// this one is std's marker.
+//
+// That matters in both directions, and both are here. Std's marker is recognized under every
+// spelling a `use` gives it: the leaf import, an alias, and the module-qualified form. And a
+// program's *own* `Transient` is not std's: it is an ordinary attribute nobody reads, so the field
+// it decorates serializes normally. A backend matching the bare name would get that case backwards
+// — and would get it backwards *silently*, since the field would then vanish from the wire while
+// the checker still required it on the way back in.
+// expect: stdout "leaf: {\"id\":\"a\"}"
+// expect: stdout "alias: {\"id\":\"b\"}"
+// expect: stdout "namespace: {\"id\":\"c\"}"
+// expect: stdout "not std's: {\"id\":\"d\",\"n\":5}"
+// expect: exit 0
+use std.json
+use std.json.Transient
+use std.json.Transient as Hidden
+
+// A same-named attribute of this program's own, which the marker's rule must not claim.
+@attribute(Field)
+struct Mine { }
+
+@derive(Serialize<Json>)
+struct Leaf { id: string
+  #[Transient] n: int = 0 }
+
+@derive(Serialize<Json>)
+struct Aliased { id: string
+  #[Hidden] n: int = 0 }
+
+@derive(Serialize<Json>)
+struct Qualified { id: string
+  #[json.Transient] n: int = 0 }
+
+@derive(Serialize<Json>)
+struct Own { id: string
+  #[Mine] n: int = 0 }
+
+echo "leaf: ${json.stringify(Leaf { id: "a", n: 5 })}";
+echo "alias: ${json.stringify(Aliased { id: "b", n: 5 })}";
+echo "namespace: ${json.stringify(Qualified { id: "c", n: 5 })}";
+echo "not std's: ${json.stringify(Own { id: "d", n: 5 })}";

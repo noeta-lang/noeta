@@ -11,7 +11,7 @@
 | `Display` | A structural `to_string` — a **marker**: the structural default you already get, kept so a competing hand-written `impl Display` is a coherence error. |
 | `Error` | `message()` returns `"${self}"` — the type's display story (a hand-written `impl Display`'s `to_string()`, or the structural rendering under `@derive(Display)`). Requires the type to have `Display` at all (E0050 otherwise); `@derive(Error, via: field)` instead forwards `message()` into the field's own `Error` implementation. See [Error Handling](Error-Handling#deriving-error). |
 | `Clone` | A structural clone — a marker like `Display` (value semantics already copy). |
-| `Serialize<Json>` | Synthesizes `to_json()` (on an enum: the variant rendering `json.stringify` produces). Encoding always writes **every** field — a default is a decode-side notion, so it never omits one. A `bytes` field encodes as a JSON **array of its byte values** (`[104, 105]`) — the lossless spelling that needs no agreed side-channel like base64; it is write-only, since `bytes` is not a decodable field type. An **enum value** encodes as its case name when the variant is payload-free (`"Green"`) and as `{"Case":[payload…]}` when it carries one (`Shape.Circle(3)` → `{"Circle":[3]}`) — the payload travels, positionally, rather than being dropped in favor of the tag; `Result` is a plain enum, so `Ok(5)` is `{"Ok":[5]}`. Like `bytes`, the payload-carrying form is write-only ([a payload-carrying enum has no JSON decoding at all](#enum-typed-fields)). An `Option` is the one exception, by the JSON-null convention: `some(x)` encodes as `x` and `none` as `null`, at the top level and inside a variant's payload alike. |
+| `Serialize<Json>` | Synthesizes `to_json()` (on an enum: the variant rendering `json.stringify` produces). Encoding writes **every** field except one marked [`#[Transient]`](#keeping-a-field-out-of-the-wire) — a default is a decode-side notion, so it never omits one. A `bytes` field encodes as a JSON **array of its byte values** (`[104, 105]`) — the lossless spelling that needs no agreed side-channel like base64; it is write-only, since `bytes` is not a decodable field type. An **enum value** encodes as its case name when the variant is payload-free (`"Green"`) and as `{"Case":[payload…]}` when it carries one (`Shape.Circle(3)` → `{"Circle":[3]}`) — the payload travels, positionally, rather than being dropped in favor of the tag; `Result` is a plain enum, so `Ok(5)` is `{"Ok":[5]}`. Like `bytes`, the payload-carrying form is write-only ([a payload-carrying enum has no JSON decoding at all](#enum-typed-fields)). An `Option` is the one exception, by the JSON-null convention: `some(x)` encodes as `x` and `none` as `null`, at the top level and inside a variant's payload alike. |
 | `Deserialize<Json>` | Registers the type's decode recipe, so JSON decodes into it: `json.parse::<T>` / `json.try_parse::<T>`, `Response.json::<T>()`, and the router-facing `json.decode_typed("T", text)` (which resolves the type by *name* at runtime, and needs this derive). Derivable for a non-generic `struct` or `class` whose fields are all JSON-decodable — numbers, `bool`, `string`, `?T`, `List`, string-keyed `Map`, a declared **enum**, or another such type; anything else is E0050. A decoded `class` is a class: it has identity, compares by reference, and runs its `Validate` at the door like any other decode. See [which fields may be omitted](#which-json-fields-may-be-omitted) and [enum-typed fields](#enum-typed-fields) below. |
 
 ```noeta check
@@ -65,7 +65,7 @@ The same rule governs request bodies: a web framework decodes a handler's body p
 
 ## A derive sees the whole type
 
-`Serialize` writes every field and `Deserialize` reads every field, **private ones included** — and that is the point rather than an oversight.
+`Serialize` writes every field and `Deserialize` reads every field, **private ones included** — and that is the point rather than an oversight. (One field at a time can be excluded, by the declaration itself: see [`#[Transient]`](#keeping-a-field-out-of-the-wire).)
 
 A derive is written *inside* the declaration, next to the methods, so it is the type saying what its wire form is. That standing is what a caller-side reflective door does not have: `construct` refuses to set a private field by name, and `fields_of` reports only the fields you could have read yourself, because those are reached from outside by code the type never authorized. The two rules answer different questions — **`pub` governs access, a derive governs shape.**
 
@@ -87,6 +87,40 @@ wire = json.stringify(Box.new("hi", 42))    // {"label":"hi","secret":42}
 back = json.parse::<Box>(wire)
 echo back.peek()                            // 42
 ```
+
+## Keeping a field out of the wire
+
+`#[Transient]` takes one field out of the type's serialized shape: the encoder never writes it, and the decoder never reads it — a document that carries the key is not consulted for it either. Everything else about the field is unchanged; it is constructed, read, mutated and compared like any other.
+
+```noeta
+use std.json
+use std.json.Transient
+
+@derive(Serialize<Json>, Deserialize<Json>)
+class Basket {
+    pub id: string
+    #[Transient] pub mut hits: int = 0    // a live counter, meaningless to anyone else
+}
+
+json.stringify(Basket { id: "abc", hits: 7 })     // {"id":"abc"} — no `hits`
+json.parse::<Basket>("{\"id\":\"abc\"}").hits     // 0, from the declaration
+```
+
+**A transient field must be able to supply its own value**, since the wire will not: give it a default the compiler can fold to a literal, or make it optional (`?T`, which fills with `none`). A field that can do neither is refused where the derive is written rather than at the first parse — a type that encodes cleanly and cannot read its own output back is a decoder bug everywhere except at the declaration that caused it. A `Serialize`-only type is unconstrained, because nothing ever fills anything.
+
+The marker is also what makes a type with an unserializable field serializable at all. `@derive(Serialize<Json>)` is refused when a field has no JSON form, and that verdict is about the whole type; marking the field takes it out of the shape, so the rest travels:
+
+```noeta
+use std.json.Transient
+
+@derive(Serialize<Json>)
+class Pool {
+    pub host: string
+    #[Transient] pub open: Set<string> = #{}    // a `Set` has no JSON form — and does not need one
+}
+```
+
+What it governs is every boundary the value crosses out of the program, not JSON alone: the same field is absent from a native function's arguments, a database bind, and an isolate's output. That is the meaning of the marker — a field holding something with no sense outside this process has nothing to send anywhere.
 
 ## Enum-typed fields
 
@@ -178,7 +212,7 @@ An extension can register a derive (`ExtDerive` — see [Native Extensions](Nati
 
 ## Field constraints (E0050)
 
-A derive must be supportable by the type's fields (or an enum's variant payloads): `Comparable` needs every field to have an ordering — a `List`/`Map`/`Set`/tuple/`bytes`/function field can never order, so the derive is rejected at the declaration instead of failing at the first runtime comparison. `Serialize` likewise rejects function-typed fields. Value-dependent kinds (`dyn`, unions, extern types like `Uuid`) stay permitted and defer to the runtime. `Equatable` has no constraint — structural `==` is total.
+A derive must be supportable by the type's fields (or an enum's variant payloads): `Comparable` needs every field to have an ordering — a `List`/`Map`/`Set`/tuple/`bytes`/function field can never order, so the derive is rejected at the declaration instead of failing at the first runtime comparison. `Serialize` likewise rejects function-typed fields, unless the field is [`#[Transient]`](#keeping-a-field-out-of-the-wire) — a field outside the wire form needs none. `Comparable` has no such escape: ordering happens in-process, where every field is present. Value-dependent kinds (`dyn`, unions, extern types like `Uuid`) stay permitted and defer to the runtime. `Equatable` has no constraint — structural `==` is total.
 
 ## Generic derives are conditional
 

@@ -180,7 +180,14 @@
 /// shape — private fields included — where a caller-side reflective door (`construct`, `fields_of`)
 /// does not. Refusing a class left it serializable and never recoverable, because `Serialize`
 /// writes every field regardless; the wire form existed with nothing able to read it back.
-pub const ABI_VERSION: u32 = 18;
+///
+/// **19** — a field can leave the serialized shape. [`registry::FieldRecipe`] gained `skipped` and
+/// [`registry::ExtAttribute`] gained `targets`; both default to the previous behavior, so the break
+/// is source-only and only for code building either by literal (`..Default::default()`, or the new
+/// `FieldRecipe::transient` / an empty `targets`). What they carry is `#[std.json.Transient]`: the
+/// marker that takes a field out of the wire form in both directions, and the placement list that
+/// makes writing it anywhere but a field a diagnostic instead of a no-op.
+pub const ABI_VERSION: u32 = 19;
 
 pub mod args;
 pub mod channel;

@@ -1,0 +1,35 @@
+// A `#[Transient]` field's type does not need a serialized form of its own — which is the case the
+// marker exists for. A class holding a live cache, a handle, or a `Set` beside its data was
+// previously not serializable at all: `@derive(Serialize<Json>)` is refused when any field has no
+// JSON form, and that verdict was about the whole type. Marking the field takes it out of the shape,
+// so the rest of the type travels.
+//
+// The decode side follows from the same fact: an absent `?T` is `none` without ever looking at its
+// payload, so an optional transient field fills even when nothing could decode what it holds.
+// expect: stdout "{\"host\":\"h\"}"
+// expect: stdout "decoded: z / none"
+// expect: stdout "serialize only: {\"host\":\"k\"}"
+// expect: exit 0
+use std.json
+use std.json.Transient
+
+@derive(Serialize<Json>, Deserialize<Json>)
+class Conn {
+    pub host: string
+    #[Transient] pub tags: ?Set<string>
+}
+
+// `Serialize` alone needs no fill at all, so a transient field with a default of an unserializable
+// type is fine — nothing ever decodes it.
+@derive(Serialize<Json>)
+class Pool {
+    pub host: string
+    #[Transient] pub open: Set<string> = #{}
+}
+
+echo json.stringify(Conn { host: "h", tags: none });
+
+back = json.parse::<Conn>("{\"host\":\"z\"}");
+echo "decoded: ${back.host} / ${back.tags}";
+
+echo "serialize only: ${json.stringify(Pool { host: "k" })}";

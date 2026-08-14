@@ -591,6 +591,11 @@ impl std::fmt::Debug for TypeDef {
 /// checker enforces `mut`-field assignment, E0033 — so the runtime tree-walker records only the name.)
 struct FieldSpec {
     name: String,
+    /// Whether the field is `#[std.json.Transient]` — outside the type's serialized shape, so the
+    /// deep marshal omits it. The tree-walker twin of the VM's `Shape::transient_slots`; both are
+    /// read from the same declaration through the same shared attribute projection, so the two
+    /// engines cannot disagree about which fields leave the program.
+    transient: bool,
 }
 
 /// A struct or class instance: its type and the values of its fields. A value `struct` is
@@ -1361,6 +1366,13 @@ struct Interpreter {
     /// by the *same* `noeta_ast::reflect::build` the VM uses — so `attributes_of` materializes
     /// identical values in both backends. Populated at the start of `run`.
     reflection: noeta_ast::reflect::ReflectionInfo,
+    /// Every spelling this program may write the transient-field marker as
+    /// ([`noeta_ast::reflect::JSON_ATTR_TRANSIENT`]), resolved once at run start by the shared
+    /// [`noeta_ast::attribute_local_names`] — the same projection the checker and the compiler
+    /// resolve it with. A field declaration is matched against it when its `TypeDef` is registered,
+    /// so the "does this field leave the program?" question is answered once per type rather than
+    /// per marshal.
+    transient_names: std::collections::HashSet<String>,
     /// For a **native** type bound under a name that is not its own — `use std.http.Framing as F` —
     /// the canonical short name a value of it carries. A pattern is written with the binding (`F.Sse`)
     /// while the value it must match is stamped with the type's own name (`Framing`), so the two are
@@ -1511,6 +1523,7 @@ impl Interpreter {
             ext_arena_free: Vec::new(),
             ext_state: Vec::new(),
             reflection: noeta_ast::reflect::ReflectionInfo::default(),
+            transient_names: std::collections::HashSet::new(),
             native_type_names: std::collections::HashMap::new(),
             type_of_sites: std::collections::HashMap::new(),
             deserialize_recipes: std::collections::HashMap::new(),
@@ -2651,6 +2664,9 @@ impl Interpreter {
                 .iter()
                 .map(|f| FieldSpec {
                     name: f.name.to_string(),
+                    // A native declaration has no `#[Transient]` surface today; the marker is a `.noe`
+                    // field attribute, and a native field carries no attributes at all.
+                    transient: false,
                 })
                 .collect(),
             methods: HashMap::new(),
@@ -6577,6 +6593,9 @@ fn native_type_value(
             .iter()
             .map(|f| FieldSpec {
                 name: f.name.to_string(),
+                // A native declaration has no `#[Transient]` surface today; the marker is a `.noe`
+                // field attribute, and a native field carries no attributes at all.
+                transient: false,
             })
             .collect(),
         methods: HashMap::new(),
@@ -6598,7 +6617,10 @@ fn fresh_type_def(name: &str, fields: &[String], is_struct: bool) -> TypeDef {
         name: name.to_string(),
         fields: fields
             .iter()
-            .map(|f| FieldSpec { name: f.clone() })
+            .map(|f| FieldSpec {
+                name: f.clone(),
+                transient: false,
+            })
             .collect(),
         methods: HashMap::new(),
         destructor: None,
@@ -7105,7 +7127,10 @@ fn materialize_ext(
 pub(crate) fn fielded_object(name: String, is_struct: bool, fields: Vec<(String, Value)>) -> Value {
     let field_specs = fields
         .iter()
-        .map(|(n, _)| FieldSpec { name: n.clone() })
+        .map(|(n, _)| FieldSpec {
+            name: n.clone(),
+            transient: false,
+        })
         .collect();
     let slots: Vec<Value> = fields.into_iter().map(|(_, v)| v).collect();
     let def = Rc::new(TypeDef {
@@ -7391,6 +7416,10 @@ fn value_to_native_deep(value: &Value) -> noeta_stdlib::NativeValue {
         Value::Object(object) => {
             // Declared field order (records/classes) or sorted-key order (opaque imports). Recursion
             // is on field *values* (distinct objects), so holding this borrow is safe.
+            //
+            // A `#[Transient]` field is dropped, mirroring the VM's `to_native_deep`: the marker
+            // takes the field out of every boundary the value crosses, and this is the walk every
+            // one of them goes through.
             let slots = object.slots.borrow();
             NativeValue::Map(
                 object
@@ -7398,6 +7427,7 @@ fn value_to_native_deep(value: &Value) -> noeta_stdlib::NativeValue {
                     .fields
                     .iter()
                     .zip(slots.iter())
+                    .filter(|(f, _)| !f.transient)
                     .map(|(f, v)| (f.name.clone(), value_to_native_deep(v)))
                     .collect(),
             )

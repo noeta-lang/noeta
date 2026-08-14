@@ -299,6 +299,7 @@ fn all_type_recipes() -> Vec<TypeRecipe> {
             variants: all_variant_recipes(),
             has_validator: true,
         },
+        TypeRecipe::Transient,
     ]
 }
 
@@ -335,6 +336,7 @@ fn all_field_recipes() -> Vec<FieldRecipe> {
             name: format!("f{i}"),
             recipe,
             default: defaults[i % defaults.len()].clone(),
+            skipped: i % 2 == 0,
         })
         .collect()
 }
@@ -371,6 +373,7 @@ fn canonical_shapes() -> Vec<Shape> {
         variant_index: Some(i as u32 + 5),
         structural_eq: i % 2 == 1,
         key_capable: i % 3 == 0,
+        transient_slots: vec![i as u32],
     })
     .collect()
 }

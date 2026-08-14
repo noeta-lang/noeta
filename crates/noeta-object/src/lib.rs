@@ -79,12 +79,29 @@ pub struct Shape {
     /// many times since this field landed.
     #[serde(default)]
     pub key_capable: bool,
+    /// The slot indices of this type's `#[std.json.Transient]` fields, ascending — the fields that
+    /// **do not leave the program**, so the deep marshal (`json.stringify`, a native call's
+    /// arguments, an isolate's output) omits them. Empty for the overwhelmingly common type that
+    /// marks none, which is why it is a sparse index list rather than a per-slot flag.
+    ///
+    /// It rides on the shape because the deep marshal walks a value's slots against its shape and
+    /// has nothing else to consult — no type table, no recipe, no checker. Type metadata like
+    /// [`Shape::structural_eq`], so it is **excluded from equality/hashing** below: a shape built
+    /// without declaration context (reflection materialization, an isolate rehydrating a value)
+    /// still matches the compiler's interned shape for the same type, which is the shape carrying
+    /// the real list.
+    ///
+    /// The `#[serde(default)]` is for the self-describing readers only, exactly as for
+    /// `key_capable` — a `.noeb` bundle is postcard, where an added field is a `FORMAT_VERSION`
+    /// question and never a defaulted one.
+    #[serde(default)]
+    pub transient_slots: Vec<u32>,
 }
 
-// `structural_eq` and `key_capable` are type metadata, not part of a shape's structural identity (two shapes are "the
-// same shape" iff same kind/name/fields/variant/result-option). Hand-implemented to exclude it so a
-// shape built without derive context (e.g. reflection materialization) still matches the compiler's
-// interned shape for the same type.
+// `structural_eq`, `key_capable` and `transient_slots` are type metadata, not part of a shape's
+// structural identity (two shapes are "the same shape" iff same kind/name/fields/variant/result-option).
+// Hand-implemented to exclude them so a shape built without derive context (e.g. reflection
+// materialization) still matches the compiler's interned shape for the same type.
 impl PartialEq for Shape {
     fn eq(&self, other: &Shape) -> bool {
         self.kind == other.kind
@@ -132,6 +149,7 @@ impl Shape {
             structural_eq,
             variant_index: None,
             key_capable: false,
+            transient_slots: Vec::new(),
         }
     }
 
@@ -141,6 +159,20 @@ impl Shape {
     pub fn with_key_capable(mut self, key_capable: bool) -> Shape {
         self.key_capable = key_capable;
         self
+    }
+
+    /// Mark which slots are `#[Transient]` — chained by the backends, which read the declaration's
+    /// field attributes; every other construction site leaves the list empty and resolves against
+    /// the compiler's canonical interned shape, exactly as for [`Shape::with_key_capable`].
+    pub fn with_transient_slots(mut self, transient_slots: Vec<u32>) -> Shape {
+        self.transient_slots = transient_slots;
+        self
+    }
+
+    /// Whether slot `i` is transient — the deep-marshal question, asked per slot. Short-circuits on
+    /// the empty list, which is what almost every type carries.
+    pub fn is_transient_slot(&self, i: usize) -> bool {
+        !self.transient_slots.is_empty() && self.transient_slots.contains(&(i as u32))
     }
 
     /// An enum-variant shape: `name` is the enum, `variant` the case, `fields` the positional
@@ -161,6 +193,7 @@ impl Shape {
             structural_eq: true,
             variant_index: None,
             key_capable: false,
+            transient_slots: Vec::new(),
         }
     }
 

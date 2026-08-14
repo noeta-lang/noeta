@@ -259,6 +259,11 @@ impl Interpreter {
         // through the same registry projection seam as the roles — the VM's compile does the same.
         let native_traits = noeta_ir::native_trait_impls(self.reg());
         self.reflection = noeta_ast::reflect::build(ast, &native_roles, &native_traits);
+        // The spellings this program may write `#[Transient]` as, from the shared projection the
+        // checker and the VM's compile resolve it with — so all three agree on which fields leave
+        // the serialized shape rather than each matching the name its own way.
+        self.transient_names =
+            noeta_ast::attribute_local_names(ast, noeta_ast::reflect::JSON_ATTR_TRANSIENT);
         // The extensions' own declarations are NOT embedded: both backends resolve a native
         // declaration through the shared lazy `ReflectionInfo` lookups (`noeta_ast::native_reflect`),
         // so the differential stays green by construction and neither pays for the whole registry.
@@ -640,6 +645,7 @@ impl Interpreter {
             .iter()
             .map(|f| FieldSpec {
                 name: f.name.clone(),
+                transient: noeta_ast::has_attribute(&f.attrs, &self.transient_names),
             })
             .collect();
         let methods = strukt
@@ -742,6 +748,7 @@ impl Interpreter {
             .iter()
             .map(|f| FieldSpec {
                 name: f.name.clone(),
+                transient: noeta_ast::has_attribute(&f.attrs, &self.transient_names),
             })
             .collect();
         let methods = class

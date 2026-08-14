@@ -70,7 +70,13 @@ impl Checker {
                         target.label(),
                     ),
                 )
-                .help("change the target, or widen the `@attribute(...)` directive");
+                // The second half only applies to an attribute the reader can edit — std's
+                // declare their sites too, and telling someone to widen `std.json.Transient` sends
+                // them looking for a declaration they cannot reach.
+                .help(
+                    "move it to one of those; an attribute you declare yourself can widen its \
+                         `@attribute(...)` list instead",
+                );
                 continue;
             }
             self.check_attribute_construction(attr, &key);

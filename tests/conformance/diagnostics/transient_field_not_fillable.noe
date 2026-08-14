@@ -1,0 +1,37 @@
+// A `#[Transient]` field of a type that derives `Deserialize` must be fillable **without the wire**,
+// because a decode of that type's own output has nothing to read for it: a `?T` (`none`) or a
+// default the checker could fold to a literal. Anything else is refused at the declaration.
+//
+// Asked here rather than at the first parse, which is the point of the case. A type marked this way
+// encodes perfectly and fails only when something reads its output back — at whichever runtime does
+// it first, naming a field the author deliberately removed from the wire. That reads as a decoder
+// bug; the missing default it actually is has to be said where the default would go.
+//
+// Three shapes fail, one per reason a fill can be impossible: no default at all, a default the
+// checker could not fold (`= size()` runs an expression, and a decode is a data walk), and a literal
+// default of a type that has no JSON form to decode it through.
+// expect: error E0050 at 19:26
+// expect: error E0050 at 25:26
+// expect: error E0050 at 31:26
+// expect: exit 1
+use std.json.Transient
+
+@derive(Serialize<Json>, Deserialize<Json>)
+struct Order {
+    id: string
+    #[Transient] note: string
+}
+
+@derive(Serialize<Json>, Deserialize<Json>)
+struct Ticket {
+    id: string
+    #[Transient] at: int = size()
+}
+
+@derive(Serialize<Json>, Deserialize<Json>)
+struct Batch {
+    id: string
+    #[Transient] tags: Set<string> = #{}
+}
+
+fn size(): int { return 1; }
