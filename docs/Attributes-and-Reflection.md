@@ -177,6 +177,25 @@ struct User { name: string; id: int }
 echo User { name: "ada", id: 1 }.inspect()   // { name: ada id: 1 }
 ```
 
+**It reports the fields the call site could have read itself.** The door hands back *values*, so it answers the same visibility question a written `x.secret` does: outside the declaring type, a `class`'s private fields are absent. A `struct`'s fields are always public, so nothing about a struct is filtered.
+
+Inside the type, `fields_of(self)` — or `fields_of(other)` on a sibling instance — reports everything, which is what makes a type able to write about its own whole shape. A trait's **default body** sees only public fields even when the implementor derives it: that body is written in the trait and shared by every implementor, so it is not inside any of them. So is a walker taking `dyn`, which is by construction outside every type it visits:
+
+```noeta
+class Box {
+    pub label: string
+    secret: int
+
+    pub fn new(l: string, s: int): Self { return Box { label: l, secret: s } }
+    pub fn own(): dyn { return fields_of(self) }        // label and secret
+}
+
+b = Box.new("hi", 42)
+fields_of(b)                                            // label only
+```
+
+A type that wants a private field on the wire says so with a derive instead — `Serialize` is written inside the declaration, so it speaks for the type where a caller-side door does not. That is the same split [`construct`](#constructname-fields--build-a-value-from-data) applies by refusing to *set* a private field, and it is why `field_specs_of` is different in kind: it describes the declaration's shape and reads no values, so it lists every field.
+
 ### `traits_of(value): List<string>` — trait-membership reflection
 
 `traits_of(value)` returns the trait names the value's nominal type has a **registered implementation** for — a standalone `impl Trait for T`, an in-body `impl` block, a `@derive(Trait)`, or a native type's ABI-declared impl — as a sorted, deduped `List<string>`. It reads the same membership table the precise `x is dyn Trait` test consults, so the two can never disagree. Names are **qualified**: a `.noe` trait keeps its linked name (bare for a trait in a package-less script, `shop.models.Trait` for one in a module), and a native trait reports its qualified identity (`std.vec.Kernels`). Built-in traits appear under their bare names (`Comparable`, `Display`) when a type registers an impl or derive of them; built-in *base* types (int, string, `List`, …) carry no declared impls, so `traits_of(42)` is `[]` even though built-in protocol behavior (echo, `<`) works on them. A non-nominal value (scalar, collection, function) yields the empty list — the same "nothing to report" answer `fields_of` gives a non-object.

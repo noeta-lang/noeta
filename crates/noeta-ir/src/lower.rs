@@ -140,6 +140,10 @@ pub struct LoweringSites<'a> {
     /// A `from_bytes::<T>` whose span is here has a `Validate`-implementing packed element type
     /// (validation arc): the emitted [`Rvalue::FromBytes`] carries `validate: true`.
     pub from_bytes_validated: &'a HashSet<Span>,
+    /// A `fields_of` whose span is here may report the operand's **private** fields: the emitted
+    /// [`Rvalue::Reflect`] carries `private_fields: true`. Decided by the checker (the same rule a
+    /// written `x.secret` goes through), baked here so both backends read one answer.
+    pub fields_of_private: &'a HashSet<Span>,
     /// A `list[i].field` member read whose span is here (the index receiver is a built-in `List`) fuses
     /// to a single [`Rvalue::IndexField`], reading a packed element's field without materializing it.
     pub index_field_sites: &'a HashSet<Span>,
@@ -282,6 +286,7 @@ impl LoweringSites<'static> {
         LoweringSites {
             packed_list_sites: PACKED.get_or_init(HashMap::new),
             from_bytes_validated: SPANS.get_or_init(HashSet::new),
+            fields_of_private: SPANS.get_or_init(HashSet::new),
             index_field_sites: SPANS.get_or_init(HashSet::new),
             arg_orders: ORDERS.get_or_init(HashMap::new),
             typed_module_call_sites: RECIPES.get_or_init(HashMap::new),
@@ -329,6 +334,7 @@ macro_rules! lowering_sites {
         $crate::LoweringSites {
             packed_list_sites: &$s.packed_list_sites,
             from_bytes_validated: &$s.from_bytes_validated,
+            fields_of_private: &$s.fields_of_private,
             index_field_sites: &$s.index_field_sites,
             arg_orders: &$s.arg_orders,
             typed_module_call_sites: &$s.typed_module_call_sites,
@@ -2298,6 +2304,9 @@ impl Lowerer<'_> {
             Rvalue::Reflect {
                 which,
                 args,
+                // Meaningful for `fields_of` alone; every other kind reports no field values, so
+                // the checker records no site for one and this stays `false`.
+                private_fields: self.sites.fields_of_private.contains(span),
                 span: *span,
             },
             *span,

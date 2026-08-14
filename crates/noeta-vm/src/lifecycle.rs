@@ -1453,16 +1453,35 @@ impl<'m> Vm<'m> {
     /// value yields the empty list. The shape is built fresh (structural equality matches the
     /// tree-walker's by construction); each carried field value is retained since the new entry
     /// object holds a fresh reference.
-    pub(crate) fn materialize_fields(&self, value: Value) -> Value {
+    pub(crate) fn materialize_fields(&self, value: Value, private_fields: bool) -> Value {
         let entry_shape = noeta_object::intern_shape(Shape::object(
             ShapeKind::Struct,
             noeta_ast::reflect::FIELD_ENTRY,
             noeta_ast::reflect::prelude_struct_fields(noeta_ast::reflect::FIELD_ENTRY),
         ));
-        let items: Vec<Value> = value
-            .object_fields_for_reflection()
-            .unwrap_or_default()
+        let Some((type_name, fields)) = value.object_fields_for_reflection() else {
+            return Value::list(Vec::new());
+        };
+        // Which fields this call site may see. `private_fields` is the checker's answer for the
+        // site; when it is false the door reports only what the caller could have read itself, and
+        // the visibility bits come from the reflection artifact — the same `field_public` the
+        // `construct` door refuses a private field by. A type with no private fields (every struct,
+        // and a class that declared them all `pub`) filters nothing, so the common case is a lookup
+        // that finds every name.
+        let hidden = match private_fields {
+            true => Vec::new(),
+            false => self
+                .module
+                .reflection
+                .field_specs(type_name)
+                .into_iter()
+                .filter(|spec| !spec.public)
+                .map(|spec| spec.name.to_string())
+                .collect(),
+        };
+        let items: Vec<Value> = fields
             .into_iter()
+            .filter(|(name, _)| !hidden.contains(name))
             .map(|(name, field_value)| {
                 noeta_gc::retain(field_value);
                 Value::object(entry_shape, vec![Value::string(&name), field_value])

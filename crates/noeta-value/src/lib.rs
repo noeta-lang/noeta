@@ -1256,21 +1256,26 @@ impl Value {
         }
     }
 
-    /// The object's `(field name, value)` pairs in shape (declaration) order — the reflection
-    /// read `fields_of(value)` materializes (derive layer 3). The returned values share the
-    /// object's references (NOT retained); the caller retains whatever it stores. `None` for a
-    /// non-object (enums and scalars included).
-    pub fn object_fields_for_reflection(self) -> Option<Vec<(String, Value)>> {
+    /// The object's type name and its `(field name, value)` pairs in shape (declaration) order —
+    /// the reflection read `fields_of(value)` materializes (derive layer 3). The returned values
+    /// share the object's references (NOT retained); the caller retains whatever it stores. `None`
+    /// for a non-object (enums and scalars included).
+    ///
+    /// The name comes back with the pairs because the caller needs both to answer one question:
+    /// `fields_of` reports only the fields its call site could have read, and which those are is
+    /// looked up in the reflection artifact under this name.
+    pub fn object_fields_for_reflection(self) -> Option<(&'static str, Vec<(String, Value)>)> {
         if self.is_pointer() {
             heap::with_payload(self, |p| match p {
-                Payload::Object { shape, slots } => Some(
+                Payload::Object { shape, slots } => Some((
+                    shape.name.as_str(),
                     shape
                         .fields
                         .iter()
                         .cloned()
                         .zip(slots.iter().copied())
                         .collect(),
-                ),
+                )),
                 _ => None,
             })
         } else {

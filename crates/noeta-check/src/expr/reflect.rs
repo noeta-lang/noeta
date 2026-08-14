@@ -185,7 +185,15 @@ impl Checker {
                 let value = expect_value(which, operand);
                 // The value-level counterpart of `type_of` (derive layer 3): a struct/class
                 // instance's fields as `List<FieldEntry>`; any other value is the empty list.
-                self.synth(value, env);
+                let operand_ty = self.synth(value, env);
+                // Whether this site may see the operand's **private** fields, answered by the same
+                // rule a written `x.secret` goes through. Recorded per site because the door hands
+                // back *values*: reporting a private one to code that could not have read it makes
+                // `pub` advisory, and the fix belongs here rather than in the runtime, which knows
+                // neither its caller's type nor its package.
+                if self.fields_of_sees_privates(&operand_ty) {
+                    self.sites.fields_of_private.insert(span);
+                }
                 Type::List(Box::new(Type::Named(
                     noeta_ast::reflect::FIELD_ENTRY.to_string(),
                     Vec::new(),
@@ -435,5 +443,30 @@ impl Checker {
                 Type::Result(Box::new(Type::Dyn), Box::new(Type::Dyn))
             }
         }
+    }
+
+    /// Whether a `fields_of` site whose operand has static type `ty` may see that type's **private**
+    /// fields — the visibility half of the value-level reflection door.
+    ///
+    /// Answered by [`Checker::field_visible`], the same rule a written `x.secret` goes through, so
+    /// the door and the field access cannot come apart: inside the declaring type (and inside a
+    /// white-box dev-tier body of its own package) the door reports everything, and everywhere else
+    /// it reports what the caller could have read itself. A type with no private fields — every
+    /// `struct`, and a `class` that declared them all `pub` — is trivially visible, so nothing about
+    /// the overwhelmingly common case changes.
+    ///
+    /// **A non-nominal operand answers `false`**, and that is the substantive half of the rule
+    /// rather than a fallback. `fields_of` earns its keep on a `dyn` value — a generic walker handed
+    /// something it did not declare — and such a walker is by construction outside every type it
+    /// visits, so reporting private values there is exactly the leak. The concrete-operand case is
+    /// what keeps `fields_of(self)` whole.
+    fn fields_of_sees_privates(&self, ty: &Type) -> bool {
+        let Type::Named(name, _) = ty else {
+            return false;
+        };
+        self.symbols
+            .private_fields
+            .get(name.as_str())
+            .is_none_or(|fields| fields.keys().all(|f| self.field_visible(name, f)))
     }
 }

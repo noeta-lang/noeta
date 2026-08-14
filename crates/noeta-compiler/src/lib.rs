@@ -4198,7 +4198,12 @@ impl<'m> FnCompiler<'m> {
             // That is the line this collapse deliberately stops at. The thirteen `Expr` variants and
             // twelve `Rvalue` variants existed to be walked, and the walks are what drifted; an `Op`
             // is dispatched, not walked, and its consumers (regalloc, liveness) already share arms.
-            Rvalue::Reflect { which, args, span } => self.compile_reflect(*which, args, dst, *span),
+            Rvalue::Reflect {
+                which,
+                args,
+                private_fields,
+                span,
+            } => self.compile_reflect(*which, args, *private_fields, dst, *span),
             Rvalue::TypedModuleCall {
                 module,
                 func,
@@ -5166,6 +5171,7 @@ impl<'m> FnCompiler<'m> {
         &mut self,
         which: noeta_ast::ReflectKind,
         args: &ReflectArgs,
+        private_fields: bool,
         dst: Reg,
         span: Span,
     ) -> Result<(), Unsupported> {
@@ -5207,7 +5213,11 @@ impl<'m> FnCompiler<'m> {
             }
             K::FieldsOf => {
                 let src = one(self)?;
-                self.code.push(Op::FieldsOf { dst, src });
+                self.code.push(Op::FieldsOf {
+                    dst,
+                    src,
+                    private_fields,
+                });
                 Ok(())
             }
             K::TraitsOf => {

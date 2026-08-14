@@ -775,7 +775,11 @@ fn all_ops() -> Vec<Op> {
         src: 168,
         span: span(34),
     });
-    ops.push(Op::FieldsOf { dst: 169, src: 170 });
+    ops.push(Op::FieldsOf {
+        dst: 169,
+        src: 170,
+        private_fields: true,
+    });
     ops.push(Op::TraitsOf { dst: 171, src: 172 });
     ops.push(Op::FromBytes {
         dst: 173,

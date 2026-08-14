@@ -2448,23 +2448,38 @@ impl Interpreter {
     /// declaration order) — the value-level reflection `fields_of` (derive layer 3). Any other
     /// value yields the empty list. Builds a fresh `TypeDef`; the VM builds the matching shape
     /// the same way, so the values agree by construction.
-    fn materialize_fields(&self, value: &Value) -> Value {
+    fn materialize_fields(&self, value: &Value, private_fields: bool) -> Value {
         let entry_def = Rc::new(fresh_type_def(
             noeta_ast::reflect::FIELD_ENTRY,
             &noeta_ast::reflect::prelude_struct_fields(noeta_ast::reflect::FIELD_ENTRY),
             true,
         ));
         let items: Vec<Value> = match value {
-            Value::Object(obj) => obj
-                .def
-                .fields
-                .iter()
-                .zip(obj.slots.borrow().iter())
-                .map(|(field, field_value)| {
-                    let slots = vec![Value::Str(field.name.clone()), field_value.clone()];
-                    Value::Object(Rc::new(ObjectValue::new(entry_def.clone(), slots)))
-                })
-                .collect(),
+            Value::Object(obj) => {
+                // Which fields this call site may see — the tree-walker mirror of the VM's
+                // `materialize_fields`, reading the same `field_public` bits out of the same
+                // reflection artifact, so the two engines report the same list by construction.
+                let hidden: Vec<String> = match private_fields {
+                    true => Vec::new(),
+                    false => self
+                        .reflection
+                        .field_specs(obj.def.name())
+                        .into_iter()
+                        .filter(|spec| !spec.public)
+                        .map(|spec| spec.name.to_string())
+                        .collect(),
+                };
+                obj.def
+                    .fields
+                    .iter()
+                    .zip(obj.slots.borrow().iter())
+                    .filter(|(field, _)| !hidden.contains(&field.name))
+                    .map(|(field, field_value)| {
+                        let slots = vec![Value::Str(field.name.clone()), field_value.clone()];
+                        Value::Object(Rc::new(ObjectValue::new(entry_def.clone(), slots)))
+                    })
+                    .collect()
+            }
             _ => Vec::new(),
         };
         Value::list(items)

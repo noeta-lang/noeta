@@ -218,6 +218,37 @@ fn test_white_box_private_field_access() {
 }
 
 #[test]
+fn test_white_box_fields_of_reports_private_fields() {
+    // The white-box boundary reaches the *reflection* door too: `fields_of` reports the fields its
+    // call site could have read itself, and inside a `@test` of the declaring package that includes
+    // the private ones. Nothing was written for the tier — `fields_of` asks the checker's
+    // `field_visible`, which already answered the white-box question for `a.balance` — so this pins
+    // that the door kept sharing the rule rather than growing a second copy of it.
+    //
+    // Here rather than in the corpus because tier *activation* is a CLI concern: a conformance run
+    // strips the `@test` body before lowering, so the assertion would never execute.
+    let file = temp_program(
+        "test_whitebox_fields_of",
+        "class Account {\n\
+             pub label: string\n\
+             balance: int\n\
+             pub fn new(l: string, b: int): Account { return Account { label: l, balance: b }; }\n\
+         }\n\
+         @test fn reflects_internals(): void {\n\
+             a = Account.new(\"acct\", 50);\n\
+             assert(fields_of(a).len() == 2);\n\
+             assert(fields_of(a)[1].value == 50);\n\
+         }\n",
+    );
+    lang()
+        .arg("test")
+        .arg(&file)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("1 passed, 0 failed, 1 total"));
+}
+
+#[test]
 fn test_unknown_tier_is_e0036() {
     let file = temp_program("test_badtier", "@tset { fn x(): void { assert(true); } }\n");
     lang()

@@ -1005,6 +1005,7 @@ impl Interpreter {
         &mut self,
         which: noeta_ast::ReflectKind,
         args: &noeta_ir::ReflectArgs,
+        private_fields: bool,
         span: Span,
         frame: &mut Frame,
     ) -> Eval<Value> {
@@ -1034,7 +1035,7 @@ impl Interpreter {
             K::FieldsOf => {
                 let A::One(operand) = args else { mismatch() };
                 let v = self.eval_ir_atom(operand, frame)?;
-                Ok(self.materialize_fields(&v))
+                Ok(self.materialize_fields(&v, private_fields))
             }
             K::TraitsOf => {
                 let A::One(operand) = args else { mismatch() };
@@ -1768,9 +1769,12 @@ impl Interpreter {
             // **The reflection surface, one arm.** All twelve queries that reach a backend
             // dispatch through `eval_reflect`, which matches exhaustively on `ReflectKind` — so a
             // thirteenth cannot be added here and forgotten in the VM, or the reverse.
-            noeta_ir::Rvalue::Reflect { which, args, span } => {
-                self.eval_reflect(*which, args, *span, frame)
-            }
+            noeta_ir::Rvalue::Reflect {
+                which,
+                args,
+                private_fields,
+                span,
+            } => self.eval_reflect(*which, args, *private_fields, *span, frame),
             // `type_name::<T>()` where `T` is a parameter of the enclosing generic type: read
             // argument `index` off the receiver's reflected type tag. A receiver with no such
             // argument aborts — a plausible-looking wrong name would travel silently.

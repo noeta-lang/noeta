@@ -1239,6 +1239,11 @@ pub enum Op {
     FieldsOf {
         dst: Reg,
         src: Reg,
+        /// Whether this site may report the value's **private** fields — the checker's answer,
+        /// baked in, because the door hands back values and a runtime knows neither its caller's
+        /// type nor its package. `false` reports only the fields the caller could have read
+        /// itself, which is every field of a struct and every `pub` field of a class.
+        private_fields: bool,
     },
     /// `traits_of(value)`: `dst = List<string>` — the qualified trait names the nominal type of
     /// the value in `src` has a registered `impl` for, sorted and deduped, off the module
@@ -2457,7 +2462,14 @@ fn op_repr(
             format!("TypeSlotName r{dst} <- type_args[r{src}].name")
         }
         Op::TypeOf { dst, src } => format!("TypeOf      r{dst} <- type_of(r{src})"),
-        Op::FieldsOf { dst, src } => format!("FieldsOf    r{dst} <- fields_of(r{src})"),
+        Op::FieldsOf {
+            dst,
+            src,
+            private_fields,
+        } => match private_fields {
+            true => format!("FieldsOf    r{dst} <- fields_of(r{src}) [+private]"),
+            false => format!("FieldsOf    r{dst} <- fields_of(r{src})"),
+        },
         Op::TraitsOf { dst, src } => format!("TraitsOf    r{dst} <- traits_of(r{src})"),
         Op::FromBytes {
             dst, src, schema, ..

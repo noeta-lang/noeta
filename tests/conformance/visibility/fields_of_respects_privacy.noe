@@ -1,0 +1,76 @@
+// `fields_of(value)` reports the fields its **call site could have read itself**. The door hands
+// back values, so it answers the same question a written `x.secret` does — and by the same rule, so
+// the two cannot come apart. Without that, `pub` was advisory on a class: `b.secret` was refused and
+// `fields_of(b)` returned it.
+//
+// Four sites, four answers, one rule (the checker's `field_visible`):
+//
+// - **outside the type** — public fields only. A struct is unaffected: its fields are always public,
+//   so nothing is filtered and the overwhelmingly common case is unchanged.
+// - **inside the type** — everything. `fields_of(self)` is the type writing about itself, and there
+//   is no other way to spell "all my fields" generically, so filtering here would make something
+//   inexpressible rather than merely refused.
+// - **a `dyn` walker** — public fields only, and this is the substantive case rather than a
+//   fallback. Reflection earns its keep on a value the walker did not declare, and such a walker is
+//   by construction outside every type it visits.
+// - **a trait's default body** — public fields only, even when the implementor `@derive`s it. That
+//   body is written in the trait and shared by every implementor, so "inside the type" is not a
+//   thing it can be; granting it privates would grant any derivable third-party trait unrestricted
+//   read of every implementor's state.
+//
+// A white-box dev-tier body sees its own package's privates here exactly as it does through a field
+// access — that falls out of sharing the rule rather than being a case added to it, and is pinned in
+// `tiers/test_white_box_fields_of.noe`.
+// expect: stdout "outside: label"
+// expect: stdout "inside: label,secret"
+// expect: stdout "dyn: label"
+// expect: stdout "derived: id"
+// expect: stdout "struct: a,b"
+// expect: stdout "sibling: label,secret"
+// expect: exit 0
+trait Inspectable {
+    fn inspect(): string {
+        return names(fields_of(self));
+    }
+}
+
+class Box {
+    pub label: string
+    secret: int
+
+    pub fn new(l: string, s: int): Self { return Box { label: l, secret: s }; }
+    pub fn own(): string { return names(fields_of(self)); }
+    // A *sibling* instance, not `self`: visibility is the enclosing type's, not the receiver's —
+    // the same relaxation `other.secret` gets inside the class.
+    pub fn peer(other: Box): string { return names(fields_of(other)); }  // an associated fn, still inside `Box`
+}
+
+@derive(Inspectable)
+class Acct {
+    pub id: int
+    balance: int
+    pub fn new(i: int, b: int): Self { return Acct { id: i, balance: b }; }
+}
+
+struct Plain { a: int; b: string }
+
+fn names(entries: List<FieldEntry>): string {
+    mut out = "";
+    mut first = true;
+    for f in entries {
+        if !first { out = out ~ ","; }
+        out = out ~ f.name;
+        first = false;
+    }
+    return out;
+}
+
+fn walk(x: dyn): string { return names(fields_of(x)); }
+
+b = Box.new("hi", 42);
+echo "outside: ${names(fields_of(b))}";
+echo "inside: ${b.own()}";
+echo "dyn: ${walk(b)}";
+echo "derived: ${Acct.new(1, 99).inspect()}";
+echo "struct: ${names(fields_of(Plain { a: 1, b: "x" }))}";
+echo "sibling: ${Box.peer(Box.new("other", 7))}";

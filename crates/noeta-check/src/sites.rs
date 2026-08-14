@@ -79,6 +79,17 @@ pub struct Sites {
     /// element (aborting at `[i]` on the first rejection — the abort door, consistent with a shape
     /// error). A pure function of the program.
     pub from_bytes_validated: HashSet<Span>,
+    /// `fields_of(value)` spans at which the operand's own **private** fields are visible — the
+    /// value-level reflection door's visibility answer, decided once here by the same
+    /// [`Checker::field_visible`](crate::Checker) rule a written `x.secret` goes through.
+    ///
+    /// Absent (the common case) means the door reports only the fields the caller could have read
+    /// itself. Present means every field, which is what an operand of the *enclosing* type — the
+    /// `fields_of(self)` a type writes about itself — and a white-box dev-tier body get. One bit per
+    /// site rather than per field, because visibility does not vary across a type's fields: they are
+    /// declared in one place, so one package and one `current_type` comparison answers for all of
+    /// them. A pure function of the program.
+    pub fields_of_private: HashSet<Span>,
     /// Call-site-typed native-call recipes (`json.parse::<T>`): the turbofish `T` resolved into a
     /// [`noeta_ext_abi::TypeRecipe`] the lowering bakes into `Rvalue::TypedModuleCall`. A pure function of the
     /// program, like the other site maps.
@@ -406,6 +417,7 @@ pub(crate) const SITE_POLICIES: &[(&str, SiteClass, &str)] = &[
     ("variant_pattern_sites", SiteClass::SpanKeyed, "span → (enum qualifier, variant name)"),
     ("packed_list_sites", SiteClass::SpanKeyed, "span → PackedLayout: field names, kinds and bit widths; no index"),
     ("from_bytes_validated", SiteClass::SpanKeyed, "a bare span set"),
+    ("fields_of_private", SiteClass::SpanKeyed, "a bare span set"),
     ("typed_module_call_sites", SiteClass::SpanKeyed, "span → TypeRecipe: structural; its VariantRecipe.index is an enum's DECLARATION position"),
     ("typed_method_call_sites", SiteClass::SpanKeyed, "span → TypeRecipe, the extern-method twin of the row above"),
     ("deserialize_recipes", SiteClass::Content, "Vec<(type name, TypeRecipe)>, lifted into a name-keyed runtime registry"),
@@ -473,6 +485,7 @@ impl Sites {
             variant_pattern_sites: _,
             packed_list_sites: _,
             from_bytes_validated: _,
+            fields_of_private: _,
             typed_module_call_sites: _,
             typed_method_call_sites: _,
             deserialize_recipes: _,
@@ -610,6 +623,9 @@ pub(crate) struct SiteMaps {
     /// `from_bytes::<T>` spans whose packed element type implements `Validate` — see
     /// [`Sites::from_bytes_validated`].
     pub(crate) from_bytes_validated: HashSet<Span>,
+    /// `fields_of` spans whose operand's private fields are visible — see
+    /// [`Sites::fields_of_private`].
+    pub(crate) fields_of_private: HashSet<Span>,
     /// Call-site-typed native-call recipes (`json.parse::<T>`), keyed by the `Expr::TypedModuleCall`
     /// span → the turbofish `T` resolved into a [`noeta_ext_abi::TypeRecipe`]. Both backends harvest
     /// this on the same program, so the lowering bakes identical recipes into `Rvalue::TypedModuleCall`.
@@ -724,6 +740,7 @@ impl SiteMaps {
             variant_pattern_sites: self.variant_pattern_sites,
             packed_list_sites: self.packed_list_sites,
             from_bytes_validated: self.from_bytes_validated,
+            fields_of_private: self.fields_of_private,
             typed_module_call_sites: self.typed_module_call_sites,
             typed_method_call_sites: self.typed_method_call_sites,
             deserialize_recipes: self.deserialize_recipes,

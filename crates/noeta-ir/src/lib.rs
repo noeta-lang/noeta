@@ -619,6 +619,14 @@ pub enum Rvalue {
     Reflect {
         which: noeta_ast::ReflectKind,
         args: ReflectArgs,
+        /// `fields_of` only: whether this site may report the operand's **private** fields.
+        ///
+        /// The value-level door hands back values, so it answers the same visibility question a
+        /// written `x.secret` does — and only the checker can, since a runtime knows neither its
+        /// caller's type nor its package. `false` (the common case, and every other
+        /// [`noeta_ast::ReflectKind`]) means the door reports what the caller could have read
+        /// itself. Baked here rather than looked up per backend so the two cannot disagree.
+        private_fields: bool,
         span: Span,
     },
     /// `channel::<T>(capacity)` — construct a bounded channel (isolates I.1), yielding a

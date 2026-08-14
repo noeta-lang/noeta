@@ -3615,8 +3615,13 @@ impl<'m> Vm<'m> {
                     set_reg(regs, fbase, *dst, result);
                     pc += 1;
                 }
-                Op::FieldsOf { dst, src } => {
-                    let result = self.materialize_fields(regs[fbase + *src as usize]);
+                Op::FieldsOf {
+                    dst,
+                    src,
+                    private_fields,
+                } => {
+                    let result =
+                        self.materialize_fields(regs[fbase + *src as usize], *private_fields);
                     set_reg(regs, fbase, *dst, result);
                     pc += 1;
                 }

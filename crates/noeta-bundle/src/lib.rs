@@ -226,7 +226,14 @@ pub const MAGIC: &[u8; 4] = b"NOEB";
 /// Neither can be re-derived on the reading side: a shape carries slot *names* and a recipe carries
 /// the type's name, and nothing downstream of the compiler ever sees the declaration that said which
 /// fields do not leave the program.
-pub const FORMAT_VERSION: u8 = 20;
+/// Bumped to 21 by the `fields_of` visibility answer: [`noeta_bytecode::Op::FieldsOf`] gained
+/// `private_fields`, the checker's per-site "may this door report private fields" bit. `Module::code`
+/// is part of the postcard payload and an op is its fields back to back, so the added `bool` shifts
+/// every byte after it in the chunk — a version-20 reader would take it as the start of the next op.
+///
+/// It cannot be re-derived on the reading side, which is the reason it travels: the answer depends on
+/// the *call site's* enclosing type and package, and neither survives into the artifact.
+pub const FORMAT_VERSION: u8 = 21;
 
 /// The SHA-256 of one canonical [`Module`]'s postcard encoding — the *other* half of
 /// [`FORMAT_VERSION`], and the thing that makes the changelog above enforceable.
@@ -250,7 +257,7 @@ pub const FORMAT_VERSION: u8 = 20;
 /// pair exists to prevent. The test's message says so; this doc says so; the changelog paragraph
 /// you are about to write is the third place.
 pub const MODULE_LAYOUT_DIGEST: &str =
-    "8d39c60b95b4f94ae0178c0f1e4c71f8ae73d16f1a601d5e3f3abb2e9be1b779";
+    "4f828456e43c4e22f7e7324aa374ad957ae1bd56aa1d254a4c726ee8006584fd";
 
 /// The runtime version stamped into and checked against artifacts — the building crate's
 /// package version. Any release that changes the serialized [`Module`] layout bumps this, so a
