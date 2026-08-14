@@ -177,7 +177,7 @@ Inside a generic type, `Self` is that type at its own instantiation — `Self` i
 
 Reflection and narrowing resolve it to the same type everything else does: `type_name::<Self>()` answers with the declaring type's name, and `v is Self` matches its values.
 
-Nothing may be *declared* `Self` — no struct, class, enum or trait may take the name, because inside any type body the spelling already means the enclosing type. In a trait declaration `Self` means the implementing type; see [Generics & Traits](Generics-and-Traits#traits).
+Nothing may be *declared* `Self` — no struct, class, enum or trait may take the name, because inside any type body the spelling already means the enclosing type. In a trait declaration `Self` means the implementing type; see [Implementing a trait](Generics-and-Traits#implementing-a-trait).
 
 ## Method visibility
 
