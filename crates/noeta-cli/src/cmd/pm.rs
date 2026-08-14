@@ -15,6 +15,58 @@ pub(crate) fn cmd_scope(action: &ScopeAction) -> ExitCode {
         ScopeAction::RequireProvenance { scope, root, off } => {
             cmd_scope_require_provenance(scope, root.as_deref(), *off)
         }
+        ScopeAction::Rotate { scope } => cmd_scope_rotate(scope),
+    }
+}
+
+/// `noeta scope rotate <scope>` — replace the scope's publish token with a registry-minted one and
+/// print it once.
+///
+/// The output is the point of the command, so it says outright that the token is not recoverable and
+/// that the old one stopped working — a rotation whose result scrolls past unread is a scope whose
+/// CI is about to fail with no obvious cause.
+pub(crate) fn cmd_scope_rotate(scope: &str) -> ExitCode {
+    // Same routing as the policy verb: the project's `[registries]` mapping for this scope, else
+    // the environment default chain ending in the built-in hosted registry.
+    let base = match scope_registry_base(scope) {
+        Ok(Some(base)) => base,
+        Ok(None) => {
+            eprintln!(
+                "noeta: rotating a token needs the hosted registry, but `NOETA_REGISTRY_DIR` \
+                 routes to the file-backed local index — unset it, set `NOETA_REGISTRY_URL`, or \
+                 map the scope under `[registries]`"
+            );
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let index = match registry::HttpIndex::new(base) {
+        Ok(index) => index,
+        Err(err) => {
+            eprintln!("noeta: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    match index.rotate_scope_token(scope) {
+        Ok((status, token)) => {
+            println!("{status}: `{scope}`");
+            println!();
+            println!("  {token}");
+            println!();
+            println!(
+                "This is the only time it is shown — the registry stores only its hash, so a lost \
+                 token means another rotation, not a lookup."
+            );
+            println!(
+                "The previous token no longer publishes: update `NOETA_REGISTRY_TOKEN` wherever \
+                 it is set, CI secrets included."
+            );
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("noeta: {err}");
+            ExitCode::from(1)
+        }
     }
 }
 
@@ -488,12 +540,59 @@ pub(crate) fn cmd_add(
                     root = dep.root
                 );
             }
+            print_import_paths(&bound);
             warn_new_committers(&old_lock, &resolved);
             ExitCode::SUCCESS
         }
         Err(err) => {
             eprintln!("noeta: added `{binding_key}`, but resolving it failed: {err}");
             ExitCode::from(1)
+        }
+    }
+}
+
+/// Print the `use` lines the freshly added packages actually answer to — the line a reader needs
+/// next, and the one `noeta add` used to leave them to guess.
+///
+/// Knowing the import *root* is not knowing the import: a root of `para` says nothing about whether
+/// the thing you want is `para.cli`, `para.api` or `para` itself, and the reader's next move is to
+/// go looking. The modules are already in hand here — resolution just materialized them — so the
+/// answer is printed rather than implied.
+///
+/// Shows the module paths, capped, because a large package would otherwise bury the message it is
+/// part of; the cap says how many it did not print rather than trailing off. A **native** package's
+/// modules are provided by its Rust extension and are invisible to the host loader, so there is
+/// nothing to enumerate and the root is stated as what it is. A package whose modules derived no
+/// path (nothing on disk to derive from) prints nothing at all rather than a guess.
+fn print_import_paths(bound: &[&noeta_loader::DepPackage]) {
+    /// Beyond this many, the list stops being an answer and starts being a directory listing.
+    const SHOWN: usize = 6;
+    for dep in bound {
+        if dep.native {
+            println!(
+                "  import it as `use {key}.…` — its modules come from the package's native \
+                 extension, so they resolve once the toolchain composes",
+                key = dep.key()
+            );
+            continue;
+        }
+        let mut paths: Vec<String> = dep
+            .modules
+            .iter()
+            .filter_map(|m| m.path.derived())
+            .map(|segments| segments.join("."))
+            .collect();
+        paths.sort();
+        paths.dedup();
+        if paths.is_empty() {
+            continue;
+        }
+        let extra = paths.len().saturating_sub(SHOWN);
+        for path in paths.iter().take(SHOWN) {
+            println!("  use {path}");
+        }
+        if extra > 0 {
+            println!("  … and {extra} more module{}", plural(extra));
         }
     }
 }
@@ -896,6 +995,17 @@ pub(crate) fn cmd_publish(
     match index.publish(&name, &release) {
         Ok(()) => {
             println!("published `{name}` {version} → {git}#{tag} ({sha}) [{provenance_tag}]");
+            // Link what was just pushed. A publish names a tag and a sha, and neither is something
+            // a person can check by reading it — so the two questions a fresh release raises get an
+            // answer to click: what does it look like to a consumer (the release page), and what
+            // content actually went out (the commit). Absent for a source with no web form (a local
+            // path, a `file:` URL), where there would be nothing to open.
+            if let Some(url) = noeta_pm::tag_web_url(git, &tag) {
+                println!("  {url}");
+            }
+            if let Some(url) = noeta_pm::commit_web_url(git, &sha) {
+                println!("  {url}");
+            }
             // Docs ride along: store the artifact with the release. For a native package it is the
             // already-generated, build-gated API docs (`native_docs`); for a pure-Noeta package it
             // is generated now from the `.noe` source. Advisory metadata — an upload failure warns,

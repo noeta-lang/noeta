@@ -127,13 +127,15 @@ Nothing here is a correctness gap in shipped behavior unless explicitly marked *
 
 ## Performance
 
+**Not before someone profiles user-shaped programs.** The five rows below are held, deliberately, and none is a quick win: they are a JIT loop-shape recognizer, monomorphic specialization, interning the checker's core `Type` tree, VM inline caches plus an ABI-facing argument projection, and a map-key probe adapter. Each is substantial, and — more to the point — none has a measurement that says which one is worth doing. Their triggers used to read like conditions ("a workload demonstrating its value", "a keyed-lookup profile") while nothing in the project measures user workloads: the instructions-retired ratchet guards the VM against *regression*, which is a different question and cannot fire any of these. So each now states the same real condition rather than a profile nobody runs, and any of them may be picked up early on a specific measurement that names it.
+
 | Item | Source / trigger |
 |---|---|
-| **Kernels in Noeta** — JIT/AOT loop-shape recognition over packed lists, so `for p in ps { total += p.r }` compiles to the tight buffer loop a native kernel is; demotes the native-kernel ABI to an escape hatch | kernel design discussion (2026-07-09). Trigger: packed bulk math in *user* code as a demonstrated bottleneck |
-| **P-MONO** — monomorphic shape specialization (generics are erased-for-storage) + reflection cross-`dyn` element recovery (`List<int>`'s `int` after a `dyn` boundary) | M1.8 tail / perf ledger. Trigger: a workload demonstrating its value |
-| `TypeId` interning in `noeta-types` (`Type` is a plain owned tree) | Trigger: a checker profile showing clone cost (the audit's env-borrow work already cut checker allocs ~39%) |
-| Inline caches for extern-type methods; borrowed-arg projection for registry dispatch (owned `NativeValue::Str` clones per call) | extern-types follow-ons. Trigger: a hot extern-method workload |
-| Zero-alloc map-key probe adapter (`Equivalent<MapKey>` + canonical hash off object slots) + reuse-analysis recycling of per-iteration key temps | packed-keys follow-up. Trigger: keyed-lookup profile |
+| **Kernels in Noeta** — JIT/AOT loop-shape recognition over packed lists, so `for p in ps { total += p.r }` compiles to the tight buffer loop a native kernel is; demotes the native-kernel ABI to an escape hatch | kernel design discussion (2026-07-09). Held: not before a real workload shows packed bulk math is its bottleneck |
+| **P-MONO** — monomorphic shape specialization (generics are erased-for-storage) + reflection cross-`dyn` element recovery (`List<int>`'s `int` after a `dyn` boundary) | M1.8 tail / perf ledger. Held: not before a real workload shows erased-for-storage generics cost it |
+| `TypeId` interning in `noeta-types` (`Type` is a plain owned tree) | Held: not before a checker profile shows clone cost dominating (the audit's env-borrow work already cut checker allocs ~39%). Highest blast radius of the five — `Type` is the checker's core representation |
+| Inline caches for extern-type methods; borrowed-arg projection for registry dispatch (owned `NativeValue::Str` clones per call) | extern-types follow-ons. Held: not before a real workload is hot in extern-method dispatch |
+| Zero-alloc map-key probe adapter (`Equivalent<MapKey>` + canonical hash off object slots) + reuse-analysis recycling of per-iteration key temps | packed-keys follow-up. Held: not before a real workload is hot in keyed lookup |
 | VM-throughput next-gap investigation — the disassembly-driven inventory of remaining PHP-gap slices (post-P-VMT) | standing investigation, `scratch-bench/xlang/RESULTS.md` for the current numbers |
 
 ## Stdlib follow-ons (all trigger-gated)

@@ -2221,6 +2221,52 @@ fn noeta_add_edits_the_manifest_and_resolves() {
         .stdout("42\n");
 }
 
+#[test]
+fn noeta_add_prints_the_import_paths_the_package_answers_to() {
+    // Knowing the import ROOT is not knowing the import: `toolkit` says nothing about whether the
+    // thing you want is `toolkit.text` or `toolkit.tools.run`, and the reader's next move was to go
+    // looking. The modules are in hand the moment resolution materializes them, so `noeta add`
+    // prints them — including a nested one, since the flat case would not prove the path is derived
+    // rather than assembled from the key and a file stem.
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_add_imports");
+    let _ = std::fs::remove_dir_all(&base);
+    let app = base.join("app");
+    let lib = base.join("lib");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::create_dir_all(lib.join("tools")).unwrap();
+    std::fs::write(
+        app.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(app.join("main.noe"), "echo 1;\n").unwrap();
+    std::fs::write(
+        lib.join("noeta.toml"),
+        "[package]\nname = \"acme/toolkit\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        lib.join("text.noe"),
+        "pub fn hi(): string { return \"hi\"; }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        lib.join("tools").join("run.noe"),
+        "pub fn go(): int { return 1; }\n",
+    )
+    .unwrap();
+
+    lang()
+        .current_dir(&app)
+        .args(["add", "toolkit", "--path", "../lib"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("use toolkit.text")
+                .and(predicate::str::contains("use toolkit.tools.run")),
+        );
+}
+
 // --- `noeta add` with no source: resolve the registry's current version -------------------------
 
 /// A local registry serving `acme/greet` at the given `(version, tag)` pairs, all pointing at one

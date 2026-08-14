@@ -46,7 +46,7 @@ use crate::error::PmError;
 /// read-only assertion the gate runs. That script is the chokepoint — the four-step ritual in
 /// `test_data/wire/README.md` is now one command, and the step everyone could forget is inside it.
 pub const WIRE_MANIFEST_SHA256: &str =
-    "c12ee1002795ca4edba7ba50c3ec021bd2bdf383155878f366efbd06ffa8ba9e";
+    "4676d9af52bc492a267f407438a42a7abcfbaa7dedd3d29702a4168a4108d555";
 
 /// The git coordinates a registry release resolves to (package-manager P2.5). The **commit SHA** the
 /// tag resolved to at publish time is pinned here too (Phase 4, S2): the index — not just the
@@ -899,6 +899,66 @@ impl HttpIndex {
             .unwrap_or_else(|| status.to_string());
         Err(PmError::Auth(format!(
             "registry rejected the policy for `{scope}`: {detail}"
+        )))
+    }
+
+    /// Replace a scope's **publish token** with a freshly minted one: `POST
+    /// /v1/scopes/{scope}/rotate`, authenticated with the scope's *current* publish token — or with
+    /// the admin token, which is why the endpoint exists at all: a claimant who lost the token can
+    /// otherwise only re-claim, and a scope an operator bootstrapped cannot re-claim.
+    ///
+    /// The new token is generated **server-side**, so its entropy is never the caller's choice, and
+    /// it is returned exactly once — the registry stores only its hash, so a lost response means
+    /// another rotation rather than a lookup. The swap is one atomic update: there is never a moment
+    /// with zero or two valid tokens. Ownership and the provenance policy are untouched, because
+    /// this rotates the *credential*, never the identity.
+    ///
+    /// Returns `(status message, new token)`.
+    pub fn rotate_scope_token(&self, scope: &str) -> Result<(String, String), PmError> {
+        let token = self.token.as_ref().ok_or_else(|| {
+            PmError::Auth(
+                "rotating a scope's token needs the current one — set NOETA_REGISTRY_TOKEN to the \
+                 scope's publish token, or to the registry's admin token to recover a lost one"
+                    .to_string(),
+            )
+        })?;
+        let resp = self
+            .client
+            .post(format!("{}/v1/scopes/{scope}/rotate", self.base))
+            .bearer_auth(token)
+            .send()
+            .map_err(|err| {
+                PmError::Network(format!(
+                    "rotating the token for scope `{scope}` failed: {err}"
+                ))
+            })?;
+        let status = resp.status();
+        let text = resp.text().unwrap_or_default();
+        if status.is_success() {
+            let body = serde_json::from_str::<serde_json::Value>(&text).ok();
+            let field = |key: &str| {
+                body.as_ref()
+                    .and_then(|v| v.get(key).and_then(|s| s.as_str()).map(str::to_string))
+            };
+            // The token is the whole point of the call, and it is shown once — a success whose body
+            // carries no token is a protocol break, not a rotation to report as done.
+            let minted = field("token").filter(|t| !t.is_empty()).ok_or_else(|| {
+                PmError::Network(format!(
+                    "registry accepted the rotation of `{scope}` but returned no token; the \
+                     scope's token may or may not have changed — check with the registry before \
+                     publishing"
+                ))
+            })?;
+            let msg = field("status").unwrap_or_else(|| format!("token rotated for `{scope}`"));
+            return Ok((msg, minted));
+        }
+        let detail = serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| status.to_string());
+        Err(PmError::Auth(format!(
+            "registry refused to rotate the token for `{scope}`: {detail}"
         )))
     }
 
@@ -3311,6 +3371,51 @@ mod wire_fixture_tests {
         assert_eq!(path, "/v1/scopes/acme/policy");
         let sent: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(sent, fixture_value("policy-request.json"));
+    }
+
+    #[test]
+    fn rotate_response_fixture_round_trips() {
+        // The rotation is a bodyless POST authenticated by the bearer token, and the *response*
+        // carries the whole payload — the minted token, shown once. So the fixture pins the reply
+        // rather than a request body, and the assertion is that the token reaches the caller
+        // verbatim: a rotation whose token is dropped or mangled leaves the scope unpublishable
+        // with nothing to recover from.
+        let (tx, rx) = mpsc::channel();
+        let base = mock_server(move |method, path, body| {
+            tx.send((method.to_string(), path.to_string(), body.to_string()))
+                .unwrap();
+            (200, fixture("rotate-response.json"))
+        });
+        let index = index_with_token(base, "acme-publish-token-0123456789abcdef");
+        let (msg, token) = index.rotate_scope_token("acme").unwrap();
+        let fix = fixture_value("rotate-response.json");
+        assert_eq!(msg, fix["status"].as_str().unwrap());
+        assert_eq!(token, fix["token"].as_str().unwrap());
+        let (method, path, _) = rx.recv().unwrap();
+        assert_eq!(method, "POST");
+        assert_eq!(path, "/v1/scopes/acme/rotate");
+    }
+
+    #[test]
+    fn a_rotation_that_returns_no_token_is_not_reported_as_done() {
+        // A 2xx with no `token` is a protocol break, and the dangerous reading is "rotated fine":
+        // the caller would print a success while the scope's token may or may not have changed. It
+        // fails instead, and says the state is unknown.
+        let base = mock_server(|_, _, _| (200, r#"{"status":"token rotated"}"#.to_string()));
+        let index = index_with_token(base, "acme-publish-token-0123456789abcdef");
+        let err = index.rotate_scope_token("acme").unwrap_err().to_string();
+        assert!(err.contains("returned no token"), "{err}");
+    }
+
+    #[test]
+    fn rotating_without_a_token_says_which_token_is_missing() {
+        // The failure is about credentials, so it names both ways to supply one — the scope's own
+        // token for hygiene, the admin token for the recovery case the endpoint exists for.
+        let base = mock_server(|_, _, _| (200, fixture("rotate-response.json")));
+        let index = HttpIndex::new(base).unwrap();
+        let err = index.rotate_scope_token("acme").unwrap_err().to_string();
+        assert!(err.contains("NOETA_REGISTRY_TOKEN"), "{err}");
+        assert!(err.contains("admin token"), "{err}");
     }
 
     #[test]

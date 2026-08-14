@@ -1142,6 +1142,70 @@ fn noeta_scope_require_provenance_validates_and_needs_a_registry() {
 }
 
 #[test]
+fn noeta_scope_rotate_prints_the_minted_token_once_and_says_so() {
+    // The rotate verb's whole product is one line of output — a token the registry will never show
+    // again. So the test asserts the token reaches stdout AND that the two consequences are stated:
+    // that it cannot be looked up, and that the old one stopped publishing. A rotation whose result
+    // scrolls past unread is a scope whose CI fails later with no obvious cause.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let base = mock_http(move |method, path, body| {
+        tx.send((method.to_string(), path.to_string(), body.to_string()))
+            .unwrap();
+        (
+            200,
+            r#"{"status":"token rotated","scope":"acme","token":"noeta_deadbeef01","note":"shown once"}"#
+                .to_string(),
+        )
+    });
+
+    lang()
+        .env("NOETA_REGISTRY_URL", &base)
+        .env("NOETA_REGISTRY_TOKEN", "acme-current-publish-token")
+        .args(["scope", "rotate", "acme"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("noeta_deadbeef01")
+                .and(predicate::str::contains("only time it is shown"))
+                .and(predicate::str::contains("no longer publishes")),
+        );
+
+    let (method, path, _) = rx.recv().unwrap();
+    assert_eq!(method, "POST");
+    assert_eq!(path, "/v1/scopes/acme/rotate");
+}
+
+#[test]
+fn noeta_scope_rotate_needs_a_token_and_the_hosted_registry() {
+    // Two refusals worth their own assertions. Without a token there is nothing to authenticate
+    // with, and the message names *both* ways to supply one — the scope's own token for hygiene,
+    // the admin token for the recovery case the endpoint exists for.
+    lang()
+        .env("NOETA_REGISTRY_URL", "https://registry.invalid")
+        .env_remove("NOETA_REGISTRY_TOKEN")
+        .args(["scope", "rotate", "acme"])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("NOETA_REGISTRY_TOKEN")
+                .and(predicate::str::contains("admin token")),
+        );
+
+    // And the file-backed local index has no rotate endpoint, so it is explained rather than
+    // silently falling through to the network — the same treatment its sibling policy verb gets.
+    let reg = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("scope_rotate_local_dir_registry");
+    std::fs::create_dir_all(&reg).unwrap();
+    lang()
+        .env_remove("NOETA_REGISTRY_URL")
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .env("NOETA_REGISTRY_TOKEN", "acme-current-publish-token")
+        .args(["scope", "rotate", "acme"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("needs the hosted registry"));
+}
+
+#[test]
 fn publish_cooldown_holds_back_a_freshly_published_registry_version() {
     // namespace-protection #1 (publish cooldown): `[trust].publish_cooldown` makes the resolver skip a
     // registry release published within the window, so an advisory/yank can catch a compromised release

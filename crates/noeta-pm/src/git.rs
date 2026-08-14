@@ -297,6 +297,18 @@ pub fn commit_web_url(url: &str, sha: &str) -> Option<String> {
     repo_web_url(url).map(|repo| format!("{repo}/commit/{sha}"))
 }
 
+/// A browsable link to the **tag** `tag` in `url`'s repo (`<repo>/releases/tag/<tag>`, the
+/// GitHub/Gitea release-page shape), or `None` when the repo isn't web-browsable.
+///
+/// The tag twin of [`commit_web_url`], and it points at the *release page* rather than the ref
+/// because that is what a publisher wants to look at after publishing: the notes, the assets, and
+/// whether the tag is the one they meant. A publish prints this beside the commit link, so the two
+/// questions a fresh release raises — what content went out, and what does it look like to a
+/// consumer — each have an answer to click.
+pub fn tag_web_url(url: &str, tag: &str) -> Option<String> {
+    repo_web_url(url).map(|repo| format!("{repo}/releases/tag/{tag}"))
+}
+
 /// Run `git` with `args`, returning trimmed stdout on success or a message built from stderr. A
 /// failure to even spawn `git` (not installed) is reported as such.
 fn run_git<'a>(args: impl IntoIterator<Item = &'a str>) -> Result<String, String> {
@@ -539,5 +551,17 @@ mod tests {
             Some("https://github.com/acme/http/commit/abc123")
         );
         assert_eq!(commit_web_url("/tmp/x", "abc"), None);
+        // The tag twin, including the `git@` form a publisher's remote is usually written as, and
+        // a tag whose name carries the `v` prefix most release tags do.
+        assert_eq!(
+            tag_web_url("https://github.com/acme/http", "v1.2.0").as_deref(),
+            Some("https://github.com/acme/http/releases/tag/v1.2.0")
+        );
+        assert_eq!(
+            tag_web_url("git@github.com:acme/http.git", "v1.2.0").as_deref(),
+            Some("https://github.com/acme/http/releases/tag/v1.2.0")
+        );
+        // Nothing to open for a source with no web form — the publish line simply omits the link.
+        assert_eq!(tag_web_url("/tmp/x", "v1.2.0"), None);
     }
 }

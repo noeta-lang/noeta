@@ -92,7 +92,7 @@ mod lock_census;
 
 /// The git **authorship** helpers backing the committer signal (`noeta update`/`add`) — re-exported so
 /// front-ends reach them without the rest of the git-fetch internals (which keep `Store` private).
-pub use git::{Authorship, authorship, commit_web_url, repo_web_url};
+pub use git::{Authorship, authorship, commit_web_url, repo_web_url, tag_web_url};
 
 /// Resolve a git `url`@`tag` to its current commit SHA (package-manager Phase 4, S2) — the one git
 /// operation `noeta publish` needs, to pin the SHA into the registry index at publish time.
