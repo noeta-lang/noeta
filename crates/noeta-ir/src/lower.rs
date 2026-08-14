@@ -1190,12 +1190,25 @@ fn collect_type_aliases(
                 // resolves to the trait's qualified identity — the name the shared membership
                 // table (`ReflectionInfo::trait_impls`) keys the implementor set on.
                 map.insert(local, tr.qualified());
-            } else if registry.is_namespace(&qualified) {
-                // A namespace group (`use std.http`): expose its types so a *dotted* narrowing
-                // target (`http.Response`) resolves to the same qualified identity a value carries,
-                // exactly as the checker's import collection does. Aliased groups key on the alias.
+            } else {
+                // A **module or namespace group** (`use std.http`, `use std.{id}`): expose the
+                // types under it so a *dotted* narrowing target (`http.Response`, `id.Uuid`)
+                // resolves to the same qualified identity the value carries, exactly as the
+                // checker's import collection does. Aliased groups key on the alias.
+                //
+                // Deliberately **not** gated on `is_namespace`. Whether a `use` target is a group
+                // or a leaf module is a fact about std's shape, not about the spelling: `std.http`
+                // is a group (parent of `.client`/`.server`) and `std.id` is a concrete module, so
+                // gating on the group made `id.Uuid` resolve to nothing while `http.Response`
+                // resolved — same syntax, different answer, and the failing half was silent
+                // (`d is id.Uuid` compared the tag against the literal string `id.Uuid`). The
+                // checker's own import pass had the identical split and closed it; this is the
+                // other copy of that rule. `namespace_types` is self-gating — it answers with the
+                // types actually under the prefix — so no membership test is needed to ask.
+                let mut bound = false;
                 for (rel, q) in registry.namespace_types(&qualified) {
                     map.insert(format!("{local}.{rel}"), q);
+                    bound = true;
                 }
                 // A module's kernel traits project the same way (`use std.vec` → a dotted
                 // `dyn vec.Kernels` target resolves to `std.vec.Kernels`).
@@ -1206,11 +1219,13 @@ fn collect_type_aliases(
                         && !short.contains('.')
                     {
                         map.insert(format!("{local}.{short}"), q);
+                        bound = true;
                     }
                 }
-            } else if n.alias.is_some() {
-                // A renamed user (or opaque) import: narrows against the imported leaf name.
-                map.insert(local, n.name.clone());
+                if !bound && n.alias.is_some() {
+                    // A renamed user (or opaque) import: narrows against the imported leaf name.
+                    map.insert(local, n.name.clone());
+                }
             }
         }
     }
@@ -1230,10 +1245,20 @@ fn collect_type_aliases(
 /// worse of the two: `type_name`'s whole job is to hand a key to something that looks it up, so a
 /// plausible-looking wrong name travels silently, which is exactly what the surface exists to prevent.
 ///
-/// Only the *leaf* form needs an entry: a group import (`use std.http` → `http.Framing`) is already
-/// rewritten to the qualified identity by the loader's native-type aliasing, and a name written
-/// qualified in source needs no rewrite at all. Built from this program's own `use` statements, so a
-/// short name the program never imported is left exactly as written.
+/// Both import forms need an entry. A **leaf** import binds the bare local name (`Uuid` ⇒
+/// `std.id.Uuid`); a **group** import binds the module or namespace, and the types reached through
+/// it are written dotted (`use std.{id}` ⇒ `id.Uuid` ⇒ `std.id.Uuid`). The loader does not rewrite
+/// the dotted form — it α-renames a native `use` handle in the *value* namespace, which is what
+/// makes `id.uuid()` resolve and says nothing about a type spelling — so without the entry below
+/// `d is id.Uuid` compared the runtime tag against the string `id.Uuid` and answered `false`, and
+/// `type_name::<id.Uuid>()` handed back that same key, which nothing is registered under. Silently,
+/// and for the one spelling that matches what `type_of` prints.
+///
+/// The dotted half goes through [`Registry::namespace_types`](noeta_ext_abi::registry::Registry::namespace_types),
+/// the projection the checker's own import pass binds these names with — so a spelling that
+/// type-checks as an annotation resolves to the same identity here rather than to a second answer.
+/// Built from this program's own `use` statements, so a name the program never imported is left
+/// exactly as written.
 ///
 /// **A local declaration wins**, the same shadowing rule the loader's own native-type aliasing
 /// follows: a name the linked program declares itself is never rewritten to a native type of that
@@ -1283,6 +1308,18 @@ fn collect_native_type_imports(
                 });
             if let Some(q) = resolved {
                 map.insert(local.to_string(), q);
+                continue;
+            }
+            // Not a type: then the import may be a **module or namespace**, whose types this
+            // program spells through it (`use std.{id}` → `id.Uuid`). Bind each of them under that
+            // dotted local spelling, through the one `namespace_types` projection the checker's
+            // `collect_imports` binds them with — so the name a written `id.Uuid` resolves to here
+            // is the name it resolved to there.
+            //
+            // A dotted key cannot collide with a local declaration (a declared type name has no
+            // dot), so the shadowing guard above has nothing to say about these.
+            for (rel, qualified_ty) in registry.namespace_types(&qualified) {
+                map.insert(format!("{local}.{rel}"), qualified_ty);
             }
         }
     }

@@ -1,0 +1,44 @@
+// A native type named **through the module it lives in** narrows like one named by a leaf import.
+// `use std.{id}` binds the module, `id.Uuid` is how its type is written, and that spelling has to
+// mean the identity a value of it actually carries — the one `type_of` prints.
+//
+// It is the same identity by three routes, and the point of the case is that all three agree:
+// `type_of(d).name()`, the narrowing pair (`is` / `.as<>`), and the reflection key
+// (`type_name::<T>()`). A dotted spelling that resolved to nothing failed *silently* — `is` answered
+// `false`, `.as<>` answered `none`, and `type_name` handed back a key nothing is registered under —
+// which is the worst shape this can take, because the spelling that failed is the one that matches
+// what the program was just told the value is.
+//
+// Whether a `use` target is a namespace *group* or a concrete *module* is a fact about how std is
+// laid out, not about the syntax: `std.http` is a group, `std.id` is a module. Both are written the
+// same way and both must resolve the same way, so this case pins one of each.
+// expect: stdout "type_of: std.id.Uuid"
+// expect: stdout "module is: true"
+// expect: stdout "module as: true"
+// expect: stdout "module key: std.id.Uuid"
+// expect: stdout "leaf is: true"
+// expect: stdout "group key: std.http.Framing"
+// expect: stdout "unrelated: false"
+// expect: exit 0
+use std.{id}
+use std.{http}
+use std.id.Uuid
+
+d: dyn = id.uuid();
+echo "type_of: ${type_of(d).name()}";
+
+// The module-qualified spelling, through both narrowing doors.
+echo "module is: ${d is id.Uuid}";
+echo "module as: ${d.as<id.Uuid>() != none}";
+
+// And as a reflection key, which is the surface whose whole job is to hand a name to a lookup.
+echo "module key: ${type_name::<id.Uuid>()}";
+
+// The leaf import of the same type is the same identity, so both spellings match one value.
+echo "leaf is: ${d is Uuid}";
+
+// A namespace *group* resolves identically — same syntax, and now the same answer.
+echo "group key: ${type_name::<http.Framing>()}";
+
+// Resolution stays type-directed: a `Uuid` is not a `Framing`.
+echo "unrelated: ${d is http.Framing}";

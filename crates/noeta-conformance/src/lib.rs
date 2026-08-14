@@ -606,9 +606,9 @@ mod tests {
     /// The pipeline the single-file path used to run: lex, parse, check, evaluate — no linking.
     ///
     /// It survives **only here**, as the control for
-    /// [`linking_is_what_resolves_a_module_qualified_native_type`]. A claim that linking matters is
-    /// worth nothing without the measurement that it does, and this is that measurement: the same
-    /// source, both ways, one answer each.
+    /// [`a_module_qualified_native_type_resolves_with_or_without_linking`]. A claim that the two
+    /// paths agree is worth nothing without the measurement that they do, and this is that
+    /// measurement: the same source, both ways.
     fn run_unlinked_control(name: &str, text: &str) -> String {
         ensure_std_registry();
         let source = Source::new(SourceId::FIRST, name, text);
@@ -627,16 +627,18 @@ mod tests {
         reference::reference_run(&parsed.program, checked.sites).stdout
     }
 
-    /// **Why the harness links.** `use std.http` then `http.Framing` is a module-qualified native
-    /// name, and the loader's rewrite tables are what bind it to the registry's `ExtEnum`. Skip
-    /// linking and the name resolves to nothing — `variants_of` answers with an empty list rather
-    /// than an error, so a conformance case could assert the empty answer and pass while
-    /// `noeta run` on the same file printed three variants.
+    /// **A module-qualified native name resolves the same with or without linking.**
+    /// `use std.http` then `http.Framing` names a native enum through the module it lives in, and
+    /// lowering binds that spelling from the program's own `use` statements — so the name reaches
+    /// the registry's `ExtEnum` whether or not the loader ran.
     ///
-    /// This is the difference, measured. If the single-file path ever stops linking, the two
-    /// numbers converge and this test says so.
+    /// Measured both ways because the failure it guards against is silent: `variants_of` answers an
+    /// empty list rather than an error for a name it cannot resolve, so a half that stopped
+    /// resolving would let a conformance case assert the empty answer and pass while `noeta run` on
+    /// the same file printed three. Equality is the assertion, and either number moving alone is
+    /// the finding.
     #[test]
-    fn linking_is_what_resolves_a_module_qualified_native_type() {
+    fn a_module_qualified_native_type_resolves_with_or_without_linking() {
         let source = "use std.http\necho variants_of::<http.Framing>().len()\n";
 
         let linked = run_linked_source("linked", source, Stage::Eval);
@@ -649,9 +651,9 @@ mod tests {
         let unlinked = run_unlinked_control("unlinked", source);
         assert_eq!(
             unlinked.trim(),
-            "0",
-            "unlinked, the same name resolves to nothing — silently, which is what made this \
-             worth a test rather than a comment"
+            linked.stdout.trim(),
+            "unlinked, the same name resolves to the same enum — lowering binds it from this \
+             program's own imports, so the two paths cannot answer differently"
         );
     }
 
