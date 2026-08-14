@@ -291,7 +291,7 @@ impl NativeCtx for VmCtx<'_, '_> {
         // Shape-relative and work results have no meaning here (`materialize_native` would panic).
         if matches!(
             out,
-            NativeOut::Object(_) | NativeOut::Struct { .. } | NativeOut::Spawn(_)
+            NativeOut::Object(_) | NativeOut::Fielded { .. } | NativeOut::Spawn(_)
         ) {
             return Err(CtxError::Std(StdError {
                 kind: noeta_stdlib::ErrorKind::ArgType,

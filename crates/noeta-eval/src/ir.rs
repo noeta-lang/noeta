@@ -2360,9 +2360,10 @@ impl Interpreter {
                 }
                 MatOut::Value(Value::map_value(Rc::new(map)))
             }
-            NativeOut::Struct {
+            NativeOut::Fielded {
                 name,
                 fields,
+                kind,
                 has_validator,
             } => {
                 let mut field_values = Vec::with_capacity(fields.len());
@@ -2388,7 +2389,13 @@ impl Interpreter {
                 // type's native `dispatch` (`call_method` → `find_class_method` → the fielded seam).
                 let value = if self.reg().resolve_fielded(&name).is_some() {
                     let fields = field_values.into_iter().map(|(n, _, v)| (n, v)).collect();
-                    crate::fielded_object(name.clone(), true, fields)
+                    // The recipe's kind, not an assumed `struct`: a native fielded type may be
+                    // either, and building a class as a value would give it structural equality
+                    // and copy-on-assign that its declaration does not have. A `.noe` type takes
+                    // the branch below, where `construct_object` reads the kind off the
+                    // declaration itself and so was never able to get this wrong.
+                    let is_struct = matches!(kind, noeta_stdlib::FieldedKind::Struct);
+                    crate::fielded_object(name.clone(), is_struct, fields)
                 } else {
                     self.construct_object(&name, span, field_values, None, None, span)?
                 };

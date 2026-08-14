@@ -1,0 +1,35 @@
+// A decoded `class` runs its `Validate` at the door, exactly as a decoded struct does.
+//
+// This is the answer to what a decode means for a type whose construction is otherwise channelled:
+// decoding IS the construction, so it validates rather than being refused. The alternative — refusing
+// to decode a validated class — would leave the caller decoding some other shape and calling the
+// constructor by hand, which is the work the derive exists to remove.
+// expect: stdout "valid: 5"
+// expect: stdout "rejected: balance may not be negative"
+// expect: exit 0
+use std.json
+
+@derive(Serialize<Json>, Deserialize<Json>)
+class Account {
+    pub name: string
+    balance: int
+
+    pub fn balance_of(): int { return self.balance; }
+
+    impl Validate {
+        pub fn validate(): Result<void, string> {
+            if self.balance < 0 { return Err("balance may not be negative"); }
+            return Ok();
+        }
+    }
+}
+
+fn report(text: string): string {
+    return match json.try_parse::<Account>(text) {
+        Ok(v) => "valid: ${v.balance_of()}",
+        Err(e) => "rejected: ${e.message()}",
+    };
+}
+
+echo report("{\"name\":\"a\",\"balance\":5}");
+echo report("{\"name\":\"a\",\"balance\":-1}");

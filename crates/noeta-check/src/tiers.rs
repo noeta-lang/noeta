@@ -1827,12 +1827,20 @@ impl Checker {
             Type::Map(k, v) if matches!(**k, Type::String) => {
                 TypeRecipe::Map(Box::new(self.type_to_recipe(v)?))
             }
-            // A non-generic value struct (a class is reference/identity, so it never decodes; an
-            // enum has its own arm below). The field set is the declared record fields, in order.
+            // A non-generic **fielded** type — a value struct or a reference class (an enum has
+            // its own arm below). The field set is the declared record fields, in order.
+            //
+            // A class decodes for the same reason it serializes: the decision is the declaration's,
+            // written inside it as `@derive(Deserialize<Json>)`. Its private fields decode too —
+            // `Serialize` writes every field, so refusing them would make a round trip lossy in a
+            // way nothing could repair, and the derive is consent in a way a caller-side door
+            // (`construct`, which refuses a private field by name) is not.
             Type::Named(name, args)
                 if args.is_empty()
-                    && self.symbols.type_kinds.get(name)
-                        == Some(&noeta_types::TypeKind::Struct) =>
+                    && matches!(
+                        self.symbols.type_kinds.get(name),
+                        Some(&noeta_types::TypeKind::Struct | &noeta_types::TypeKind::Class)
+                    ) =>
             {
                 let defaults = self.symbols.field_defaults.get(name);
                 let fields = self
@@ -1860,9 +1868,17 @@ impl Checker {
                     &Type::Named(name.clone(), Vec::new()),
                     noeta_types::BuiltinTrait::Validate,
                 );
-                TypeRecipe::Struct {
+                TypeRecipe::Fielded {
                     name: name.clone(),
                     fields,
+                    // The declaration's kind, read from the one table that answers it, so the
+                    // backend interns the shape the type actually has.
+                    kind: match self.symbols.type_kinds.get(name) {
+                        Some(&noeta_types::TypeKind::Class) => {
+                            noeta_ext_abi::registry::FieldedKind::Class
+                        }
+                        _ => noeta_ext_abi::registry::FieldedKind::Struct,
+                    },
                     has_validator,
                 }
             }

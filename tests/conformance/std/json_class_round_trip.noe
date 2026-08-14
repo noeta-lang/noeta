@@ -1,0 +1,50 @@
+// A `class` decodes from JSON, so a type that serializes can be read back. `Serialize` writes every
+// field, so the wire form of a class always existed; without a decode it was a shape nothing could
+// consume.
+//
+// **Its private fields travel.** A decode is the declaration's own doing — `@derive(Deserialize<Json>)`
+// is written inside the type, like a method — so it reaches the whole shape, where a caller-side
+// reflective door does not (`construct` refuses a private field by name, `reflection/construct_field_privacy`).
+// Refusing them here would make the round trip lossy in a way nothing could repair.
+//
+// **The decoded value is a class, not a value that looks like one.** The recipe carries which kind to
+// build, because the two differ in what they mean: a struct compares structurally and copies on
+// assignment, a class has identity. A decoded class equal to every twin would be the wrong type
+// wearing the right name — which is what building one as a struct would have produced.
+// expect: stdout "{\"label\":\"hi\",\"secret\":42}"
+// expect: stdout "round trip: hi / 42"
+// expect: stdout "class ==: false"
+// expect: stdout "class is itself: true"
+// expect: stdout "struct ==: true"
+// expect: exit 0
+use std.json
+
+@derive(Serialize<Json>, Deserialize<Json>)
+class Box {
+    pub label: string
+    secret: int
+
+    pub fn new(l: string, s: int): Self { return Box { label: l, secret: s }; }
+    pub fn peek(): int { return self.secret; }
+}
+
+@derive(Serialize<Json>, Deserialize<Json>)
+struct Pair { n: int }
+
+wire = json.stringify(Box.new("hi", 42));
+echo wire;
+
+echo match json.try_parse::<Box>(wire) {
+    Ok(v) => "round trip: ${v.label} / ${v.peek()}",
+    Err(e) => "err: ${e.message()}",
+};
+
+// Two decodes of one document are two distinct objects, and neither is structurally equal to the
+// other — reference semantics, exactly as a source-constructed class has.
+a = json.parse::<Box>(wire);
+b = json.parse::<Box>(wire);
+echo "class ==: ${a == b}";
+echo "class is itself: ${a === a}";
+
+// A struct decoded the same way still compares by value, so the kind is read rather than assumed.
+echo "struct ==: ${json.parse::<Pair>("{\"n\":1}") == json.parse::<Pair>("{\"n\":1}")}";

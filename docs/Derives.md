@@ -12,7 +12,7 @@
 | `Error` | `message()` returns `"${self}"` — the type's display story (a hand-written `impl Display`'s `to_string()`, or the structural rendering under `@derive(Display)`). Requires the type to have `Display` at all (E0050 otherwise); `@derive(Error, via: field)` instead forwards `message()` into the field's own `Error` implementation. See [Error Handling](Error-Handling#deriving-error). |
 | `Clone` | A structural clone — a marker like `Display` (value semantics already copy). |
 | `Serialize<Json>` | Synthesizes `to_json()` (on an enum: the variant rendering `json.stringify` produces). Encoding always writes **every** field — a default is a decode-side notion, so it never omits one. A `bytes` field encodes as a JSON **array of its byte values** (`[104, 105]`) — the lossless spelling that needs no agreed side-channel like base64; it is write-only, since `bytes` is not a decodable field type. An **enum value** encodes as its case name when the variant is payload-free (`"Green"`) and as `{"Case":[payload…]}` when it carries one (`Shape.Circle(3)` → `{"Circle":[3]}`) — the payload travels, positionally, rather than being dropped in favor of the tag; `Result` is a plain enum, so `Ok(5)` is `{"Ok":[5]}`. Like `bytes`, the payload-carrying form is write-only ([a payload-carrying enum has no JSON decoding at all](#enum-typed-fields)). An `Option` is the one exception, by the JSON-null convention: `some(x)` encodes as `x` and `none` as `null`, at the top level and inside a variant's payload alike. |
-| `Deserialize<Json>` | Registers the type's decode recipe, so JSON decodes into it: `json.parse::<T>` / `json.try_parse::<T>`, `Response.json::<T>()`, and the router-facing `json.decode_typed("T", text)` (which resolves the type by *name* at runtime, and needs this derive). Derivable for a non-generic value `struct` whose fields are all JSON-decodable — numbers, `bool`, `string`, `?T`, `List`, string-keyed `Map`, a declared **enum**, or another such struct; anything else is E0050. See [which fields may be omitted](#which-json-fields-may-be-omitted) and [enum-typed fields](#enum-typed-fields) below. |
+| `Deserialize<Json>` | Registers the type's decode recipe, so JSON decodes into it: `json.parse::<T>` / `json.try_parse::<T>`, `Response.json::<T>()`, and the router-facing `json.decode_typed("T", text)` (which resolves the type by *name* at runtime, and needs this derive). Derivable for a non-generic `struct` or `class` whose fields are all JSON-decodable — numbers, `bool`, `string`, `?T`, `List`, string-keyed `Map`, a declared **enum**, or another such type; anything else is E0050. A decoded `class` is a class: it has identity, compares by reference, and runs its `Validate` at the door like any other decode. See [which fields may be omitted](#which-json-fields-may-be-omitted) and [enum-typed fields](#enum-typed-fields) below. |
 
 ```noeta check
 @derive(Equatable, Comparable, Display, Clone)
@@ -62,6 +62,31 @@ echo "${pet.id}: ${pet.name}"      // 7: (unnamed)
 The literal cutoff is not arbitrary: a decode is a pure data walk with no access to the running program, so it can only fill a default it carries *as data*. Every in-process constructor — a `T { … }` literal, `construct(name, fields)` — runs the field's compiled default expression instead, which is why those accept a non-literal default where a decode cannot. `field_specs_of::<T>()` reports `optional = true` for any default at all; a decode narrows that to the literal ones and tells you when it did.
 
 The same rule governs request bodies: a web framework decodes a handler's body parameter with `json.decode_typed`, so a body struct with a literal default accepts documents that omit that field rather than rejecting them.
+
+## A derive sees the whole type
+
+`Serialize` writes every field and `Deserialize` reads every field, **private ones included** — and that is the point rather than an oversight.
+
+A derive is written *inside* the declaration, next to the methods, so it is the type saying what its wire form is. That standing is what a caller-side reflective door does not have: `construct` refuses to set a private field by name, and `fields_of` reports only the fields you could have read yourself, because those are reached from outside by code the type never authorized. The two rules answer different questions — **`pub` governs access, a derive governs shape.**
+
+The alternative makes a round trip lossy with nothing able to repair it. Encoding writes every field, so a wire form of the whole value exists whether or not anything can read it back; a decode that skipped private fields would build a value the encoder never described.
+
+```noeta
+use std.json
+
+@derive(Serialize<Json>, Deserialize<Json>)
+class Box {
+    pub label: string
+    secret: int                       // private, and still part of the wire form
+
+    pub fn new(l: string, s: int): Self { return Box { label: l, secret: s } }
+    pub fn peek(): int { return self.secret }
+}
+
+wire = json.stringify(Box.new("hi", 42))    // {"label":"hi","secret":42}
+back = json.parse::<Box>(wire)
+echo back.peek()                            // 42
+```
 
 ## Enum-typed fields
 

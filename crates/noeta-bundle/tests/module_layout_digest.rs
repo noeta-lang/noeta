@@ -80,7 +80,8 @@ use noeta_bytecode::{
 };
 use noeta_diagnostics::{Diagnostic, DiagnosticCode, Label, Severity};
 use noeta_ext_abi::{
-    FieldDefault, FieldRecipe, IntMethod, TypeArgInfo, TypeRecipe, VariantRecipe, VariantTag,
+    FieldDefault, FieldRecipe, FieldedKind, IntMethod, TypeArgInfo, TypeRecipe, VariantRecipe,
+    VariantTag,
 };
 use noeta_object::{Shape, ShapeKind};
 use noeta_span::{SourceId, Span};
@@ -340,9 +341,10 @@ fn all_field_recipes() -> Vec<FieldRecipe> {
 
 /// Every recipe variant, reached through the one that carries a list of fields.
 fn every_type_recipe() -> TypeRecipe {
-    TypeRecipe::Struct {
+    TypeRecipe::Fielded {
         name: "app.Order".to_string(),
         fields: all_field_recipes(),
+        kind: FieldedKind::Struct,
         has_validator: false,
     }
 }

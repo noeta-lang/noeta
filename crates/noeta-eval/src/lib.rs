@@ -7212,7 +7212,7 @@ pub(crate) fn materialize_native(out: noeta_stdlib::NativeOut) -> Value {
         // The typed `json.parse::<T>` results that name their own types are built by the typed-call
         // path (`materialize_recipe`, which has the interpreter's type registry), not here; async
         // work is ticketed at the dispatch return (extern-types X5), never materialized.
-        NativeOut::Struct { .. } | NativeOut::Spawn(_) => {
+        NativeOut::Fielded { .. } | NativeOut::Spawn(_) => {
             unreachable!("recipe/spawn results never reach materialize_native")
         }
     }

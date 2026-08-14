@@ -1,17 +1,21 @@
-// F2b negative: an instantiation that flows into a recipe-needing forward must be buildable — a
-// class (no decode recipe) is rejected statically at the INSTANTIATING call, mirroring the direct
-// `json.try_parse::<Box>` error.
-// expect: error E0007 at 17:5
+// F2b negative: an instantiation that flows into a recipe-needing forward must be buildable — a type
+// with no decode recipe is rejected statically at the INSTANTIATING call, mirroring the direct
+// `json.try_parse::<Bag>` error.
+//
+// A `Set` is the unbuildable part here: JSON has no set form, so nothing containing one decodes. The
+// kind of the container is not what decides — a class decodes as readily as a struct
+// (`std/json_class_round_trip`) — which is why the field is what this case is built around.
+// expect: error E0007 at 21:5
 // expect: exit 1
 use std.json
 use std.json.JsonError
 
-class Box {
-    value: int
+class Bag {
+    items: Set<int>
 }
 
 fn load<T>(text: string): Result<T, JsonError> {
     return json.try_parse::<T>(text)
 }
 
-r = load::<Box>("{}")
+r = load::<Bag>("{}")

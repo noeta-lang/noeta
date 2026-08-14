@@ -115,7 +115,7 @@ pub const MAGIC: &[u8; 4] = b"NOEB";
 /// Bumped to 10 by two arcs landing together — one bump, because version 9 was never released and
 /// either change alone is a wire break.
 ///
-/// Bumped to 10 by the json-defaults arc: `TypeRecipe::Struct::fields` (in `Module::deserialize_recipes`
+/// Bumped to 10 by the json-defaults arc: `TypeRecipe::Fielded::fields` (in `Module::deserialize_recipes`
 /// and in the `Op` variants that carry a call-site recipe) changed from `Vec<(String, TypeRecipe)>` to
 /// `Vec<FieldRecipe>` — each field now also carries its `FieldDefault`, so a JSON decode can fill a
 /// field whose declaration gave it a literal default. Postcard writes the struct's fields back to back
@@ -204,7 +204,18 @@ pub const MAGIC: &[u8; 4] = b"NOEB";
 /// reflected tag was rejected at `attributes_of::<T>()` and answered at `field_specs_of::<T>()`, and
 /// `roles_of::<E>()` had no register at all. One name-string operand is what `Op::FieldSpecsOf`,
 /// `Op::VariantsOf` and `Op::Construct` already take; the two channels fill it identically.
-pub const FORMAT_VERSION: u8 = 18;
+///
+/// Bumped to 19 by class deserialization: a `class` decodes from JSON, so [`noeta_ext_abi::TypeRecipe::Struct`] became `Fielded`
+/// and gained a [`noeta_ext_abi::FieldedKind`] saying which kind to build. A baked deserialize
+/// recipe therefore carries one more field, and postcard writes an enum variant by *index*: adding
+/// a field shifts every byte after it, and the two `Fielded`/`Enum` arms did not move, so a
+/// version-18 reader decoding a version-19 recipe reads the kind byte as the start of
+/// `has_validator` and everything after it slides.
+///
+/// The kind cannot be re-derived on the reading side — a recipe carries the type's *name*, and the
+/// backend interns a shape from it without ever consulting a declaration — which is precisely why
+/// it had to enter the artifact rather than be looked up.
+pub const FORMAT_VERSION: u8 = 19;
 
 /// The SHA-256 of one canonical [`Module`]'s postcard encoding — the *other* half of
 /// [`FORMAT_VERSION`], and the thing that makes the changelog above enforceable.
@@ -228,7 +239,7 @@ pub const FORMAT_VERSION: u8 = 18;
 /// pair exists to prevent. The test's message says so; this doc says so; the changelog paragraph
 /// you are about to write is the third place.
 pub const MODULE_LAYOUT_DIGEST: &str =
-    "992b2f919e64dedac239b39f33c8ff6f960de252abe5dc42deda12514fdb1a10";
+    "e3aa9a499b3d11692f0b1e11008e0d9da555e960d3614447dd1e0f2722ffcd4e";
 
 /// The runtime version stamped into and checked against artifacts — the building crate's
 /// package version. Any release that changes the serialized [`Module`] layout bumps this, so a

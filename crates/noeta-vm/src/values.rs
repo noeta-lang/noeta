@@ -278,7 +278,7 @@ pub(crate) fn materialize_native(out: noeta_stdlib::NativeOut) -> Value {
         // The typed `json.parse::<T>` results that name their own types are built by the typed-call
         // path (`materialize_recipe`, which has the VM's shape table), not here; async work is
         // ticketed at the dispatch return (extern-types X5), never materialized.
-        NativeOut::Struct { .. } | NativeOut::Spawn(_) => {
+        NativeOut::Fielded { .. } | NativeOut::Spawn(_) => {
             unreachable!("recipe/spawn results never reach materialize_native")
         }
     }
@@ -920,14 +920,21 @@ impl Vm<'_> {
                 }
                 MatOut::Value(Value::map(map))
             }
-            NativeOut::Struct {
+            NativeOut::Fielded {
                 name,
                 fields,
+                kind,
                 has_validator,
             } => {
                 let names: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
-                let shape =
-                    noeta_object::intern_shape(Shape::object(ShapeKind::Struct, &name, names));
+                // The declaration's kind, carried by the recipe: a decoded class must intern a
+                // CLASS shape or it would be a value — structurally equal to any twin, copied on
+                // assignment, and identity-less — which is not the type the program declared.
+                let shape_kind = match kind {
+                    noeta_stdlib::FieldedKind::Class => ShapeKind::Class,
+                    noeta_stdlib::FieldedKind::Struct => ShapeKind::Struct,
+                };
+                let shape = noeta_object::intern_shape(Shape::object(shape_kind, &name, names));
                 let mut values = Vec::with_capacity(fields.len());
                 for (fname, fout) in fields {
                     let mark = push_member(path, &fname);

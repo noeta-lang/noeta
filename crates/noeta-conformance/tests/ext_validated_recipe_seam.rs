@@ -7,9 +7,9 @@
 //! on both backends, with the leak oracle at zero.
 //!
 //! This is the exerciser for the recipe-door gap the arc's E2 note flagged: `type_to_recipe` already
-//! builds a `TypeRecipe::Struct` for a native struct (its qualified identity is in the checker's
+//! builds a `TypeRecipe::Fielded` for a native struct (its qualified identity is in the checker's
 //! `records`/`type_kinds` tables, `has_validator` set from `satisfies(Validate)`), and `json` emits
-//! `NativeOut::Struct { has_validator: true }` from it — but neither backend used to MATERIALIZE a
+//! `NativeOut::Fielded { has_validator: true }` from it — but neither backend used to MATERIALIZE a
 //! native struct from that node or DISPATCH its `validate`:
 //!
 //! - the tree-walker's recipe path called `construct_object(&qualified_name)`, a scope lookup that

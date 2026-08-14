@@ -1238,7 +1238,7 @@ struct Symbols {
     attribute_optional_fields: HashMap<String, HashSet<String>>,
     /// Per struct/class, each field whose declared default means something to a **JSON decode**
     /// (json-defaults): type name → field name → [`noeta_ext_abi::FieldDefault`]. Read by
-    /// [`Checker::type_to_recipe`] when it bakes a `TypeRecipe::Struct`, so an omitted field with a
+    /// [`Checker::type_to_recipe`] when it bakes a `TypeRecipe::Fielded`, so an omitted field with a
     /// literal default decodes to that default instead of erroring — the same optionality
     /// `attribute_optional_fields` above gives an attribute construction, and `construct(name,
     /// fields)` gives a dynamic construction. Only non-[`noeta_ext_abi::FieldDefault::Required`]

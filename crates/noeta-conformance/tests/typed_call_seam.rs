@@ -43,11 +43,12 @@ fn default_out(recipe: &TypeRecipe) -> NativeOut {
         TypeRecipe::Option(_) => NativeOut::None,
         TypeRecipe::List(_) => NativeOut::List(Vec::new()),
         TypeRecipe::Map(_) => NativeOut::Map(Vec::new()),
-        TypeRecipe::Struct {
+        TypeRecipe::Fielded {
             name,
             fields,
+            kind,
             has_validator,
-        } => NativeOut::Struct {
+        } => NativeOut::Fielded {
             name: name.clone(),
             fields: fields
                 .iter()
@@ -55,6 +56,8 @@ fn default_out(recipe: &TypeRecipe) -> NativeOut {
                 // this producer builds a value from nothing, so every field is produced.
                 .map(|f| (f.name.clone(), default_out(&f.recipe)))
                 .collect(),
+            // Forwarded, not assumed: the recipe decides whether this builds a class or a struct.
+            kind: *kind,
             has_validator: *has_validator,
         },
         // An enum's "default" is its FIRST declared variant — the only choice a producer building a

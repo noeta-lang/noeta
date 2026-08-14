@@ -107,10 +107,15 @@ pub enum NativeOut {
     /// type, so the backend builds the instance by name (the tree-walker through its real registered
     /// definition, so methods/defaults match a normal literal; the VM through a fresh same-name shape,
     /// as reflection already does). Field values are themselves `NativeOut`, so nesting recurses.
-    Struct {
+    Fielded {
         name: String,
         fields: Vec<(String, NativeOut)>,
-        /// Propagated from [`TypeRecipe::Struct::has_validator`] (validation arc): when set, the
+        /// Which kind the backend must build — a value `struct` or a reference `class`. Propagated
+        /// from [`TypeRecipe::Fielded::kind`], because the two differ in the shape they intern and
+        /// therefore in equality, assignment and identity: building a class as a struct would give
+        /// a decoded value structural equality its declaration does not have.
+        kind: FieldedKind,
+        /// Propagated from [`TypeRecipe::Fielded::has_validator`] (validation arc): when set, the
         /// backend re-enters the VM to run this type's `Validate::validate` on the built value,
         /// bottom-up. `false` short-circuits any re-entry (zero cost for a non-validated type).
         has_validator: bool,
@@ -148,7 +153,7 @@ pub enum NativeOut {
         variant_index: u32,
         fields: Vec<NativeOut>,
         /// Propagated from [`TypeRecipe::Enum::has_validator`] — the exact twin of
-        /// [`NativeOut::Struct::has_validator`]: when set, the backend re-enters to run this enum's
+        /// [`NativeOut::Fielded::has_validator`]: when set, the backend re-enters to run this enum's
         /// `Validate::validate` on the built value, so a **decode door** enforces an enum's
         /// invariants on the same terms it enforces a struct's (`docs/Validation.md`).
         ///
@@ -159,7 +164,7 @@ pub enum NativeOut {
     },
     /// A native-declared **fielded-type** instance (native-extensibility S2, unified) — a REAL
     /// language `Object` the backend materializes with named fields, distinct from an anonymous
-    /// value struct built by a call-site recipe ([`NativeOut::Struct`]). `kind` selects the shape:
+    /// value struct built by a call-site recipe ([`NativeOut::Fielded`]). `kind` selects the shape:
     /// [`FieldedKind::Class`] → a **class-kind** shape (reference identity, RC + cycle participation,
     /// its extern-handle field's `Drop` as destructor); [`FieldedKind::Struct`] → a **struct-kind**
     /// shape (structural equality, value/copy semantics — the object model derives it). `class` is
@@ -524,10 +529,20 @@ pub enum TypeRecipe {
     List(Box<TypeRecipe>),
     /// A string-keyed map; the boxed recipe is the value type (JSON object keys are always strings).
     Map(Box<TypeRecipe>),
-    /// A struct/record type: its name and its [`FieldRecipe`]s in the type's declared order.
-    Struct {
+    /// A **fielded** type — a value `struct` or a reference `class` — by name, with its
+    /// [`FieldRecipe`]s in the type's declared order.
+    ///
+    /// Both kinds decode. A class is not excluded for being a reference type: a decode is the
+    /// declaration's own doing (`@derive(Deserialize<Json>)` is written inside it, like a method),
+    /// and refusing one would leave a class serializable but never recoverable — `Serialize` writes
+    /// every field, so the wire form exists whether or not anything can read it back.
+    Fielded {
         name: String,
         fields: Vec<FieldRecipe>,
+        /// Which kind to build. A class interns a class shape and keeps reference semantics; a
+        /// struct interns a struct shape. The checker knows this and the backend cannot re-derive
+        /// it from the name alone, so it travels with the recipe.
+        kind: FieldedKind,
         /// Whether this type implements the `Validate` built-in trait (validation arc). When set,
         /// a recipe door re-enters the backend to run `validate()` on the freshly-built value
         /// (bottom-up: after all fields are materialized and validated). Resolved by the checker's
@@ -555,7 +570,7 @@ pub enum TypeRecipe {
         name: String,
         variants: Vec<VariantRecipe>,
         /// Whether this enum implements the `Validate` built-in trait — the enum twin of
-        /// [`TypeRecipe::Struct::has_validator`], honoring the identical decode-door contract: a
+        /// [`TypeRecipe::Fielded::has_validator`], honoring the identical decode-door contract: a
         /// freshly decoded variant runs `validate()` before it escapes the door.
         has_validator: bool,
     },
@@ -615,7 +630,7 @@ impl VariantTag {
     }
 }
 
-/// One field of a [`TypeRecipe::Struct`]: its name, the recipe its value decodes through, and what
+/// One field of a [`TypeRecipe::Fielded`]: its name, the recipe its value decodes through, and what
 /// the decoder does when the input omits it ([`FieldDefault`]).
 ///
 /// The default rides *on the field* rather than as a wrapper recipe node so that every consumer that
@@ -624,7 +639,7 @@ impl VariantTag {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct FieldRecipe {
     /// The field's declared name — the key the decoder matches in the input object, and the name it
-    /// emits in the resulting [`NativeOut::Struct`].
+    /// emits in the resulting [`NativeOut::Fielded`].
     pub name: String,
     /// The recipe the field's value decodes through.
     pub recipe: TypeRecipe,
@@ -1349,7 +1364,7 @@ pub enum VariantValue {
 ///
 /// `Class` is the default ([`ExtFielded::DEFAULTS`]) so every pre-unification `ExtClass` fixture
 /// keeps its meaning unchanged.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FieldedKind {
     Class,
     Struct,
@@ -3604,7 +3619,7 @@ impl Registry {
                     self.debug_verify_out(owner, func, item);
                 }
             }
-            O::Struct { fields, .. } => {
+            O::Fielded { fields, .. } => {
                 for (_, value) in fields {
                     self.debug_verify_out(owner, func, value);
                 }

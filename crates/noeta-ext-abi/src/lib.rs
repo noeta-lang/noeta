@@ -28,7 +28,7 @@
 /// and no longer compiles; the composed build reports that as an ABI mismatch naming the package
 /// it belongs to (`compose::compose_failure`) rather than as a bare `rustc` error.
 ///
-/// **3** — [`registry::TypeRecipe::Struct`]'s `fields` became `Vec<FieldRecipe>` (from
+/// **3** — [`registry::TypeRecipe::Fielded`]'s `fields` became `Vec<FieldRecipe>` (from
 /// `Vec<(String, TypeRecipe)>`) so each field carries its [`registry::FieldDefault`] — what an
 /// omitted input field means. A `typed_dispatch` that walks a struct recipe destructures the tuple
 /// and no longer compiles; there is no silent behavior change, and `..DEFAULTS` cannot cover it
@@ -166,7 +166,21 @@
 /// out-of-tree literal in the same release that moved the verbs. Doing it as its own version keeps
 /// the two diagnosable apart. A `short` on a positional kind is ignored rather than fatal, since a
 /// package's slip should not abort the CLI for everyone who installed it.
-pub const ABI_VERSION: u32 = 17;
+///
+/// **18** — a `class` decodes from JSON. [`registry::TypeRecipe::Fielded`] and
+/// [`registry::NativeOut::Fielded`] are both now `Fielded`, and both carry a
+/// [`registry::FieldedKind`]: the recipe says which kind to build, because a class interns a class
+/// shape and keeps reference semantics while a struct interns a struct shape, and the backend
+/// cannot re-derive that from the type's name. A **source break** for an extension that builds
+/// either variant by name — rename it and add `kind` (`FieldedKind::Struct` preserves the old
+/// meaning exactly).
+///
+/// The rule it implements: a decode is the *declaration's* own doing, since
+/// `@derive(Deserialize<Json>)` is written inside the type like a method, so it reaches the whole
+/// shape — private fields included — where a caller-side reflective door (`construct`, `fields_of`)
+/// does not. Refusing a class left it serializable and never recoverable, because `Serialize`
+/// writes every field regardless; the wire form existed with nothing able to read it back.
+pub const ABI_VERSION: u32 = 18;
 
 pub mod args;
 pub mod channel;

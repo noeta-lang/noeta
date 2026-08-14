@@ -443,9 +443,10 @@ fn decode(json: &Json, recipe: &TypeRecipe, path: &mut String) -> Result<NativeO
             }
             _ => Err(JsonError::mismatch(path, "map", json)),
         },
-        TypeRecipe::Struct {
+        TypeRecipe::Fielded {
             name,
             fields,
+            kind,
             has_validator,
         } => match json {
             Json::Object(entries) => {
@@ -469,9 +470,12 @@ fn decode(json: &Json, recipe: &TypeRecipe, path: &mut String) -> Result<NativeO
                         }
                     }
                 }
-                Ok(NativeOut::Struct {
+                Ok(NativeOut::Fielded {
                     name: name.clone(),
                     fields: slots,
+                    // Carried through so the backend builds the kind the declaration is, rather
+                    // than assuming the value kind every recipe used to be.
+                    kind: *kind,
                     has_validator: *has_validator,
                 })
             }
@@ -653,6 +657,7 @@ fn convert(value: JsonValue) -> Json {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::FieldedKind;
 
     #[test]
     fn parses_scalars() {
@@ -715,22 +720,24 @@ mod tests {
     #[test]
     fn decodes_flat_struct_fields_in_declared_order() {
         // Declared order is `x, y` even though JSON keys arrive sorted (`x, y` here anyway).
-        let recipe = TypeRecipe::Struct {
+        let recipe = TypeRecipe::Fielded {
             name: "Point".into(),
             fields: vec![
                 FieldRecipe::required("x", TypeRecipe::Int),
                 FieldRecipe::required("y", TypeRecipe::Int),
             ],
+            kind: FieldedKind::Struct,
             has_validator: false,
         };
         assert_eq!(
             parse_typed("{\"y\": 2, \"x\": 1}", &recipe).unwrap(),
-            NativeOut::Struct {
+            NativeOut::Fielded {
                 name: "Point".into(),
                 fields: vec![
                     ("x".into(), NativeOut::Scalar(Scalar::Int(1))),
                     ("y".into(), NativeOut::Scalar(Scalar::Int(2))),
                 ],
+                kind: FieldedKind::Struct,
                 has_validator: false,
             }
         );
@@ -738,30 +745,33 @@ mod tests {
 
     #[test]
     fn missing_required_field_errors_optional_becomes_none() {
-        let recipe = TypeRecipe::Struct {
+        let recipe = TypeRecipe::Fielded {
             name: "Pair".into(),
             fields: vec![
                 FieldRecipe::required("a", TypeRecipe::Int),
                 FieldRecipe::required("b", TypeRecipe::Option(boxed(TypeRecipe::Int))),
             ],
+            kind: FieldedKind::Struct,
             has_validator: false,
         };
         // `b` absent → `None`.
         assert_eq!(
             parse_typed("{\"a\": 1}", &recipe).unwrap(),
-            NativeOut::Struct {
+            NativeOut::Fielded {
                 name: "Pair".into(),
                 fields: vec![
                     ("a".into(), NativeOut::Scalar(Scalar::Int(1))),
                     ("b".into(), NativeOut::None),
                 ],
+                kind: FieldedKind::Struct,
                 has_validator: false,
             }
         );
         // `a` absent → error.
-        let recipe_missing_required = TypeRecipe::Struct {
+        let recipe_missing_required = TypeRecipe::Fielded {
             name: "Pair".into(),
             fields: vec![FieldRecipe::required("a", TypeRecipe::Int)],
+            kind: FieldedKind::Struct,
             has_validator: false,
         };
         assert!(parse_typed("{}", &recipe_missing_required).is_err());
@@ -771,12 +781,13 @@ mod tests {
 
     /// `Pet { id: int, name: string = "(unnamed)" }` — the literal-defaulted struct the tests decode.
     fn pet_recipe() -> TypeRecipe {
-        TypeRecipe::Struct {
+        TypeRecipe::Fielded {
             name: "Pet".into(),
             fields: vec![
                 FieldRecipe::required("id", TypeRecipe::Int),
                 FieldRecipe::with_default("name", TypeRecipe::Str, "\"(unnamed)\""),
             ],
+            kind: FieldedKind::Struct,
             has_validator: false,
         }
     }
@@ -785,12 +796,13 @@ mod tests {
     fn omitted_literal_default_field_is_filled_with_the_default() {
         assert_eq!(
             parse_typed("{\"id\": 7}", &pet_recipe()).unwrap(),
-            NativeOut::Struct {
+            NativeOut::Fielded {
                 name: "Pet".into(),
                 fields: vec![
                     ("id".into(), NativeOut::Scalar(Scalar::Int(7))),
                     ("name".into(), NativeOut::Str("(unnamed)".into())),
                 ],
+                kind: FieldedKind::Struct,
                 has_validator: false,
             }
         );
@@ -800,12 +812,13 @@ mod tests {
     fn a_present_value_wins_over_the_declared_default() {
         assert_eq!(
             parse_typed("{\"id\": 7, \"name\": \"Rex\"}", &pet_recipe()).unwrap(),
-            NativeOut::Struct {
+            NativeOut::Fielded {
                 name: "Pet".into(),
                 fields: vec![
                     ("id".into(), NativeOut::Scalar(Scalar::Int(7))),
                     ("name".into(), NativeOut::Str("Rex".into())),
                 ],
+                kind: FieldedKind::Struct,
                 has_validator: false,
             }
         );
@@ -815,7 +828,7 @@ mod tests {
     fn a_baked_default_decodes_through_its_own_field_recipe() {
         // Every recipe kind a literal default can reach: the widening `int → float`, a `bool`, and a
         // list of scalars. The filled value is built by the same walk a supplied value takes.
-        let recipe = TypeRecipe::Struct {
+        let recipe = TypeRecipe::Fielded {
             name: "Config".into(),
             fields: vec![
                 FieldRecipe::with_default("ratio", TypeRecipe::Float, "1"),
@@ -834,11 +847,12 @@ mod tests {
                     "null",
                 ),
             ],
+            kind: FieldedKind::Struct,
             has_validator: false,
         };
         assert_eq!(
             parse_typed("{}", &recipe).unwrap(),
-            NativeOut::Struct {
+            NativeOut::Fielded {
                 name: "Config".into(),
                 fields: vec![
                     ("ratio".into(), NativeOut::Scalar(Scalar::Float(1.0))),
@@ -852,6 +866,7 @@ mod tests {
                     ),
                     ("note".into(), NativeOut::None),
                 ],
+                kind: FieldedKind::Struct,
                 has_validator: false,
             }
         );
@@ -862,13 +877,14 @@ mod tests {
         // `Event { at: int = now() }` — the checker could not fold the default, so the recipe carries
         // `Dynamic`: the field stays required, and the error tells the author why their default did
         // not apply (the whole point of keeping the case distinct from a bare missing field).
-        let recipe = TypeRecipe::Struct {
+        let recipe = TypeRecipe::Fielded {
             name: "Event".into(),
             fields: vec![FieldRecipe {
                 name: "at".into(),
                 recipe: TypeRecipe::Int,
                 default: FieldDefault::Dynamic,
             }],
+            kind: FieldedKind::Struct,
             has_validator: false,
         };
         let err = try_parse_typed("{}", &recipe).unwrap_err();
@@ -902,20 +918,22 @@ mod tests {
         assert_eq!(
             items,
             vec![
-                NativeOut::Struct {
+                NativeOut::Fielded {
                     name: "Pet".into(),
                     fields: vec![
                         ("id".into(), NativeOut::Scalar(Scalar::Int(1))),
                         ("name".into(), NativeOut::Str("(unnamed)".into())),
                     ],
+                    kind: FieldedKind::Struct,
                     has_validator: false,
                 },
-                NativeOut::Struct {
+                NativeOut::Fielded {
                     name: "Pet".into(),
                     fields: vec![
                         ("id".into(), NativeOut::Scalar(Scalar::Int(2))),
                         ("name".into(), NativeOut::Str("Rex".into())),
                     ],
+                    kind: FieldedKind::Struct,
                     has_validator: false,
                 },
             ]
@@ -930,18 +948,20 @@ mod tests {
         // Unreachable for a checker-built recipe (the default is rendered from a folded literal that
         // already type-checked against the field), so this guards the hand-built/foreign-recipe edge:
         // a default that is not JSON, and one that is JSON of the wrong kind, both report.
-        let not_json = TypeRecipe::Struct {
+        let not_json = TypeRecipe::Fielded {
             name: "Broken".into(),
             fields: vec![FieldRecipe::with_default("n", TypeRecipe::Int, "nope")],
+            kind: FieldedKind::Struct,
             has_validator: false,
         };
         let err = try_parse_typed("{}", &not_json).unwrap_err();
         assert_eq!(err.kind, JsonErrorKind::MissingField);
         assert!(err.detail.contains("not valid JSON"), "{}", err.detail);
 
-        let wrong_kind = TypeRecipe::Struct {
+        let wrong_kind = TypeRecipe::Fielded {
             name: "Broken".into(),
             fields: vec![FieldRecipe::with_default("n", TypeRecipe::Int, "\"five\"")],
+            kind: FieldedKind::Struct,
             has_validator: false,
         };
         let err = try_parse_typed("{}", &wrong_kind).unwrap_err();
@@ -955,12 +975,13 @@ mod tests {
     #[test]
     fn decodes_nested_list_and_struct() {
         // `List<Point>` where `Point { x: int, y: int }`.
-        let point = TypeRecipe::Struct {
+        let point = TypeRecipe::Fielded {
             name: "Point".into(),
             fields: vec![
                 FieldRecipe::required("x", TypeRecipe::Int),
                 FieldRecipe::required("y", TypeRecipe::Int),
             ],
+            kind: FieldedKind::Struct,
             has_validator: false,
         };
         let recipe = TypeRecipe::List(boxed(point));
@@ -984,9 +1005,10 @@ mod tests {
     #[test]
     fn shape_mismatch_is_an_error() {
         // An array where an object (struct) is expected.
-        let recipe = TypeRecipe::Struct {
+        let recipe = TypeRecipe::Fielded {
             name: "Point".into(),
             fields: vec![FieldRecipe::required("x", TypeRecipe::Int)],
+            kind: FieldedKind::Struct,
             has_validator: false,
         };
         assert!(parse_typed("[1, 2, 3]", &recipe).is_err());
@@ -996,17 +1018,19 @@ mod tests {
 
     /// `Order { items: List<Item { price: float }> }` — the nested recipe the path tests decode.
     fn order_recipe() -> TypeRecipe {
-        let item = TypeRecipe::Struct {
+        let item = TypeRecipe::Fielded {
             name: "Item".into(),
             fields: vec![FieldRecipe::required("price", TypeRecipe::Float)],
+            kind: FieldedKind::Struct,
             has_validator: false,
         };
-        TypeRecipe::Struct {
+        TypeRecipe::Fielded {
             name: "Order".into(),
             fields: vec![FieldRecipe::required(
                 "items",
                 TypeRecipe::List(boxed(item)),
             )],
+            kind: FieldedKind::Struct,
             has_validator: false,
         }
     }
@@ -1065,9 +1089,10 @@ mod tests {
         assert_eq!(root.message, "json.parse: expected int, found JSON string");
         let missing = parse_typed(
             "{}",
-            &TypeRecipe::Struct {
+            &TypeRecipe::Fielded {
                 name: "Pair".into(),
                 fields: vec![FieldRecipe::required("a", TypeRecipe::Int)],
+                kind: FieldedKind::Struct,
                 has_validator: false,
             },
         )
