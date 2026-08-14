@@ -528,6 +528,63 @@ fn test_on_a_directory_runs_every_files_tests() {
 }
 
 #[test]
+fn a_directory_walk_stops_at_a_nested_package() {
+    // A directory holding its own `noeta.toml` is a different package — its own dependencies, its
+    // own lockfile — and the loader has always refused to merge one into a consumer's program. The
+    // CLI's own walk did not, so `noeta test` at a package root swept an example app's files up and
+    // resolved each against the OUTER root: they took the outer package's dependency versions, and
+    // an example pinning anything else simply failed to check. One question, answered twice,
+    // answered differently.
+    //
+    // A nested package is entered rather than swept: pointing the verb AT it runs it as what it is.
+    let dir = temp_dir(
+        "test_dir_nested_package",
+        &[
+            (
+                "noeta.toml",
+                "[package]\nname = \"local/outer\"\nversion = \"0.1.0\"\n\n\
+                 [directives]\ntest = \"std\"\n",
+            ),
+            (
+                "src/main.noe",
+                "echo 1;\n\
+                 @test {\n\
+                     fn outer_test(): void { assert(1 == 1); }\n\
+                 }\n",
+            ),
+            (
+                "examples/app/noeta.toml",
+                "[package]\nname = \"local/inner\"\nversion = \"0.1.0\"\n\n\
+                 [directives]\ntest = \"std\"\n",
+            ),
+            (
+                "examples/app/main.noe",
+                "echo 2;\n\
+                 @test {\n\
+                     fn inner_test(): void { assert(2 == 2); }\n\
+                 }\n",
+            ),
+        ],
+    );
+    // The outer walk sees the outer package only.
+    lang().arg("test").arg(&dir).assert().success().stdout(
+        predicate::str::contains("src/main.noe::outer_test")
+            .and(predicate::str::contains("inner_test").not())
+            .and(predicate::str::contains("1 passed, 0 failed, 1 total")),
+    );
+    // The nested package still runs — as itself, from its own root.
+    lang()
+        .arg("test")
+        .arg(dir.join("examples/app"))
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("main.noe::inner_test")
+                .and(predicate::str::contains("1 passed, 0 failed, 1 total")),
+        );
+}
+
+#[test]
 fn test_on_a_directory_fails_when_any_files_test_fails() {
     let dir = temp_dir(
         "test_dir_failure",

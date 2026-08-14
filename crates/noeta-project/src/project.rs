@@ -581,6 +581,30 @@ pub fn pool_modules(
 /// depth-first `read_dir` walk that silently skips directories it cannot read (a partial tree still
 /// checks what it can). Symlinked directories are followed by `read_dir` as ordinary entries; cycles
 /// are not guarded against, matching the loader's own assumptions about a normal source tree.
+///
+/// **This walk is deliberately wider than the loader's** ([`noeta_loader::derive::is_outside_package`]),
+/// and the difference is the point rather than drift. The loader answers *which files are modules of
+/// this package* and prunes everything else out of the pool; this answers *which files should be
+/// checked as entries*, and a file the pool prunes is exactly the one nothing else will look at.
+/// Narrowing this to the loader's rule silently deletes that: two files deriving one module path
+/// across a Cargo-crate prune is E0073 today only because this walk still finds the pruned one.
+///
+/// It stops at two kinds of directory, for two different reasons:
+///
+/// * **A dot-directory.** `.git` is metadata; the one that bites is `.claude/worktrees/`, a whole
+///   second copy of every module, so checking a package swept an agent's in-progress branch into
+///   the same program and reported its errors against a consumer that never referenced it.
+/// * **A nested package** — a directory holding its own [`noeta_loader::MANIFEST_NAME`]. Not
+///   because its files do not deserve checking, but because they cannot be checked *from here*: a
+///   nested package has its own dependencies and its own lockfile, and every verb resolves an entry
+///   against the root it is standing in. Sweeping one up resolved its files against the OUTER
+///   package's dependency versions, so a nested package pinning anything else failed provenance
+///   verification and simply did not check — reported as "N files failed to check", naming no
+///   boundary. Its modules derive under its own root, so nothing this walk covers can collide with
+///   them, and nothing is lost by leaving them to it.
+///
+/// A nested package is not skipped work: it is entered. `noeta test examples/app` (or a CI step
+/// that `cd`s there first) runs it as what it is, with its own manifest resolving.
 pub fn noe_files(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
@@ -592,15 +616,14 @@ pub fn noe_files(root: &Path) -> Vec<PathBuf> {
         for entry in entries.flatten() {
             let p = entry.path();
             if p.is_dir() {
-                // Skip dotted directories, matching `noeta fmt`'s walker. `.git` is the obvious
-                // one, but the case that actually bites is `.claude/worktrees/` — a git worktree
-                // holds a SECOND copy of every module, so checking a package (or a path/patched
-                // dependency) swept an agent's in-progress branch into the same program and
-                // reported its errors against a consumer that never referenced it.
-                if p.file_name()
+                // A dot-directory, or a package of its own — see this function's doc for why those
+                // two and not the loader's wider prune.
+                let skip = p
+                    .file_name()
                     .and_then(|n| n.to_str())
                     .is_some_and(|n| n.starts_with('.'))
-                {
+                    || p.join(noeta_loader::MANIFEST_NAME).is_file();
+                if skip {
                     continue;
                 }
                 dirs.push(p);
