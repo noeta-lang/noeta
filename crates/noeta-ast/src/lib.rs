@@ -18,6 +18,7 @@ pub mod derive;
 pub mod desugar;
 mod name;
 pub mod native_reflect;
+pub mod normalize;
 mod pretty;
 pub mod reflect;
 pub mod shape;

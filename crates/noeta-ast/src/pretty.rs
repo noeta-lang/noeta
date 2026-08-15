@@ -5,23 +5,17 @@
 //! span regression shows up directly in a snapshot diff. It is also the printer the
 //! parse→print→parse property test (Slice 9) builds on.
 //!
-//! # It is also the fmt safety gate, so: **no `..` in an arm**
+//! # Every arm binds every field by name
 //!
-//! `noeta fmt` promises its output "re-parses to the same AST modulo spans" and implements that by
-//! comparing *this* rendering with the span annotations erased (`noeta-fmt/src/safety.rs`). A field
-//! no arm here prints is therefore a field the formatter may silently rewrite — which is not a
-//! hypothetical: a `..` on the [`Stmt::TierBlock`] arm hid `attached`, and a printer rule that
-//! collapsed `@test { fn t() {…} }` into `@test fn t()` flipped it past the gate; an unqualified
-//! payload-less variant pattern rendered like a catch-all binding, and the printer was dropping
-//! exactly the parens that tell them apart, turning `Ok() => …` into a pattern that matches
-//! everything.
+//! No `..` anywhere: a field that is deliberately not rendered is `_`-bound instead, so the decision
+//! is visible at the site and a newly added field is a compile error here rather than a silently
+//! missing line in a snapshot.
 //!
-//! So every arm **binds every field by name**, and a field that is deliberately not rendered is
-//! `_`-bound rather than swept up by `..`. That makes the decision visible at the site and makes a
-//! newly added field a compile error here instead of a silent hole in the safety property. The only
-//! fields currently `_`-bound are spans (formatting shifts every byte offset by construction, so
-//! the gate erases them on purpose) — see `plans/fmt-structural-safety-gate.md` for the full survey
-//! and for the structural comparison that should eventually replace this proxy.
+//! This rule arrived as a *safety* measure, when `noeta fmt`'s gate compared two programs by
+//! comparing this rendering. It no longer does — [`crate::normalize`] plus the derived `PartialEq`
+//! answers that question directly, with no printer in the middle, which is what makes it a property
+//! rather than a proxy for one. The rule stays because it is independently worth having: a snapshot
+//! that silently stops showing a field is a snapshot that stops being evidence.
 
 use crate::{
     AttrArg, AttrValue, CallArg, ClassDecl, ClosureBody, EnumDecl, Expr, FieldDecl, FnDecl,

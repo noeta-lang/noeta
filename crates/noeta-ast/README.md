@@ -3,7 +3,7 @@
 The abstract syntax tree: pure data, no behavior.
 
 - **Takes in:** nothing (consumes only `noeta-span`, plus `noeta-ext-abi` for `native_reflect` below — a leaf crate with no `noeta-*` dependencies of its own)
-- **Emits:** AST node types (every node carries a `Span`), the `SyntaxKind` tag set, and a stable `Pretty` printer for snapshots.
+- **Emits:** AST node types (every node carries a `Span`), the `SyntaxKind` tag set, a stable `Pretty` printer for snapshots, and `normalize` — the span eraser that makes structural equality answerable.
 
 ## Shared derivations over the AST
 
@@ -12,6 +12,12 @@ Being the bottom of the stack, this is also where a few **pure derivations** liv
 `conversion` names a declared conversion's body. A type may carry one `impl From<Source>` block per source and a method table has one slot per name, so a type declaring several names each conversion after the source it converts and a type declaring one leaves it under the plain `from`. Everything that builds or resolves a method table asks that one function — the checker's signature registration, IR lowering, the bytecode compiler's prototype reservation, and the reflection manifest — so the four agree by construction rather than by four walks written to match.
 
 `shape` answers "what is this declaration made of?" as `(member name, declared type spelling)` pairs, in declaration order — a `struct`'s or `class`'s fields, an `enum`'s variants with their payload spellings, and nothing for a declaration with no typed members. Two seams hand that answer to a native extension: the checker's `ExtDerive::validate` and the loader's `DirectiveCtx::fields` for an expanding directive. Both read the one walk, so a derive recipe and an expansion hook in the same extension can never see the same declaration differently. Spellings are the *declared surface* ones at full fidelity — `List<int>`, `?User`, no lattice normalization — with namespace-qualified identities shortened back to the name the author wrote, since the linker has already qualified them by the time either consumer runs.
+
+## Span normalization
+
+Every node carries a `Span`, and `PartialEq` is derived on every node — so `a == b` asks "same program?" *and* "written at the same byte offsets?" at once. `normalize::zero_spans` separates them: it sets every span to a fixed value, after which the derived comparison is exactly structural equality. That is what makes `noeta fmt`'s safety gate a property rather than a proxy for one; the module's own docs carry the argument.
+
+The shape is chosen so the walk cannot fall behind the AST. A private `Normalize` trait is implemented for `Span` (zero it), for the containers (recurse), and for the leaves (no-op), and every node's impl destructures **by name with no `..`** — so a field added tomorrow is a compile error at the one site that must consider it, and what to do with it is then decided by its type rather than by whoever added it. The leaf impls are listed explicitly, because a blanket `impl<T> Normalize for T` would silently swallow a new *node* type that does hold spans.
 
 ## Native reflection
 

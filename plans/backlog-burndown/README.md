@@ -1,6 +1,6 @@
 # Arc — Backlog burndown (2026-08)
 
-Status: in progress. Slices 1–5 are done; slice 6 needs a decision that is not mine.
+Status: **every slice is done** (2026-08-15). One follow-up remains — the 25 provenance-only rows below — and this directory is deleted once that is settled.
 
 ## How this list was derived
 
@@ -43,7 +43,7 @@ Three follow-ups fall out of this, and none is in the slices below because they 
 | 3 | Doors that exist on one side only | 4 | yes |
 | 4 | Two small identity guards | 1 | yes |
 | 5 | Cancellation reaches blocking work | 2 | ✅ **done** |
-| 6 | The fmt safety gate stops being a proxy | 1 | needs a decision |
+| 6 | The fmt safety gate stops being a proxy | 1 | ✅ **done** |
 
 **Slice 2 goes first.** It is the only one that changes what the *other* slices can prove.
 
@@ -190,19 +190,23 @@ The `noeta test` half cost less than the row priced: keeping the flag as its own
 
 ## Slice 6 — The fmt safety gate stops being a proxy
 
-Status: needs a decision. Design already written: [`fmt-structural-safety-gate.md`](../fmt-structural-safety-gate.md)
+Status: **done** (2026-08-15). Its design note is deleted with it.
 
-### The decision
+### The decision, and the claim that did not survive checking
 
-`noeta fmt` promises its output re-parses to the same AST modulo spans. It checks that the output re-parses to the same **`Pretty` rendering** — a hand-written S-expression dump written for snapshot legibility, where every field it forgets to print is a field the gate cannot see. Two real defects have gone through it.
+The arc framed this as: option B, or wait for a trigger — where the trigger on offer was an **open formatter defect** whose "whole class is what the proxy cannot see."
 
-The design note's option B is a span normalizer plus a derived `PartialEq`, which is complete without maintenance. The stated trigger is "the next substantial pass through `noeta-ast`", and there is no such pass scheduled — but there is an **open formatter defect** (`~/.claude/notes/fmt-printer-bug-2026-08-05.txt`, with a saved proptest seed) whose whole class is what the proxy cannot see.
+**That reading was wrong, and re-reading the code is what showed it.** `format_source` has two safety failures: the output fails to parse at all, and the output parses to a *different* AST. Option B replaces the second. The open defect is the **first** — a parse failure, caught before any AST comparison runs. The proxy did not miss it; it caught it loudly, and fmt declined. Option B would not have found it one minute sooner.
 
-So the question is whether that open defect counts as the trigger. It is a judgement call about cost: option B touches every AST node's derive.
+Reproduced and narrowed rather than taken on trust: still open at `feb13f8f7`, and the 40-line fuzz case reduces to `b = (match a { _ => a } << 0 >> 0)` under `[fmt] wrap = true` — one user-settable knob, `<<` followed by `>>` only, and only with a block-bodied `match` as the leftmost operand. It is a contained bug in the wrapped-binary-chain rule, and it is **not** what this slice is about. It stays open, as its own row.
 
-### Done when
+The stopgap had also moved further than the note credited: every `Pretty` arm already bound every field by name, so the note's headline claim — *"the next field added to the AST starts un-rendered, and nothing fails"* — was no longer true either. A new field was already a compile error.
 
-Either the replacement lands and the open defect's seed passes, or the row records the decision to wait and names what would change it.
+So B was taken on the argument that survives both corrections: **the failure modes are not symmetric.** A printer that forgets a field, or renders two values alike, makes the gate blinder — it approves a rewrite it should have refused, which is what happened twice. A walk that forgets a span makes it stricter — fmt declines and leaves the file untouched. The proxy can be wrong; the walk can only be incomplete.
+
+### Outcome
+
+`noeta_ast::normalize` + the derived `PartialEq`. Shaped as a private trait so the type system decides what carries a span rather than the author. Two risks were checked rather than assumed and neither materialized: decorator order is not in the AST (`Decorators` is a struct of named fields), and the whole corpus formats green under the strict gate in all three configs — so no canonicalization was hiding in the printer. The walk's own completeness is a corpus property (`every_span_is_erased_across_the_corpus`), ablated to confirm it bites.
 
 ---
 

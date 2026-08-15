@@ -1,44 +1,49 @@
 //! The safety-gate comparison: are two programs structurally equal, ignoring spans?
 //!
-//! Formatting shifts every byte offset, so the AST's `PartialEq` (which compares spans) cannot be
-//! used directly. We compare the canonical S-expression [`Pretty`] form with its `@start..end` span
-//! annotations erased. This reuses the printer the parser's own snapshot tests already trust, at the
-//! cost of a string round-trip — acceptable for a guard that runs once per format.
+//! Formatting shifts every byte offset, so the AST's derived `PartialEq` — which compares spans
+//! along with everything else — cannot be used directly. [`noeta_ast::normalize`] closes that one
+//! gap: it sets every span to a fixed value in an exhaustive walk, after which `a == b` **is** the
+//! question the gate is asking, with no rendering in between.
 //!
-//! F3 note: this is upgradeable to a true span-erased structural walk if the string form ever proves
-//! too coarse; for now it is exact enough and far less code than mirroring every AST node.
+//! That last clause is the point. Comparing a *printed* form of both programs is only equivalent to
+//! structural equality if the printer is injective, and nothing enforces that — two formatter
+//! defects reached `main` through exactly that gap (see the `normalize` module docs). Field
+//! completeness here is what `#[derive(PartialEq)]` is, and two different node kinds cannot collapse
+//! onto one rendering because there is no rendering.
 
-use noeta_ast::{Pretty, Program, Stmt};
+use noeta_ast::normalize::{Normalization, normalize};
+use noeta_ast::{Program, Stmt};
 
 /// Whether `a` and `b` are the same program up to span positions **and up to import ordering**. The
 /// latter lets the import-sorting formatter reorder `use` statements (and the names inside a `use`)
 /// without tripping the gate — reordering imports is semantics-neutral, so canonicalizing it away on
 /// both sides is sound and keeps every other structural difference caught.
 pub fn ast_equal_modulo_spans(a: &Program, b: &Program) -> bool {
-    strip_spans(&canonical_imports(a).to_pretty_string())
-        == strip_spans(&canonical_imports(b).to_pretty_string())
+    equal_under(a, b, &Normalization::default())
 }
 
 /// As [`ast_equal_modulo_spans`], but also ignoring the **static text of tier bodies** — the relaxed
 /// gate for extension-driven tier-body formatting. A body formatter reflows a tier's foreign text, so
 /// its `statics` change; fmt cannot prove that reflow value-preserving in the foreign language (only
-/// the formatter's author can), so this drops every `(static "…")` line from the compared pretty
-/// forms. Everything else — the tier name, the `${…}` holes between the statics, and every node
-/// outside tier bodies — is still compared exactly, so a real formatting bug is still caught.
+/// the formatter's author can), so both sides have them cleared. Everything else — the tier name, the
+/// `${…}` holes between the statics, and every node outside tier bodies — is still compared exactly,
+/// so a real formatting bug is still caught.
 pub fn ast_equal_ignoring_tier_statics(a: &Program, b: &Program) -> bool {
-    let norm =
-        |p: &Program| strip_tier_statics(&strip_spans(&canonical_imports(p).to_pretty_string()));
-    norm(a) == norm(b)
+    equal_under(
+        a,
+        b,
+        &Normalization {
+            clear_tier_statics: true,
+        },
+    )
 }
 
-/// Drop every `(static "…")` line — the [`Pretty`] rendering of a tier body's static segment (one
-/// per line; the debug-quoted string never spans lines). The interleaved hole lines are kept.
-fn strip_tier_statics(pretty: &str) -> String {
-    pretty
-        .lines()
-        .filter(|line| !line.trim_start().starts_with("(static \""))
-        .collect::<Vec<_>>()
-        .join("\n")
+/// Canonicalize both programs under `how` and compare them structurally.
+fn equal_under(a: &Program, b: &Program, how: &Normalization) -> bool {
+    let (mut a, mut b) = (canonical_imports(a), canonical_imports(b));
+    normalize(&mut a, how);
+    normalize(&mut b, how);
+    a == b
 }
 
 /// A clone of `program` with import order canonicalized: every contiguous run of `use` statements is
@@ -76,85 +81,109 @@ fn use_sort_key(stmt: &Stmt) -> (Vec<String>, Vec<String>) {
     }
 }
 
-/// Remove every `@<digits>..<digits>` span annotation from a pretty string.
-///
-/// No quote-awareness is needed: the two programs being compared have, by construction, identical
-/// string values, so a literal `@N..M` occurring *inside* a string value is byte-identical in both
-/// and stripping it from both is harmless — while the real span annotations (which differ) are all
-/// removed. (Quote-tracking is not only unnecessary but error-prone: a `\\"` — an escaped backslash
-/// before a closing quote — desynchronizes a naive prev-char check.)
-fn strip_spans(pretty: &str) -> String {
-    let bytes = pretty.as_bytes();
-    let mut out = String::with_capacity(pretty.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'@'
-            && let Some(len) = span_len(&bytes[i..])
-        {
-            i += len; // drop the whole `@N..M`
-            continue;
-        }
-        let ch_len = utf8_len(bytes[i]);
-        out.push_str(&pretty[i..i + ch_len]);
-        i += ch_len;
-    }
-    out
-}
-
-/// If `s` begins with a `@<digits>..<digits>` span, return its byte length; else `None`.
-fn span_len(s: &[u8]) -> Option<usize> {
-    debug_assert_eq!(s[0], b'@');
-    let mut i = 1;
-    let start = i;
-    while i < s.len() && s[i].is_ascii_digit() {
-        i += 1;
-    }
-    if i == start || i + 1 >= s.len() || s[i] != b'.' || s[i + 1] != b'.' {
-        return None;
-    }
-    i += 2;
-    let mid = i;
-    while i < s.len() && s[i].is_ascii_digit() {
-        i += 1;
-    }
-    if i == mid { None } else { Some(i) }
-}
-
-/// The byte length of a UTF-8 sequence from its leading byte.
-fn utf8_len(lead: u8) -> usize {
-    match lead {
-        0x00..=0x7F => 1,
-        0xC0..=0xDF => 2,
-        0xE0..=0xEF => 3,
-        _ => 4,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use noeta_span::{Source, SourceId};
 
-    #[test]
-    fn strips_plain_spans() {
-        assert_eq!(
-            strip_spans("(program @0..10 (echo @0..4))"),
-            "(program  (echo ))"
+    /// Parse `src`, with `sql`/`html` known as text tiers so a tier body lexes as one. Panics on a
+    /// parse error: a test that silently compared two *empty* programs would pass for the wrong
+    /// reason, which is exactly how the first draft of the tier test below passed.
+    fn program(src: &str) -> Program {
+        let source = Source::new(SourceId::FIRST, "t.noe", src);
+        let tiers = noeta_lexer::TextTiers::with(["sql".to_string(), "html".to_string()]);
+        let lexed = noeta_lexer::lex_in(&source, noeta_lexer::Edition::DEFAULT, &tiers);
+        let parsed = noeta_parser::parse_in(
+            &source,
+            &lexed.tokens,
+            noeta_lexer::Edition::DEFAULT,
+            &tiers,
         );
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "fixture must parse: {:?}",
+            parsed.diagnostics
+        );
+        parsed.program
     }
 
     #[test]
-    fn strips_span_like_text_uniformly() {
-        // A `@N..M` inside a string is stripped too — harmless, since both compared programs have
-        // identical string values, so it is removed identically from each.
-        assert_eq!(strip_spans("(str \"@1..2\" @3..8)"), "(str \"\" )");
+    fn spans_alone_never_make_two_programs_differ() {
+        // The whole reason the gate needs a normalization step: the same program written with
+        // different whitespace is the same program, and every byte offset in it differs.
+        assert!(ast_equal_modulo_spans(
+            &program("echo 1\necho 2\n"),
+            &program("\n\n   echo 1\n\n\n      echo 2\n"),
+        ));
     }
 
     #[test]
-    fn escaped_backslash_before_quote_does_not_desync() {
-        // The `back: \\` case that broke the old quote-tracking stripper: spans still strip cleanly.
-        assert_eq!(
-            strip_spans("(str \"back: \\\\\" @1..2) (echo @3..4)"),
-            "(str \"back: \\\\\" ) (echo )"
-        );
+    fn a_payload_less_variant_pattern_is_not_a_catch_all_binding() {
+        // **The regression test for a defect that shipped.** `Ok()` is a constructor pattern that
+        // matches one case; bare `Ok` is a binding that matches *everything*, so every later arm
+        // goes dead. The printer was dropping exactly those parens, and the gate — which compared a
+        // rendering in which both printed as `Ok` — approved the rewrite.
+        assert!(!ast_equal_modulo_spans(
+            &program("x = match r { Ok() => 1, _ => 2 }\n"),
+            &program("x = match r { Ok => 1, _ => 2 }\n"),
+        ));
+    }
+
+    #[test]
+    fn an_attached_tier_block_is_not_a_braced_one() {
+        // **The other defect that shipped.** `@test fn t() {…}` decorates the declaration;
+        // `@test { fn t() {…} }` is a block that contains it. The checker branches on the
+        // difference (a declared-site check runs only when attached), so collapsing one into the
+        // other can invent an error the author's source does not have.
+        assert!(!ast_equal_modulo_spans(
+            &program("@test fn t(): void {}\n"),
+            &program("@test { fn t(): void {} }\n"),
+        ));
+    }
+
+    #[test]
+    fn imports_are_compared_up_to_order() {
+        // The one canonicalization the gate grants, because the formatter is allowed to sort
+        // imports and reordering them is semantics-neutral.
+        assert!(ast_equal_modulo_spans(
+            &program("use std.io\nuse std.fs\n"),
+            &program("use std.fs\nuse std.io\n"),
+        ));
+        // …and it is granted to imports only: reordering anything else is a different program.
+        assert!(!ast_equal_modulo_spans(
+            &program("echo 1\necho 2\n"),
+            &program("echo 2\necho 1\n"),
+        ));
+    }
+
+    #[test]
+    fn a_type_annotation_is_part_of_the_program() {
+        // Representative of the whole class the survey had to close by hand, one field at a time.
+        // Under a derived comparison it needs no arm at all — the field is compared because it
+        // exists.
+        assert!(!ast_equal_modulo_spans(
+            &program("acc: List<int> = []\n"),
+            &program("acc = []\n"),
+        ));
+    }
+
+    #[test]
+    fn the_relaxed_gate_ignores_tier_body_text_and_nothing_else() {
+        let a = program("x = @sql { select 1 }\n");
+        let b = program("x = @sql { SELECT   1 }\n");
+        // A body formatter reflowed the foreign text: the strict gate sees it…
+        assert!(!ast_equal_modulo_spans(&a, &b));
+        // …and the relaxed one, which the caller opts into only when a body formatter ran, does not.
+        assert!(ast_equal_ignoring_tier_statics(&a, &b));
+        // The relaxation is *only* the static text. A different tier is a different program…
+        assert!(!ast_equal_ignoring_tier_statics(
+            &a,
+            &program("x = @html { select 1 }\n"),
+        ));
+        // …and so is a different hole between the statics, which is user code and never reflowed.
+        assert!(!ast_equal_ignoring_tier_statics(
+            &program("x = @sql { select ${a} }\n"),
+            &program("x = @sql { select ${b} }\n"),
+        ));
     }
 }
