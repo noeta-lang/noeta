@@ -83,6 +83,28 @@ pub fn builtin_registry_refusal(scope: &str, identity: &str) -> String {
     )
 }
 
+/// The error raised when a **local tree** declares a built-in scope as its own identity — a
+/// `path`/`git` dependency (or the root project) whose manifest says `name = "std/fs"`.
+///
+/// Distinct from [`builtin_registry_refusal`] because the situation is not the same one. That names
+/// a *registry* serving reserved code, which is an attack with no legitimate reading; this names a
+/// tree on disk, which is more often a mistake — someone naming their own filesystem helper `std/fs`
+/// — so it says what the name claims and what to write instead, rather than accusing.
+///
+/// It is refused all the same, and for a reason the wording carries: a built-in scope is where core
+/// code lives, so a package claiming one is claiming to *be* core code. Where the tree came from
+/// does not change what the name says.
+pub fn builtin_identity_refusal(scope: &str, identity: &str) -> String {
+    format!(
+        "`{identity}` declares itself under the reserved `{scope}` namespace, which is built into \
+         the Noeta toolchain. A package cannot claim a built-in scope as its identity — that name \
+         means core code, wherever the package came from. Rename it under your own scope \
+         (`yourco/{package}`). (Built-in scopes: {list}.)",
+        package = identity.split_once('/').map_or(identity, |(_, pkg)| pkg),
+        list = BUILTIN_SCOPES.join(", ")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

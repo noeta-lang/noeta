@@ -350,7 +350,7 @@ fn pure_source_package_publishes_and_resolves_from_the_registry() {
     // 3. A fresh consumer depends on it via the REGISTRY (version + package), not a path.
     std::fs::write(
         cons.join("noeta.toml"),
-        "[package]\nname = \"noeta/reg_consumer\"\nversion = \"0.1.0\"\n\n\
+        "[package]\nname = \"local/reg_consumer\"\nversion = \"0.1.0\"\n\n\
          [dependencies]\nview = { version = \"^0.1\", package = \"acme/view\" }\n",
     )
     .unwrap();

@@ -49,6 +49,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::error::PmError;
+use crate::reserved;
 
 // The `[fmt]` grammar lives in `noeta-fmt` (dev tooling), so reading a manifest's formatter config
 // pulls in the formatter crate — gated behind `fmt-config` (dev-deps D3c) so a lean runtime that only
@@ -1508,6 +1509,22 @@ fn parse_package(table: &toml::Table) -> Result<Option<PackageMeta>, String> {
         .and_then(|v| v.as_str())
         .ok_or("`package` must have a string `name` (`\"company/package\"`)")?;
     let name = PackageName::parse(name_str)?;
+    // A tree may not declare a **built-in scope** as its own identity. The same guard already
+    // refuses `std/…` as a registry selector and as an import-root key; what it never asked was the
+    // identity a local tree writes about *itself*, so a `path`/`git` dependency whose manifest said
+    // `name = "std/fs"` resolved without a word. The whole point of the reserved list is that
+    // `std/…` names core code, and where the tree came from does not change what the name claims.
+    //
+    // Refused here rather than at [`PackageName::parse`], which also parses a dependency's
+    // `package = "…"` *selector* — that path has its own refusal with a better message (it can say
+    // which dependency asked, and that a registry serving `std/…` is an attack), and moving the
+    // check earlier would replace it with a parse error that names neither.
+    if reserved::is_builtin(&name.company) {
+        return Err(reserved::builtin_identity_refusal(
+            &name.company,
+            &name.to_string(),
+        ));
+    }
     let version_str = pkg
         .get("version")
         .and_then(|v| v.as_str())
@@ -3190,6 +3207,37 @@ mod tests {
         // …but not a leading or trailing hyphen, which no forge accepts either.
         assert!(Manifest::parse("[package]\nname = \"-acme/x\"\nversion = \"1.0.0\"\n").is_err());
         assert!(Manifest::parse("[package]\nname = \"acme/x-\"\nversion = \"1.0.0\"\n").is_err());
+    }
+
+    /// A tree may not name **itself** under a built-in scope. The reserved list already guarded the
+    /// registry selector and the import-root key; the identity a local tree declares about itself
+    /// was the path it never covered, so a `path` dependency whose manifest read `name = "std/fs"`
+    /// resolved silently — and `std/…` means core code however the tree arrived.
+    #[test]
+    fn a_tree_may_not_declare_a_built_in_scope_as_its_identity() {
+        for scope in crate::reserved::builtin_scopes() {
+            let err = Manifest::parse(&format!(
+                "[package]\nname = \"{scope}/fs\"\nversion = \"1.0.0\"\n"
+            ))
+            .unwrap_err()
+            .to_string();
+            assert!(err.contains("reserved"), "for `{scope}`: {err}");
+            // It says what to write instead rather than only refusing — this is as often a naming
+            // mistake as an attack, and the two read the same from here.
+            assert!(err.contains("yourco/fs"), "for `{scope}`: {err}");
+        }
+
+        // The check is on the whole company segment, never a prefix: `noeta-lang` is somebody's
+        // forge org and has nothing to do with the built-in `noeta`.
+        assert!(
+            Manifest::parse(
+                "[package]\nname = \"noeta-lang/my-toolkit\"\nroot = \"toolkit\"\nversion = \"1.0.0\"\n"
+            )
+            .is_ok()
+        );
+        // And a first-party scope is reserved against open *registration*, not against being a
+        // package — para's own packages declare it.
+        assert!(Manifest::parse("[package]\nname = \"para/db\"\nversion = \"1.0.0\"\n").is_ok());
     }
 
     /// The identity may be a registry name; the segment modules derive under must lex. When `root`
