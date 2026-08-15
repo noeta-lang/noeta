@@ -152,6 +152,18 @@ pub struct Sites {
     /// lowering wraps the op's result in `Rvalue::MaskWidth` to wrap the erased i64 into the width. A
     /// pure function of the program, like the other site maps — the masking is invisible to `RunResult`.
     pub width_sites: HashMap<Span, (bool, u8)>,
+    /// **Display sites whose value contains an unsigned 64-bit integer**, keyed by the rendered
+    /// expression's span → the [`RenderHint`](noeta_ast::RenderHint) built from its static type.
+    ///
+    /// The display twin of [`Sites::width_sites`], and it exists for the same reason: a fixed-width
+    /// integer is erased to its i64 word, so a `u64` past bit 63 is a negative word and renders as
+    /// its signed reinterpretation unless the *type* says otherwise. Lowering reads this (via
+    /// [`Checked::render_hint_sites`](crate::Checked)) and wraps the atom in an
+    /// `Rvalue::Render`, which both backends apply through the same walk. Recorded at the three
+    /// doors that render a value from an expression whose static type is in hand — `echo`, an
+    /// interpolation hole, and a display-based `~` operand — and empty for every program with no
+    /// `u64` in a displayed position. A pure function of the program, like the other site maps.
+    pub render_hint_sites: HashMap<Span, noeta_ast::RenderHint>,
     /// **Statically decided type tests**: `Expr::TypeTest` spans the checker answered itself → the
     /// answer. Lowering emits the constant (after still evaluating the scrutinee for its effects)
     /// instead of an `Rvalue::TypeTest`, so both backends agree by construction.
@@ -429,6 +441,7 @@ pub(crate) const SITE_POLICIES: &[(&str, SiteClass, &str)] = &[
     ("arg_orders", SiteClass::Ordinal, "each usize is an ARGUMENT position in written order, permuted by lowering"),
     ("for_stream_sites", SiteClass::SpanKeyed, "a bare span set"),
     ("width_sites", SiteClass::Ordinal, "(signed, bits): a fixed-width arithmetic BIT WIDTH, not an index"),
+    ("render_hint_sites", SiteClass::SpanKeyed, "span → RenderHint: structural; its Slots/Variants numbers are SLOT positions within the rendered value"),
     ("folded_type_tests", SiteClass::SpanKeyed, "span → the constant answer of a statically decided `is`"),
     ("handle_sites", SiteClass::SpanKeyed, "span → (type, method, associated)"),
     ("bound_handle_sites", SiteClass::SpanKeyed, "a bare span set"),
@@ -497,6 +510,7 @@ impl Sites {
             arg_orders: _,
             for_stream_sites: _,
             width_sites: _,
+            render_hint_sites: _,
             folded_type_tests: _,
             handle_sites: _,
             bound_handle_sites: _,
@@ -682,6 +696,8 @@ pub(crate) struct SiteMaps {
     /// `IntN` → the result's `(signed, bits)`. Lowering reads this (via [`Checked::width_sites`]) to
     /// wrap the op's result in `Rvalue::MaskWidth`. Empty for programs with no fixed-width arithmetic.
     pub(crate) width_sites: HashMap<Span, (bool, u8)>,
+    /// Display sites carrying an unsigned 64-bit integer — see [`Sites::render_hint_sites`].
+    pub(crate) render_hint_sites: HashMap<Span, noeta_ast::RenderHint>,
     /// Statically decided type tests — see [`Sites::folded_type_tests`].
     pub(crate) folded_type_tests: HashMap<Span, bool>,
     /// Unbound method-handle sites: a `Type.method` member expression in value position → the
@@ -755,6 +771,7 @@ impl SiteMaps {
             arg_orders: self.arg_orders,
             for_stream_sites: self.for_stream_sites,
             width_sites: self.width_sites,
+            render_hint_sites: self.render_hint_sites,
             folded_type_tests: self.folded_type_tests,
             handle_sites: self.handle_sites,
             bound_handle_sites: self.bound_handle_sites,

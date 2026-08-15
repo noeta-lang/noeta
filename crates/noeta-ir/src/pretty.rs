@@ -233,6 +233,7 @@ impl Printer<'_> {
                 if *signed { 'i' } else { 'u' },
                 atom(operand)
             ),
+            Rvalue::Render { operand, .. } => format!("render({})", atom(operand)),
             Rvalue::Binary {
                 op,
                 lhs,

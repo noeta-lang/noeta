@@ -165,6 +165,11 @@ pub struct LoweringSites<'a> {
     /// Fixed-width arithmetic sites (Tier W) → the result's `(signed, bits)`, wrapping the op's result
     /// in [`Rvalue::MaskWidth`] so the erased i64 is masked back into the declared width.
     pub width_sites: &'a HashMap<Span, (bool, u8)>,
+    /// Display sites whose value contains an unsigned 64-bit integer → the
+    /// [`noeta_ast::RenderHint`] built from its static type. The rendered atom is wrapped in an
+    /// [`Rvalue::Render`], which turns it into its display string with the erased words read
+    /// unsigned — the display twin of `width_sites`, and applied by both backends alike.
+    pub render_hint_sites: &'a HashMap<Span, noeta_ast::RenderHint>,
     /// `Expr::TypeTest` spans the checker answered statically → the answer. The test lowers to that
     /// constant (the scrutinee still evaluated, for its effects) instead of an [`Rvalue::TypeTest`],
     /// so no runtime matcher is consulted for a question it cannot answer. See
@@ -268,6 +273,7 @@ impl LoweringSites<'static> {
         static SPANS: OnceLock<HashSet<Span>> = OnceLock::new();
         static RECIPES: OnceLock<HashMap<Span, noeta_ext_abi::TypeRecipe>> = OnceLock::new();
         static WIDTHS: OnceLock<HashMap<Span, (bool, u8)>> = OnceLock::new();
+        static HINTS: OnceLock<HashMap<Span, noeta_ast::RenderHint>> = OnceLock::new();
         static FOLDED: OnceLock<HashMap<Span, bool>> = OnceLock::new();
         static REPRS: OnceLock<HashMap<Span, noeta_ast::reflect::TypeRepr>> = OnceLock::new();
         static HANDLES: OnceLock<HashMap<Span, (String, String, bool)>> = OnceLock::new();
@@ -294,6 +300,7 @@ impl LoweringSites<'static> {
             decode_typed_sites: SPANS.get_or_init(HashSet::new),
             for_stream_sites: SPANS.get_or_init(HashSet::new),
             width_sites: WIDTHS.get_or_init(HashMap::new),
+            render_hint_sites: HINTS.get_or_init(HashMap::new),
             folded_type_tests: FOLDED.get_or_init(HashMap::new),
             construction_sites: REPRS.get_or_init(HashMap::new),
             inferred_object_types: NAMES.get_or_init(HashMap::new),
@@ -342,6 +349,7 @@ macro_rules! lowering_sites {
             decode_typed_sites: &$s.decode_typed_sites,
             for_stream_sites: &$s.for_stream_sites,
             width_sites: &$s.width_sites,
+            render_hint_sites: &$s.render_hint_sites,
             folded_type_tests: &$s.folded_type_tests,
             construction_sites: &$s.construction_sites,
             inferred_object_types: &$s.inferred_object_types,
@@ -2439,7 +2447,34 @@ impl Lowerer<'_> {
     /// Lower an expression to an [`Atom`], emitting the `let`s that compute any
     /// sub-expressions into `out` first (A-normal form). Literals and identifiers reduce
     /// directly to an atom with no `let`.
+    ///
+    /// An expression the checker marked as a **display site carrying an unsigned 64-bit integer**
+    /// (`render_hint_sites`) is wrapped here in an [`Rvalue::Render`], so the value reaches its
+    /// `echo` / interpolation hole / `~` operand already rendered — the one place the wrap happens,
+    /// for all three doors, because "which expressions are display sites" is the checker's answer
+    /// and this is where an expression becomes an atom.
     fn lower_expr(&mut self, expr: &Expr, out: &mut Vec<Stmt>) -> Result<Atom, Unsupported> {
+        let atom = self.lower_expr_unrendered(expr, out)?;
+        let Some(hint) = self.sites.render_hint_sites.get(&expr.span()) else {
+            return Ok(atom);
+        };
+        let span = expr.span();
+        Ok(self.emit(
+            out,
+            Rvalue::Render {
+                operand: atom,
+                hint: std::rc::Rc::new(hint.clone()),
+                span,
+            },
+            span,
+        ))
+    }
+
+    fn lower_expr_unrendered(
+        &mut self,
+        expr: &Expr,
+        out: &mut Vec<Stmt>,
+    ) -> Result<Atom, Unsupported> {
         match expr {
             // A resolved native module-function reference (expr-tiers arc) → the first-class
             // module-function value, emitted as its own rvalue (the backend loads the const).

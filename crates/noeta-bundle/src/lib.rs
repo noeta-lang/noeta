@@ -233,7 +233,14 @@ pub const MAGIC: &[u8; 4] = b"NOEB";
 ///
 /// It cannot be re-derived on the reading side, which is the reason it travels: the answer depends on
 /// the *call site's* enclosing type and package, and neither survives into the artifact.
-pub const FORMAT_VERSION: u8 = 21;
+/// Bumped to 22 by the unsigned render hint: [`noeta_bytecode::Op::Stringify`] gained `hint`, an
+/// `Option<Box<noeta_ast::RenderHint>>` naming the positions of a display site's unsigned 64-bit
+/// integers. It is an op field, so — exactly as for `FieldsOf` above — a version-21 reader would
+/// take its bytes as the start of the next op and every op after it slides.
+///
+/// It cannot be re-derived on the reading side: the signedness of a fixed-width integer lives only
+/// in the static type, which the checker resolves and the artifact does not otherwise carry.
+pub const FORMAT_VERSION: u8 = 22;
 
 /// The SHA-256 of one canonical [`Module`]'s postcard encoding — the *other* half of
 /// [`FORMAT_VERSION`], and the thing that makes the changelog above enforceable.
@@ -257,7 +264,7 @@ pub const FORMAT_VERSION: u8 = 21;
 /// pair exists to prevent. The test's message says so; this doc says so; the changelog paragraph
 /// you are about to write is the third place.
 pub const MODULE_LAYOUT_DIGEST: &str =
-    "4f828456e43c4e22f7e7324aa374ad957ae1bd56aa1d254a4c726ee8006584fd";
+    "477cf84367f94ecc87c98b143b5ea08d90fa24eab2d003cab0da0c99359b5a46";
 
 /// The runtime version stamped into and checked against artifacts — the building crate's
 /// package version. Any release that changes the serialized [`Module`] layout bumps this, so a

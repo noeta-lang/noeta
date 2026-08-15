@@ -957,6 +957,9 @@ fn all_ops() -> Vec<Op> {
         dst: 245,
         src: 246,
         span: span(64),
+        hint: Some(Box::new(noeta_ast::RenderHint::Elements(Box::new(
+            noeta_ast::RenderHint::Unsigned,
+        )))),
     });
     ops.push(Op::BuildString {
         dst: 247,

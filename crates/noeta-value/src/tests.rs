@@ -1485,3 +1485,33 @@ fn lib_rs_stays_decomposed() {
          plans/audit/audit-1-vm-runtime.md finding 8) instead of raising the budget."
     );
 }
+
+/// The hinted render (`Rvalue::Render`'s VM half) reads an erased `u64` word unsigned at every
+/// position the hint names, and hands every other position back to the plain `display`. This is the
+/// unit-level half of `tests/conformance/types/unsigned_display.noe`; the differential is what
+/// asserts the tree-walker's twin agrees.
+#[test]
+fn a_hint_renders_an_erased_word_unsigned_at_the_positions_it_names() {
+    use noeta_ast::RenderHint;
+    let max = Value::int(u64::MAX as i64);
+    // The bare scalar, and the control: no hint means the signed word.
+    assert_eq!(
+        max.display_hinted(&RenderHint::Unsigned),
+        "18446744073709551615"
+    );
+    assert_eq!(max.display(), "-1");
+    // Elements of a list; a hint whose shape does not match the value falls back to `display`.
+    let list = Value::list(vec![max, Value::int(1)]);
+    let elems = RenderHint::Elements(Box::new(RenderHint::Unsigned));
+    assert_eq!(list.display_hinted(&elems), "[18446744073709551615, 1]");
+    assert_eq!(max.display_hinted(&elems), "-1");
+    // A sparse `Slots` hint: only slot 1 is unsigned, so slot 0 keeps the signed reading.
+    let tuple = Value::tuple(vec![max, max]);
+    let slots = RenderHint::slots([None, Some(RenderHint::Unsigned)]).unwrap();
+    assert_eq!(tuple.display_hinted(&slots), "(-1, 18446744073709551615)");
+    for v in [list, tuple] {
+        if v.dec_ref() {
+            v.free();
+        }
+    }
+}

@@ -512,6 +512,35 @@ impl EnumValue {
         }
     }
 
+    /// [`Self::display`] with each payload field rendered under the hint for its slot in *this*
+    /// variant — the enum half of `Value::display_hinted`. Only called with a non-empty payload.
+    fn display_hinted(&self, hint: &noeta_ast::RenderHint) -> String {
+        let head = if self.is_builtin_result_or_option() {
+            self.variant.clone()
+        } else {
+            format!(
+                "{}.{}",
+                noeta_ast::short_type_name(&self.enum_name),
+                self.variant
+            )
+        };
+        let slots = hint.variant(&self.variant).unwrap_or(&[]);
+        let parts: Vec<String> = self
+            .data
+            .iter()
+            .enumerate()
+            .map(
+                |(i, v)| match slots.iter().find(|(s, _)| *s == i as u32).map(|(_, h)| h) {
+                    // A variant's payload renders with `display` (unquoted), as the unhinted path
+                    // does — the hint changes the words, not the form.
+                    Some(h) => v.display_hinted(h),
+                    None => v.display(),
+                },
+            )
+            .collect();
+        format!("{head}({})", parts.join(", "))
+    }
+
     fn is_builtin_result_or_option(&self) -> bool {
         self.enum_name == "Result" || self.enum_name == "Option"
     }
@@ -733,6 +762,27 @@ impl ObjectValue {
             .collect();
         // Display strips a qualified identity to its short name; the identity keyed on for
         // dispatch/`is`/`as` stays qualified.
+        format!(
+            "{} {{{}}}",
+            noeta_ast::short_type_name(&self.def.name),
+            parts.join(", ")
+        )
+    }
+
+    /// [`Self::display`] with each field rendered under the hint for its slot — the object half of
+    /// `Value::display_hinted`.
+    fn display_hinted(&self, hint: &noeta_ast::RenderHint) -> String {
+        let slots = self.slots.borrow();
+        let parts: Vec<String> = self
+            .def
+            .fields
+            .iter()
+            .zip(slots.iter())
+            .enumerate()
+            .map(|(i, (f, value))| {
+                format!("{}: {}", f.name, value.repr_hinted(hint.slot(i as u32)))
+            })
+            .collect();
         format!(
             "{} {{{}}}",
             noeta_ast::short_type_name(&self.def.name),

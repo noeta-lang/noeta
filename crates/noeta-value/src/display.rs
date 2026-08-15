@@ -3,6 +3,8 @@
 //! verbatim from the crate root (audit-1 finding 8) — same crate, so private access is
 //! preserved; rendering is byte-identical.
 
+use noeta_ast::RenderHint;
+
 use crate::heap::{self, Payload};
 use crate::{CompactString, Value};
 
@@ -311,6 +313,139 @@ impl Value {
         match self.as_string() {
             Some(s) => format!("{s:?}"),
             None => self.display(),
+        }
+    }
+
+    /// [`Self::display`] under a [`RenderHint`] — the rendering of a value whose static type carries
+    /// an unsigned 64-bit integer somewhere, emitted by `Rvalue::Render` at every display site the
+    /// checker marked. The hint describes *positions*, so this walks the value and the hint together
+    /// and hands every unhinted position straight back to [`Self::display`]: only the erased words
+    /// the hint reaches are read unsigned, and everything else renders byte-identically to the
+    /// unhinted path. The tree-walker holds the identical twin, so the differential pins them equal.
+    pub fn display_hinted(self, hint: &RenderHint) -> String {
+        // A packed list has no specialized rendering (and no 64-bit element — only widths under 8
+        // bytes pack), so it materializes and renders exactly as its boxed equivalent does.
+        if self.is_packed_list() {
+            let boxed = self.realize_list();
+            let out = boxed.display_hinted(hint);
+            boxed.release();
+            return out;
+        }
+        if let RenderHint::Unsigned = hint {
+            return match self.as_int() {
+                Some(word) => noeta_ast::unsigned_digits(word),
+                None => self.display(),
+            };
+        }
+        // Every remaining hint describes a heap aggregate. An immediate here is a hint that does not
+        // match the value it reached, which renders exactly as it would unhinted — and the guard is
+        // what keeps `with_payload` off a non-pointer word.
+        if !self.is_pointer() {
+            return self.display();
+        }
+        match hint {
+            // Handled above; repeated here because the match is exhaustive.
+            RenderHint::Unsigned => self.display(),
+            RenderHint::Elements(inner) => self.render_sequence(Some(inner)),
+            RenderHint::Entries { key, value } => heap::with_payload(self, |p| match p {
+                Payload::Map(entries) => {
+                    let mut kv: Vec<(&noeta_ext_abi::MapKey, &Value)> = entries.iter().collect();
+                    kv.sort_unstable_by(|a, b| a.0.cmp(b.0));
+                    let parts: Vec<String> = kv
+                        .iter()
+                        .map(|(k, v)| {
+                            format!(
+                                "{}: {}",
+                                noeta_ast::map_key_display(k, key.as_deref()),
+                                v.repr_hinted(value.as_deref())
+                            )
+                        })
+                        .collect();
+                    format!("{{{}}}", parts.join(", "))
+                }
+                _ => self.display(),
+            }),
+            RenderHint::Slots(_) => heap::with_payload(self, |p| match p {
+                Payload::Tuple(items) => {
+                    let parts: Vec<String> = items
+                        .iter()
+                        .enumerate()
+                        .map(|(i, v)| v.repr_hinted(hint.slot(i as u32)))
+                        .collect();
+                    format!("({})", parts.join(", "))
+                }
+                Payload::Object { shape, slots } => {
+                    let parts: Vec<String> = shape
+                        .fields
+                        .iter()
+                        .zip(slots)
+                        .enumerate()
+                        .map(|(i, (name, v))| {
+                            format!("{name}: {}", v.repr_hinted(hint.slot(i as u32)))
+                        })
+                        .collect();
+                    format!(
+                        "{} {{{}}}",
+                        noeta_ast::short_type_name(&shape.name),
+                        parts.join(", ")
+                    )
+                }
+                _ => self.display(),
+            }),
+            RenderHint::Variants(_) => heap::with_payload(self, |p| match p {
+                Payload::Enum { shape, data } if !data.is_empty() => {
+                    let variant = shape.variant.clone().unwrap_or_default();
+                    let head = if shape.builtin_result_option {
+                        variant.clone()
+                    } else {
+                        format!(
+                            "{}.{}",
+                            noeta_ast::short_type_name(&shape.name),
+                            variant.clone()
+                        )
+                    };
+                    let slots = hint.variant(&variant).unwrap_or(&[]);
+                    let parts: Vec<String> = data
+                        .iter()
+                        .enumerate()
+                        .map(|(i, v)| {
+                            match slots.iter().find(|(s, _)| *s == i as u32).map(|(_, h)| h) {
+                                // A variant's payload renders with `display` (unquoted), as the
+                                // unhinted path does — the hint changes the words, not the form.
+                                Some(h) => v.display_hinted(h),
+                                None => v.display(),
+                            }
+                        })
+                        .collect();
+                    format!("{head}({})", parts.join(", "))
+                }
+                _ => self.display(),
+            }),
+        }
+    }
+
+    /// The list/set half of [`Self::display_hinted`] — both render their elements with `repr`, and
+    /// differ only in their brackets. Only reached for a pointer value (the caller's guard).
+    fn render_sequence(self, elem: Option<&RenderHint>) -> String {
+        heap::with_payload(self, |p| match p {
+            Payload::List(items) => {
+                let parts: Vec<String> = items.iter().map(|v| v.repr_hinted(elem)).collect();
+                format!("[{}]", parts.join(", "))
+            }
+            Payload::Set(items) => {
+                let parts: Vec<String> = items.iter().map(|v| v.repr_hinted(elem)).collect();
+                format!("{{{}}}", parts.join(", "))
+            }
+            _ => self.display(),
+        })
+    }
+
+    /// [`Self::repr`] under an optional hint: the in-collection form (strings quoted), with the
+    /// hinted positions rendered by [`Self::display_hinted`].
+    fn repr_hinted(self, hint: Option<&RenderHint>) -> String {
+        match hint {
+            Some(hint) if self.as_string().is_none() => self.display_hinted(hint),
+            _ => self.repr(),
         }
     }
 }

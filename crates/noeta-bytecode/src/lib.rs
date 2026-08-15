@@ -1568,10 +1568,18 @@ pub enum Op {
     /// implements the `Display` trait dispatches to its `to_string` method (pushing a call
     /// frame); every other value is copied unchanged, since the consuming `Echo`/`Concat`
     /// stringifies it via `display`. Emitted before each `Echo` and each interpolation hole.
+    ///
+    /// `hint` is set only where the checker found an **unsigned 64-bit integer** in the displayed
+    /// value's static type (`Rvalue::Render`). Such a value is erased to a negative i64 word, so
+    /// `display` would print its signed reinterpretation; with a hint the op renders the value
+    /// outright — through the same walk the tree-walker runs — and produces the finished string.
+    /// The hint is boxed and absent for every other display site, so the common op keeps its shape
+    /// and the dispatch loop pays one null test.
     Stringify {
         dst: Reg,
         src: Reg,
         span: Span,
+        hint: Option<Box<noeta_ast::RenderHint>>,
     },
     /// `dst = concat(display(part) for part in parts)` — build an interpolated string in one pass
     /// and one output allocation (P-VMT-STR). Each `Literal` part is copied verbatim from the

@@ -1287,6 +1287,13 @@ impl Interpreter {
                     other => other,
                 })
             }
+            noeta_ir::Rvalue::Render { operand, hint, .. } => {
+                // Render a display-site value whose static type carries an unsigned 64-bit integer.
+                // The VM runs the identical hinted walk on its own value model, so the differential
+                // pins the two renderings equal.
+                let value = self.eval_ir_atom(operand, frame)?;
+                Ok(Value::Str(value.display_hinted(hint)))
+            }
             noeta_ir::Rvalue::Binary {
                 op,
                 lhs,

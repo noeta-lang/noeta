@@ -7,7 +7,9 @@ The abstract syntax tree: pure data, no behavior.
 
 ## Shared derivations over the AST
 
-Being the bottom of the stack, this is also where a few **pure derivations** live once, so the crates above cannot each grow their own: `derive` (the shared derive planner), `reflect` (the reflection manifest), `desugar`, `shape`, and `conversion`.
+Being the bottom of the stack, this is also where a few **pure derivations** live once, so the crates above cannot each grow their own: `derive` (the shared derive planner), `reflect` (the reflection manifest), `desugar`, `shape`, `conversion`, and `render_hint`.
+
+`render_hint` is the shape of "how do I display this?" for the one case where a value cannot answer for itself. A fixed-width integer is erased to its 64-bit word, so an unsigned value past bit 63 is a negative word and would render as its signed reinterpretation; the signedness lives only in the static type. A `RenderHint` names the *positions* — the value itself, a list's elements, a map's keys and values, a tuple's or object's slots, an enum's per-variant payload — under which the checker found one, and both backends walk their own value model against that one description. It lives here because it starts at the checker, travels through the IR and the bytecode, and is applied by two crates that share no value type.
 
 `conversion` names a declared conversion's body. A type may carry one `impl From<Source>` block per source and a method table has one slot per name, so a type declaring several names each conversion after the source it converts and a type declaring one leaves it under the plain `from`. Everything that builds or resolves a method table asks that one function — the checker's signature registration, IR lowering, the bytecode compiler's prototype reservation, and the reflection manifest — so the four agree by construction rather than by four walks written to match.
 

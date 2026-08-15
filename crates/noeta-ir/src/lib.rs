@@ -172,6 +172,20 @@ pub enum Rvalue {
         bits: u8,
         span: Span,
     },
+    /// Render a value to its **display string** under a [`noeta_ast::RenderHint`] — the display twin
+    /// of [`Rvalue::MaskWidth`], and emitted for the same reason. A fixed-width integer is erased to
+    /// its i64 word, so an unsigned value past bit 63 is a negative word and would print as its
+    /// signed reinterpretation; the hint carries the signedness the *static type* holds and the
+    /// render walk reads those words unsigned. Lowering emits it at the display sites the checker
+    /// marked — `echo`, an interpolation hole, a display-based `~` operand — and only there, so a
+    /// value with no unsigned integer in its type never meets one. Both backends run the identical
+    /// hinted walk, so the differential pins them equal. Pure, single-operand; the result is a
+    /// `string`, which every downstream display door renders as itself.
+    Render {
+        operand: Atom,
+        hint: std::rc::Rc<noeta_ast::RenderHint>,
+        span: Span,
+    },
     /// A non-short-circuiting infix operation. `&&`/`||` are lowered to control flow and
     /// never appear here; everything else (arithmetic, concat, comparisons, equality) does.
     /// Operator-trait overloading on user objects is resolved by the interpreter, not the

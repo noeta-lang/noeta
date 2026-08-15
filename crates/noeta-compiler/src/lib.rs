@@ -2569,6 +2569,7 @@ impl<'m> FnCompiler<'m> {
                     dst: s,
                     src: t,
                     span: *span,
+                    hint: None,
                 });
                 self.code.push(Op::Echo { reg: s });
                 Ok(())
@@ -3583,6 +3584,23 @@ impl<'m> FnCompiler<'m> {
                 });
                 Ok(())
             }
+            // A display site whose value carries an unsigned 64-bit integer: the hint rides on the
+            // `Stringify` this display door already emits, and the op renders the value outright
+            // rather than passing it through for `display` to reinterpret as signed.
+            Rvalue::Render {
+                operand,
+                hint,
+                span,
+            } => {
+                let src = self.atom_reg(operand)?;
+                self.code.push(Op::Stringify {
+                    dst,
+                    src,
+                    span: *span,
+                    hint: Some(Box::new((**hint).clone())),
+                });
+                Ok(())
+            }
             // Sign-dependent fixed-width `/ % < <= > >=` (Tier W3): a single width-carrying op the VM
             // resolves via `apply_binary_wide`. No trait dispatch (operands are erased ints), no
             // reuse — always the copying form.
@@ -4347,7 +4365,12 @@ impl<'m> FnCompiler<'m> {
                     let r = self.alloc_reg();
                     // Route a `Display` object through its `to_string` before `BuildString` renders
                     // it via `display`; identity for every other value.
-                    self.code.push(Op::Stringify { dst: r, src, span });
+                    self.code.push(Op::Stringify {
+                        dst: r,
+                        src,
+                        span,
+                        hint: None,
+                    });
                     segments.push(StrPart::Hole(r));
                 }
             }

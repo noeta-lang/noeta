@@ -1075,7 +1075,10 @@ impl Checker {
             Expr::Interp { parts, .. } => {
                 for part in parts {
                     if let StrPart::Hole(e) = part {
-                        self.synth(e, env);
+                        let ty = self.synth(e, env);
+                        // A hole is a display site like `echo`: its value is rendered, so an
+                        // unsigned 64-bit integer under it needs the same hint.
+                        self.note_render_hint(&ty, e.span());
                     }
                 }
                 Type::String

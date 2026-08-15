@@ -77,6 +77,11 @@ impl Checker {
                 if let (Type::List(a), Type::List(b)) = (&lt, &rt) {
                     Type::List(Box::new(unify_element(a, b).unwrap_or(Type::Dyn)))
                 } else {
+                    // The display-concatenation form renders both operands, so each is a display
+                    // site and takes the same hint `echo` does. (The list form above concatenates
+                    // *values* and renders nothing, which is why it records none.)
+                    self.note_render_hint(&lt, lhs.span());
+                    self.note_render_hint(&rt, rhs.span());
                     Type::String
                 }
             }

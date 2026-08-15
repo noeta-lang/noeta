@@ -206,6 +206,123 @@ impl Checker {
         );
     }
 
+    /// Record the [`RenderHint`](noeta_ast::RenderHint) for a value **about to be displayed** at
+    /// `span` (an `echo`, an interpolation hole, a display-based `~` operand), if its static type
+    /// contains an unsigned 64-bit integer. Nothing is recorded otherwise — the overwhelmingly
+    /// common case — so a program that never displays a `u64` carries no hint and lowers unchanged.
+    ///
+    /// This is the display counterpart of the `width_sites` recording on fixed-width arithmetic:
+    /// both exist because the width and signedness of an `IntN` live only in the type, and the
+    /// operations that need them (division, ordering, and rendering) must be told.
+    pub(crate) fn note_render_hint(&mut self, ty: &Type, span: Span) {
+        // A **declared** type implementing `Display` renders through its own `to_string`, whose body
+        // does its own displaying (and takes its own hints there). Hinting the site would render the
+        // value structurally instead, silently replacing the type's chosen form. The test is
+        // deliberately narrow — a named type, which is exactly what the runtime dispatches on (an
+        // object or enum value) — because every built-in type satisfies `Display` too, and exempting
+        // those would exempt the whole surface. Only the *outermost* type is exempt: a value nested
+        // in a collection or field renders with `repr`, which never dispatches `Display`.
+        if matches!(ty, Type::Named(..)) && self.satisfies(ty, BuiltinTrait::Display) {
+            return;
+        }
+        if let Some(hint) = self.render_hint(ty, &mut Vec::new()) {
+            self.sites.render_hint_sites.insert(span, hint);
+        }
+    }
+
+    /// Build the render hint for `ty`, or `None` when nothing under it is an unsigned 64-bit
+    /// integer. `stack` carries the named types already being expanded, so a self-referential type
+    /// (`class Node { next: ?Node }`) terminates instead of recursing forever; the cut is safe
+    /// because a cycle adds no *new* position — every position it could reach is already described
+    /// by the outer expansion of the same type.
+    ///
+    /// Only 64-bit unsigned values need one: every `u8`/`u16`/`u32` value fits in an i64 word with
+    /// room to spare, so it already renders correctly, and every *signed* width is exactly what the
+    /// erased word is.
+    fn render_hint(&self, ty: &Type, stack: &mut Vec<String>) -> Option<noeta_ast::RenderHint> {
+        use noeta_ast::RenderHint;
+        match ty {
+            Type::IntN {
+                signed: false,
+                bits: 64,
+            } => Some(RenderHint::Unsigned),
+            Type::List(e) | Type::Set(e) => {
+                Some(RenderHint::Elements(Box::new(self.render_hint(e, stack)?)))
+            }
+            Type::Map(k, v) => {
+                let key = self.render_hint(k, stack).map(Box::new);
+                let value = self.render_hint(v, stack).map(Box::new);
+                (key.is_some() || value.is_some()).then_some(RenderHint::Entries { key, value })
+            }
+            Type::Tuple(items) => {
+                RenderHint::slots(items.iter().map(|t| self.render_hint(t, stack)))
+            }
+            // `?T` and `Result<T, E>` are enums at runtime, so they render through their variant
+            // names exactly as a user enum does — `some`/`Ok`/`Err` carry the payload in slot 0.
+            Type::Option(inner) => self
+                .render_hint(inner, stack)
+                .map(|h| RenderHint::Variants(vec![("some".to_string(), vec![(0, h)])])),
+            Type::Result(ok, err) => {
+                let variants: Vec<(String, Vec<(u32, RenderHint)>)> = [
+                    ("Ok", self.render_hint(ok, stack)),
+                    ("Err", self.render_hint(err, stack)),
+                ]
+                .into_iter()
+                .filter_map(|(name, h)| h.map(|h| (name.to_string(), vec![(0, h)])))
+                .collect();
+                (!variants.is_empty()).then_some(RenderHint::Variants(variants))
+            }
+            Type::Named(name, args) => self.named_render_hint(name, args, stack),
+            _ => None,
+        }
+    }
+
+    /// The render hint for a declared struct/class (its fields, as positional slots) or enum (its
+    /// variants' payloads), at the instantiation `args`. Split from [`Self::render_hint`] to keep
+    /// the cycle guard's push/pop in one place.
+    fn named_render_hint(
+        &self,
+        name: &str,
+        args: &[Type],
+        stack: &mut Vec<String>,
+    ) -> Option<noeta_ast::RenderHint> {
+        use noeta_ast::RenderHint;
+        if stack.iter().any(|n| n == name) {
+            return None;
+        }
+        stack.push(name.to_string());
+        let subst = self.type_arg_subst(name, args);
+        let at = |t: &Type| crate::subst::apply_subst(t, &subst);
+        let hint = match self.symbols.records.get(name) {
+            Some(fields) => {
+                let hints: Vec<Option<RenderHint>> = fields
+                    .iter()
+                    .map(|(_, fty)| self.render_hint(&at(fty), stack))
+                    .collect();
+                RenderHint::slots(hints)
+            }
+            None => self.symbols.enums.get(name).and_then(|variants| {
+                let variants: Vec<(String, Vec<(u32, RenderHint)>)> = variants
+                    .iter()
+                    .filter_map(|v| {
+                        let slots: Vec<(u32, RenderHint)> = v
+                            .fields
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(i, fty)| {
+                                self.render_hint(&at(fty), stack).map(|h| (i as u32, h))
+                            })
+                            .collect();
+                        (!slots.is_empty()).then(|| (v.name.clone(), slots))
+                    })
+                    .collect();
+                (!variants.is_empty()).then_some(RenderHint::Variants(variants))
+            }),
+        };
+        stack.pop();
+        hint
+    }
+
     /// The inclusive `(min, max)` value range of a fixed-width integer type, as `i128` so every
     /// width (including `u64`) fits — used only for diagnostic text.
     pub(crate) fn int_width_range(signed: bool, bits: u8) -> (i128, i128) {

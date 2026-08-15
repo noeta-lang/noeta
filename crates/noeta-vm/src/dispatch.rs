@@ -1541,8 +1541,23 @@ impl<'m> Vm<'m> {
                         self.emit_stdout_line(&text);
                         pc += 1;
                     }
-                    Op::Stringify { dst, src, span } => {
+                    Op::Stringify {
+                        dst,
+                        src,
+                        span,
+                        hint,
+                    } => {
                         let v = regs[fbase + *src as usize];
+                        // A hinted site renders here and now: the hint says the value's static type
+                        // holds an unsigned 64-bit integer, whose erased word `display` would read
+                        // as signed. The rendered string is what the consuming `Echo`/`BuildString`
+                        // then displays (a string displays as itself).
+                        if let Some(hint) = hint {
+                            let rendered = Value::from_string(v.display_hinted(hint).into());
+                            set_reg(regs, fbase, *dst, rendered);
+                            pc += 1;
+                            continue;
+                        }
                         // A user object or enum value lights up the `Display` trait: render it via its
                         // `to_string` method (which runs bytecode, so it is pushed as a call frame). The
                         // method table is keyed by the value's shape name, identical for both kinds

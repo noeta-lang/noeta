@@ -2137,7 +2137,8 @@ impl Checker {
             // (`Unknown`) expectation — subsumption is a no-op here. (Other statement positions,
             // such as `return`, do supply a real expectation; see `check_stmt`'s `Return` arm.)
             Stmt::Echo { value, .. } => {
-                self.check(value, &Type::Unknown, env);
+                let ty = self.check(value, &Type::Unknown, env);
+                self.note_render_hint(&ty, value.span());
             }
             Stmt::Binding {
                 mut_decl,

@@ -17,6 +17,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::rc::Rc;
 
+use noeta_ast::RenderHint;
 use noeta_ast::reflect::TypeRepr;
 use noeta_stdlib::channel::SendPhase;
 
@@ -869,6 +870,79 @@ impl Value {
         match self {
             Value::Str(s) => format!("{s:?}"),
             other => other.display(),
+        }
+    }
+
+    /// [`Self::display`] under a [`RenderHint`] — the rendering of a value whose static type carries
+    /// an unsigned 64-bit integer somewhere, applied by `Rvalue::Render` at every display site the
+    /// checker marked. The hint describes *positions*, so this walks the value and the hint together
+    /// and hands every unhinted position straight back to [`Self::display`]: only the erased words
+    /// the hint reaches are read unsigned. The VM holds the identical twin (`noeta-value`'s
+    /// `display_hinted`) — per-representation glue, mirrored by design, with the differential
+    /// asserting the two agree.
+    pub fn display_hinted(&self, hint: &RenderHint) -> String {
+        match hint {
+            RenderHint::Unsigned => match self {
+                Value::Int(word) => noeta_ast::unsigned_digits(*word),
+                other => other.display(),
+            },
+            RenderHint::Elements(inner) => match self {
+                Value::List(repr) => {
+                    let parts: Vec<String> = repr
+                        .to_rc_vec()
+                        .iter()
+                        .map(|v| v.repr_hinted(Some(inner)))
+                        .collect();
+                    format!("[{}]", parts.join(", "))
+                }
+                Value::Set(items, _) => {
+                    let parts: Vec<String> =
+                        items.iter().map(|v| v.repr_hinted(Some(inner))).collect();
+                    format!("{{{}}}", parts.join(", "))
+                }
+                other => other.display(),
+            },
+            RenderHint::Entries { key, value } => match self {
+                Value::Map(entries, _) => {
+                    let parts: Vec<String> = entries
+                        .iter()
+                        .map(|(k, v)| {
+                            format!(
+                                "{}: {}",
+                                noeta_ast::map_key_display(k, key.as_deref()),
+                                v.repr_hinted(value.as_deref())
+                            )
+                        })
+                        .collect();
+                    format!("{{{}}}", parts.join(", "))
+                }
+                other => other.display(),
+            },
+            RenderHint::Slots(_) => match self {
+                Value::Tuple(items) => {
+                    let parts: Vec<String> = items
+                        .iter()
+                        .enumerate()
+                        .map(|(i, v)| v.repr_hinted(hint.slot(i as u32)))
+                        .collect();
+                    format!("({})", parts.join(", "))
+                }
+                Value::Object(object) => object.display_hinted(hint),
+                other => other.display(),
+            },
+            RenderHint::Variants(_) => match self {
+                Value::Enum(value) if !value.data.is_empty() => value.display_hinted(hint),
+                other => other.display(),
+            },
+        }
+    }
+
+    /// [`Self::repr`] under an optional hint: the in-collection form (strings quoted), with the
+    /// hinted positions rendered by [`Self::display_hinted`].
+    pub(crate) fn repr_hinted(&self, hint: Option<&RenderHint>) -> String {
+        match (hint, self) {
+            (Some(hint), value) if !matches!(value, Value::Str(_)) => value.display_hinted(hint),
+            _ => self.repr(),
         }
     }
 

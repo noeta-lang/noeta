@@ -599,7 +599,16 @@ extern "C" fn jit_run_leaf_op(
             set_reg(regs, base, *dst, v);
             noeta_jit_abi::OUTCOME_CONTINUE
         }
-        Op::Stringify { dst, src, span: _ } => {
+        Op::Stringify {
+            dst,
+            src,
+            span: _,
+            hint,
+        } => {
+            // A hinted render is the display walk, not a passthrough — leave it to tier 0.
+            if hint.is_some() {
+                return bail;
+            }
             let v = regs[base + *src as usize];
             // A user object/enum may light up `Display` — its `to_string` runs bytecode, which
             // pushes a frame. Bail on **every** object/enum (a conservative superset of the

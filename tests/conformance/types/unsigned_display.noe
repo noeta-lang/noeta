@@ -1,0 +1,85 @@
+// Displaying a `u64` past bit 63. A fixed-width integer is erased to its i64 word, so `u64::MAX` is
+// the word `-1` and every display door would print the signed reinterpretation. The signedness lives
+// only in the static type, so the checker marks each display site — `echo`, an interpolation hole, a
+// display-based `~` operand — and both backends render through the same hinted walk. The hint is
+// structural, so a `u64` nested in a list, set, map, tuple, object or enum payload renders unsigned
+// too. Narrower widths are the controls: every `u8`/`u16`/`u32` value fits in an i64 already.
+// expect: stdout "9223372036854775807"
+// expect: stdout "9223372036854775808"
+// expect: stdout "18446744073709551615"
+// expect: stdout "18446744073709551615"
+// expect: stdout "x=18446744073709551615!"
+// expect: stdout "18446744073709551615 and 9223372036854775808"
+// expect: stdout "255"
+// expect: stdout "65535"
+// expect: stdout "4294967295"
+// expect: stdout "-1"
+// expect: stdout "[18446744073709551615, 9223372036854775808, 1]"
+// expect: stdout "{18446744073709551615, 1}"
+// expect: stdout "{"big": 18446744073709551615}"
+// expect: stdout "(18446744073709551615, "tag")"
+// expect: stdout "Meter {reading: 18446744073709551615, label: "m"}"
+// expect: stdout "some(18446744073709551615)"
+// expect: stdout "none"
+// expect: stdout "Reading.Raw(18446744073709551615)"
+// expect: stdout "[Meter {reading: 18446744073709551615, label: "m"}]"
+// expect: stdout "Gauge<18446744073709551615>"
+// expect: stdout "[Gauge {v: 18446744073709551615}]"
+// expect: exit 0
+
+struct Meter {
+    reading: u64
+    label: string
+}
+
+enum Reading { Raw(u64); Missing }
+
+// A type with its own `Display` keeps rendering through `to_string` — and the `u64` inside that
+// method's own interpolation is a display site there, hinted like any other. Nested in a list it
+// renders structurally (as `repr` always does), with the field's hint still applied.
+struct Gauge {
+    v: u64
+
+    impl Display {
+        pub fn to_string(): string { return "Gauge<${self.v}>"; }
+    }
+}
+
+// The three boundaries: the largest value an i64 also holds, the first one it does not, and the top.
+echo 9223372036854775807u64
+echo 9223372036854775808u64
+echo 18446744073709551615u64
+
+// Interpolation and `~` concatenation are display doors too.
+echo "${18446744073709551615u64}"
+echo "x=" ~ 18446744073709551615u64 ~ "!"
+
+// A binding keeps the type, and one hole per interpolation is rendered independently.
+big: u64 = 18446744073709551615u64
+half: u64 = 9223372036854775808u64
+echo "${big} and ${half}"
+
+// Controls: the narrower unsigned widths always fit an i64, and `i64` itself is the erased word.
+echo 255u8
+echo 65535u16
+echo 4294967295u32
+echo -1i64
+
+// Collections render their elements through the same hint.
+echo [big, half, 1u64]
+echo [big, 1u64].to_set()
+echo {"big": big}
+echo (big, "tag")
+
+// An object's fields, an enum's payload, and a nesting of the two.
+m = Meter { reading: big, label: "m" }
+echo m
+echo some(big)
+maybe: ?u64 = none
+echo maybe
+echo Reading.Raw(big)
+echo [m]
+
+g = Gauge { v: big }
+echo g
+echo [g]
