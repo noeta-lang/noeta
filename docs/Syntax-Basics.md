@@ -215,7 +215,7 @@ echo -1.5f32           // -1.5    (unary negation stays f32)
 
 ## The three string forms
 
-**`"..."` — interpolated.** `${expr}` embeds any expression; bare `{`/`}` are literal.
+**`"..."` — interpolated.** `${expr}` embeds any expression — string interpolation; bare `{`/`}` are literal.
 
 ```noeta
 name = "Niro"

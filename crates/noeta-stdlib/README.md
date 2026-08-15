@@ -58,7 +58,7 @@ Later milestones grew this crate well past the M1.10 baseline above; all of the 
 - **`env`/`args`** — process introspection over the host seam (a fixed sandbox fixture; the real environment under `noeta run`). No longer deferred.
 - **`fs` streaming + directories + handles** — `read_lines`/`append`, `mkdir`/`is_dir`/`list(dir)`, and the `fs.open` cursor `FileHandle` (`handle.rs`, the first mutable heap value type, shared by both backends), plus `read_bytes`/`write_bytes` and the `*_async` variants.
 - **The async `Executor` seam** (`executor.rs`) — a deterministic `SandboxExecutor` (logical time, in-oracle) behind the `async`/`await`, generator, and iterator surfaces; the real tokio `RealExecutor` lives in `noeta-host-real`.
-- **`vec`/`quat`** — scalar 3D math plus the autovectorized `soa_*`/`*_all` bulk kernels over packed buffers.
+- **`vec`/`quat`** — scalar 3D math plus the autovectorized `soa_*`/`*_all` bulk kernels over packed buffers. The `vec.Kernels`/`vec.SatKernels` method bundles (`vec_kernels.rs`) carry the same operations at every numeric width, as one generic body per op over the `Scalar` element trait (`scalar.rs`).
 - **The native-extension registry** (`registry.rs`) — the neutral `NativeValue` marshalling seam through which `math`/`random`/`time`/`env`/`args`/`fs`/`vec`/`quat`/`json` are registered as the dogfooded "std" extension, with one shared dispatch function per module so the differential holds by construction. `json.parse::<T>` decodes into a call-site-named type.
 
 See the wiki's [Standard-Library Modules](../../docs/Standard-Library-Modules.md) and [Native Extensions](../../docs/Native-Extensions.md) pages; the original arc ledgers live in `plans/` git history.

@@ -1,0 +1,101 @@
+// The geometry half of `vec.Kernels`: `cross`, `distance`, `lerp`, `clamp` and `reflect` — the ops
+// that combine a value's components rather than walking them lane by lane, at every element width.
+// `cross` and `clamp` compute at the element width (so integer `cross` wraps, matching the bundle's
+// arithmetic); `distance` and `lerp` compute in the promoted `Self::Float` domain, so a narrow or
+// unsigned element cannot wrap on the way and an integer interpolation passes through its fraction
+// before rounding back. Both backends run the one generic kernel monomorphized per width, so the
+// differential pins the agreement.
+// expect: stdout "V3 {x: 0.0, y: 0.0, z: 1.0}"
+// expect: stdout "V3 {x: -3.0, y: 6.0, z: -3.0}"
+// expect: stdout "5.0"
+// expect: stdout "V3 {x: 5.0, y: 10.0, z: 15.0}"
+// expect: stdout "V3 {x: 2.0, y: 4.0, z: 6.0}"
+// expect: stdout "V3 {x: 1.0, y: 1.0, z: 0.0}"
+// expect: stdout "V3 {x: 1.0, y: 0.0, z: 1.0}"
+// expect: stdout "V3 {x: 0.0, y: 0.0, z: 0.0}"
+// expect: stdout "true"
+// expect: stdout "DVec3 {x: -3.0, y: 6.0, z: -3.0}"
+// expect: stdout "16777217.0"
+// expect: stdout "16777216.0"
+// expect: stdout "DVec3 {x: 2.0, y: 3.0, z: 4.0}"
+// expect: stdout "DVec3 {x: 1.0, y: 1.0, z: 0.0}"
+// expect: stdout "IVec3 {x: -3, y: 6, z: -3}"
+// expect: stdout "IVec3 {x: 0, y: 0, z: -2147479015}"
+// expect: stdout "5.0"
+// expect: stdout "IVec3 {x: 3, y: 4, z: 5}"
+// expect: stdout "IVec3 {x: 2147483647, y: 0, z: 0}"
+// expect: stdout "IVec3 {x: 1, y: 0, z: 1}"
+// expect: stdout "5.0"
+// expect: stdout "IVec2 {x: 2, y: 3}"
+// expect: stdout "255.0"
+// expect: exit 0
+use std.{vec}
+
+@packed struct V3 { x: f32; y: f32; z: f32 }
+@packed struct DVec3 { x: f64; y: f64; z: f64 }
+@packed struct IVec3 { x: i32; y: i32; z: i32 }
+@packed struct IVec2 { x: i32; y: i32 }
+@packed struct Chan { a: u8; b: u8 }
+
+impl vec.Kernels for V3 {}
+impl vec.Kernels for DVec3 {}
+impl vec.Kernels for IVec3 {}
+impl vec.Kernels for IVec2 {}
+impl vec.Kernels for Chan {}
+
+zero = V3 { x: 0.0f32, y: 0.0f32, z: 0.0f32 }
+one = V3 { x: 1.0f32, y: 1.0f32, z: 1.0f32 }
+up = V3 { x: 0.0f32, y: 1.0f32, z: 0.0f32 }
+
+// `cross` follows the right-hand rule: +x × +y = +z.
+echo V3 { x: 1.0f32, y: 0.0f32, z: 0.0f32 }.cross(up)
+echo V3 { x: 1.0f32, y: 2.0f32, z: 3.0f32 }.cross(V3 { x: 4.0f32, y: 5.0f32, z: 6.0f32 })
+
+echo zero.distance(V3 { x: 3.0f32, y: 4.0f32, z: 0.0f32 })      // 5.0
+echo zero.lerp(V3 { x: 10.0f32, y: 20.0f32, z: 30.0f32 }, 0.5)
+echo zero.lerp(V3 { x: 1.0f32, y: 2.0f32, z: 3.0f32 }, 2.0)     // t is not clamped: extrapolates
+echo V3 { x: 1.0f32, y: -1.0f32, z: 0.0f32 }.reflect(up)        // mirrored about the y=0 plane
+echo V3 { x: 5.0f32, y: -5.0f32, z: 2.0f32 }.clamp(zero, one)
+// `clamp` is total: `lo` above `hi` yields `hi`, computed as max(lo).min(hi).
+echo one.clamp(one, zero)
+
+// The bundle method and the free `f32` module function are the same operation to the last bit.
+a = V3 { x: 1.0f32, y: 2.0f32, z: 3.0f32 }
+b = V3 { x: 4.0f32, y: 5.0f32, z: 6.0f32 }
+parity = [
+    a.cross(b) == vec.cross(a, b),
+    a.distance(b) == vec.distance(a, b),
+    a.lerp(b, 0.25) == vec.lerp(a, b, 0.25),
+    a.clamp(zero, one) == vec.clamp(a, zero, one),
+    a.reflect(up) == vec.reflect(a, up),
+]
+echo parity.all()
+
+// f64: the same operations at double precision. 16777217 is the first integer an `f32` cannot hold,
+// so the `f64` distance answers it exactly where the `f32` one rounds down.
+echo DVec3 { x: 1.0f64, y: 2.0f64, z: 3.0f64 }.cross(DVec3 { x: 4.0f64, y: 5.0f64, z: 6.0f64 })
+echo DVec3 { x: 0.0f64, y: 0.0f64, z: 0.0f64 }.distance(DVec3 { x: 16777217.0f64, y: 0.0f64, z: 0.0f64 })
+echo zero.distance(V3 { x: 16777217.0f32, y: 0.0f32, z: 0.0f32 })
+echo DVec3 { x: 1.0f64, y: 2.0f64, z: 3.0f64 }.lerp(DVec3 { x: 3.0f64, y: 4.0f64, z: 5.0f64 }, 0.5)
+echo DVec3 { x: 1.0f64, y: -1.0f64, z: 0.0f64 }.reflect(DVec3 { x: 0.0f64, y: 1.0f64, z: 0.0f64 })
+
+// Integers. `cross` is element-width arithmetic and WRAPS: 46341² = 2147488281 exceeds i32::MAX.
+echo IVec3 { x: 1i32, y: 2i32, z: 3i32 }.cross(IVec3 { x: 4i32, y: 5i32, z: 6i32 })
+echo IVec3 { x: 46341i32, y: 0i32, z: 0i32 }.cross(IVec3 { x: 0i32, y: 46341i32, z: 0i32 })
+
+// `distance` promotes, so an integer vector answers with a float.
+echo IVec3 { x: 0i32, y: 0i32, z: 0i32 }.distance(IVec3 { x: 3i32, y: 4i32, z: 0i32 })
+// `lerp` keeps the fraction and rounds back half away from zero: 2.5/3.5/4.5 → 3/4/5.
+echo IVec3 { x: 1i32, y: 2i32, z: 3i32 }.lerp(IVec3 { x: 4i32, y: 5i32, z: 6i32 }, 0.5)
+// Closing the promoted domain SATURATES at the element's bounds — the float-to-integer conversion
+// rule, not the wrapping one the element-width ops follow. 2·2147483647 clamps to i32::MAX.
+echo IVec3 { x: 2147483647i32, y: 0i32, z: 0i32 }.lerp(IVec3 { x: 0i32, y: 0i32, z: 0i32 }, -1.0)
+echo IVec3 { x: 5i32, y: -5i32, z: 2i32 }.clamp(IVec3 { x: 0i32, y: 0i32, z: 0i32 }, IVec3 { x: 1i32, y: 1i32, z: 1i32 })
+
+// Every arity the bundle binds, not just three components.
+echo IVec2 { x: 0i32, y: 0i32 }.distance(IVec2 { x: 3i32, y: 4i32 })
+echo IVec2 { x: 1i32, y: 2i32 }.lerp(IVec2 { x: 3i32, y: 4i32 }, 0.5)
+
+// An unsigned element's difference is taken AFTER promotion, so it cannot wrap: 0 and 255 are 255
+// apart in either direction (a wrapping subtract would answer 1.0 one way round).
+echo Chan { a: 0u8, b: 0u8 }.distance(Chan { a: 255u8, b: 0u8 })

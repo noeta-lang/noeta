@@ -1,0 +1,11 @@
+// `cross` is the one arity-specific kernel: a cross product exists in three dimensions, and the
+// bundle binds every arity from two upwards. A 2-component receiver is refused by name at the call
+// rather than reading past its components — the runtime twin of the impl-site shape check.
+// expect: error E0007 at 11:6
+// expect: exit 1
+use std.{vec}
+
+@packed struct IVec2 { x: i32; y: i32 }
+impl vec.Kernels for IVec2 {}
+
+echo IVec2 { x: 1i32, y: 2i32 }.cross(IVec2 { x: 3i32, y: 4i32 })

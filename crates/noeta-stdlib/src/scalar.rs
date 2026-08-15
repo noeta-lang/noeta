@@ -88,6 +88,23 @@ pub trait Scalar: Copy {
     /// Promote one element to its [`Self::Float`] (for `length`/`normalize`).
     fn to_float(self) -> Self::Float;
 
+    /// Round a [`Self::Float`] back to an element — the closing step of a kernel that computes in the
+    /// promoted domain (`lerp`). Integers round to nearest, half away from zero, and **saturate** at
+    /// the width's bounds; `f32`/`f64` are already their own `Float`, so this is the identity.
+    fn from_float(f: Self::Float) -> Self;
+
+    /// A plain `f64` as a [`Self::Float`] — how a language `float` argument (an interpolation
+    /// parameter) enters the promoted domain. `f32` narrows; the integer widths keep `f64`.
+    fn float_from_f64(f: f64) -> Self::Float;
+
+    /// Arithmetic in the promoted domain. A kernel that must not wrap at the element width — a
+    /// distance between two `u8` components, an interpolation between two `i32` ones — computes here
+    /// and closes with [`Self::from_float`]. `f32` stays `f32`, so a float vector's result is the one
+    /// its own precision gives, not a rounded `f64`.
+    fn float_add(a: Self::Float, b: Self::Float) -> Self::Float;
+    fn float_sub(a: Self::Float, b: Self::Float) -> Self::Float;
+    fn float_mul(a: Self::Float, b: Self::Float) -> Self::Float;
+
     /// Promote a **widened accumulator** ([`Self::Wide`]) to a float ([`Self::Float`]) — the missing
     /// rung `length` needs (scalar-unification slice 3): a vector length is `sqrt` of the *widened*
     /// dot accumulator, but [`Self::to_float`] promotes a bare element, not a `Wide`. Integers widen
@@ -182,6 +199,26 @@ macro_rules! impl_signed_scalar {
                 self as f64
             }
             #[inline]
+            fn from_float(f: f64) -> Self {
+                <Self as Scalar>::saturating_from_f64(f)
+            }
+            #[inline]
+            fn float_from_f64(f: f64) -> f64 {
+                f
+            }
+            #[inline]
+            fn float_add(a: f64, b: f64) -> f64 {
+                a + b
+            }
+            #[inline]
+            fn float_sub(a: f64, b: f64) -> f64 {
+                a - b
+            }
+            #[inline]
+            fn float_mul(a: f64, b: f64) -> f64 {
+                a * b
+            }
+            #[inline]
             fn wide_to_float(w: i64) -> f64 {
                 w as f64
             }
@@ -272,6 +309,26 @@ macro_rules! impl_unsigned_scalar {
             #[inline]
             fn to_float(self) -> f64 {
                 self as f64
+            }
+            #[inline]
+            fn from_float(f: f64) -> Self {
+                <Self as Scalar>::saturating_from_f64(f)
+            }
+            #[inline]
+            fn float_from_f64(f: f64) -> f64 {
+                f
+            }
+            #[inline]
+            fn float_add(a: f64, b: f64) -> f64 {
+                a + b
+            }
+            #[inline]
+            fn float_sub(a: f64, b: f64) -> f64 {
+                a - b
+            }
+            #[inline]
+            fn float_mul(a: f64, b: f64) -> f64 {
+                a * b
             }
             #[inline]
             fn wide_to_float(w: u64) -> f64 {
@@ -366,6 +423,28 @@ macro_rules! impl_float_scalar {
             #[inline]
             fn to_float(self) -> $ty {
                 self
+            }
+            /// `Float == Self` for a float element, so closing the promoted domain is the identity —
+            /// an `f32` vector's interpolation is computed and returned at `f32`.
+            #[inline]
+            fn from_float(f: $ty) -> Self {
+                f
+            }
+            #[inline]
+            fn float_from_f64(f: f64) -> $ty {
+                f as $ty
+            }
+            #[inline]
+            fn float_add(a: $ty, b: $ty) -> $ty {
+                a + b
+            }
+            #[inline]
+            fn float_sub(a: $ty, b: $ty) -> $ty {
+                a - b
+            }
+            #[inline]
+            fn float_mul(a: $ty, b: $ty) -> $ty {
+                a * b
             }
             #[inline]
             fn wide_to_float(w: $ty) -> $ty {
@@ -506,6 +585,37 @@ mod tests {
         assert_eq!(Scalar::min(f32::NAN, 1.0), 1.0f32);
         assert_eq!(Scalar::max(1.0f32, f32::NAN), 1.0f32);
         assert_eq!(Scalar::min(-1.0f64, 2.0), -1.0f64);
+    }
+
+    /// The promoted domain: integers compute at `f64` and round back half-away-from-zero with
+    /// saturation, `f32` computes and closes at `f32` (no `f64` detour), `f64` is the identity.
+    #[test]
+    fn promoted_domain_round_trip() {
+        // An integer element promotes, keeps the fraction through the arithmetic, and rounds back.
+        let half = <i32 as Scalar>::float_from_f64(0.5);
+        let lerped = <i32 as Scalar>::float_add(
+            1i32.to_float(),
+            <i32 as Scalar>::float_mul(
+                <i32 as Scalar>::float_sub(4i32.to_float(), 1i32.to_float()),
+                half,
+            ),
+        );
+        assert_eq!(lerped, 2.5f64);
+        assert_eq!(<i32 as Scalar>::from_float(lerped), 3i32); // half away from zero
+        assert_eq!(<i32 as Scalar>::from_float(-2.5f64), -3i32);
+        // Closing saturates at the width rather than wrapping.
+        assert_eq!(<u8 as Scalar>::from_float(400.0), 255u8);
+        assert_eq!(<i8 as Scalar>::from_float(-999.0), -128i8);
+        // An unsigned difference computed in the promoted domain is signed, so it cannot wrap.
+        assert_eq!(
+            <u8 as Scalar>::float_sub(3u8.to_float(), 5u8.to_float()),
+            -2.0f64
+        );
+        // A float element stays at its own precision end to end.
+        let f: f32 = <f32 as Scalar>::float_from_f64(0.1);
+        assert_eq!(f, 0.1f32);
+        assert_eq!(<f32 as Scalar>::from_float(1.5f32), 1.5f32);
+        assert_eq!(<f64 as Scalar>::from_float(1.5f64), 1.5f64);
     }
 
     /// Identities: seeding an empty fold gives `0` / `1`.

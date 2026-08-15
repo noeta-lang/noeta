@@ -21,7 +21,9 @@
 //! run the exact same kernel, so `v.add(w)` and `xs.add_all(ys)` agree by construction.
 //!
 //! The free `vec.add`/`vec.dot`/`vec.cross`/… **module functions** (the `f32`-precision `Vec3` surface)
-//! stay in [`crate::vec3`] unchanged — this file replaces only the nominal *bundle* layer.
+//! stay in [`crate::vec3`] unchanged — this file replaces only the nominal *bundle* layer. The two
+//! layers cover the same operations: `cross`, `distance`, `lerp`, `clamp` and `reflect` are bundle
+//! methods at every width, so "the same operations at `f64`" is a fact rather than an aspiration.
 
 use crate::registry::{
     AssocDerivation, BundleReceiver, ConstraintArity, ConstraintField, ConstraintLayout,
@@ -121,9 +123,9 @@ pub(crate) const VEC_KERNELS: ExtTrait = ExtTrait {
           struct of **two or more fields of one numeric kind** (E0015 otherwise). That uniform \
           element is what the associated types derive from: `Self::Wide` widens it (so `dot` cannot \
           overflow on narrow integers) and `Self::Float` promotes it (so `length` returns a float \
-          even for an integer shape).\n\nEvery method has a bulk `*_all` twin on `List<Self>` that \
-          runs over the packed list's contiguous bytes in one pass — `xs.add_all(ys)` rather than a \
-          loop over `add`.",
+          even for an integer shape).\n\nThe lane-wise methods carry a bulk `*_all` twin on \
+          `List<Self>` that runs over the packed list's contiguous bytes in one pass — \
+          `xs.add_all(ys)` rather than a loop over `add`.",
     docs: KERNELS_DOCS,
 };
 
@@ -151,6 +153,38 @@ const KERNELS_DOCS: &[(&str, &str)] = &[
         "The unit vector in the same direction — every element divided by `length`. A zero-length \
          value normalizes to the zero vector rather than producing NaN.\n\n**Float shapes only.** \
          An integer vector has no unit vector, so calling this on one is a runtime error.",
+    ),
+    (
+        "cross",
+        "The cross product — the vector perpendicular to both operands, with `a.cross(b)` following \
+         the right-hand rule.\n\n**Three-component shapes only.** A cross product is defined in \
+         three dimensions, so calling this on a shape of any other arity is a runtime error.",
+    ),
+    (
+        "distance",
+        "The Euclidean distance between two values, `(self - other).length()`. Returns \
+         `Self::Float`.\n\nThe difference is taken after the float promotion, so a narrow or \
+         unsigned element cannot wrap on the way: two `u8` components three apart are three apart \
+         in either order.",
+    ),
+    (
+        "lerp",
+        "Linear interpolation towards `other`: `self + (other - self) * t`, component by \
+         component.\n\n`t` is not clamped, so a value outside `0.0..1.0` extrapolates past the \
+         endpoints. An integer shape interpolates in the promoted domain and rounds back — half \
+         away from zero, saturating at the element's bounds rather than wrapping.",
+    ),
+    (
+        "clamp",
+        "Every component held inside the box `lo..hi`, computed as `max(lo).min(hi)` per \
+         component.\n\nIt is total: `lo` above `hi` yields `hi` rather than an error.",
+    ),
+    (
+        "reflect",
+        "The mirror reflection of this vector about the plane with the given normal, `self - 2 * \
+         self.dot(normal) * normal`. The normal is taken to be unit-length; normalize it \
+         first.\n\n**Float shapes only** — an integer vector carries no unit normal, the same \
+         reason `normalize` refuses one.",
     ),
     (
         "add_all",
@@ -184,7 +218,13 @@ const KERNELS_DOCS: &[(&str, &str)] = &[
     ),
 ];
 
-/// `Kernels`' full method set: the shared element methods + `normalize` + the bulk `*_all` forms.
+/// `Kernels`' full method set: the lane-wise element methods, the geometry ops (`normalize` and the
+/// component-combining `cross`/`distance`/`lerp`/`clamp`/`reflect`), and the bulk `*_all` forms.
+///
+/// The geometry ops have no `*_all` twin, and that is the line rather than an omission: a bulk form
+/// exists to stream one lane op over a whole packed buffer, which is what makes it worth a separate
+/// method. `normalize` and its neighbours already read a whole value at once, so `xs.map(v => …)`
+/// over them costs what a `*_all` would.
 const KERNELS_METHODS: &[ExtTraitMethod] = &[
     tfn(
         "add",
@@ -247,6 +287,42 @@ const KERNELS_METHODS: &[ExtTraitMethod] = &[
         "normalize",
         &[],
         &[],
+        RetTy::SameAsArg(0),
+        BundleReceiver::Element,
+    ),
+    // The geometry ops: they combine a value's components rather than walking them lane by lane.
+    tfn(
+        "cross",
+        &[SELF_TY],
+        &["other"],
+        RetTy::SameAsArg(0),
+        BundleReceiver::Element,
+    ),
+    tfn(
+        "distance",
+        &[SELF_TY],
+        &["other"],
+        RetTy::Concrete(FLOAT),
+        BundleReceiver::Element,
+    ),
+    tfn(
+        "lerp",
+        &[SELF_TY, FACTOR],
+        &["other", "t"],
+        RetTy::SameAsArg(0),
+        BundleReceiver::Element,
+    ),
+    tfn(
+        "clamp",
+        &[SELF_TY, SELF_TY],
+        &["lo", "hi"],
+        RetTy::SameAsArg(0),
+        BundleReceiver::Element,
+    ),
+    tfn(
+        "reflect",
+        &[SELF_TY],
+        &["normal"],
         RetTy::SameAsArg(0),
         BundleReceiver::Element,
     ),
@@ -512,6 +588,103 @@ fn sat_scale_buf<S: Elem>(a: &[u8], factor: f64) -> Vec<u8> {
         S::saturating_from_f64(S::read_le(c).to_f64() * factor).write_le(&mut out);
     }
     out
+}
+
+// --- The geometry kernels: the operations that combine a value's components rather than walking them
+// lane by lane. Each is one generic body over the element type, like the lane ops above.
+//
+// Two of them (`cross`, `clamp`) are exact at the element width and compute there; two (`distance`,
+// `lerp`) would wrap or truncate at a narrow width and compute in the promoted [`Elem::Float`] domain
+// instead — a `u8` component's difference is signed, and an interpolation between two `i32`s passes
+// through a fraction. Promotion is per element type, so a float vector never takes an `f64` detour:
+// `Float == Self` there, and the result is the one the vector's own precision gives.
+
+/// Cross product `a × b` of two **3-component** vectors, at the element width (wrapping for
+/// integers, IEEE for floats). The caller checks the arity — this indexes three components.
+fn cross_buf<S: Elem>(a: &[u8], b: &[u8]) -> Vec<u8> {
+    let at = |buf: &[u8], k: usize| S::read_le(&buf[k * S::BYTES..]);
+    let (a0, a1, a2) = (at(a, 0), at(a, 1), at(a, 2));
+    let (b0, b1, b2) = (at(b, 0), at(b, 1), at(b, 2));
+    let mut out = Vec::with_capacity(3 * S::BYTES);
+    a1.mul(b2).sub(a2.mul(b1)).write_le(&mut out);
+    a2.mul(b0).sub(a0.mul(b2)).write_le(&mut out);
+    a0.mul(b1).sub(a1.mul(b0)).write_le(&mut out);
+    out
+}
+
+/// Component-wise clamp into `[lo, hi]`, computed as `max(lo).min(hi)` per component so it is total
+/// even when `lo > hi` (no panic, and both backends fold identically).
+fn clamp_buf<S: Elem>(v: &[u8], lo: &[u8], hi: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(v.len());
+    for ((p, l), h) in v
+        .chunks_exact(S::BYTES)
+        .zip(lo.chunks_exact(S::BYTES))
+        .zip(hi.chunks_exact(S::BYTES))
+    {
+        S::read_le(p)
+            .max(S::read_le(l))
+            .min(S::read_le(h))
+            .write_le(&mut out);
+    }
+    out
+}
+
+/// Reflect `v` about the plane with normal `n`: `v − 2·(v·n)·n`, the standard mirror reflection with
+/// `n` taken as unit-length. Float elements only (the dispatch rejects an integer one), so the
+/// element width is already the natural domain and the inner dot matches [`dot_buf`]'s fold order.
+fn reflect_buf<S: Elem>(v: &[u8], n: &[u8]) -> Vec<u8> {
+    let mut d = S::ZERO;
+    for (p, q) in v.chunks_exact(S::BYTES).zip(n.chunks_exact(S::BYTES)) {
+        d = d.add(S::read_le(p).mul(S::read_le(q)));
+    }
+    let scale = S::ONE.add(S::ONE).mul(d);
+    let mut out = Vec::with_capacity(v.len());
+    for (p, q) in v.chunks_exact(S::BYTES).zip(n.chunks_exact(S::BYTES)) {
+        S::read_le(p)
+            .sub(S::read_le(q).mul(scale))
+            .write_le(&mut out);
+    }
+    out
+}
+
+/// Linear interpolation `a + (b − a)·t`, component-wise, in the promoted domain and rounded back to
+/// the element width. `t` is not clamped, so `t` outside `[0, 1]` extrapolates; an integer element
+/// saturates on the way back rather than wrapping.
+fn lerp_buf<S: Elem>(a: &[u8], b: &[u8], t: f64) -> Vec<u8> {
+    let tf = S::float_from_f64(t);
+    let mut out = Vec::with_capacity(a.len());
+    for (p, q) in a.chunks_exact(S::BYTES).zip(b.chunks_exact(S::BYTES)) {
+        let (x, y) = (S::read_le(p).to_float(), S::read_le(q).to_float());
+        let step = S::float_mul(S::float_sub(y, x), tf);
+        S::from_float(S::float_add(x, step)).write_le(&mut out);
+    }
+    out
+}
+
+/// `distance` per element → `‖a − b‖` at [`Elem::Float`]. Layout-aware, like the other reductions.
+/// The difference is taken **after** promotion, so an unsigned or narrow element cannot wrap on the
+/// way (which is the whole reason this is not `length(a − b)`).
+fn distance_buf<S: Elem>(
+    a: &[u8],
+    b: &[u8],
+    fields: usize,
+    count: usize,
+    column: bool,
+) -> Vec<S::Float> {
+    (0..count)
+        .map(|i| {
+            let mut acc = S::ZERO.to_float();
+            for k in 0..fields {
+                let o = field_at::<S>(i, k, fields, count, column);
+                let d = S::float_sub(
+                    S::read_le(&a[o..]).to_float(),
+                    S::read_le(&b[o..]).to_float(),
+                );
+                acc = S::float_add(acc, S::float_mul(d, d));
+            }
+            S::sqrt(acc)
+        })
+        .collect()
 }
 
 /// The byte offset of element `i`'s field `k` within a buffer of `count` elements — row-major (each
@@ -926,6 +1099,39 @@ fn read_factor(ctx: &mut dyn NativeCtx, slot: Slot) -> CtxResult<Scalar> {
     }
 }
 
+/// A `Self`-typed operand (a second vector) encoded at the **receiver's** element kind, after
+/// checking it carries the same number of components. The checker types these parameters as `Self`,
+/// so a mismatch is normally a compile-time diagnostic; this keeps the runtime honest for a call
+/// that reached the kernel some other way (a `dyn`-shaped operand, an embedder's own dispatch).
+fn same_shape_operand(
+    ctx: &mut dyn NativeCtx,
+    method: &str,
+    kind: &PackedField,
+    fields: usize,
+    slot: Slot,
+) -> CtxResult<Vec<u8>> {
+    let (_, b) = elem_kind_and_scalars(ctx, slot)?;
+    if b.len() != fields {
+        return Err(arg_error(format!(
+            "`vec.Kernels.{method}` expects a vector of {fields} components, found {}",
+            b.len()
+        )));
+    }
+    encode(kind, &b)
+}
+
+/// Guard that the bound element is a float — the domain of the operations built on a unit-length
+/// direction (`normalize` produces one, `reflect` mirrors about one). An integer vector carries no
+/// such direction, so both refuse it here rather than each spelling the rule out again.
+fn ensure_float(method: &str, kind: &PackedField) -> CtxResult<()> {
+    match kind {
+        PackedField::F32 | PackedField::Float | PackedField::F64 => Ok(()),
+        _ => Err(arg_error(format!(
+            "`vec.Kernels.{method}` needs a float vector (an integer vector has no unit direction)"
+        ))),
+    }
+}
+
 // ---------------------------------------------------------------------------------------------------
 // `vec.Kernels` dispatch (default arithmetic).
 // ---------------------------------------------------------------------------------------------------
@@ -937,7 +1143,8 @@ fn kernels_dispatch(
     args: &[Slot],
 ) -> Result<CtxOut, CtxError> {
     match method {
-        "add" | "sub" | "min" | "max" | "scale" | "abs" | "dot" | "length" | "normalize" => {
+        "add" | "sub" | "min" | "max" | "scale" | "abs" | "dot" | "length" | "normalize"
+        | "cross" | "distance" | "lerp" | "clamp" | "reflect" => {
             kernels_element(method, ctx, recv, args)
         }
         _ => kernels_bulk(method, ctx, recv, args),
@@ -976,6 +1183,47 @@ fn kernels_element(
             ctx_arity(method, args, 0)?;
             let out = normalize(&kind, &a)?;
             Ok(CtxOut::Out(NativeOut::Object(out)))
+        }
+        "distance" => {
+            ctx_arity(method, args, 1)?;
+            let bb = same_shape_operand(ctx, method, &kind, n, args[0])?;
+            let sv = distance_scalarvec(&kind, &ab, &bb, n, 1, false)?;
+            Ok(CtxOut::Out(NativeOut::Scalar(scalarvec_first(&sv))))
+        }
+        "cross" => {
+            ctx_arity(method, args, 1)?;
+            // The one arity-specific op: a cross product exists in three dimensions and nowhere the
+            // bundle also binds, so a 2- or 4-component vector is refused by name rather than
+            // silently reading past its components.
+            if n != 3 {
+                return Err(arg_error(format!(
+                    "`vec.Kernels.cross` needs a 3-component vector, found {n} components"
+                )));
+            }
+            let bb = same_shape_operand(ctx, method, &kind, n, args[0])?;
+            let bytes = by_numeric_kind!(&kind, S, cross_buf::<S>(&ab, &bb));
+            Ok(CtxOut::Out(NativeOut::Object(read_fields(&kind, &bytes))))
+        }
+        "reflect" => {
+            ctx_arity(method, args, 1)?;
+            ensure_float(method, &kind)?;
+            let bb = same_shape_operand(ctx, method, &kind, n, args[0])?;
+            let bytes = by_numeric_kind!(&kind, S, reflect_buf::<S>(&ab, &bb));
+            Ok(CtxOut::Out(NativeOut::Object(read_fields(&kind, &bytes))))
+        }
+        "lerp" => {
+            ctx_arity(method, args, 2)?;
+            let bb = same_shape_operand(ctx, method, &kind, n, args[0])?;
+            let t = factor_f64(&read_factor(ctx, args[1])?);
+            let bytes = by_numeric_kind!(&kind, S, lerp_buf::<S>(&ab, &bb, t));
+            Ok(CtxOut::Out(NativeOut::Object(read_fields(&kind, &bytes))))
+        }
+        "clamp" => {
+            ctx_arity(method, args, 2)?;
+            let lo = same_shape_operand(ctx, method, &kind, n, args[0])?;
+            let hi = same_shape_operand(ctx, method, &kind, n, args[1])?;
+            let bytes = by_numeric_kind!(&kind, S, clamp_buf::<S>(&ab, &lo, &hi));
+            Ok(CtxOut::Out(NativeOut::Object(read_fields(&kind, &bytes))))
         }
         "abs" => {
             ctx_arity(method, args, 0)?;
@@ -1367,6 +1615,67 @@ fn length_scalarvec(
     })
 }
 
+/// Compute `distance` and box into a [`ScalarVec`], on [`length_scalarvec`]'s per-kind mapping (both
+/// answer at `Self::Float`, so they box identically — integers/`f64` → `Float`, `f32` → `F32`).
+fn distance_scalarvec(
+    kind: &PackedField,
+    a: &[u8],
+    b: &[u8],
+    fields: usize,
+    count: usize,
+    column: bool,
+) -> CtxResult<ScalarVec> {
+    use crate::PackedField as PF;
+    macro_rules! floats {
+        ($S:ty) => {
+            ScalarVec::Float(
+                distance_buf::<$S>(a, b, fields, count, column)
+                    .into_iter()
+                    .map(|f| f as f64)
+                    .collect(),
+            )
+        };
+    }
+    Ok(match kind {
+        PF::IntN {
+            bits: 8,
+            signed: true,
+        } => floats!(i8),
+        PF::IntN {
+            bits: 8,
+            signed: false,
+        } => floats!(u8),
+        PF::IntN {
+            bits: 16,
+            signed: true,
+        } => floats!(i16),
+        PF::IntN {
+            bits: 16,
+            signed: false,
+        } => floats!(u16),
+        PF::IntN {
+            bits: 32,
+            signed: true,
+        } => floats!(i32),
+        PF::IntN {
+            bits: 32,
+            signed: false,
+        } => floats!(u32),
+        PF::IntN {
+            bits: 64,
+            signed: true,
+        } => floats!(i64),
+        PF::IntN {
+            bits: 64,
+            signed: false,
+        } => floats!(u64),
+        PF::Int => floats!(i64),
+        PF::F32 => ScalarVec::F32(distance_buf::<f32>(a, b, fields, count, column)),
+        PF::Float | PF::F64 => ScalarVec::Float(distance_buf::<f64>(a, b, fields, count, column)),
+        _ => return Err(non_numeric(kind_name(kind))),
+    })
+}
+
 // ---------------------------------------------------------------------------------------------------
 // Small per-arm helpers (concrete-type conversions used inside the dispatch macros).
 // ---------------------------------------------------------------------------------------------------
@@ -1423,23 +1732,16 @@ fn encode(kind: &PackedField, scalars: &[Scalar]) -> CtxResult<Vec<u8>> {
 /// `normalize` (float vectors only): the unit vector, or the zero vector for a zero-length input (a
 /// deterministic, total convention). Rejects an integer element — a unit vector has no integer form.
 fn normalize(kind: &PackedField, scalars: &[Scalar]) -> CtxResult<Vec<Scalar>> {
-    let floats: Vec<f64> = match kind {
-        PackedField::F32 | PackedField::Float | PackedField::F64 => scalars
-            .iter()
-            .map(|s| match s {
-                Scalar::F32(f) => *f as f64,
-                Scalar::Float(f) => *f,
-                Scalar::Int(n) => *n as f64,
-                Scalar::Bool(_) => 0.0,
-            })
-            .collect(),
-        _ => {
-            return Err(arg_error(
-                "`vec.Kernels.normalize` needs a float vector (an integer vector has no unit vector)"
-                    .to_string(),
-            ));
-        }
-    };
+    ensure_float("normalize", kind)?;
+    let floats: Vec<f64> = scalars
+        .iter()
+        .map(|s| match s {
+            Scalar::F32(f) => *f as f64,
+            Scalar::Float(f) => *f,
+            Scalar::Int(n) => *n as f64,
+            Scalar::Bool(_) => 0.0,
+        })
+        .collect();
     let len = floats.iter().map(|x| x * x).sum::<f64>().sqrt();
     let unit: Vec<f64> = if len == 0.0 {
         floats.iter().map(|_| 0.0).collect()

@@ -1,0 +1,11 @@
+// `reflect` mirrors about a **unit** normal, which an integer vector cannot carry — the same reason
+// `normalize` refuses one. The refusal names the requirement rather than answering with a rounded
+// direction, so a program cannot mistake a truncated reflection for the real one.
+// expect: error E0007 at 11:6
+// expect: exit 1
+use std.{vec}
+
+@packed struct IVec3 { x: i32; y: i32; z: i32 }
+impl vec.Kernels for IVec3 {}
+
+echo IVec3 { x: 1i32, y: 2i32, z: 3i32 }.reflect(IVec3 { x: 0i32, y: 1i32, z: 0i32 })
