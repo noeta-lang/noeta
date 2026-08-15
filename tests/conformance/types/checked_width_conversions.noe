@@ -1,0 +1,115 @@
+// Range-checked numeric conversions: `checked_to_u8`/`checked_to_i32`/…/`checked_to_int`, the
+// fallible twin of the total `to_*` casts. Each answers `?dest` (`checked_to_u8(): ?u8`) — `some(v)`
+// with exactly the value
+// the total cast would have produced, or `none` at precisely the inputs where the total cast would
+// have had to wrap (an integer receiver) or saturate (a float receiver). The cases below walk both
+// boundaries of every width, both signedness crossings, and the `u64` receiver whose erased i64 word
+// is negative — the one source the check cannot read without knowing the receiver's signedness.
+// expect: stdout "some(200)"
+// expect: stdout "none"
+// expect: stdout "44"
+// expect: stdout "some(0)"
+// expect: stdout "some(255)"
+// expect: stdout "none"
+// expect: stdout "none"
+// expect: stdout "some(-128)"
+// expect: stdout "some(127)"
+// expect: stdout "none"
+// expect: stdout "none"
+// expect: stdout "some(-32768)"
+// expect: stdout "some(32767)"
+// expect: stdout "none"
+// expect: stdout "none"
+// expect: stdout "some(2147483647)"
+// expect: stdout "none"
+// expect: stdout "some(4294967295)"
+// expect: stdout "none"
+// expect: stdout "none"
+// expect: stdout "none"
+// expect: stdout "some(200)"
+// expect: stdout "none"
+// expect: stdout "some(9223372036854775807)"
+// expect: stdout "none"
+// expect: stdout "none"
+// expect: stdout "none"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "none"
+// expect: stdout "some(200)"
+// expect: stdout "some(3)"
+// expect: stdout "some(-3)"
+// expect: stdout "none"
+// expect: stdout "none"
+// expect: stdout "none"
+// expect: stdout "some(255)"
+// expect: stdout "255"
+// expect: stdout "0"
+// expect: exit 0
+
+// The headline: a value that fits answers `some`, one that does not answers `none` — where the
+// total cast silently wraps it into range.
+echo 200u16.checked_to_u8()        // some(200)
+echo 300u16.checked_to_u8()        // none
+echo 300u16.to_u8()                // 44 — the total cast wraps instead
+
+// Both ends of `u8`, from a wider signed source.
+echo 0i16.checked_to_u8()          // some(0)
+echo 255i16.checked_to_u8()        // some(255)
+echo 256i16.checked_to_u8()        // none
+echo (-1i16).checked_to_u8()       // none
+
+// Both ends of `i8`.
+echo (-128i16).checked_to_i8()     // some(-128)
+echo 127i16.checked_to_i8()        // some(127)
+echo (-129i16).checked_to_i8()     // none
+echo 128i16.checked_to_i8()        // none
+
+// Both ends of `i16`, from `int`.
+echo (-32768).checked_to_i16()     // some(-32768)
+echo 32767.checked_to_i16()        // some(32767)
+echo (-32769).checked_to_i16()     // none
+echo 32768.checked_to_i16()        // none
+
+// Both ends of the 32-bit widths, from `int`.
+echo 2147483647.checked_to_i32()   // some(2147483647)
+echo 2147483648.checked_to_i32()   // none
+echo 4294967295.checked_to_u32()   // some(4294967295)
+echo 4294967296.checked_to_u32()   // none
+
+// Crossing signedness is a range question too: each of these reinterprets under the total cast.
+echo 200u8.checked_to_i8()         // none  (`to_i8()` would give -56)
+echo (-56i8).checked_to_u8()       // none  (`to_u8()` would give 200)
+
+// Widening always fits.
+echo 200u8.checked_to_u32()        // some(200)
+
+// The `u64` crux. A `u64` past bit 63 is erased to a NEGATIVE i64 word, so reading that word as
+// signed would report that it fits an `int` (`to_int()` answers -1). The check reads it by the
+// receiver's signedness instead, and answers `none` in both directions.
+echo 18446744073709551615u64.checked_to_int()   // none
+echo 9223372036854775807u64.checked_to_int()    // some(9223372036854775807)
+echo 9223372036854775808u64.checked_to_int()    // none  (one past `int`'s maximum)
+echo 18446744073709551615u64.checked_to_i32()   // none
+echo 18446744073709551615u64.checked_to_u32()   // none
+
+// The same word DOES fit `u64` itself, and the check says so — compared against the value rather
+// than displayed, because the whole point is that this word is not the `int` it looks like.
+echo 18446744073709551615u64.checked_to_u64() == some(18446744073709551615u64)   // true
+echo 9223372036854775808u64.checked_to_u64() == some(9223372036854775808u64)     // true
+
+// The mirror: a negative `int` is not a `u64`.
+echo (-1).checked_to_u64()         // none
+
+// A float receiver checks the same range, over the value it truncates toward zero.
+echo (200.5).checked_to_u8()       // some(200)
+echo (3.9).checked_to_int()        // some(3)
+echo (-3.9).checked_to_int()       // some(-3)
+echo (1000.0).checked_to_u8()      // none  (`to_u8()` would saturate to 255)
+echo (-1.0).checked_to_u8()        // none
+echo (0.0 / 0.0).checked_to_int()  // none  (NaN is in no destination's range)
+
+// The result is a real `?T`, usable everywhere an option is.
+mut fits: ?u8 = 255u16.checked_to_u8()
+echo fits                          // some(255)
+echo fits ?? 0u8                   // 255
+echo 300u16.checked_to_u8() ?? 0u8 // 0

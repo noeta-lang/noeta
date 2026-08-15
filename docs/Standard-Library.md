@@ -190,7 +190,7 @@ Generators (`yield`) produce iterators too — see [Concurrency](Concurrency#gen
 
 ## Integer bit-methods
 
-Every integer (and fixed-width integer) carries bit-manipulation methods and total conversions — `count_ones()`, `rotate_left(n)`, `to_u8()`, and more. The `to_*` conversions also bridge to the float domain (`to_float`/`to_f32`) and back (`float.to_int()`). See [Fixed-Width Ints & Packed Types](Fixed-Width-Integers#bit-intrinsics-and-conversions).
+Every integer (and fixed-width integer) carries bit-manipulation methods and total conversions — `count_ones()`, `rotate_left(n)`, `to_u8()`, and more. The `to_*` conversions also bridge to the float domain (`to_float`/`to_f32`) and back (`float.to_int()`), and each integer destination has a range-checked twin (`checked_to_u8(): ?u8`, `none` when the value does not fit). See [Fixed-Width Ints & Packed Types](Fixed-Width-Integers#bit-intrinsics-and-conversions).
 
 ## Diagnostic codes you'll see
 

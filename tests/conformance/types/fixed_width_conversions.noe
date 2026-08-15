@@ -2,7 +2,8 @@
 // widths — `to_u8`/`to_i32`/…/`to_int`. Because every fixed-width value is an erased i64 already
 // extended for its source type, each conversion is a single re-mask into the destination width, i.e.
 // exactly a Rust `as` cast: widening is safe, narrowing wraps (truncates), and crossing signedness
-// reinterprets the bit pattern. Total (never fails) — a range-checked form arrives later. Both
+// reinterprets the bit pattern. Total: these never fail, and the `checked_to_*` family in
+// `checked_width_conversions.noe` is the twin that reports the values they have to wrap. Both
 // backends dispatch the conversion through the shared `int_method`, so the differential pins them.
 // expect: stdout "200"
 // expect: stdout "44"

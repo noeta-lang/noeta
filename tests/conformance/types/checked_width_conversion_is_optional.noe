@@ -1,0 +1,8 @@
+// A range-checked conversion answers `?u8`, never a bare `u8` — handling the "does not fit" answer
+// is the entire difference from the total `to_u8()`. Assigning one straight to the destination width
+// is a type error, and there is no checked spelling for a float destination (rounding is not a range
+// question), so `checked_to_f32` is not a method at all.
+// expect: error E0007 at 7:18
+// expect: error E0007 at 8:6
+mut narrow: u8 = 200u16.checked_to_u8()
+echo (1).checked_to_f32()

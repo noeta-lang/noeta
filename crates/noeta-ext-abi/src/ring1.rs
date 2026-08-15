@@ -529,6 +529,26 @@ pub enum IntMethod {
     /// truncation, cross-signedness = bit reinterpretation). `to_int` and `to_i64` both carry
     /// `(true, 64)` (identical at runtime; the checker keeps their static types distinct).
     Convert { signed: bool, bits: u8 },
+    /// A **range-checked** numeric conversion: `checked_to_u8`/`checked_to_i32`/…/`checked_to_int`,
+    /// the fallible twin of [`IntMethod::Convert`]. `signed`/`bits` are the destination; the result
+    /// is `Some(word)` when the receiver's value is representable there and `None` exactly where the
+    /// total conversion would have had to wrap — computed by the shared [`checked_convert`], so the
+    /// backends agree by construction.
+    ///
+    /// `src_signed` is the **receiver's** signedness, and it is load-bearing: a fixed-width value is
+    /// erased to an i64 word, so a `u64` receiver whose value exceeds `i64::MAX` carries a *negative*
+    /// word. Reading that word as signed would answer `checked_to_int()` with `some(-1)` where the
+    /// true answer is `none`, and `checked_to_i32()` with `some(-1)` where it is also `none`. Every
+    /// source narrower than 64 bits is already sign/zero-extended into its exact mathematical value,
+    /// so only a `u64` receiver diverges — but it diverges in both directions, which is why the bit
+    /// travels instead of being re-derived at the use site. [`IntMethod::from_name`] decodes the
+    /// `int`-receiver default (`true`); lowering rewrites it from the checker's recorded receiver
+    /// width when the receiver is a fixed-width type.
+    CheckedConvert {
+        src_signed: bool,
+        signed: bool,
+        bits: u8,
+    },
 }
 
 impl IntMethod {
@@ -546,41 +566,129 @@ impl IntMethod {
         })
     }
 
-    /// Decode a `to_<type>` conversion method name into its destination `(signed, bits)`. `to_int`
-    /// is the i64-signed identity; otherwise the suffix is an `i8`/`u32`/… spelling. Kept here (not
-    /// in `noeta-types`) so `noeta-stdlib` stays dependency-free; the checker decodes names to *types*
-    /// separately (it must tell `to_int` from `to_i64`, which share a runtime `Convert`).
+    /// Decode a `to_<type>` conversion method name into its destination `(signed, bits)`, or the
+    /// `checked_to_<type>` spelling into the fallible [`IntMethod::CheckedConvert`] twin. Kept here
+    /// (not in `noeta-types`) so `noeta-stdlib` stays dependency-free; the checker decodes names to
+    /// *types* separately (it must tell `to_int` from `to_i64`, which share a runtime `Convert`).
     fn conversion_from_name(name: &str) -> Option<IntMethod> {
-        let rest = name.strip_prefix("to_")?;
-        if rest == "int" {
-            return Some(IntMethod::Convert {
-                signed: true,
-                bits: 64,
+        if let Some(rest) = name.strip_prefix("checked_to_") {
+            let (signed, bits) = int_destination_from_suffix(rest)?;
+            // The `int`-receiver default: an `int` IS a signed 64-bit word, and lowering overrides
+            // this from the checker's recorded width for a fixed-width receiver.
+            return Some(IntMethod::CheckedConvert {
+                src_signed: true,
+                signed,
+                bits,
             });
         }
-        let signed = match rest.as_bytes().first()? {
-            b'i' => true,
-            b'u' => false,
-            _ => return None,
-        };
-        let bits = match &rest[1..] {
-            "8" => 8,
-            "16" => 16,
-            "32" => 32,
-            "64" => 64,
-            _ => return None,
-        };
+        let (signed, bits) = int_destination_from_suffix(name.strip_prefix("to_")?)?;
         Some(IntMethod::Convert { signed, bits })
     }
 
     /// The number of arguments the method takes: `rotate_left`/`rotate_right` take one shift amount;
-    /// the rest (including the `Convert` conversions) take none.
+    /// the rest (including both conversion families) take none.
     pub fn arity(self) -> usize {
         match self {
             IntMethod::RotateLeft | IntMethod::RotateRight => 1,
             _ => 0,
         }
     }
+}
+
+/// Decode the destination `(signed, bits)` a conversion method name spells after its prefix: `int`
+/// is the platform-signed 64-bit word, otherwise an `i8`/`u32`/… spelling. Shared by the total
+/// `to_<type>` and the range-checked `checked_to_<type>` families so a width the one accepts is
+/// exactly a width the other does.
+fn int_destination_from_suffix(rest: &str) -> Option<(bool, u8)> {
+    if rest == "int" {
+        return Some((true, 64));
+    }
+    let signed = match rest.as_bytes().first()? {
+        b'i' => true,
+        b'u' => false,
+        _ => return None,
+    };
+    let bits = match &rest[1..] {
+        "8" => 8,
+        "16" => 16,
+        "32" => 32,
+        "64" => 64,
+        _ => return None,
+    };
+    Some((signed, bits))
+}
+
+/// The inclusive value range a `(signed, bits)` integer type can hold, in `i128` so both `i64::MIN`
+/// and `u64::MAX` are expressible at once. The single source of truth for "does this value fit",
+/// shared by the range-checked conversions.
+pub fn int_width_range(signed: bool, bits: u8) -> (i128, i128) {
+    if signed {
+        (-(1i128 << (bits - 1)), (1i128 << (bits - 1)) - 1)
+    } else {
+        (0, (1i128 << bits) - 1)
+    }
+}
+
+/// The range-checked twin of [`num_convert`]: `Some(word)` when `src` is representable in the
+/// `(dest_signed, dest_bits)` integer destination — and the word is exactly what the total
+/// conversion would have produced — or `None` where the total conversion would have had to wrap (an
+/// integer source) or saturate (a float source). That equivalence is the whole contract:
+/// `x.checked_to_T()` is `some(x.to_T())` or `none`, never a third answer.
+///
+/// `src_signed` says how an integer source's erased i64 word is READ (see
+/// [`IntMethod::CheckedConvert`]); it is irrelevant to a float source, whose value is not erased.
+/// A float truncates toward zero first, exactly as `to_int` does — the check is over the *range*, so
+/// `(3.9).checked_to_int()` is `some(3)` — and `NaN`/`±inf` are outside every destination.
+pub fn checked_convert(
+    src: NumScalar,
+    src_signed: bool,
+    dest_signed: bool,
+    dest_bits: u8,
+) -> Option<i64> {
+    match src {
+        NumScalar::Int(i) => checked_int_convert(i, src_signed, dest_signed, dest_bits),
+        NumScalar::F64(f) => checked_float_to_int(f, dest_signed, dest_bits),
+        NumScalar::F32(f) => checked_float_to_int(f as f64, dest_signed, dest_bits),
+    }
+}
+
+/// The integer→integer half of [`checked_convert`]. The erased word is widened to its exact
+/// mathematical value (as signed or as unsigned, per `src_signed`), range-tested against the
+/// destination, and truncated back to the erased word the destination stores — which for an in-range
+/// value is exactly [`mask_to_width`]'s result, so a `some` agrees with the total cast by
+/// construction.
+fn checked_int_convert(
+    recv: i64,
+    src_signed: bool,
+    dest_signed: bool,
+    dest_bits: u8,
+) -> Option<i64> {
+    let value: i128 = if src_signed {
+        recv as i128
+    } else {
+        recv as u64 as i128
+    };
+    let (lo, hi) = int_width_range(dest_signed, dest_bits);
+    (lo <= value && value <= hi).then_some(value as i64)
+}
+
+/// The float→integer half of [`checked_convert`]. The bounds are built as exact powers of two, so
+/// the comparison is exact at every width: `2^64` is representable in an `f64` while `u64::MAX` is
+/// not, and testing `t < 2^64` rather than `t <= u64::MAX as f64` is what stops `18446744073709551616.0`
+/// from reporting that it fits. Delegates the accepted case to the same saturating cast the total
+/// conversion uses, which cannot saturate once the range has been checked.
+fn checked_float_to_int(f: f64, dest_signed: bool, dest_bits: u8) -> Option<i64> {
+    if !f.is_finite() {
+        return None;
+    }
+    let truncated = f.trunc();
+    let (lo, hi_exclusive) = if dest_signed {
+        let half = (1u128 << (dest_bits - 1)) as f64;
+        (-half, half)
+    } else {
+        (0.0, (1u128 << dest_bits) as f64)
+    };
+    (truncated >= lo && truncated < hi_exclusive).then(|| float_to_int(f, dest_signed, dest_bits))
 }
 
 /// Apply an [`IntMethod`] to receiver `recv`, with `arg` the shift amount for `rotate_left`/
@@ -600,6 +708,48 @@ pub fn int_method(recv: i64, method: IntMethod, arg: i64) -> i64 {
         // Total conversion (Tier W4): the erased i64 is already correctly extended for its source
         // type, so re-masking into the destination width yields the `as`-cast result in one step.
         IntMethod::Convert { signed, bits } => mask_to_width(recv, signed, bits),
+        IntMethod::CheckedConvert { .. } => {
+            unreachable!(
+                "a checked conversion answers an option — dispatch it via `int_method_outcome`"
+            )
+        }
+    }
+}
+
+/// What applying an [`IntMethod`] produced: a plain integer word for the bit intrinsics and the
+/// total conversions, or the **option** a range-checked conversion answers. Returned (rather than a
+/// bare `i64`) so a backend's dispatch has to `match` both shapes — the enum is what stops one
+/// backend forgetting to build the option and silently answering with the wrapped word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntOutcome {
+    /// The method's `int` result — stored straight into the destination register/slot.
+    Word(i64),
+    /// A range-checked conversion's answer: `Some(word)` when the value fit, `None` when it did not.
+    /// Each backend wraps this in its own `Option` enum value.
+    Checked(Option<i64>),
+}
+
+/// **The** entry point a backend's `int`-method dispatch calls. Routes a range-checked conversion to
+/// [`checked_convert`] and everything else to [`int_method`] (or, when the receiver's static width is
+/// known, [`int_method_width`]). `width` is `Some(bits)` only where the checker marked the receiver
+/// as a fixed-width type — the width-relative intrinsics need it and the checked conversions carry
+/// their own source signedness, so it is `None` on the plain-`int` path.
+pub fn int_method_outcome(recv: i64, method: IntMethod, arg: i64, width: Option<u8>) -> IntOutcome {
+    match method {
+        IntMethod::CheckedConvert {
+            src_signed,
+            signed,
+            bits,
+        } => IntOutcome::Checked(checked_convert(
+            NumScalar::Int(recv),
+            src_signed,
+            signed,
+            bits,
+        )),
+        other => IntOutcome::Word(match width {
+            Some(bits) => int_method_width(recv, other, arg, bits),
+            None => int_method(recv, other, arg),
+        }),
     }
 }
 
@@ -607,8 +757,8 @@ pub fn int_method(recv: i64, method: IntMethod, arg: i64) -> i64 {
 /// the ops act on the low `bits` bits, not the full i64, so `(1u8).leading_zeros() == 7`,
 /// `(0u8).count_zeros() == 8`, and rotate/reverse/swap wrap within the width. Signedness is
 /// irrelevant (these read the value as its `bits`-bit pattern). For `bits >= 64` this is exactly
-/// [`int_method`]. Never called with `Convert` (a conversion is width-typed at the call site, not a
-/// width-relative intrinsic).
+/// [`int_method`]. Never called with either conversion family (a conversion is width-typed at the
+/// call site, not a width-relative intrinsic) — [`int_method_outcome`] routes those away first.
 pub fn int_method_width(recv: i64, method: IntMethod, arg: i64, bits: u8) -> i64 {
     if bits >= 64 {
         return int_method(recv, method, arg);
@@ -650,8 +800,10 @@ pub fn int_method_width(recv: i64, method: IntMethod, arg: i64, bits: u8) -> i64
         // Reverse / swap operate on the full 64 bits, so shift the reversed low-`bits` field back down.
         IntMethod::ReverseBits => (v.reverse_bits() >> (64 - width)) as i64,
         IntMethod::SwapBytes => (v.swap_bytes() >> (64 - width)) as i64,
-        IntMethod::Convert { .. } => {
-            unreachable!("Convert is a width-typed conversion, not a width-relative intrinsic")
+        IntMethod::Convert { .. } | IntMethod::CheckedConvert { .. } => {
+            unreachable!(
+                "a conversion is width-typed at the call site, not a width-relative intrinsic"
+            )
         }
     }
 }
@@ -1336,6 +1488,111 @@ mod tests {
             ),
             Int(44)
         );
+    }
+
+    #[test]
+    fn checked_convert_decodes_names() {
+        assert_eq!(
+            IntMethod::from_name("checked_to_u8"),
+            Some(IntMethod::CheckedConvert {
+                src_signed: true,
+                signed: false,
+                bits: 8
+            })
+        );
+        assert_eq!(
+            IntMethod::from_name("checked_to_int"),
+            Some(IntMethod::CheckedConvert {
+                src_signed: true,
+                signed: true,
+                bits: 64
+            })
+        );
+        // Only integer destinations have a checked spelling, and the name is not a total conversion.
+        assert_eq!(IntMethod::from_name("checked_to_f32"), None);
+        assert_eq!(IntMethod::from_name("checked_to_bool"), None);
+        assert_eq!(NumConvert::from_name("checked_to_u8"), None);
+    }
+
+    #[test]
+    fn checked_convert_reports_the_wrapping_inputs() {
+        use NumScalar::*;
+        // A `some` carries exactly what the total cast produced; a `none` marks exactly where the
+        // total cast had to wrap. Both ends of a width, and both signedness crossings.
+        assert_eq!(checked_convert(Int(200), true, false, 8), Some(200));
+        assert_eq!(checked_convert(Int(255), true, false, 8), Some(255));
+        assert_eq!(checked_convert(Int(256), true, false, 8), None);
+        assert_eq!(checked_convert(Int(-1), true, false, 8), None);
+        assert_eq!(checked_convert(Int(127), true, true, 8), Some(127));
+        assert_eq!(checked_convert(Int(128), true, true, 8), None);
+        assert_eq!(checked_convert(Int(-128), true, true, 8), Some(-128));
+        assert_eq!(checked_convert(Int(-129), true, true, 8), None);
+        // The `u64` receiver: the same erased word answers differently read as signed or unsigned.
+        // -1 IS `u64::MAX`, which fits `u64` and nothing narrower — while a signed -1 fits both.
+        assert_eq!(checked_convert(Int(-1), false, false, 64), Some(-1));
+        assert_eq!(checked_convert(Int(-1), false, true, 64), None);
+        assert_eq!(checked_convert(Int(-1), false, true, 32), None);
+        assert_eq!(checked_convert(Int(-1), true, true, 64), Some(-1));
+        assert_eq!(checked_convert(Int(-1), true, true, 32), Some(-1));
+        assert_eq!(checked_convert(Int(-1), true, false, 64), None);
+        // A float truncates toward zero and then answers the range question.
+        assert_eq!(checked_convert(F64(3.9), true, true, 64), Some(3));
+        assert_eq!(checked_convert(F64(-3.9), true, true, 64), Some(-3));
+        assert_eq!(checked_convert(F64(255.9), true, false, 8), Some(255));
+        assert_eq!(checked_convert(F64(1000.0), true, false, 8), None);
+        assert_eq!(checked_convert(F64(-1.0), true, false, 8), None);
+        assert_eq!(checked_convert(F32(300.0), true, false, 8), None);
+        assert_eq!(checked_convert(F64(f64::NAN), true, true, 64), None);
+        assert_eq!(checked_convert(F64(f64::INFINITY), true, true, 64), None);
+        // The `u64` bound is where an inexact comparison would go wrong: `u64::MAX as f64` rounds UP
+        // to 2^64, so a `<= u64::MAX as f64` test would accept 2^64 itself.
+        assert_eq!(
+            checked_convert(F64(18446744073709551616.0), true, false, 64),
+            None
+        );
+        assert_eq!(
+            checked_convert(F64(9223372036854775808.0), true, true, 64),
+            None
+        );
+    }
+
+    #[test]
+    fn checked_convert_agrees_with_the_total_cast_wherever_it_answers_some() {
+        // The contract in one assertion, swept over every width and a spread of inputs: a `some`
+        // always carries the total cast's own result, so the two families cannot disagree.
+        for &(signed, bits) in &[
+            (true, 8u8),
+            (false, 8),
+            (true, 16),
+            (false, 16),
+            (true, 32),
+            (false, 32),
+            (true, 64),
+            (false, 64),
+        ] {
+            for &value in &[
+                0i64,
+                1,
+                -1,
+                127,
+                128,
+                255,
+                256,
+                -32768,
+                32767,
+                65535,
+                i64::MIN,
+                i64::MAX,
+            ] {
+                if let Some(word) = checked_convert(NumScalar::Int(value), true, signed, bits) {
+                    assert_eq!(
+                        word,
+                        int_method(value, IntMethod::Convert { signed, bits }, 0),
+                        "checked_to for ({signed}, {bits}) disagreed with to_ at {value}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

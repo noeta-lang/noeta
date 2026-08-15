@@ -414,9 +414,33 @@ impl<'m> Vm<'m> {
                 },
                 None => 0,
             };
-            return Ok(Value::int(noeta_stdlib::int_method(
-                recv_int, int_method, arg,
-            )));
+            // `None` width: a plain `int` receiver is the full signed i64 (a fixed-width receiver
+            // lowered to `Op::WidthIntMethod` instead, which carries its width).
+            return Ok(
+                match noeta_stdlib::int_method_outcome(recv_int, int_method, arg, None) {
+                    noeta_stdlib::IntOutcome::Word(word) => Value::int(word),
+                    noeta_stdlib::IntOutcome::Checked(Some(word)) => make_some(Value::int(word)),
+                    noeta_stdlib::IntOutcome::Checked(None) => make_none(),
+                },
+            );
+        }
+        // The range-checked conversions on a FLOAT receiver (`(1e9).checked_to_u8()` → `none`): the
+        // fallible twin of the saturating `to_<int>` casts below. An integer receiver already
+        // returned above; a float's value is not erased, so no source signedness is involved.
+        if matches!(hk, None | Some(HeapKind::Int))
+            && let Some(src) = v
+                .as_f32()
+                .map(noeta_stdlib::NumScalar::F32)
+                .or_else(|| v.as_float().map(noeta_stdlib::NumScalar::F64))
+            && let Some(noeta_stdlib::IntMethod::CheckedConvert { signed, bits, .. }) =
+                noeta_stdlib::IntMethod::from_name(method)
+        {
+            return Ok(
+                match noeta_stdlib::checked_convert(src, true, signed, bits) {
+                    Some(word) => make_some(Value::int(word)),
+                    None => make_none(),
+                },
+            );
         }
         // Cross-domain numeric conversions (S0): `int→float/f32`, `float/f32→int`,
         // `float↔f32`. The `IntMethod` branch above handled `int→int` and returned; an

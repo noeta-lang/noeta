@@ -2907,15 +2907,29 @@ impl Lowerer<'_> {
                         "a call with a skipped parameter lowered to a form that cannot carry its \
                          supplied-mask"
                     );
-                    // Width-exact bit intrinsic on a fixed-width receiver (Tier W5): the checker marked
-                    // this call span in `width_sites`. Emit the width-carrying `WidthIntMethod` so both
-                    // backends compute within the width via `int_method_width`, rather than the generic
-                    // `Method` (which would compute on the full erased i64). A `Convert` (`to_*`) is not
-                    // width-relative — it stays an ordinary method.
-                    if let Some(&(_, bits)) = self.sites.width_sites.get(span)
+                    // An int method that needs the receiver's static width (Tier W5): the checker
+                    // marked this call span in `width_sites`. Emit the width-carrying
+                    // `WidthIntMethod` rather than the generic `Method` (which would compute on the
+                    // full erased i64) — a bit intrinsic computes within the width, a range-checked
+                    // conversion reads the erased word by the receiver's signedness. A total
+                    // `Convert` (`to_*`) needs neither and stays an ordinary method.
+                    if let Some(&(recv_signed, bits)) = self.sites.width_sites.get(span)
                         && let Some(method) = noeta_ext_abi::IntMethod::from_name(name)
                         && !matches!(method, noeta_ext_abi::IntMethod::Convert { .. })
                     {
+                        // A range-checked conversion decoded the plain-`int` source default from its
+                        // name; here the receiver's real signedness is known, and it decides how the
+                        // erased word is read (a `u64` above `i64::MAX` carries a negative one).
+                        let method = match method {
+                            noeta_ext_abi::IntMethod::CheckedConvert { signed, bits, .. } => {
+                                noeta_ext_abi::IntMethod::CheckedConvert {
+                                    src_signed: recv_signed,
+                                    signed,
+                                    bits,
+                                }
+                            }
+                            other => other,
+                        };
                         return Ok(self.emit(
                             out,
                             Rvalue::WidthIntMethod {

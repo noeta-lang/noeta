@@ -3276,7 +3276,34 @@ impl Interpreter {
                 }
                 None => 0,
             };
-            return Ok(Value::Int(noeta_stdlib::int_method(recv, method, arg)));
+            // `None` width: a plain `int` receiver is the full signed i64 (a fixed-width receiver
+            // lowered to `WidthIntMethod` instead, which carries its width).
+            return Ok(
+                match noeta_stdlib::int_method_outcome(recv, method, arg, None) {
+                    noeta_stdlib::IntOutcome::Word(word) => Value::Int(word),
+                    noeta_stdlib::IntOutcome::Checked(Some(word)) => {
+                        builtin_enum("Option", "some", vec![Value::Int(word)])
+                    }
+                    noeta_stdlib::IntOutcome::Checked(None) => {
+                        builtin_enum("Option", "none", Vec::new())
+                    }
+                },
+            );
+        }
+        // The range-checked conversions on a FLOAT receiver (`(1e9).checked_to_u8()` → `none`): the
+        // fallible twin of the saturating `to_<int>` casts below. An integer receiver already
+        // returned above; a float's value is not erased, so no source signedness is involved.
+        if let Some(src) = numeric_scalar(&receiver)
+            && let Some(noeta_stdlib::IntMethod::CheckedConvert { signed, bits, .. }) =
+                noeta_stdlib::IntMethod::from_name(name)
+        {
+            self.expect_std_arity(name, &args, 0, span)?;
+            return Ok(
+                match noeta_stdlib::checked_convert(src, true, signed, bits) {
+                    Some(word) => builtin_enum("Option", "some", vec![Value::Int(word)]),
+                    None => builtin_enum("Option", "none", Vec::new()),
+                },
+            );
         }
         // Cross-domain numeric conversions (S0): `int→float/f32`, `float/f32→int`, `float↔f32`. The
         // `IntMethod` branch above already handled `int→int` (`to_i32`…) and returned; an integer

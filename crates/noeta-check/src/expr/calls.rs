@@ -1676,16 +1676,18 @@ impl Checker {
                     stdlib::method_params(self.reg(), &recv, name).unwrap_or_default();
                 self.finalize_closure_args(&builtin_params, args, arg_exprs, env);
                 self.check_method_args(&recv, name, args, arg_exprs, span, call_span);
-                // A bit intrinsic on a fixed-width receiver (Tier W5) must act within the width, not
-                // the erased i64 (`(1u8).leading_zeros() == 7`), so mark the **call** span (the one
-                // lowering's `Method` carries) — lowering then emits the width-carrying
-                // `WidthIntMethod`. Conversions (`IntMethod::Convert`, the `to_*` names) are already
-                // width-typed by name and stay ordinary methods. Signedness is irrelevant here.
-                if let Type::IntN { bits, .. } = recv
+                // Two int methods need the RECEIVER's static width, not the erased i64, so mark the
+                // **call** span (the one lowering's `Method` carries) — lowering then emits the
+                // width-carrying `WidthIntMethod`. A bit intrinsic must act within the width
+                // (`(1u8).leading_zeros() == 7`); a range-checked conversion must know how to READ
+                // the erased word, because a `u64` above `i64::MAX` carries a negative one. The
+                // total `to_*` conversions need neither — they are width-typed by name and stay
+                // ordinary methods.
+                if let Type::IntN { signed, bits } = recv
                     && let Some(m) = noeta_ext_abi::IntMethod::from_name(name)
                     && !matches!(m, noeta_ext_abi::IntMethod::Convert { .. })
                 {
-                    self.sites.width_sites.insert(call_span, (false, bits));
+                    self.sites.width_sites.insert(call_span, (signed, bits));
                 }
                 // `it.zip(other)` → `Iterator<(A, B)>`: both element types are needed and only `recv`
                 // reaches `method_return`, so the precise tuple is assembled here where the argument

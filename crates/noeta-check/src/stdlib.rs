@@ -619,7 +619,18 @@ fn int_conversion_return(name: &str) -> Option<Type> {
         "to_f32" => return Some(Type::F32),
         _ => {}
     }
-    let rest = name.strip_prefix("to_")?;
+    // A range-checked conversion answers `?dest` — the same destination the total cast names,
+    // wrapped, because it reports "does not fit" with `none`. Only integer destinations have one.
+    if let Some(rest) = name.strip_prefix("checked_to_") {
+        return Some(opt(int_destination_type(rest)?));
+    }
+    int_destination_type(name.strip_prefix("to_")?)
+}
+
+/// The type a conversion method's destination suffix names: `int` → the platform `int`, otherwise
+/// the `i8`/`u32`/… fixed-width type. Shared by the total and range-checked spellings on either
+/// receiver domain, so a width one family accepts is exactly a width the other does.
+fn int_destination_type(rest: &str) -> Option<Type> {
     if rest == "int" {
         return Some(Type::Int);
     }
@@ -637,11 +648,13 @@ fn float_conversion_return(name: &str) -> Option<Type> {
         "to_float" => Some(Type::Float),
         "to_f64" => Some(Type::F64),
         "to_f32" => Some(Type::F32),
-        "to_int" => Some(Type::Int),
         _ => {
-            let rest = name.strip_prefix("to_")?;
-            let (signed, bits) = noeta_types::parse_int_width(rest)?;
-            Some(Type::IntN { signed, bits })
+            // The range-checked `checked_to_<int>` twin — `?dest`, `none` where the total cast would
+            // have had to saturate. Float destinations have no checked spelling.
+            if let Some(rest) = name.strip_prefix("checked_to_") {
+                return Some(opt(int_destination_type(rest)?));
+            }
+            int_destination_type(name.strip_prefix("to_")?)
         }
     }
 }

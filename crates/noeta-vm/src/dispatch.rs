@@ -3939,16 +3939,27 @@ impl<'m> Vm<'m> {
                     bits,
                     ..
                 } => {
-                    // Width-exact bit intrinsic (Tier W5): compute within `bits`, not the erased i64.
-                    // The checker guarantees an integer receiver and (for `rotate_*`) an integer arg.
+                    // An int method needing the receiver's static width (Tier W5): a bit intrinsic
+                    // computes within `bits` rather than the erased i64; a range-checked conversion
+                    // answers an option. The checker guarantees an integer receiver and (for
+                    // `rotate_*`) an integer arg.
                     let recv_int = regs[fbase + *recv as usize].as_int().unwrap_or(0);
                     let amount = match arg {
                         Some(r) => regs[fbase + *r as usize].as_int().unwrap_or(0),
                         None => 0,
                     };
-                    let value = Value::int(noeta_stdlib::int_method_width(
-                        recv_int, *method, amount, *bits,
-                    ));
+                    let value = match noeta_stdlib::int_method_outcome(
+                        recv_int,
+                        *method,
+                        amount,
+                        Some(*bits),
+                    ) {
+                        noeta_stdlib::IntOutcome::Word(word) => Value::int(word),
+                        noeta_stdlib::IntOutcome::Checked(Some(word)) => {
+                            make_some(Value::int(word))
+                        }
+                        noeta_stdlib::IntOutcome::Checked(None) => make_none(),
+                    };
                     set_reg(regs, fbase, *dst, value);
                     pc += 1;
                 }

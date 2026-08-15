@@ -1336,8 +1336,9 @@ impl Interpreter {
                 bits,
                 ..
             } => {
-                // Width-exact bit intrinsic (Tier W5): the twin of the VM's `Op::WidthIntMethod`,
-                // computed within `bits` via the shared `int_method_width`.
+                // An int method needing the receiver's static width (Tier W5): the twin of the VM's
+                // `Op::WidthIntMethod`, routed through the shared `int_method_outcome` — a bit
+                // intrinsic computes within `bits`, a range-checked conversion answers an option.
                 let recv = self.eval_ir_atom(receiver, frame)?;
                 let recv_int = match recv {
                     Value::Int(n) => n,
@@ -1350,9 +1351,17 @@ impl Interpreter {
                     },
                     None => 0,
                 };
-                Ok(Value::Int(noeta_stdlib::int_method_width(
-                    recv_int, *method, amount, *bits,
-                )))
+                Ok(
+                    match noeta_stdlib::int_method_outcome(recv_int, *method, amount, Some(*bits)) {
+                        noeta_stdlib::IntOutcome::Word(word) => Value::Int(word),
+                        noeta_stdlib::IntOutcome::Checked(Some(word)) => {
+                            crate::builtin_enum("Option", "some", vec![Value::Int(word)])
+                        }
+                        noeta_stdlib::IntOutcome::Checked(None) => {
+                            crate::builtin_enum("Option", "none", Vec::new())
+                        }
+                    },
+                )
             }
             noeta_ir::Rvalue::List { items, reflect, .. } => {
                 let mut values = Vec::with_capacity(items.len());

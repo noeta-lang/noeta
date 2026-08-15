@@ -72,7 +72,7 @@ echo (1).rotate_left(4)        // 16
 | `reverse_bits()` | Reverse bit order. |
 | `swap_bytes()` | Reverse byte order. |
 
-Conversions are total (`to_i8`, `to_u8`, …, `to_i64`, `to_u64`, `to_int`), with Rust-`as` semantics — widening is lossless, narrowing truncates, and crossing signedness reinterprets:
+The `to_*` conversions are total (`to_i8`, `to_u8`, …, `to_i64`, `to_u64`, `to_int`), with Rust-`as` semantics — widening is lossless, narrowing truncates, and crossing signedness reinterprets:
 
 ```noeta
 echo (300).to_u8()    // 44   (300 mod 256)
@@ -89,6 +89,34 @@ echo (1000.0).to_u8()    // 255   (float -> int SATURATES to the width; negative
 ```
 
 Int→float is value-preserving (rounding to nearest on `f32`); float→int truncates toward zero and **saturates** to the destination range, with `NaN` → 0.
+
+### Range-checked conversions
+
+Every integer destination also has a **range-checked** spelling — `checked_to_i8`, `checked_to_u8`, …, `checked_to_u64`, `checked_to_int` — which returns `?T` instead of `T` and answers `none` when the value does not fit:
+
+```noeta
+echo 200u16.checked_to_u8()   // some(200)
+echo 300u16.checked_to_u8()   // none    (300 does not fit a u8; `to_u8()` would give 44)
+echo 200u8.checked_to_i8()    // none    (crossing signedness is a range question too)
+echo (-1).checked_to_u64()    // none
+```
+
+The two families answer the same question from opposite sides: `x.checked_to_T()` is `some(x.to_T())` at every input where `to_T()` is exact, and `none` at exactly the inputs where `to_T()` has to wrap (an integer receiver) or saturate (a float receiver). So reaching for the checked form never changes a value — it only adds the case where there is no value to give.
+
+A float receiver checks the range of the value it truncates toward zero, and `NaN` and the infinities are in no destination's range:
+
+```noeta
+echo (3.9).checked_to_int()    // some(3)   (truncation is not a range failure)
+echo (1000.0).checked_to_u8()  // none      (`to_u8()` would saturate to 255)
+```
+
+Float *destinations* have no checked spelling: `to_f32` narrows by rounding, which loses precision rather than range, and there is no value it could refuse.
+
+Use `??` to supply a fallback, or match the option when the out-of-range case needs handling of its own:
+
+```noeta
+echo 300u16.checked_to_u8() ?? 0u8   // 0
+```
 
 ## Packed value types — `@packed`
 
