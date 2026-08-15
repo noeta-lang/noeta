@@ -33,7 +33,7 @@ use std::collections::{HashMap, HashSet};
 
 use noeta_ast::reflect::{PackedLayout, TypeRepr};
 use noeta_ast::{ClosureBody, Expr, FnDecl, Program, Stmt, StrPart};
-use noeta_check::Receiver;
+use noeta_check::{Receiver, Sites};
 use noeta_span::{SourceId, Span};
 
 use crate::resolve::DefUse;
@@ -66,10 +66,11 @@ pub fn type_hints(
     expr_types: &HashMap<Span, TypeRepr>,
     packed_layouts: &HashMap<String, PackedLayout>,
     receivers: &HashMap<Span, Receiver>,
+    sites: &Sites,
     source: SourceId,
     text: &str,
 ) -> Vec<TypeHint> {
-    let declarations: HashSet<Span> = DefUse::build(program).binding_spans().collect();
+    let declarations: HashSet<Span> = DefUse::build(program, sites).binding_spans().collect();
     let mut hints = Vec::new();
     let mut walker = Walker {
         source,

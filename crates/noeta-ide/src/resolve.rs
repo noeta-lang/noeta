@@ -20,6 +20,7 @@
 use std::collections::HashMap;
 
 use noeta_ast::{ClosureBody, Expr, FnDecl, ForPattern, Param, Pattern, Program, Stmt, StrPart};
+use noeta_check::Sites;
 use noeta_span::{SourceId, Span};
 
 /// The top-level definitions a document offers for go-to-definition, keyed by name → the span of the
@@ -244,9 +245,12 @@ pub struct DefUse {
 }
 
 impl DefUse {
-    /// Build the value def/use index for `program`.
-    pub fn build(program: &Program) -> DefUse {
-        let mut resolver = Resolver::default();
+    /// Build the value def/use index for `program`, reading `sites` for the pattern facts only the
+    /// checker knows (see [`Resolver::variant_patterns`]). `sites` must come from a check of
+    /// *this* program; a bundle from a failed link is empty, which costs nothing but the resolution
+    /// of a bare variant pattern.
+    pub fn build(program: &Program, sites: &Sites) -> DefUse {
+        let mut resolver = Resolver::new(sites);
         // Top-level functions resolve regardless of textual order (mutual recursion), so seed them
         // before walking any body.
         for stmt in &program.stmts {
@@ -363,11 +367,14 @@ impl DefUse {
 /// deepest AST node that contains the cursor, so a name is offered exactly where it is in scope
 /// (shadowing included). Top-level functions and type declarations are *not* here — the caller lists
 /// those directly, with their precise kinds. Empty when the cursor is not inside any statement.
-pub fn visible_at(program: &Program, offset: u32, source: SourceId) -> Vec<(String, Span)> {
-    let mut resolver = Resolver {
-        cursor: Some((offset, source)),
-        ..Resolver::default()
-    };
+pub fn visible_at(
+    program: &Program,
+    sites: &Sites,
+    offset: u32,
+    source: SourceId,
+) -> Vec<(String, Span)> {
+    let mut resolver = Resolver::new(sites);
+    resolver.cursor = Some((offset, source));
     // Seed top-level functions (mutual recursion) exactly as `DefUse::build` does, so a snapshot
     // taken inside a function body sees the same scope shape; the functions themselves live outside
     // the scope stack and so are excluded from the snapshot.
@@ -392,14 +399,20 @@ pub fn visible_at(program: &Program, offset: u32, source: SourceId) -> Vec<(Stri
 
 /// The mutable state of one [`DefUse::build`] walk: the top-level function table, the lexical scope
 /// stack of value bindings (innermost last), and the accumulating use→def references.
-#[derive(Default)]
-struct Resolver {
+struct Resolver<'a> {
     functions: HashMap<String, Span>,
     scopes: Vec<HashMap<String, Span>>,
     refs: Vec<(Span, Span)>,
     member_refs: Vec<MemberRef>,
     /// Every declared-name span passed to [`bind`](Self::bind), for [`DefUse::binding_spans`].
     bindings: Vec<Span>,
+    /// The `match`-arm [`Pattern::Binding`] spans the checker **resolved to a payload-free variant**
+    /// of the scrutinee's enum (`noeta_check::Sites::variant_pattern_sites`). Those bind nothing —
+    /// the name is a case test, not a local — and the walk must skip them, because whether a bare
+    /// name in an arm is a variant or a binding is scrutinee-directed and so unknowable from the
+    /// bare AST this walk otherwise reads. Registering one anyway put a phantom local in hover,
+    /// go-to-definition and completion.
+    variant_patterns: &'a HashMap<Span, (Option<String>, String)>,
     /// When set (completion), the `(offset, source)` whose in-scope bindings to capture. `None` for
     /// the def/use walk, which pays no snapshot cost.
     cursor: Option<(u32, SourceId)>,
@@ -410,7 +423,21 @@ struct Resolver {
     snapshot: Option<(Vec<(String, Span)>, u32)>,
 }
 
-impl Resolver {
+impl<'a> Resolver<'a> {
+    /// A fresh walk over a program the checker produced `sites` for.
+    fn new(sites: &'a Sites) -> Resolver<'a> {
+        Resolver {
+            functions: HashMap::new(),
+            scopes: Vec::new(),
+            refs: Vec::new(),
+            member_refs: Vec::new(),
+            bindings: Vec::new(),
+            cursor: None,
+            snapshot: None,
+            variant_patterns: &sites.variant_pattern_sites,
+        }
+    }
+
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
     }
@@ -798,7 +825,13 @@ impl Resolver {
                 self.walk_expr(scrutinee);
                 for arm in arms {
                     self.push_scope();
-                    bind_pattern(&arm.pattern, &mut |name, span| self.bind(name, span));
+                    // A bare name the checker resolved to a payload-free variant is a case test,
+                    // not a binding — see `Resolver::variant_patterns`.
+                    bind_pattern(&arm.pattern, &mut |name, span| {
+                        if !self.variant_patterns.contains_key(&span) {
+                            self.bind(name, span);
+                        }
+                    });
                     match &arm.body {
                         noeta_ast::ClosureBody::Expr(e) => self.walk_expr(e),
                         noeta_ast::ClosureBody::Block(stmts) => {
@@ -928,9 +961,21 @@ mod tests {
 
     /// The definition byte-offset the value index resolves for the cursor at `use_offset`.
     fn def_start_at(src: &str, use_offset: u32) -> Option<u32> {
-        DefUse::build(&program_of(src))
+        let program = program_of(src);
+        let checked = noeta_check::check_all(&program);
+        DefUse::build(&program, &checked.sites)
             .definition_at(use_offset, SourceId::FIRST)
             .map(|span| span.start)
+    }
+
+    /// The declared-name start offsets the value index registers for `src`, checker facts included.
+    fn binding_starts(src: &str) -> Vec<u32> {
+        let program = program_of(src);
+        let checked = noeta_check::check_all(&program);
+        DefUse::build(&program, &checked.sites)
+            .binding_spans()
+            .map(|span| span.start)
+            .collect()
     }
 
     #[test]
@@ -992,5 +1037,45 @@ mod tests {
         let src = "fn greet(): int { return 1 }\nx = 1";
         // A cursor on a nonexistent name resolves to nothing in the value index.
         assert_eq!(def_start_at(src, 0), None);
+    }
+
+    /// A bare `String =>` arm on a `Type` scrutinee is the **variant**, not a binding — the checker
+    /// resolved it and recorded the span, so the value index must register no definition there.
+    /// Registering one puts a phantom local in hover, go-to-definition and completion.
+    #[test]
+    fn a_resolved_bare_variant_pattern_is_not_a_binding() {
+        let src = "enum Type {\n    String;\n    Int;\n}\nfn describe(t: Type): string {\n    return match t {\n        String => \"s\",\n        _ => \"other\",\n    }\n}\n";
+        let arm_at = src.find("String =>").unwrap() as u32;
+        assert!(
+            !binding_starts(src).contains(&arm_at),
+            "the bare variant arm registered a binding at {arm_at}: {:?}",
+            binding_starts(src)
+        );
+    }
+
+    /// The other direction: a bare name that resolves to **no** variant of the scrutinee's enum is
+    /// an ordinary catch-all binding, and stays one — uses of it in the arm body still resolve.
+    #[test]
+    fn an_unresolved_bare_pattern_is_still_a_binding() {
+        let src = "enum Type {\n    String;\n    Int;\n}\nfn describe(t: Type): string {\n    return match t {\n        String => \"s\",\n        other => \"${other}\",\n    }\n}\n";
+        let arm_at = src.find("other =>").unwrap() as u32;
+        assert!(
+            binding_starts(src).contains(&arm_at),
+            "the catch-all arm lost its binding at {arm_at}: {:?}",
+            binding_starts(src)
+        );
+        // And the reference in the arm body resolves to it.
+        let use_at = src.rfind("other}").unwrap() as u32;
+        assert_eq!(def_start_at(src, use_at), Some(arm_at));
+    }
+
+    /// A payload-carrying variant pattern's sub-binding is untouched: `List(item)` binds `item`.
+    #[test]
+    fn a_variant_payload_binding_still_binds() {
+        let src = "enum Type {\n    String;\n    List(inner: string);\n}\nfn describe(t: Type): string {\n    return match t {\n        String => \"s\",\n        List(item) => \"${item}\",\n    }\n}\n";
+        let item_at = src.find("item)").unwrap() as u32;
+        assert!(binding_starts(src).contains(&item_at));
+        let use_at = src.rfind("item}").unwrap() as u32;
+        assert_eq!(def_start_at(src, use_at), Some(item_at));
     }
 }

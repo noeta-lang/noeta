@@ -107,7 +107,7 @@ pub fn impact_of_edit(old_src: &str, new_src: &str, edition: noeta_lexer::Editio
             reason: "the edit does not check".into(),
         };
     }
-    let graph = callgraph::build(program, &checked.expr_types, &[new_src]);
+    let graph = callgraph::build(program, &checked.expr_types, &checked.sites, &[new_src]);
     // In an unlinked single file a dotted diff name is always `Type.method` (qualification is
     // the linker's job), so its member is everything after the first dot.
     let members: BTreeSet<String> = names
@@ -584,7 +584,12 @@ impl ImpactSession {
             .sources_with(&link.expansions)
             .map(|s| s.text(&self.db))
             .collect();
-        let graph = callgraph::build(&activated.program, &checked.expr_types, &texts);
+        let graph = callgraph::build(
+            &activated.program,
+            &checked.expr_types,
+            &checked.sites,
+            &texts,
+        );
         match reverse_closure(&graph, seeds, members) {
             Ok(impacted) => Impact::Decls(impacted.into_iter().collect()),
             Err(reason) => Impact::All { reason },

@@ -113,7 +113,12 @@ impl CallGraph {
 /// (method receivers resolve through it); `texts` holds each source's text by [`SourceId`] index —
 /// used for the call-vs-reference classification and for naming external module targets. A missing
 /// text degrades that edge's classification, never drops it.
-pub fn build(program: &Program, expr_types: &HashMap<Span, TypeRepr>, texts: &[&str]) -> CallGraph {
+pub fn build(
+    program: &Program,
+    expr_types: &HashMap<Span, TypeRepr>,
+    sites: &noeta_check::Sites,
+    texts: &[&str],
+) -> CallGraph {
     // 1. The function inventory: top-level fns, plus methods qualified as `Type.method`.
     let mut functions: Vec<FnNode> = Vec::new();
     for stmt in &program.stmts {
@@ -169,7 +174,7 @@ pub fn build(program: &Program, expr_types: &HashMap<Span, TypeRepr>, texts: &[&
         .map(|(i, f)| (f.name_span, i))
         .collect();
 
-    let def_use = DefUse::build(program);
+    let def_use = DefUse::build(program, sites);
     let members = MemberTable::collect(program);
     let mut edges: Vec<CallEdge> = Vec::new();
 
@@ -325,7 +330,7 @@ mod tests {
             "fixture parses"
         );
         let checked = noeta_check::check_all_with_types(&parsed.program);
-        let g = build(&parsed.program, &checked.expr_types, &[src]);
+        let g = build(&parsed.program, &checked.expr_types, &checked.sites, &[src]);
         (g, checked)
     }
 

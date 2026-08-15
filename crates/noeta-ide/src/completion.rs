@@ -139,7 +139,12 @@ fn reflection_intrinsics() -> Vec<Candidate> {
 /// De-duplicated by label, keeping the earliest — the scoping walk also binds a top-level function's
 /// name into the module scope, so listing the declarations first is what stamps `greet` as a
 /// `Function` rather than a bare `Variable`.
-pub fn complete(program: &Program, offset: u32, source: SourceId) -> Vec<Candidate> {
+pub fn complete(
+    program: &Program,
+    sites: &noeta_check::Sites,
+    offset: u32,
+    source: SourceId,
+) -> Vec<Candidate> {
     let mut candidates = Vec::new();
 
     // Top-level declarations, with their precise kinds (a name usable as a call, constructor, or
@@ -165,7 +170,7 @@ pub fn complete(program: &Program, offset: u32, source: SourceId) -> Vec<Candida
     // bindings) — the names relevant where the cursor is. A top-level function's name is also here
     // (bound into the module scope) but was already emitted above with its precise kind, so dedup
     // drops it; a genuine local keeps its `Variable` kind.
-    for (name, _span) in resolve::visible_at(program, offset, source) {
+    for (name, _span) in resolve::visible_at(program, sites, offset, source) {
         candidates.push(Candidate {
             label: name,
             kind: CandidateKind::Variable,
@@ -983,7 +988,8 @@ mod tests {
         let source = Source::new(SourceId::FIRST, "t.noe", src);
         let lexed = lex(&source);
         let program = parse(&source, &lexed.tokens).program;
-        complete(&program, offset, SourceId::FIRST)
+        let checked = noeta_check::check_all(&program);
+        complete(&program, &checked.sites, offset, SourceId::FIRST)
     }
 
     fn labels_of(candidates: &[Candidate], kind: CandidateKind) -> Vec<&str> {

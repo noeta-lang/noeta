@@ -758,6 +758,7 @@ impl DocumentStore {
                 &ide.expr_types,
                 &ide.packed_layouts,
                 &ide.method_receivers,
+                &ide.sites,
                 source,
                 doc.text(db),
             )
@@ -879,7 +880,8 @@ impl DocumentStore {
         text: &str,
         offset: u32,
     ) -> Option<ResolvedCallable<'a>> {
-        let def_use = resolve::DefUse::build(program);
+        let sites = &noeta_db::linked_checked_ide_from(&self.db, cache.workspace, doc).sites;
+        let def_use = resolve::DefUse::build(program, sites);
         if let Some((receiver_span, member)) = def_use.member_at(offset, source) {
             let type_name =
                 self.receiver_type_name(program, cache.workspace, doc, text, receiver_span)?;
@@ -1080,8 +1082,9 @@ impl DocumentStore {
             Ok(program) => program,
             Err(_) => &entry_ast.0.program,
         };
+        let sites = &noeta_db::linked_checked_ide_from(db, cache.workspace, doc).sites;
 
-        resolve::DefUse::build(program)
+        resolve::DefUse::build(program, sites)
             .definition_at(offset, cursor)
             .or_else(|| {
                 let token = noeta_db::tokens(db, doc).0.tokens.iter().find(|token| {
@@ -1097,7 +1100,7 @@ impl DocumentStore {
             // A method/associated call name (`p.manhattan`, `Point.origin`) — resolve the receiver's
             // type and look the method up, so hovering a call surfaces the method's `@doc` too.
             .or_else(|| {
-                let def_use = resolve::DefUse::build(program);
+                let def_use = resolve::DefUse::build(program, sites);
                 let (receiver_span, member) = def_use.member_at(offset, cursor)?;
                 let ty = self.receiver_type_name(
                     program,
@@ -1606,7 +1609,8 @@ impl DocumentStore {
             Ok(program) => program,
             Err(_) => &entry_ast.0.program,
         };
-        let def_use = resolve::DefUse::build(program);
+        let sites = &noeta_db::linked_checked_ide_from(db, cache.workspace, doc).sites;
+        let def_use = resolve::DefUse::build(program, sites);
 
         // 1. Scope-aware value resolution — a local, parameter, or function reference resolves to
         //    the precise binding in scope at the cursor (shadowing-correct).
@@ -1697,7 +1701,8 @@ impl DocumentStore {
             Ok(program) => program,
             Err(_) => &entry_ast.0.program,
         };
-        let def_use = resolve::DefUse::build(program);
+        let sites = &noeta_db::linked_checked_ide_from(db, cache.workspace, doc).sites;
+        let def_use = resolve::DefUse::build(program, sites);
 
         // 1. Value symbol (local, parameter, function).
         if let Some(def) = def_use.symbol_at(offset, cursor) {
@@ -1899,13 +1904,13 @@ impl DocumentStore {
         // Member completion, partial form: the parser produced a `receiver.member` access under the
         // cursor. A namespace-group receiver (`http.cl`) has no value type, so it is resolved first
         // against the group bindings and offers the group's submodules/types (module-namespaces).
-        let def_use = resolve::DefUse::build(program);
+        let checked = noeta_db::linked_checked_ide_from(db, cache.workspace, doc);
+        let def_use = resolve::DefUse::build(program, &checked.sites);
         let namespaces = completion::namespace_bindings(program);
         if let Some((receiver_span, _member)) = def_use.member_at(offset, cursor) {
             if let Some(prefix) = namespaces.get(&entry_text[receiver_span.range()]) {
                 return Some(completion::namespace_members(prefix));
             }
-            let checked = noeta_db::linked_checked_ide_from(db, cache.workspace, doc);
             let mut members = checked
                 .expr_types
                 .get(&receiver_span)
@@ -1940,7 +1945,12 @@ impl DocumentStore {
             return Some(types);
         }
 
-        Some(completion::complete(program, offset, cursor))
+        Some(completion::complete(
+            program,
+            &checked.sites,
+            offset,
+            cursor,
+        ))
     }
 
     /// The semantic tokens for `uri`: the compiler-classified identifiers (function/variable/type/
@@ -1948,13 +1958,17 @@ impl DocumentStore {
     /// single-file overlay over the entry document's own AST — the client keeps its static grammar for
     /// everything else. `None` if the document is not open.
     pub fn semantic_tokens(&self, uri: &str, encoding: Encoding) -> Option<Vec<SemanticToken>> {
-        let (_cache, doc, _source) = self.doc_cache(uri)?;
+        let (cache, doc, _source) = self.doc_cache(uri)?;
         let index = LineIndex::new(doc.text(&self.db));
         let program = &noeta_db::ast(&self.db, doc).0.program;
+        // The workspace check's site bundle. It is keyed by span, and the entry's statements keep
+        // their own spans in the merged program, so the entry-file facts it carries are exactly the
+        // ones this single-file overlay needs.
+        let sites = &noeta_db::linked_checked_ide_from(&self.db, cache.workspace, doc).sites;
 
         let mut data = Vec::new();
         let (mut prev_line, mut prev_char) = (0u32, 0u32);
-        for (span, kind) in semtokens::highlights(program) {
+        for (span, kind) in semtokens::highlights(program, sites) {
             let range = index.range(span, encoding);
             // Identifiers do not span lines, so the token length is the width on the start line.
             let length = range.end.character - range.start.character;
@@ -2728,7 +2742,7 @@ impl DocumentStore {
             .sources_with(&linked.expansions)
             .map(|s| s.text(db))
             .collect();
-        let graph = callgraph::build(program, &ide.expr_types, &texts);
+        let graph = callgraph::build(program, &ide.expr_types, &ide.sites, &texts);
         let native_roles = noeta_stdlib::registry::single_registry_process().native_roles();
         // Role/manifest/type views only — the trait-membership table is a runtime-narrowing
         // concern, so the IDE view passes the empty native-trait join.
@@ -3694,7 +3708,7 @@ fn bare_dot_members(
     let lexed = noeta_lexer::lex(&source);
     let parsed = noeta_parser::parse(&source, &lexed.tokens);
     let checked = noeta_check::check_all_with_types(&parsed.program);
-    let def_use = resolve::DefUse::build(&parsed.program);
+    let def_use = resolve::DefUse::build(&parsed.program, &checked.sites);
     let (receiver_span, _member) = def_use.member_at(offset, SourceId::FIRST)?;
     // A namespace-group receiver (`http.`) has no value type — offer the group's members directly.
     if let Some(prefix) = namespaces.get(&munged[receiver_span.range()]) {

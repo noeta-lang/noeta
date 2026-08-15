@@ -49,10 +49,10 @@ pub struct SemanticToken {
 /// one classification per span (the first source wins). Value references come from the def/use index
 /// (function vs variable by what the use resolves to), member accesses are properties, and the
 /// top-level declaration names are functions/types.
-pub fn highlights(program: &Program) -> Vec<(Span, SemKind)> {
+pub fn highlights(program: &Program, sites: &noeta_check::Sites) -> Vec<(Span, SemKind)> {
     let defs = Definitions::collect(program);
     let function_defs: HashSet<Span> = defs.value_spans().collect();
-    let def_use = DefUse::build(program);
+    let def_use = DefUse::build(program, sites);
 
     let mut spans: Vec<(Span, SemKind)> = Vec::new();
 
@@ -104,7 +104,8 @@ mod tests {
         let source = Source::new(SourceId::FIRST, "t.noe", src);
         let lexed = lex(&source);
         let program = parse(&source, &lexed.tokens).program;
-        highlights(&program)
+        let checked = noeta_check::check_all(&program);
+        highlights(&program, &checked.sites)
             .into_iter()
             .map(|(span, kind)| (src[span.range()].to_string(), kind))
             .collect()
@@ -139,7 +140,8 @@ mod tests {
         let source = Source::new(SourceId::FIRST, "t.noe", src);
         let lexed = lex(&source);
         let program = parse(&source, &lexed.tokens).program;
-        let spans = highlights(&program);
+        let checked = noeta_check::check_all(&program);
+        let spans = highlights(&program, &checked.sites);
         let mut starts: Vec<u32> = spans.iter().map(|(s, _)| s.start).collect();
         let sorted = {
             let mut s = starts.clone();
