@@ -80,9 +80,59 @@ mod read {
     ///
     /// Behind a `Mutex` because a recv descriptor runs on the executor's blocking pool, off the host's
     /// thread. Dropping this is what tears the stream down.
+    ///
+    /// The channel carries [`Pumped`] rather than a bare `Frame`, and the extra variants are the
+    /// whole reason: a reader parked on `recv` is roused by *something arriving*, and a
+    /// `std::sync::mpsc` receiver has no other door. So the interruption is a message the
+    /// cancellation hook pushes (see [`StreamWaker`]) — which, unlike a timeout loop, wakes a quiet
+    /// stream at the moment it is cancelled rather than at the end of the next tick.
     #[derive(Debug)]
     pub(crate) struct RealStream {
-        frames: Arc<Mutex<Receiver<Frame>>>,
+        frames: Arc<Mutex<Receiver<Pumped>>>,
+        /// Whether the body has ended, latched by whichever read saw [`Pumped::Ended`]. Sticky
+        /// because the end arrives **once**: holding a sender for the interruption keeps the
+        /// channel open, so a second read after the end would have nothing to disconnect from and
+        /// would wait for a pump that has already gone.
+        ended: Arc<std::sync::atomic::AtomicBool>,
+        /// The interruption end of the same channel, held so it lives exactly as long as the
+        /// stream: the host registers it weakly, so closing the stream also drops it from the
+        /// cancellation fan-out.
+        waker: Arc<StreamWaker>,
+    }
+
+    impl RealStream {
+        /// This stream's interruption end, for the host to register on the run's cancellation.
+        pub(crate) fn waker(&self) -> &Arc<StreamWaker> {
+            &self.waker
+        }
+    }
+
+    /// What travels down a stream's frame channel.
+    #[derive(Debug)]
+    pub(crate) enum Pumped {
+        /// One decoded frame of the body.
+        Frame(Frame),
+        /// The body ended — sent **once**, by the pump thread as it exits, for any reason it
+        /// exits. Explicit rather than inferred from the channel disconnecting, because the
+        /// interruption end below holds a sender of its own and a channel with a live sender never
+        /// disconnects.
+        Ended,
+        /// The run this stream belongs to is being cancelled. Only rouses; the reader re-reads the
+        /// flag and decides, so a message that outlived its (already honored) request is ignored.
+        Interrupted,
+    }
+
+    /// The cancellation party for one open stream: a sender it pushes an end-my-wait message down.
+    #[derive(Debug)]
+    pub(crate) struct StreamWaker(SyncSender<Pumped>);
+
+    impl crate::cancel::CancelParty for StreamWaker {
+        fn interrupt(&self) {
+            // `try_send`, because this must not block and a full buffer means the reader is not
+            // waiting anyway — it will read the flag before its next wait. A closed channel means
+            // the pump is gone, which ends the wait by itself.
+            let _ = self.0.try_send(Pumped::Interrupted);
+        }
     }
 
     /// The shared open-stream table on [`crate::RealHost`].
@@ -133,7 +183,9 @@ mod read {
         framing: Framing,
     ) -> Result<(RealStream, ResponseHead), NetError> {
         let (head_tx, head_rx) = sync_channel::<Result<ResponseHead, NetError>>(1);
-        let (frame_tx, frame_rx) = sync_channel::<Frame>(FRAME_BUFFER);
+        let (frame_tx, frame_rx) = sync_channel::<Pumped>(FRAME_BUFFER);
+        // The interruption end, cloned before the pump takes ownership of the sending half.
+        let waker = Arc::new(StreamWaker(frame_tx.clone()));
         let url = request.url.clone();
 
         std::thread::Builder::new()
@@ -161,7 +213,11 @@ mod read {
                 let _enter = runtime.enter();
                 let client = reqwest::Client::new();
                 drop(_enter);
-                runtime.block_on(pump(client, request, framing, head_tx, frame_tx));
+                runtime.block_on(pump(client, request, framing, head_tx, frame_tx.clone()));
+                // The end of the body, from the **one** place that knows the pump is done — every
+                // way out of `pump` passes through here, including the ones that never sent a
+                // frame at all.
+                let _ = frame_tx.send(Pumped::Ended);
             })
             .map_err(|e| {
                 NetError::new(
@@ -177,6 +233,8 @@ mod read {
             Ok(Ok(head)) => Ok((
                 RealStream {
                     frames: Arc::new(Mutex::new(frame_rx)),
+                    ended: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    waker,
                 },
                 head,
             )),
@@ -196,7 +254,7 @@ mod read {
         request: NetRequest,
         framing: Framing,
         head_tx: SyncSender<Result<ResponseHead, NetError>>,
-        frame_tx: SyncSender<Frame>,
+        frame_tx: SyncSender<Pumped>,
     ) {
         let url = request.url.clone();
         let response = match send_head(&client, request).await {
@@ -284,11 +342,11 @@ mod read {
 
     /// Push every ready frame to the reader. Returns `false` once the reader has gone away, which is
     /// the signal to tear the connection down.
-    fn forward(decoder: &mut FrameDecoder, frame_tx: &SyncSender<Frame>) -> bool {
+    fn forward(decoder: &mut FrameDecoder, frame_tx: &SyncSender<Pumped>) -> bool {
         while let Some(frame) = decoder.next_frame() {
             // A blocking send: this IS the backpressure — a slow reader stops the pump, which stops
             // reading the socket, which lets TCP slow the server down.
-            if frame_tx.send(frame).is_err() {
+            if frame_tx.send(Pumped::Frame(frame)).is_err() {
                 return false;
             }
         }
@@ -302,6 +360,9 @@ mod read {
     pub(crate) struct RealStreamRecvIo {
         pub(crate) streams: RealStreams,
         pub(crate) stream: u64,
+        /// The run's cancellation token, so a read of a stream that has gone quiet — an idle SSE
+        /// connection is the ordinary case, not the pathological one — ends when the run does.
+        pub(crate) cancel: Arc<crate::cancel::HostCancel>,
     }
 
     impl ExternIo for RealStreamRecvIo {
@@ -312,21 +373,49 @@ mod read {
         }
 
         fn run_real(&mut self) -> Option<RealBody> {
-            let frames = self
+            let open = self
                 .streams
                 .lock()
                 .unwrap()
                 .get(&self.stream)
-                .map(|s| s.frames.clone());
+                .map(|s| (s.frames.clone(), Arc::clone(&s.ended)));
+            let cancel = Arc::clone(&self.cancel);
             Some(RealBody::Blocking(Box::new(move || {
                 // A stream that is not open reads as ended, matching the sandbox: after `close()` the
-                // honest answer to "is there more?" is no.
-                let Some(frames) = frames else {
+                // honest answer to "is there more?" is no. A stream whose body already ended reads
+                // the same way, without waiting on a pump that has gone.
+                let Some((frames, ended)) = open else {
                     return Ok(frame_recv_outcome(None));
                 };
-                // A channel disconnect means the pump finished — the body ended.
-                let next = frames.lock().unwrap().recv().ok();
-                Ok(frame_recv_outcome(next))
+                if ended.load(std::sync::atomic::Ordering::Relaxed) {
+                    return Ok(frame_recv_outcome(None));
+                }
+                // A cancellation that was requested *before* this read started: the host's hook has
+                // already fired, so no message is coming to rouse us and the flag is the only thing
+                // that can answer.
+                if cancel.pending() {
+                    return Err(crate::interrupted_here("recv"));
+                }
+                let frames = frames.lock().unwrap();
+                loop {
+                    match frames.recv() {
+                        Ok(Pumped::Frame(frame)) => return Ok(frame_recv_outcome(Some(frame))),
+                        // The pump is done; latch it so a later read answers without waiting.
+                        // A disconnect means the pump thread died before it could say so, which
+                        // reads the same way — a body that stopped early is a truncated body.
+                        Ok(Pumped::Ended) | Err(_) => {
+                            ended.store(true, std::sync::atomic::Ordering::Relaxed);
+                            return Ok(frame_recv_outcome(None));
+                        }
+                        // Roused. The flag decides: a request that has since been honored leaves
+                        // this message behind, and waiting on is the right answer to it.
+                        Ok(Pumped::Interrupted) => {
+                            if cancel.pending() {
+                                return Err(crate::interrupted_here("recv"));
+                            }
+                        }
+                    }
+                }
             })))
         }
     }

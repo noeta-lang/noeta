@@ -6,8 +6,8 @@
 //! it stays with the modules ([`crate::fs`], [`crate::random`], [`crate::net`]) whose state it holds.
 
 pub use noeta_ext_abi::host::{
-    Clock, Console, Entropy, Env, FileReader, FileSystem, Host, Ids, Network, Os, P2p, P2pProvider,
-    ReadSource, RealP2pConfig, Rng, Stream,
+    Cancellable, Clock, Console, Entropy, Env, FileReader, FileSystem, Host, Ids, Network, Os, P2p,
+    P2pProvider, ReadSource, RealP2pConfig, Rng, Stream,
 };
 pub use noeta_ext_abi::{Logging, Metrics, Tracing};
 
@@ -710,6 +710,11 @@ impl Network for SandboxHost {
 // `para.p2p`/`para.synced` surface serves itself from the extension broker.
 impl P2pProvider for SandboxHost {}
 
+// Nothing in the sandbox blocks: its process output is scripted and already complete, its clock is
+// logical, and its network is a fixture table. So it keeps the **default** `Cancellable` — a host
+// that is armed and never has anything to rouse — which is what keeps this seam out of the oracle.
+impl Cancellable for SandboxHost {}
+
 impl Env for SandboxHost {
     fn env_get(&self, key: &str) -> Option<String> {
         self.env.get(key).cloned()
@@ -1222,7 +1227,7 @@ mod tests {
         // Everything else forwards — one line per capability, provided methods included.
         noeta_ext_abi::delegate_host!(EngineHost => base :
             FileReader, FileSystem, Rng, Clock, Console, Os, Entropy, Ids, Network, P2pProvider,
-            Tracing, Metrics, Logging);
+            Cancellable, Tracing, Metrics, Logging);
 
         // The blanket impl makes the overlay a full Host — the boxed form every backend holds.
         let mut host: Box<dyn Host> = Box::new(EngineHost {

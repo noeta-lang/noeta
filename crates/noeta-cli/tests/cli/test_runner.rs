@@ -1215,6 +1215,78 @@ fn test_a_wedged_test_is_asked_to_stop_and_its_destructors_run() {
     );
 }
 
+/// A case parked **outside the interpreter** is stopped and joined too — the class the safepoints
+/// alone can never reach, and the reason a stop request carries a wake rather than only a flag.
+///
+/// Two shapes, neither of which a safepoint poll can touch. `sleeps` is parked in one ten-minute
+/// timer, so its executor is where it lives; `listens` is blocked reading a child that has stopped
+/// talking (`cat` with a stdin nobody writes to), so its *host* is. Both are unbounded by design:
+/// no machine and no load makes either finish inside this test, and the ask-and-rouse is the only
+/// exit — a rail that regressed to waiting would hang here rather than pass slowly.
+///
+/// The destructor marker is the evidence, exactly as in the compute-bound test above: a case that
+/// was asked and answered unwinds through its live locals, an abandoned one runs nothing ever
+/// again. The negative assertion carries the rest — a joined case leaves no thread behind, so the
+/// report must not warn about one.
+#[cfg(unix)]
+#[test]
+fn test_a_test_parked_outside_the_interpreter_is_stopped_and_joined() {
+    let dir = temp_root().join("noeta_cli_test_timeout_parked");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let marker = dir.join("stopped.log");
+    let marker_path = marker.to_str().expect("utf-8 path");
+    let src = format!(
+        "use std.fs\n\
+         use std.os\n\
+         use std.task.{{sleep}}\n\
+         class Res {{ pub tag: string\n\
+           fn new(t: string): Res {{ return Res {{ tag: t }} }}\n\
+           destruct {{ fs.append(\"{marker_path}\", \"stopped\\n\") }} }}\n\
+         @test {{\n\
+           async fn sleeps(): void {{ held = Res.new(\"s\")\n\
+             sleep(600000).await\n\
+             assert(held.tag.len() > 0) }}\n\
+           fn listens(): void {{ held = Res.new(\"l\")\n\
+             p = os.spawn(\"cat\", [])\n\
+             p.read_line()\n\
+             assert(held.tag.len() > 0) }}\n\
+         }}\n"
+    );
+    let file = dir.join("main.noe");
+    std::fs::write(&file, &src).expect("write program");
+    let start = std::time::Instant::now();
+    lang()
+        .arg("test")
+        .arg(&file)
+        .args(["--timeout", "2"])
+        .timeout(std::time::Duration::from_secs(120))
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(
+            predicate::str::contains("TIME  sleeps")
+                .and(predicate::str::contains("TIME  listens"))
+                .and(predicate::str::contains(
+                    "0 passed, 0 failed, 2 timed out, 2 total",
+                ))
+                .and(predicate::str::contains("its thread was abandoned").not()),
+        );
+    let elapsed = start.elapsed();
+    let markers = std::fs::read_to_string(&marker).unwrap_or_default();
+    assert_eq!(
+        markers.lines().count(),
+        2,
+        "each parked case must have been roused, stopped, and run its live local's destructor on \
+         the way out; got: {markers:?}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(60),
+        "both cases must stop at their bound rather than at their (never-coming) own end; took \
+         {elapsed:?}"
+    );
+}
+
 /// **The named limit, and the constraint the whole rail exists for.** A case blocked inside a native
 /// call — here a `fs.read` on a FIFO with no writer — reaches no safepoint, so the request cannot
 /// land and the grace expires. Abandoning it is the only option left, and the rail must still do

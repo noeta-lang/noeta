@@ -40,6 +40,7 @@ pub fn shutdown_notify() -> std::sync::Arc<Notify> {
         .clone()
 }
 
+mod cancel;
 mod stream;
 #[cfg(feature = "telemetry")]
 mod telemetry;
@@ -174,6 +175,10 @@ pub struct RealHost {
     /// An exact directory for the `para.p2p` node's persistent identity/store, set by a driver
     /// that runs several identities (`RealHost::with_p2p_dir`). `None` ⇒ the per-app default.
     p2p_data_dir: Option<std::path::PathBuf>,
+    /// This run's cancellation token (interruptible-io), shared into every party inside the host
+    /// that can block outside the interpreter. Inert until [`Cancellable::set_cancel`] arms it —
+    /// which the isolate worker does at startup, and an uncancellable run never does.
+    cancel: Arc<cancel::HostCancel>,
     /// Whether this host streams program output to the real terminal as it is produced
     /// ([`Console::streams_output`]), instead of letting it batch until the run ends.
     ///
@@ -287,6 +292,7 @@ impl RealHost {
             tel: RealTelemetry::new(),
             p2p_app_id: None,
             p2p_data_dir: None,
+            cancel: Arc::new(cancel::HostCancel::default()),
             live_output: false,
         })
     }
@@ -393,6 +399,26 @@ fn io_error(message: String) -> StdError {
         kind: ErrorKind::Io,
         message,
     }
+}
+
+/// Build the "the run is stopping" error a blocking leaf here returns when it ends its wait early
+/// (interruptible-io). Thin, but named: a leaf must **return** this rather than be abandoned, since
+/// the run's teardown waits for every blocking body that has already started, and a body that never
+/// returns turns a leaked thread into a hung run.
+fn interrupted_here(operation: &str) -> StdError {
+    noeta_stdlib::interrupted_error(operation)
+}
+
+/// The transport-vocabulary form of the same thing, for a request abandoned mid-flight. `NetError`
+/// is the user-facing `HttpError`, so this is what a `try_fetch` sees — hence a kind of its own,
+/// which `retryable()` answers false for.
+#[cfg(feature = "ring-http-client")]
+fn interrupted_request(url: &str) -> NetError {
+    NetError::new(
+        NetErrorKind::Interrupted,
+        url,
+        "the run it belongs to is being cancelled",
+    )
 }
 
 impl FileReader for RealHost {
@@ -693,7 +719,28 @@ impl Network for RealHost {
     fn net_fetch(&mut self, request: NetRequest) -> Result<NetResponse, NetError> {
         #[cfg(feature = "ring-http-client")]
         {
-            self.runtime.block_on(reqwest_fetch(&self.http, request))
+            let url = request.url.clone();
+            let cancel = Arc::clone(&self.cancel);
+            let client = self.http.clone();
+            self.runtime.block_on(async move {
+                // Arm the race before the request starts: `enable` registers this waiter, so a
+                // cancellation fired between here and the `select!` is delivered rather than lost.
+                let interrupted = cancel.interrupted();
+                tokio::pin!(interrupted);
+                interrupted.as_mut().enable();
+                if cancel.pending() {
+                    return Err(interrupted_request(&url));
+                }
+                tokio::select! {
+                    // Biased so a request that completes in the same instant as the cancellation
+                    // still reports its answer only if it got there first.
+                    biased;
+                    outcome = reqwest_fetch(&client, request) => outcome,
+                    // Dropping the reqwest future here genuinely ends the request — unlike a
+                    // blocking-pool body, whose work outlives the wait that was abandoned.
+                    () = &mut interrupted => Err(interrupted_request(&url)),
+                }
+            })
         }
         // Without the `ring-http-client` ring the outbound client isn't linked. A program that never imports
         // `std.http` never reaches here; a build that stripped the ring while the program *did* use it
@@ -841,6 +888,9 @@ impl Network for RealHost {
         // No client is passed in: the stream builds its own on its pump thread, so it can never be
         // handed a pooled connection whose driver lives on this host's runtime (see `stream.rs`).
         let (opened, head) = stream::open(request, framing)?;
+        // The stream is a party to this run's cancellation: a reader parked on a body that has gone
+        // quiet is roused by a sentinel down its own frame channel.
+        self.cancel.register(opened.waker());
         let id = self.next_stream;
         self.next_stream += 1;
         self.streams.lock().unwrap().insert(id, opened);
@@ -859,6 +909,7 @@ impl Network for RealHost {
         Box::new(stream::RealStreamRecvIo {
             streams: self.streams.clone(),
             stream,
+            cancel: Arc::clone(&self.cancel),
         })
     }
 
@@ -1232,6 +1283,21 @@ impl noeta_stdlib::host::P2pProvider for RealHost {
     }
 }
 
+impl noeta_stdlib::host::Cancellable for RealHost {
+    fn set_cancel(
+        &mut self,
+        flag: Arc<std::sync::atomic::AtomicBool>,
+        wake: Arc<noeta_stdlib::CancelWake>,
+    ) {
+        // Flag first, hook second. `CancelWake::register` runs a hook whose wake already fired, so
+        // arming after the request still rouses — and a party created later reads the flag it can
+        // already see rather than parking on a wake that will never fire again.
+        self.cancel.arm(flag);
+        let cancel = Arc::clone(&self.cancel);
+        wake.register(move || cancel.interrupt_all());
+    }
+}
+
 impl Entropy for RealHost {
     fn entropy_u64(&mut self) -> u64 {
         // OS entropy. `getrandom` only fails on platforms/configurations with no entropy
@@ -1313,13 +1379,44 @@ struct StreamBuf {
 struct SharedStream {
     buf: Mutex<StreamBuf>,
     more: std::sync::Condvar,
+    /// The run's cancellation token (interruptible-io), so a read waiting on a child that never
+    /// speaks can stop when the run it belongs to is stopping. Shared with the host that spawned
+    /// the child; inert on a run nobody can cancel.
+    cancel: Arc<cancel::HostCancel>,
+}
+
+/// Rousing a stream reader is a `notify_all` — but **under the buffer's lock**, which is what makes
+/// it race-free rather than merely prompt. A reader checks [`HostCancel::pending`] holding that
+/// lock and then releases it inside `Condvar::wait`; a notification delivered in between would wake
+/// nobody, and the reader would sleep through the cancellation it was told about. Taking the lock
+/// here orders this after the check or before the wait, never between them.
+impl cancel::CancelParty for SharedStream {
+    fn interrupt(&self) {
+        let _held = self.buf.lock().unwrap_or_else(|e| e.into_inner());
+        self.more.notify_all();
+    }
 }
 
 impl SharedStream {
+    /// A buffer for a child spawned by a host carrying `cancel` — every read on it observes that
+    /// run's cancellation.
+    fn new(cancel: Arc<cancel::HostCancel>) -> SharedStream {
+        SharedStream {
+            cancel,
+            ..SharedStream::default()
+        }
+    }
+
     /// The next line (without its trailing newline), from the shared cursor, blocking until a full
     /// line is buffered or the stream ends. `None` at end of output; a final unterminated line is
     /// returned once (like `str::lines`). The cursor advances past the line (and its newline).
-    fn read_line(&self) -> Option<String> {
+    ///
+    /// `Err` only when the run is being cancelled while this read is blocked — see
+    /// [`interrupted_here`]. That is a distinct answer from the `None` at end of output on purpose:
+    /// a child that has stopped talking and a child we have stopped listening to are not the same
+    /// thing, and a caller told "end of stream" for the second would move on to whatever follows
+    /// the loop.
+    fn read_line(&self) -> Result<Option<String>, StdError> {
         let mut buf = self.buf.lock().unwrap();
         loop {
             let at = buf.cursor;
@@ -1327,15 +1424,20 @@ impl SharedStream {
                 let end = at + rel;
                 let line = String::from_utf8_lossy(&buf.data[at..end]).into_owned();
                 buf.cursor = end + 1;
-                return Some(line);
+                return Ok(Some(line));
             }
             if buf.eof {
                 if at < buf.data.len() {
                     let line = String::from_utf8_lossy(&buf.data[at..]).into_owned();
                     buf.cursor = buf.data.len();
-                    return Some(line);
+                    return Ok(Some(line));
                 }
-                return None;
+                return Ok(None);
+            }
+            // Buffered output is served first even under a cancellation: what the child already
+            // said is not lost by our having stopped waiting for more.
+            if self.cancel.pending() {
+                return Err(interrupted_here("read_line"));
             }
             buf = self.more.wait(buf).unwrap();
         }
@@ -1344,14 +1446,15 @@ impl SharedStream {
     /// Up to `count` characters from the shared cursor, blocking only until at least one character
     /// is available, then returning up to `count` of them (POSIX `read` shape); `None` at end of
     /// output. Decodes the valid-UTF-8 prefix from the cursor — a multi-byte character split across
-    /// a drain chunk waits for its continuation. `count <= 0` yields the empty string.
-    fn read(&self, count: usize) -> Option<String> {
+    /// a drain chunk waits for its continuation. `count <= 0` yields the empty string. `Err` under
+    /// a cancellation, exactly as [`SharedStream::read_line`].
+    fn read(&self, count: usize) -> Result<Option<String>, StdError> {
         let mut buf = self.buf.lock().unwrap();
         loop {
             let at = buf.cursor;
             // Exhausted (nothing left and the stream ended) → end of output.
             if at >= buf.data.len() && buf.eof {
-                return None;
+                return Ok(None);
             }
             let rest = &buf.data[at..];
             // The complete-character prefix (a trailing partial UTF-8 sequence is excluded until
@@ -1363,10 +1466,13 @@ impl SharedStream {
             if !valid.is_empty() || count == 0 {
                 let chunk: String = valid.chars().take(count).collect();
                 buf.cursor = at + chunk.len();
-                return Some(chunk);
+                return Ok(Some(chunk));
             }
             if buf.eof {
-                return None;
+                return Ok(None);
+            }
+            if self.cancel.pending() {
+                return Err(interrupted_here("read"));
             }
             buf = self.more.wait(buf).unwrap();
         }
@@ -1464,6 +1570,34 @@ impl ChildProc {
 struct WaitSlot {
     done: Mutex<Option<ExecResult>>,
     ready: std::sync::Condvar,
+    /// The run's cancellation token, so a wait on a child that does not exit ends when the run
+    /// does — the same reason [`SharedStream`] carries one.
+    cancel: Arc<cancel::HostCancel>,
+}
+
+/// Rousing a waiter, under the slot's lock for the reason spelled out on [`SharedStream`]'s impl:
+/// a notification delivered between a waiter's flag check and its `wait` reaches nobody.
+impl cancel::CancelParty for WaitSlot {
+    fn interrupt(&self) {
+        let _held = self.done.lock().unwrap_or_else(|e| e.into_inner());
+        self.ready.notify_all();
+    }
+}
+
+impl WaitSlot {
+    /// An exit slot for a child spawned by a host carrying `cancel`.
+    fn new(cancel: Arc<cancel::HostCancel>) -> WaitSlot {
+        WaitSlot {
+            cancel,
+            ..WaitSlot::default()
+        }
+    }
+
+    /// Publish `result` and rouse everyone waiting on it.
+    fn publish(&self, result: ExecResult) {
+        *self.done.lock().unwrap() = Some(result);
+        self.ready.notify_all();
+    }
 }
 
 /// The real host's `wait_async` descriptor: it owns the detached child (and its drain threads), so
@@ -1502,21 +1636,15 @@ impl RealProcWaitIo {
             .child
             .take()
             .expect("a pending RealProcWaitIo always owns the child");
-        let status = child.wait().map_err(|e| io_error(format!("wait: {e}")))?;
-        if let Some(h) = self.stdout_join.take() {
-            let _ = h.join();
-        }
-        if let Some(h) = self.stderr_join.take() {
-            let _ = h.join();
-        }
-        let result = ExecResult {
-            status: i64::from(status.code().unwrap_or(-1)),
-            stdout: self.stdout.snapshot(),
-            stderr: self.stderr.snapshot(),
-        };
+        let result = reap_detached(
+            &mut child,
+            &self.stdout,
+            &self.stderr,
+            self.stdout_join.take(),
+            self.stderr_join.take(),
+        )?;
         if let Some(slot) = self.slot.take() {
-            *slot.done.lock().unwrap() = Some(result.clone());
-            slot.ready.notify_all();
+            slot.publish(result.clone());
         }
         Ok(NativeOut::Extern(ExternBox::new(result)))
     }
@@ -1541,21 +1669,15 @@ impl ExternIo for RealProcWaitIo {
         let slot = self.slot.take();
         Some(RealBody::Blocking(Box::new(move || {
             let mut child = child.take().expect("pending waiter owns the child");
-            let status = child.wait().map_err(|e| io_error(format!("wait: {e}")))?;
-            if let Some(h) = stdout_join.take() {
-                let _ = h.join();
-            }
-            if let Some(h) = stderr_join.take() {
-                let _ = h.join();
-            }
-            let result = ExecResult {
-                status: i64::from(status.code().unwrap_or(-1)),
-                stdout: stdout.snapshot(),
-                stderr: stderr.snapshot(),
-            };
+            let result = reap_detached(
+                &mut child,
+                &stdout,
+                &stderr,
+                stdout_join.take(),
+                stderr_join.take(),
+            )?;
             if let Some(slot) = slot {
-                *slot.done.lock().unwrap() = Some(result.clone());
-                slot.ready.notify_all();
+                slot.publish(result.clone());
             }
             Ok(NativeOut::Extern(ExternBox::new(result)))
         })))
@@ -1589,16 +1711,19 @@ impl std::fmt::Debug for RealProcReadIo {
 
 impl RealProcReadIo {
     /// Perform the read against `stream`, wrapping the outcome as the `?string` the surface returns.
-    fn perform(stream: &SharedStream, read: noeta_stdlib::os::ProcRead) -> NativeOut {
+    fn perform(
+        stream: &SharedStream,
+        read: noeta_stdlib::os::ProcRead,
+    ) -> Result<NativeOut, StdError> {
         use noeta_stdlib::os::ProcRead;
         let out = match read {
-            ProcRead::StdoutLine | ProcRead::StderrLine => stream.read_line(),
-            ProcRead::Stdout(count) => stream.read(count.max(0) as usize),
+            ProcRead::StdoutLine | ProcRead::StderrLine => stream.read_line()?,
+            ProcRead::Stdout(count) => stream.read(count.max(0) as usize)?,
         };
-        match out {
+        Ok(match out {
             Some(s) => NativeOut::Some(Box::new(NativeOut::Str(s))),
             None => NativeOut::None,
-        }
+        })
     }
 }
 
@@ -1608,7 +1733,7 @@ impl ExternIo for RealProcReadIo {
             .stream
             .take()
             .ok_or_else(|| noeta_stdlib::os::unknown_process_error(self.handle))?;
-        Ok(RealProcReadIo::perform(&stream, self.read))
+        RealProcReadIo::perform(&stream, self.read)
     }
 
     fn run_real(&mut self) -> Option<RealBody> {
@@ -1617,7 +1742,7 @@ impl ExternIo for RealProcReadIo {
         let handle = self.handle;
         Some(RealBody::Blocking(Box::new(move || {
             let stream = stream.ok_or_else(|| noeta_stdlib::os::unknown_process_error(handle))?;
-            Ok(RealProcReadIo::perform(&stream, read))
+            RealProcReadIo::perform(&stream, read)
         })))
     }
 }
@@ -1630,23 +1755,51 @@ struct SlotWaitIo {
     slot: Arc<WaitSlot>,
 }
 
-fn await_slot(slot: &WaitSlot) -> ExecResult {
+fn await_slot(slot: &WaitSlot) -> Result<ExecResult, StdError> {
     let mut done = slot.done.lock().unwrap();
     while done.is_none() {
+        if slot.cancel.pending() {
+            return Err(interrupted_here("wait"));
+        }
         done = slot.ready.wait(done).unwrap();
     }
-    done.clone().expect("slot filled")
+    Ok(done.clone().expect("slot filled"))
+}
+
+/// Reap a detached child and publish its outcome: wait for exit, join the drain threads (so the
+/// captured buffers are complete), and fill `slot`. The body shared by the `wait_async` descriptor
+/// and the synchronous wait's background reaper — one routine, because a synchronous `wait` and an
+/// awaited one must produce the identical [`ExecResult`] for the same child.
+fn reap_detached(
+    child: &mut std::process::Child,
+    stdout: &SharedStream,
+    stderr: &SharedStream,
+    stdout_join: Option<std::thread::JoinHandle<()>>,
+    stderr_join: Option<std::thread::JoinHandle<()>>,
+) -> Result<ExecResult, StdError> {
+    let status = child.wait().map_err(|e| io_error(format!("wait: {e}")))?;
+    if let Some(h) = stdout_join {
+        let _ = h.join();
+    }
+    if let Some(h) = stderr_join {
+        let _ = h.join();
+    }
+    Ok(ExecResult {
+        status: i64::from(status.code().unwrap_or(-1)),
+        stdout: stdout.snapshot(),
+        stderr: stderr.snapshot(),
+    })
 }
 
 impl ExternIo for SlotWaitIo {
     fn run_sync(&mut self, _host: &mut dyn noeta_stdlib::Host) -> Result<NativeOut, StdError> {
-        Ok(NativeOut::Extern(ExternBox::new(await_slot(&self.slot))))
+        Ok(NativeOut::Extern(ExternBox::new(await_slot(&self.slot)?)))
     }
 
     fn run_real(&mut self) -> Option<RealBody> {
         let slot = Arc::clone(&self.slot);
         Some(RealBody::Blocking(Box::new(move || {
-            Ok(NativeOut::Extern(ExternBox::new(await_slot(&slot))))
+            Ok(NativeOut::Extern(ExternBox::new(await_slot(&slot)?)))
         })))
     }
 }
@@ -1759,10 +1912,50 @@ impl RealHost {
         &mut self,
         handle: u64,
         which: Stream,
-        read: impl FnOnce(&SharedStream) -> Option<String>,
+        read: impl FnOnce(&SharedStream) -> Result<Option<String>, StdError>,
     ) -> Result<Option<String>, StdError> {
         let stream = self.stream_of(handle, which)?;
-        Ok(read(&stream))
+        read(&stream)
+    }
+
+    /// Hand `handle`'s child (and its drain threads) to a background reaper publishing into a fresh
+    /// [`WaitSlot`], and return the slot. The synchronous twin of what `os_proc_wait_spawn` does on
+    /// the blocking pool, for a wait that must be interruptible: the caller then blocks on the slot
+    /// instead of in `waitpid`.
+    ///
+    /// The slot is left on the handle, so a later `wait`/`try_wait` observes the same outcome — the
+    /// detachment is invisible to the program apart from being interruptible.
+    fn detach_onto_waiter(&mut self, handle: u64) -> Arc<WaitSlot> {
+        let slot = Arc::new(WaitSlot::new(Arc::clone(&self.cancel)));
+        self.cancel.register(&slot);
+        let proc = self
+            .procs
+            .get_mut(&handle)
+            .expect("the caller looked the handle up already");
+        proc.awaiting = Some(Arc::clone(&slot));
+        let mut child = proc
+            .child
+            .take()
+            .expect("a not-yet-detached child is present");
+        let stdout = Arc::clone(&proc.stdout);
+        let stderr = Arc::clone(&proc.stderr);
+        let stdout_join = proc.stdout_join.take();
+        let stderr_join = proc.stderr_join.take();
+        let published = Arc::clone(&slot);
+        // Detached rather than joined: this thread outlives an interrupted wait by design, and it
+        // ends when the child does. Nothing waits for it, so a child that never exits costs one
+        // parked thread rather than a hung run.
+        std::thread::Builder::new()
+            .name("noeta-proc-wait".to_string())
+            .spawn(move || {
+                if let Ok(result) =
+                    reap_detached(&mut child, &stdout, &stderr, stdout_join, stderr_join)
+                {
+                    published.publish(result);
+                }
+            })
+            .expect("spawning a process waiter thread");
+        slot
     }
 }
 
@@ -1825,8 +2018,12 @@ impl Os for RealHost {
         let pid = i64::from(child.id());
         // Drain both pipes on background threads into shared buffers, so a chatty child never
         // blocks on a full pipe while the program supervises it, and `read_line` can stream stdout.
-        let stdout = Arc::new(SharedStream::default());
-        let stderr = Arc::new(SharedStream::default());
+        let stdout = Arc::new(SharedStream::new(Arc::clone(&self.cancel)));
+        let stderr = Arc::new(SharedStream::new(Arc::clone(&self.cancel)));
+        // Both buffers are parties to this run's cancellation: a read blocked on either is roused
+        // by the host's single hook, and then decides for itself by reading the flag.
+        self.cancel.register(&stdout);
+        self.cancel.register(&stderr);
         let stdout_join = child.stdout.take().map(|pipe| {
             let shared = Arc::clone(&stdout);
             std::thread::spawn(move || drain_pipe(pipe, shared))
@@ -1870,11 +2067,25 @@ impl Os for RealHost {
         // `wait_async` detached the child onto a background waiter: block on its shared slot until
         // the waiter publishes the outcome, then cache it here so this stays idempotent.
         if let Some(slot) = proc.awaiting.clone() {
-            let mut done = slot.done.lock().unwrap();
-            while done.is_none() {
-                done = slot.ready.wait(done).unwrap();
-            }
-            let result = done.clone().expect("slot filled");
+            let result = await_slot(&slot)?;
+            proc.result = Some(result.clone());
+            return Ok(result);
+        }
+        // **On a cancellable run, wait on a condvar rather than in `waitpid`.** `Child::wait` is a
+        // real syscall and nothing in this process can end it early, so a child that does not exit
+        // holds the worker for as long as it lives. Detaching the reap onto a background thread
+        // turns that into the same shared slot `wait_async` already publishes to — which is a
+        // party to the cancellation, so this wait ends with the run.
+        //
+        // Only when armed: an ordinary run has no cancellation to observe, and paying a thread per
+        // `wait` to interrupt something that cannot be interrupted would be a cost with no buyer.
+        if self.cancel.armed() {
+            let slot = self.detach_onto_waiter(handle);
+            let result = await_slot(&slot)?;
+            let proc = self
+                .procs
+                .get_mut(&handle)
+                .ok_or_else(|| noeta_stdlib::os::unknown_process_error(handle))?;
             proc.result = Some(result.clone());
             return Ok(result);
         }
@@ -1969,7 +2180,8 @@ impl Os for RealHost {
         }
         // First `wait_async`: detach the child + its drain threads onto the descriptor and leave a
         // shared slot behind so synchronous `wait`/`try_wait` still observe the outcome.
-        let slot = Arc::new(WaitSlot::default());
+        let slot = Arc::new(WaitSlot::new(Arc::clone(&self.cancel)));
+        self.cancel.register(&slot);
         proc.awaiting = Some(Arc::clone(&slot));
         Box::new(RealProcWaitIo {
             handle,
@@ -2775,6 +2987,397 @@ mod tests {
         assert_eq!(opened.expect("the stream opens"), 200);
 
         let _ = server.join();
+    }
+
+    /// Arm `host` against a fresh cancellation token and hand back the two halves: the flag a leaf
+    /// reads, and a closure that requests the cancellation exactly as a parent does (flag, then
+    /// wake). Shared by the interruption tests below so none of them can accidentally exercise a
+    /// half-armed host.
+    #[cfg(unix)]
+    fn armed(host: &mut RealHost) -> (Arc<std::sync::atomic::AtomicBool>, impl Fn() + use<>) {
+        use noeta_stdlib::host::Cancellable;
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let wake = Arc::new(noeta_stdlib::CancelWake::new());
+        host.set_cancel(Arc::clone(&flag), Arc::clone(&wake));
+        let request = {
+            let flag = Arc::clone(&flag);
+            move || {
+                flag.store(true, Ordering::Relaxed);
+                wake.wake();
+            }
+        };
+        (flag, request)
+    }
+
+    /// **The row's headline example.** A worker blocked reading a child that has nothing to say
+    /// reaches no safepoint, so before this its cancellation was observed only when the child
+    /// eventually spoke or exited — for `cat` with no input, never.
+    ///
+    /// `cat` is the fixture precisely because it is silent: it holds its stdout open and writes
+    /// nothing until it is fed, so ending the wait is the *only* way this read can return, and a
+    /// pass cannot be an accident of timing.
+    ///
+    /// The answer is an error rather than `None`: `None` means end of stream, and telling a caller
+    /// that a child it can still write to has finished talking is a different lie from the one this
+    /// fixes.
+    #[cfg(unix)]
+    #[test]
+    fn a_read_blocked_on_a_silent_child_ends_when_the_run_is_cancelled() {
+        let mut host = RealHost::new().unwrap();
+        let (_flag, request_cancel) = armed(&mut host);
+        let handle = host.os_try_spawn("cat", &[]).expect("`cat` is on PATH");
+
+        let canceller = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            request_cancel();
+        });
+
+        let start = std::time::Instant::now();
+        let outcome = host.os_proc_read_line(handle);
+        let elapsed = start.elapsed();
+        canceller.join().unwrap();
+
+        let error = outcome.expect_err("a cancelled read reports why it stopped");
+        assert_eq!(error.kind, ErrorKind::Interrupted);
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "the read must end at the cancellation, not at the child's (never-coming) output; \
+             took {elapsed:?}"
+        );
+        let _ = host.os_proc_kill(handle);
+    }
+
+    /// **The wake is what ends the wait, not a poll** — the ablation, and the reason the flag alone
+    /// is not the fix. Setting the flag on a reader that is already parked on the condvar changes
+    /// nothing until something notifies it, which is exactly the shape of the hole: a flag nobody
+    /// is looking at.
+    ///
+    /// Run against the stream directly rather than through `os_proc_read_line`, because the point
+    /// is to hold the read blocked on one thread while the cancellation is requested on another,
+    /// and the host method needs `&mut self`.
+    #[cfg(unix)]
+    #[test]
+    fn setting_the_flag_without_the_wake_leaves_a_parked_reader_parked() {
+        let mut host = RealHost::new().unwrap();
+        let (flag, request_cancel) = armed(&mut host);
+        let handle = host.os_try_spawn("cat", &[]).expect("`cat` is on PATH");
+        let stdout = Arc::clone(&host.procs[&handle].stdout);
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let outcome = stdout.read_line();
+            let _ = done_tx.send(());
+            outcome
+        });
+        // Let the reader reach the condvar, then set the flag *without* rousing it.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        flag.store(true, Ordering::Relaxed);
+        assert!(
+            done_rx
+                .recv_timeout(std::time::Duration::from_millis(300))
+                .is_err(),
+            "a flag store alone cannot reach a reader that is already asleep — if this ever \
+             passes, something is polling and the wake has stopped being load-bearing"
+        );
+
+        // Now the real request, whose wake is the half that matters.
+        request_cancel();
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the wake ends the wait");
+        assert_eq!(
+            reader.join().unwrap().expect_err("interrupted").kind,
+            ErrorKind::Interrupted
+        );
+        let _ = host.os_proc_kill(handle);
+    }
+
+    /// **The interrupted leaf returns rather than being abandoned**, which is the hard requirement
+    /// the sibling test in `executor.rs` measures the cost of: dropping a runtime waits for every
+    /// blocking task that has already started, so a worker that is merely woken *past* a leaf still
+    /// hangs in teardown until that leaf finishes. `a_started_blocking_body_outlives_the_executor_
+    /// it_was_spawned_on` pins that a 2 s body costs the drop the remaining 1.95 s.
+    ///
+    /// Here the body is an awaitable read of a child that never speaks — unbounded, so the same
+    /// teardown would never end — and the assertion is that the drop is prompt anyway, because the
+    /// read observed the cancellation and returned.
+    #[cfg(unix)]
+    #[test]
+    fn an_interrupted_async_read_lets_its_runtime_tear_down_promptly() {
+        use noeta_stdlib::Executor;
+        use noeta_stdlib::host::Cancellable;
+
+        let mut exec = executor::RealExecutor::new().unwrap();
+        let mut host = RealHost::new().unwrap();
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let wake = Arc::new(noeta_stdlib::CancelWake::new());
+        // Both halves of the worker's arming: the executor's hook ends the *wait*, the host's ends
+        // the *read*. Only the second can help here — no timer is pending.
+        host.set_cancel(Arc::clone(&flag), Arc::clone(&wake));
+        exec.set_cancel_wake(Arc::clone(&wake));
+
+        let handle = host.os_try_spawn("cat", &[]).expect("`cat` is on PATH");
+        let io = host.os_proc_read_spawn(handle, noeta_stdlib::os::ProcRead::StdoutLine);
+        exec.spawn_ext(&mut host, io);
+
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            flag.store(true, Ordering::Relaxed);
+            wake.wake();
+        });
+
+        let start = std::time::Instant::now();
+        exec.advance();
+        let teardown = std::time::Instant::now();
+        drop(exec);
+        assert!(
+            teardown.elapsed() < std::time::Duration::from_secs(5),
+            "the runtime drop must not wait on the read — a leaf that is abandoned instead of \
+             returned turns a leaked thread into a hung run; drop took {:?} (wait: {:?})",
+            teardown.elapsed(),
+            start.elapsed()
+        );
+        let _ = host.os_proc_kill(handle);
+    }
+
+    /// A cancellation that has been **honored** must not go on interrupting reads. The VM clears
+    /// the flag when it acts on it, and a destructor running on the way out performs real IO — so a
+    /// leaf that latched "cancelled" at the first request would break teardown for every program
+    /// that closes a child politely.
+    #[cfg(unix)]
+    #[test]
+    fn a_spent_cancellation_stops_interrupting_reads() {
+        let mut host = RealHost::new().unwrap();
+        let (flag, request_cancel) = armed(&mut host);
+        let handle = host
+            .os_try_spawn(
+                "sh",
+                &["-c".to_string(), "sleep 0.2; echo late".to_string()],
+            )
+            .expect("`sh` is on PATH");
+
+        request_cancel();
+        assert_eq!(
+            host.os_proc_read_line(handle)
+                .expect_err("the request is live")
+                .kind,
+            ErrorKind::Interrupted
+        );
+
+        // The VM clears the flag as it honors the request; the next read is an ordinary one again.
+        flag.store(false, Ordering::Relaxed);
+        assert_eq!(
+            host.os_proc_read_line(handle)
+                .expect("reads normally again"),
+            Some("late".to_string())
+        );
+        let _ = host.os_proc_kill(handle);
+    }
+
+    /// **A request in flight ends with the run.** The server here accepts the connection and then
+    /// says nothing at all — a hostile or wedged endpoint, and the shape the row that asked for this
+    /// names: bounding a native read without killing the process.
+    ///
+    /// This leaf is interrupted by racing rather than by rousing, because a reqwest future really
+    /// is cancelled by dropping it — unlike a blocking-pool body, whose work outlives the wait.
+    #[cfg(feature = "ring-http-client")]
+    #[test]
+    fn a_request_to_a_server_that_never_answers_ends_when_the_run_is_cancelled() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().unwrap();
+        // Accept and hold. Dropping the connection would end the request by itself, which is why
+        // the socket is kept alive until the test is over.
+        let held = std::thread::spawn(move || listener.accept().map(|(sock, _)| sock));
+
+        let mut host = RealHost::new().unwrap();
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let wake = Arc::new(noeta_stdlib::CancelWake::new());
+        {
+            use noeta_stdlib::host::Cancellable;
+            host.set_cancel(Arc::clone(&flag), Arc::clone(&wake));
+        }
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            flag.store(true, Ordering::Relaxed);
+            wake.wake();
+        });
+
+        let start = std::time::Instant::now();
+        let outcome = host.net_fetch(NetRequest {
+            method: "GET".to_string(),
+            url: format!("http://{addr}/"),
+            headers: vec![],
+            body: vec![],
+            // No deadline: a timeout would be a second way out, and then a pass would not mean the
+            // cancellation reached the request.
+            timeout_ms: None,
+        });
+        let elapsed = start.elapsed();
+
+        let error = outcome.expect_err("a cancelled request reports why it stopped");
+        assert_eq!(error.kind, NetErrorKind::Interrupted);
+        assert!(
+            !error.kind.retryable(),
+            "retrying a request the run has abandoned is work nobody will read"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(20),
+            "the fetch must end at the cancellation; took {elapsed:?}"
+        );
+        drop(held.join());
+    }
+
+    /// The streaming twin: a body that has gone quiet. The pump is alive and the connection is
+    /// open, so the reader is parked on the frame channel with nothing to time out — a channel
+    /// receive has no deadline of its own, which is why the cancellation arrives *down the channel*
+    /// as a sentinel rather than as a timeout the reader could poll for.
+    #[cfg(feature = "ring-http-client")]
+    #[test]
+    fn a_read_of_a_quiet_stream_ends_when_the_run_is_cancelled() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().unwrap();
+        // Answer the head, send one frame, then hold the connection open and stay silent.
+        let server = std::thread::spawn(move || {
+            let Ok((mut sock, _)) = listener.accept() else {
+                return;
+            };
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf);
+            let _ = sock.write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ntransfer-encoding: chunked\r\n\r\n\
+                  6\r\nfirst\n\r\n",
+            );
+            let _ = sock.flush();
+            std::thread::sleep(std::time::Duration::from_secs(30));
+        });
+
+        let mut host = RealHost::new().unwrap();
+        let (_flag, request_cancel) = armed(&mut host);
+        let head = host
+            .net_stream_open(
+                NetRequest {
+                    method: "GET".to_string(),
+                    url: format!("http://{addr}/"),
+                    headers: vec![],
+                    body: vec![],
+                    timeout_ms: Some(10_000),
+                },
+                noeta_stdlib::stream::Framing::Lines,
+            )
+            .expect("the stream opens");
+
+        // The first frame is already there — a cancellation must not swallow what arrived.
+        let read = || {
+            let mut io = host.net_stream_recv(head.stream);
+            let Some(RealBody::Blocking(body)) = io.run_real() else {
+                panic!("the real recv descriptor is a blocking body")
+            };
+            body()
+        };
+        assert!(read().is_ok(), "the buffered frame reads normally");
+
+        let canceller = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            request_cancel();
+        });
+        let start = std::time::Instant::now();
+        let outcome = read();
+        let elapsed = start.elapsed();
+        canceller.join().unwrap();
+
+        assert_eq!(
+            outcome
+                .expect_err("a cancelled stream read reports why it stopped")
+                .kind,
+            ErrorKind::Interrupted
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(20),
+            "the read must end at the cancellation, not when the server finally speaks; took \
+             {elapsed:?}"
+        );
+        let _ = host.net_stream_close(head.stream);
+        drop(server);
+    }
+
+    /// **The third blocking leaf**: `wait` on a child that does not exit. `Child::wait` is a real
+    /// `waitpid` and nothing in this process can end it early, so on a cancellable run the reap
+    /// moves to a background thread and the caller blocks on a condvar the cancellation can reach.
+    ///
+    /// `sleep 600` is the fixture for the same reason `cat` is above: its bound is real time, so no
+    /// machine and no load makes it finish inside this test, and the interruption is the only exit.
+    #[cfg(unix)]
+    #[test]
+    fn a_wait_on_a_child_that_does_not_exit_ends_when_the_run_is_cancelled() {
+        let mut host = RealHost::new().unwrap();
+        let (_flag, request_cancel) = armed(&mut host);
+        let handle = host
+            .os_try_spawn("sleep", &["600".to_string()])
+            .expect("`sleep` is on PATH");
+
+        let canceller = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            request_cancel();
+        });
+        let start = std::time::Instant::now();
+        let outcome = host.os_proc_wait(handle);
+        let elapsed = start.elapsed();
+        canceller.join().unwrap();
+
+        assert_eq!(
+            outcome
+                .expect_err("a cancelled wait reports why it stopped")
+                .kind,
+            ErrorKind::Interrupted
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(30),
+            "the wait must end at the cancellation, not at the child's exit 600s away; took \
+             {elapsed:?}"
+        );
+        let _ = host.os_proc_kill(handle);
+    }
+
+    /// The detour through a background reaper must be invisible otherwise: an armed run's `wait`
+    /// returns the same status and the same captured output as an unarmed one, and stays idempotent
+    /// (the outcome is cached on the handle, so a second `wait` answers without re-reaping).
+    #[cfg(unix)]
+    #[test]
+    fn an_armed_wait_reports_the_same_outcome_as_an_unarmed_one() {
+        let script = "echo out; echo err 1>&2; exit 3";
+        let run = |arm: bool| {
+            let mut host = RealHost::new().unwrap();
+            if arm {
+                let _ = armed(&mut host);
+            }
+            let handle = host
+                .os_try_spawn("sh", &["-c".to_string(), script.to_string()])
+                .expect("`sh` is on PATH");
+            let first = host.os_proc_wait(handle).expect("the child exits");
+            let second = host.os_proc_wait(handle).expect("wait is idempotent");
+            assert_eq!(first, second);
+            first
+        };
+        let unarmed = run(false);
+        assert_eq!((unarmed.status, unarmed.stdout.trim()), (3, "out"));
+        assert_eq!(unarmed.stderr.trim(), "err");
+        assert_eq!(run(true), unarmed);
+    }
+
+    /// A host nobody armed — every `noeta run` that cannot be cancelled — reads exactly as before:
+    /// the token is inert, so the flag can never read true and no leaf checks anything else.
+    #[cfg(unix)]
+    #[test]
+    fn an_unarmed_host_reads_a_child_normally() {
+        let mut host = RealHost::new().unwrap();
+        let handle = host
+            .os_try_spawn("sh", &["-c".to_string(), "echo one; echo two".to_string()])
+            .expect("`sh` is on PATH");
+        assert_eq!(host.os_proc_read_line(handle).unwrap(), Some("one".into()));
+        assert_eq!(host.os_proc_read_line(handle).unwrap(), Some("two".into()));
+        assert_eq!(host.os_proc_read_line(handle).unwrap(), None);
     }
 
     /// The real `Network` capability against a live endpoint. `#[ignore]` so CI stays hermetic —

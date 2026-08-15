@@ -3034,14 +3034,17 @@ const HTTP_ERROR_DOCS: &[(&str, &str)] = &[
         "What went wrong: `\"timeout\"`, `\"dns\"`, `\"connect\"`, `\"tls\"`, `\"protocol\"` (the \
          response was unreadable), `\"invalid_url\"`, or `\"other\"`. A request never yields \
          `\"status\"` — an HTTP error status is an ordinary `Response`, checked with `ok()`; that \
-         kind appears only when you opt in with `error_for_status()`.",
+         kind appears only when you opt in with `error_for_status()`. `\"interrupted\"` says the \
+         run itself is stopping and the request was abandoned, which is the one kind that is not \
+         about the network.",
     ),
     ("url", "The request URL that failed."),
     (
         "retryable",
         "Whether retrying the identical request could plausibly succeed. True for `timeout`, \
-         `dns`, and `connect` (transient); false for `tls` and `invalid_url` (deterministic) and \
-         for `protocol`/`other`, where the request may already have been applied server-side.",
+         `dns`, and `connect` (transient); false for `tls` and `invalid_url` (deterministic), for \
+         `protocol`/`other`, where the request may already have been applied server-side, and for \
+         `interrupted`, where nobody is left to read the answer.",
     ),
 ];
 

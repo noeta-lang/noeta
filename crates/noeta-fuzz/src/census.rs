@@ -173,7 +173,14 @@ pub fn reasons() -> BTreeSet<Reason> {
                 }
                 // The window is generous: a call spanning several lines still reaches its code and
                 // message, and overshooting into the next statement only risks a false positive.
-                let end = (idx + 600).min(text.len());
+                //
+                // Walked back to a character boundary, because 600 *bytes* into a comment lands
+                // inside an em-dash sooner or later and slicing there panics — a scanner that dies
+                // on prose it was only ever meant to skip past.
+                let mut end = (idx + 600).min(text.len());
+                while !text.is_char_boundary(end) {
+                    end -= 1;
+                }
                 let window = &text[idx..end];
                 let Some(code_at) = window.find("DiagnosticCode::") else {
                     continue;

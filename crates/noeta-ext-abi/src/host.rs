@@ -796,6 +796,40 @@ pub trait P2pProvider {
     }
 }
 
+/// A host's side of the **cancellation token** (interruptible-io), and the mirror of
+/// [`Executor::set_cancel_wake`](crate::Executor::set_cancel_wake): a run that can be cancelled
+/// hands its host the same pair the executor gets, so a leaf blocked *outside* the interpreter can
+/// end its own wait instead of holding the worker until the block ends on its own.
+///
+/// Two objects because they answer two questions. The flag says **whether** a cancellation is
+/// pending, and it is the only thing allowed to decide — the leaf reads it and returns
+/// [`ErrorKind::Interrupted`], and the safepoint the unwind reaches
+/// makes the actual call, so every rule about *when* a cancellation is honored stays in the VM. The
+/// wake says **how to rouse** a party that is not looking at anything: whatever primitive the leaf
+/// blocks on (a condvar, a tokio `Notify`, a channel) is registered as a hook, and the canceller
+/// fires the lot right after the flag store.
+///
+/// Ending the wait is deliberately not the same as ending the work. A blocking leaf's real body
+/// runs on a pool the run's teardown waits for, so a leaf that is *abandoned* rather than returned
+/// from turns a leak into a hang — every interruptible leaf therefore returns an error, and none is
+/// dropped mid-flight.
+///
+/// Default: a no-op, which is correct for any host with nothing that blocks unboundedly — the
+/// deterministic sandbox reads scripted output that is already complete, so this seam leaves it
+/// byte-identical and in-oracle.
+pub trait Cancellable {
+    /// Arm this host against the cancellation of the run it serves. Called once at startup, before
+    /// any user code runs, by whoever owns the run's cancellation — a `CancelWake` fires a hook
+    /// registered after the request immediately, so arming can never lose a race with it.
+    fn set_cancel(
+        &mut self,
+        flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        wake: std::sync::Arc<crate::CancelWake>,
+    ) {
+        let _ = (flag, wake);
+    }
+}
+
 /// A `synced_signal`'s convergence state relative to its peers (p2p P3.3). Meaningless on the
 /// deterministic loopback broker (always [`SyncStatus::Synced`]); real once a network can be
 /// partitioned — a live p2panda node reports it from its log-sync session lifecycle, letting a
@@ -852,6 +886,7 @@ pub trait Host:
     + Ids
     + Network
     + P2pProvider
+    + Cancellable
     + crate::Tracing
     + crate::Metrics
     + crate::Logging
@@ -868,6 +903,7 @@ impl<
         + Ids
         + Network
         + P2pProvider
+        + Cancellable
         + crate::Tracing
         + crate::Metrics
         + crate::Logging,

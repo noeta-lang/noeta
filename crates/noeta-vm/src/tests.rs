@@ -2751,8 +2751,7 @@ fn worker_teardown_reaps_stranded_reference_cycles() {
             false,
             // Never cancelled here: this test is about the worker's teardown, and a cancelled
             // worker's teardown is exercised end to end by the CLI isolate tests instead.
-            Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            Arc::new(noeta_stdlib::CancelWake::new()),
+            Arc::new(noeta_stdlib::CancelSignal::new()),
             noeta_span::Span::new(0, 0),
         );
         assert!(
@@ -2815,8 +2814,7 @@ fn a_worker_ships_its_program_output_home() {
             None,
             None,
             false,
-            Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            Arc::new(noeta_stdlib::CancelWake::new()),
+            Arc::new(noeta_stdlib::CancelSignal::new()),
             noeta_span::Span::new(0, 0),
         )
     })
@@ -2845,7 +2843,6 @@ fn a_worker_ships_its_program_output_home() {
 #[test]
 fn a_cancelled_worker_reports_cancelled_and_frees_its_heap() {
     use std::sync::Arc;
-    use std::sync::atomic::AtomicBool;
     let _ = noeta_stdlib::registry::default_seeded();
     let src = "class Node { pub mut next: ?Node\n\
          pub fn new(): Node { return Node { next: none } } }\n\
@@ -2875,7 +2872,8 @@ fn a_cancelled_worker_reports_cancelled_and_frees_its_heap() {
             Box::new(noeta_stdlib::SandboxExecutor::new()) as Box<dyn noeta_stdlib::Executor>,
         )
     });
-    let cancel = Arc::new(AtomicBool::new(true));
+    let cancel = Arc::new(noeta_stdlib::CancelSignal::new());
+    cancel.request();
     let (outcome, residual) = std::thread::spawn(move || {
         let before = noeta_value::live_count();
         let outcome = crate::lifecycle::run_isolate_worker(
@@ -2892,7 +2890,6 @@ fn a_cancelled_worker_reports_cancelled_and_frees_its_heap() {
             None,
             false,
             cancel,
-            Arc::new(noeta_stdlib::CancelWake::new()),
             noeta_span::Span::new(0, 0),
         );
         let residual = noeta_value::live_count() as i64 - before as i64;
@@ -2991,8 +2988,11 @@ fn a_worker_arms_its_executor_against_its_own_cancellation() {
             }) as Box<dyn noeta_stdlib::Executor>,
         )
     });
-    let wake = Arc::new(noeta_stdlib::CancelWake::new());
-    wake.wake();
+    // A cancellation requested and then *honored* before the worker starts: the flag reads false
+    // again, so the wake it fired is a spurious one the worker must simply ignore.
+    let signal = Arc::new(noeta_stdlib::CancelSignal::new());
+    signal.request();
+    signal.honored();
     let report = std::thread::spawn(move || {
         crate::lifecycle::run_isolate_worker(
             &module,
@@ -3007,8 +3007,7 @@ fn a_worker_arms_its_executor_against_its_own_cancellation() {
             None,
             None,
             false,
-            Arc::new(AtomicBool::new(false)),
-            wake,
+            signal,
             noeta_span::Span::new(0, 0),
         )
     })
@@ -3044,7 +3043,6 @@ fn a_worker_arms_its_executor_against_its_own_cancellation() {
 #[test]
 fn a_cancelled_top_level_run_stops_and_frees_its_heap() {
     use std::sync::Arc;
-    use std::sync::atomic::AtomicBool;
     noeta_stdlib::registry::default_seeded();
     let src = "mut i = 0\nwhile true { i = i + 1 }\necho i\n";
     let source = Source::new(SourceId::FIRST, "test.noe", src);
@@ -3055,7 +3053,11 @@ fn a_cancelled_top_level_run_stops_and_frees_its_heap() {
     let out = VmBackend::new().run_module_with(
         &module,
         RunOptions {
-            cancel: Some(Arc::new(AtomicBool::new(true))),
+            cancel: Some({
+                let signal = Arc::new(noeta_stdlib::CancelSignal::new());
+                signal.request();
+                signal
+            }),
             ..RunOptions::default()
         },
     );
@@ -3092,11 +3094,10 @@ fn a_cancelled_top_level_run_stops_and_frees_its_heap() {
 #[test]
 fn native_code_observes_a_cancellation_request_at_a_loop_header() {
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
-    let flag = Arc::new(AtomicBool::new(false));
-    let armer = Arc::clone(&flag);
+    let signal = Arc::new(noeta_stdlib::CancelSignal::new());
+    let armer = Arc::clone(&signal);
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         noeta_stdlib::registry::default_seeded();
@@ -3108,13 +3109,13 @@ fn native_code_observes_a_cancellation_request_at_a_loop_header() {
         // Ask for the stop once the loop is definitely running natively.
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(150));
-            armer.store(true, Ordering::Relaxed);
+            armer.request();
         });
         let out = VmBackend::new().run_module_with(
             &module,
             RunOptions {
                 tiering: Tiering::Forced,
-                cancel: Some(flag),
+                cancel: Some(signal),
                 ..RunOptions::default()
             },
         );

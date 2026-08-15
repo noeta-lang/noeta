@@ -9,6 +9,14 @@ This is the non-sandbox side of the host/executor split. Where `SandboxHost`/`Sa
 
 Disk IO runs on a per-isolate `tokio` `current_thread` runtime, matching the shared-nothing isolate model (no work-stealing across heaps). The `Host` surface is still synchronous, so each IO method drives its future to completion with `block_on` at the leaf and returns a plain value. Building the IO path on `tokio` now means the `async`/`await` surface layered on later is additive (these `tokio::fs` calls get `await`ed instead of `block_on`-ed) rather than a rewrite. The filesystem is real-disk (paths relative to the process working directory) with a directory hierarchy mapping onto `tokio::fs`. This crate is `unsafe`-free.
 
+## Interrupting a blocking leaf
+
+Everything here that can wait indefinitely is a party to the run's cancellation. `Cancellable::set_cancel` hands the host the run's flag and its `CancelWake`; the host registers **one** hook, and that hook rouses every live party — a child's output buffer (`notify_all` under its own lock), a process exit slot, an open stream (a sentinel down its frame channel), and a request in flight (a `Notify` the fetch is `select!`ed against). The flag decides, the wake only rouses: a roused party re-reads the flag and returns `ErrorKind::Interrupted`, and the safepoint the unwind reaches is where the cancellation is actually honored.
+
+The hard rule behind the shape is that **ending a wait is not ending the work**. A blocking leaf's body runs on a pool the run's teardown waits for, so a leaf that is abandoned rather than returned from turns a leaked thread into a hung run — which is why every interruptible leaf returns an error and none is dropped mid-flight, and why a `wait` on a cancellable run detaches its reap onto a background thread instead of blocking in `waitpid`, which nothing in this process can end early. File reads stay uninterruptible: they block in the operating system, and a file read that never returns is a FIFO or a character device rather than a file.
+
+An unarmed host — every run that cannot be cancelled — takes none of this: the flag can never read true, so each leaf blocks exactly as it would without the seam.
+
 ## Streaming HTTP
 
 The real host answers the `Network` capability's streaming seam two ways.

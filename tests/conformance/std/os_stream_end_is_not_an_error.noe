@@ -1,0 +1,40 @@
+// **End of output is `none`, and only end of output is `none`** (interruptible-io).
+//
+// A blocking read of a child's stdout now has three answers rather than two: a line, the end of the
+// stream, and "the run this read belongs to is being cancelled". The third is an error precisely so
+// it cannot be mistaken for the second — a child that has stopped talking and a child we have
+// stopped listening to are different things, and a caller told "end of stream" for the second would
+// go on to whatever follows its loop.
+//
+// Cancellation is not expressible here: the sandbox has no run to cancel, its scripted child's
+// output is complete at spawn, and nothing in it blocks. That is what this case pins — the answer
+// on the ordinary path is unchanged and never an error, through every door on the same handle: the
+// line reads, the character read, stderr's independent cursor, and the awaitable twins.
+// expect: stdout "some(one)"
+// expect: stdout "some(two)"
+// expect: stdout "none"
+// expect: stdout "none"
+// expect: stdout "none"
+// expect: stdout "some(e)"
+// expect: stdout "none"
+// expect: stdout "none"
+// expect: exit 0
+use std.{os}
+
+async fn drain(): void {
+    p = os.spawn("echo", ["one\ntwo"])
+    echo p.read_line()
+    echo p.read_line()
+    // Exhausted. Every further read — of a line, of characters, awaited or not — answers `none`,
+    // and the handle stays perfectly usable rather than reporting a failure.
+    echo p.read_line()
+    echo p.read(4)
+    echo p.read_line_async().await
+
+    // stderr is exhausted on its own cursor, and reads the same way.
+    e = os.spawn("status", ["0", "e"])
+    echo e.read_err_line()
+    echo e.read_err_line()
+    echo e.read_err_line_async().await
+}
+drain().await

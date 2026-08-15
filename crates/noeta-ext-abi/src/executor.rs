@@ -240,6 +240,61 @@ impl CancelWake {
     }
 }
 
+/// A run's whole cancellation token: the flag its safepoints poll, and the [`CancelWake`] that
+/// rouses whatever is blocked outside them. **One object because they are one request** — asking a
+/// run to stop without rousing it reaches only the parts that happen to be looking, and every hole
+/// this seam exists to close is a party that is not.
+///
+/// Carried as an `Arc` by everyone who can stop a run, and by everyone who must observe being
+/// stopped. The two halves stay separately shareable because their consumers want different
+/// things: the interpreter's safepoint and the JIT's baked poll want the bare
+/// [`flag`](CancelSignal::flag), and a blocking host leaf wants the [`wake`](CancelSignal::wake) to
+/// register on. Handing both out as `Arc`s rather than references is what keeps the JIT's immediate
+/// valid — it holds the flag alive for as long as the compiled body can execute.
+#[derive(Debug, Default)]
+pub struct CancelSignal {
+    flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    wake: std::sync::Arc<CancelWake>,
+}
+
+impl CancelSignal {
+    /// A fresh, unrequested signal.
+    pub fn new() -> CancelSignal {
+        CancelSignal::default()
+    }
+
+    /// Ask the run to stop: set the flag, then rouse anything blocked outside a safepoint. **That
+    /// order is the contract** — a hook registered after the wake fires runs immediately, so a
+    /// party arriving late reads a flag that is already true rather than waiting for a wake that
+    /// has been and gone.
+    pub fn request(&self) {
+        self.flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.wake.wake();
+    }
+
+    /// Whether a stop has been asked for and not yet honored.
+    pub fn requested(&self) -> bool {
+        self.flag.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Record that the request has been **honored**, clearing it. The unwind it starts runs user
+    /// code — destructors, and teardown behind them — which performs real IO; leaving the request
+    /// standing would tell every leaf that runs on the way out to stop before it did anything.
+    pub fn honored(&self) {
+        self.flag.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The poll half, for a safepoint (and for the JIT, which bakes its address).
+    pub fn flag(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        std::sync::Arc::clone(&self.flag)
+    }
+
+    /// The rouse half, for anything that can block outside a safepoint.
+    pub fn wake(&self) -> std::sync::Arc<CancelWake> {
+        std::sync::Arc::clone(&self.wake)
+    }
+}
+
 /// The async scheduler's clock + timer seam, injected into each backend exactly like [`crate::Host`].
 ///
 /// The cooperative scheduler (round-robin polling of the tasks in a `concurrent` scope) lives in the

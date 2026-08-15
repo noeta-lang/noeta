@@ -883,3 +883,51 @@ fn run_real_isolate_cancel_reaches_a_worker_parked_in_one_long_sleep() {
          599.8s; took {elapsed:?}"
     );
 }
+
+/// **The read half**, and the row's headline example. Its sibling above parks the worker in a
+/// timer, which `RealExecutor::advance` owns; this one parks it in a *host* leaf — a blocking read
+/// of a child's stdout — which the executor knows nothing about. Ending the executor's wait cannot
+/// help here, because there is no wait: the worker is asleep on a condvar inside the host, holding
+/// the buffer of a child that has nothing to say.
+///
+/// The house rule again, structurally: `cat` with a piped stdin nobody writes to and nobody closes
+/// produces no output and does not exit, so this program has exactly one way to terminate. A broken
+/// interruption runs into `assert_cmd`'s 60 s bound and fails loudly rather than passing slowly.
+#[cfg(unix)]
+#[test]
+fn run_real_isolate_cancel_reaches_a_worker_parked_in_a_child_read() {
+    let file = temp_program(
+        "isolate_cancel_child_read",
+        "use std.io\n\
+         use std.os\n\
+         use std.task.{sleep}\n\
+         async fn listener(): int {\n\
+         p = os.spawn(\"cat\", [])\n\
+         p.read_line()\n\
+         return 1\n\
+         }\n\
+         async fn run(): int {\n\
+         concurrent {\n\
+         h = isolate listener()\n\
+         sleep(200).await\n\
+         h.cancel()\n\
+         io.outln(match h.join() { Ok(v) => \"ok=\" ~ v, Err(_) => \"stopped\" })\n\
+         }\n\
+         return 0\n\
+         }\n\
+         echo run().await",
+    );
+    let start = std::time::Instant::now();
+    lang()
+        .arg("run")
+        .arg(&file)
+        .timeout(std::time::Duration::from_secs(60))
+        .assert()
+        .success()
+        .stdout("stopped\n0\n");
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(20),
+        "a cancelled worker parked in a child read must be roused inside the host; took {elapsed:?}"
+    );
+}

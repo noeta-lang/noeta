@@ -57,7 +57,7 @@ pub fn run_module_real_host(
     app_id: Option<String>,
     jit_report: bool,
     live_output: bool,
-    cancel: Option<noeta_vm::CancelFlag>,
+    cancel: Option<noeta_vm::RunCancel>,
 ) -> (RunResult, Vec<TraceFrame>, Option<JitReport>) {
     let factory: noeta_vm::IsolateFactory = Arc::new(move || {
         let host: Box<dyn noeta_stdlib::Host> = Box::new(

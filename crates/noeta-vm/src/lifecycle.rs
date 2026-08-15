@@ -146,6 +146,12 @@ pub(crate) struct IsolateState {
     /// is already parked), so the poll is a never-taken, perfectly-predicted branch on an ordinary
     /// run.
     pub(crate) cancel_flag: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// The whole token [`cancel_flag`](Self::cancel_flag) is the poll half of, kept so honoring a
+    /// request can **clear** it. That matters because the unwind an honored cancellation starts
+    /// runs user code — destructors, and the teardown behind them — which performs real IO: a
+    /// request left standing would tell every host leaf on the way out to stop before it did
+    /// anything. `None` exactly when `cancel_flag` is.
+    pub(crate) cancel_signal: Option<Arc<noeta_stdlib::CancelSignal>>,
     /// Set when this worker observed its [`cancel_flag`](Self::cancel_flag) at a safepoint and
     /// unwound. Distinguishes the resulting `Abort` from a genuine runtime error, so
     /// [`run_isolate_worker`](crate::lifecycle::run_isolate_worker) ships
@@ -159,16 +165,13 @@ pub(crate) struct IsolateState {
 pub(crate) struct IsolateSlot {
     pub(crate) result: std::sync::mpsc::Receiver<IsolateReport>,
     pub(crate) handle: Option<std::thread::JoinHandle<()>>,
-    /// Set by the parent's `cancel_task` (isolate-cancel). The worker reads it with a relaxed load
-    /// at every safepoint; nothing else writes it, so it only ever goes `false → true`.
-    pub(crate) cancel: Arc<std::sync::atomic::AtomicBool>,
-    /// The **wake half** of that request (interruptible-io): fired by the parent right after the
-    /// flag store, so a worker blocked *outside* the interpreter — parked in its executor's
-    /// real-time sleep for one long `sleep(ms)` — returns from that block and reaches the safepoint
-    /// that reads the flag. The worker registers its executor's hook on it at startup (before any
-    /// user code runs); a `CancelWake` with no hooks registered is inert, so this costs nothing on
-    /// a worker whose executor cannot block.
-    pub(crate) wake: Arc<noeta_stdlib::CancelWake>,
+    /// This worker's cancellation token, requested by the parent's `cancel_task` (isolate-cancel).
+    /// Its flag is what the worker reads at every safepoint; its wake is what rouses the worker
+    /// when the safepoints are exactly what it has left — parked in its executor's real-time sleep
+    /// for one long `sleep(ms)`, or blocked in a host read of a child that has stopped talking. A
+    /// wake with no hooks registered is inert, so this costs nothing on a worker that cannot block
+    /// outside the interpreter.
+    pub(crate) signal: Arc<noeta_stdlib::CancelSignal>,
 }
 
 /// What a worker isolate ships home when its thread finishes (isolate-cancel). Three terminal
@@ -748,6 +751,7 @@ impl<'m> Vm<'m> {
                 promote_sources: Vec::new(),
                 unshippable_globals: HashMap::new(),
                 cancel_flag: None,
+                cancel_signal: None,
                 cancel_observed: false,
             },
             out: RunOutput {
@@ -1053,19 +1057,23 @@ pub(crate) fn run_isolate_worker(
     trace: Option<noeta_stdlib::TraceContext>,
     registry: Option<&'static noeta_stdlib::registry::Registry>,
     stall_tracked: bool,
-    cancel: Arc<std::sync::atomic::AtomicBool>,
-    cancel_wake: Arc<noeta_stdlib::CancelWake>,
+    cancel: Arc<noeta_stdlib::CancelSignal>,
     span: Span,
 ) -> IsolateReport {
     noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
-    let (host, mut executor) = factory();
-    // Arm the executor against this worker's cancellation (interruptible-io) *before* the VM is
-    // built, so the request can never land in the window between construction and the first
-    // suspension: a wake that already fired runs the hook at registration. The executor is built on
-    // THIS thread by the factory (a `RealExecutor` owns a tokio runtime, which is not `Send`), which
-    // is why the wake travels out to the parent through a shared handle rather than the executor
-    // travelling home.
-    executor.set_cancel_wake(cancel_wake);
+    let (mut host, mut executor) = factory();
+    // Arm the executor and the host against this worker's cancellation (interruptible-io) *before*
+    // the VM is built, so the request can never land in the window between construction and the
+    // first suspension: a wake that already fired runs the hook at registration. The executor is
+    // built on THIS thread by the factory (a `RealExecutor` owns a tokio runtime, which is not
+    // `Send`), which is why the wake travels out to the parent through a shared handle rather than
+    // the executor travelling home.
+    //
+    // Both, and for different holes. The executor's hook ends a *wait* — a worker parked on a long
+    // timer. The host's ends a *read* — a worker parked on a child that has stopped talking, which
+    // no timer will ever end. They share the token and nothing else.
+    host.set_cancel(cancel.flag(), cancel.wake());
+    executor.set_cancel_wake(cancel.wake());
     let mut wvm = Vm::load(module, host, executor);
     // Per-isolate profiling (injected by `noeta profile`): this worker gets its own collector, and
     // the seam propagates so isolates IT spawns are profiled too. The display name is the spawned
@@ -1100,7 +1108,8 @@ pub(crate) fn run_isolate_worker(
     wvm.isolates.isolate_factory = Some(factory.clone());
     // Install the parent's cancellation flag (isolate-cancel) *before* any user code runs, so a
     // cancel that lands during startup is honored at the body's first safepoint.
-    wvm.isolates.cancel_flag = Some(cancel);
+    wvm.isolates.cancel_flag = Some(cancel.flag());
+    wvm.isolates.cancel_signal = Some(cancel);
     // Seed the worker's globals from the parent's snapshot so the isolate body can call other
     // top-level functions (and read value-type constants). Slots match: parent and worker share the
     // same `Arc<Module>`, so a global's `GlobalId` is identical on both sides (P-VMT-GSLOT).
@@ -1866,10 +1875,17 @@ impl<'m> Vm<'m> {
         self.error(DiagnosticCode::InvalidTypeArguments, span, message)
     }
 
-    /// Convert a native-dispatch [`noeta_stdlib::StdError`] into the unwind token. The
-    /// distinguished `Exit` kind (`os.exit(code)`, stdlib-gaps) is NOT a diagnostic: it records
-    /// the requested code and aborts cleanly — nothing is reported, stdout is kept. Mirrors the
-    /// tree-walker's `std_dispatch_error`.
+    /// Convert a native-dispatch [`noeta_stdlib::StdError`] into the unwind token. Two kinds are
+    /// NOT diagnostics. `Exit` (`os.exit(code)`, stdlib-gaps) records the requested code and aborts
+    /// cleanly — nothing is reported, stdout is kept. `Interrupted` (interruptible-io) is a
+    /// cancellation arriving through a value rather than through a safepoint: a host leaf blocked
+    /// outside the interpreter reads the same flag a safepoint would and stops, so honoring it here
+    /// is honoring it in the one place that decides. Reporting it instead would make a *cancelled*
+    /// worker a *failed* one — its parent's `join()` re-raises a panic rather than yielding the
+    /// cancelled outcome, which is the opposite of what asking it to stop means.
+    ///
+    /// Mirrors the tree-walker's `std_dispatch_error` (which has no run-level cancellation, so no
+    /// leaf there can produce `Interrupted`).
     pub(crate) fn std_dispatch_error(
         &mut self,
         error: noeta_stdlib::StdError,
@@ -1878,6 +1894,12 @@ impl<'m> Vm<'m> {
         if let noeta_stdlib::ErrorKind::Exit(code) = error.kind {
             self.out.requested_exit = Some(code);
             return Abort;
+        }
+        // Only while the request is live. An interruption that outlives the cancellation it belongs
+        // to — the flag is cleared the moment it is honored — is a real IO failure, and is reported
+        // as one rather than silently ending a run nobody asked to stop.
+        if error.kind == noeta_stdlib::ErrorKind::Interrupted && self.cancel_requested() {
+            return self.observe_cancel();
         }
         self.error(stdlib_error_code(error.kind), span, error.message)
     }

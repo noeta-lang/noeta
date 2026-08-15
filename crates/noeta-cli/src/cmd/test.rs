@@ -135,9 +135,9 @@ impl Bound {
             Overrun::Abandoned => format!(
                 "{bound}. It was asked to stop and did not, so its thread was abandoned: it keeps \
                  running — holding its isolate, its heap and any open files or sockets — until \
-                 this run exits. A test that will not stop is blocked inside a native call (a \
-                 socket or pipe read, a subprocess wait) that no safepoint can reach; put the \
-                 deadline on that operation rather than on the test around it"
+                 this run exits. A test that will not stop is blocked in a file read that the \
+                 operating system will not return from — a FIFO or a character device rather than \
+                 a file; put the deadline on that read rather than on the test around it"
             ),
         }
     }
@@ -869,7 +869,7 @@ fn run_one_test_bounded(
     let (tx, rx) = mpsc::channel();
     // The case's stop request. Armed before the run starts, so a deadline that expires while the
     // case is still compiling is honored at the body's very first safepoint.
-    let cancel: noeta_vm::CancelFlag = Arc::new(AtomicBool::new(false));
+    let cancel: noeta_vm::RunCancel = Arc::new(noeta_stdlib::CancelSignal::new());
     let spawned = {
         let (setup, opts, owned) = (Arc::clone(setup), Arc::clone(opts), case.clone());
         let cancel = Arc::clone(&cancel);
@@ -974,11 +974,13 @@ fn run_one_test_bounded(
 fn stop_overrun_case(
     handle: thread::JoinHandle<()>,
     done: &mpsc::Receiver<TestOutcome>,
-    cancel: &noeta_vm::CancelFlag,
+    cancel: &noeta_vm::RunCancel,
 ) -> (Overrun, String) {
-    // Ask. Relaxed is enough: the flag only ever goes `false → true` and the case's reaction —
-    // unwinding its own frames — is entirely local to its thread.
-    cancel.store(true, Ordering::Relaxed);
+    // Ask — and **rouse**, which is the half a bare flag store cannot do. A case parked in a long
+    // `sleep`, or blocked reading a child that has stopped talking, reaches no safepoint at all, so
+    // the flag alone would be observed only when that block ended on its own; the request's wake
+    // ends it, and the case is then joined below rather than abandoned.
+    cancel.request();
     match done.recv_timeout(CANCEL_GRACE) {
         // It stopped when asked (or, harmlessly, finished on its own in the same instant). Join it:
         // the send is the last thing its closure does, so this returns at once. Its *verdict* is
@@ -1021,7 +1023,7 @@ pub(crate) fn run_one_test(
     opts: &noeta_check::CheckOptions,
     case: &TestCase,
     span: Span,
-    cancel: Option<noeta_vm::CancelFlag>,
+    cancel: Option<noeta_vm::RunCancel>,
 ) -> TestOutcome {
     let args = match &case.arg {
         CaseArg::None => Vec::new(),

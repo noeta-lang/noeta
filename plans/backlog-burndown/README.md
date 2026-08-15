@@ -1,6 +1,6 @@
 # Arc — Backlog burndown (2026-08)
 
-Status: in progress. Slice 2 is done; slices 1, 3 and 4 are ready; slice 5 is ready but larger; slice 6 needs a decision that is not mine.
+Status: in progress. Slices 1–5 are done; slice 6 needs a decision that is not mine.
 
 ## How this list was derived
 
@@ -42,7 +42,7 @@ Three follow-ups fall out of this, and none is in the slices below because they 
 | 2 | The oracles see what they claim to see | 2 | ✅ **done** |
 | 3 | Doors that exist on one side only | 4 | yes |
 | 4 | Two small identity guards | 1 | yes |
-| 5 | Cancellation reaches blocking work | 2 | yes, larger |
+| 5 | Cancellation reaches blocking work | 2 | ✅ **done** |
 | 6 | The fmt safety gate stops being a proxy | 1 | needs a decision |
 
 **Slice 2 goes first.** It is the only one that changes what the *other* slices can prove.
@@ -156,7 +156,7 @@ A local tree declaring a reserved scope is refused with the same diagnostic the 
 
 ## Slice 5 — Cancellation reaches blocking work
 
-Status: todo, larger. Design already written: [`interruptible-host-io.md`](../interruptible-host-io.md)
+Status: **done** (2026-08-15). Its design note is deleted with it, as `plans/README.md` prescribes.
 
 ### Goal
 
@@ -175,6 +175,16 @@ process reads → sync http + streaming → `os_proc_wait` → `fs` (the last ne
 ### Done when
 
 A worker blocked in a host read stops at the next safepoint after a cancel, with the leaf returning `Interrupted` rather than being abandoned; a timed-out `@test` case is joined rather than detached; the existing allocator-segfault regression guard stays green.
+
+### Outcome
+
+All three met, and the plan's slice order held: process reads, then sync http + streaming, then `os_proc_wait`, then the stated decision to leave `fs`. Two things the build found that the design did not.
+
+**`Interrupted` had to be honored, not reported.** The plan's sentence — "the worker's very next safepoint turns it into the ordinary cancellation unwind" — was an assumption, and it was wrong: an `StdError` unwinds as a diagnostic, so the first end-to-end run reported `isolate panicked: read_line stopped…` and the parent's `join()` re-raised it. A *cancelled* worker was becoming a *failed* one. The fix belongs in `std_dispatch_error`, beside the identical interception `Exit` already had.
+
+**That function was reached from 1 of 30 sites.** The other 29 spelled `self.error(stdlib_error_code(e.kind), span, e.message)` inline — [one rule spelled thirty times](../../AGENTS.md), and the reason the first fix appeared to do nothing. All of them now route through it, which also gives `Exit` the interception those sites silently lacked.
+
+The `noeta test` half cost less than the row priced: keeping the flag as its own `Arc<AtomicBool>` *inside* `CancelSignal` rather than inline left the JIT's baked immediate untouched, so the "wants `--jit-differential --cancel-poll` as its gate" caveat did not apply.
 
 ---
 

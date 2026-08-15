@@ -699,7 +699,7 @@ mod tests {
 
         noeta_ext_abi::delegate_host!(RecordingHost => base :
             FileReader, FileSystem, Rng, Console, Os, Env, Entropy, Ids, Network, P2pProvider,
-            Tracing, Metrics, Logging);
+            Cancellable, Tracing, Metrics, Logging);
 
         let policy = RetryPolicy::new(2);
         let expected: Vec<i64> = (0..policy.max_retries)

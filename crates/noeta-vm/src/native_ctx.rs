@@ -16,7 +16,7 @@ use noeta_stdlib::{
 use noeta_value::Value;
 
 use crate::values::{materialize_ext, materialize_native};
-use crate::{Abort, Poll, Vm, isolate, stdlib_error_code};
+use crate::{Abort, Poll, Vm, isolate};
 
 pub(crate) struct VmCtx<'c, 'm> {
     vm: &'c mut Vm<'m>,
@@ -1058,7 +1058,7 @@ impl<'m> Vm<'m> {
             }
             Err(CtxError::Std(e)) => {
                 drop(ctx);
-                Err(self.error(stdlib_error_code(e.kind), span, e.message))
+                Err(self.std_dispatch_error(e, span))
             }
             Err(CtxError::Abort) => Err(Abort),
         }
@@ -1148,7 +1148,7 @@ impl<'m> Vm<'m> {
             }
             Err(CtxError::Std(e)) => {
                 drop(ctx);
-                Err(self.error(stdlib_error_code(e.kind), span, e.message))
+                Err(self.std_dispatch_error(e, span))
             }
             // The abort's diagnostic is already recorded (the re-entry recorded it); propagate.
             Err(CtxError::Abort) => Err(Abort),

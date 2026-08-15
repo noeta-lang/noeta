@@ -340,6 +340,9 @@ pub(crate) fn stdlib_error_code(kind: noeta_stdlib::ErrorKind) -> DiagnosticCode
         noeta_stdlib::ErrorKind::Bounds => DiagnosticCode::IndexOutOfBounds,
         noeta_stdlib::ErrorKind::UnknownName => DiagnosticCode::UnknownName,
         noeta_stdlib::ErrorKind::Io => DiagnosticCode::IoError,
+        // An operation that stopped because its run is stopping — see the tree-walker's twin for
+        // why it shares `Io`'s code.
+        noeta_stdlib::ErrorKind::Interrupted => DiagnosticCode::IoError,
         noeta_stdlib::ErrorKind::Panic => DiagnosticCode::Panic,
         noeta_stdlib::ErrorKind::ReactiveCycle => DiagnosticCode::ReactiveCycle,
         // Intercepted upstream (`Vm::std_dispatch_error`) — defensive mapping only.

@@ -7309,6 +7309,10 @@ fn std_error_code(kind: noeta_stdlib::ErrorKind) -> DiagnosticCode {
         noeta_stdlib::ErrorKind::Bounds => DiagnosticCode::IndexOutOfBounds,
         noeta_stdlib::ErrorKind::UnknownName => DiagnosticCode::UnknownName,
         noeta_stdlib::ErrorKind::Io => DiagnosticCode::IoError,
+        // An operation that stopped because its run is stopping. Normally invisible — the safepoint
+        // this unwind passes ends the run as cancelled — so it shares `Io`'s code rather than
+        // minting one nobody can trigger on purpose; its own message says what happened.
+        noeta_stdlib::ErrorKind::Interrupted => DiagnosticCode::IoError,
         // Intercepted upstream (`std_dispatch_error`) — defensive mapping only.
         noeta_stdlib::ErrorKind::Exit(_) => DiagnosticCode::Panic,
         noeta_stdlib::ErrorKind::Panic => DiagnosticCode::Panic,

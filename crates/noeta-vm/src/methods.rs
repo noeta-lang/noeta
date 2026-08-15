@@ -88,7 +88,7 @@ impl<'m> Vm<'m> {
                     let end = self.stdlib_opt_int(name, args, 1, len as i64, span)?;
                     if start < 0 || end < start || end as usize > len {
                         let error = noeta_stdlib::slice_bounds_error(start, end, len);
-                        return Err(self.error(stdlib_error_code(error.kind), span, error.message));
+                        return Err(self.std_dispatch_error(error, span));
                     }
                     let indices: Vec<usize> = (start as usize..end as usize).collect();
                     return Ok(list.packed_select(&indices));
@@ -176,7 +176,7 @@ impl<'m> Vm<'m> {
                     .any(|&item| noeta_value::compare_values(items[0], item).is_none())
                 {
                     let error = noeta_stdlib::unorderable_error(name);
-                    return Err(self.error(stdlib_error_code(error.kind), span, error.message));
+                    return Err(self.std_dispatch_error(error, span));
                 }
                 let mut sorted = items;
                 sorted.sort_by(|&a, &b| {
@@ -194,7 +194,7 @@ impl<'m> Vm<'m> {
                 let end = self.stdlib_opt_int(name, args, 1, len as i64, span)?;
                 if start < 0 || end < start || end as usize > len {
                     let error = noeta_stdlib::slice_bounds_error(start, end, len);
-                    return Err(self.error(stdlib_error_code(error.kind), span, error.message));
+                    return Err(self.std_dispatch_error(error, span));
                 }
                 let slice: Vec<Value> = items[start as usize..end as usize].to_vec();
                 for &element in &slice {
@@ -238,7 +238,7 @@ impl<'m> Vm<'m> {
                     }
                     None => {
                         let error = noeta_stdlib::unorderable_error(name);
-                        Err(self.error(stdlib_error_code(error.kind), span, error.message))
+                        Err(self.std_dispatch_error(error, span))
                     }
                 }
             }
@@ -334,7 +334,7 @@ impl<'m> Vm<'m> {
                     }
                     None => {
                         let error = noeta_stdlib::unorderable_error(name);
-                        Err(self.error(stdlib_error_code(error.kind), span, error.message))
+                        Err(self.std_dispatch_error(error, span))
                     }
                 }
             }
@@ -365,7 +365,7 @@ impl<'m> Vm<'m> {
             Some(items) => Ok(items),
             None => {
                 let error = noeta_stdlib::type_error(name, "set");
-                Err(self.error(stdlib_error_code(error.kind), span, error.message))
+                Err(self.std_dispatch_error(error, span))
             }
         }
     }
@@ -425,7 +425,7 @@ impl<'m> Vm<'m> {
             return self.call_ctx_function(module, func, args, span);
         }
         let error = noeta_stdlib::no_function_error(module, func);
-        Err(self.error(stdlib_error_code(error.kind), span, error.message))
+        Err(self.std_dispatch_error(error, span))
     }
 
     /// Dispatch a method on an extern-type receiver (extern-types X1) through its registered
@@ -509,7 +509,7 @@ impl<'m> Vm<'m> {
                 Ok(Value::make_async_io(id))
             }
             Ok(out) => Ok(materialize_native(out)),
-            Err(error) => Err(self.error(stdlib_error_code(error.kind), span, error.message)),
+            Err(error) => Err(self.std_dispatch_error(error, span)),
         }
     }
 
@@ -604,7 +604,7 @@ impl<'m> Vm<'m> {
                 Ok(materialize_native(*ret))
             }
             Ok(out) => Ok(materialize_native(out)),
-            Err(error) => Err(self.error(stdlib_error_code(error.kind), span, error.message)),
+            Err(error) => Err(self.std_dispatch_error(error, span)),
         }
     }
 
@@ -652,7 +652,7 @@ impl<'m> Vm<'m> {
                 ),
             )),
             Ok(out) => Ok(materialize_native(out)),
-            Err(error) => Err(self.error(stdlib_error_code(error.kind), span, error.message)),
+            Err(error) => Err(self.std_dispatch_error(error, span)),
         }
     }
 
@@ -1064,7 +1064,7 @@ impl<'m> Vm<'m> {
             Ok(k)
         } else {
             let error = noeta_stdlib::map_key::map_key_error(key.type_name());
-            Err(self.error(stdlib_error_code(error.kind), span, error.message))
+            Err(self.std_dispatch_error(error, span))
         }
     }
 
@@ -1116,7 +1116,7 @@ impl<'m> Vm<'m> {
             return Ok(map.map_get_key(&k));
         }
         let error = noeta_stdlib::map_key::map_key_error(key.type_name());
-        Err(self.error(stdlib_error_code(error.kind), span, error.message))
+        Err(self.std_dispatch_error(error, span))
     }
 
     /// In-place `add`/`remove` for a reuse-marked set self-update (`s = s.add(x)` / `s = s.remove(x)`).
@@ -1154,7 +1154,7 @@ impl<'m> Vm<'m> {
                 if !orderable {
                     release(set);
                     let error = noeta_stdlib::unorderable_error(name);
-                    return Err(self.error(stdlib_error_code(error.kind), span, error.message));
+                    return Err(self.std_dispatch_error(error, span));
                 }
                 // The set gains an owned reference only when the element is newly inserted.
                 if set.set_insert_sorted(target) {
@@ -1185,7 +1185,7 @@ impl<'m> Vm<'m> {
             Ok(())
         } else {
             let error = noeta_stdlib::arity_error(name, expected, args.len());
-            Err(self.error(stdlib_error_code(error.kind), span, error.message))
+            Err(self.std_dispatch_error(error, span))
         }
     }
 
@@ -1203,7 +1203,7 @@ impl<'m> Vm<'m> {
             Ok(())
         } else {
             let error = noeta_stdlib::arity_error(name, max, args.len());
-            Err(self.error(stdlib_error_code(error.kind), span, error.message))
+            Err(self.std_dispatch_error(error, span))
         }
     }
 
@@ -1213,7 +1213,7 @@ impl<'m> Vm<'m> {
             Some(s) => Ok(s),
             None => {
                 let error = noeta_stdlib::type_error(name, "string");
-                Err(self.error(stdlib_error_code(error.kind), span, error.message))
+                Err(self.std_dispatch_error(error, span))
             }
         }
     }
@@ -1231,7 +1231,7 @@ impl<'m> Vm<'m> {
             Some(i) => Ok(i),
             None => {
                 let error = noeta_stdlib::type_error(name, "int");
-                Err(self.error(stdlib_error_code(error.kind), span, error.message))
+                Err(self.std_dispatch_error(error, span))
             }
         }
     }

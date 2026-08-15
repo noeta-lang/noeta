@@ -408,6 +408,17 @@ macro_rules! __delegate_host_capability {
             }
         }
     };
+    ($ty:ty, $field:ident, Cancellable) => {
+        impl $crate::Cancellable for $ty {
+            fn set_cancel(
+                &mut self,
+                flag: ::std::sync::Arc<::std::sync::atomic::AtomicBool>,
+                wake: ::std::sync::Arc<$crate::CancelWake>,
+            ) {
+                self.$field.set_cancel(flag, wake)
+            }
+        }
+    };
     ($ty:ty, $field:ident, Tracing) => {
         impl $crate::Tracing for $ty {
             fn tel_enabled(&self) -> bool {

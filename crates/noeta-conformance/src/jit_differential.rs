@@ -13,7 +13,6 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 use noeta_backend::RunResult;
 use noeta_db::LangDatabase;
@@ -57,11 +56,12 @@ pub enum Arm {
 }
 
 impl Arm {
-    /// The flag to arm the forced-JIT run with — a fresh, never-set one per case.
-    fn flag(self) -> Option<Arc<AtomicBool>> {
+    /// The cancellation token to arm the forced-JIT run with — a fresh, never-requested one per
+    /// case, so the codegen emits its loop-header poll while nothing ever asks the run to stop.
+    fn flag(self) -> Option<Arc<noeta_stdlib::CancelSignal>> {
         match self {
             Arm::Plain | Arm::AotBodies => None,
-            Arm::CancelPoll => Some(Arc::new(AtomicBool::new(false))),
+            Arm::CancelPoll => Some(Arc::new(noeta_stdlib::CancelSignal::new())),
         }
     }
 

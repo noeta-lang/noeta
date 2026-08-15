@@ -71,6 +71,14 @@ pub enum NetErrorKind {
     InvalidUrl,
     /// A transport failure that does not fit the classes above.
     Other,
+    /// The request was abandoned because the run it belongs to is being cancelled
+    /// (interruptible-io) — not a property of the network at all.
+    ///
+    /// Its own kind rather than [`NetErrorKind::Other`] because a program that recovers from a
+    /// transport failure would otherwise treat a shutdown as a blip and try again. Retrying is
+    /// exactly wrong here (see [`NetErrorKind::retryable`]), and the caller's very next safepoint
+    /// ends the run regardless, so the only useful thing a `kind()` match can do with this is stop.
+    Interrupted,
 }
 
 impl NetErrorKind {
@@ -85,6 +93,7 @@ impl NetErrorKind {
             NetErrorKind::Status => "status",
             NetErrorKind::InvalidUrl => "invalid_url",
             NetErrorKind::Other => "other",
+            NetErrorKind::Interrupted => "interrupted",
         }
     }
 
@@ -96,7 +105,9 @@ impl NetErrorKind {
     /// `Other` are conservatively **not** retried, because a request that reached the server and
     /// came back mangled may well have been applied — retrying it risks a duplicate write.
     /// `Status` is not retried here either: which statuses are worth another attempt is a policy
-    /// question the retry configuration answers, not a property of the kind.
+    /// question the retry configuration answers, not a property of the kind. `Interrupted` is never
+    /// retried, and that is the strongest case of all: the run is stopping, so a retry is work
+    /// nobody will read.
     pub fn retryable(self) -> bool {
         matches!(
             self,
@@ -147,7 +158,13 @@ impl NetError {
 impl From<NetError> for crate::StdError {
     fn from(error: NetError) -> crate::StdError {
         crate::StdError {
-            kind: crate::ErrorKind::Io,
+            // A cancelled request keeps saying so across the seam: the aborting door must end the
+            // run as *cancelled* rather than report a failed one, and this is where the kind that
+            // decides that is chosen.
+            kind: match error.kind {
+                NetErrorKind::Interrupted => crate::ErrorKind::Interrupted,
+                _ => crate::ErrorKind::Io,
+            },
             message: error.message(),
         }
     }

@@ -185,9 +185,22 @@ concurrent {
 
 - **It does not undo work already done.** A cancelled task keeps every file it wrote, every message it sent, every row it inserted. `Err(Cancelled)` means "this produced no value", not "this never happened" — a caller that needs the effects reverted has to revert them.
 - **A request that arrives too late is not a cancellation.** If the body finished before the request was noticed, `join` reports `Ok(v)`. It never claims work that ran to completion was cancelled.
-- **It cannot preempt a native call.** An isolate blocked inside the host — a pipe read, a socket read, a blocking syscall — is not executing Noeta, so it reaches no safepoint and does not stop until that call returns. This is the one case where a cancel can leave you waiting indefinitely, and the fix is a deadline on the operation itself rather than a cancel around it. It applies to the `_async` twins too: awaiting `fs.read_async` or `p.read_line_async()` frees the *scheduler* to run your other tasks, but the read itself still has to return before the isolate can finish stopping.
+- **It does not preempt a native call mid-flight.** An isolate inside the host is not executing Noeta and reaches no safepoint, so the call ends *itself* and the isolate stops at the safepoint just after. Which calls can do that is the list below.
 
 **A long `sleep` is cancellable.** A worker parked in `sleep(3000).await` is not running Noeta either — its clock advance is a single real sleep — so the request is delivered with a **wake** that ends that sleep, and the worker stops at the round it wakes into: measured, a 3 s sleep cancelled 200 ms in ends the run at 0.21 s. Nothing is asked of your code: `while w < ms { sleep(5).await; w = w + 5 }` and `sleep(ms).await` stop alike, so there is no reason to sleep in slices.
+
+**Blocking work stops where it can.** The wait a cancel reaches is not only the scheduler's: a run that is stopping tells its host so, and every place the host would otherwise wait on something that may never come ends its wait and reports that the run is stopping. Four of them, all the cases where waiting is unbounded by nature:
+
+| Waiting on | Ends at the cancel |
+|---|---|
+| `p.read_line()` / `p.read(n)` / `p.read_err_line()` — a child that has not spoken | yes |
+| `p.wait()` — a child that has not exited | yes |
+| `http.fetch` / `http.try_fetch` — a request in flight | yes; the recoverable door reports `kind() == "interrupted"`, which `retryable()` answers false for |
+| a `stream(...)` body's next frame — a connection that has gone quiet | yes |
+
+Each of these stops *distinguishably*. A read that ends because the run is stopping is not an end of stream, and does not answer `none`: a child you have stopped listening to and a child that has stopped talking are different things, and code that treats the first as the second walks past the loop it was supposed to stop in.
+
+**A file read is the exception, and deliberately so.** `fs.read` and its `_async` twin are not interruptible: they block in the operating system, and the only file read that never returns is a FIFO or a character device — which is not really a file. Put a deadline on the operation rather than a cancel around it. The `_async` twins are otherwise as cancellable as their blocking forms: awaiting `p.read_line_async()` frees the scheduler to run your other tasks *and* the read itself ends at the cancellation, so nothing is left holding the isolate open.
 
 **Cancellation and the closing brace.** A `concurrent` block joins everything it spawned, and a cancelled member is no exception: the block waits for it to actually stop before returning. This is the load-bearing half of structured concurrency, and it is why a cancelled isolate is joined rather than abandoned — the alternative is a thread that outlives its scope, still holding its heap and its handles, still writing to the world the program thinks it has finished with.
 

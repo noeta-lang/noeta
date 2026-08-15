@@ -187,7 +187,19 @@
 /// `FieldRecipe::transient` / an empty `targets`). What they carry is `#[std.json.Transient]`: the
 /// marker that takes a field out of the wire form in both directions, and the placement list that
 /// makes writing it anywhere but a field a diagnostic instead of a no-op.
-pub const ABI_VERSION: u32 = 19;
+///
+/// **20** — a blocking host leaf can be interrupted. [`Host`] gained [`Cancellable`] as an arm of
+/// its union, so a run that can be cancelled hands its host the same flag-and-wake pair the
+/// executor already gets; [`ErrorKind`] gained `Interrupted` and [`NetErrorKind`] the transport
+/// spelling of it, for a leaf that ended its wait early; and [`CancelSignal`] bundles the flag and
+/// the [`CancelWake`] into the one object a canceller passes around. A **source break** only for a
+/// host that spells out the union it implements: the method defaults to a no-op, so
+/// `impl Cancellable for MyHost {}` restores it, and a host with nothing that blocks unboundedly
+/// wants exactly that. The rule it implements: ending a wait is not ending the work, so an
+/// interruptible leaf **returns** `Interrupted` rather than being abandoned — teardown waits for
+/// every blocking body that has started, and one that never returns turns a leaked thread into a
+/// hung run.
+pub const ABI_VERSION: u32 = 20;
 
 pub mod args;
 pub mod channel;
@@ -212,11 +224,11 @@ pub use ctx::{
     Cap, CtxDispatch, CtxError, CtxOut, CtxResult, ExtState, FutureTracing, HotReload, NativeCtx,
     PackedField, PackedView, Retained, Slot, TaskContext, capabilities, capability, ctx_arity,
 };
-pub use executor::{CancelWake, Executor, ExternIo, FsIo, RealBody, SandboxExecutor};
+pub use executor::{CancelSignal, CancelWake, Executor, ExternIo, FsIo, RealBody, SandboxExecutor};
 pub use extern_value::{ExternBox, ExternValue};
 pub use host::{
-    Clock, Console, Entropy, Env, FileReader, FileSystem, Host, Ids, Network, Os, P2p, P2pProvider,
-    ReadSource, RealP2pConfig, Rng, Stream, SyncStatus,
+    Cancellable, Clock, Console, Entropy, Env, FileReader, FileSystem, Host, Ids, Network, Os, P2p,
+    P2pProvider, ReadSource, RealP2pConfig, Rng, Stream, SyncStatus,
 };
 pub use map_key::{ExternKeyRef, MapKey, PackedKeyField};
 pub use net::{
@@ -287,6 +299,16 @@ pub enum ErrorKind {
     /// diagnostic: each backend intercepts it at the dispatch boundary, halts cleanly (stdout
     /// kept, nothing printed), and surfaces the code as the run's exit code.
     Exit(i32),
+    /// A blocking host operation gave up because the run it serves is being cancelled — see
+    /// [`Cancellable`]. Distinct from [`ErrorKind::Io`] because it says nothing about the resource:
+    /// a `read_line` that answers `none` means *end of stream*, and a cancelled read is not an end
+    /// of stream, so a leaf that stopped early must be able to say which happened.
+    ///
+    /// Not a failure mode a program is expected to see. The safepoint the unwind passes through
+    /// observes the cancellation flag and ends the run as cancelled, which is what a caller
+    /// actually gets; this kind only survives that far in the window where a cancellation was
+    /// already honored elsewhere, where it renders as the ordinary IO failure it is.
+    Interrupted,
 }
 
 /// A stdlib misuse error. The `message` is rendered here so both backends report it
@@ -375,6 +397,16 @@ pub fn panic_error(message: impl Into<String>) -> StdError {
     StdError {
         kind: ErrorKind::Panic,
         message: message.into(),
+    }
+}
+
+/// Build the canonical "the run is stopping" error for a blocking host leaf that ended its wait
+/// early — see [`ErrorKind::Interrupted`]. `operation` names what stopped (`"read_line"`,
+/// `"fetch"`), because the leaf is the only place that still knows.
+pub fn interrupted_error(operation: &str) -> StdError {
+    StdError {
+        kind: ErrorKind::Interrupted,
+        message: format!("`{operation}` stopped: the run it belongs to is being cancelled"),
     }
 }
 

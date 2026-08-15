@@ -81,7 +81,7 @@ pub(crate) fn execute_real_host(
     checked: &noeta_check::Checked,
     args: Vec<String>,
     live_output: bool,
-    cancel: Option<noeta_vm::CancelFlag>,
+    cancel: Option<noeta_vm::RunCancel>,
 ) -> Result<(noeta_backend::RunResult, Vec<noeta_vm::TraceFrame>), noeta_compiler::Unsupported> {
     let (result, trace, _) = run_module_real_host(
         std::sync::Arc::new(compile_real(program, checked)?),
@@ -124,7 +124,7 @@ pub(crate) fn run_module_real_host(
     args: Vec<String>,
     jit_report: bool,
     live_output: bool,
-    cancel: Option<noeta_vm::CancelFlag>,
+    cancel: Option<noeta_vm::RunCancel>,
 ) -> (
     noeta_backend::RunResult,
     Vec<noeta_vm::TraceFrame>,

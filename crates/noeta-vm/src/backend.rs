@@ -43,15 +43,17 @@ pub enum Tiering {
     Forced,
 }
 
-/// A **cooperative stop request** a run polls at its safepoints (isolate-cancel): the parent stores
-/// `true`, the runner notices at its next frame transfer / loop back-edge / scheduler round and
-/// unwinds, running the same teardown a completed run does.
+/// A **cooperative stop request** a run polls at its safepoints (isolate-cancel): the requester
+/// calls [`CancelSignal::request`], the runner notices at its next frame transfer / loop back-edge /
+/// scheduler round and unwinds, running the same teardown a completed run does — and anything
+/// blocked *outside* a safepoint is roused by the same call, so a run parked in a long sleep or in a
+/// host read stops with the rest.
 ///
-/// It is the same `Arc<AtomicBool>` a real worker isolate carries — one mechanism, two callers.
-/// `h.cancel()` reaches a worker through its isolate slot; [`RunOptions::cancel`] arms the
-/// *top-level* run of a whole program with one, which is what lets `noeta test` ask an overrunning
-/// case to stop instead of only abandoning it.
-pub type CancelFlag = Arc<std::sync::atomic::AtomicBool>;
+/// It is the same token a real worker isolate carries — one mechanism, two callers. `h.cancel()`
+/// reaches a worker through its isolate slot; [`RunOptions::cancel`] arms the *top-level* run of a
+/// whole program with one, which is what lets `noeta test` ask an overrunning case to stop instead
+/// of only abandoning it.
+pub type RunCancel = Arc<noeta_stdlib::CancelSignal>;
 
 /// Everything one VM run can vary, in one place (audit-1 finding 14 / the `CheckOptions`
 /// pattern) — instead of the `run_module_*` family growing a method per host × executor ×
@@ -101,7 +103,7 @@ pub struct RunOptions {
     /// **not meaningful** — the body did not finish, so there is no value and no diagnostic; the
     /// caller asked for the stop and already knows what it means. `noeta test` is the one caller,
     /// and it discards the result (it has already reported the case as timed out).
-    pub cancel: Option<CancelFlag>,
+    pub cancel: Option<RunCancel>,
     /// Per-isolate profiling (`noeta profile` over a program with real isolates): each spawned
     /// worker gets its own hook from the factory and deposits it, named, in the sink at finish.
     /// Meaningful only alongside `isolates`.
@@ -295,7 +297,16 @@ impl VmBackend {
         // program exits.
         #[cfg(feature = "compile")]
         let arena = typed_arena::Arena::new();
-        let mut vm = Vm::load(module, opts.host, opts.executor);
+        // Arm the host and the executor against this run's cancellation *before* the VM owns them
+        // (interruptible-io): a safepoint poll reaches only a run that is executing Noeta, so a run
+        // parked in a long sleep or blocked in a host read needs the wake to end that block first.
+        // The same pair a worker isolate arms itself with — one mechanism, two callers.
+        let (mut host, mut executor) = (opts.host, opts.executor);
+        if let Some(signal) = &opts.cancel {
+            host.set_cancel(signal.flag(), signal.wake());
+            executor.set_cancel_wake(signal.wake());
+        }
+        let mut vm = Vm::load(module, host, executor);
         vm.debugger = opts.debugger;
         vm.profiler = opts.profiler;
         #[cfg(feature = "compile")]
@@ -329,7 +340,8 @@ impl VmBackend {
         // isolate installs on its own VM, so one mechanism serves `h.cancel()` and `noeta test`'s
         // "ask the case to stop" alike. Set *before* the run so a request that arrives during
         // startup is honored at the body's first safepoint.
-        vm.isolates.cancel_flag = opts.cancel;
+        vm.isolates.cancel_flag = opts.cancel.as_ref().map(|signal| signal.flag());
+        vm.isolates.cancel_signal = opts.cancel;
         match opts.tiering {
             Tiering::Off => {}
             // Without the `jit` feature both arms are no-ops: everything interprets.
@@ -633,7 +645,7 @@ impl VmBackend {
         executor: Box<dyn noeta_stdlib::Executor>,
         factory: IsolateFactory,
         jit_report: bool,
-        cancel: Option<CancelFlag>,
+        cancel: Option<RunCancel>,
     ) -> (RunResult, Vec<TraceFrame>, Option<JitReport>) {
         let out = self.run_module_with(
             &Arc::clone(&module),

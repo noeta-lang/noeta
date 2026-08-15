@@ -365,9 +365,7 @@ impl<'m> Vm<'m> {
                 // dispatch result (extern-types X5); an IO failure aborts (E0021) at the
                 // `.await`, matching the synchronous `fs.*`.
                 Some(Ok(out)) => Ok(Poll::Ready(crate::values::materialize_native(out))),
-                Some(Err(error)) => {
-                    Err(self.error(stdlib_error_code(error.kind), span, error.message))
-                }
+                Some(Err(error)) => Err(self.std_dispatch_error(error, span)),
                 None => Ok(Poll::Pending),
             };
         }
@@ -698,10 +696,7 @@ impl<'m> Vm<'m> {
     /// nothing: it only ends the block, and the worker's own poll then honors the request. Ordered
     /// flag-then-wake so the woken worker cannot fail to see what it was woken for.
     pub(crate) fn request_isolate_cancel(&mut self, id: u32) {
-        self.isolates.isolates[id as usize]
-            .cancel
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        self.isolates.isolates[id as usize].wake.wake();
+        self.isolates.isolates[id as usize].signal.request();
         isolate::WAKE.notify();
     }
 
@@ -745,6 +740,12 @@ impl<'m> Vm<'m> {
     /// expected to discard it.
     pub(crate) fn observe_cancel(&mut self) -> Abort {
         self.isolates.cancel_observed = true;
+        // Clear the request as well as disarming the poll. The unwind below runs destructors, and
+        // a destructor performs real IO through a host that reads this same token — so a request
+        // left standing would interrupt every leaf on the way out (interruptible-io).
+        if let Some(signal) = self.isolates.cancel_signal.take() {
+            signal.honored();
+        }
         self.isolates.cancel_flag = None;
         for id in 0..self.isolates.isolates.len() as u32 {
             self.request_isolate_cancel(id);
@@ -1039,18 +1040,13 @@ impl<'m> Vm<'m> {
         // The worker participates in the stall registry iff this parent does (isolates I.4c); its
         // `active` slot is already registered above, on the parent thread.
         let stall_tracked = self.stall_active;
-        // This worker's cancellation flag (isolate-cancel): the parent stores through it from
-        // `h.cancel()`, the worker reads it at every safepoint. A fresh flag per worker, so a nested
-        // isolate is cancellable independently of the isolate that spawned it; a *cancelled* parent
-        // worker propagates to its children explicitly (see `observe_cancel`).
-        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let worker_cancel = Arc::clone(&cancel);
-        // The wake half of that request (interruptible-io): the worker registers its executor's
-        // wake on it at startup, and the parent fires it right after the flag store, so a worker
-        // blocked outside the interpreter (parked in one long `sleep`) is roused instead of
-        // observing the request when the sleep ends.
-        let cancel_wake = Arc::new(noeta_stdlib::CancelWake::new());
-        let worker_wake = Arc::clone(&cancel_wake);
+        // This worker's cancellation token (isolate-cancel): the parent requests through it from
+        // `h.cancel()`, the worker reads its flag at every safepoint and arms its own executor and
+        // host with its wake at startup. A fresh token per worker, so a nested isolate is
+        // cancellable independently of the isolate that spawned it; a *cancelled* parent worker
+        // propagates to its children explicitly (see `observe_cancel`).
+        let signal = Arc::new(noeta_stdlib::CancelSignal::new());
+        let worker_signal = Arc::clone(&signal);
         let (tx, rx) = std::sync::mpsc::channel();
         let thread_handle = std::thread::spawn(move || {
             let msg = run_isolate_worker(
@@ -1064,8 +1060,7 @@ impl<'m> Vm<'m> {
                 trace,
                 registry,
                 stall_tracked,
-                worker_cancel,
-                worker_wake,
+                worker_signal,
                 span,
             );
             let _ = tx.send(msg);
@@ -1077,8 +1072,7 @@ impl<'m> Vm<'m> {
         self.isolates.isolates.push(IsolateSlot {
             result: rx,
             handle: Some(thread_handle),
-            cancel,
-            wake: cancel_wake,
+            signal,
         });
         self.isolates.inflight_isolates += 1;
         // A worker that has *already* been cancelled must not leave a freshly spawned child running

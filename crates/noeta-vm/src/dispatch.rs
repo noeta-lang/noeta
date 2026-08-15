@@ -959,11 +959,7 @@ impl<'m> Vm<'m> {
                             match read {
                                 Ok(byte) => set_reg(regs, fbase, *dst, Value::int(byte)),
                                 Err(error) => {
-                                    return Err(self.error(
-                                        stdlib_error_code(error.kind),
-                                        *span,
-                                        error.message,
-                                    ));
+                                    return Err(self.std_dispatch_error(error, *span));
                                 }
                             }
                             pc += 1;

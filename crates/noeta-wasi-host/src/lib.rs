@@ -589,6 +589,10 @@ impl Network for WasiHost {
 // extension owns it in per-run ctx state — so it keeps the default `P2pProvider` (`as_p2p` → `None`).
 impl noeta_stdlib::host::P2pProvider for WasiHost {}
 
+// WASI's file reads are synchronous and bounded, and the module has no threads to cancel from, so
+// there is nothing here to rouse: the default `Cancellable` is the honest answer.
+impl noeta_stdlib::host::Cancellable for WasiHost {}
+
 impl Tracing for WasiHost {
     fn tel_enabled(&self) -> bool {
         // No exporter exists on this target (OTLP needs outbound HTTP — W4), so

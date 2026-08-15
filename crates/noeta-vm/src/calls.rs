@@ -386,7 +386,7 @@ impl<'m> Vm<'m> {
                     return Ok(stdlib_output_to_value(output));
                 }
                 noeta_stdlib::Dispatch::Err(error) => {
-                    return Err(self.error(stdlib_error_code(error.kind), span, error.message));
+                    return Err(self.std_dispatch_error(error, span));
                 }
                 noeta_stdlib::Dispatch::Unknown => {}
             }
@@ -630,7 +630,7 @@ impl<'m> Vm<'m> {
                 .expect("checked `is_bytes` above");
             return match sliced {
                 Ok(bytes) => Ok(Value::bytes(bytes)),
-                Err(error) => Err(self.error(stdlib_error_code(error.kind), span, error.message)),
+                Err(error) => Err(self.std_dispatch_error(error, span)),
             };
         }
         // Built-in zero-argument methods on lists/maps/strings. `len()` is the collection
@@ -718,8 +718,7 @@ impl<'m> Vm<'m> {
                     noeta_stdlib::reduce_num_scalars(op, scalars.into_iter())
                 }
             };
-            let folded =
-                folded.map_err(|e| self.error(stdlib_error_code(e.kind), span, e.message))?;
+            let folded = folded.map_err(|e| self.std_dispatch_error(e, span))?;
             return Ok(match op {
                 noeta_stdlib::NumReduce::Min | noeta_stdlib::NumReduce::Max => match folded {
                     Some(rn) => make_some(rednum_to_value(rn)),
@@ -737,7 +736,7 @@ impl<'m> Vm<'m> {
             _ => {
                 let scalars = self.list_reduction_scalars(v, method, from, span)?;
                 noeta_stdlib::reduce_bool_scalars(op, scalars.into_iter())
-                    .map_err(|e| self.error(stdlib_error_code(e.kind), span, e.message))?
+                    .map_err(|e| self.std_dispatch_error(e, span))?
             }
         };
         Ok(match folded {
@@ -817,8 +816,7 @@ impl<'m> Vm<'m> {
                 }
             });
             if let Some(res) = out {
-                let bytes =
-                    res.map_err(|e| self.error(stdlib_error_code(e.kind), span, e.message))?;
+                let bytes = res.map_err(|e| self.std_dispatch_error(e, span))?;
                 return Ok(Value::packed_list(schema, bytes));
             }
         }
@@ -826,7 +824,7 @@ impl<'m> Vm<'m> {
         let a = self.list_reduction_scalars(left, op.symbol(), 0, span)?;
         let b = self.list_reduction_scalars(right, op.symbol(), 0, span)?;
         let out = noeta_stdlib::zip_num_scalars(op, &a, &b)
-            .map_err(|e| self.error(stdlib_error_code(e.kind), span, e.message))?;
+            .map_err(|e| self.std_dispatch_error(e, span))?;
         Ok(Value::list(
             out.into_iter()
                 .map(crate::values::scalar_to_value)
@@ -880,7 +878,7 @@ impl<'m> Vm<'m> {
                     noeta_stdlib::map_num_packed(op, &field, &bytes)
                 }
             };
-            let out = result.map_err(|e| self.error(stdlib_error_code(e.kind), span, e.message))?;
+            let out = result.map_err(|e| self.std_dispatch_error(e, span))?;
             return Ok(Value::packed_list(schema, out));
         }
         // Boxed fallback.
@@ -896,7 +894,7 @@ impl<'m> Vm<'m> {
                 noeta_stdlib::map_num_scalars(op, &a)
             }
         };
-        let out = result.map_err(|e| self.error(stdlib_error_code(e.kind), span, e.message))?;
+        let out = result.map_err(|e| self.std_dispatch_error(e, span))?;
         Ok(Value::list(
             out.into_iter()
                 .map(crate::values::scalar_to_value)
@@ -917,7 +915,7 @@ impl<'m> Vm<'m> {
                 noeta_stdlib::checked_sum_scalars(scalars.into_iter())
             }
         };
-        let folded = folded.map_err(|e| self.error(stdlib_error_code(e.kind), span, e.message))?;
+        let folded = folded.map_err(|e| self.std_dispatch_error(e, span))?;
         Ok(match folded {
             Some(rn) => make_some(rednum_to_value(rn)),
             None => make_none(),

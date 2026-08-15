@@ -532,6 +532,10 @@ impl Network for BrowserHost {
 // F2) — the `para.p2p` extension owns it — so it keeps the default `P2pProvider` (`as_p2p` → `None`).
 impl noeta_stdlib::host::P2pProvider for BrowserHost {}
 
+// The playground runs on the browser's single thread and has no blocking leaf at all — every effect
+// it offers returns immediately — so it keeps the default `Cancellable`.
+impl noeta_stdlib::host::Cancellable for BrowserHost {}
+
 impl Tracing for BrowserHost {
     fn tel_enabled(&self) -> bool {
         false
