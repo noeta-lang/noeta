@@ -1288,7 +1288,77 @@ fn publishing_a_package_with_a_path_dependency_is_rejected() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("depend only via the registry"))
+        .stderr(predicate::str::contains("path dependency"))
         .stderr(predicate::str::contains("helper"));
+}
+
+#[test]
+fn publishing_a_package_with_a_git_dependency_is_rejected() {
+    // A git dependency has no index shape at all: a release records `(identity, requirement)` per
+    // dependency, with nowhere to put a URL — so a consumer would resolve this release with the
+    // edge missing. Refused at publish, before touching git, naming the URL and the ref.
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_publish_git_dep_lint");
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    std::fs::write(
+        base.join("noeta.toml"),
+        "[package]\nname = \"acme/lib\"\nversion = \"1.0.0\"\n\
+         [dependencies]\n\
+         helper = { git = \"https://example.com/acme/helper\", tag = \"v2.0.0\", package = \"acme/helper\" }\n",
+    )
+    .unwrap();
+    lang()
+        .current_dir(&base)
+        .env("NOETA_REGISTRY_DIR", base.join("registry"))
+        .args([
+            "publish",
+            "--git",
+            "https://example.com/acme/lib",
+            "--tag",
+            "v1.0.0",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "dependency `helper` is a git dependency",
+        ))
+        .stderr(predicate::str::contains("https://example.com/acme/helper"))
+        .stderr(predicate::str::contains("v2.0.0"))
+        .stderr(predicate::str::contains("depend only via the registry"))
+        .stderr(predicate::str::contains("Publish aborted."));
+}
+
+#[test]
+fn publishing_a_scope_with_a_git_member_names_the_member() {
+    // A scope array publishes as its members, and only one of them offends here. The message has to
+    // point at that member: replacing the key `para` would drop the registry sibling with it.
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_publish_scope_git_lint");
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    std::fs::write(
+        base.join("noeta.toml"),
+        "[package]\nname = \"acme/lib\"\nversion = \"1.0.0\"\n\
+         [dependencies]\n\
+         para = [ { version = \"^0.4\", package = \"para/aether\" }, \
+         { git = \"https://example.com/para/db\", tag = \"v0.4.0\", package = \"para/db\" } ]\n",
+    )
+    .unwrap();
+    lang()
+        .current_dir(&base)
+        .env("NOETA_REGISTRY_DIR", base.join("registry"))
+        .args([
+            "publish",
+            "--git",
+            "https://example.com/acme/lib",
+            "--tag",
+            "v1.0.0",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "dependency `para` (scope member `para/db`) is a git dependency",
+        ))
+        .stderr(predicate::str::contains("replace that member with"));
 }
 
 #[test]

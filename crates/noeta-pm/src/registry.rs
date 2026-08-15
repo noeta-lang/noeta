@@ -26,6 +26,7 @@ use std::path::PathBuf;
 use semver::{Version, VersionReq};
 
 use crate::error::PmError;
+use crate::manifest::{Dependency, Manifest};
 
 /// SHA-256 of `test_data/wire/MANIFEST.sha256` — the **cross-repo protocol stamp**.
 ///
@@ -69,6 +70,80 @@ pub struct GitCoords {
 pub struct Dep {
     pub package: String,
     pub req: VersionReq,
+}
+
+/// The index dependency edges a release records, read out of a manifest's `[dependencies]`.
+///
+/// A published release must be resolvable **from the index alone** — a consumer reads these edges
+/// without cloning anything — so every dependency has to name a registry identity and a SemVer
+/// requirement. A `path` or `git` dependency has neither shape: [`Dep`] is `(identity, req)` and has
+/// nowhere to put a working-copy path or a git URL, in the index or on the wire. A release carrying
+/// one would therefore publish with that edge simply missing, and every consumer's resolve would
+/// build a graph short one package. Refusing here — at publish, naming the dependency — puts the
+/// failure on the publisher, who can still fix it, instead of on everyone downstream.
+pub fn release_deps(manifest: &Manifest) -> Result<Vec<Dep>, PmError> {
+    let mut deps = Vec::new();
+    for (key, dep) in manifest.dependencies() {
+        // A scope dependency (`para = [ … ]`) publishes as its member packages, and each member is
+        // subject to the same registry-only rule — so flatten, and remember that a leaf came from a
+        // scope: the member is what the publisher edits, not the shared key.
+        match dep {
+            Dependency::Scope(members) => {
+                for member in members {
+                    deps.push(release_dep(key, member, true)?);
+                }
+            }
+            leaf => deps.push(release_dep(key, leaf, false)?),
+        }
+    }
+    Ok(deps)
+}
+
+/// One leaf of [`release_deps`]: the index edge this dependency publishes as, or the diagnostic
+/// explaining why it cannot be published. `in_scope` says the leaf is a member of a scope array, so
+/// the message names the member and tells the publisher to edit *it* rather than the shared key.
+fn release_dep(key: &str, dep: &Dependency, in_scope: bool) -> Result<Dep, PmError> {
+    let site = match (in_scope, dep.declared_package()) {
+        (false, _) => format!("dependency `{key}`"),
+        (true, Some(pkg)) => format!("dependency `{key}` (scope member `{pkg}`)"),
+        (true, None) => format!("dependency `{key}` (a scope member)"),
+    };
+    // What to write instead. A scope member is one entry of an array, so telling the publisher to
+    // replace the whole key would silently drop its sibling members.
+    let instead = if in_scope {
+        "replace that member with `{ version = \"…\", package = \"company/pkg\" }`".to_string()
+    } else {
+        format!("replace it with `{key} = {{ version = \"…\", package = \"company/pkg\" }}`")
+    };
+    let registry_only = "a published package must depend only via the registry: the index records \
+                         each dependency as an identity and a version requirement, so this is what \
+                         a consumer resolving the release would have to go on";
+    match dep {
+        Dependency::Registry {
+            package: Some(pkg),
+            req,
+        } => Ok(Dep {
+            package: format!("{}/{}", pkg.company, pkg.package),
+            req: req.clone(),
+        }),
+        Dependency::Registry { package: None, .. } => Err(PmError::Manifest(format!(
+            "{site} is a registry dependency but names no `package = \"company/pkg\"` — a published \
+             package's dependencies must each name their registry identity, so {instead}."
+        ))),
+        Dependency::Path { path, .. } => Err(PmError::Manifest(format!(
+            "{site} is a path dependency (`{}`) — {registry_only}, and a path that resolves on this \
+             machine resolves nowhere else. Publish that package and {instead}, or keep the path \
+             dependency in a workspace you do not publish.",
+            path.display()
+        ))),
+        Dependency::Git { url, git_ref, .. } => Err(PmError::Manifest(format!(
+            "{site} is a git dependency (`{url}` at {}) — {registry_only}, and there is nowhere in \
+             it to record a git URL, so a consumer would resolve this release with that dependency \
+             missing. Publish that package and {instead}.",
+            git_ref.describe()
+        ))),
+        Dependency::Scope(_) => unreachable!("a nested array was already rejected"),
+    }
 }
 
 /// A published release (package-manager Phase 4, S5): a version, its git [`GitCoords`], the registry
@@ -2315,6 +2390,136 @@ mod tests {
             keywords: Vec::new(),
             description: None,
         }
+    }
+
+    /// A manifest for the [`release_deps`] tests: a publishable package plus the given
+    /// `[dependencies]` body.
+    fn manifest_with_deps(deps: &str) -> Manifest {
+        Manifest::parse(&format!(
+            "[package]\nname = \"acme/lib\"\nversion = \"1.0.0\"\n\n[dependencies]\n{deps}"
+        ))
+        .expect("valid manifest")
+    }
+
+    #[test]
+    fn release_deps_records_registry_edges() {
+        let m = manifest_with_deps(
+            "http = { version = \"^1.2\", package = \"guzzle/http\" }\n\
+             json = { version = \"^0.4\", package = \"acme/json\" }\n",
+        );
+        let deps = release_deps(&m).expect("registry-only dependencies publish");
+        assert_eq!(
+            deps,
+            vec![
+                Dep {
+                    package: "guzzle/http".to_string(),
+                    req: VersionReq::parse("^1.2").unwrap(),
+                },
+                Dep {
+                    package: "acme/json".to_string(),
+                    req: VersionReq::parse("^0.4").unwrap(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn release_deps_refuses_a_git_dependency() {
+        // The row this closes: a git dep has no [`Dep`] shape, so it must never reach the index.
+        // The message names the offending key, the URL and the ref, and says what to write instead.
+        let m = manifest_with_deps(
+            "helper = { git = \"https://example.com/acme/helper\", tag = \"v2.0.0\", \
+             package = \"acme/helper\" }\n",
+        );
+        let err = release_deps(&m).expect_err("a git dependency cannot be published");
+        assert!(matches!(err, PmError::Manifest(_)), "{err:?}");
+        let msg = err.message();
+        assert!(
+            msg.contains("dependency `helper` is a git dependency"),
+            "{msg}"
+        );
+        assert!(msg.contains("https://example.com/acme/helper"), "{msg}");
+        assert!(msg.contains("v2.0.0"), "{msg}");
+        assert!(
+            msg.contains(
+                "replace it with `helper = { version = \"…\", package = \"company/pkg\" }`"
+            ),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn release_deps_refuses_a_branch_and_head_git_dependency() {
+        // The tag-free forms are the same refusal — a branch tip and a default-branch HEAD are, if
+        // anything, less resolvable than a tag.
+        for (source, described) in [
+            (
+                "{ git = \"https://example.com/acme/helper\", branch = \"main\" }",
+                "branch main",
+            ),
+            ("{ git = \"https://example.com/acme/helper\" }", "HEAD"),
+        ] {
+            let m = manifest_with_deps(&format!("helper = {source}\n"));
+            let err = release_deps(&m).expect_err("a git dependency cannot be published");
+            assert!(err.message().contains(described), "{}", err.message());
+        }
+    }
+
+    #[test]
+    fn release_deps_refuses_a_path_dependency() {
+        let m = manifest_with_deps("helper = { path = \"../helper\" }\n");
+        let err = release_deps(&m).expect_err("a path dependency cannot be published");
+        let msg = err.message();
+        assert!(
+            msg.contains("dependency `helper` is a path dependency"),
+            "{msg}"
+        );
+        assert!(msg.contains("../helper"), "{msg}");
+        assert!(msg.contains("workspace you do not publish"), "{msg}");
+    }
+
+    #[test]
+    fn release_deps_names_the_offending_scope_member() {
+        // A scope array publishes as its members, so the refusal has to name the *member* — telling
+        // the publisher to replace the key `para` would drop its registry sibling along with it.
+        let m = manifest_with_deps(
+            "para = [ { version = \"^0.4\", package = \"para/aether\" }, \
+             { git = \"https://example.com/para/db\", tag = \"v0.4.0\", package = \"para/db\" } ]\n",
+        );
+        let err = release_deps(&m).expect_err("a git scope member cannot be published");
+        let msg = err.message();
+        assert!(
+            msg.contains("dependency `para` (scope member `para/db`) is a git dependency"),
+            "{msg}"
+        );
+        assert!(msg.contains("replace that member with"), "{msg}");
+        assert!(
+            !msg.contains("para = {"),
+            "must not suggest replacing the key: {msg}"
+        );
+    }
+
+    #[test]
+    fn release_deps_publishes_a_registry_only_scope() {
+        let m = manifest_with_deps(
+            "para = [ { version = \"^0.4\", package = \"para/aether\" }, \
+             { version = \"^0.4\", package = \"para/db\" } ]\n",
+        );
+        let deps = release_deps(&m).expect("a registry-only scope publishes as its members");
+        let names: Vec<&str> = deps.iter().map(|d| d.package.as_str()).collect();
+        assert_eq!(names, vec!["para/aether", "para/db"]);
+    }
+
+    #[test]
+    fn release_deps_refuses_a_registry_dependency_without_an_identity() {
+        let m = manifest_with_deps("http = \"^1.2\"\n");
+        let err = release_deps(&m).expect_err("a bare requirement names no identity");
+        assert!(
+            err.message()
+                .contains("names no `package = \"company/pkg\"`"),
+            "{}",
+            err.message()
+        );
     }
 
     #[test]
