@@ -45,14 +45,14 @@ or trigger-gated**:
    local proof are done), and editions S3/S4 (awaits a deliberate post-1.0 breaking change).
 2. **Design-gated**: Tauri packaging, capability-enforcement (static effect analysis — deferred by
    the owner), synced store R&D, TaskScope patterns.
-3. **Trigger-gated tails**: the perf cluster, stdlib follow-ons, OTEL residuals, the attested watch
-   ledger (design note filed), the wasm-serve component packaging, interruptible host IO (designed
-   and measured, not built), the fmt safety gate's `Pretty`-proxy replacement, and the small
-   remaining tooling rows — each fires on its stated trigger, none on its own.
+3. **Trigger-gated tails**: the perf cluster (held outright since 2026-08-14 — seven rows, none
+   carrying a measurement that says which is worth doing), the arc scope-cut menus, the OTEL surface
+   residuals, the attested watch ledger (design note filed), the wasm-serve component packaging, and
+   the small remaining tooling rows — each fires on its stated trigger, none on its own.
 
-**An arc is open against the un-gated remainder:** [`backlog-burndown/`](backlog-burndown/README.md). Of the 55 open rows it claims thirteen — correctness holes found while doing something else, and doors that shipped on one side only, neither with a trigger to wait for because finding them *was* the trigger. Its slice 2 (the oracles) goes first: the conformance single-file path does not link, so a case can pass while the behavior it pins is broken.
+**That claim is now true, and it was audited rather than assumed.** The `backlog-burndown` arc (2026-08-12 → 2026-08-15) took the un-gated remainder: the reflection-boundary visibility holes, the two oracles that reported passes over things they never examined, four doors that shipped on one side only, two identity guards, cancellation reaching work blocked outside the interpreter, and the `noeta fmt` safety gate — which now compares programs structurally instead of comparing a hand-written rendering of them. Its six slices and their war stories are in git history; the arc directory is deleted, as the discipline below requires.
 
-**The "exclusively decision-gated or trigger-gated" claim above is half true**, and the arc's [Gates](backlog-burndown/README.md#gates) section is the audit. Of the other 42 rows, **25 state no condition at all** — their trigger column records where the row came from, not what would start it. Of the 17 that do state one, five (the whole performance cluster) wait on a profile of user workloads that nobody runs, and one has already fired without being noticed: `para/ai` funnels two error types into one wrapper and documents its workaround for the missing multi-source `From`.
+**The audit's real finding was about the backlog itself.** Of the rows it did *not* claim, 27 stated no condition at all — their trigger column recorded where the row came from, not what would start it. Those are now written: four had already shipped and were struck, one closed on a rule rather than a fix, four had a genuine condition nobody had written down (a **date**, for the Sigstore root), three OTEL rows collapsed into one, one was promoted for being a memory leak rather than a missing feature, and the arc scope-cut menus say plainly that they are inventory rather than tracked work. Only three remain bare, deliberately: `TaskScope` patterns, the synced store, and desktop packaging are R&D whose trigger is a decision to do them. **Read a row's evidence before picking it up:** re-reading the HTTP scope-cut row found three of its five items had shipped without it being touched, and the backlog still closes rows late — this arc's own slices 1, 3 and 4 shipped without striking theirs.
 
 **Publishing is done, and is no longer the keystone it was written as.** Both repos are public and
 level with `origin/main` (`noeta-lang/noeta`, `noeta-lang/noeta-registry`), the nine `para`
