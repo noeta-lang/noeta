@@ -1,13 +1,11 @@
-// A statement continues across a newline when the line ends on an operator, and for `~`/`&`/`^`/`<<`
-// that trailing position is the ONLY one that works: a newline ends a statement unless the next
-// line's first token continues it, and none of these four do (a leading `~` would start a new
-// statement). `+` is the contrast — it may lead the next line as well, which is why
-// `optional_semicolons.noe` writes it that way.
+// A statement continues across a newline when the line ends on an operator. Every infix operator
+// supports this, and every one also supports the mirror spelling, where the operator leads the next
+// line instead — see `leading_operator_continuation.noe`, which pins that half.
 //
-// This is also the corpus gate on the `noeta fmt` printer: it used to move every operator to the
-// head of the broken line, so its output for `"a" ~⏎"b"` lexed as two statements and failed the
-// formatter's own re-parse safety check (`crates/noeta-fmt/tests/corpus.rs` panics on any corpus
-// file whose formatting trips that gate).
+// This is also the corpus gate on the `noeta fmt` printer: it moves an operator to the head of the
+// broken line, so a file written this way is re-emitted in the other spelling and must still mean
+// the same program (`crates/noeta-fmt/tests/corpus.rs` panics on any corpus file whose formatting
+// trips the formatter's own re-parse safety check).
 // expect: stdout "abc"
 // expect: stdout "2"
 // expect: stdout "5"

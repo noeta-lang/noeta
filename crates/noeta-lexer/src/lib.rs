@@ -1692,7 +1692,18 @@ fn is_leading_continuation(kind: TokenKind) -> bool {
             | TokenKind::Gt
             | TokenKind::AmpAmp
             | TokenKind::PipePipe
+            // The bitwise infix set. `|` doubles as the union-type separator and was already here;
+            // `<<`, `&` and `^` are infix and nothing else — Noeta has no prefix `&`, `^` or `<<` —
+            // so a line starting with one can only be continuing the line above it. `>>` needs no
+            // entry: it is not a lexer token at all but two adjacent `Gt`, each of which is here,
+            // which is exactly why `x\n>> 1` parsed while `x\n<< 1` did not.
             | TokenKind::Pipe
+            | TokenKind::Amp
+            | TokenKind::Caret
+            | TokenKind::Shl
+            // Concatenation. Infix only — the complement operator is `!`, not `~` — so a leading
+            // `~` is as unambiguous as a leading `+`.
+            | TokenKind::Tilde
             // Member / pipeline / coalesce / range.
             | TokenKind::Dot
             | TokenKind::PipeGt
@@ -2631,6 +2642,49 @@ mod tests {
         assert_eq!(boundaries_of("f(\n  1,\n  2,\n)\n"), vec![]);
         assert_eq!(boundaries_of("x = [\n  1,\n  2,\n]\n"), vec![]);
         assert_eq!(boundaries_of("y = a\n  .b()\n"), vec![]);
+    }
+
+    #[test]
+    fn every_infix_operator_continues_the_line_it_starts() {
+        // **The whole infix set, asserted as a set.** Four of these were missing — `~`, `<<`, `&`,
+        // `^` — so a chain wrapped across lines on one of them stopped being one expression and
+        // became two statements, the second of which begins with an operator and cannot parse. It
+        // surfaced through `noeta fmt`, which produces exactly that wrap under `wrap = true`, but a
+        // hand written `mask = flags\n    & 0xFF` failed the same way.
+        //
+        // None of the four has a prefix form — Noeta\'s complement operator is `!`, not `~` — so a
+        // line starting with one can only be continuing the line above it. `-` is the operator that
+        // *is* ambiguous, and it has always been on this list: the formatter compensates by keeping
+        // a `;` that separates two statements when the second could otherwise read as a
+        // continuation.
+        //
+        // `>>` is deliberately absent from the list under test: it is not a lexer token at all, but
+        // two adjacent `Gt` — which is precisely why it kept working while `<<` did not, and why
+        // reading the symptom as "shift operators are broken" would have been wrong.
+        for src in [
+            "b = 1\n  + 0\n",
+            "b = 1\n  - 0\n",
+            "b = 1\n  * 0\n",
+            "b = 1\n  / 0\n",
+            "b = 1\n  % 0\n",
+            "b = 1\n  << 0\n",
+            "b = 1\n  >> 0\n",
+            "b = 1\n  & 0\n",
+            "b = 1\n  ^ 0\n",
+            "b = 1\n  | 0\n",
+            "b = \"x\"\n  ~ \"y\"\n",
+            "b = 1\n  == 0\n",
+            "b = 1\n  < 0\n",
+            "b = 1\n  > 0\n",
+            "b = true\n  && false\n",
+            "b = true\n  || false\n",
+        ] {
+            assert_eq!(
+                boundaries_of(src),
+                vec![],
+                "a line starting with this operator must continue the one above it: {src:?}"
+            );
+        }
     }
 
     #[test]

@@ -1179,31 +1179,36 @@ mod tests {
     }
 
     #[test]
-    fn author_break_keeps_a_non_continuing_operator_trailing() {
-        // A newline ends a statement unless the *next* line's first token continues it, so `~` (and
-        // `&`/`^`/`<<`) can only ever sit at the END of the broken line. The printer used to move
-        // every operator to the head of the second line, turning `x = "a" ~⏎"b"` into
-        // `x = "a"⏎~ "b"` — which lexes as `x = "a"; ~ "b"` and does not re-parse, so `noeta fmt`
-        // refused the file outright ("printer bug"). Each of these must format, keep the author's
-        // break, and be idempotent; `fmt` itself enforces the re-parse (the safety gate).
+    fn an_author_break_puts_every_operator_at_the_head_of_the_next_line() {
+        // One layout for every infix operator: the author's break is kept, and the operator leads
+        // the second line. Which side it lands on is a **parse** question — a newline ends a
+        // statement unless the next line's first token continues it — and every infix operator
+        // continues one, so there is a single answer rather than one per operator.
+        //
+        // `~`/`&`/`^`/`<<` are the four worth listing: they read as a group that might have a prefix
+        // meaning and have none (complement is `!`, not `~`), and the lexer's continuation set was
+        // missing exactly them. While it was, the printer had to leave them trailing, and a chain
+        // wide enough to wrap could not be formatted at all.
         for (src, want) in [
-            ("x = \"a\" ~\n    \"b\"", "x = \"a\" ~\n    \"b\"\n"),
-            ("m = 10 &\n    6", "m = 10 &\n    6\n"),
-            ("x = 6 ^\n    3", "x = 6 ^\n    3\n"),
-            ("s = 1 <<\n    4", "s = 1 <<\n    4\n"),
-            // A three-operand chain breaks at the author's break only, operator still trailing.
+            ("x = \"a\" ~\n    \"b\"", "x = \"a\"\n    ~ \"b\"\n"),
+            ("m = 10 &\n    6", "m = 10\n    & 6\n"),
+            ("x = 6 ^\n    3", "x = 6\n    ^ 3\n"),
+            ("s = 1 <<\n    4", "s = 1\n    << 4\n"),
+            ("n = 1 +\n    2", "n = 1\n    + 2\n"),
+            // `>>` is two `Gt` tokens rather than one `Shl`-style token, which is why it continued a
+            // line when `<<` did not — the asymmetry that made the bug look like a shift-operator
+            // rule when it was a missing table entry.
+            ("s = 8 >>\n    1", "s = 8\n    >> 1\n"),
+            // A three-operand chain breaks at the author's break only.
             (
                 "t = \"a\" ~ \"b\" ~\n    \"c\"",
-                "t = \"a\" ~ \"b\" ~\n    \"c\"\n",
+                "t = \"a\" ~ \"b\"\n    ~ \"c\"\n",
             ),
         ] {
             let once = fmt(src).expect("formats and re-parses");
             assert_eq!(once, want, "unexpected layout for {src:?}");
             assert_eq!(fmt(&once).expect("re-formats"), once, "not idempotent");
         }
-        // A line-continuing operator keeps the leading-operator layout it always had — `+` at the
-        // head of the second line joins the lines, so the break is preserved that way.
-        assert_eq!(fmt("n = 1 +\n    2").unwrap(), "n = 1\n    + 2\n");
     }
 
     #[test]

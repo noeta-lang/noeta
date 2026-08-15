@@ -15,6 +15,20 @@
 //! shrinking on top — on a failure it minimizes the *driver bytes*, and fewer bytes generate a
 //! smaller program, so the counterexample it prints is close to a paste-ready regression case.
 //!
+//! # The checked-in seed
+//!
+//! `fmt.proptest-regressions` holds one saved counterexample, replayed before any new case is
+//! generated. It is the shrunk driver for a formatter defect this test found and nothing else did:
+//! under `wrap = true`, a binary chain wrapping on `~`, `<<`, `&` or `^` was emitted with the
+//! operator leading the broken line, and a line starting with one of those four did not continue the
+//! line above it — so the output lexed as two statements and `noeta fmt` refused the file. The fix
+//! was one missing entry set in the lexer's continuation table; this seed is what re-asks the
+//! question.
+//!
+//! Saving the seed is the point rather than an afterthought. The property is randomized, so a green
+//! run of the sweep is evidence about 3,000 programs and not about this one — and the defect had
+//! already survived several such runs of the very same tree before it was pinned.
+//!
 //! # Coverage, stated rather than assumed
 //!
 //! `SEEDS` is what runs in the gate, chosen so this stays comparable to the corpus sweep it sits

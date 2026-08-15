@@ -2490,10 +2490,13 @@ impl Printer<'_> {
             }
             // Width-driven: flatten a same-precedence binary chain (`a + b + c + …`) into one group
             // so it lays out flat when it fits and one operand per line — with a leading operator
-            // that continues the previous line — when it does not. Only operators that *continue* a
-            // line when they start one may wrap this way: a leading `~`/`&`/`^`/`<<`/`>>` would
-            // instead terminate the statement (a parse change the safety gate would reject), so those
-            // fall through to the source-directed arm and never break mid-chain.
+            // that continues the previous line — when it does not.
+            //
+            // The guard is a **parse** question, not a taste one: an operator may lead a broken line
+            // only if a line starting with it continues the line above. Every infix operator does,
+            // so in practice this guard passes for all of them; it stays because the answer belongs
+            // to the lexer, and an operator added later without a continuation entry must fall
+            // through to the source-directed arm rather than emit something that will not re-parse.
             Expr::Binary { op, lhs, rhs, .. }
                 if self.config.wrap && noeta_lexer::token_continues_line(binop_token(*op)) =>
             {
@@ -2521,13 +2524,12 @@ impl Printer<'_> {
                 // Source-directed: preserve a break the author put around the operator. **Which side
                 // of the break the operator lands on is a parse question, not a taste one.** A
                 // newline ends the statement unless the next line's first token continues it
-                // ([`noeta_lexer::token_continues_line`]), so an operator that does *not* continue a
-                // line — `~`, `&`, `^`, `<<`, `>>` — must stay at the END of the first line, exactly
-                // where the author wrote it (`"a" ~⏎ "b"`). Emitting it at the start of the second
-                // line turned `x = "a" ~⏎ "b"` into `x = "a"⏎ ~ "b"`, which lexes as two statements
-                // (`x = "a"; ~ "b"`) — the printer bug `noeta fmt`'s re-parse safety check caught,
-                // refusing to write the file at all. The wrapping arm above only handles
-                // line-continuing operators, so this arm is the sole place either shape is chosen.
+                // ([`noeta_lexer::token_continues_line`]), so the operator leads the second line
+                // when it may and stays at the end of the first when it may not. Every infix
+                // operator may, so the leading form is what an author break is normalized to; the
+                // trailing branch is the fallback for an operator whose continuation entry is
+                // missing, which is a shape the safety gate would otherwise refuse the whole file
+                // over.
                 let sep = if self.broke_between(lhs.span().end, rhs.span().start) {
                     if noeta_lexer::token_continues_line(binop_token(*op)) {
                         Doc::concat([Doc::hardline(), Doc::text(format!("{} ", op.symbol()))])
@@ -4111,8 +4113,8 @@ fn flatten_pipeline<'e>(left: &'e Expr, right: &'e Expr) -> (&'e Expr, Vec<&'e E
 }
 
 /// The lexer token a binary operator is spelled with — used to ask [`noeta_lexer::token_continues_line`]
-/// whether a chain may wrap by breaking *before* the operator (a leading operator that does not
-/// continue the previous line, like `~`/`&`/`^`/`<<`/`>>`, would re-parse as a new statement).
+/// whether a chain may wrap by breaking *before* the operator, since a leading operator that does
+/// not continue the previous line would re-parse as a new statement.
 fn binop_token(op: BinaryOp) -> TokenKind {
     match op {
         BinaryOp::Add => TokenKind::Plus,

@@ -1,0 +1,47 @@
+// A statement continues across a newline when the **next line starts** with an infix operator — the
+// mirror of `trailing_operator_continuation.noe`, where the operator ends the line instead. Both
+// spellings are the same program, and every infix operator supports both.
+//
+// The rule is that a newline ends a statement unless the following line's first token continues it,
+// and an infix operator continues it because it cannot begin one. `~`, `<<`, `&` and `^` are the
+// operators worth pinning: they read as a group with a prefix meaning and have none — Noeta spells
+// complement `!`, not `~` — so a line beginning with one of them has exactly one reading.
+//
+// This is also the corpus gate on the `noeta fmt` printer from the other side. Under `wrap = true`
+// the printer breaks a wide binary chain before its operator, producing precisely this shape; when
+// one of these four did not continue the line, that output lexed as two statements and the
+// formatter's own re-parse check refused to format the file at all.
+// expect: stdout "abc"
+// expect: stdout "2"
+// expect: stdout "5"
+// expect: stdout "16"
+// expect: stdout "11"
+// expect: stdout "one-two"
+// expect: exit 0
+
+// Leading `~`: the concatenation continues from the line above.
+joined = "a"
+    ~ "b"
+    ~ "c"
+echo joined
+
+// The bitwise trio reads the same way.
+echo 10
+    & 6
+echo 6
+    ^ 3
+echo 1
+    << 4
+
+// Mixed with an operator that always worked, in one chain — `>>` is two `>` tokens rather than one
+// `>>`, which is why it kept working when `<<` did not, and the two must now behave alike.
+echo 1
+    << 4
+    >> 1
+    | 3
+
+// Indented across several lines, the shape a wrapped real program writes.
+label = "one"
+    ~ "-"
+    ~ "two"
+echo label
