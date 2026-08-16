@@ -1586,6 +1586,28 @@ pub enum ConstructTarget<'a> {
     Rejected(String),
 }
 
+/// The payload slot indices typed `u64` in a variant's construction schema, ascending — the
+/// reflection-door twin of [`crate::unsigned_field_slots`], reading the reified [`TypeRepr`] the
+/// manifest carries instead of the surface annotation. Both backends stamp a
+/// `construct("Enum.Variant", …)` value with this, so a reflection-built case orders exactly like a
+/// source-written one.
+pub fn unsigned_payload_slots(payload: &[FieldSpecData<'_>]) -> Vec<u32> {
+    payload
+        .iter()
+        .enumerate()
+        .filter_map(|(i, f)| {
+            matches!(
+                f.ty,
+                TypeRepr::IntN {
+                    signed: false,
+                    bits: 64
+                }
+            )
+            .then_some(i as u32)
+        })
+        .collect()
+}
+
 /// Resolve a `construct(name, …)` target string against the reflection artifact.
 ///
 /// **A payload-carrying variant is spelled `"Enum.Variant"`, and its `fields` argument is the

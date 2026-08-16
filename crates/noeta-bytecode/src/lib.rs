@@ -1876,6 +1876,15 @@ pub struct Module {
     /// VM's `map` builtin looks up its call span here to build a flat result. Empty for a program with
     /// no such `map`.
     pub map_packed_sites: Vec<(Span, u32)>,
+    /// **Ordering sites** whose value contains an unsigned 64-bit integer: the site's `Span` paired
+    /// with the [`noeta_ast::RenderHint`] naming the positions to read unsigned. The VM looks a site
+    /// up by span — a stdlib method call's (`.sorted()`, `.min()`, `.max()`, `.keys()`,
+    /// `.values()`) or a `for` loop's — and orders the sequence the program sees accordingly.
+    ///
+    /// A side table rather than an operand, deliberately: these ops are the hot dispatch path, and
+    /// nearly every program has no entry here at all. The tree-walker reads the same hint off its
+    /// IR node (`Rvalue::Method::order` / `Stmt::For::order`), so both engines order alike.
+    pub order_hint_sites: Vec<(Span, noeta_ast::RenderHint)>,
     pub methods: Vec<MethodEntry>,
     /// `(type_name, proto)` for each class with a `destruct` block — the runtime-invoked
     /// destructor, compiled like a parameterless method (receiver in register 0). The VM runs

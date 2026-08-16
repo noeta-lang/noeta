@@ -1,0 +1,99 @@
+// Ordering a declared `u64` FIELD. Unlike a bare `u64` in a collection — whose signedness lives only
+// in the static type of the site that orders it — a field's signedness is a property of the type, so
+// it rides on the type's own runtime description (the slot list every value of the type carries).
+// `@derive(Comparable)` therefore reads such a slot unsigned at every door: `<`/`>`, `.sorted()`, a
+// set's canonical order, and a nested field of an outer type. It works after a `dyn` launder too,
+// which is the point of putting it on the type rather than at the call. The last block pins the one
+// thing the three hint walks disagree about — how an object's slots are NUMBERED.
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "true"
+// expect: stdout "[Reading {at: 1, tag: "small"}, Reading {at: 9223372036854775808, tag: "past"}, Reading {at: 18446744073709551615, tag: "top"}]"
+// expect: stdout "{Reading {at: 1, tag: "small"}, Reading {at: 18446744073709551615, tag: "top"}}"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "[Level.Low(1), Level.Low(18446744073709551615), Level.High(1)]"
+// expect: stdout "true"
+// expect: stdout "[Window {lo: Reading {at: 1, tag: "inner"}, span: 1}, Window {lo: Reading {at: 18446744073709551615, tag: "top"}, span: 1}]"
+// expect: stdout "[Signed {at: -1, tag: "neg"}, Signed {at: 1, tag: "pos"}]"
+// expect: stdout "[Box {note: "n", item: 1}, Box {note: "n", item: 18446744073709551615}]"
+// expect: stdout "{"item":18446744073709551615}"
+// expect: exit 0
+
+use std.json
+use std.json.Transient
+
+@derive(Comparable)
+struct Reading {
+    at: u64
+    tag: string
+}
+
+// The control: the same shape with a SIGNED field orders by the word, because for `i64` the word is
+// the value.
+@derive(Comparable)
+struct Signed {
+    at: i64
+    tag: string
+}
+
+// A `u64` payload orders the same way, after the variant's declaration index.
+@derive(Comparable)
+enum Level { Low(u64); High(u64) }
+
+// A nested field: the outer compare recurses, and the inner type carries its own slot list.
+@derive(Comparable)
+struct Window {
+    lo: Reading
+    span: u64
+}
+
+big: u64 = 18446744073709551615u64
+mid: u64 = 9223372036854775808u64
+one: u64 = 1u64
+
+top = Reading { at: big, tag: "top" }
+small = Reading { at: one, tag: "small" }
+past = Reading { at: mid, tag: "past" }
+
+echo top > small
+echo top < small
+echo past > small
+echo [top, small, past].sorted()
+echo [top, small].to_set()
+echo [top, small].to_set().contains(top)
+
+// After a `dyn` launder nothing at the sorting site says `at` is unsigned — only the values' own
+// type does, which is exactly why the slot list rides on the type.
+laundered: List<dyn> = [top, small, past]
+ordered = laundered.sorted()
+echo ordered[0] == small
+echo ordered[2] == top
+
+echo [Level.High(one), Level.Low(big), Level.Low(one)].sorted()
+echo Level.Low(big) > Level.Low(one)
+
+echo [
+    Window { lo: top, span: one },
+    Window { lo: Reading { at: one, tag: "inner" }, span: one },
+].sorted()
+
+echo [Signed { at: 1i64, tag: "pos" }, Signed { at: -1i64, tag: "neg" }].sorted()
+
+// The slot NUMBERING, which the display and JSON walks disagree about: a JSON encoding drops a
+// `#[Transient]` field, so its slots renumber, while an ordering walk compares two values against
+// the object's own slot array, where the field is still there. `item` is typed by a parameter, so
+// the type's own slot list cannot cover it — the site hint alone decides, and it must be numbered
+// the way the value is. Under the JSON numbering this sorts backwards, silently.
+@derive(Comparable)
+struct Box<T> {
+    #[Transient]
+    note: string
+    item: T
+}
+
+hi: Box<u64> = Box { note: "n", item: big }
+lo: Box<u64> = Box { note: "n", item: one }
+echo [hi, lo].sorted()
+echo json.stringify(hi)

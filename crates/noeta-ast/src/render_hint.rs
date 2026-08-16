@@ -1,17 +1,19 @@
-//! The **render hint**: how to write out a value whose static type contains an unsigned 64-bit
-//! integer.
+//! The **render hint**: the structural map of the unsigned 64-bit integers under a static type —
+//! where to read an erased word unsigned when writing a value out, and where to read one unsigned
+//! when ordering one.
 //!
 //! A fixed-width integer is erased to the underlying i64 word at runtime ([`crate::BuiltinTy::IntN`]
 //! and `noeta_types::Type::IntN` both say so), so nothing the value carries distinguishes `u64` from
-//! `i64`. For arithmetic and ordering that is handled by the width-carrying ops the checker records
-//! in its width sites; for writing a value out the same information is needed, because a `u64` past
-//! bit 63 is a negative i64 word and would otherwise appear as its signed reinterpretation.
+//! `i64`. For arithmetic that is handled by the width-carrying ops the checker records in its width
+//! sites; for writing a value out, and for the ordering the collections compute, the same
+//! information is needed, because a `u64` past bit 63 is a negative i64 word and would otherwise
+//! appear as — and sort as — its signed reinterpretation.
 //!
 //! The signedness is therefore taken from the **static type at the door** and travels to both
 //! backends as one of these hints, built by the checker and applied by a shared walk. Widths
 //! narrower than 64 bits need no hint: every value of one fits in an i64 and is already correct.
 //!
-//! There are two kinds of door, and they take the same hint:
+//! There are three kinds of door, and they take the same hint:
 //!
 //! * **Display** — `echo`, an interpolation hole, a display-based `~` operand — applied by each
 //!   backend to its own value model.
@@ -19,14 +21,30 @@
 //!   applied by [`json_stringify`] here, over the one neutral `NativeValue` tree both backends
 //!   marshal into. This half is a *data* encoding rather than a rendering: the number is not merely
 //!   displayed wrong, it is written wrong to an API response or a persisted record.
+//! * **Ordering** — `.sorted()`, `.min()`, `.max()`, `.keys()`, `.values()`, a rendered set or map,
+//!   and a `for` over a set or map — applied by each backend's comparator against its own value
+//!   model, through [`unsigned_order`] and [`map_key_order`].
 //!
 //! The hint mirrors only the structure those walks take: a scalar, a list/set's elements, a map's
 //! keys and values, positional slots (a tuple's positions, an object's fields), and an enum's
 //! per-variant payload. It is **sparse** — a branch with no unsigned integer under it is absent, and
 //! a type with none anywhere produces no hint at all, so a program that never mentions `u64` carries
-//! nothing and goes through the untouched path. The two walks number an object's slots differently
-//! (a display renders every declared field; a JSON encoding drops the `#[Transient]` ones), which is
-//! why the checker builds each hint for a stated purpose.
+//! nothing and goes through the untouched path.
+//!
+//! The walks do not all number an object's slots the same way, which is why the checker builds each
+//! hint for a stated purpose (`HintPurpose`): a display and an ordering walk both see the object's
+//! own declared fields, while the deep marshal a JSON encoding runs on drops the `#[Transient]`
+//! ones, so its slot numbers count only the fields that survive.
+//!
+//! **A hint never reaches an identity order.** A set's canonical buffer and a
+//! [`noeta_ext_abi::MapKey`]'s [`Ord`] place elements for binary search, `BTreeMap` lookup, hashing
+//! and the deterministic destructor sort — they are built at one site and probed at another, so they
+//! must stay a pure function of the erased word, or a value laundered through `dyn` would probe with
+//! a different order than it was stored under and miss a member that is present. Those orders are
+//! never observed directly: both backends produce the order a program *sees* at the door, under the
+//! hint. What a declared type carries in its own runtime description — a `u64` **field**, via
+//! `noeta_object::Shape::unsigned_slots` — is a different mechanism and does reach the identity
+//! order, precisely because it is a property of the data rather than of the call.
 
 use serde::{Deserialize, Serialize};
 
@@ -75,6 +93,24 @@ impl RenderHint {
         }
     }
 
+    /// The element hint of a [`RenderHint::Elements`] — a list's or set's per-element positions —
+    /// or `None` for any other shape.
+    pub fn elements(&self) -> Option<&RenderHint> {
+        match self {
+            RenderHint::Elements(inner) => Some(inner),
+            _ => None,
+        }
+    }
+
+    /// The key hint of a [`RenderHint::Entries`] — what a map's key order reads — or `None` for any
+    /// other shape (or a map whose keys need none).
+    pub fn entry_key(&self) -> Option<&RenderHint> {
+        match self {
+            RenderHint::Entries { key, .. } => key.as_deref(),
+            _ => None,
+        }
+    }
+
     /// Build a [`RenderHint::Slots`] from per-slot hints, dropping the slots that need none.
     /// Returns `None` when no slot does — the sparseness rule, in one place.
     pub fn slots(hints: impl IntoIterator<Item = Option<RenderHint>>) -> Option<RenderHint> {
@@ -91,6 +127,58 @@ impl RenderHint {
 /// reinterpretation is written, shared by both backends so they cannot spell it differently.
 pub fn unsigned_digits(word: i64) -> String {
     (word as u64).to_string()
+}
+
+/// Order two erased integer words as the unsigned values they stand for — the ordering twin of
+/// [`unsigned_digits`], and likewise the only place the reinterpretation is spelled.
+pub fn unsigned_order(a: i64, b: i64) -> std::cmp::Ordering {
+    (a as u64).cmp(&(b as u64))
+}
+
+/// The **observed** order of two map keys under an optional key hint: an integer key reads unsigned
+/// where the hint says so, a packed key's slots read unsigned per the hint's slot list, and every
+/// other pairing falls back to the key's own [`Ord`] — the identity order.
+///
+/// Used only where a program *sees* the order (a rendered map, `keys()`, `values()`, iteration).
+/// Storage and lookup keep using [`Ord`]: see the module docs for why the two must not be the same
+/// function.
+pub fn map_key_order(
+    a: &noeta_ext_abi::MapKey,
+    b: &noeta_ext_abi::MapKey,
+    hint: Option<&RenderHint>,
+) -> std::cmp::Ordering {
+    use noeta_ext_abi::MapKey;
+    match (hint, a, b) {
+        (Some(RenderHint::Unsigned), MapKey::Int(x), MapKey::Int(y)) => unsigned_order(*x, *y),
+        (Some(hint @ RenderHint::Slots(_)), MapKey::Packed(x), MapKey::Packed(y)) => x
+            .type_name
+            .cmp(&y.type_name)
+            .then_with(|| packed_fields_order(&x.fields, &y.fields, hint)),
+        _ => a.cmp(b),
+    }
+}
+
+/// The slot-wise observed order of two packed keys of the same type: a slot the hint marks
+/// [`RenderHint::Unsigned`] reads its word unsigned, every other slot keeps the derived
+/// [`Ord`] a packed field carries.
+fn packed_fields_order(
+    a: &[noeta_ext_abi::PackedKeyField],
+    b: &[noeta_ext_abi::PackedKeyField],
+    hint: &RenderHint,
+) -> std::cmp::Ordering {
+    use noeta_ext_abi::PackedKeyField;
+    for (i, (x, y)) in a.iter().zip(b).enumerate() {
+        let ord = match (hint.slot(i as u32), x, y) {
+            (Some(RenderHint::Unsigned), PackedKeyField::Int(p), PackedKeyField::Int(q)) => {
+                unsigned_order(*p, *q)
+            }
+            _ => x.cmp(y),
+        };
+        if ord != std::cmp::Ordering::Equal {
+            return ord;
+        }
+    }
+    a.len().cmp(&b.len())
 }
 
 /// A map key's rendered form under an optional hint. An integer key is the only kind a hint can
@@ -265,6 +353,56 @@ mod tests {
         assert_eq!(unsigned_digits(i64::MIN), "9223372036854775808");
         assert_eq!(unsigned_digits(-1), "18446744073709551615");
         assert_eq!(unsigned_digits(255), "255");
+    }
+
+    /// The ordering reinterpretation at both boundaries, and its asymmetry with the signed one:
+    /// past bit 63 the two readings order oppositely, which is the whole ordering defect.
+    #[test]
+    fn an_erased_word_orders_unsigned_past_bit_63() {
+        use std::cmp::Ordering;
+        assert_eq!(unsigned_order(1, -1), Ordering::Less);
+        assert_eq!(1i64.cmp(&-1), Ordering::Greater);
+        assert_eq!(unsigned_order(i64::MAX, i64::MIN), Ordering::Less);
+        assert_eq!(unsigned_order(255, 255), Ordering::Equal);
+    }
+
+    /// A map key's OBSERVED order: an integer key reads unsigned under the hint and by its own
+    /// `Ord` without one, a packed key reads its hinted slots unsigned, and a key kind the hint
+    /// does not describe keeps the identity order either way.
+    #[test]
+    fn a_map_key_orders_unsigned_only_where_the_hint_says_so() {
+        use noeta_ext_abi::{MapKey, PackedKeyField};
+        use std::cmp::Ordering;
+        let (max, one) = (MapKey::Int(-1), MapKey::Int(1));
+        assert_eq!(
+            map_key_order(&max, &one, Some(&RenderHint::Unsigned)),
+            Ordering::Greater
+        );
+        assert_eq!(map_key_order(&max, &one, None), Ordering::Less);
+        // A string key is untouched by an (impossible, defensive) integer hint.
+        let (a, b) = (MapKey::from("a"), MapKey::from("b"));
+        assert_eq!(
+            map_key_order(&a, &b, Some(&RenderHint::Unsigned)),
+            Ordering::Less
+        );
+        // A packed key: slot 0 hinted unsigned, slot 1 left signed.
+        let key = |at: i64, lane: i64| {
+            MapKey::packed(
+                "Tick",
+                vec![PackedKeyField::Int(at), PackedKeyField::Int(lane)],
+            )
+        };
+        let slots = RenderHint::Slots(vec![(0, RenderHint::Unsigned)]);
+        assert_eq!(
+            map_key_order(&key(-1, 0), &key(1, 0), Some(&slots)),
+            Ordering::Greater
+        );
+        assert_eq!(map_key_order(&key(-1, 0), &key(1, 0), None), Ordering::Less);
+        // The unhinted slot still orders signed, and only after the hinted one ties.
+        assert_eq!(
+            map_key_order(&key(1, -1), &key(1, 0), Some(&slots)),
+            Ordering::Less
+        );
     }
 
     /// Only an integer key is reinterpreted; every other key renders through `MapKey::render`,

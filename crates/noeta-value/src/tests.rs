@@ -1515,3 +1515,44 @@ fn a_hint_renders_an_erased_word_unsigned_at_the_positions_it_names() {
         }
     }
 }
+
+/// The ordering half, and its two sources. A slot the SHAPE declares `u64` orders unsigned with no
+/// hint at all — that is what makes a `@derive(Comparable)` field order the same way after a `dyn`
+/// launder — while a bare erased word takes the site's hint, since nothing the value carries says
+/// so. Without either, the signed word wins, which is the reading `u64::MAX` erases to.
+#[test]
+fn a_u64_orders_unsigned_from_the_shape_or_from_the_site_hint() {
+    use noeta_ast::RenderHint;
+    use std::cmp::Ordering;
+    let max = Value::int(u64::MAX as i64);
+    let one = Value::int(1);
+    // No shape, no hint: the erased word, which is where the defect lived.
+    assert_eq!(compare_values(max, one), Some(Ordering::Less));
+    // The site hint reaches a bare scalar.
+    assert_eq!(
+        compare_values_hinted(max, one, Some(&RenderHint::Unsigned)),
+        Some(Ordering::Greater)
+    );
+    // The shape reaches a declared field, with no hint in sight. Slot 0 is declared `u64`; slot 1
+    // is the control and keeps the signed reading.
+    let reading = noeta_object::intern_shape(
+        Shape::object(
+            noeta_object::ShapeKind::Struct,
+            "Reading",
+            vec!["at".into(), "delta".into()],
+        )
+        .with_unsigned_slots(vec![0]),
+    );
+    let big = Value::object(reading, vec![max, max]);
+    let small = Value::object(reading, vec![one, one]);
+    assert_eq!(compare_values(big, small), Some(Ordering::Greater));
+    // Equal in the unsigned slot ⇒ the tie falls to the signed one, where `-1 < 1`.
+    let a = Value::object(reading, vec![one, max]);
+    let b = Value::object(reading, vec![one, one]);
+    assert_eq!(compare_values(a, b), Some(Ordering::Less));
+    for v in [big, small, a, b] {
+        if v.dec_ref() {
+            v.free();
+        }
+    }
+}

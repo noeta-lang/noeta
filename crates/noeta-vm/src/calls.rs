@@ -738,8 +738,14 @@ impl<'m> Vm<'m> {
                     noeta_stdlib::reduce_num_packed(op, &field, &bytes[from * schema.byte_size..])
                 }
                 _ => {
+                    // `min`/`max` on a `List<u64>` read the erased words unsigned; the checker
+                    // recorded the receiver's element hint at this call span.
+                    let unsigned = matches!(
+                        self.order_hint(&span).and_then(|h| h.elements()),
+                        Some(noeta_ast::RenderHint::Unsigned)
+                    );
                     let scalars = self.list_reduction_scalars(v, method, from, span)?;
-                    noeta_stdlib::reduce_num_scalars(op, scalars.into_iter())
+                    noeta_stdlib::reduce_num_scalars(op, scalars.into_iter(), unsigned)
                 }
             };
             let folded = folded.map_err(|e| self.std_dispatch_error(e, span))?;

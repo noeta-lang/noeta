@@ -450,7 +450,11 @@ impl Interpreter {
                 body,
                 span,
                 stream,
-            } => self.exec_ir_for(pattern, iterable, body, *span, *stream, frame),
+                order,
+            } => {
+                self.note_order_hint(*span, order);
+                self.exec_ir_for(pattern, iterable, body, *span, *stream, frame)
+            }
             noeta_ir::Stmt::Match {
                 scrutinee,
                 arms,
@@ -646,6 +650,7 @@ impl Interpreter {
             .map(|f| FieldSpec {
                 name: f.name.clone(),
                 transient: noeta_ast::has_attribute(&f.attrs, &self.transient_names),
+                unsigned: f.ty.as_ref().is_some_and(noeta_ast::is_unsigned_64_type),
             })
             .collect();
         let methods = strukt
@@ -710,6 +715,8 @@ impl Interpreter {
             .map(|v| VariantInfo {
                 name: v.name.clone(),
                 field_names: v.fields.iter().map(|f| f.name.clone()).collect(),
+                unsigned: noeta_ast::unsigned_field_slots(v.fields.iter().map(|f| f.ty.as_ref()))
+                    .into(),
                 // The backing a wire→case conversion matches on, through the one `fold_const_expr`
                 // the reflection manifest and the checker's decode recipes also fold with.
                 backing: v
@@ -749,6 +756,7 @@ impl Interpreter {
             .map(|f| FieldSpec {
                 name: f.name.clone(),
                 transient: noeta_ast::has_attribute(&f.attrs, &self.transient_names),
+                unsigned: f.ty.as_ref().is_some_and(noeta_ast::is_unsigned_64_type),
             })
             .collect();
         let methods = class
@@ -1570,8 +1578,13 @@ impl Interpreter {
                 type_args,
                 span,
                 supplied,
+                order,
                 name_span: _,
             } => {
+                // A method whose result reveals an order the program can see, on a `u64`-carrying
+                // receiver: register the hint by span, so the collection method below reads it the
+                // way the VM reads its own span-keyed table.
+                self.note_order_hint(*span, order);
                 // In-place collection self-update (Phase 5.1c): a marked `m = m.set(k,v)` moves the
                 // receiver out of its (reassigned) binding so a uniquely-owned map can be mutated in
                 // place; mirrors the VM's reuse-aware dispatch. A non-map receiver (e.g. a user method

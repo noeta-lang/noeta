@@ -316,13 +316,18 @@ impl Num {
 /// Combine two boxed numeric elements under `op`, promoting to float if either is a float (matching
 /// the eager `sum`'s int/float promotion). Left-to-right, so the fold order — and thus float rounding
 /// — is identical to the packed kernel's sequential fold.
-fn combine(op: NumReduce, a: Num, b: Num) -> Num {
+fn combine(op: NumReduce, a: Num, b: Num, unsigned: bool) -> Num {
     match (a, b) {
         // `Ord::min`/`Ord::max` and `f64::min`/`f64::max` are named explicitly: the `Elem` trait is in
         // scope for the packed folds, and its own `min`/`max` would otherwise make `x.min(y)` ambiguous.
         (Num::Int(x), Num::Int(y)) => Num::Int(match op {
             NumReduce::Sum => x.wrapping_add(y),
             NumReduce::Product => x.wrapping_mul(y),
+            // `min`/`max` are the sign-DEPENDENT reductions: a `u64` past bit 63 is a negative
+            // erased word, so the signed reading would report it as the minimum of every list it
+            // is in. `sum`/`product` need no such distinction — they wrap at the width either way.
+            NumReduce::Min if unsigned => unsigned_pick(x, y, std::cmp::Ordering::Less),
+            NumReduce::Max if unsigned => unsigned_pick(x, y, std::cmp::Ordering::Greater),
             NumReduce::Min => Ord::min(x, y),
             NumReduce::Max => Ord::max(x, y),
         }),
@@ -343,9 +348,14 @@ fn combine(op: NumReduce, a: Num, b: Num) -> Num {
 /// list type reduces identically whichever representation it happens to have. `min`/`max` of empty
 /// return `None`; `sum`/`product` of empty return their identity as an `int` (matching the historical
 /// eager `sum`, which folds an empty list to `int` `0`).
+///
+/// `unsigned` says the element type is `u64` — the width the erased i64 word cannot represent, so
+/// `min`/`max` must read it unsigned. The caller reads it from the call site's ordering hint (a
+/// `List<u64>` receiver); every other element type passes `false`.
 pub fn reduce_num_scalars(
     op: NumReduce,
     scalars: impl Iterator<Item = Scalar>,
+    unsigned: bool,
 ) -> Result<Option<RedNum>, StdError> {
     let mut acc: Option<Num> = None;
     for s in scalars {
@@ -357,7 +367,7 @@ pub fn reduce_num_scalars(
         };
         acc = Some(match acc {
             None => v,
-            Some(a) => combine(op, a, v),
+            Some(a) => combine(op, a, v, unsigned),
         });
     }
     Ok(match op {
@@ -365,6 +375,17 @@ pub fn reduce_num_scalars(
         NumReduce::Product => Some(acc.map(to_rednum).unwrap_or(RedNum::Int(1))),
         NumReduce::Min | NumReduce::Max => acc.map(to_rednum),
     })
+}
+
+/// The one of two erased words that compares `want` against the other **read as `u64`** — the
+/// unsigned twin of `Ord::min`/`Ord::max`, and the only place this file spells the reinterpretation.
+/// Ties keep the left operand, so the fold stays left-to-right like every other combiner here.
+fn unsigned_pick(x: i64, y: i64, want: std::cmp::Ordering) -> i64 {
+    if (x as u64).cmp(&(y as u64)) == want {
+        x
+    } else {
+        y
+    }
 }
 
 fn to_rednum(n: Num) -> RedNum {
@@ -514,9 +535,33 @@ mod tests {
         ] {
             let packed = reduce_num_packed(op, &field, &bytes).unwrap();
             let boxed =
-                reduce_num_scalars(op, vals.iter().map(|&v| Scalar::Int(v as i64))).unwrap();
+                reduce_num_scalars(op, vals.iter().map(|&v| Scalar::Int(v as i64)), false).unwrap();
             assert_eq!(packed, boxed, "op {op:?}");
         }
+    }
+
+    /// `min`/`max` are the sign-dependent reductions: a `u64` past bit 63 is a NEGATIVE erased
+    /// word, so the signed reading reports it as the smallest element of every list it is in.
+    /// `sum`/`product` wrap at the width either way, so they read the same both ways.
+    #[test]
+    fn unsigned_min_max_read_the_erased_word_unsigned() {
+        let words = [
+            1i64,
+            -1,       /* u64::MAX */
+            i64::MIN, /* i64::MAX + 1 */
+        ];
+        let fold = |op, unsigned| {
+            reduce_num_scalars(op, words.iter().map(|&v| Scalar::Int(v)), unsigned).unwrap()
+        };
+        assert_eq!(fold(NumReduce::Min, true), Some(RedNum::Int(1)));
+        assert_eq!(fold(NumReduce::Max, true), Some(RedNum::Int(-1)));
+        assert_eq!(fold(NumReduce::Min, false), Some(RedNum::Int(i64::MIN)));
+        assert_eq!(fold(NumReduce::Max, false), Some(RedNum::Int(1)));
+        assert_eq!(fold(NumReduce::Sum, true), fold(NumReduce::Sum, false));
+        assert_eq!(
+            fold(NumReduce::Product, true),
+            fold(NumReduce::Product, false)
+        );
     }
 
     #[test]

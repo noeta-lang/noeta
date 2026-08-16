@@ -54,6 +54,20 @@ pub(crate) fn resolve_extern_route(
 }
 
 impl<'m> Vm<'m> {
+    /// The **ordering hint** the checker recorded at `span` — a `.sorted()`/`.min()`/`.max()`/
+    /// `.keys()`/`.values()` call, or a `for` loop, over a value whose static type carries an
+    /// unsigned 64-bit integer. `None` for every unrecorded site, which is nearly all of them, so
+    /// the ordinary path costs one length test — the `is_empty` short-circuit is what keeps this off
+    /// the loop-entry `IterSnapshot`'s cost, which would otherwise hash a span per loop entry. The
+    /// tree-walker reads the same hint off its IR node instead of a side table; both walk it
+    /// identically.
+    pub(crate) fn order_hint(&self, span: &Span) -> Option<&noeta_ast::RenderHint> {
+        if self.order_hints.is_empty() {
+            return None;
+        }
+        self.order_hints.get(span)
+    }
+
     /// A Ring 1 list method (`reverse`/`contains`/`join`). Mirrors the tree-walker's
     /// `call_list_method`; the result is a freshly-owned value (refcount 1). The receiver's
     /// elements shared from `list_items` are not retained, so any element placed into a *new*
@@ -178,9 +192,13 @@ impl<'m> Vm<'m> {
                     let error = noeta_stdlib::unorderable_error(name);
                     return Err(self.std_dispatch_error(error, span));
                 }
+                // A `List<u64>` (or a list carrying one in a payload the runtime cannot describe)
+                // orders under the checker's hint for this call, so the erased words read unsigned.
+                let elem = self.order_hint(&span).and_then(|h| h.elements());
                 let mut sorted = items;
                 sorted.sort_by(|&a, &b| {
-                    noeta_value::compare_values(a, b).unwrap_or(std::cmp::Ordering::Equal)
+                    noeta_value::compare_values_hinted(a, b, elem)
+                        .unwrap_or(std::cmp::Ordering::Equal)
                 });
                 for &element in &sorted {
                     retain(element);
@@ -858,7 +876,13 @@ impl<'m> Vm<'m> {
         match method {
             noeta_stdlib::MapMethod::Keys => {
                 self.stdlib_arity(name, args, 0, span)?;
-                let keys = map.map_keys().expect("map receiver");
+                let mut keys = map.map_keys().expect("map receiver");
+                // A `Map<u64, _>`'s keys are handed back in the order the *type* states, not the
+                // erased word's. The map itself is untouched: its key placement is an identity
+                // order (see `noeta_ast::render_hint`), and this only re-sorts the answer.
+                if let Some(key) = self.order_hint(&span).map(|h| h.entry_key()) {
+                    keys.sort_by(|a, b| noeta_ast::map_key_order(a, b, key));
+                }
                 // A string key becomes a fresh string value; an extern key a fresh extern value
                 // (its box cloned — a key is a snapshot); a packed key rebuilds its struct value
                 // from the content snapshot (P-PKEY).
@@ -877,7 +901,16 @@ impl<'m> Vm<'m> {
             }
             noeta_stdlib::MapMethod::Values => {
                 self.stdlib_arity(name, args, 0, span)?;
-                let values = map.map_values().expect("map receiver");
+                // In key order — under the observed key order where the map's key type carries a
+                // `u64`, so `values()` and `keys()` line up element for element.
+                let values = match self.order_hint(&span).map(|h| h.entry_key()) {
+                    Some(key) => {
+                        let mut entries = map.map_entries_keyed().expect("map receiver");
+                        entries.sort_by(|a, b| noeta_ast::map_key_order(&a.0, &b.0, key));
+                        entries.into_iter().map(|(_, v)| v).collect()
+                    }
+                    None => map.map_values().expect("map receiver"),
+                };
                 for &element in &values {
                     retain(element);
                 }

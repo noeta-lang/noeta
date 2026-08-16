@@ -350,7 +350,10 @@ impl Value {
             RenderHint::Entries { key, value } => heap::with_payload(self, |p| match p {
                 Payload::Map(entries) => {
                     let mut kv: Vec<(&noeta_ext_abi::MapKey, &Value)> = entries.iter().collect();
-                    kv.sort_unstable_by(|a, b| a.0.cmp(b.0));
+                    // The OBSERVED key order: a `u64` key reads unsigned, so what is rendered
+                    // matches what `keys()` and a `for` over the map hand back. The map's own key
+                    // placement is untouched — see `noeta_ast::render_hint`.
+                    kv.sort_by(|a, b| noeta_ast::map_key_order(a.0, b.0, key.as_deref()));
                     let parts: Vec<String> = kv
                         .iter()
                         .map(|(k, v)| {
@@ -433,6 +436,13 @@ impl Value {
                 format!("[{}]", parts.join(", "))
             }
             Payload::Set(items) => {
+                // A set renders in the OBSERVED element order, so a `u64` member prints where its
+                // value belongs. The canonical buffer itself is untouched: it is the identity order
+                // membership binary-searches — see `noeta_ast::render_hint`.
+                let mut items = items.clone();
+                items.sort_by(|&a, &b| {
+                    crate::compare_values_hinted(a, b, elem).unwrap_or(std::cmp::Ordering::Equal)
+                });
                 let parts: Vec<String> = items.iter().map(|v| v.repr_hinted(elem)).collect();
                 format!("{{{}}}", parts.join(", "))
             }

@@ -6,7 +6,7 @@
 
 use std::cmp::Ordering;
 
-use noeta_ast::{BinaryOp, UnaryOp};
+use noeta_ast::{BinaryOp, RenderHint, UnaryOp};
 use noeta_diagnostics::DiagnosticCode;
 
 use crate::Value;
@@ -277,10 +277,12 @@ pub fn compare_primitive(left: Value, right: Value) -> Option<Ordering> {
     if left.is_extern() && right.is_extern() {
         return left.with_extern(|a| right.with_extern(|b| a.cmp_value(b)));
     }
-    // P-PKEY: two key-capable `@packed` structs order by content — (type name, then field-wise
-    // slot order), the same total order `MapKey::Packed` uses, so set order, `sorted()`, and map
-    // iteration all agree. Engages only when BOTH sides are key-capable objects; anything else
-    // falls through to the numeric lane below.
+    // P-PKEY: two key-capable `@packed` structs order by content — type name, then field-wise slot
+    // order — so set order, `sorted()` and a map's observed key order all agree. Engages only when
+    // BOTH sides are key-capable objects; anything else falls through to the numeric lane below.
+    // A `u64` slot reads unsigned here (the shape says which); `MapKey::Packed`'s own `Ord` is the
+    // *identity* order and stays on the erased word, with the observed order produced at the door
+    // by `noeta_ast::map_key_order` — see that module for why the two must not be one function.
     if let Some(ordering) = packed_primitive_cmp(left, right) {
         return Some(ordering);
     }
@@ -293,9 +295,10 @@ pub fn compare_primitive(left: Value, right: Value) -> Option<Ordering> {
 }
 
 /// The content order of two **key-capable `@packed` struct** values (P-PKEY): type name first,
-/// then the slots in declaration order — bools `false < true`, ints numerically, nested capable
-/// structs recursively. Exactly [`noeta_ext_abi::MapKey`]'s packed order, so every order-observing
-/// surface agrees. `None` unless both sides are key-capable objects (the caller falls through).
+/// then the slots in declaration order — bools `false < true`, ints numerically (unsigned where the
+/// shape declares the slot `u64`), nested capable structs recursively. The order every
+/// *order-observing* surface shows, including a rendered map's keys. `None` unless both sides are
+/// key-capable objects (the caller falls through).
 fn packed_primitive_cmp(a: Value, b: Value) -> Option<Ordering> {
     let sa = a.shape()?;
     let sb = b.shape()?;
@@ -307,11 +310,11 @@ fn packed_primitive_cmp(a: Value, b: Value) -> Option<Ordering> {
         return Some(by_name);
     }
     // Same type ⇒ same field kinds per slot (the capability contract fixes them).
-    for (x, y) in a.slots()?.into_iter().zip(b.slots()?) {
+    for (i, (x, y)) in a.slots()?.into_iter().zip(b.slots()?).enumerate() {
         let ord = if let (Some(p), Some(q)) = (x.as_bool(), y.as_bool()) {
             p.cmp(&q)
         } else if let (Some(p), Some(q)) = (x.as_int(), y.as_int()) {
-            p.cmp(&q)
+            int_slot_order(p, q, sa.is_unsigned_slot(i))
         } else {
             packed_primitive_cmp(x, y)?
         };
@@ -328,8 +331,21 @@ fn packed_primitive_cmp(a: Value, b: Value) -> Option<Ordering> {
 /// `None` if the operands are not two same-type objects/enums, or any field is non-primitive
 /// (and so has no defined order) — the caller turns that into a runtime type error.
 pub fn structural_compare(left: Value, right: Value) -> Option<Ordering> {
+    structural_compare_hinted(left, right, None)
+}
+
+/// [`structural_compare`] under an optional [`RenderHint`], which names the positions the *static*
+/// type says are `u64` where the runtime description cannot (a type argument: a `?u64`'s payload, a
+/// `List<u64>`'s element). A slot orders unsigned if either source says so — the shape's own
+/// `unsigned_slots` (a declared field) or the hint's slot (a type argument) — so the two mechanisms
+/// compose in this one walk instead of being spelled twice.
+fn structural_compare_hinted(
+    left: Value,
+    right: Value,
+    hint: Option<&RenderHint>,
+) -> Option<Ordering> {
     if left.is_enum() && right.is_enum() {
-        return enum_structural_compare(left, right);
+        return enum_structural_compare(left, right, hint);
     }
     if !left.is_object() || !right.is_object() {
         return None;
@@ -342,8 +358,9 @@ pub fn structural_compare(left: Value, right: Value) -> Option<Ordering> {
     if la.len() != lb.len() {
         return None;
     }
-    for (a, b) in la.iter().zip(lb.iter()) {
-        match compare_values(*a, *b)? {
+    for (i, (a, b)) in la.iter().zip(lb.iter()).enumerate() {
+        let slot = hint.and_then(|h| h.slot(i as u32));
+        match slot_compare(*a, *b, sa.is_unsigned_slot(i), slot)? {
             Ordering::Equal => continue,
             other => return Some(other),
         }
@@ -351,11 +368,37 @@ pub fn structural_compare(left: Value, right: Value) -> Option<Ordering> {
     Some(Ordering::Equal)
 }
 
+/// One slot of a structural compare, told whether the slot's declared type is `u64`
+/// ([`noeta_object::Shape::unsigned_slots`]). A fixed-width integer is erased to its i64 word, so a
+/// `u64` past bit 63 is a negative word and the signed reading would order it below every small
+/// value; every other slot compares exactly as [`compare_values`] does.
+fn slot_compare(a: Value, b: Value, unsigned: bool, hint: Option<&RenderHint>) -> Option<Ordering> {
+    let unsigned = unsigned || matches!(hint, Some(RenderHint::Unsigned));
+    if unsigned && let (Some(x), Some(y)) = (a.as_int(), b.as_int()) {
+        return Some(int_slot_order(x, y, true));
+    }
+    compare_values_hinted(a, b, hint)
+}
+
+/// Two erased integer words in declared-slot order: read unsigned when the slot's type is `u64`,
+/// signed otherwise. The one place the reinterpretation is spelled on the VM's ordering path.
+fn int_slot_order(a: i64, b: i64, unsigned: bool) -> Ordering {
+    if unsigned {
+        (a as u64).cmp(&(b as u64))
+    } else {
+        a.cmp(&b)
+    }
+}
+
 /// Two same-enum values order by variant **declaration index** (`Low < High` as declared), then
 /// payload slots lexicographically — the enum half of derived `Comparable`. A shape without a
 /// recorded index (built outside the compiler, e.g. reflection materialization) is unordered
 /// (`None` → runtime error), never wrongly ordered.
-fn enum_structural_compare(left: Value, right: Value) -> Option<Ordering> {
+fn enum_structural_compare(
+    left: Value,
+    right: Value,
+    hint: Option<&RenderHint>,
+) -> Option<Ordering> {
     let (sa, sb) = (left.shape()?, right.shape()?);
     if sa.name != sb.name {
         return None;
@@ -368,8 +411,13 @@ fn enum_structural_compare(left: Value, right: Value) -> Option<Ordering> {
     if la.len() != lb.len() {
         return None;
     }
-    for (a, b) in la.iter().zip(lb.iter()) {
-        match compare_values(*a, *b)? {
+    // A hint reaches an enum by VARIANT name (the discriminator the value carries), matching the
+    // render walk — an `?u64`'s `some` payload, a user enum's case.
+    let variant = sa.variant.as_deref().unwrap_or_default();
+    let slots = hint.and_then(|h| h.variant(variant)).unwrap_or(&[]);
+    for (i, (a, b)) in la.iter().zip(lb.iter()).enumerate() {
+        let slot = slots.iter().find(|(s, _)| *s == i as u32).map(|(_, h)| h);
+        match slot_compare(*a, *b, sa.is_unsigned_slot(i), slot)? {
             Ordering::Equal => continue,
             other => return Some(other),
         }
@@ -405,8 +453,25 @@ pub fn set_order(left: Value, right: Value) -> Option<Ordering> {
 /// `.sorted()` uses — the checker gates `.sorted()` on `Comparable` elements, and derived
 /// `Comparable` structs/enums order exactly like this.
 pub fn compare_values(a: Value, b: Value) -> Option<Ordering> {
+    compare_values_hinted(a, b, None)
+}
+
+/// [`compare_values`] under an optional [`RenderHint`] — the **observed** order of two values whose
+/// static type carries a `u64` somewhere a runtime description cannot say (a bare `List<u64>`
+/// element, a `?u64` payload, a `Map<u64, _>` key). Emitted by lowering at the ordering sites the
+/// checker marked (`.sorted()`, `.min()`, `.max()`, `.keys()`, `.values()`, a `for` over a set or
+/// map), and never at a set's or map's identity order — see [`noeta_ast::render_hint`]. The
+/// tree-walker holds the identical twin, so the differential pins them equal.
+pub fn compare_values_hinted(a: Value, b: Value, hint: Option<&RenderHint>) -> Option<Ordering> {
+    if let Some(RenderHint::Unsigned) = hint
+        && let (Some(x), Some(y)) = (a.as_int(), b.as_int())
+        && a.as_float().is_none()
+        && b.as_float().is_none()
+    {
+        return Some(noeta_ast::unsigned_order(x, y));
+    }
     if (a.is_object() && b.is_object()) || (a.is_enum() && b.is_enum()) {
-        structural_compare(a, b)
+        structural_compare_hinted(a, b, hint)
     } else {
         compare_primitive(a, b)
     }

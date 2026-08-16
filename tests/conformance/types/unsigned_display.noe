@@ -15,7 +15,7 @@
 // expect: stdout "4294967295"
 // expect: stdout "-1"
 // expect: stdout "[18446744073709551615, 9223372036854775808, 1]"
-// expect: stdout "{18446744073709551615, 1}"
+// expect: stdout "{1, 18446744073709551615}"
 // expect: stdout "{"big": 18446744073709551615}"
 // expect: stdout "(18446744073709551615, "tag")"
 // expect: stdout "Meter {reading: 18446744073709551615, label: "m"}"
@@ -65,7 +65,8 @@ echo 65535u16
 echo 4294967295u32
 echo -1i64
 
-// Collections render their elements through the same hint.
+// Collections render their elements through the same hint — and a SET renders in the order its
+// element type states, so its members print where their values belong (`types/unsigned_ordering`).
 echo [big, half, 1u64]
 echo [big, 1u64].to_set()
 echo {"big": big}

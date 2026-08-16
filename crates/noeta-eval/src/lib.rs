@@ -20,7 +20,7 @@ use noeta_ast::reflect::TypeRepr;
 // finding 10), shared with the VM session so the two backends agree by construction (the
 // `session_parity` differential gates).
 use noeta_ast::desugar::{REPL_VALUE, rewrite_trailing_expr};
-use noeta_ast::{BinaryOp, ForPattern, Pattern, Program, TypeRef, UnaryOp};
+use noeta_ast::{BinaryOp, ForPattern, Pattern, Program, RenderHint, TypeRef, UnaryOp};
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 use noeta_span::Span;
 
@@ -444,6 +444,14 @@ impl EnumDef {
             .unwrap_or(usize::MAX)
     }
 
+    /// The variant's `u64` payload slots — empty for a variant that declares none, and for a name
+    /// this enum does not have.
+    fn variant_unsigned(&self, name: &str) -> Rc<[u32]> {
+        self.variant(name)
+            .map(|v| v.unsigned.clone())
+            .unwrap_or_else(|| Rc::from(&[][..]))
+    }
+
     fn method(&self, name: &str) -> Option<&Rc<Closure>> {
         self.methods.get(name)
     }
@@ -453,6 +461,9 @@ impl EnumDef {
 struct VariantInfo {
     name: String,
     field_names: Vec<String>,
+    /// The payload slot indices declared `u64`, ascending — stamped onto every value of this
+    /// variant (see [`EnumValue::unsigned`]).
+    unsigned: Rc<[u32]>,
     /// The variant's **backing value** in a backed enum (`enum Plan: string { Free = "free" }`),
     /// folded through the shared `fold_const_expr`; `None` for a plain enum's case, a native or
     /// prelude enum (neither is backed), and a backing that is not a literal. What `Enum.from` /
@@ -470,6 +481,12 @@ pub struct EnumValue {
     /// payload). Type metadata like the VM `Shape::variant_index`: **excluded from `PartialEq`**
     /// (equality compares name/variant/data).
     variant_index: usize,
+    /// The payload slot indices declared `u64`, ascending — the slots derived `Comparable` reads
+    /// unsigned. The tree-walker twin of the VM's `Shape::unsigned_slots` on a variant shape, and
+    /// type metadata like [`EnumValue::variant_index`]: **excluded from `PartialEq`**. Shared
+    /// (`Rc`) because every value of one variant carries the same list, which is empty for nearly
+    /// every enum.
+    unsigned: Rc<[u32]>,
     /// The reflected type for a **generic** enum-variant construction (runtime type-argument
     /// reflection, R2b.2), `Some` only for a generic enum — so `type_of` recovers its type arguments
     /// after a `dyn` launder. `None` for a non-generic enum / an ordinary construction. Invisible to
@@ -625,6 +642,12 @@ struct FieldSpec {
     /// read from the same declaration through the same shared attribute projection, so the two
     /// engines cannot disagree about which fields leave the program.
     transient: bool,
+    /// Whether the field is declared `u64` — the slot a structural ordering compare must read
+    /// unsigned, since a fixed-width integer is erased to its i64 word and a `u64` past bit 63 is a
+    /// negative one. The tree-walker twin of the VM's `Shape::unsigned_slots`; both are read from
+    /// the same declaration through the same shared `noeta_ast::unsigned_field_slots` projection, so
+    /// the two engines cannot disagree about which slots order unsigned.
+    unsigned: bool,
 }
 
 /// A struct or class instance: its type and the values of its fields. A value `struct` is
@@ -1423,6 +1446,11 @@ struct Interpreter {
     /// so the "does this field leave the program?" question is answered once per type rather than
     /// per marshal.
     transient_names: std::collections::HashSet<String>,
+    /// Ordering-site span → the [`RenderHint`] naming the positions to read unsigned, registered as
+    /// lowering's `Rvalue::Method::order` / `Stmt::For::order` reaches each site. The tree-walker
+    /// twin of the VM's load-time `order_hints` table, keyed the same way so a `.sorted()` on a
+    /// `List<u64>` orders identically in both engines. Empty for nearly every program.
+    order_hints: HashMap<Span, Rc<RenderHint>>,
     /// For a **native** type bound under a name that is not its own — `use std.http.Framing as F` —
     /// the canonical short name a value of it carries. A pattern is written with the binding (`F.Sse`)
     /// while the value it must match is stamped with the type's own name (`Framing`), so the two are
@@ -1530,6 +1558,8 @@ impl Interpreter {
                         .map(|v| VariantInfo {
                             name: v.name.clone(),
                             field_names: v.field_names(),
+                            // No prelude enum carries a `u64` payload.
+                            unsigned: Rc::from(&[][..]),
                             backing: None,
                         })
                         .collect(),
@@ -1574,6 +1604,7 @@ impl Interpreter {
             ext_state: Vec::new(),
             reflection: noeta_ast::reflect::ReflectionInfo::default(),
             transient_names: std::collections::HashSet::new(),
+            order_hints: HashMap::new(),
             native_type_names: std::collections::HashMap::new(),
             type_of_sites: std::collections::HashMap::new(),
             deserialize_recipes: std::collections::HashMap::new(),
@@ -1880,13 +1911,50 @@ impl Interpreter {
         )
     }
 
+    /// Register the ordering hint lowering baked at `span` (`Rvalue::Method::order` /
+    /// `Stmt::For::order`), so the collection method or loop reached from there can look it up the
+    /// way the VM looks up its own load-time table. Idempotent: one span carries one hint.
+    /// The ordering hint registered at `span`, or `None`. The `is_empty` short-circuit keeps this
+    /// off the loop-entry cost of a program that never orders a `u64` — which is nearly all of them.
+    pub(crate) fn order_hint(&self, span: Span) -> Option<&Rc<RenderHint>> {
+        if self.order_hints.is_empty() {
+            return None;
+        }
+        self.order_hints.get(&span)
+    }
+
+    pub(crate) fn note_order_hint(&mut self, span: Span, hint: &Option<Rc<RenderHint>>) {
+        if let Some(hint) = hint {
+            self.order_hints.entry(span).or_insert_with(|| hint.clone());
+        }
+    }
+
     fn iter_elements(&mut self, iterable: Value, span: Span) -> Eval<Vec<Value>> {
+        // A `for` over a set/map whose element or key type carries a `u64` walks the snapshot in the
+        // order the *type* states rather than the erased word's. The collection is untouched: its
+        // canonical buffer / key placement is an identity order (see `noeta_ast::render_hint`).
+        let order = self.order_hint(span).cloned();
         match &iterable {
             Value::List(repr) => Ok((*repr.to_rc_vec()).clone()),
             // A set iterates in its canonical (sorted) order — deterministic, like the VM.
-            Value::Set(items, _) => Ok((**items).clone()),
+            Value::Set(items, _) => {
+                let mut items = (**items).clone();
+                if let Some(hint) = order.as_deref().and_then(|h| h.elements()) {
+                    items.sort_by(|a, b| {
+                        compare_field_hinted(a, b, Some(hint)).unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                }
+                Ok(items)
+            }
             // Iterating a map yields its values, in deterministic key order.
-            Value::Map(entries, _) => Ok(entries.values().cloned().collect()),
+            Value::Map(entries, _) => Ok(match order.as_deref().map(|h| h.entry_key()) {
+                Some(key) => {
+                    let mut kv: Vec<(&noeta_stdlib::MapKey, &Value)> = entries.iter().collect();
+                    kv.sort_by(|a, b| noeta_ast::map_key_order(a.0, b.0, key));
+                    kv.into_iter().map(|(_, v)| v.clone()).collect()
+                }
+                None => entries.values().cloned().collect(),
+            }),
             // A user object lights up the `Iterable` trait: `for x in o` iterates the list its
             // `iter` method returns — or, composing with the member-handle iterator below, the
             // `next`-driven user iterator object it returns.
@@ -2341,6 +2409,8 @@ impl Interpreter {
                 // no defaults, no slot table and no methods of its own to inherit, so the payload
                 // values ARE the value. Built under the immutable reflection borrow, which is released
                 // before the validator re-entry below (that needs `&mut self`).
+                let variant_unsigned: Rc<[u32]> =
+                    noeta_ast::reflect::unsigned_payload_slots(&payload).into();
                 let built = match plan_variant_payload(&type_name, &payload, &fields_val) {
                     Err(msg) => Err(msg),
                     Ok(data) => Ok(Value::Enum(Rc::new(EnumValue {
@@ -2348,6 +2418,10 @@ impl Interpreter {
                         variant: variant.to_string(),
                         data,
                         variant_index: index as usize,
+                        // Resolved from the declaration, exactly as a source-written
+                        // `Enum.Variant(payload)` does — a reflection-constructed case must order
+                        // identically to a constructed one, and the mask is what decides that.
+                        unsigned: variant_unsigned,
                         reflect: None,
                     }))),
                 };
@@ -2732,6 +2806,9 @@ impl Interpreter {
                     // A native declaration has no `#[Transient]` surface today; the marker is a `.noe`
                     // field attribute, and a native field carries no attributes at all.
                     transient: false,
+                    // A native fielded type declares its widths in Rust, not in a `.noe` annotation;
+                    // it carries no `u64`-typed surface field to order.
+                    unsigned: false,
                 })
                 .collect(),
             methods: HashMap::new(),
@@ -2838,6 +2915,7 @@ impl Interpreter {
             variant: variant.to_string(),
             data: args,
             variant_index: def.variant_index(variant),
+            unsigned: def.variant_unsigned(variant),
             reflect: None,
         })))
     }
@@ -2890,6 +2968,8 @@ impl Interpreter {
                     variant_index: def.variant_index(&name),
                     variant: name,
                     data: vec![],
+                    // A payload-free case has no slot to order.
+                    unsigned: Rc::from(&[][..]),
                     reflect: None,
                 }));
                 if method == "from" {
@@ -3856,8 +3936,13 @@ impl Interpreter {
                         error.message,
                     ));
                 }
+                // A `List<u64>` (or a list carrying one in a payload the runtime cannot describe)
+                // orders under the checker's hint for this call, so the erased words read unsigned.
+                let elem = self.order_hint(span).and_then(|h| h.elements()).cloned();
                 let mut sorted = items.to_vec();
-                sorted.sort_by(|a, b| compare_field(a, b).unwrap_or(std::cmp::Ordering::Equal));
+                sorted.sort_by(|a, b| {
+                    compare_field_hinted(a, b, elem.as_ref()).unwrap_or(std::cmp::Ordering::Equal)
+                });
                 Ok(Value::list(sorted))
             }
             noeta_stdlib::ListMethod::Slice => {
@@ -4416,9 +4501,16 @@ impl Interpreter {
         match method {
             noeta_stdlib::MapMethod::Keys => {
                 self.expect_std_arity(name, args, 0, span)?;
+                // A `Map<u64, _>`'s keys are handed back in the order the *type* states, not the
+                // erased word's. The map itself is untouched: its key placement is an identity
+                // order (see `noeta_ast::render_hint`), and this only re-sorts the answer.
+                let mut ordered: Vec<&noeta_stdlib::MapKey> = entries.keys().collect();
+                if let Some(key) = self.order_hint(span).map(|h| h.entry_key()) {
+                    ordered.sort_by(|a, b| noeta_ast::map_key_order(a, b, key));
+                }
                 // A string key becomes a fresh string value; an extern key a fresh extern value.
-                let keys = entries
-                    .keys()
+                let keys = ordered
+                    .into_iter()
                     .map(|k| match k {
                         noeta_stdlib::MapKey::Str(s) => Value::Str(s.as_str().to_owned()),
                         noeta_stdlib::MapKey::Int(i) => Value::Int(*i),
@@ -4435,7 +4527,19 @@ impl Interpreter {
             }
             noeta_stdlib::MapMethod::Values => {
                 self.expect_std_arity(name, args, 0, span)?;
-                Ok(Value::list(entries.values().cloned().collect()))
+                // In key order — under the OBSERVED key order where the key type carries a `u64`,
+                // so `values()` and `keys()` line up element for element.
+                Ok(Value::list(
+                    match self.order_hint(span).map(|h| h.entry_key()) {
+                        Some(key) => {
+                            let mut kv: Vec<(&noeta_stdlib::MapKey, &Value)> =
+                                entries.iter().collect();
+                            kv.sort_by(|a, b| noeta_ast::map_key_order(a.0, b.0, key));
+                            kv.into_iter().map(|(_, v)| v.clone()).collect()
+                        }
+                        None => entries.values().cloned().collect(),
+                    },
+                ))
             }
             noeta_stdlib::MapMethod::Has => {
                 self.expect_std_arity(name, args, 1, span)?;
@@ -5669,10 +5773,16 @@ impl Interpreter {
                         &p.raw()[from * view.byte_size..],
                     )
                 }
-                _ => noeta_stdlib::reduce_num_scalars(
-                    op,
-                    self.list_scalars(list, method, from, span)?,
-                ),
+                _ => {
+                    // `min`/`max` on a `List<u64>` read the erased words unsigned; the checker
+                    // recorded the receiver's element hint at this call span.
+                    let unsigned = matches!(
+                        self.order_hint(span).and_then(|h| h.elements()),
+                        Some(RenderHint::Unsigned)
+                    );
+                    let scalars = self.list_scalars(list, method, from, span)?;
+                    noeta_stdlib::reduce_num_scalars(op, scalars, unsigned)
+                }
             };
             let folded =
                 folded.map_err(|e| self.runtime_error(std_error_code(e.kind), span, e.message))?;
@@ -6157,6 +6267,10 @@ fn builtin_enum(enum_name: &str, variant: &str, data: Vec<Value>) -> Value {
         variant: variant.to_string(),
         data,
         variant_index,
+        // `Option`/`Result` carry a type ARGUMENT, not a declared field, so there is no declared
+        // width to record here: a `?u64`'s signedness lives only in the static type and reaches
+        // ordering as a site hint.
+        unsigned: Rc::from(&[][..]),
         reflect: None,
     }))
 }
@@ -6668,6 +6782,8 @@ fn native_type_value(
                 .map(|v| VariantInfo {
                     name: v.name.to_string(),
                     field_names: (0..v.fields.len()).map(|n| format!("_{n}")).collect(),
+                    // A native enum declares its widths in Rust, not in a `.noe` annotation.
+                    unsigned: Rc::from(&[][..]),
                     backing: None,
                 })
                 .collect(),
@@ -6688,6 +6804,8 @@ fn native_type_value(
                 // A native declaration has no `#[Transient]` surface today; the marker is a `.noe`
                 // field attribute, and a native field carries no attributes at all.
                 transient: false,
+                // See the sibling native projection above: no `.noe` annotation, nothing to order.
+                unsigned: false,
             })
             .collect(),
         methods: HashMap::new(),
@@ -6712,6 +6830,7 @@ fn fresh_type_def(name: &str, fields: &[String], is_struct: bool) -> TypeDef {
             .map(|f| FieldSpec {
                 name: f.clone(),
                 transient: false,
+                unsigned: false,
             })
             .collect(),
         methods: HashMap::new(),
@@ -7222,6 +7341,7 @@ pub(crate) fn fielded_object(name: String, is_struct: bool, fields: Vec<(String,
         .map(|(n, _)| FieldSpec {
             name: n.clone(),
             transient: false,
+            unsigned: false,
         })
         .collect();
     let slots: Vec<Value> = fields.into_iter().map(|(_, v)| v).collect();
@@ -7300,6 +7420,8 @@ pub(crate) fn materialize_native(out: noeta_stdlib::NativeOut) -> Value {
             variant,
             data: fields.into_iter().map(materialize_native).collect(),
             variant_index: variant_index as usize,
+            // A native enum declares its widths in Rust, not in a `.noe` annotation.
+            unsigned: Rc::from(&[][..]),
             reflect: None,
         })),
         // A native-declared **fielded-type** instance (native-extensibility S2, unified): a REAL
@@ -7402,6 +7524,17 @@ fn std_error_code(kind: noeta_stdlib::ErrorKind) -> DiagnosticCode {
 /// `None` if `right` is not an object of the same type, or any field is non-primitive — the caller
 /// turns that into a runtime type error. Mirrors `noeta_value::structural_compare` (VM side).
 fn object_structural_compare(left: &ObjectValue, right: &Value) -> Option<std::cmp::Ordering> {
+    object_structural_compare_hinted(left, right, None)
+}
+
+/// [`object_structural_compare`] under an optional [`RenderHint`], which names the positions the
+/// *static* type says are `u64` where the runtime description cannot (a type argument). A slot
+/// orders unsigned if either source says so. Mirrors the VM's `structural_compare_hinted`.
+fn object_structural_compare_hinted(
+    left: &ObjectValue,
+    right: &Value,
+    hint: Option<&RenderHint>,
+) -> Option<std::cmp::Ordering> {
     let Value::Object(rb) = right else {
         return None;
     };
@@ -7413,7 +7546,8 @@ fn object_structural_compare(left: &ObjectValue, right: &Value) -> Option<std::c
     for (i, f) in left.def.fields.iter().enumerate() {
         let a = &la[i];
         let b = &lb[rb.slot_of(&f.name)?];
-        match compare_field(a, b)? {
+        let slot = hint.and_then(|h| h.slot(i as u32));
+        match compare_slot(a, b, f.unsigned, slot)? {
             std::cmp::Ordering::Equal => continue,
             other => return Some(other),
         }
@@ -7427,17 +7561,64 @@ fn object_structural_compare(left: &ObjectValue, right: &Value) -> Option<std::c
 /// [`compare_primitive`]. `None` is an incomparable pairing, which the caller turns into a
 /// runtime type error.
 fn compare_field(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
+    compare_field_hinted(a, b, None)
+}
+
+/// [`compare_field`] under an optional [`RenderHint`] — the **observed** order of two values whose
+/// static type carries a `u64` where no runtime description can say so (a bare `List<u64>` element,
+/// a `?u64` payload, a `Map<u64, _>` key). Applied only at the ordering sites the checker marked,
+/// never at a set's or map's identity order — see [`noeta_ast::render_hint`]. Mirrors the VM's
+/// `compare_values_hinted`.
+pub(crate) fn compare_field_hinted(
+    a: &Value,
+    b: &Value,
+    hint: Option<&RenderHint>,
+) -> Option<std::cmp::Ordering> {
+    if let Some(RenderHint::Unsigned) = hint
+        && let (Value::Int(x), Value::Int(y)) = (a, b)
+    {
+        return Some(noeta_ast::unsigned_order(*x, *y));
+    }
     match a {
-        Value::Object(la) => object_structural_compare(la, b),
-        Value::Enum(la) => enum_structural_compare(la, b),
+        Value::Object(la) => object_structural_compare_hinted(la, b, hint),
+        Value::Enum(la) => enum_structural_compare_hinted(la, b, hint),
         _ => compare_primitive(a, b),
     }
+}
+
+/// One slot of a structural compare, told whether the slot's declared type is `u64` (the
+/// `FieldSpec::unsigned` / `EnumValue::unsigned` bit). A fixed-width integer is erased to its i64
+/// word, so a `u64` past bit 63 is a negative word and the signed reading would order it below
+/// every small value; every other slot compares exactly as [`compare_field`] does. Mirrors the VM's
+/// `slot_compare` (`noeta_value::ops`).
+fn compare_slot(
+    a: &Value,
+    b: &Value,
+    unsigned: bool,
+    hint: Option<&RenderHint>,
+) -> Option<std::cmp::Ordering> {
+    let unsigned = unsigned || matches!(hint, Some(RenderHint::Unsigned));
+    if unsigned && let (Value::Int(x), Value::Int(y)) = (a, b) {
+        return Some(noeta_ast::unsigned_order(*x, *y));
+    }
+    compare_field_hinted(a, b, hint)
 }
 
 /// Two same-enum values order by variant **declaration index**, then payload slots
 /// lexicographically — the enum half of derived `Comparable`. Mirrors the VM's
 /// `enum_structural_compare` (`noeta_value::ops`). `None` if `right` is not the same enum.
 fn enum_structural_compare(left: &EnumValue, right: &Value) -> Option<std::cmp::Ordering> {
+    enum_structural_compare_hinted(left, right, None)
+}
+
+/// [`enum_structural_compare`] under an optional hint, which reaches a payload by **variant name**
+/// exactly as the render walk does (an `?u64`'s `some`, a user enum's case). Mirrors the VM's
+/// `enum_structural_compare`.
+fn enum_structural_compare_hinted(
+    left: &EnumValue,
+    right: &Value,
+    hint: Option<&RenderHint>,
+) -> Option<std::cmp::Ordering> {
     let Value::Enum(rb) = right else {
         return None;
     };
@@ -7451,8 +7632,10 @@ fn enum_structural_compare(left: &EnumValue, right: &Value) -> Option<std::cmp::
     if left.data.len() != rb.data.len() {
         return None;
     }
-    for (a, b) in left.data.iter().zip(rb.data.iter()) {
-        match compare_field(a, b)? {
+    let slots = hint.and_then(|h| h.variant(&left.variant)).unwrap_or(&[]);
+    for (i, (a, b)) in left.data.iter().zip(rb.data.iter()).enumerate() {
+        let slot = slots.iter().find(|(s, _)| *s == i as u32).map(|(_, h)| h);
+        match compare_slot(a, b, left.unsigned.contains(&(i as u32)), slot)? {
             std::cmp::Ordering::Equal => continue,
             other => return Some(other),
         }
@@ -7591,9 +7774,10 @@ pub(crate) fn compare_primitive(left: &Value, right: &Value) -> Option<std::cmp:
         // Extern-type values order through their contract (extern-types X1) — a total order per
         // key-capable kind; `None` for unordered kinds. Mirrors the VM's `compare_primitive`.
         (Value::Extern(a), Value::Extern(b)) => a.borrow().cmp_value(&**b.borrow()),
-        // P-PKEY: two key-capable `@packed` structs order by content — (type name, then
-        // field-wise slot order), exactly `MapKey::Packed`'s order. Mirrors the VM's
-        // `packed_primitive_cmp`.
+        // P-PKEY: two key-capable `@packed` structs order by content — type name, then field-wise
+        // slot order, a `u64` slot read unsigned (the `TypeDef` says which). The order every
+        // order-observing surface shows; `MapKey::Packed`'s own `Ord` is the identity order and
+        // stays on the erased word. Mirrors the VM's `packed_primitive_cmp`.
         (Value::Object(a), Value::Object(b))
             if a.def.key_capable.get() && b.def.key_capable.get() =>
         {
@@ -7602,9 +7786,11 @@ pub(crate) fn compare_primitive(left: &Value, right: &Value) -> Option<std::cmp:
                 return Some(by_name);
             }
             let (xs, ys) = (a.slots.borrow(), b.slots.borrow());
-            for (x, y) in xs.iter().zip(ys.iter()) {
+            for (i, (x, y)) in xs.iter().zip(ys.iter()).enumerate() {
+                let unsigned = a.def.fields.get(i).is_some_and(|f| f.unsigned);
                 let ord = match (x, y) {
                     (Value::Bool(p), Value::Bool(q)) => p.cmp(q),
+                    (Value::Int(p), Value::Int(q)) if unsigned => (*p as u64).cmp(&(*q as u64)),
                     (Value::Int(p), Value::Int(q)) => p.cmp(q),
                     _ => compare_primitive(x, y)?,
                 };

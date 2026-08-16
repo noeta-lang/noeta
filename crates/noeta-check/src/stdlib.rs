@@ -679,6 +679,28 @@ fn string_method(name: &str) -> Option<Type> {
 /// The result type of a numeric list reduction (`sum`/`product`/`min`/`max`) — the element type
 /// itself — or `None` if the element is not numeric. `sum`/`product` return this directly (width-
 /// wrapping); `min`/`max` wrap it in `?T` for the empty case.
+/// Whether the built-in method `name` on receiver `recv` produces or reveals an order a program can
+/// **observe** — the doors [`crate::Sites::order_hint_sites`] is recorded at.
+///
+/// `sorted`/`min`/`max` compute an order over a list's elements; `keys`/`values` hand back a map's
+/// entries in key order. `to_set`, `add`, `union`, `contains` and `has` are absent on purpose: those
+/// build or probe an identity order, which must stay a pure function of the erased word. The list
+/// reductions are spelled here beside [`numeric_reduce`], which types them, so the two cannot drift.
+pub(super) fn reveals_order(recv: &Type, name: &str) -> bool {
+    use noeta_ext_abi::{ListMethod, MapMethod};
+    match recv {
+        Type::List(_) => {
+            matches!(ListMethod::from_name(name), Some(ListMethod::Sorted))
+                || matches!(name, "min" | "max")
+        }
+        Type::Map(..) => matches!(
+            MapMethod::from_name(name),
+            Some(MapMethod::Keys | MapMethod::Values)
+        ),
+        _ => false,
+    }
+}
+
 fn numeric_reduce(elem: &Type) -> Option<Type> {
     matches!(
         elem,

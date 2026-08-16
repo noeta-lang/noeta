@@ -374,6 +374,7 @@ fn canonical_shapes() -> Vec<Shape> {
         structural_eq: i % 2 == 1,
         key_capable: i % 3 == 0,
         transient_slots: vec![i as u32],
+        unsigned_slots: vec![i as u32 % 2],
     })
     .collect()
 }
@@ -1027,6 +1028,15 @@ fn canonical_module() -> Module {
             column: true,
         }],
         map_packed_sites: vec![(span(104), 3)],
+        // An ordering site: the span a `.sorted()`/`.keys()`/`for` reads its unsigned-position
+        // hint at. Non-empty (and structurally nested) so the digest covers the field's encoding.
+        order_hint_sites: vec![(
+            span(105),
+            noeta_ast::RenderHint::Entries {
+                key: Some(Box::new(noeta_ast::RenderHint::Unsigned)),
+                value: None,
+            },
+        )],
         methods: vec![MethodEntry {
             type_name: "app.Order".to_string(),
             method: "total".to_string(),

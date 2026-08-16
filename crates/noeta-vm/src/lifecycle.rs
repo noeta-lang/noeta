@@ -706,6 +706,8 @@ impl<'m> Vm<'m> {
             .iter()
             .map(|(span, idx)| (*span, persist.packed_schemas[*idx as usize]))
             .collect();
+        let order_hints: HashMap<Span, noeta_ast::RenderHint> =
+            module.order_hint_sites.iter().cloned().collect();
         Vm {
             module,
             debug_session: None,
@@ -716,6 +718,7 @@ impl<'m> Vm<'m> {
             registered_workers: 0,
             persist,
             map_packed,
+            order_hints,
             methods,
             global_slots,
             destructors,
@@ -1654,7 +1657,8 @@ impl<'m> Vm<'m> {
                             payload.iter().map(|s| s.name.to_string()).collect(),
                             false,
                         )
-                        .with_variant_index(index),
+                        .with_variant_index(index)
+                        .with_unsigned_slots(noeta_ast::reflect::unsigned_payload_slots(&payload)),
                     ),
                     plan_variant_payload(&type_name, &payload, &fields_val),
                     // A validated ENUM validates on its own name, not the `"Enum.Variant"` spelling

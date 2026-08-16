@@ -1,0 +1,80 @@
+// Ordering a `u64` past bit 63. A fixed-width integer is erased to its i64 word, so `u64::MAX` is
+// the word `-1` and every comparison would place it below every small value. For a bare `u64` in a
+// collection the signedness lives only in the static type — nothing the runtime holds says so — and
+// the checker therefore marks the doors where a program can SEE an order: `.sorted()`, `.min()`,
+// `.max()`, `.keys()`, `.values()`, a rendered set or map, and a `for` over one. Both backends order
+// under that one hint.
+//
+// A set's canonical buffer and a map's key placement are deliberately NOT hinted: those are identity
+// orders, built at one site and probed at another, so they stay a pure function of the erased word.
+// The last block is what that buys — a map keyed by large `u64`s still finds every key, and its
+// `keys()` order matches its display order.
+// expect: stdout "[1, 9223372036854775807, 9223372036854775808, 18446744073709551615]"
+// expect: stdout "some(1)"
+// expect: stdout "some(18446744073709551615)"
+// expect: stdout "{1, 9223372036854775807, 9223372036854775808, 18446744073709551615}"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "[-1, 1, 9223372036854775807]"
+// expect: stdout "some(-1)"
+// expect: stdout "[1, 4294967295]"
+// expect: stdout "{1: "one", 9223372036854775807: "top", 9223372036854775808: "mid", 18446744073709551615: "big"}"
+// expect: stdout "[1, 9223372036854775807, 9223372036854775808, 18446744073709551615]"
+// expect: stdout "["one", "top", "mid", "big"]"
+// expect: stdout "one"
+// expect: stdout "top"
+// expect: stdout "mid"
+// expect: stdout "big"
+// expect: stdout "1"
+// expect: stdout "9223372036854775807"
+// expect: stdout "9223372036854775808"
+// expect: stdout "18446744073709551615"
+// expect: stdout "[some(1), some(18446744073709551615)]"
+// expect: stdout "big"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: exit 0
+
+// The three boundaries: the largest value an i64 also holds, the first one it does not, and the top.
+top: u64 = 9223372036854775807u64
+mid: u64 = 9223372036854775808u64
+big: u64 = 18446744073709551615u64
+one: u64 = 1u64
+
+// A list's own order is its data; `sorted` computes one, and `min`/`max` reduce to one.
+echo [big, one, mid, top].sorted()
+echo [big, one, mid, top].min()
+echo [big, one, mid, top].max()
+
+// A set renders in the order its element type states — and still finds its members, which is what
+// keeping the canonical buffer on the erased word is for.
+echo [big, one, mid, top].to_set()
+echo [big, one, mid, top].to_set().contains(big)
+echo [big, one, mid, top].to_set().contains(mid)
+
+// Controls. A signed `i64` list keeps the word order (it *is* the value), and every unsigned width
+// below 64 bits fits an i64 with room to spare, so neither needs a hint at all.
+echo [1i64, -1i64, 9223372036854775807i64].sorted()
+echo [1i64, -1i64].min()
+echo [4294967295u32, 1u32].sorted()
+
+// A `Map<u64, _>`: display, `keys()`, `values()` and iteration all agree on the key order.
+m: Map<u64, string> = {big: "big", one: "one", mid: "mid", top: "top"}
+echo m
+echo m.keys()
+echo m.values()
+for v in m {
+    echo v
+}
+for k in m.keys() {
+    echo k
+}
+
+// The hint is structural, so it reaches an `Option` payload the same way display does.
+echo [some(big), some(one)].sorted()
+
+// The property the identity order exists for: a map built with keys past bit 63 finds them again,
+// through the index and through `has`.
+echo m[big]
+echo m.has(mid)
+echo m.keys().len() == 4

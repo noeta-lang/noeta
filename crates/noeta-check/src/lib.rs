@@ -2492,6 +2492,13 @@ impl Checker {
                 if matches!(&iter_ty, Type::Named(n, _) if n == stdlib::ITERATOR) {
                     self.sites.for_stream_sites.insert(*span);
                 }
+                // A `for` over a SET or MAP hands the loop elements in the collection's order, which
+                // a `u64` element/key makes the erased word's rather than the type's. Record the
+                // ordering hint at the loop span so both backends sort the snapshot the program
+                // sees. A `List` is deliberately absent: its order is its data, not a comparison.
+                if matches!(iter_ty, Type::Set(_) | Type::Map(..)) {
+                    self.note_order_hint(&iter_ty, *span);
+                }
                 self.check_iterable(&iter_ty, iterable.span());
                 env.push(HashMap::new());
                 self.bind_for_pattern(pattern, &iter_ty, env);

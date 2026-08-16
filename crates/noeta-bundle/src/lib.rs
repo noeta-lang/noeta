@@ -249,7 +249,23 @@ pub const MAGIC: &[u8; 4] = b"NOEB";
 /// is **inserted** rather than appended, so every recipe variant after it shifts by one — a
 /// version-22 artifact's `Float` recipe would decode as `IntN`. Neither can be re-derived on the
 /// reading side: both say what the *static type* was, which the artifact does not otherwise carry.
-pub const FORMAT_VERSION: u8 = 23;
+///
+/// Bumped to 24 by the ORDERING half of the same hint, which added a field at two levels.
+/// [`noeta_object::Shape`] gained `unsigned_slots` — the slots a structural compare reads unsigned,
+/// so a `@derive(Comparable)` type with a `u64` field orders by its value rather than by the
+/// negative word it is erased to — and [`noeta_bytecode::Module`] gained `order_hint_sites`, the
+/// span-keyed unsigned-position hints the VM reads at `.sorted()`/`.min()`/`.max()`/`.keys()`/
+/// `.values()` and at a `for` over a set or map. postcard writes a struct's fields back to back with
+/// no tags, so a version-23 reader takes each new field's bytes as whatever follows it — silently,
+/// since the values stay well-formed. It cannot be re-derived on the reading side for the same
+/// reason the two halves above cannot: signedness lives only in the static type.
+///
+/// **23 was claimed twice.** The display fix's two follow-ups — JSON and ordering — were written
+/// against version 22 in parallel and each bumped it to 23, so for as long as they sat on separate
+/// branches two different layouts wore one number. That is precisely the failure this constant
+/// exists to prevent, and it is why the second to land takes 24 rather than keeping its own bump:
+/// a version number is a claim about a byte layout, and only one layout may ever hold a number.
+pub const FORMAT_VERSION: u8 = 24;
 
 /// The SHA-256 of one canonical [`Module`]'s postcard encoding — the *other* half of
 /// [`FORMAT_VERSION`], and the thing that makes the changelog above enforceable.
@@ -273,7 +289,7 @@ pub const FORMAT_VERSION: u8 = 23;
 /// pair exists to prevent. The test's message says so; this doc says so; the changelog paragraph
 /// you are about to write is the third place.
 pub const MODULE_LAYOUT_DIGEST: &str =
-    "ab7622b1d70fbea4465ba8abb91c81b74b4e99d1666f90f03a86bab4ea5e573f";
+    "492966653de625f61b362d6ac58747a5eddc71dd58e2a91bb323c23c9fbdbd2d";
 
 /// The runtime version stamped into and checked against artifacts — the building crate's
 /// package version. Any release that changes the serialized [`Module`] layout bumps this, so a

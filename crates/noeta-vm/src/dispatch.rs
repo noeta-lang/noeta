@@ -2284,7 +2284,7 @@ impl<'m> Vm<'m> {
     /// NOTHING ELSE CHANGES. Same opcodes, same semantics, same relative order, same diagnostics;
     /// the arms are byte-identical apart from how they spell their two exits (see [`ColdStep`]).
     /// The shared leaf-op seam is untouched: these arms still call the same `#[inline(always)]`
-    /// free functions (`make_range_list`, `iter_snapshot_value`, `make_tuple`,
+    /// free functions (`make_range_list`, `iter_snapshot_value_hinted`, `make_tuple`,
     /// `tuple_element_retained`, …) that tier-1's `jit_run_leaf_op` calls — one behavior, one
     /// implementation, two callers, exactly as before.
     ///
@@ -2833,6 +2833,7 @@ impl<'m> Vm<'m> {
                 }
                 Op::IterSnapshot { dst, src, span } => {
                     let v = regs[fbase + *src as usize];
+                    let order = self.order_hint(span);
                     // A user object lights up the `Iterable` trait: `for x in o` iterates the list
                     // its `iter` method returns. The method runs bytecode, so it is pushed as a
                     // call frame; its returned value becomes the snapshot (the following `ListLen`
@@ -2885,7 +2886,7 @@ impl<'m> Vm<'m> {
                     // boxed snapshot (so `ListLen`/`ListGet` never see the flat form); a list's
                     // elements, a set's canonical elements, or a map's values in sorted-key order
                     // are each retained so the loop owns them independently.
-                    let Some(snapshot) = iter_snapshot_value(v) else {
+                    let Some(snapshot) = iter_snapshot_value_hinted(v, order) else {
                         return Err(self.error(
                             DiagnosticCode::TypeMismatch,
                             *span,
@@ -4353,18 +4354,43 @@ pub(crate) fn make_range_list(lo: Value, hi: Value, inclusive: bool) -> Option<V
 
 /// `Op::IterSnapshot`'s happy path for a non-object source: a packed list materializes directly
 /// into an owned boxed snapshot; a list's elements, a set's canonical elements, or a map's values
-/// in sorted-key order are snapshotted with each element retained, so the loop owns them
-/// independently. `None` = not iterable (the interpreter raises; the JIT bails). The caller
-/// handles the `Iterable::iter` object dispatch before calling.
+/// in key order are snapshotted with each element retained, so the loop owns them independently.
+/// `None` = not iterable (the interpreter raises; the JIT bails). The caller handles the
+/// `Iterable::iter` object dispatch before calling.
+/// `Op::IterSnapshot`'s happy path under the loop's ordering hint: a `Set`/`Map` whose element or key type
+/// carries a `u64` hands the loop its elements in the order the *type* states rather than the erased
+/// word's. The collection itself is untouched — this reorders the snapshot the loop walks, never the
+/// set's canonical buffer or the map's key placement, which are identity orders (see
+/// [`noeta_ast::render_hint`]). A `List` is never reordered: its order is its data.
 #[inline(always)]
-pub(crate) fn iter_snapshot_value(v: Value) -> Option<Value> {
+pub(crate) fn iter_snapshot_value_hinted(
+    v: Value,
+    hint: Option<&noeta_ast::RenderHint>,
+) -> Option<Value> {
     if v.is_packed_list() {
         return Some(v.realize_list());
     }
-    let elements = v
-        .list_items()
-        .or_else(|| v.set_items())
-        .or_else(|| v.map_values())?;
+    let elements = match hint {
+        // A map's values, re-ordered by the OBSERVED key order.
+        Some(hint) if v.is_map() => {
+            let mut entries = v.map_entries_keyed()?;
+            let key = hint.entry_key();
+            entries.sort_by(|a, b| noeta_ast::map_key_order(&a.0, &b.0, key));
+            entries.into_iter().map(|(_, value)| value).collect()
+        }
+        Some(hint) if v.is_set() => {
+            let mut items = v.set_items()?;
+            let elem = hint.elements();
+            items.sort_by(|&a, &b| {
+                noeta_value::compare_values_hinted(a, b, elem).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            items
+        }
+        _ => v
+            .list_items()
+            .or_else(|| v.set_items())
+            .or_else(|| v.map_values())?,
+    };
     for &e in &elements {
         retain(e);
     }

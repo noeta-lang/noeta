@@ -338,6 +338,17 @@ pub enum Rvalue {
         /// the mask by one on the way in; one whose method scope holds only the declared
         /// parameters (the reference interpreter's) uses it as-is.
         supplied: Option<u64>,
+        /// The **ordering hint** for a method that reveals an order a program can observe —
+        /// `.sorted()`, `.min()`, `.max()` on a list, `.keys()`/`.values()` on a map — whose
+        /// receiver's static type carries an unsigned 64-bit integer. `None` for every other call,
+        /// which is nearly all of them.
+        ///
+        /// The ordering twin of [`Rvalue::Render`], emitted for the same reason: a fixed-width
+        /// integer is erased to its i64 word, so a `u64` past bit 63 is a negative word and would
+        /// order below every small value. Both backends order under the identical hint, so the
+        /// differential pins them equal. A set's canonical buffer and a map's key placement are
+        /// **identity** orders and never see it — see [`noeta_ast::render_hint`].
+        order: Option<std::rc::Rc<noeta_ast::RenderHint>>,
         span: Span,
     },
     /// A **trait** method call with a baked-in route: `receiver.name(args)` where the checker
@@ -861,6 +872,11 @@ pub enum Stmt {
         body: Block,
         span: Span,
         stream: bool,
+        /// The **ordering hint** for a loop over a `Set`/`Map` whose element or key type carries an
+        /// unsigned 64-bit integer: the snapshot the loop walks is sorted under it, so the program
+        /// sees the order its type says. `None` for a list iterable (whose order is its data) and
+        /// for every collection with no `u64` in it. See [`Rvalue::Method::order`].
+        order: Option<std::rc::Rc<noeta_ast::RenderHint>>,
     },
     /// `match scrutinee { arms }`. When the match is used as an expression its value is
     /// written to `dst`; in statement position `dst` is `None`. Patterns reuse the surface

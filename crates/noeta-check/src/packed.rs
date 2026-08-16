@@ -7,19 +7,28 @@
 
 use super::*;
 
-/// Which walk a [`noeta_ast::RenderHint`] is being built for — the one axis on which the display
-/// and JSON hints differ.
+/// Which walk a [`noeta_ast::RenderHint`] is being built for — the one axis on which the hints
+/// differ.
 ///
-/// A hint's `Slots` numbers are **positions in the value the walk sees**, and the two walks see a
-/// different object: a display renders every declared field, while the deep marshal a JSON encoding
-/// runs on drops the `#[Transient]` ones. Everything else — the widths that need a hint, the
-/// collection and enum shapes, the cycle cut — is the same for both, so one builder answers both
-/// with this as its only branch.
+/// A hint's `Slots` numbers are **positions in the value the walk sees**, and not every walk sees
+/// the same object: one that reads a value's own slots counts every declared field, while the deep
+/// marshal a JSON encoding runs on drops the `#[Transient]` ones. Everything else — the widths that
+/// need a hint, the collection and enum shapes, the cycle cut — is identical, so one builder answers
+/// all of them with this as its only branch.
+///
+/// There are three door kinds and two numberings: display and ordering share one, JSON has its own.
+/// The variants are named for the numbering's original door rather than split three ways, because a
+/// third variant equal to [`HintPurpose::Display`] in every respect would be a second place to keep
+/// in step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HintPurpose {
-    /// The display doors: `echo`, an interpolation hole, a display-based `~` operand.
+    /// The walks that read a value's **own declared slots**, `#[Transient]` fields included: the
+    /// display doors (`echo`, an interpolation hole, a display-based `~` operand) and the ordering
+    /// doors (`.sorted()`, `.min()`, `.max()`, `.keys()`, `.values()`, a rendered set or map, a
+    /// `for` over one), which compare two values slot by slot against the object itself.
     Display,
-    /// The JSON doors: the `json.stringify` argument, a derived `to_json()` or `inspect()` receiver.
+    /// The walks that read the **marshalled** value, whose `#[Transient]` fields are gone: the JSON
+    /// doors — the `json.stringify` argument, a derived `to_json()` or `inspect()` receiver.
     Json,
 }
 
@@ -279,6 +288,26 @@ impl Checker {
         }
         if let [value] = args {
             self.note_json_hint(value, call_span);
+        }
+    }
+
+    /// Record the [`RenderHint`](noeta_ast::RenderHint) for a value **about to be ordered** at
+    /// `span` (`.sorted()`, `.min()`, `.max()`, `.keys()`, `.values()`, a `for` over a set or map),
+    /// if `ty` contains an unsigned 64-bit integer. Nothing is recorded otherwise, so a program that
+    /// never orders a `u64` carries no hint and lowers unchanged.
+    ///
+    /// [`HintPurpose::Display`] is the numbering, deliberately: an ordering walk compares two values
+    /// slot by slot against the object's **own** slot array (`Payload::Object`'s slots in the VM, the
+    /// `TypeDef`'s field specs in the tree-walker) — the deep marshal never runs, so a `#[Transient]`
+    /// field is present and counted exactly as a display renders it. Taking the JSON numbering here
+    /// would shift every hint after a transient field onto the wrong slot, silently.
+    ///
+    /// The same structural hint [`Self::note_render_hint`] records, without its `Display`-trait
+    /// exemption: a type's own `to_string` decides how it *prints*, never how it *orders* (ordering
+    /// is `Comparable`, and a hand-written `compare` is dispatched before this walk is reached).
+    pub(crate) fn note_order_hint(&mut self, ty: &Type, span: Span) {
+        if let Some(hint) = self.render_hint(ty, HintPurpose::Display, &mut Vec::new()) {
+            self.sites.order_hint_sites.insert(span, hint);
         }
     }
 

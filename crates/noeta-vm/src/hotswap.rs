@@ -509,6 +509,7 @@ impl<'m> Vm<'m> {
         // keep that instead, and resolve the fresh spans below.
         if sites.is_none() {
             extended.map_packed_sites = self.module.map_packed_sites.clone();
+            extended.order_hint_sites = self.module.order_hint_sites.clone();
         }
 
         // (2) Grow the derived tables from the snapshot's tails (all appends are prefix-stable).
@@ -556,6 +557,12 @@ impl<'m> Vm<'m> {
         for (span, idx) in &extended.map_packed_sites {
             let schema = self.persist.packed_schemas[*idx as usize];
             self.map_packed.insert(*span, schema);
+        }
+        // Same reason for the ordering hints: the live table is built once at load, so a swapped-in
+        // `.sorted()` on a `List<u64>` would otherwise order by the erased word while a cold start
+        // orders unsigned. Idempotent for the spans already there.
+        for (span, hint) in &extended.order_hint_sites {
+            self.order_hints.insert(*span, hint.clone());
         }
         for repr in &extended.type_reprs[self.persist.type_reprs.len()..] {
             self.persist.type_reprs.push(Rc::new(repr.clone()));

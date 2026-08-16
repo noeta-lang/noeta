@@ -1728,6 +1728,15 @@ impl Checker {
                 {
                     self.sites.width_sites.insert(call_span, (signed, bits));
                 }
+                // A method whose result reveals an ORDER the program can see, on a receiver whose
+                // static type carries an unsigned 64-bit integer: record the hint at the call span,
+                // so both backends read those erased words unsigned. Only the observing doors are
+                // here — a set's canonical buffer and a map's key placement are identity orders,
+                // built at one site and probed at another, and are deliberately never hinted (see
+                // `Sites::order_hint_sites`).
+                if stdlib::reveals_order(&recv, name) {
+                    self.note_order_hint(&recv, call_span);
+                }
                 // `it.zip(other)` → `Iterator<(A, B)>`: both element types are needed and only `recv`
                 // reaches `method_return`, so the precise tuple is assembled here where the argument
                 // type is in scope (A from the receiver, B from the argument iterator).

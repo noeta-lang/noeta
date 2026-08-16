@@ -28,7 +28,9 @@ mod syntax_kind;
 pub use builtin_ty::{BuiltinTy, Spelling, parse_int_width};
 pub use name::Name;
 pub use pretty::Pretty;
-pub use render_hint::{RenderHint, json_stringify, map_key_display, unsigned_digits};
+pub use render_hint::{
+    RenderHint, json_stringify, map_key_display, map_key_order, unsigned_digits, unsigned_order,
+};
 pub use syntax_kind::SyntaxKind;
 
 /// The human-facing **short name** of a (possibly namespace-qualified) type identity: the segment
@@ -1023,6 +1025,42 @@ pub fn attribute_local_names(program: &Program, qualified: &str) -> HashSet<Stri
 /// [`attribute_local_names`] resolved for one qualified identity.
 pub fn has_attribute(attrs: &[Attribute], names: &HashSet<String>) -> bool {
     attrs.iter().any(|a| names.contains(a.name.as_str()))
+}
+
+/// Whether `ty` is written as the unsigned 64-bit integer — the one width whose value range does
+/// not fit the erased i64 word, so it is the only one whose *ordering* differs from the word's.
+/// Every other fixed width (signed at any size, unsigned below 64 bits) orders identically read as
+/// a signed word, which is why nothing else needs to be recorded anywhere.
+pub fn is_unsigned_64_type(ty: &TypeRef) -> bool {
+    matches!(
+        ty,
+        TypeRef::Named { name, args, .. }
+            if args.is_empty()
+                && matches!(
+                    BuiltinTy::from_name_any(name.as_str()),
+                    Some(BuiltinTy::IntN { signed: false, bits: 64 })
+                )
+    )
+}
+
+/// The slot indices of the declared fields typed `u64`, ascending — the **ordering** twin of the
+/// transient-slot list, and read from the declaration by both backends through this one projection
+/// so they cannot disagree about which slots order unsigned.
+///
+/// A declared field's signedness is a property of the *type*, not of any call, so it belongs in the
+/// type's runtime description (a `Shape` in the VM, a `TypeDef` field spec in the tree-walker)
+/// rather than in a per-site hint: an object's fields then order the same way at
+/// every door — `<`, `.sorted()`, a set's canonical order — including where the value has been
+/// laundered through `dyn` and no static type remains.
+///
+/// Sparse (empty for the overwhelmingly common type that declares no `u64`), so the ordering walk
+/// short-circuits on it.
+pub fn unsigned_field_slots<'a>(types: impl IntoIterator<Item = Option<&'a TypeRef>>) -> Vec<u32> {
+    types
+        .into_iter()
+        .enumerate()
+        .filter_map(|(i, ty)| ty.is_some_and(is_unsigned_64_type).then_some(i as u32))
+        .collect()
 }
 
 /// The named field types of a `@packed` struct, for the key-capability fixpoint (P-PKEY):

@@ -416,12 +416,14 @@ fn rewrite_stmt(
             body,
             span,
             stream,
+            order,
         } => Stmt::For {
             pattern: pattern.clone(),
             iterable: iterable.clone(),
             body: rewrite_block(body, &sl.sub[0], droppable, owned, cx, scopes, true),
             span: *span,
             stream: *stream,
+            order: order.clone(),
         },
         Stmt::Match {
             scrutinee,

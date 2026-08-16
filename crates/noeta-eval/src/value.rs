@@ -896,6 +896,15 @@ impl Value {
                     format!("[{}]", parts.join(", "))
                 }
                 Value::Set(items, _) => {
+                    // The OBSERVED element order: a `u64` member prints where its value belongs, so
+                    // a rendered set matches what a `for` over it hands back. The canonical buffer
+                    // is untouched — it is the identity order membership binary-searches (see
+                    // `noeta_ast::render_hint`). Mirrors the VM's `render_sequence`.
+                    let mut items = (**items).clone();
+                    items.sort_by(|a, b| {
+                        crate::compare_field_hinted(a, b, Some(inner))
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
                     let parts: Vec<String> =
                         items.iter().map(|v| v.repr_hinted(Some(inner))).collect();
                     format!("{{{}}}", parts.join(", "))
@@ -904,7 +913,11 @@ impl Value {
             },
             RenderHint::Entries { key, value } => match self {
                 Value::Map(entries, _) => {
-                    let parts: Vec<String> = entries
+                    // The OBSERVED key order, so a rendered map matches `keys()` and iteration.
+                    // The map's own key placement is untouched. Mirrors the VM's `display_hinted`.
+                    let mut kv: Vec<(&noeta_stdlib::MapKey, &Value)> = entries.iter().collect();
+                    kv.sort_by(|a, b| noeta_ast::map_key_order(a.0, b.0, key.as_deref()));
+                    let parts: Vec<String> = kv
                         .iter()
                         .map(|(k, v)| {
                             format!(

@@ -558,6 +558,7 @@ mod tests {
             shapes: Vec::new(),
             packed_schemas: Vec::new(),
             map_packed_sites: Vec::new(),
+            order_hint_sites: Vec::new(),
             methods: Vec::new(),
             destructors: Vec::new(),
             field_defaults: Vec::new(),

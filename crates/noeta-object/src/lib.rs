@@ -96,9 +96,26 @@ pub struct Shape {
     /// question and never a defaulted one.
     #[serde(default)]
     pub transient_slots: Vec<u32>,
+    /// The slot indices of this type's `u64` fields, ascending — the slots a structural **ordering**
+    /// compare (derived `Comparable`: `<`, `.sorted()`, a set's canonical order) must read unsigned.
+    /// Empty for the overwhelmingly common type that declares none, so the ordering walk
+    /// short-circuits on it; a sparse index list for the same reason as [`Shape::transient_slots`].
+    ///
+    /// It rides on the shape because signedness lives only in the *static* type — a fixed-width
+    /// integer is erased to its i64 word, so a `u64` past bit 63 is a negative word — and a declared
+    /// field's signedness is a property of the type rather than of any site that compares it. Put
+    /// here, an object orders identically at every door, including after a `dyn` launder where no
+    /// static type is left to consult. Type metadata like [`Shape::structural_eq`], so it is
+    /// **excluded from equality/hashing** below.
+    ///
+    /// The `#[serde(default)]` is for the self-describing readers only, exactly as for
+    /// [`Shape::transient_slots`] — a `.noeb` bundle is postcard, where an added field is a
+    /// `FORMAT_VERSION` question and never a defaulted one.
+    #[serde(default)]
+    pub unsigned_slots: Vec<u32>,
 }
 
-// `structural_eq`, `key_capable` and `transient_slots` are type metadata, not part of a shape's
+// `structural_eq`, `key_capable`, `transient_slots` and `unsigned_slots` are type metadata, not part of a shape's
 // structural identity (two shapes are "the same shape" iff same kind/name/fields/variant/result-option).
 // Hand-implemented to exclude them so a shape built without derive context (e.g. reflection
 // materialization) still matches the compiler's interned shape for the same type.
@@ -150,6 +167,7 @@ impl Shape {
             variant_index: None,
             key_capable: false,
             transient_slots: Vec::new(),
+            unsigned_slots: Vec::new(),
         }
     }
 
@@ -175,6 +193,21 @@ impl Shape {
         !self.transient_slots.is_empty() && self.transient_slots.contains(&(i as u32))
     }
 
+    /// Mark which slots are declared `u64` — chained by the backends, which read the declaration's
+    /// field types through the one shared `noeta_ast::unsigned_field_slots` projection; every other
+    /// construction site leaves the list empty and resolves against the compiler's canonical
+    /// interned shape, exactly as for [`Shape::with_transient_slots`].
+    pub fn with_unsigned_slots(mut self, unsigned_slots: Vec<u32>) -> Shape {
+        self.unsigned_slots = unsigned_slots;
+        self
+    }
+
+    /// Whether slot `i` holds a `u64` — the structural-ordering question, asked per slot.
+    /// Short-circuits on the empty list, which is what almost every type carries.
+    pub fn is_unsigned_slot(&self, i: usize) -> bool {
+        !self.unsigned_slots.is_empty() && self.unsigned_slots.contains(&(i as u32))
+    }
+
     /// An enum-variant shape: `name` is the enum, `variant` the case, `fields` the positional
     /// data-field names.
     pub fn enum_variant(
@@ -194,6 +227,7 @@ impl Shape {
             variant_index: None,
             key_capable: false,
             transient_slots: Vec::new(),
+            unsigned_slots: Vec::new(),
         }
     }
 

@@ -164,6 +164,7 @@ fn ext_enum_type_info(en: &noeta_ext_abi::registry::ExtEnum) -> TypeInfo {
                 VariantSlots {
                     index: i as u32,
                     fields: (0..v.fields.len()).map(|n| format!("_{n}")).collect(),
+                    unsigned: Vec::new(),
                     // A native enum declares cases, not wire values.
                     backing: None,
                 },
@@ -477,7 +478,9 @@ const TABLE_POLICIES: &[(&str, Policy, &str)] = &[
     ("type_args", Policy::MergeByContent, "absorb_type_args — live values index it, so it may only grow"),
     ("type_arg_reprs", Policy::MergeByContent, "absorb_type_args, in lockstep with type_args"),
     ("structural_eq_types", Policy::Append, "register_types"),
+    ("order_hint_sites", Policy::MergeByKey, "lowering — one entry per ordering site, keyed by span"),
     ("transient_slots", Policy::MergeByKey, "register_types"),
+    ("unsigned_slots", Policy::MergeByKey, "register_types"),
     ("transient_names", Policy::Append, "register_types — a later entry's `use` adds spellings, never retracts one"),
     ("native_type_names", Policy::MergeByKey, "register_types"),
     ("packed_fields", Policy::MergeByKey, "register_types"),
@@ -585,6 +588,8 @@ impl SessionCompiler {
             type_arg_reprs: Vec::new(),
             structural_eq_types: HashSet::new(),
             transient_slots: HashMap::new(),
+            unsigned_slots: HashMap::new(),
+            order_hint_sites: Vec::new(),
             transient_names: HashSet::new(),
             native_type_names: HashMap::new(),
             packed_fields: HashMap::new(),
@@ -1026,6 +1031,7 @@ impl SessionCompiler {
             // The FULL map-packed accumulation rides every module — an earlier install's still-live
             // function looks its `map(...)` call span up at run time (session-checker C5).
             map_packed_sites: self.map_packed,
+            order_hint_sites: self.mc.order_hint_sites,
             methods: self.mc.methods,
             destructors: self.mc.destructors,
             field_defaults: self.mc.field_defaults,
@@ -1136,6 +1142,11 @@ enum TypeInfo {
 struct VariantSlots {
     index: u32,
     fields: Vec<String>,
+    /// The payload slot indices declared `u64`, ascending — baked into the variant's
+    /// `Shape::unsigned_slots` so a derived `Comparable` enum orders such a payload unsigned.
+    /// Empty for every variant that declares none (and for a native or prelude enum, neither of
+    /// which has a surface `u64` payload).
+    unsigned: Vec<u32>,
     /// The variant's **backing value** in a backed enum, folded through the shared
     /// `fold_const_expr`; `None` for a plain enum's case, a native or prelude enum (neither is
     /// backed), and a backing that is not a literal. Baked into `Op::EnumFromStr` so a wire→case
@@ -1185,6 +1196,16 @@ struct ModuleCompiler {
     /// declaration through the same [`noeta_ast::attribute_local_names`] projection so the two
     /// backends cannot disagree about which fields leave the program.
     transient_slots: HashMap<String, Vec<u32>>,
+    /// Per declared struct/class/enum, the slot indices of its `u64` fields (baked into each
+    /// instance's `Shape::unsigned_slots`, which the structural ordering compare reads). Only types
+    /// that declare one appear. Mirrors the tree-walker's `FieldSpec::unsigned`, resolved from the
+    /// same declaration through the same [`noeta_ast::unsigned_field_slots`] projection so the two
+    /// backends cannot disagree about which slots order unsigned.
+    unsigned_slots: HashMap<String, Vec<u32>>,
+    /// Ordering sites whose value contains an unsigned 64-bit integer, in emission order: the site's
+    /// span → the [`noeta_ast::RenderHint`] the VM reads there. Baked into
+    /// [`Module::order_hint_sites`]; empty for a program with no `u64` in an ordered position.
+    order_hint_sites: Vec<(Span, noeta_ast::RenderHint)>,
     /// The spellings this program may write the transient marker as, resolved once from its `use`
     /// statements — see [`Self::transient_slots`].
     transient_names: HashSet<String>,
@@ -1378,6 +1399,27 @@ impl ModuleCompiler {
         }
     }
 
+    /// Record the ordering hint a site carries, so the VM can look it up by span. Idempotent per
+    /// span (a re-installed session lowers the same site again).
+    fn record_order_hint(&mut self, span: Span, hint: &noeta_ast::RenderHint) {
+        if !self.order_hint_sites.iter().any(|(s, _)| *s == span) {
+            self.order_hint_sites.push((span, hint.clone()));
+        }
+    }
+
+    /// Record which of `type_name`'s slots are declared `u64`, for the `Shape` every value of it
+    /// interns. Nothing is stored for a type that declares none, which is nearly all of them.
+    fn record_unsigned_slots<'t>(
+        &mut self,
+        type_name: &str,
+        types: impl IntoIterator<Item = Option<&'t noeta_ast::TypeRef>>,
+    ) {
+        let slots = noeta_ast::unsigned_field_slots(types);
+        if !slots.is_empty() {
+            self.unsigned_slots.insert(type_name.to_string(), slots);
+        }
+    }
+
     /// Pass 1: register every top-level `type`/`class`/`enum`/`use` so bodies compiled later
     /// can resolve them, and reserve a placeholder prototype for each class `fn`.
     fn register_types(&mut self, program: &Program) {
@@ -1402,6 +1444,7 @@ impl ModuleCompiler {
                                 VariantSlots {
                                     index: i as u32,
                                     fields: v.field_names(),
+                                    unsigned: Vec::new(),
                                     // No prelude enum is backed.
                                     backing: None,
                                 },
@@ -1442,6 +1485,10 @@ impl ModuleCompiler {
                     // A value `struct` always compares structurally.
                     self.structural_eq_types.insert(decl.name.to_string());
                     self.record_transient_slots(decl.name.as_str(), &decl.fields);
+                    self.record_unsigned_slots(
+                        decl.name.as_str(),
+                        decl.fields.iter().map(|f| f.ty.as_ref()),
+                    );
                     // A `@packed` struct feeds the key-capability fixpoint (P-PKEY, below).
                     if let Some(named) = noeta_ast::packed_named_fields(decl) {
                         self.packed_fields.insert(decl.name.to_string(), named);
@@ -1469,6 +1516,10 @@ impl ModuleCompiler {
                 noeta_ast::Stmt::Class(decl) => {
                     let fields: Vec<String> = decl.fields.iter().map(|f| f.name.clone()).collect();
                     self.record_transient_slots(decl.name.as_str(), &decl.fields);
+                    self.record_unsigned_slots(
+                        decl.name.as_str(),
+                        decl.fields.iter().map(|f| f.ty.as_ref()),
+                    );
                     // A reference `class` compares structurally only if it is `Equatable` — derives
                     // it or hand-`impl`s `eq`; otherwise `==` falls back to reference identity.
                     if noeta_ast::derives_trait(&decl.decorators.derives, "Equatable")
@@ -1510,6 +1561,9 @@ impl ModuleCompiler {
                                 VariantSlots {
                                     index: i as u32,
                                     fields: v.fields.iter().map(|f| f.name.clone()).collect(),
+                                    unsigned: noeta_ast::unsigned_field_slots(
+                                        v.fields.iter().map(|f| f.ty.as_ref()),
+                                    ),
                                     backing: v
                                         .backed_value
                                         .as_ref()
@@ -1970,6 +2024,10 @@ impl ModuleCompiler {
             // has the declaration in hand, so whichever site arrives with it wins over an empty one.
             if !shape.transient_slots.is_empty() {
                 self.shapes[i].transient_slots = shape.transient_slots;
+            }
+            // Same reason again for the `u64` slot list.
+            if !shape.unsigned_slots.is_empty() {
+                self.shapes[i].unsigned_slots = shape.unsigned_slots;
             }
             return i as u32;
         }
@@ -2587,7 +2645,15 @@ impl<'m> FnCompiler<'m> {
                 body,
                 span,
                 stream,
-            } => self.for_stmt(pattern, iterable, body, *span, *stream),
+                order,
+            } => {
+                // A loop over a `u64`-carrying set/map sorts its snapshot under this hint; the VM
+                // reads it off the module by the `IterSnapshot` span.
+                if let Some(hint) = order {
+                    self.module.record_order_hint(*span, hint);
+                }
+                self.for_stmt(pattern, iterable, body, *span, *stream)
+            }
             Stmt::While { cond, body, span } => self.while_stmt(cond, body, *span),
             // `break`/`continue` emit a placeholder `Jump` recorded on the innermost loop, which
             // patches it once its exit / continue target is known. The checker guarantees a loop is
@@ -3742,8 +3808,15 @@ impl<'m> FnCompiler<'m> {
                 reflect_slot,
                 span,
                 supplied,
+                order,
                 name_span: _,
             } => {
+                // A method whose result reveals an order the program can see, on a `u64`-carrying
+                // receiver: the hint travels on the module's span-keyed side table rather than in
+                // the op, which stays the size it is on the hot dispatch path.
+                if let Some(hint) = order {
+                    self.module.record_order_hint(*span, hint);
+                }
                 // A generic enum-variant construction carries its reflected type (R2b.2); intern it so
                 // the `MakeEnum` op can stamp it. `None` for an ordinary method call.
                 let reflect = reflect.as_ref().map(|r| self.module.intern_type_repr(r));
@@ -4871,6 +4944,12 @@ impl<'m> FnCompiler<'m> {
             .get(type_name)
             .cloned()
             .unwrap_or_default();
+        let unsigned = self
+            .module
+            .unsigned_slots
+            .get(type_name)
+            .cloned()
+            .unwrap_or_default();
         let shape = self.module.intern_shape(
             Shape::object_equatable(
                 kind,
@@ -4879,7 +4958,8 @@ impl<'m> FnCompiler<'m> {
                 structural_eq,
             )
             .with_key_capable(key_capable)
-            .with_transient_slots(transient),
+            .with_transient_slots(transient)
+            .with_unsigned_slots(unsigned),
         );
         // In-place reuse (Phase 5): a self-update `acc = Type { ...acc, f: v }` whose spread base is a
         // directly-held **local** (Phase 5.1a) or a top-level **global** (Phase 5.1b) reuses that
@@ -5013,6 +5093,7 @@ impl<'m> FnCompiler<'m> {
             },
             _ => unreachable!("make_enum is only reached for enum types"),
         };
+        let unsigned = slots.unsigned.clone();
         let shape = self.module.intern_shape(
             Shape::enum_variant(
                 self.module.runtime_type_name(type_name),
@@ -5020,7 +5101,8 @@ impl<'m> FnCompiler<'m> {
                 slots.fields,
                 false,
             )
-            .with_variant_index(slots.index),
+            .with_variant_index(slots.index)
+            .with_unsigned_slots(unsigned),
         );
         let mut consumed = Vec::new();
         let mut arg_regs = Vec::with_capacity(args.len());

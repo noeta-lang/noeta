@@ -713,12 +713,14 @@ extern "C" fn jit_run_leaf_op(
             set_reg(regs, base, *dst, list);
             noeta_jit_abi::OUTCOME_CONTINUE
         }
-        Op::IterSnapshot { dst, src, span: _ } => {
+        Op::IterSnapshot { dst, src, span } => {
             let v = regs[base + *src as usize];
             if v.is_object() {
                 return bail; // `Iterable::iter` dispatch → interpreter
             }
-            match iter_snapshot_value(v) {
+            // The loop's ordering hint (a `u64`-carrying set/map) is read off the VM by span, so
+            // tier 1 walks the same snapshot order tier 0 does rather than the erased word's.
+            match crate::dispatch::iter_snapshot_value_hinted(v, vm.order_hint(span)) {
                 Some(snapshot) => {
                     set_reg(regs, base, *dst, snapshot);
                     noeta_jit_abi::OUTCOME_CONTINUE
