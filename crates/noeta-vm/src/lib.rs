@@ -36,7 +36,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
 
-use noeta_ast::{BinaryOp, ClosureBody, Expr, Param, Program, Stmt};
+use noeta_ast::{BinaryOp, ClosureBody, Expr, Param, Program, Stmt, UnaryOp};
 // `RunResult` is re-exported below (`pub use noeta_backend::{RunResult, …}`), so it is not imported
 // privately here (that would be a duplicate binding).
 use noeta_bytecode::{

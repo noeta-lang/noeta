@@ -1337,11 +1337,16 @@ impl<'m> Vm<'m> {
                     Op::Unary { op, dst, src, span } => {
                         match apply_unary(*op, regs[fbase + *src as usize]) {
                             Ok(v) => {
-                                // `..xs` (spread) returns the source value unchanged, so the result
+                                // `...xs` (spread) returns the source value unchanged, so the result
                                 // aliases a live heap reference — retain it before `set_reg` releases
-                                // the old occupant of `dst` (which is `src`). A no-op for the fresh
-                                // primitives `Neg`/`Not` produce; mirrors `Op::Move`.
-                                retain(v);
+                                // the old occupant of `dst` (which may be `src`); mirrors `Op::Move`.
+                                // `Neg`/`Not` build a **fresh** value that already owns its reference
+                                // — an `int` outside the 48-bit inline range heap-boxes, so retaining
+                                // one strands it. They take `apply_unary`'s result straight into
+                                // `dst`, exactly as the arithmetic path takes `apply_binary`'s.
+                                if *op == UnaryOp::Spread {
+                                    retain(v);
+                                }
                                 set_reg(regs, fbase, *dst, v);
                                 pc += 1;
                             }

@@ -1,0 +1,36 @@
+// `-x` and `!x` build a **fresh** value, so the VM stores the result without retaining it, exactly
+// as the binary arithmetic path does. An `int` outside the 48-bit inline range heap-boxes, so a
+// retain there would strand one object per operation — invisible on a small operand, which needs no
+// allocation at all. `...xs` is the runtime identity: its result aliases the operand and *is*
+// retained. Both halves of the rule run here, so the leak oracle covers each.
+// expect: stdout "-4611686018427387904"
+// expect: stdout "-4611686018427387905"
+// expect: stdout "4611686018427387904"
+// expect: stdout "4611686018427387903"
+// expect: stdout "-4611686018427387904"
+// expect: stdout "-4611686018427387904"
+// expect: stdout "3"
+// expect: stdout "4611686018427387904"
+// expect: exit 0
+a = 4611686018427387904
+echo -a
+echo !a
+
+b = -a
+echo -b
+echo !b
+
+// The same operand typed as a fixed-width `i64`, which masks the result after negating.
+c: i64 = 4611686018427387904i64
+echo -c
+
+// Destination aliasing the source: the old occupant of the register is the operand itself.
+mut d = 4611686018427387904
+d = -d
+echo d
+
+// Spread keeps its retain — the concatenation reads the same boxed elements the source list owns.
+xs = [4611686018427387904, 4611686018427387905]
+ys = [...xs, 1]
+echo ys.len()
+echo ys[0]
