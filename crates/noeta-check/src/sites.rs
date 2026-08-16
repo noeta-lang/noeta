@@ -164,6 +164,19 @@ pub struct Sites {
     /// interpolation hole, and a display-based `~` operand — and empty for every program with no
     /// `u64` in a displayed position. A pure function of the program, like the other site maps.
     pub render_hint_sites: HashMap<Span, noeta_ast::RenderHint>,
+    /// **JSON sites whose value contains an unsigned 64-bit integer**, keyed by the serializing
+    /// call's span → the [`RenderHint`](noeta_ast::RenderHint) built from the serialized value's
+    /// static type.
+    ///
+    /// The JSON twin of [`Sites::render_hint_sites`]: an erased i64 word carries no signedness, so a
+    /// `u64` past bit 63 would be *written to the wire* as its signed reinterpretation — a wrong
+    /// number in an API response or a persisted record, with nothing to tell the reader. Recorded at
+    /// the doors that turn a value whose static type is in hand into JSON text — the
+    /// `json.stringify` argument and a derived `to_json` receiver — and read by lowering (via
+    /// [`Checked::json_hint_sites`](crate::Checked)), which emits an `Rvalue::JsonRender` both
+    /// backends serialize through the one hinted walk. Empty for every program with no `u64` in a
+    /// serialized position. A pure function of the program, like the other site maps.
+    pub json_hint_sites: HashMap<Span, noeta_ast::RenderHint>,
     /// **Statically decided type tests**: `Expr::TypeTest` spans the checker answered itself → the
     /// answer. Lowering emits the constant (after still evaluating the scrutinee for its effects)
     /// instead of an `Rvalue::TypeTest`, so both backends agree by construction.
@@ -442,6 +455,7 @@ pub(crate) const SITE_POLICIES: &[(&str, SiteClass, &str)] = &[
     ("for_stream_sites", SiteClass::SpanKeyed, "a bare span set"),
     ("width_sites", SiteClass::Ordinal, "(signed, bits): a fixed-width arithmetic BIT WIDTH, not an index"),
     ("render_hint_sites", SiteClass::SpanKeyed, "span → RenderHint: structural; its Slots/Variants numbers are SLOT positions within the rendered value"),
+    ("json_hint_sites", SiteClass::SpanKeyed, "span → RenderHint: structural; its Slots/Variants numbers are SLOT positions within the serialized value"),
     ("folded_type_tests", SiteClass::SpanKeyed, "span → the constant answer of a statically decided `is`"),
     ("handle_sites", SiteClass::SpanKeyed, "span → (type, method, associated)"),
     ("bound_handle_sites", SiteClass::SpanKeyed, "a bare span set"),
@@ -511,6 +525,7 @@ impl Sites {
             for_stream_sites: _,
             width_sites: _,
             render_hint_sites: _,
+            json_hint_sites: _,
             folded_type_tests: _,
             handle_sites: _,
             bound_handle_sites: _,
@@ -698,6 +713,8 @@ pub(crate) struct SiteMaps {
     pub(crate) width_sites: HashMap<Span, (bool, u8)>,
     /// Display sites carrying an unsigned 64-bit integer — see [`Sites::render_hint_sites`].
     pub(crate) render_hint_sites: HashMap<Span, noeta_ast::RenderHint>,
+    /// JSON sites carrying an unsigned 64-bit integer — see [`Sites::json_hint_sites`].
+    pub(crate) json_hint_sites: HashMap<Span, noeta_ast::RenderHint>,
     /// Statically decided type tests — see [`Sites::folded_type_tests`].
     pub(crate) folded_type_tests: HashMap<Span, bool>,
     /// Unbound method-handle sites: a `Type.method` member expression in value position → the
@@ -772,6 +789,7 @@ impl SiteMaps {
             for_stream_sites: self.for_stream_sites,
             width_sites: self.width_sites,
             render_hint_sites: self.render_hint_sites,
+            json_hint_sites: self.json_hint_sites,
             folded_type_tests: self.folded_type_tests,
             handle_sites: self.handle_sites,
             bound_handle_sites: self.bound_handle_sites,

@@ -7,6 +7,22 @@
 
 use super::*;
 
+/// Which walk a [`noeta_ast::RenderHint`] is being built for — the one axis on which the display
+/// and JSON hints differ.
+///
+/// A hint's `Slots` numbers are **positions in the value the walk sees**, and the two walks see a
+/// different object: a display renders every declared field, while the deep marshal a JSON encoding
+/// runs on drops the `#[Transient]` ones. Everything else — the widths that need a hint, the
+/// collection and enum shapes, the cycle cut — is the same for both, so one builder answers both
+/// with this as its only branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HintPurpose {
+    /// The display doors: `echo`, an interpolation hole, a display-based `~` operand.
+    Display,
+    /// The JSON doors: the `json.stringify` argument, a derived `to_json()` or `inspect()` receiver.
+    Json,
+}
+
 impl Checker {
     /// Range-check a fixed-width integer literal (Tier W) and return its `Type::IntN`. `negated` is
     /// set when the literal is the operand of a unary `-`, which widens a signed type's low bound to
@@ -225,8 +241,44 @@ impl Checker {
         if matches!(ty, Type::Named(..)) && self.satisfies(ty, BuiltinTrait::Display) {
             return;
         }
-        if let Some(hint) = self.render_hint(ty, &mut Vec::new()) {
+        if let Some(hint) = self.render_hint(ty, HintPurpose::Display, &mut Vec::new()) {
             self.sites.render_hint_sites.insert(span, hint);
+        }
+    }
+
+    /// Record the [`RenderHint`](noeta_ast::RenderHint) for a value **about to be serialized as
+    /// JSON** at `span` (the `json.stringify` argument, a derived `to_json()` or `inspect()`
+    /// receiver), if its static type contains an unsigned 64-bit integer. The JSON twin of
+    /// [`Self::note_render_hint`], and
+    /// sparse in the same way: nothing is recorded for a type with no such integer under it, so a
+    /// program that never serializes a `u64` lowers unchanged.
+    ///
+    /// **No `Display` exemption.** A JSON encoding is structural at every depth — a declared type's
+    /// own `to_string` has no part in it — so a type implementing `Display` is hinted here exactly
+    /// like any other.
+    pub(crate) fn note_json_hint(&mut self, ty: &Type, span: Span) {
+        if let Some(hint) = self.render_hint(ty, HintPurpose::Json, &mut Vec::new()) {
+            self.sites.json_hint_sites.insert(span, hint);
+        }
+    }
+
+    /// Record the JSON hint for a call to the native `json.stringify(value)`, whichever way its
+    /// callee was spelled — qualified (`json.stringify(v)`), selectively imported (`stringify(v)`),
+    /// or a resolved native forward (the body a `@derive(Inspect)` synthesizes). One helper for all
+    /// three because they are one door: the same function, serializing the same argument, and a
+    /// hint that reached only one spelling would leave the others writing the signed word.
+    pub(crate) fn note_json_stringify_hint(
+        &mut self,
+        module: &str,
+        func: &str,
+        args: &[Type],
+        call_span: Span,
+    ) {
+        if func != "stringify" || self.reg().find_module(module).map(|m| m.name) != Some("json") {
+            return;
+        }
+        if let [value] = args {
+            self.note_json_hint(value, call_span);
         }
     }
 
@@ -239,40 +291,48 @@ impl Checker {
     /// Only 64-bit unsigned values need one: every `u8`/`u16`/`u32` value fits in an i64 word with
     /// room to spare, so it already renders correctly, and every *signed* width is exactly what the
     /// erased word is.
-    fn render_hint(&self, ty: &Type, stack: &mut Vec<String>) -> Option<noeta_ast::RenderHint> {
+    ///
+    /// `purpose` decides how an object's slots are numbered — see [`HintPurpose`]; every other
+    /// position is identical for both walks, which is why they are one function.
+    fn render_hint(
+        &self,
+        ty: &Type,
+        purpose: HintPurpose,
+        stack: &mut Vec<String>,
+    ) -> Option<noeta_ast::RenderHint> {
         use noeta_ast::RenderHint;
         match ty {
             Type::IntN {
                 signed: false,
                 bits: 64,
             } => Some(RenderHint::Unsigned),
-            Type::List(e) | Type::Set(e) => {
-                Some(RenderHint::Elements(Box::new(self.render_hint(e, stack)?)))
-            }
+            Type::List(e) | Type::Set(e) => Some(RenderHint::Elements(Box::new(
+                self.render_hint(e, purpose, stack)?,
+            ))),
             Type::Map(k, v) => {
-                let key = self.render_hint(k, stack).map(Box::new);
-                let value = self.render_hint(v, stack).map(Box::new);
+                let key = self.render_hint(k, purpose, stack).map(Box::new);
+                let value = self.render_hint(v, purpose, stack).map(Box::new);
                 (key.is_some() || value.is_some()).then_some(RenderHint::Entries { key, value })
             }
             Type::Tuple(items) => {
-                RenderHint::slots(items.iter().map(|t| self.render_hint(t, stack)))
+                RenderHint::slots(items.iter().map(|t| self.render_hint(t, purpose, stack)))
             }
             // `?T` and `Result<T, E>` are enums at runtime, so they render through their variant
             // names exactly as a user enum does — `some`/`Ok`/`Err` carry the payload in slot 0.
             Type::Option(inner) => self
-                .render_hint(inner, stack)
+                .render_hint(inner, purpose, stack)
                 .map(|h| RenderHint::Variants(vec![("some".to_string(), vec![(0, h)])])),
             Type::Result(ok, err) => {
                 let variants: Vec<(String, Vec<(u32, RenderHint)>)> = [
-                    ("Ok", self.render_hint(ok, stack)),
-                    ("Err", self.render_hint(err, stack)),
+                    ("Ok", self.render_hint(ok, purpose, stack)),
+                    ("Err", self.render_hint(err, purpose, stack)),
                 ]
                 .into_iter()
                 .filter_map(|(name, h)| h.map(|h| (name.to_string(), vec![(0, h)])))
                 .collect();
                 (!variants.is_empty()).then_some(RenderHint::Variants(variants))
             }
-            Type::Named(name, args) => self.named_render_hint(name, args, stack),
+            Type::Named(name, args) => self.named_render_hint(name, args, purpose, stack),
             _ => None,
         }
     }
@@ -284,6 +344,7 @@ impl Checker {
         &self,
         name: &str,
         args: &[Type],
+        purpose: HintPurpose,
         stack: &mut Vec<String>,
     ) -> Option<noeta_ast::RenderHint> {
         use noeta_ast::RenderHint;
@@ -293,11 +354,21 @@ impl Checker {
         stack.push(name.to_string());
         let subst = self.type_arg_subst(name, args);
         let at = |t: &Type| crate::subst::apply_subst(t, &subst);
+        let transient = self.symbols.transient_fields.get(name);
         let hint = match self.symbols.records.get(name) {
             Some(fields) => {
                 let hints: Vec<Option<RenderHint>> = fields
                     .iter()
-                    .map(|(_, fty)| self.render_hint(&at(fty), stack))
+                    // A `#[Transient]` field is absent from the marshalled value entirely, so a JSON
+                    // walk must not count it: the slot numbers are positions in the value being
+                    // walked, and one extra slot shifts every field after it onto the wrong hint.
+                    // A display walk renders the object's declared fields, transient ones included,
+                    // and numbers them all.
+                    .filter(|(fname, _)| {
+                        purpose == HintPurpose::Display
+                            || !transient.is_some_and(|t| t.contains(fname))
+                    })
+                    .map(|(_, fty)| self.render_hint(&at(fty), purpose, stack))
                     .collect();
                 RenderHint::slots(hints)
             }
@@ -310,7 +381,8 @@ impl Checker {
                             .iter()
                             .enumerate()
                             .filter_map(|(i, fty)| {
-                                self.render_hint(&at(fty), stack).map(|h| (i as u32, h))
+                                self.render_hint(&at(fty), purpose, stack)
+                                    .map(|h| (i as u32, h))
                             })
                             .collect();
                         (!slots.is_empty()).then(|| (v.name.clone(), slots))

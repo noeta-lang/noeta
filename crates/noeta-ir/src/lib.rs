@@ -186,6 +186,21 @@ pub enum Rvalue {
         hint: std::rc::Rc<noeta_ast::RenderHint>,
         span: Span,
     },
+    /// Serialize a value to **JSON text** under a [`noeta_ast::RenderHint`] — the wire twin of
+    /// [`Rvalue::Render`], and emitted for the same reason. An erased i64 word carries no
+    /// signedness, so a `u64` past bit 63 would be *written to the wire* as its signed
+    /// reinterpretation: a wrong number in an API response or a persisted record, with nothing to
+    /// tell the reader. Lowering emits it in place of the serializing call at the JSON doors the
+    /// checker marked — the `json.stringify` argument, a derived `to_json` receiver — and only
+    /// there, so a program with no `u64` in a serialized position serializes through the untouched
+    /// path. Both backends deep-marshal their own value and run the one hinted walk
+    /// ([`noeta_ast::json_stringify`]), so the differential pins them equal. Pure, single-operand;
+    /// the result is a `string`.
+    JsonRender {
+        operand: Atom,
+        hint: std::rc::Rc<noeta_ast::RenderHint>,
+        span: Span,
+    },
     /// A non-short-circuiting infix operation. `&&`/`||` are lowered to control flow and
     /// never appear here; everything else (arithmetic, concat, comparisons, equality) does.
     /// Operator-trait overloading on user objects is resolved by the interpreter, not the

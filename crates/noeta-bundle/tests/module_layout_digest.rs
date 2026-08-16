@@ -961,6 +961,14 @@ fn all_ops() -> Vec<Op> {
             noeta_ast::RenderHint::Unsigned,
         )))),
     });
+    ops.push(Op::JsonStringify {
+        dst: 245,
+        src: 246,
+        hint: Box::new(noeta_ast::RenderHint::Entries {
+            key: Some(Box::new(noeta_ast::RenderHint::Unsigned)),
+            value: None,
+        }),
+    });
     ops.push(Op::BuildString {
         dst: 247,
         parts: Box::new([StrPart::Literal(248), StrPart::Hole(249)]),
@@ -972,7 +980,7 @@ fn all_ops() -> Vec<Op> {
 
 /// How many `Op` variants [`all_ops`] builds. Stated so a *duplicate* (two literals of one variant,
 /// one variant missing) is caught — the compiler cannot see that, since neither literal is wrong.
-const OP_VARIANTS: usize = 104;
+const OP_VARIANTS: usize = 105;
 
 fn canonical_chunk() -> Chunk {
     Chunk {

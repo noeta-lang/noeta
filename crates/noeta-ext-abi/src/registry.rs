@@ -507,6 +507,10 @@ impl RetTy {
     }
 }
 
+/// The handler an [`ExtDerive`] method names to forward into the native JSON serializer — the one
+/// spelling of it, so a derive recipe declaring it and the checker recognizing it cannot drift.
+pub const JSON_STRINGIFY_HANDLER: &str = "json.stringify";
+
 /// A recursive build recipe for a call-site type argument (`json.parse::<T>`). The checker resolves
 /// the turbofish `T` into a `TypeRecipe`; the dispatch walks an input (a JSON tree) against it to
 /// produce a [`NativeOut`] tree the backend materializes into a value of `T`.
@@ -519,6 +523,16 @@ impl RetTy {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum TypeRecipe {
     Int,
+    /// A **fixed-width** integer (`u8`, `i32`, `u64`, …). It decodes from a JSON number whose value
+    /// fits the declared width — the range check is the recipe's whole job, since the built value is
+    /// the erased 64-bit word either way and nothing downstream could tell an out-of-range one from
+    /// a legitimate value. `u64` is why the check is written against the *width* rather than `i64`:
+    /// a `u64` past bit 63 is a perfectly ordinary value whose word is negative, and it must decode
+    /// exactly as `json.stringify` wrote it.
+    IntN {
+        signed: bool,
+        bits: u8,
+    },
     Float,
     F32,
     Bool,

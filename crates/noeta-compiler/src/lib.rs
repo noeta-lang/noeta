@@ -3601,6 +3601,18 @@ impl<'m> FnCompiler<'m> {
                 });
                 Ok(())
             }
+            // A JSON door whose serialized value carries an unsigned 64-bit integer: the hinted
+            // serializer replaces the `json.stringify` / derived `to_json` call outright, so the
+            // erased words reach the wire unsigned.
+            Rvalue::JsonRender { operand, hint, .. } => {
+                let src = self.atom_reg(operand)?;
+                self.code.push(Op::JsonStringify {
+                    dst,
+                    src,
+                    hint: Box::new((**hint).clone()),
+                });
+                Ok(())
+            }
             // Sign-dependent fixed-width `/ % < <= > >=` (Tier W3): a single width-carrying op the VM
             // resolves via `apply_binary_wide`. No trait dispatch (operands are erased ints), no
             // reuse — always the copying form.

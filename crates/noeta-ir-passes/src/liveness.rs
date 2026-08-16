@@ -642,7 +642,8 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
         Rvalue::Try { operand, .. }
         | Rvalue::TypeArgName { operand, .. }
         | Rvalue::MaskWidth { operand, .. }
-        | Rvalue::Render { operand, .. } => f(operand),
+        | Rvalue::Render { operand, .. }
+        | Rvalue::JsonRender { operand, .. } => f(operand),
         // The forwarded `type_name::<T>()` reads the enclosing fn's hidden type-argument slot.
         Rvalue::TypeSlotName { slot, .. } => f(slot),
         // **One arm for the whole reflection surface.** A value operand, a runtime target string, a

@@ -65,7 +65,7 @@ static STD_DERIVES: &[noeta_ext_abi::registry::ExtDerive] = &[noeta_ext_abi::reg
     methods: &[noeta_ext_abi::registry::ExtDeriveMethod {
         name: "inspect",
         arity: 0,
-        handler: "json.stringify",
+        handler: noeta_ext_abi::JSON_STRINGIFY_HANDLER,
     }],
     validate: None,
 }];

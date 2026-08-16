@@ -1,0 +1,128 @@
+// A `u64` past bit 63 through the JSON doors, and back. A fixed-width integer is erased to its i64
+// word, so `u64::MAX` is the word `-1` and every serializer would *write that number to the wire* —
+// an API response or a persisted record carrying a wrong value with nothing to tell the reader. The
+// signedness lives only in the static type, so the checker marks each JSON door — the
+// `json.stringify` argument however its callee is spelled, a derived `to_json()`, a derived
+// `inspect()` — and both backends serialize through the same hinted walk. The hint is structural, so
+// a `u64` nested in a list, map, tuple, struct or enum payload is written unsigned too, and a
+// `Map<u64, _>`'s keys with it. Decoding is the other half: a fixed-width field accepts a number
+// that fits its width and refuses one that does not, so what `stringify` wrote `parse` recovers.
+// Narrower widths are the controls: every `u8`/`u16`/`u32` value fits in an i64 already.
+// expect: stdout "9223372036854775807"
+// expect: stdout "9223372036854775808"
+// expect: stdout "18446744073709551615"
+// expect: stdout "255"
+// expect: stdout "65535"
+// expect: stdout "4294967295"
+// expect: stdout "-1"
+// expect: stdout "[18446744073709551615,9223372036854775808,1]"
+// expect: stdout "{"big":18446744073709551615}"
+// expect: stdout "{"18446744073709551615":"a"}"
+// expect: stdout "[18446744073709551615,"tag"]"
+// expect: stdout "{"reading":18446744073709551615,"label":"m"}"
+// expect: stdout "[{"reading":18446744073709551615,"label":"m"}]"
+// expect: stdout "18446744073709551615"
+// expect: stdout "null"
+// expect: stdout "{"Raw":[18446744073709551615]}"
+// expect: stdout "{"Ok":[18446744073709551615]}"
+// expect: stdout "{"reading":18446744073709551615}"
+// expect: stdout "18446744073709551615"
+// expect: stdout "18446744073709551615"
+// expect: stdout "{"reading":18446744073709551615,"label":"m"}"
+// expect: stdout "{"reading":18446744073709551615,"label":"m"}"
+// expect: stdout "Ok(18446744073709551615)"
+// expect: stdout "Ok(9223372036854775808)"
+// expect: stdout "Ok(9223372036854775807)"
+// expect: stdout "Ok([18446744073709551615, 0])"
+// expect: stdout "Ok(Meter {reading: 18446744073709551615, label: "m"})"
+// expect: stdout "Ok(255)"
+// expect: stdout "Ok(-5)"
+// expect: stdout "true"
+// expect: stdout "Err(expected u8, found 300 — out of range for u8)"
+// expect: stdout "Err(expected u64, found -1 — out of range for u64)"
+// expect: stdout "Err(expected u64, found 18446744073709551616.0 — out of range for u64)"
+// expect: exit 0
+use std.{json};
+use std.json.{stringify};
+
+@derive(Serialize<Json>, Deserialize<Json>)
+struct Meter {
+    reading: u64
+    label: string
+}
+
+@derive(Inspect)
+struct Gauge {
+    reading: u64
+    label: string
+}
+
+enum Reading { Raw(u64); Missing }
+
+// A `#[Transient]` field is absent from the marshalled value entirely, so the hint's slot numbers
+// have to count the fields that survive the marshal, not the declared ones.
+struct Slotted {
+    #[json.Transient]
+    note: ?string
+    reading: u64
+}
+
+big: u64 = 18446744073709551615u64
+half: u64 = 9223372036854775808u64
+top: u64 = 9223372036854775807u64
+
+// The three boundaries, bare: the largest value an i64 also holds, the first one it does not, and
+// the top. Then the controls — the narrower unsigned widths always fit an i64, and `i64` itself is
+// exactly the erased word.
+echo json.stringify(top);
+echo json.stringify(half);
+echo json.stringify(big);
+echo json.stringify(255u8);
+echo json.stringify(65535u16);
+echo json.stringify(4294967295u32);
+echo json.stringify(-1i64);
+
+// Every nesting position: a list's elements, a map's values and its KEYS, a tuple's slots, a
+// struct's fields at one and two levels, an `Option`'s payload (which marshals through itself), and
+// an enum payload — a user enum's and a `Result`'s.
+echo json.stringify([big, half, 1u64]);
+echo json.stringify({"big": big});
+mk: Map<u64, string> = {big: "a"};
+echo json.stringify(mk);
+echo json.stringify((big, "tag"));
+m = Meter { reading: big, label: "m" };
+echo json.stringify(m);
+echo json.stringify([m]);
+echo json.stringify(some(big));
+maybe: ?u64 = none;
+echo json.stringify(maybe);
+echo json.stringify(Reading.Raw(big));
+r: Result<u64, string> = Ok(big);
+echo json.stringify(r);
+
+// A struct whose serialized `u64` sits behind a `#[Transient]` field: the marshal drops the
+// transient one, so the hint's slot numbers must count the fields that survive it.
+echo json.stringify(Slotted { note: none, reading: big });
+
+// The door is the call, not the spelling: a selectively-imported `stringify`, a pipe, the derived
+// `to_json()`, and the derived `inspect()` all serialize the same value the same way.
+echo stringify(big);
+echo big |> json.stringify();
+echo m.to_json();
+echo Gauge { reading: big, label: "m" }.inspect();
+
+// The round trip: what `stringify` wrote, `parse` recovers — at all three boundaries, nested, and
+// through a declared type. The narrower widths and a signed one are the controls.
+echo json.try_parse::<u64>("18446744073709551615");
+echo json.try_parse::<u64>("9223372036854775808");
+echo json.try_parse::<u64>("9223372036854775807");
+echo json.try_parse::<List<u64>>("[18446744073709551615,0]");
+echo json.try_parse::<Meter>(json.stringify(m));
+echo json.try_parse::<u8>("255");
+echo json.try_parse::<i32>("-5");
+echo json.parse::<u64>(json.stringify(big)) == big;
+
+// Negative cases: a number the declared width cannot hold is refused, whichever end it overflows.
+echo json.try_parse::<u8>("300");
+echo json.try_parse::<u64>("-1");
+echo json.try_parse::<u64>("18446744073709551616");

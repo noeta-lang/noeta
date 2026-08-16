@@ -650,7 +650,7 @@ fn op_facts(op: &Op) -> OpFacts {
             f.uses.push(*reg)
         }
         Op::Echo { reg } => f.uses.push(*reg),
-        Op::Stringify { dst, src, .. } => {
+        Op::Stringify { dst, src, .. } | Op::JsonStringify { dst, src, .. } => {
             f.def = Some(*dst);
             f.uses.push(*src);
         }
@@ -1196,7 +1196,7 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
         Op::JumpIfTrue { reg, .. } => m(reg),
         Op::JumpIfFalse { reg, .. } => m(reg),
         Op::Echo { reg } => m(reg),
-        Op::Stringify { dst, src, .. } => {
+        Op::Stringify { dst, src, .. } | Op::JsonStringify { dst, src, .. } => {
             m(dst);
             m(src);
         }

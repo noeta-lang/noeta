@@ -1541,6 +1541,17 @@ impl<'m> Vm<'m> {
                         self.emit_stdout_line(&text);
                         pc += 1;
                     }
+                    Op::JsonStringify { dst, src, hint } => {
+                        // A JSON door whose value carries an unsigned 64-bit integer: deep-marshal
+                        // it and run the one hinted walk, so the erased words reach the wire
+                        // unsigned. Byte-identical to the tree-walker, which marshals its own value
+                        // into the same neutral tree and runs the same walk.
+                        let v = regs[fbase + *src as usize];
+                        let json = noeta_ast::json_stringify(&v.to_native_deep(), Some(hint));
+                        set_reg(regs, fbase, *dst, Value::string(&json));
+                        pc += 1;
+                        continue;
+                    }
                     Op::Stringify {
                         dst,
                         src,

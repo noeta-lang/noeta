@@ -988,6 +988,27 @@ impl Checker {
                 })
                 .collect();
             let type_name = type_name.to_string();
+            // A native derive whose forward is `json.stringify(self)` — `@derive(Inspect)` — makes
+            // the method a JSON door over the receiver. Recorded here, where the plan and the
+            // registry's recipe are both in hand, and read at the *call* site: a synthesized body is
+            // registered for its signature and never checked, so the hint cannot come from inside
+            // it. A hand-written method of the same name wins (`register_synth_method` skips it),
+            // so it is excluded here too.
+            for (trait_name, _) in &plans {
+                let Some(recipe) = self.reg().find_ext_derive(trait_name) else {
+                    continue;
+                };
+                for m in recipe.methods {
+                    if m.handler == noeta_ext_abi::JSON_STRINGIFY_HANDLER
+                        && m.arity == 0
+                        && !methods.iter().any(|own| own.name == m.name)
+                    {
+                        self.symbols
+                            .json_forward_methods
+                            .insert((type_name.clone(), m.name.to_string()));
+                    }
+                }
+            }
             for (trait_name, ms) in &plans {
                 for m in ms {
                     self.register_synth_method(&type_name, trait_name, m);

@@ -170,6 +170,11 @@ pub struct LoweringSites<'a> {
     /// [`Rvalue::Render`], which turns it into its display string with the erased words read
     /// unsigned — the display twin of `width_sites`, and applied by both backends alike.
     pub render_hint_sites: &'a HashMap<Span, noeta_ast::RenderHint>,
+    /// JSON sites whose serialized value contains an unsigned 64-bit integer → the
+    /// [`noeta_ast::RenderHint`] built from its static type. The serializing call is replaced by an
+    /// [`Rvalue::JsonRender`] over the one value it serializes, so the erased words reach the wire
+    /// unsigned — the wire twin of `render_hint_sites`, and applied by both backends alike.
+    pub json_hint_sites: &'a HashMap<Span, noeta_ast::RenderHint>,
     /// `Expr::TypeTest` spans the checker answered statically → the answer. The test lowers to that
     /// constant (the scrutinee still evaluated, for its effects) instead of an [`Rvalue::TypeTest`],
     /// so no runtime matcher is consulted for a question it cannot answer. See
@@ -301,6 +306,7 @@ impl LoweringSites<'static> {
             for_stream_sites: SPANS.get_or_init(HashSet::new),
             width_sites: WIDTHS.get_or_init(HashMap::new),
             render_hint_sites: HINTS.get_or_init(HashMap::new),
+            json_hint_sites: HINTS.get_or_init(HashMap::new),
             folded_type_tests: FOLDED.get_or_init(HashMap::new),
             construction_sites: REPRS.get_or_init(HashMap::new),
             inferred_object_types: NAMES.get_or_init(HashMap::new),
@@ -350,6 +356,7 @@ macro_rules! lowering_sites {
             for_stream_sites: &$s.for_stream_sites,
             width_sites: &$s.width_sites,
             render_hint_sites: &$s.render_hint_sites,
+            json_hint_sites: &$s.json_hint_sites,
             folded_type_tests: &$s.folded_type_tests,
             construction_sites: &$s.construction_sites,
             inferred_object_types: &$s.inferred_object_types,
@@ -2803,6 +2810,38 @@ impl Lowerer<'_> {
                 ))
             }
             Expr::Call { callee, args, span } => {
+                // A **JSON door** whose serialized value carries an unsigned 64-bit integer: the
+                // checker recorded this call span, whichever way its callee was spelled — a
+                // qualified `json.stringify(v)`, a selectively-imported `stringify(v)`, a resolved
+                // native forward (a `@derive(Inspect)` body), or a derived `v.to_json()`. Emit the
+                // hinted serializer over the one value being serialized, so the erased words reach
+                // the wire unsigned instead of as their signed reinterpretation. Decided before the
+                // callee shape is examined at all, because the door is the *call*, not the spelling:
+                // only `to_json` serializes its receiver, and every other form its single argument.
+                if let Some(hint) = self.sites.json_hint_sites.get(span) {
+                    let operand = match callee.as_ref() {
+                        // A receiver-serializing door (`v.to_json()`, `v.inspect()`) takes no
+                        // arguments; every other spelling passes the value as its one argument.
+                        Expr::Member { receiver, .. } if args.is_empty() => {
+                            self.lower_expr(receiver, out)?
+                        }
+                        _ => {
+                            let (mut arg_atoms, _supplied) = self.lower_args(args, *span, out)?;
+                            arg_atoms
+                                .pop()
+                                .expect("a hinted serializing call has its one argument")
+                        }
+                    };
+                    return Ok(self.emit(
+                        out,
+                        Rvalue::JsonRender {
+                            operand,
+                            hint: std::rc::Rc::new(hint.clone()),
+                            span: *span,
+                        },
+                        *span,
+                    ));
+                }
                 // The async desugar's single-poll primitive (`$poll(future)`, Track A.3) — a synthetic
                 // name (lexer-forbidden `$`, no source collision) the state machine emits at each
                 // `.await`. Lowers to the dedicated poll rvalue (`some(v)`/`none`).
@@ -3664,6 +3703,23 @@ impl Lowerer<'_> {
         match right {
             // `x |> f(a)` ⟶ `f(x, a)`; `x |> obj.m(a)` ⟶ `obj.m(x, a)`.
             Expr::Call { callee, args, span } => {
+                // A **JSON door** reached through a pipe (`value |> json.stringify()`): the piped
+                // value is the serializer's one argument, already lowered as `left_atom`. Same site
+                // map and same emitted form as the written-out call — a spelling must not decide
+                // whether a `u64` reaches the wire correctly.
+                if let Some(hint) = self.sites.json_hint_sites.get(span)
+                    && args.is_empty()
+                {
+                    return Ok(self.emit(
+                        out,
+                        Rvalue::JsonRender {
+                            operand: left_atom,
+                            hint: std::rc::Rc::new(hint.clone()),
+                            span: *span,
+                        },
+                        *span,
+                    ));
+                }
                 if let Expr::Member {
                     receiver,
                     name,

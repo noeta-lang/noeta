@@ -16,6 +16,13 @@
 //! `plans/backend-mirror.md`). Key order is per aggregate kind, identical in both doors: maps
 //! sorted (their canonical order), objects in declared field order.
 //!
+//! A value whose static type carries an **unsigned 64-bit integer** takes one detour: the erased
+//! i64 word says nothing about signedness, so the checker hands the door a `noeta_ast::RenderHint`
+//! and the tree goes through `noeta_ast::json_stringify`, which writes those positions unsigned and
+//! delegates every other branch straight back to [`stringify`]. Decoding is the mirror:
+//! [`TypeRecipe::IntN`] accepts a number that fits the declared width, and [`Json::Uint`] keeps the
+//! range past `i64::MAX` exact on the way in, so what the encoder wrote the decoder recovers.
+//!
 //! The parse goes through `serde_json` (robust over escapes, Unicode, and number edge cases).
 //! With `serde_json`'s default features its object map is a `BTreeMap`, so keys arrive sorted —
 //! deterministic, and matching the language's sorted-key maps.
@@ -35,6 +42,10 @@ pub enum Json {
     Null,
     Bool(bool),
     Int(i64),
+    /// A whole number **above** `i64::MAX` but within `u64` — the range a `u64` occupies and an
+    /// `i64` does not. Split from [`Json::Int`] rather than stored as its wrapped word so nothing
+    /// downstream can mistake it for a negative value; only a `u64` recipe accepts one.
+    Uint(u64),
     Float(f64),
     Str(String),
     Array(Vec<Json>),
@@ -143,6 +154,24 @@ impl JsonError {
             kind: JsonErrorKind::Mismatch,
             path: path.to_string(),
             detail: format!("expected {expected}, found JSON {}", json_kind(found)),
+            line: None,
+            column: None,
+        }
+    }
+
+    /// A whole number at `path` that does not fit the fixed-width integer type it decodes into.
+    /// Kept a [`JsonErrorKind::Mismatch`] — the value is the wrong one for this type, which is what
+    /// that kind means — with a detail that names the width and quotes the number, because "expected
+    /// u8, found JSON number" about the number `300` reads as a shape complaint and is not
+    /// actionable.
+    fn out_of_width(path: &str, width: &str, found: &Json) -> JsonError {
+        JsonError {
+            kind: JsonErrorKind::Mismatch,
+            path: path.to_string(),
+            detail: format!(
+                "expected {width}, found {} — out of range for {width}",
+                json_scalar_text(found)
+            ),
             line: None,
             column: None,
         }
@@ -345,6 +374,11 @@ fn to_native(json: &Json) -> NativeOut {
         Json::Null => NativeOut::Unit,
         Json::Bool(b) => NativeOut::Scalar(Scalar::Bool(*b)),
         Json::Int(n) => NativeOut::Scalar(Scalar::Int(*n)),
+        // The **dynamic** door has no type to say "unsigned", and the language's `int` is the signed
+        // 64-bit word: a number past `i64::MAX` therefore arrives as the `float` its magnitude fits,
+        // exactly as any other number too large for an `int` does. Recovering it as a `u64` is what
+        // the *typed* door is for (`json.parse::<u64>`).
+        Json::Uint(n) => NativeOut::Scalar(Scalar::Float(*n as f64)),
         Json::Float(f) => NativeOut::Scalar(Scalar::Float(*f)),
         Json::Str(s) => NativeOut::Str(s.clone()),
         Json::Array(items) => NativeOut::List(items.iter().map(to_native).collect()),
@@ -391,14 +425,38 @@ fn decode(json: &Json, recipe: &TypeRecipe, path: &mut String) -> Result<NativeO
             Json::Int(n) => Ok(NativeOut::Scalar(Scalar::Int(*n))),
             _ => Err(JsonError::mismatch(path, "int", json)),
         },
+        // A fixed-width integer: the number must fit the declared width, and the built value is the
+        // erased 64-bit word — the same representation the language holds one in, so `u64::MAX`
+        // round-trips through the negative word it is stored as.
+        TypeRecipe::IntN { signed, bits } => match int_within_width(json, *signed, *bits) {
+            Some(word) => Ok(NativeOut::Scalar(Scalar::Int(word))),
+            // A whole number of the right *kind* that the width cannot hold is its own failure, not
+            // a shape mismatch: the document says `300` where the field is a `u8`, and a caller can
+            // act on that only if the message says so rather than reporting "found JSON number"
+            // about a number.
+            None => Err(match json {
+                // A magnitude past `u64` arrives as a float with no fractional part — still a whole
+                // number the width cannot hold, so it reports as one. A genuinely fractional number
+                // is the ordinary shape mismatch.
+                Json::Int(_) | Json::Uint(_) => {
+                    JsonError::out_of_width(path, &int_width_name(*signed, *bits), json)
+                }
+                Json::Float(f) if f.fract() == 0.0 => {
+                    JsonError::out_of_width(path, &int_width_name(*signed, *bits), json)
+                }
+                _ => JsonError::mismatch(path, &int_width_name(*signed, *bits), json),
+            }),
+        },
         TypeRecipe::Float => match json {
             Json::Float(f) => Ok(NativeOut::Scalar(Scalar::Float(*f))),
             Json::Int(n) => Ok(NativeOut::Scalar(Scalar::Float(*n as f64))),
+            Json::Uint(n) => Ok(NativeOut::Scalar(Scalar::Float(*n as f64))),
             _ => Err(JsonError::mismatch(path, "float", json)),
         },
         TypeRecipe::F32 => match json {
             Json::Float(f) => Ok(NativeOut::Scalar(Scalar::F32(*f as f32))),
             Json::Int(n) => Ok(NativeOut::Scalar(Scalar::F32(*n as f32))),
+            Json::Uint(n) => Ok(NativeOut::Scalar(Scalar::F32(*n as f32))),
             _ => Err(JsonError::mismatch(path, "f32", json)),
         },
         TypeRecipe::Bool => match json {
@@ -555,6 +613,7 @@ fn tag_matches(tag: &VariantTag, case_name: &str, json: &Json) -> bool {
         (VariantTag::Int(b), Json::Int(n)) => n == b,
         (VariantTag::Float(b), Json::Float(f)) => f == b,
         (VariantTag::Float(b), Json::Int(n)) => (*n as f64) == *b,
+        (VariantTag::Float(b), Json::Uint(n)) => (*n as f64) == *b,
         (VariantTag::Bool(b), Json::Bool(v)) => v == b,
         _ => false,
     }
@@ -569,7 +628,10 @@ fn tag_kind_matches(tag: &VariantTag, json: &Json) -> bool {
         (tag, json),
         (VariantTag::Name | VariantTag::Str(_), Json::Str(_))
             | (VariantTag::Int(_), Json::Int(_))
-            | (VariantTag::Float(_), Json::Float(_) | Json::Int(_))
+            | (
+                VariantTag::Float(_),
+                Json::Float(_) | Json::Int(_) | Json::Uint(_)
+            )
             | (VariantTag::Bool(_), Json::Bool(_))
     )
 }
@@ -625,6 +687,7 @@ fn json_scalar_text(json: &Json) -> String {
     match json {
         Json::Str(s) => noeta_ext_abi::json_text::json_string(s),
         Json::Int(n) => n.to_string(),
+        Json::Uint(n) => n.to_string(),
         Json::Float(f) => noeta_ext_abi::format_float(*f),
         Json::Bool(b) => b.to_string(),
         Json::Null => "null".to_string(),
@@ -632,12 +695,38 @@ fn json_scalar_text(json: &Json) -> String {
     }
 }
 
+/// A JSON number as the erased 64-bit word of a `(signed, bits)` fixed-width integer, or `None` when
+/// it is not a whole number or does not fit that width.
+///
+/// The width check is the recipe's whole contract: both readings of the erased word are legal values
+/// of *some* integer type, so a decode that skipped it would silently deliver a `u8` field the value
+/// `300` — or a `u64` field a negative one. `u64` is the width that needs [`Json::Uint`]: its upper
+/// half has no `i64` spelling, and `json.stringify` writes it as the unsigned digits this reads back.
+fn int_within_width(json: &Json, signed: bool, bits: u8) -> Option<i64> {
+    let value: i128 = match json {
+        Json::Int(n) => i128::from(*n),
+        Json::Uint(n) => i128::from(*n),
+        _ => return None,
+    };
+    let (min, max): (i128, i128) = match signed {
+        true => (-(1i128 << (bits - 1)), (1i128 << (bits - 1)) - 1),
+        false => (0, (1i128 << bits) - 1),
+    };
+    (min..=max).contains(&value).then_some(value as i64)
+}
+
+/// A fixed-width integer type's surface name (`u64`, `i8`) — the "expected" half of a width
+/// mismatch, spelled as the author wrote the type.
+fn int_width_name(signed: bool, bits: u8) -> String {
+    format!("{}{bits}", if signed { 'i' } else { 'u' })
+}
+
 /// The surface kind name of a JSON value, for mismatch messages.
 fn json_kind(json: &Json) -> &'static str {
     match json {
         Json::Null => "null",
         Json::Bool(_) => "boolean",
-        Json::Int(_) | Json::Float(_) => "number",
+        Json::Int(_) | Json::Uint(_) | Json::Float(_) => "number",
         Json::Str(_) => "string",
         Json::Array(_) => "array",
         Json::Object(_) => "object",
@@ -654,11 +743,14 @@ fn convert(value: JsonValue) -> Json {
     match value {
         JsonValue::Null => Json::Null,
         JsonValue::Bool(b) => Json::Bool(b),
-        JsonValue::Number(n) => match n.as_i64() {
-            // A whole number that fits `i64` is an int; anything else (a fractional number, or a
-            // magnitude beyond `i64`) is a float — matching the language's int/float split.
-            Some(i) => Json::Int(i),
-            None => Json::Float(n.as_f64().unwrap_or(f64::NAN)),
+        JsonValue::Number(n) => match (n.as_i64(), n.as_u64()) {
+            // A whole number that fits `i64` is an int; one that fits only `u64` is the range a
+            // `u64` occupies past bit 63, kept exactly so it can decode back into one; anything else
+            // (a fractional number, or a magnitude beyond both) is a float — matching the language's
+            // int/float split.
+            (Some(i), _) => Json::Int(i),
+            (None, Some(u)) => Json::Uint(u),
+            (None, None) => Json::Float(n.as_f64().unwrap_or(f64::NAN)),
         },
         JsonValue::String(s) => Json::Str(s),
         JsonValue::Array(items) => Json::Array(items.into_iter().map(convert).collect()),
@@ -1185,6 +1277,93 @@ mod tests {
         let err = parse_dynamic("{not json}").unwrap_err();
         assert_eq!(err.kind, ErrorKind::ArgType);
         assert!(err.message.starts_with("invalid JSON: "), "{}", err.message);
+    }
+
+    // --- fixed-width integers -------------------------------------------------------------------
+
+    /// The three boundaries a `u64` has and an `i64` does not, decoded into the erased word the
+    /// language holds one in — the read half of what `json.stringify` writes.
+    #[test]
+    fn a_u64_decodes_past_bit_63_into_its_erased_word() {
+        let u64_recipe = TypeRecipe::IntN {
+            signed: false,
+            bits: 64,
+        };
+        for (text, word) in [
+            ("9223372036854775807", i64::MAX),
+            ("9223372036854775808", i64::MIN),
+            ("18446744073709551615", -1),
+            ("0", 0),
+        ] {
+            assert_eq!(
+                parse_typed(text, &u64_recipe).unwrap(),
+                NativeOut::Scalar(Scalar::Int(word)),
+                "{text}"
+            );
+        }
+    }
+
+    /// The width is the contract: a number outside it is refused, at both ends and for both
+    /// signednesses, with a detail that names the width and quotes the number.
+    #[test]
+    fn a_number_outside_the_declared_width_is_refused() {
+        let u8_recipe = TypeRecipe::IntN {
+            signed: false,
+            bits: 8,
+        };
+        assert_eq!(
+            parse_typed("255", &u8_recipe).unwrap(),
+            NativeOut::Scalar(Scalar::Int(255))
+        );
+        let err = try_parse_typed("300", &u8_recipe).unwrap_err();
+        assert_eq!(err.kind, JsonErrorKind::Mismatch);
+        assert_eq!(err.detail, "expected u8, found 300 — out of range for u8");
+        assert!(try_parse_typed("-1", &u8_recipe).is_err());
+        let i8_recipe = TypeRecipe::IntN {
+            signed: true,
+            bits: 8,
+        };
+        assert_eq!(
+            parse_typed("-128", &i8_recipe).unwrap(),
+            NativeOut::Scalar(Scalar::Int(-128))
+        );
+        assert!(try_parse_typed("128", &i8_recipe).is_err());
+        // An unsigned width never accepts a negative number, however small the magnitude.
+        let u64_recipe = TypeRecipe::IntN {
+            signed: false,
+            bits: 64,
+        };
+        let err = try_parse_typed("-1", &u64_recipe).unwrap_err();
+        assert_eq!(err.detail, "expected u64, found -1 — out of range for u64");
+        // A magnitude past `u64` arrives as a float with no fractional part — still a whole number
+        // the width cannot hold, so it reports as one rather than as a shape mismatch.
+        let err = try_parse_typed("18446744073709551616", &u64_recipe).unwrap_err();
+        assert!(
+            err.detail.contains("out of range for u64"),
+            "{}",
+            err.detail
+        );
+        // A genuinely fractional number IS a shape mismatch.
+        let err = try_parse_typed("1.5", &u64_recipe).unwrap_err();
+        assert_eq!(err.detail, "expected u64, found JSON number");
+    }
+
+    /// The range past `i64::MAX` is kept exact on the way in (`Json::Uint`) so the typed door can
+    /// recover it — while the DYNAMIC door, which has no type to read a width from, still sees the
+    /// float any oversized number has always been.
+    #[test]
+    fn a_number_past_i64_parses_as_a_uint_and_stays_a_float_dynamically() {
+        assert_eq!(parse("18446744073709551615").unwrap(), Json::Uint(u64::MAX));
+        assert_eq!(parse("9223372036854775807").unwrap(), Json::Int(i64::MAX));
+        assert_eq!(
+            try_parse_dynamic("18446744073709551615").unwrap(),
+            NativeOut::Scalar(Scalar::Float(u64::MAX as f64))
+        );
+        // A `float` field widens one, exactly as it widens an `int`.
+        assert_eq!(
+            parse_typed("18446744073709551615", &TypeRecipe::Float).unwrap(),
+            NativeOut::Scalar(Scalar::Float(u64::MAX as f64))
+        );
     }
 
     #[test]

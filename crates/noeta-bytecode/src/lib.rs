@@ -521,6 +521,7 @@ macro_rules! for_each_jump_pc_arms {
             | Op::RequireCondBool { .. }
             | Op::Echo { .. }
             | Op::Stringify { .. }
+            | Op::JsonStringify { .. }
             | Op::BuildString { .. }
             | Op::Raise { .. }
             | Op::Halt => {}
@@ -1580,6 +1581,17 @@ pub enum Op {
         src: Reg,
         span: Span,
         hint: Option<Box<noeta_ast::RenderHint>>,
+    },
+    /// `dst = json(src)` under `hint` — the wire twin of a hinted [`Op::Stringify`]. Emitted only at
+    /// a JSON door whose serialized value carries an **unsigned 64-bit integer**
+    /// (`Rvalue::JsonRender`): the value is deep-marshalled and serialized through the one hinted
+    /// walk, so the erased words reach the wire unsigned instead of as their signed
+    /// reinterpretation. Every other `json.stringify` / derived `to_json` call stays an ordinary
+    /// call, so the op appears only where the checker found something to fix.
+    JsonStringify {
+        dst: Reg,
+        src: Reg,
+        hint: Box<noeta_ast::RenderHint>,
     },
     /// `dst = concat(display(part) for part in parts)` — build an interpolated string in one pass
     /// and one output allocation (P-VMT-STR). Each `Literal` part is copied verbatim from the
@@ -2696,6 +2708,7 @@ fn op_repr(
         Op::CondBranch { reg, target, .. } => format!("CondBranch  r{reg} unless -> {target}"),
         Op::Echo { reg } => format!("Echo        r{reg}"),
         Op::Stringify { dst, src, .. } => format!("Stringify   r{dst} <- display(r{src})"),
+        Op::JsonStringify { dst, src, .. } => format!("JsonStringi r{dst} <- json(r{src})"),
         Op::BuildString { dst, parts } => {
             let rendered = parts
                 .iter()

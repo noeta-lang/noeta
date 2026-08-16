@@ -1,26 +1,36 @@
-//! The **render hint**: how to display a value whose static type contains an unsigned 64-bit
+//! The **render hint**: how to write out a value whose static type contains an unsigned 64-bit
 //! integer.
 //!
 //! A fixed-width integer is erased to the underlying i64 word at runtime ([`crate::BuiltinTy::IntN`]
 //! and `noeta_types::Type::IntN` both say so), so nothing the value carries distinguishes `u64` from
 //! `i64`. For arithmetic and ordering that is handled by the width-carrying ops the checker records
-//! in its width sites; for *rendering* the same information is needed, because a `u64` past bit 63
-//! is a negative i64 word and would print as its signed reinterpretation.
+//! in its width sites; for writing a value out the same information is needed, because a `u64` past
+//! bit 63 is a negative i64 word and would otherwise appear as its signed reinterpretation.
 //!
-//! The signedness is therefore taken from the **static type at the display site** — `echo`, an
-//! interpolation hole, and a display-based `~` operand — and travels to both backends as one of
-//! these hints, built by the checker and applied by the shared render walk. Widths narrower than 64
-//! bits need no hint: every value of one fits in an i64 and already prints correctly.
+//! The signedness is therefore taken from the **static type at the door** and travels to both
+//! backends as one of these hints, built by the checker and applied by a shared walk. Widths
+//! narrower than 64 bits need no hint: every value of one fits in an i64 and is already correct.
 //!
-//! The hint mirrors only the structure display itself walks: a scalar, a list/set's elements, a
-//! map's keys and values, positional slots (a tuple's positions, an object's declared fields), and
-//! an enum's per-variant payload. It is **sparse** — a branch with no unsigned integer under it is
-//! absent, and a type with none anywhere produces no hint at all, so a program that never mentions
-//! `u64` carries nothing and renders through the untouched path.
+//! There are two kinds of door, and they take the same hint:
+//!
+//! * **Display** — `echo`, an interpolation hole, a display-based `~` operand — applied by each
+//!   backend to its own value model.
+//! * **JSON** — the `json.stringify` argument, a derived `to_json()` or `inspect()` receiver —
+//!   applied by [`json_stringify`] here, over the one neutral `NativeValue` tree both backends
+//!   marshal into. This half is a *data* encoding rather than a rendering: the number is not merely
+//!   displayed wrong, it is written wrong to an API response or a persisted record.
+//!
+//! The hint mirrors only the structure those walks take: a scalar, a list/set's elements, a map's
+//! keys and values, positional slots (a tuple's positions, an object's fields), and an enum's
+//! per-variant payload. It is **sparse** — a branch with no unsigned integer under it is absent, and
+//! a type with none anywhere produces no hint at all, so a program that never mentions `u64` carries
+//! nothing and goes through the untouched path. The two walks number an object's slots differently
+//! (a display renders every declared field; a JSON encoding drops the `#[Transient]` ones), which is
+//! why the checker builds each hint for a stated purpose.
 
 use serde::{Deserialize, Serialize};
 
-/// How to render a value whose static type contains an unsigned 64-bit integer. See the module
+/// How to write out a value whose static type contains an unsigned 64-bit integer. See the module
 /// docs; every variant is a *position* under which such an integer was found.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RenderHint {
@@ -94,6 +104,135 @@ pub fn map_key_display(key: &noeta_ext_abi::MapKey, hint: Option<&RenderHint>) -
     }
 }
 
+/// Serialize a deeply-marshalled [`noeta_ext_abi::NativeValue`] to JSON **under a hint** — the JSON
+/// twin of the display walk, and the one serializer both backends reach for a hinted door.
+///
+/// Without a hint this *is* [`noeta_ext_abi::json_text::stringify`], byte for byte: the walk
+/// delegates the moment a branch has none, so only the hinted spine is re-walked here and every
+/// unhinted subtree is produced by the single shared engine. With one, an erased word at a
+/// [`RenderHint::Unsigned`] position is written as the unsigned value it stands for, at any depth —
+/// a list element, a map key or value, a tuple or object slot, an enum payload.
+///
+/// The hint describes the *static type*; the tree describes the marshalled value, and the two
+/// differ in exactly one place: an `Option` marshals **through** its payload (`some(x)` is `x`,
+/// `none` is null), while its hint is the ordinary [`RenderHint::Variants`] every enum gets. That
+/// is why a `Variants` hint over a non-variant value takes the `some` payload's hint — the last
+/// arm below.
+pub fn json_stringify(value: &noeta_ext_abi::NativeValue, hint: Option<&RenderHint>) -> String {
+    use noeta_ext_abi::json_text::{json_string, stringify};
+    use noeta_ext_abi::{NativeValue, Scalar};
+    let Some(hint) = hint else {
+        return stringify(value);
+    };
+    match (hint, value) {
+        // The reinterpretation itself: the erased word read as the `u64` the type says it is.
+        (RenderHint::Unsigned, NativeValue::Scalar(Scalar::Int(word))) => unsigned_digits(*word),
+        // A list or set — every element carries the same hint.
+        (RenderHint::Elements(inner), NativeValue::List(items)) => {
+            json_array(items.iter().map(|item| json_stringify(item, Some(inner))))
+        }
+        // A map: keys and values take their own hints. A JSON object key is text by definition, so
+        // the marshal has already rendered it (`MapKey::as_native_str`); a hinted key is therefore
+        // read back as the i64 word that text was rendered from — the exact inverse of the one
+        // `to_string` that produced it — and re-rendered unsigned.
+        (RenderHint::Entries { key, value: val }, NativeValue::Map(entries)) => {
+            json_object(entries.iter().map(|(k, v)| {
+                (
+                    json_map_key(k, key.as_deref()),
+                    json_stringify(v, val.as_deref()),
+                )
+            }))
+        }
+        // Positional slots against a tuple, which marshals as a JSON array.
+        (RenderHint::Slots(_), NativeValue::List(items)) => json_array(
+            items
+                .iter()
+                .enumerate()
+                .map(|(i, item)| json_stringify(item, hint.slot(i as u32))),
+        ),
+        // Positional slots against an object — a declared struct/class marshals as a JSON object in
+        // serialized field order, which is the order the checker numbered the slots in.
+        (RenderHint::Slots(_), NativeValue::Map(entries)) => json_object(
+            entries
+                .iter()
+                .enumerate()
+                .map(|(i, (k, v))| (json_string(k), json_stringify(v, hint.slot(i as u32)))),
+        ),
+        (RenderHint::Slots(_), NativeValue::Instance { fields, .. }) => json_object(
+            fields
+                .iter()
+                .enumerate()
+                .map(|(i, (k, v))| (json_string(k), json_stringify(v, hint.slot(i as u32)))),
+        ),
+        // An enum value: the payload-free form is its case name, the payload-carrying one the
+        // `{"Variant":[fields]}` shape, each field under its own slot hint.
+        (
+            RenderHint::Variants(_),
+            NativeValue::Variant {
+                variant, fields, ..
+            },
+        ) => {
+            if fields.is_empty() {
+                return json_string(variant);
+            }
+            let slots = hint.variant(variant).unwrap_or(&[]);
+            let parts = json_array(fields.iter().enumerate().map(|(i, field)| {
+                let slot = slots.iter().find(|(j, _)| *j == i as u32).map(|(_, h)| h);
+                json_stringify(field, slot)
+            }));
+            format!("{{{}:{}}}", json_string(variant), parts)
+        }
+        // An `Option` reaches here: it marshalled through its payload, so the value is the payload
+        // itself (or unit for `none`) while the hint is still the enum's. Apply the `some` payload's
+        // hint to it; `none` is a unit, which the delegation below writes as `null`.
+        (RenderHint::Variants(_), _) => {
+            match hint.variant("some").and_then(|slots| {
+                slots
+                    .iter()
+                    .find(|(i, _)| *i == 0)
+                    .map(|(_, payload)| payload)
+            }) {
+                Some(payload) => json_stringify(value, Some(payload)),
+                None => stringify(value),
+            }
+        }
+        // The hint describes a position this value does not occupy (a `dyn` that came back a
+        // different shape, a hint-free branch): the shared engine answers, unchanged.
+        _ => stringify(value),
+    }
+}
+
+/// One JSON array from already-serialized elements — the array syntax written once for
+/// [`json_stringify`]'s three array-shaped arms.
+fn json_array(parts: impl IntoIterator<Item = String>) -> String {
+    let parts: Vec<String> = parts.into_iter().collect();
+    format!("[{}]", parts.join(","))
+}
+
+/// One JSON object from already-serialized `(quoted key, value)` pairs — the object syntax written
+/// once for [`json_stringify`]'s three object-shaped arms.
+fn json_object(entries: impl IntoIterator<Item = (String, String)>) -> String {
+    let parts: Vec<String> = entries
+        .into_iter()
+        .map(|(key, value)| format!("{key}:{value}"))
+        .collect();
+    format!("{{{}}}", parts.join(","))
+}
+
+/// A marshalled map key as its **quoted JSON key**, under the key's own hint. See the
+/// [`RenderHint::Entries`] arm of [`json_stringify`]: the key arrives as the text
+/// [`noeta_ext_abi::MapKey::as_native_str`] produced, so an [`RenderHint::Unsigned`] key is read
+/// back as that i64 word and re-rendered. A key whose text is not one is left alone.
+fn json_map_key(key: &str, hint: Option<&RenderHint>) -> String {
+    match hint {
+        Some(RenderHint::Unsigned) => match key.parse::<i64>() {
+            Ok(word) => noeta_ext_abi::json_text::json_string(&unsigned_digits(word)),
+            Err(_) => noeta_ext_abi::json_text::json_string(key),
+        },
+        _ => noeta_ext_abi::json_text::json_string(key),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,5 +282,135 @@ mod tests {
             map_key_display(&str_key, Some(&RenderHint::Unsigned)),
             str_key.render()
         );
+    }
+
+    // --- the hinted JSON walk -------------------------------------------------------------------
+
+    use noeta_ext_abi::{NativeValue, Scalar};
+
+    fn int(word: i64) -> NativeValue {
+        NativeValue::Scalar(Scalar::Int(word))
+    }
+
+    /// No hint is the shared engine, byte for byte — the delegation that keeps one serializer.
+    #[test]
+    fn an_unhinted_walk_is_the_shared_serializer() {
+        let value = NativeValue::List(vec![int(-1), NativeValue::Str("a".into())]);
+        assert_eq!(
+            json_stringify(&value, None),
+            noeta_ext_abi::json_text::stringify(&value)
+        );
+        // And so is a hint that describes a position this value does not occupy.
+        assert_eq!(
+            json_stringify(&value, Some(&RenderHint::Unsigned)),
+            noeta_ext_abi::json_text::stringify(&value)
+        );
+    }
+
+    /// The three boundaries, bare: the largest word an i64 also holds reads the same either way,
+    /// and everything past bit 63 is where the two readings part.
+    #[test]
+    fn a_hinted_scalar_writes_its_unsigned_digits() {
+        for (word, text) in [
+            (i64::MAX, "9223372036854775807"),
+            (i64::MIN, "9223372036854775808"),
+            (-1, "18446744073709551615"),
+        ] {
+            assert_eq!(
+                json_stringify(&int(word), Some(&RenderHint::Unsigned)),
+                text
+            );
+        }
+    }
+
+    /// Every nesting position the hint models, against the tree the marshal actually produces.
+    #[test]
+    fn a_hint_reaches_every_nested_position() {
+        // A list's elements.
+        let list = NativeValue::List(vec![int(-1), int(1)]);
+        assert_eq!(
+            json_stringify(
+                &list,
+                Some(&RenderHint::Elements(Box::new(RenderHint::Unsigned)))
+            ),
+            "[18446744073709551615,1]"
+        );
+        // A map's values, and its keys — which arrive as the text the marshal rendered.
+        let map = NativeValue::Map(vec![("-1".into(), int(-1))]);
+        assert_eq!(
+            json_stringify(
+                &map,
+                Some(&RenderHint::Entries {
+                    key: Some(Box::new(RenderHint::Unsigned)),
+                    value: Some(Box::new(RenderHint::Unsigned)),
+                })
+            ),
+            "{\"18446744073709551615\":18446744073709551615}"
+        );
+        // A string-keyed map keeps its key whatever the value hint says.
+        assert_eq!(
+            json_stringify(
+                &NativeValue::Map(vec![("v".into(), int(-1))]),
+                Some(&RenderHint::Entries {
+                    key: None,
+                    value: Some(Box::new(RenderHint::Unsigned)),
+                })
+            ),
+            "{\"v\":18446744073709551615}"
+        );
+        // A tuple's slots (a JSON array) and an object's slots (a JSON object), both positional.
+        let slots = RenderHint::Slots(vec![(0, RenderHint::Unsigned)]);
+        assert_eq!(
+            json_stringify(
+                &NativeValue::List(vec![int(-1), NativeValue::Str("t".into())]),
+                Some(&slots)
+            ),
+            "[18446744073709551615,\"t\"]"
+        );
+        assert_eq!(
+            json_stringify(
+                &NativeValue::Map(vec![
+                    ("reading".into(), int(-1)),
+                    ("label".into(), NativeValue::Str("m".into())),
+                ]),
+                Some(&slots)
+            ),
+            "{\"reading\":18446744073709551615,\"label\":\"m\"}"
+        );
+    }
+
+    /// An enum's payload takes its variant's slot hint; a payload-free case is still its name.
+    #[test]
+    fn an_enum_payload_takes_its_variants_slot() {
+        let hint = RenderHint::Variants(vec![("Raw".into(), vec![(0, RenderHint::Unsigned)])]);
+        let raw = NativeValue::Variant {
+            enum_name: "Reading".into(),
+            variant: "Raw".into(),
+            variant_index: 0,
+            fields: vec![int(-1)],
+        };
+        assert_eq!(
+            json_stringify(&raw, Some(&hint)),
+            "{\"Raw\":[18446744073709551615]}"
+        );
+        let missing = NativeValue::Variant {
+            enum_name: "Reading".into(),
+            variant: "Missing".into(),
+            variant_index: 1,
+            fields: Vec::new(),
+        };
+        assert_eq!(json_stringify(&missing, Some(&hint)), "\"Missing\"");
+    }
+
+    /// The one place hint and tree disagree: an `Option` marshals through its payload, so the
+    /// `some` slot's hint applies to the bare value and `none` is still `null`.
+    #[test]
+    fn an_option_takes_its_some_payloads_hint_through_the_flattening() {
+        let hint = RenderHint::Variants(vec![("some".into(), vec![(0, RenderHint::Unsigned)])]);
+        assert_eq!(
+            json_stringify(&int(-1), Some(&hint)),
+            "18446744073709551615"
+        );
+        assert_eq!(json_stringify(&NativeValue::Unit, Some(&hint)), "null");
     }
 }

@@ -240,7 +240,16 @@ pub const MAGIC: &[u8; 4] = b"NOEB";
 ///
 /// It cannot be re-derived on the reading side: the signedness of a fixed-width integer lives only
 /// in the static type, which the checker resolves and the artifact does not otherwise carry.
-pub const FORMAT_VERSION: u8 = 22;
+///
+/// Bumped to 23 by the JSON half of that hint, which moved the layout twice over.
+/// [`noeta_bytecode::Op::JsonStringify`] is a new op carrying the [`noeta_ast::RenderHint`] a JSON
+/// door serializes under: a new opcode renumbers nothing on its own, but a version-22 reader has no
+/// arm for it and would take its operands as the start of the next op — the same slide, from the
+/// other direction. And [`noeta_ext_abi::TypeRecipe::IntN`] (a fixed-width integer's decode recipe)
+/// is **inserted** rather than appended, so every recipe variant after it shifts by one — a
+/// version-22 artifact's `Float` recipe would decode as `IntN`. Neither can be re-derived on the
+/// reading side: both say what the *static type* was, which the artifact does not otherwise carry.
+pub const FORMAT_VERSION: u8 = 23;
 
 /// The SHA-256 of one canonical [`Module`]'s postcard encoding — the *other* half of
 /// [`FORMAT_VERSION`], and the thing that makes the changelog above enforceable.
@@ -264,7 +273,7 @@ pub const FORMAT_VERSION: u8 = 22;
 /// pair exists to prevent. The test's message says so; this doc says so; the changelog paragraph
 /// you are about to write is the third place.
 pub const MODULE_LAYOUT_DIGEST: &str =
-    "477cf84367f94ecc87c98b143b5ea08d90fa24eab2d003cab0da0c99359b5a46";
+    "ab7622b1d70fbea4465ba8abb91c81b74b4e99d1666f90f03a86bab4ea5e573f";
 
 /// The runtime version stamped into and checked against artifacts — the building crate's
 /// package version. Any release that changes the serialized [`Module`] layout bumps this, so a

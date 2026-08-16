@@ -1816,6 +1816,13 @@ impl Checker {
         use noeta_ext_abi::TypeRecipe;
         Some(match ty {
             Type::Int => TypeRecipe::Int,
+            // A fixed-width integer decodes from a JSON number that fits its width. It is the
+            // counterpart of what serialization writes: `json.stringify` renders a `u64` past bit 63
+            // as its unsigned digits, and this is what reads those digits back into one.
+            Type::IntN { signed, bits } => TypeRecipe::IntN {
+                signed: *signed,
+                bits: *bits,
+            },
             Type::Float => TypeRecipe::Float,
             Type::F32 => TypeRecipe::F32,
             Type::Bool => TypeRecipe::Bool,

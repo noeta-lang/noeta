@@ -1253,6 +1253,16 @@ struct Symbols {
     /// [`noeta_ext_abi::FieldRecipe::skipped`]) and by the derive gate that requires a transient
     /// field to be fillable without the wire.
     transient_fields: HashMap<String, HashSet<String>>,
+    /// `(type name, method name)` for every **native-derive method that serializes its receiver to
+    /// JSON** — the forward `@derive(Inspect)` synthesizes (`fn inspect(): dyn` returning
+    /// `json.stringify(self)`), and any later `ExtDerive` method declaring the same handler.
+    ///
+    /// Written where the derive plans are registered ([`Checker::collect`]'s derive walk), because
+    /// that is the one place the plan and the registry's recipe are both in hand; a hand-written
+    /// method of the same name is excluded, exactly as it wins over the synthesized one. Read at the
+    /// call site, which is where the receiver's static type is known — a synthesized body is
+    /// registered for its signature and never checked, so nothing inside it could record the hint.
+    json_forward_methods: HashSet<(String, String)>,
     /// Class names that declare a `destruct { ... }` block — the seeds of destruct-reachability.
     destructor_classes: HashSet<String>,
     /// The **type-param forwarding table** (poly-values F2b + composite slots D2a): top-level

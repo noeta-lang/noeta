@@ -244,11 +244,11 @@ pub use registry::{
     ConstraintField, ConstraintLayout, CtxTypeDispatch, EnumBacking, ExtAssocType, ExtCapability,
     ExtClass, ExtEnum, ExtField, ExtFielded, ExtFn, ExtModule, ExtRoleTag, ExtStruct, ExtTier,
     ExtTierRunner, ExtTrait, ExtTraitMethod, ExtType, ExtTypeDirective, ExtVariant, Extension,
-    FieldDefault, FieldRecipe, FieldedDispatch, FieldedKind, HiddenArg, ModuleDispatch, NativeOut,
-    NativeValue, Nominal, NominalKind, NominalType, PackedConstraint, PackedLayoutKind, RetTy,
-    Scalar, ScalarVec, SigType, TierRoot, TierRoots, TierRun, TierRunner, TierText, TraitDispatch,
-    TypeArgIndex, TypeArgInfo, TypeDispatch, TypeRecipe, TypedDispatch, TypedTypeDispatch,
-    VariantRecipe, VariantTag, VariantValue,
+    FieldDefault, FieldRecipe, FieldedDispatch, FieldedKind, HiddenArg, JSON_STRINGIFY_HANDLER,
+    ModuleDispatch, NativeOut, NativeValue, Nominal, NominalKind, NominalType, PackedConstraint,
+    PackedLayoutKind, RetTy, Scalar, ScalarVec, SigType, TierRoot, TierRoots, TierRun, TierRunner,
+    TierText, TraitDispatch, TypeArgIndex, TypeArgInfo, TypeDispatch, TypeRecipe, TypedDispatch,
+    TypedTypeDispatch, VariantRecipe, VariantTag, VariantValue,
 };
 pub use stream::{
     Frame, FrameDecoder, FrameStream, Framing, SseCloseIo, SseSendIo, SseSink, StreamRecvIo,

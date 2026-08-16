@@ -1294,6 +1294,16 @@ impl Interpreter {
                 let value = self.eval_ir_atom(operand, frame)?;
                 Ok(Value::Str(value.display_hinted(hint)))
             }
+            noeta_ir::Rvalue::JsonRender { operand, hint, .. } => {
+                // Serialize a JSON-site value whose static type carries an unsigned 64-bit integer.
+                // The marshal is this backend's own; the walk over the marshalled tree is the shared
+                // one the VM runs, so the two encodings agree by construction.
+                let value = self.eval_ir_atom(operand, frame)?;
+                Ok(Value::Str(noeta_ast::json_stringify(
+                    &crate::value_to_native_deep(&value),
+                    Some(hint),
+                )))
+            }
             noeta_ir::Rvalue::Binary {
                 op,
                 lhs,

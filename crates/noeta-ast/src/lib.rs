@@ -28,7 +28,7 @@ mod syntax_kind;
 pub use builtin_ty::{BuiltinTy, Spelling, parse_int_width};
 pub use name::Name;
 pub use pretty::Pretty;
-pub use render_hint::{RenderHint, map_key_display, unsigned_digits};
+pub use render_hint::{RenderHint, json_stringify, map_key_display, unsigned_digits};
 pub use syntax_kind::SyntaxKind;
 
 /// The human-facing **short name** of a (possibly namespace-qualified) type identity: the segment

@@ -957,6 +957,9 @@ impl Checker {
                     self.check_args(&params, required, args, arg_exprs, span, func);
                 }
                 self.check_module_bounds(module, func, args, span);
+                // The same JSON door as the qualified spelling — this is the form a
+                // `@derive(Inspect)` body forwards through.
+                self.note_json_stringify_hint(module, func, args, call_span);
                 stdlib::module_return(self.reg(), module, func, args).unwrap_or(Type::Unknown)
             }
             // A plain `name(args)` call: a user function, else a prelude free function.
@@ -1104,6 +1107,9 @@ impl Checker {
                         self.check_args(&params, required, args, arg_exprs, span, &func);
                     }
                     self.check_module_bounds(&module, &func, args, span);
+                    // The same JSON door as the qualified spelling, reached through
+                    // `use std.json.{stringify}`.
+                    self.note_json_stringify_hint(&module, &func, args, call_span);
                     return stdlib::module_return(self.reg(), &module, &func, args)
                         .unwrap_or(Type::Unknown);
                 }
@@ -1336,6 +1342,11 @@ impl Checker {
                         );
                         return Type::Unknown;
                     }
+                    // `json.stringify(value)` is a **JSON door**: the serialized value's static type
+                    // is in hand right here and nowhere downstream, so a `u64` under it is recorded
+                    // as a hint lowering turns into an `Rvalue::JsonRender`. Without it the erased
+                    // word goes to the wire as its signed reinterpretation.
+                    self.note_json_stringify_hint(&qm, name, args, call_span);
                     return stdlib::module_return(self.reg(), &qm, name, args)
                         .unwrap_or(Type::Unknown);
                 }
@@ -1535,6 +1546,34 @@ impl Checker {
                 // `receiver.method(args)` — a built-in method, a user method, or (on a `dyn`/hole
                 // receiver) a runtime-dispatched call that stays deferred.
                 let recv = self.synth(receiver, env);
+                // A **receiver-serializing JSON door**: the derived `to_json()`
+                // (`@derive(Serialize<Json>)` synthesizes a structural serializer) and a native
+                // derive's forward into `json.stringify(self)` (`@derive(Inspect)`). Both turn the
+                // receiver into JSON text, so the receiver's static type decides how its `u64`s
+                // reach the wire, and both are predicated exactly as the code that runs them is — no
+                // hand-written method of that name shadowing the synthesized one, because a
+                // hand-written one builds its own string and must not be handed a structural hint.
+                //
+                // Recorded here, before the resolution arms below, because it must not depend on
+                // which of them answers the call: a native derive's forward IS registered in
+                // `symbols.methods` and returns from the user-method arm, while the compiler-derived
+                // `to_json` is not and falls through to the end. Recording only notes a hint and
+                // leaves the typing to whichever arm claims it.
+                if args.is_empty()
+                    && let Type::Named(type_name, _) = &recv
+                    && (self
+                        .symbols
+                        .json_forward_methods
+                        .contains(&(type_name.to_string(), name.to_string()))
+                        || (name == "to_json"
+                            && self.has_builtin_trait(type_name.as_str(), BuiltinTrait::Serialize)
+                            && !self
+                                .symbols
+                                .methods
+                                .contains_key(&(type_name.to_string(), "to_json".to_string()))))
+                {
+                    self.note_json_hint(&recv, call_span);
+                }
                 // A trait default-body method (ExtBundle→ExtTrait convergence, slice 2): a native
                 // trait's *defaulted* method the receiver's concrete type does not provide — the TRAIT
                 // answers (source 2). Checked FIRST, before the `symbols.methods` resolution below,

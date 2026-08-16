@@ -35,6 +35,8 @@ const BUILD_TYPED_FNS: &[ExtFn] = &[ExtFn {
 fn default_out(recipe: &TypeRecipe) -> NativeOut {
     match recipe {
         TypeRecipe::Int => NativeOut::Scalar(Scalar::Int(0)),
+        // A fixed-width integer is erased to the same 64-bit word, so its zero is the same one.
+        TypeRecipe::IntN { .. } => NativeOut::Scalar(Scalar::Int(0)),
         TypeRecipe::Float => NativeOut::Scalar(Scalar::Float(0.0)),
         TypeRecipe::F32 => NativeOut::Scalar(Scalar::F32(0.0)),
         TypeRecipe::Bool => NativeOut::Scalar(Scalar::Bool(false)),

@@ -234,6 +234,7 @@ impl Printer<'_> {
                 atom(operand)
             ),
             Rvalue::Render { operand, .. } => format!("render({})", atom(operand)),
+            Rvalue::JsonRender { operand, .. } => format!("json_render({})", atom(operand)),
             Rvalue::Binary {
                 op,
                 lhs,
