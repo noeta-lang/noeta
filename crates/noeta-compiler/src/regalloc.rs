@@ -233,6 +233,147 @@ pub fn coalesce(chunk: &mut Chunk) {
     chunk.num_registers = new_count as u16;
 }
 
+/// Release a **stale global read** before the in-place update that moves the same global out of its
+/// slot — a last-use release for the one register class the IR's drop insertion cannot see.
+///
+/// A top-level binding lives in a global slot, so every read of it materializes a *retained copy*
+/// into a fresh register ([`Op::LoadGlobal`]). A function-scope local has no such copy: its register
+/// **is** the binding, and an operand reads it in place. That asymmetry is the whole defect this
+/// pass fixes. In a self-update statement — `m[k] = m.get_or(k, 0) + 1`, `xs = xs ~ e`, `p.x = p.x +
+/// 1` — the lowering emits `TakeGlobal` so the in-place path sees a sole-owned receiver, but the
+/// *earlier* read in the same statement has already left a second reference sitting in a register
+/// nothing reads again. The refcount is 2, the in-place guard declines, and the update copies the
+/// whole collection. Whether that happens is decided by [`coalesce`]: when the two registers happen
+/// to be given the same physical slot, the load's release-on-overwrite kills the stale reference and
+/// the update stays in place — otherwise it does not, and an O(n) copy runs once per iteration.
+/// Register-allocation luck is not a performance model, so this pass makes the release explicit.
+///
+/// For each `TakeGlobal` of global `g`, it scans **backward through the same basic block** for a
+/// `LoadGlobal` of that same `g` whose destination register is
+///
+/// 1. not redefined between the load and the take (so the slot still holds that read),
+/// 2. **dead** at the take (`live_out` does not contain it, and it is not the take's own
+///    destination — `TakeGlobal` reads nothing, so those two together are exactly "dead here"), and
+/// 3. not a `frame_locals` / `debug_locals` register, whose panic-teardown and debugger contracts
+///    own the slot's lifetime,
+///
+/// and emits `Op::Drop { relevant: false }` for it immediately before the take. The scan stops at
+/// any intervening `StoreGlobal`/`TakeGlobal` of the same global, so the stale register is never
+/// confused with a re-read of a *different* value that happens to live in the same slot.
+///
+/// **Why this cannot break genuine aliasing.** The pass releases one reference held by a register
+/// that liveness proves dead, and touches nothing else. A real alias — `t = m` — is a `Move` into
+/// its own live register, and its reference is untouched, so the receiver's count stays above 1 and
+/// the update still copies. `relevant: false` is the same release strength that reclaims this exact
+/// register today, when the next iteration's `LoadGlobal` overwrites it (`set_reg` releases with the
+/// plain `release`): the pass moves that release earlier within one basic block and changes nothing
+/// about which destructors run. Clearing the register to `unit` is idempotent with both
+/// release-on-overwrite and frame teardown, so no value is released twice. It is also never the
+/// *last* reference: only top-level code emits `StoreGlobal`, so nothing a call in between can do
+/// vacates the slot the read came from, and the scan stops at any store this block does itself.
+///
+/// Runs **after** [`coalesce`], on the physical registers: where coalescing already merged the two,
+/// there is no dead register left to find and the pass emits nothing.
+pub fn release_stale_global_loads(chunk: &mut Chunk) {
+    let n = chunk.code.len();
+    let regs = chunk.num_registers as usize;
+    if n == 0 || regs == 0 {
+        return;
+    }
+    // Basic-block entries: index 0, any jump target, and the instruction after a non-fall-through
+    // op. The backward scan stops at one, which also guarantees a `Drop` is never inserted in front
+    // of a branch destination (a jump would otherwise skip it).
+    let mut block_start = vec![false; n];
+    block_start[0] = true;
+    for (i, op) in chunk.code.iter().enumerate() {
+        let facts = op_facts(op);
+        if !facts.fallthrough && i + 1 < n {
+            block_start[i + 1] = true;
+        }
+        for t in facts.targets {
+            if (t as usize) < n {
+                block_start[t as usize] = true;
+            }
+        }
+    }
+    // Registers whose lifetime belongs to the panic teardown or the debugger — never touched.
+    let mut pinned = BitSet::new(regs);
+    for &reg in &chunk.frame_locals {
+        pinned.insert(reg as usize);
+    }
+    for local in &chunk.debug_locals {
+        pinned.insert(local.reg as usize);
+    }
+
+    let liveness = Liveness::analyze(&chunk.code, regs);
+    let mut drops: Vec<Vec<Reg>> = vec![Vec::new(); n];
+    let mut any = false;
+    for (p, at_take) in drops.iter_mut().enumerate() {
+        let Op::TakeGlobal { dst, global, .. } = chunk.code[p] else {
+            continue;
+        };
+        let out = &liveness.live_out[p];
+        let mut redefined = BitSet::new(regs);
+        let mut i = p;
+        while i > 0 && !block_start[i] {
+            i -= 1;
+            match chunk.code[i] {
+                // A write to the same slot between the read and the take: everything before it
+                // refers to a different value.
+                Op::StoreGlobal { global: g, .. } | Op::TakeGlobal { global: g, .. }
+                    if g == global =>
+                {
+                    break;
+                }
+                Op::LoadGlobal {
+                    dst: r, global: g, ..
+                } if g == global
+                    && r != dst
+                    && !redefined.contains(r as usize)
+                    && !out.contains(r as usize)
+                    && !pinned.contains(r as usize) =>
+                {
+                    at_take.push(r);
+                    any = true;
+                }
+                _ => {}
+            }
+            let facts = op_facts(&chunk.code[i]);
+            if let Some(d) = facts.def {
+                redefined.insert(d as usize);
+            }
+            if let Some(d) = extra_defs(&chunk.code[i]) {
+                redefined.insert(d as usize);
+            }
+        }
+    }
+    if !any {
+        return;
+    }
+
+    // Rebuild with the drops spliced in, remapping every branch destination and line-table pc. A
+    // jump target keeps landing on its original op: drops only ever precede an op inside a block.
+    let mut new_code: Vec<Op> = Vec::with_capacity(n);
+    let mut remap = vec![0u32; n];
+    for (i, op) in chunk.code.iter().enumerate() {
+        for &reg in &drops[i] {
+            new_code.push(Op::Drop {
+                reg,
+                relevant: false,
+            });
+        }
+        remap[i] = new_code.len() as u32;
+        new_code.push(op.clone());
+    }
+    for op in &mut new_code {
+        op.for_each_jump_pc_mut(|t| *t = remap[*t as usize]);
+    }
+    for entry in &mut chunk.line_table {
+        entry.pc = remap[entry.pc as usize];
+    }
+    chunk.code = new_code;
+}
+
 /// The registers an op **reads** (`uses`) and the single register it fully **overwrites** (`def`),
 /// plus its control-flow successors. ANF makes every non-parameter register write-once except for
 /// reassigned `mut` locals, which simply contribute several defs to the one register's range.
@@ -1232,6 +1373,9 @@ impl BitSet {
     fn remove(&mut self, i: usize) {
         self.words[i / 64] &= !(1 << (i % 64));
     }
+    fn contains(&self, i: usize) -> bool {
+        self.words[i / 64] & (1 << (i % 64)) != 0
+    }
     fn union_with(&mut self, other: &BitSet) {
         for (a, b) in self.words.iter_mut().zip(&other.words) {
             *a |= *b;
@@ -1384,5 +1528,207 @@ mod tests {
         let mut c = chunk(code, 0, 2);
         coalesce(&mut c);
         assert_eq!(c.num_registers, 2, "loop-carried value must not be fused");
+    }
+
+    // ── release_stale_global_loads ─────────────────────────────────────────────────────────────
+
+    fn gload(dst: Reg, g: u32) -> Op {
+        Op::LoadGlobal {
+            dst,
+            global: noeta_bytecode::GlobalId(g),
+            span: Span::new(0, 0),
+        }
+    }
+
+    fn gtake(dst: Reg, g: u32) -> Op {
+        Op::TakeGlobal {
+            dst,
+            global: noeta_bytecode::GlobalId(g),
+            span: Span::new(0, 0),
+        }
+    }
+
+    /// The pass declined: the code kept its original length and no `Drop` was spliced in.
+    fn assert_untouched(c: &Chunk, len: usize) {
+        assert_eq!(c.code.len(), len, "no op should have been inserted");
+        assert!(
+            !c.code.iter().any(|op| matches!(op, Op::Drop { .. })),
+            "no drop should have been inserted"
+        );
+    }
+
+    fn gstore(src: Reg, g: u32) -> Op {
+        Op::StoreGlobal {
+            global: noeta_bytecode::GlobalId(g),
+            src,
+        }
+    }
+
+    /// The defect's exact shape: a read of the global sits dead in r1 while `TakeGlobal` moves the
+    /// same global into r2, so the in-place update would see refcount 2 and copy. The pass releases
+    /// r1 immediately before the take.
+    #[test]
+    fn stale_global_read_is_released_before_the_take() {
+        let code = vec![
+            gload(1, 0),         // 0: the read whose reference goes stale
+            Op::Echo { reg: 1 }, // 1: its last use
+            gtake(2, 0),         // 2: the in-place update's receiver
+            gstore(2, 0),        // 3
+            Op::Halt,
+        ];
+        let mut c = chunk(code, 0, 3);
+        release_stale_global_loads(&mut c);
+        assert!(
+            matches!(
+                c.code[2],
+                Op::Drop {
+                    reg: 1,
+                    relevant: false
+                }
+            ),
+            "expected a drop of r1 before the take, got {:?}",
+            c.code
+        );
+        assert!(matches!(c.code[3], Op::TakeGlobal { dst: 2, .. }));
+    }
+
+    /// Coalescing already gave the read and the take one slot (the "lucky" spelling): the read's
+    /// reference dies on the overwrite, there is nothing dead to release, and the pass adds nothing.
+    #[test]
+    fn a_coalesced_read_needs_no_drop() {
+        let code = vec![
+            gload(1, 0),
+            Op::Echo { reg: 1 },
+            gtake(1, 0),
+            gstore(1, 0),
+            Op::Halt,
+        ];
+        let mut c = chunk(code, 0, 2);
+        release_stale_global_loads(&mut c);
+        assert_untouched(&c, 5);
+    }
+
+    /// A genuine alias: the read is still live after the take (something reads it later), so its
+    /// reference is real and the receiver must keep its refcount above 1 — no drop.
+    #[test]
+    fn a_live_read_is_never_released() {
+        let code = vec![
+            gload(1, 0),
+            gtake(2, 0),
+            gstore(2, 0),
+            Op::Echo { reg: 1 }, // r1 is read *after* the update: a real second reference
+            Op::Halt,
+        ];
+        let mut c = chunk(code, 0, 3);
+        release_stale_global_loads(&mut c);
+        assert_untouched(&c, 5);
+    }
+
+    /// A read of a *different* global holds a reference to a different value — releasing it would
+    /// not help the receiver and could free something still owned elsewhere.
+    #[test]
+    fn a_read_of_another_global_is_left_alone() {
+        let code = vec![
+            gload(1, 1),
+            Op::Echo { reg: 1 },
+            gtake(2, 0),
+            gstore(2, 0),
+            Op::Halt,
+        ];
+        let mut c = chunk(code, 0, 3);
+        release_stale_global_loads(&mut c);
+        assert_untouched(&c, 5);
+    }
+
+    /// A store to the same global between the read and the take rebinds the slot: the register now
+    /// holds a *different* value from the one the take moves out, so the scan stops there.
+    #[test]
+    fn an_intervening_store_stops_the_scan() {
+        let code = vec![
+            gload(1, 0),
+            Op::Echo { reg: 1 },
+            gstore(2, 0),
+            gtake(3, 0),
+            gstore(3, 0),
+            Op::Halt,
+        ];
+        let mut c = chunk(code, 0, 4);
+        release_stale_global_loads(&mut c);
+        assert_untouched(&c, 6);
+    }
+
+    /// The register was rewritten after the read, so it no longer holds that read's value.
+    #[test]
+    fn a_redefined_register_is_not_the_stale_read() {
+        let code = vec![
+            gload(1, 0),
+            Op::Echo { reg: 1 },
+            load(1), // r1 now holds a constant, not the global
+            gtake(2, 0),
+            gstore(2, 0),
+            Op::Halt,
+        ];
+        let mut c = chunk(code, 0, 3);
+        release_stale_global_loads(&mut c);
+        assert_untouched(&c, 6);
+    }
+
+    /// The scan is block-local: a read in a *predecessor* block may or may not have executed on the
+    /// path that reaches the take, so it is never released.
+    #[test]
+    fn the_scan_does_not_cross_a_block_boundary() {
+        let code = vec![
+            gload(1, 0),
+            Op::JumpIfFalse { reg: 1, target: 3 },
+            Op::Halt,
+            gtake(2, 0), // a jump target: its block starts here
+            gstore(2, 0),
+            Op::Halt,
+        ];
+        let mut c = chunk(code, 0, 3);
+        release_stale_global_loads(&mut c);
+        assert_untouched(&c, 6);
+    }
+
+    /// A register on the panic-teardown list owns its slot's lifetime — the teardown fires it, so the
+    /// pass leaves it to do that.
+    #[test]
+    fn a_teardown_register_is_left_alone() {
+        let code = vec![
+            gload(1, 0),
+            Op::Echo { reg: 1 },
+            gtake(2, 0),
+            gstore(2, 0),
+            Op::Halt,
+        ];
+        let mut c = chunk(code, 0, 3);
+        c.frame_locals = vec![1];
+        release_stale_global_loads(&mut c);
+        assert_untouched(&c, 5);
+    }
+
+    /// Splicing a drop in shifts every later instruction, so branch destinations and the line table
+    /// have to move with them — a stale target would jump into the middle of the statement.
+    #[test]
+    fn inserting_a_drop_remaps_jump_targets() {
+        // 0: JumpIfFalse r0 -> 5 ; 1..4 the loop body with the stale read ; 5: Halt
+        let code = vec![
+            Op::JumpIfFalse { reg: 0, target: 5 },
+            gload(1, 0),
+            Op::Echo { reg: 1 },
+            gtake(2, 0),
+            gstore(2, 0),
+            Op::Halt,
+        ];
+        let mut c = chunk(code, 0, 3);
+        c.line_table = vec![noeta_bytecode::LineEntry {
+            pc: 5,
+            span: Span::new(0, 0),
+        }];
+        release_stale_global_loads(&mut c);
+        assert_eq!(c.code.len(), 7, "one drop spliced in");
+        assert!(matches!(c.code[0], Op::JumpIfFalse { target: 6, .. }));
+        assert!(matches!(c.code[6], Op::Halt));
+        assert_eq!(c.line_table[0].pc, 6, "the line table moves with the code");
     }
 }

@@ -1,0 +1,62 @@
+// A top-level (global-slot) self-update `m[k] = m.get_or(k, 0) + 1` updates the map **in place** when
+// nothing else references it, and **copies** when something does — and the two are observationally
+// identical apart from cost. The spelling of the key must not decide which happens: an inline key
+// leaves the earlier read of `m` sitting in a register the statement never reads again, and that dead
+// reference is released at its last use so the in-place guard sees the sole owner it really is.
+// The three halves this pins: value semantics survive the in-place path (`before`, taken by a `Move`
+// *before* the updates, still shows the pre-update entry); a genuine alias still copies (`snap`, taken
+// mid-run, keeps its own snapshot while `m` goes on being updated); and both key spellings, at top
+// level and inside a function, produce the identical map.
+// expect: stdout "inline top 3 2 0"
+// expect: stdout "named top 3 2 0"
+// expect: stdout "inline fn 3 2 0"
+// expect: stdout "before 0"
+// expect: stdout "snap 2 -> live 3"
+// expect: exit 0
+
+fn inline_in_fn(): string {
+    mut m: Map<string, int> = {}
+    mut i = 0
+    while i < 6 {
+        m["k${i % 3}"] = m.get_or("k${i % 3}", 0) + 1
+        i = i + 1
+    }
+    return "${m.len()} ${m.get_or("k0", 0)} ${m.get_or("k9", 0)}"
+}
+
+mut m: Map<string, int> = {}
+mut i = 0
+while i < 6 {
+    m["k${i % 3}"] = m.get_or("k${i % 3}", 0) + 1
+    i = i + 1
+}
+echo "inline top ${m.len()} ${m.get_or("k0", 0)} ${m.get_or("k9", 0)}"
+
+mut n: Map<string, int> = {}
+mut j = 0
+while j < 6 {
+    key = "k${j % 3}"
+    n[key] = n.get_or(key, 0) + 1
+    j = j + 1
+}
+echo "named top ${n.len()} ${n.get_or("k0", 0)} ${n.get_or("k9", 0)}"
+echo "inline fn ${inline_in_fn()}"
+
+// A snapshot taken before any update must not observe them.
+mut c: Map<string, int> = {}
+before = c
+mut p = 0
+while p < 3 {
+    c["hit"] = c.get_or("hit", 0) + 1
+    p = p + 1
+}
+echo "before ${before.len()}"
+
+// A snapshot taken *between* updates aliases the map at that moment: the next update must copy
+// rather than mutate what `snap` holds.
+mut d: Map<string, int> = {}
+d["a"] = 1
+d["b"] = 2
+snap = d
+d["c"] = d.get_or("c", 0) + 1
+echo "snap ${snap.len()} -> live ${d.len()}"

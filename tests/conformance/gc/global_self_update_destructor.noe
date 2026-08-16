@@ -1,0 +1,48 @@
+// Releasing the dead global read at a top-level self-update must not change **which** destructors run
+// or **when**. Three shapes, each with the receiver read inline in the statement that updates it:
+// a map whose displaced value has a destructor (the old `Res` dies at the overwrite, before the next
+// line prints); the same overwrite while a second binding still holds that value (it survives, because
+// the alias — not the update — owns the last reference); and a struct field self-update on a global,
+// where the container keeps living and nothing is destroyed at all. The last line proves the surviving
+// values are still reachable and correct after the in-place path ran.
+// expect: stdout "start"
+// expect: stdout "drop a1"
+// expect: stdout "swapped"
+// expect: stdout "kept b1"
+// expect: stdout "counter 3"
+// expect: stdout "end"
+// expect: stdout "drop b1"
+// expect: stdout "drop b2"
+// expect: stdout "drop a2"
+// expect: exit 0
+class Res {
+    pub tag: string
+    pub fn new(t: string): Res { return Res { tag: t } }
+    destruct { echo "drop ${self.tag}" }
+}
+
+struct Counter { mut n: int }
+
+mut reg: Map<string, Res> = {}
+mut held: Map<string, Res> = {}
+mut c = Counter { n: 0 }
+
+echo "start"
+reg["slot${0}"] = Res.new("a1")
+// The displaced `a1` has no other owner: its destructor runs here, at the overwrite.
+reg["slot${0}"] = Res.new("a2")
+echo "swapped"
+
+held["slot${0}"] = Res.new("b1")
+keep = match held.get("slot${0}") { some(v) => v, none => Res.new("missing") }
+// `b1` is still held by `keep`, so the overwrite only drops one of its two references.
+held["slot${0}"] = Res.new("b2")
+echo "kept ${keep.tag}"
+
+mut i = 0
+while i < 3 {
+    c.n = c.n + 1
+    i = i + 1
+}
+echo "counter ${c.n}"
+echo "end"

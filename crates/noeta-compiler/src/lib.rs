@@ -2400,6 +2400,10 @@ impl<'m> FnCompiler<'m> {
         // its (now loop-spanning) live range.
         regalloc::hoist_loop_invariant_consts(&mut chunk);
         regalloc::coalesce(&mut chunk);
+        // Last: make the stale-global-read release explicit at every in-place self-update, so an
+        // `m[k] = m.get_or(k, 0) + 1` at top level keeps its receiver sole-owned instead of leaving
+        // that to whether coalescing happened to give the read and the `TakeGlobal` one slot.
+        regalloc::release_stale_global_loads(&mut chunk);
         chunk
     }
 
