@@ -402,7 +402,7 @@ impl ReflectionInfo {
 ///
 /// `type_name` is the implementing type's **runtime tag**: the linked declaration name a value's
 /// shape carries (qualified for a namespaced module's type, bare for an entry-file type), or a
-/// native type's qualified identity (`std.p2p.GCounter`) for an ABI-advertised impl — exactly the
+/// native type's qualified identity (`para.crdt.GCounter`) for an ABI-advertised impl — exactly the
 /// name `runtime_matches`/`narrow_matches` compare a nominal narrowing against.
 ///
 /// `trait_name` is the trait's **canonical identity**: the linked `.noe` trait name (qualified by
