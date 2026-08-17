@@ -21,14 +21,19 @@ pub mod native_reflect;
 pub mod normalize;
 mod pretty;
 pub mod reflect;
-pub mod render_hint;
 pub mod shape;
 mod syntax_kind;
 
 pub use builtin_ty::{BuiltinTy, Spelling, parse_int_width};
 pub use name::Name;
 pub use pretty::Pretty;
-pub use render_hint::{
+// The **render hint** and its shared walks live in `noeta-ext-abi`, beside the one JSON encoder they
+// delegate to, the `MapKey` they order and render, and the `NativeValue` tree both backends marshal
+// into — and where the native seam can name them, so a native function that stores a value for later
+// serialization can carry its hint. Re-exported here because the hint describes a *static type* and
+// the checker that builds one speaks this crate's vocabulary.
+pub use noeta_ext_abi::render_hint;
+pub use noeta_ext_abi::render_hint::{
     RenderHint, json_stringify, map_key_display, map_key_order, unsigned_digits, unsigned_order,
 };
 pub use syntax_kind::SyntaxKind;

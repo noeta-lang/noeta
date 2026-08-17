@@ -199,7 +199,18 @@
 /// interruptible leaf **returns** `Interrupted` rather than being abandoned — teardown waits for
 /// every blocking body that has started, and one that never returns turns a leaked thread into a
 /// hung run.
-pub const ABI_VERSION: u32 = 20;
+///
+/// **21** — the [`render_hint`] surface: [`render_hint::RenderHint`] — the structural map of the
+/// unsigned 64-bit integers under a static type — and the walks that apply one,
+/// [`render_hint::json_stringify`], [`render_hint::map_key_display`], [`render_hint::map_key_order`],
+/// [`render_hint::unsigned_digits`] and [`render_hint::unsigned_order`]. Purely additive; nothing
+/// written for ABI 20 stops compiling. A `u64` past bit 63 is a negative i64 word and the signedness
+/// lives only in the static type, so writing one out correctly takes a description from the door —
+/// and the hint belongs beside the one JSON encoder its walk delegates to, the [`MapKey`] it renders
+/// and orders, and the [`NativeValue`] tree both backends marshal into. That an extension, and the
+/// native seam itself, can now name it is the point: a native function that keeps a value for a
+/// *later* serialization can keep its hint too.
+pub const ABI_VERSION: u32 = 21;
 
 pub mod args;
 pub mod channel;
@@ -215,6 +226,7 @@ pub mod net;
 pub mod os;
 pub mod p2p;
 pub mod registry;
+pub mod render_hint;
 pub mod ring1;
 pub mod stream;
 pub mod telemetry;
@@ -249,6 +261,9 @@ pub use registry::{
     PackedLayoutKind, RetTy, Scalar, ScalarVec, SigType, TierRoot, TierRoots, TierRun, TierRunner,
     TierText, TraitDispatch, TypeArgIndex, TypeArgInfo, TypeDispatch, TypeRecipe, TypedDispatch,
     TypedTypeDispatch, VariantRecipe, VariantTag, VariantValue,
+};
+pub use render_hint::{
+    RenderHint, json_stringify, map_key_display, map_key_order, unsigned_digits, unsigned_order,
 };
 pub use stream::{
     Frame, FrameDecoder, FrameStream, Framing, SseCloseIo, SseSendIo, SseSink, StreamRecvIo,
