@@ -1558,10 +1558,19 @@ mod tests {
         );
         assert!(a.contains("version = \"0.0.0+cafe0123dead\""), "{a}");
         assert!(b.contains("version = \"0.0.0+beefbeefbeef\""), "{b}");
-        let aot = aot_shim_cargo_toml(&entries(), &ws, root, &[], "cafe0123deadbeef");
-        assert!(aot.contains("version = \"0.0.0+cafe0123dead\""), "{aot}");
         // A keyless call (unit-test convenience) still yields a VALID semver — no dangling `+`.
         assert_eq!(shim_version(""), "0.0.0");
+    }
+
+    /// The AOT half of the row above: the composed staticlib shares the same per-key identity, so a
+    /// shared target dir cannot serve one composition's archive for another's.
+    #[cfg(feature = "jit")]
+    #[test]
+    fn aot_shim_package_identity_is_stamped_with_the_compose_key() {
+        let ws = ToolchainSource::Workspace(PathBuf::from("/src/noeta"));
+        let root = Path::new("/src/noeta");
+        let aot = aot_shim_cargo_toml(&entries(), &ws, root, &[], "cafe0123deadbeef");
+        assert!(aot.contains("version = \"0.0.0+cafe0123dead\""), "{aot}");
     }
 
     #[test]
@@ -1687,7 +1696,7 @@ mod tests {
     }
 
     #[test]
-    fn footprint_rings_are_full_in_a_runnable_shim_but_gated_in_the_aot_shim() {
+    fn footprint_rings_are_full_in_a_runnable_shim() {
         let ws = ToolchainSource::Workspace(PathBuf::from("/src/noeta"));
         let root = Path::new("/src/noeta");
 
@@ -1700,8 +1709,17 @@ mod tests {
                 "{kind:?} shim enables the ring:\n{toml}"
             );
         }
+    }
 
-        // The AOT shim gates rings on the footprint: selected ⇒ enabled …
+    /// The contrast with the row above: where a runnable shim is fully capable, the AOT staticlib
+    /// gates each ring on the program's measured footprint.
+    #[cfg(feature = "jit")]
+    #[test]
+    fn footprint_rings_are_gated_in_the_aot_shim() {
+        let ws = ToolchainSource::Workspace(PathBuf::from("/src/noeta"));
+        let root = Path::new("/src/noeta");
+
+        // Selected ⇒ enabled …
         let selected = aot_shim_cargo_toml(
             &ring_entries(),
             &ws,
@@ -1822,6 +1840,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "jit")]
     #[test]
     fn aot_shim_manifest_is_a_lean_staticlib_forwarding_rings() {
         // dev-deps `--native` gap: the composed AOT runtime is a lean `staticlib` (no CLI/runner base)
@@ -1855,6 +1874,7 @@ mod tests {
         assert!(!toml.contains("noeta-runner ="), "{toml}");
     }
 
+    #[cfg(feature = "jit")]
     #[test]
     fn aot_shim_manifest_with_no_rings_forwards_an_empty_feature_set() {
         let toml = aot_shim_cargo_toml(
@@ -1870,6 +1890,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "jit")]
     #[test]
     fn aot_shim_lib_installs_units_and_runs_embedded() {
         // The composed AOT runtime exports a C `main` that installs the app's native units then runs
