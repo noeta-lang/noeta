@@ -2156,6 +2156,9 @@ impl<'m> Vm<'m> {
     /// duration, so the block sees a live object and the net reference count is unchanged —
     /// the caller's subsequent `release` performs the actual free.
     fn run_destructor(&mut self, proto: u32, instance: Value) {
+        // The one destructor-invocation site, and so the one place the skipped-destructor audit
+        // counts from (inert outside the oracle).
+        noeta_value::note_destructor_run();
         let num_registers = self.module.protos[proto as usize].num_registers as usize;
         let (mut frames, mut regs) = self.pooled_run_stacks(num_registers);
         retain(instance);

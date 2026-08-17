@@ -1,0 +1,57 @@
+// An eagerly-built argument the callee **discards** still fires its destructor (spec §2). Noeta is
+// call-by-value, so `held.get_or("k", Res.new("fallback"))` builds the fallback whether or not the
+// key is present; on the hit branch `get_or` hands back the value already in the map and the built
+// fallback is handed to nobody. It is an owned temporary, so its `destruct` runs right after the
+// call — the argument twin of the temp-receiver rule (`temp_receiver_method.noe`).
+//
+// `miss` is the other branch, and the reason the drop is refcount-gated rather than unconditional:
+// there the fallback *is* the result, so `got` owns it and its destructor is deferred to `got`'s own
+// last use — after "the default is still alive", not before it. `boxed` shows the destructor need not
+// be on the argument itself: a discarded list default reclaims the elements it carries.
+// expect: stdout "start"
+// expect: stdout "drop fallback"
+// expect: stdout "the default is already gone"
+// expect: stdout "drop present"
+// expect: stdout "hit present"
+// expect: stdout "drop present"
+// expect: stdout "the default is still alive"
+// expect: stdout "drop fallback"
+// expect: stdout "miss fallback"
+// expect: stdout "drop fallback"
+// expect: stdout "the discarded list is gone"
+// expect: stdout "drop present"
+// expect: stdout "boxed 1"
+// expect: stdout "end"
+// expect: exit 0
+class Res {
+    pub tag: string
+    pub fn new(tag: string): Res { return Res { tag: tag }; }
+    destruct { echo "drop ${self.tag}"; }
+}
+
+fn hit(): void {
+    held = {"k": Res.new("present")};
+    got = held.get_or("k", Res.new("fallback"));
+    echo "the default is already gone";
+    echo "hit ${got.tag}";
+}
+
+fn miss(): void {
+    held = {"k": Res.new("present")};
+    got = held.get_or("absent", Res.new("fallback"));
+    echo "the default is still alive";
+    echo "miss ${got.tag}";
+}
+
+fn boxed(): void {
+    held = {"k": [Res.new("present")]};
+    got = held.get_or("k", [Res.new("fallback")]);
+    echo "the discarded list is gone";
+    echo "boxed ${got.len()}";
+}
+
+echo "start";
+hit();
+miss();
+boxed();
+echo "end";

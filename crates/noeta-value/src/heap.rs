@@ -89,6 +89,85 @@ pub fn live_peak() -> usize {
     PEAK.with(|c| c.get())
 }
 
+// --- The skipped-destructor audit ---------------------------------------------------------------
+//
+// Residency and refcount anomalies are both counts of *memory*, and there is a third way precise
+// reference counting can be wrong that neither of them can see: an object whose type declares
+// `destruct` is freed on a path that releases it without asking whether a destructor is due. Memory
+// is reclaimed, residency returns to zero, and the destructor simply never runs — the program prints
+// one line fewer than it should, which is a wrong answer no oracle comparing *memory* can produce.
+// Nor can the differential see it: the two backends share the IR that decides where drops go, so a
+// missing drop is missing in both and they agree, byte for byte, on the wrong output.
+//
+// The audit closes that: it counts the objects allocated with a destructor-bearing shape and the
+// destructors actually run. At a clean exit — where residency is already asserted to be zero, so
+// every object allocated has been freed — the two counts must be equal. A surplus allocation is an
+// object that was freed with its `destruct` never run.
+//
+// Inert until [`destruct_audit_begin`], like the tree-walker's use-after-drop audit: one
+// thread-local bool on the shaped-allocation path, nothing at all on the string/int path.
+
+thread_local! {
+    /// Whether the audit is recording. The allocation hook short-circuits on it, so a production
+    /// run pays one bool read per shaped allocation.
+    static DESTRUCT_AUDIT: Cell<bool> = const { Cell::new(false) };
+    /// The names of the types whose declaration carries a `destruct` block, as the driver installs
+    /// them at [`destruct_audit_begin`]. Empty is the common case and short-circuits the hook.
+    static DESTRUCTIBLE_TYPES: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    /// Objects allocated with a destructor-bearing shape since [`destruct_audit_begin`].
+    static DESTRUCTIBLE_ALLOCS: Cell<usize> = const { Cell::new(0) };
+    /// Destructors run since [`destruct_audit_begin`], as the runtime reports them.
+    static DESTRUCTOR_RUNS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Start the skipped-destructor audit on this thread, recording against `types` — the names of the
+/// types that declare a `destruct` block (the runtime's own destructor table, so the audit cannot
+/// disagree with it about which types are in scope). Clears prior counts. Pair with
+/// [`destruct_audit_end`].
+pub fn destruct_audit_begin(types: HashSet<String>) {
+    DESTRUCTIBLE_TYPES.with(|t| *t.borrow_mut() = types);
+    DESTRUCTIBLE_ALLOCS.with(|c| c.set(0));
+    DESTRUCTOR_RUNS.with(|c| c.set(0));
+    DESTRUCT_AUDIT.with(|a| a.set(true));
+}
+
+/// Record that a destructor ran. Called by the runtime at its one destructor-invocation site.
+#[inline]
+pub fn note_destructor_run() {
+    if DESTRUCT_AUDIT.with(|a| a.get()) {
+        DESTRUCTOR_RUNS.with(|c| c.set(c.get() + 1));
+    }
+}
+
+/// Stop the audit and return the number of **skipped destructors**: destructor-bearing objects
+/// allocated minus destructors run. Zero for a correct program at a clean exit; a positive number
+/// counts objects freed without their `destruct`. (Read it only where residency is also zero — a
+/// still-live object has legitimately not been destructed yet.)
+pub fn destruct_audit_end() -> i64 {
+    DESTRUCT_AUDIT.with(|a| a.set(false));
+    let allocs = DESTRUCTIBLE_ALLOCS.with(|c| c.get()) as i64;
+    let runs = DESTRUCTOR_RUNS.with(|c| c.get()) as i64;
+    DESTRUCTIBLE_TYPES.with(|t| t.borrow_mut().clear());
+    allocs - runs
+}
+
+/// The audit's allocation hook: count an object whose shape names a destructor-bearing type.
+/// Only a shaped object can carry a destructor, so the payload discriminant is checked **first**:
+/// a string, an int box or a list — the allocations a hot loop actually makes — never reach the
+/// thread-local at all.
+#[inline]
+fn note_destructible_alloc(payload: &Payload) {
+    let Payload::Object { shape, .. } = payload else {
+        return;
+    };
+    if !DESTRUCT_AUDIT.with(|a| a.get()) {
+        return;
+    }
+    if DESTRUCTIBLE_TYPES.with(|t| t.borrow().contains(&shape.name)) {
+        DESTRUCTIBLE_ALLOCS.with(|c| c.set(c.get() + 1));
+    }
+}
+
 /// Reset the peak high-water mark to the current live count, so the next run's peak is measured in
 /// isolation. Call before a measured run; read [`live_peak`] after.
 pub fn reset_peak() {
@@ -737,6 +816,7 @@ impl IterState {
 /// object registers as a mark-sweep candidate in `Trace` mode.
 fn alloc_with(payload: Payload, shared: bool) -> Value {
     live_inc();
+    note_destructible_alloc(&payload);
     let seq = NEXT_SEQ.with(|c| {
         let s = c.get();
         c.set(s.wrapping_add(1));

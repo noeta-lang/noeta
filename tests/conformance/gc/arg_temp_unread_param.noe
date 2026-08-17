@@ -1,0 +1,37 @@
+// The same rule at a user function call, and the case with no owner anywhere: `pick` reads `a` and
+// never reads `b`, so nothing inside the callee ever names `b` — the drop pass places drops at a
+// binding's last *use*, and a parameter that is never used has none. Both argument temporaries are
+// owned by the caller, so both fire their destructors after the call returns, newest first (reverse
+// construction, spec §3).
+//
+// The third argument is a live local, not a temporary: it is borrowed, so its destructor stays with
+// its own binding — it survives the call and dies at its own last use, two statements later.
+// expect: stdout "start"
+// expect: stdout "picked used"
+// expect: stdout "drop unread"
+// expect: stdout "drop used"
+// expect: stdout "after call"
+// expect: stdout "drop borrowed"
+// expect: stdout "still borrowed"
+// expect: stdout "end"
+// expect: exit 0
+class Res {
+    pub tag: string
+    pub fn new(tag: string): Res { return Res { tag: tag }; }
+    destruct { echo "drop ${self.tag}"; }
+}
+
+fn pick(a: Res, b: Res, c: Res): void {
+    echo "picked ${a.tag}";
+}
+
+fn go(): void {
+    borrowed = Res.new("borrowed");
+    pick(Res.new("used"), Res.new("unread"), borrowed);
+    echo "after call";
+    echo "still ${borrowed.tag}";
+}
+
+echo "start";
+go();
+echo "end";

@@ -47,12 +47,15 @@ Static analysis is an **optimization input, never a soundness requirement**. Cor
 
 **Deterministic `__destruct` at last use.** When an object's last reference drops — at the precise IR point liveness identified, not at scope end — its destructor runs synchronously. Children are destroyed container-before-contained in declared order (fields, then enum payloads, then collection elements), the *same* order both backends walk because they walk the same IR.
 
+**A value built for a call belongs to the caller.** Arguments are evaluated before the call, so `m.get_or(key, Fallback.new())` builds the fallback whether or not the key is present — and whichever branch the callee takes, the caller owns what it built. An unnamed argument is destroyed right after the call returns, newest first, and the destruction is refcount-gated: a fallback the callee *kept* (stored, or handed back as the result) is left to its real owner and dies at that owner's own last use. So a discarded argument's `destruct` runs at the call, and a returned one's runs where the result dies. When building the default is the part you want to avoid rather than merely reclaim, reach for `m.get(key) ?? build()` — the right side of `??` is evaluated only on a miss.
+
 **Verification.** Every phase is gated by the same oracles [Contributing](Contributing#testing-architecture) describes:
 
 | Gate | What it asserts |
 |---|---|
 | The leak oracle | heap residency is 0 at clean exit — both backends, whole corpus, empty allowlist |
 | The refcount-anomaly oracle | every unreachable object's refcount equals its in-edges from the garbage set, so a skipped retain/release is caught |
+| The skipped-destructor oracle | every object of a type declaring `destruct` ran its destructor — the one wrong answer freeing memory correctly can still produce |
 | The static-≤-dynamic property test | the analysis never claims a death before the real one |
 | The differential oracle | reference interpreter ↔ VM output is byte-for-byte identical |
 | miri | every refcount/collector `unsafe` path is UB-free |

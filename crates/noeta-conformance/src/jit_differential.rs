@@ -316,6 +316,17 @@ fn run_and_compare(name: &str, module: &noeta_bytecode::Module, report: &mut Jit
     // integer fast path leaves every register an immediate, so residency must match the interpreter.
     let before = noeta_value::live_count() as i64;
     noeta_value::reset_refcount_anomalies();
+    // …and the destructors native code owes: an object whose type declares `destruct`, freed by a
+    // release that never asked whether one was due, reclaims its memory and skips its side effects.
+    // Residency cannot see that and neither can the result comparison above when the interpreter
+    // skips it too. See `noeta_value::destruct_audit_begin`.
+    noeta_value::destruct_audit_begin(
+        module
+            .destructors
+            .iter()
+            .map(|(type_name, _)| type_name.clone())
+            .collect(),
+    );
     // `Arm::Plain` is exactly `run_module_jit_with_stats`; `Arm::CancelPoll` is the same run with a
     // never-set cancellation flag, which is what makes the JIT emit its loop-header polls;
     // `Arm::AotBodies` is the same run emitting the ahead-of-time body shape.
@@ -334,6 +345,7 @@ fn run_and_compare(name: &str, module: &noeta_bytecode::Module, report: &mut Jit
     // teardown's final backup sweep reclaims orphans and cycles alike — so the teardown measures
     // it separately (see `noeta_gc::count_refcount_anomalies`) and the oracle asserts it here.
     let anomalies = noeta_value::refcount_anomalies() as i64;
+    let skipped_destructors = noeta_value::destruct_audit_end();
 
     report.native_protos += stats.native;
     report.compiled_protos += stats.compiled;
@@ -358,6 +370,13 @@ fn run_and_compare(name: &str, module: &noeta_bytecode::Module, report: &mut Jit
             name: name.to_string(),
             backend: "jit (refcount)",
             residual: anomalies,
+        });
+    }
+    if skipped_destructors != 0 {
+        report.leaks.push(Leak {
+            name: name.to_string(),
+            backend: "jit (destructors)",
+            residual: skipped_destructors,
         });
     }
 }
