@@ -402,6 +402,11 @@ step 1 clippy "clippy (default features)" -- \
 step 1 clippy "clippy (jit feature)" -- \
     "${CARGO[@]}" clippy -p noeta-vm -p noeta-jit -p noeta-conformance -p noeta-cli \
     --features "noeta-vm/jit noeta-conformance/jit" --all-targets --locked -- -D warnings
+# The THIRD shape: the Cranelift-free CLI. `noeta-cli`'s `jit` feature gates the whole
+# `build --native` flow, so a `--no-default-features` build compiles items nothing reaches — dead
+# code neither step above can see, since each builds `noeta-cli` with the feature on.
+step 1 clippy "clippy (lean CLI, --no-default-features)" -- \
+    "${CARGO[@]}" clippy -p noeta-cli --no-default-features --all-targets --locked -- -D warnings
 
 # --- test: the workspace suite + the oracles ---------------------------------------------------
 step 2 test "cargo test --workspace (Cranelift-free)" -- \
