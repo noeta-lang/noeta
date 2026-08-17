@@ -11,6 +11,15 @@
 //!
 //! A program the VM cannot compile yet is measured on the tree-walker only (the VM's residual is
 //! simply not sampled), exactly as the differential skips it.
+//!
+//! Two further counts ride along on the VM, because residency alone cannot see them. The
+//! **refcount-anomaly** count catches a skipped retain/release that teardown's backup sweep absorbs.
+//! The **skipped-destructor** count catches the other way precise reference counting goes wrong: an
+//! object whose type declares `destruct` reclaimed by a release that never asked whether a
+//! destructor was due. Memory is freed, residency returns to zero — and the destructor never ran.
+//! Since residency here is asserted zero, every object allocated was freed, so a destructor-bearing
+//! allocation with no matching destructor run is exactly that bug. See
+//! [`noeta_value::destruct_audit_begin`].
 
 use std::path::Path;
 
@@ -26,7 +35,9 @@ use crate::reference::reference_run;
 pub struct Leak {
     pub name: String,
     pub backend: &'static str,
-    /// Objects still live after the program returned and tore down (should be zero).
+    /// What the row counts, all of which must be zero: objects still live after the program
+    /// returned and tore down, refcount anomalies noted during collection, or destructors that
+    /// never ran.
     pub residual: i64,
 }
 
@@ -69,17 +80,20 @@ impl LeakReport {
             self.not_run.to_human(),
         );
         if self.leaks.is_empty() {
-            out.push_str("residency 0 at clean exit on every program, both backends ✓\n");
+            out.push_str(
+                "residency 0, no refcount anomalies and no skipped destructors at clean exit on \
+                 every program, both backends ✓\n",
+            );
         } else {
             let _ = writeln!(
                 out,
-                "{} LEAK(s) — live residency at clean exit:",
+                "{} LEAK(s) — residency, refcount anomalies or skipped destructors at clean exit:",
                 self.leaks.len()
             );
             for l in &self.leaks {
                 let _ = writeln!(
                     out,
-                    "  [{}] {} — {} object(s) still live",
+                    "  [{}] {} — {} unreclaimed",
                     l.backend, l.name, l.residual
                 );
             }
@@ -163,6 +177,7 @@ fn measure_single(name: &str, text: &str, report: &mut LeakReport) {
     if let Ok(module) = &noeta_db::bytecode(&db, src).0 {
         let before = noeta_value::live_count() as i64;
         noeta_value::reset_refcount_anomalies();
+        noeta_value::destruct_audit_begin(destructible_types(module));
         let _ = VmBackend::new().run_module(module);
         record(
             report,
@@ -176,8 +191,24 @@ fn measure_single(name: &str, text: &str, report: &mut LeakReport) {
             "vm (refcount)",
             noeta_value::refcount_anomalies() as i64,
         );
+        record(
+            report,
+            name,
+            "vm (destructors)",
+            noeta_value::destruct_audit_end(),
+        );
         report.vm_measured += 1;
     }
+}
+
+/// The names of the module's destructor-bearing types — the runtime's own table, so the audit and
+/// the runtime cannot disagree about which types have a `destruct` block.
+fn destructible_types(module: &noeta_bytecode::Module) -> std::collections::HashSet<String> {
+    module
+        .destructors
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect()
 }
 
 /// Measure one multi-file fixture on both backends (the workspace analogue of [`measure_single`]).
@@ -212,6 +243,7 @@ fn measure_workspace(name: &str, raw: &noeta_loader::RawWorkspace, report: &mut 
     if let Ok(module) = &noeta_db::linked_bytecode(&db, ws).0 {
         let before = noeta_value::live_count() as i64;
         noeta_value::reset_refcount_anomalies();
+        noeta_value::destruct_audit_begin(destructible_types(module));
         let _ = VmBackend::new().run_module(module);
         record(
             report,
@@ -224,6 +256,12 @@ fn measure_workspace(name: &str, raw: &noeta_loader::RawWorkspace, report: &mut 
             name,
             "vm (refcount)",
             noeta_value::refcount_anomalies() as i64,
+        );
+        record(
+            report,
+            name,
+            "vm (destructors)",
+            noeta_value::destruct_audit_end(),
         );
         report.vm_measured += 1;
     }

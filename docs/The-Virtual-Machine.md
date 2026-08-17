@@ -134,11 +134,12 @@ A prototype that keeps a heap value in a register is compiled **heap-aware**: ov
 
 ### The oracle
 
-Tier 1 has its own gate, separate from the eval↔VM differential: **`--jit-differential`** runs every corpus program through the interpreter and through the forced-Tier-1 JIT and asserts three things at once:
+Tier 1 has its own gate, separate from the eval↔VM differential: **`--jit-differential`** runs every corpus program through the interpreter and through the forced-Tier-1 JIT and asserts four things at once:
 
 - **A byte-identical `RunResult`** — the JIT may never change observable behavior.
 - **Zero heap residency** — no program leaks under native code.
 - **Zero refcount anomalies** — during cycle collection, every unreachable object's refcount must equal its in-edges from the garbage set (unreachable garbage can only reference itself). This closes a blind spot the residency check alone has: a *skipped* retain or release is caught even when teardown's backup sweep would have absorbed the orphan — exactly the failure mode of a wrong immediacy claim, and the check that made a latent mid-frame-entry bug reproducible (it also caught three unrelated interpreter refcount bugs on arrival).
+- **No skipped destructors** — every object whose type declares `destruct` ran its destructor. Freeing an object's memory and skipping its destructor is the one memory bug that produces a *wrong answer* rather than a residual, so residency cannot see it and neither can the output check when the interpreter skips it too. Objects allocated with a destructor-bearing shape are weighed against destructors run; residency being zero in the same measurement means everything allocated was freed, so a surplus allocation is exactly an object freed with its `destruct` skipped.
 
 The oracle has a **second arm**, `--jit-differential --cancel-poll`, which runs the same corpus with a never-set cancellation flag armed on the JIT side. That is not a knob: a run that can be cancelled gets genuinely different native code — a cancellation poll at every loop header (see [Concurrency Internals](Concurrency-Internals#the-third-safepoint-a-jit-loop-header)) — and the two shapes are covered separately because testing either alone would leave the other unchecked.
 
