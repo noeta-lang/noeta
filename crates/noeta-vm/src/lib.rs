@@ -543,6 +543,11 @@ struct Vm<'m> {
     /// (`.sorted()`, `.min()`, `.max()`, `.keys()`, `.values()`) and the `for` loop's snapshot look
     /// their span up here; empty for nearly every program.
     order_hints: HashMap<Span, noeta_ast::RenderHint>,
+    /// Deferred-serialization site span → the [`noeta_ast::RenderHint`] the native dispatch reads as
+    /// `NativeCtx::push_hint`, resolved at load from [`Module::binding_hint_sites`]. A native method
+    /// that BINDS a value it serializes on a later tick (`view.expose`) captures it once, here;
+    /// empty for nearly every program.
+    binding_hints: HashMap<Span, noeta_ast::RenderHint>,
     /// Instance-method dispatch: type name → (method name → prototype index). Two-level
     /// (audit-1 finding 7) so every lookup probes with **borrowed** `&str` keys via
     /// [`Vm::method_proto`] — the previous flat `(String, String)` key forced two heap

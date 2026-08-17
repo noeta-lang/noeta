@@ -217,7 +217,18 @@
 /// key stores its declared fields as flat words, so a `u64` field is indistinguishable from an `i64`
 /// one inside the key; the ordering walk already read the hint's slots and the rendering walk did
 /// not, which left a rendered map printing a key its own `keys()` printed differently.
-pub const ABI_VERSION: u32 = 22;
+///
+/// **23** — deferred serialization can carry its hint. [`registry::ExtType`] gained
+/// `push_hint_args`, the `(method, parameter index)` pairs naming an argument the type *keeps* and
+/// serializes to JSON on a later tick, and [`ctx::NativeCtx`] gained [`ctx::NativeCtx::push_hint`],
+/// which hands that argument's [`render_hint::RenderHint`] to the dispatch so it can be stored beside
+/// the value. Additive with defaults — an `ExtType` literal spreading `..ExtType::DEFAULTS` and a
+/// `NativeCtx` implementation both compile unchanged; only an `ExtType` literal naming every field
+/// needs the one line. The rule it implements: a `u64` past bit 63 is a negative i64 word and its
+/// width lives only in the static type, so a value serialized where it was *bound* rather than where
+/// it was passed has to be handed the description at binding time — a LiveView binding re-serialized
+/// on every flush tick otherwise pushes a negative number to the browser with nothing to notice.
+pub const ABI_VERSION: u32 = 23;
 
 pub mod args;
 pub mod channel;

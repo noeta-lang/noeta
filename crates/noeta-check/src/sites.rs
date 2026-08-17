@@ -189,6 +189,19 @@ pub struct Sites {
     /// built at one site and probed at another (see [`noeta_ast::render_hint`]). Empty for every
     /// program with no `u64` in an ordered position. A pure function of the program.
     pub order_hint_sites: HashMap<Span, noeta_ast::RenderHint>,
+    /// **Deferred-serialization sites whose bound value contains an unsigned 64-bit integer**, keyed
+    /// by the binding call's span → the [`RenderHint`](noeta_ast::RenderHint) built from the bound
+    /// argument's static type.
+    ///
+    /// The third JSON door, and the one with no serializing call to sit on. A native type may declare
+    /// (`ExtType::push_hint_args`) that a method *keeps* one of its arguments and serializes it to
+    /// JSON on some later tick — `std.reactive`'s `View.expose` binds a reactive node whose value is
+    /// pushed afresh on every flush. By then there is no call site left to read a static type from,
+    /// so the hint is recorded where the value is **bound** and travels with the binding. Read by
+    /// lowering (via [`Checked::binding_hint_sites`](crate::Checked)); the tree-walker takes it off
+    /// the method node and the VM off a span-keyed module table, and both hand it to the dispatch as
+    /// `NativeCtx::push_hint`. Empty for every program with no `u64` in a bound position.
+    pub binding_hint_sites: HashMap<Span, noeta_ast::RenderHint>,
     /// **Statically decided type tests**: `Expr::TypeTest` spans the checker answered itself → the
     /// answer. Lowering emits the constant (after still evaluating the scrutinee for its effects)
     /// instead of an `Rvalue::TypeTest`, so both backends agree by construction.
@@ -469,6 +482,7 @@ pub(crate) const SITE_POLICIES: &[(&str, SiteClass, &str)] = &[
     ("render_hint_sites", SiteClass::SpanKeyed, "span → RenderHint: structural; its Slots/Variants numbers are SLOT positions within the rendered value"),
     ("json_hint_sites", SiteClass::SpanKeyed, "span → RenderHint: structural; its Slots/Variants numbers are SLOT positions within the serialized value"),
     ("order_hint_sites", SiteClass::SpanKeyed, "span → RenderHint: structural; its Slots/Variants numbers are SLOT positions within the ordered value"),
+    ("binding_hint_sites", SiteClass::SpanKeyed, "span → RenderHint: structural; its Slots/Variants numbers are SLOT positions within the value serialized later"),
     ("folded_type_tests", SiteClass::SpanKeyed, "span → the constant answer of a statically decided `is`"),
     ("handle_sites", SiteClass::SpanKeyed, "span → (type, method, associated)"),
     ("bound_handle_sites", SiteClass::SpanKeyed, "a bare span set"),
@@ -540,6 +554,7 @@ impl Sites {
             render_hint_sites: _,
             json_hint_sites: _,
             order_hint_sites: _,
+            binding_hint_sites: _,
             folded_type_tests: _,
             handle_sites: _,
             bound_handle_sites: _,
@@ -731,6 +746,9 @@ pub(crate) struct SiteMaps {
     pub(crate) json_hint_sites: HashMap<Span, noeta_ast::RenderHint>,
     /// Ordering sites carrying an unsigned 64-bit integer — see [`Sites::order_hint_sites`].
     pub(crate) order_hint_sites: HashMap<Span, noeta_ast::RenderHint>,
+    /// Deferred-serialization sites carrying an unsigned 64-bit integer — see
+    /// [`Sites::binding_hint_sites`].
+    pub(crate) binding_hint_sites: HashMap<Span, noeta_ast::RenderHint>,
     /// Statically decided type tests — see [`Sites::folded_type_tests`].
     pub(crate) folded_type_tests: HashMap<Span, bool>,
     /// Unbound method-handle sites: a `Type.method` member expression in value position → the
@@ -807,6 +825,7 @@ impl SiteMaps {
             render_hint_sites: self.render_hint_sites,
             json_hint_sites: self.json_hint_sites,
             order_hint_sites: self.order_hint_sites,
+            binding_hint_sites: self.binding_hint_sites,
             folded_type_tests: self.folded_type_tests,
             handle_sites: self.handle_sites,
             bound_handle_sites: self.bound_handle_sites,

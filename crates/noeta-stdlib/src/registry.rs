@@ -716,6 +716,10 @@ const CORE_TYPES: &[ExtType] = &[
             crate::reactive::view_ctx_method_dispatch(method, ctx, recv, args)
         }),
         docs: VIEW_METHOD_DOCS,
+        // `expose`'s second argument is a reactive node whose value this view serializes on every
+        // later flush tick, not here — so the call site's static type is the last place the value's
+        // signedness exists, and the binding carries the hint from here on.
+        push_hint_args: crate::reactive::VIEW_PUSH_HINT_ARGS,
         ..ExtType::DEFAULTS
     },
 ];

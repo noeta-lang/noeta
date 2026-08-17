@@ -510,6 +510,7 @@ impl<'m> Vm<'m> {
         if sites.is_none() {
             extended.map_packed_sites = self.module.map_packed_sites.clone();
             extended.order_hint_sites = self.module.order_hint_sites.clone();
+            extended.binding_hint_sites = self.module.binding_hint_sites.clone();
         }
 
         // (2) Grow the derived tables from the snapshot's tails (all appends are prefix-stable).
@@ -563,6 +564,11 @@ impl<'m> Vm<'m> {
         // orders unsigned. Idempotent for the spans already there.
         for (span, hint) in &extended.order_hint_sites {
             self.order_hints.insert(*span, hint.clone());
+        }
+        // And the push hints, for the same reason: a swapped-in `view.expose` of a `Signal<u64>`
+        // would otherwise push the erased word where a cold start pushes the value.
+        for (span, hint) in &extended.binding_hint_sites {
+            self.binding_hints.insert(*span, hint.clone());
         }
         for repr in &extended.type_reprs[self.persist.type_reprs.len()..] {
             self.persist.type_reprs.push(Rc::new(repr.clone()));

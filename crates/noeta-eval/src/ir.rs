@@ -1579,12 +1579,17 @@ impl Interpreter {
                 span,
                 supplied,
                 order,
+                push,
                 name_span: _,
             } => {
                 // A method whose result reveals an order the program can see, on a `u64`-carrying
                 // receiver: register the hint by span, so the collection method below reads it the
                 // way the VM reads its own span-keyed table.
                 self.note_order_hint(*span, order);
+                // A native call that BINDS a value it serializes on a later tick: register its push
+                // hint by span, so the ctx built for the dispatch reads it the way the VM reads its
+                // own span-keyed table.
+                self.note_binding_hint(*span, push);
                 // In-place collection self-update (Phase 5.1c): a marked `m = m.set(k,v)` moves the
                 // receiver out of its (reassigned) binding so a uniquely-owned map can be mutated in
                 // place; mirrors the VM's reuse-aware dispatch. A non-map receiver (e.g. a user method

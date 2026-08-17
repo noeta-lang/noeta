@@ -1,0 +1,63 @@
+// A LiveView binding pushes its value as JSON on a flush tick, not at the call that bound it — so a
+// `u64` past bit 63 has nowhere left to say it is unsigned by the time the frame is written, and
+// would reach the browser as the negative i64 word it is erased to. `view.expose` therefore captures
+// the bound value's hint at the call and the binding keeps it: `snapshot()` and every later `diff()`
+// serialize under it, at any depth the hint describes.
+//
+// This is the same walk `json.stringify` runs and the same hint the checker builds for it — only the
+// moment differs. The controls are the negative half: an `int` binding, and the narrower unsigned
+// widths, which fit an i64 already and carry no hint at all.
+// expect: stdout "{"type":"snapshot","values":{"big":18446744073709551615,"boxed":{"reading":18446744073709551615,"label":"m"},"listed":[18446744073709551615,1],"mid":9223372036854775808,"narrow":4294967295,"plain":7,"top":9223372036854775807}}"
+// expect: stdout "{"type":"patch","changes":{"big":9223372036854775808,"listed":[9223372036854775808,2]}}"
+// expect: stdout "none"
+// expect: stdout "{"type":"patch","changes":{"boxed":{"reading":1,"label":"m"}}}"
+// expect: stdout "{"big":18446744073709551615}"
+// expect: exit 0
+use std.reactive.{signal, view}
+use std.json
+
+@derive(Serialize<Json>)
+struct Meter {
+    reading: u64
+    label: string
+}
+
+// The three boundaries: the largest value an i64 also holds, the first one it does not, and the top.
+top = signal(9223372036854775807u64)
+mid = signal(9223372036854775808u64)
+big = signal(18446744073709551615u64)
+
+// The hint is structural, so it reaches a `u64` inside a list or a struct field the same way.
+listed = signal([18446744073709551615u64, 1u64])
+boxed = signal(Meter { reading: 18446744073709551615u64, label: "m" })
+
+// Controls: an `int` binding, and a `u32`, which fits an i64 with room to spare.
+plain = signal(7)
+narrow = signal(4294967295u32)
+
+v = view()
+v.expose("top", top)
+v.expose("mid", mid)
+v.expose("big", big)
+v.expose("listed", listed)
+v.expose("boxed", boxed)
+v.expose("plain", plain)
+v.expose("narrow", narrow)
+
+echo v.snapshot()
+
+// A patch carries the same treatment — the binding kept its hint, and this tick has no call site.
+big.set(9223372036854775808u64)
+listed.set([9223372036854775808u64, 2u64])
+echo v.diff() ?? "none"
+
+// Nothing changed since.
+echo v.diff() ?? "none"
+
+// And through a struct field, where the hint is positional.
+boxed.set(Meter { reading: 1u64, label: "m" })
+echo v.diff() ?? "none"
+
+// The frame agrees with the ordinary `json.stringify` door on the same value, because it IS the same
+// walk under the same hint.
+echo json.stringify({"big": 18446744073709551615u64})

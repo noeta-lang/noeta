@@ -1737,6 +1737,19 @@ impl Checker {
                 if stdlib::reveals_order(&recv, name) {
                     self.note_order_hint(&recv, call_span);
                 }
+                // A native method that BINDS one of its arguments now and serializes it to JSON on a
+                // later tick (`view.expose(name, signal)`, pushed on every flush): record that
+                // argument's hint at the call span, since the push itself has no call site to read a
+                // static type from. Which argument is the receiving type's own declaration
+                // (`ExtType::push_hint_args`), so no method name is spelled here. The bound argument
+                // is a *handle* generic over the value it carries (`Signal<u64>`), and it is that
+                // value the later push serializes — so the hint is built from its type argument.
+                if let Some(i) = stdlib::push_hint_arg(self.reg(), &recv, name)
+                    && let Some(Type::Named(_, targs)) = args.get(i)
+                    && let Some(value_ty) = targs.first().cloned()
+                {
+                    self.note_binding_hint(&value_ty, call_span);
+                }
                 // `it.zip(other)` → `Iterator<(A, B)>`: both element types are needed and only `recv`
                 // reaches `method_return`, so the precise tuple is assembled here where the argument
                 // type is in scope (A from the receiver, B from the argument iterator).

@@ -172,7 +172,7 @@ count.set(3)
 echo v.diff() ?? "none"  // none — same value, nothing to push
 ```
 
-Minimality is enforced twice: the flush records exactly which nodes changed (the set signal plus computeds it transitively dirtied), so `diff()` never inspects untouched bindings; and each candidate's fresh value is compared against the last one pushed, so a write of an equal value — or a recompute that lands on the same result — pushes nothing. Frames are deterministic (name-sorted keys, the `json.stringify` encoding), so a scripted client conversation pins them byte-exactly in tests. The change tracking is pay-for-use: until the first `view()` exists, a hot `set` loop records nothing.
+Minimality is enforced twice: the flush records exactly which nodes changed (the set signal plus computeds it transitively dirtied), so `diff()` never inspects untouched bindings; and each candidate's fresh value is compared against the last one pushed, so a write of an equal value — or a recompute that lands on the same result — pushes nothing. Frames are deterministic (name-sorted keys, the `json.stringify` encoding), so a scripted client conversation pins them byte-exactly in tests — and each binding is written from the type it was exposed under, so a `Signal<u64>` pushes the same digits `json.stringify` would give it (see [Fixed-Width Ints](Fixed-Width-Integers)). The change tracking is pay-for-use: until the first `view()` exists, a hot `set` loop records nothing.
 
 Typically each websocket session creates its own view and sends `snapshot()` on connect and `diff()` after handling each client event — the bundled browser shim (`server.liveview_js()`) applies those frames to the DOM. The wiring, as a sketch (the complete runnable version is `examples/liveview_counter.noe`):
 

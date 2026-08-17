@@ -349,6 +349,15 @@ pub enum Rvalue {
         /// differential pins them equal. A set's canonical buffer and a map's key placement are
         /// **identity** orders and never see it — see [`noeta_ast::render_hint`].
         order: Option<std::rc::Rc<noeta_ast::RenderHint>>,
+        /// The **push hint** for a native method that binds one of its arguments now and serializes
+        /// it to JSON on a later tick (`view.expose(name, signal)`), whose bound value's static type
+        /// carries an unsigned 64-bit integer. `None` for every other call.
+        ///
+        /// The deferred twin of [`Rvalue::JsonRender`]: the same walk over the same hint, applied
+        /// where the value is *pushed* rather than where it is passed, because by then the call site
+        /// that knew its width is gone. Both backends hand it to the dispatch as
+        /// `NativeCtx::push_hint`, so the frames they emit are byte-identical.
+        push: Option<std::rc::Rc<noeta_ast::RenderHint>>,
         span: Span,
     },
     /// A **trait** method call with a baked-in route: `receiver.name(args)` where the checker

@@ -291,6 +291,19 @@ impl Checker {
         }
     }
 
+    /// Record the [`RenderHint`](noeta_ast::RenderHint) for a value a native method **binds now and
+    /// serializes later** — the argument at the index its receiver's `ExtType::push_hint_args`
+    /// declares (`view.expose(name, signal)`, whose value is pushed as JSON on every later flush
+    /// tick). The same structural hint [`Self::note_json_hint`] records, for the same walk and under
+    /// the same [`HintPurpose::Json`] numbering, because the serialization it feeds *is* that walk —
+    /// only the moment differs, which is the whole reason this door needs its own site map: by the
+    /// time the value is written there is no call site left to read a static type from.
+    pub(crate) fn note_binding_hint(&mut self, ty: &Type, span: Span) {
+        if let Some(hint) = self.render_hint(ty, HintPurpose::Json, &mut Vec::new()) {
+            self.sites.binding_hint_sites.insert(span, hint);
+        }
+    }
+
     /// Record the [`RenderHint`](noeta_ast::RenderHint) for a value **about to be ordered** at
     /// `span` (`.sorted()`, `.min()`, `.max()`, `.keys()`, `.values()`, a `for` over a set or map),
     /// if `ty` contains an unsigned 64-bit integer. Nothing is recorded otherwise, so a program that

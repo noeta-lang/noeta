@@ -701,6 +701,30 @@ pub(super) fn reveals_order(recv: &Type, name: &str) -> bool {
     }
 }
 
+/// The **deferred-serialization** argument a native method declares, if any: the position of the
+/// parameter whose value the receiver's extern type keeps and serializes to JSON on some later tick
+/// (`ExtType::push_hint_args`). The checker records that argument's hint at the call span, because a
+/// later serialization has no call site of its own to read a static type from.
+///
+/// Declared by the type rather than named here, so the front end learns nothing about `std`: a
+/// package's own extern type with the same shape gets the same treatment by declaring it.
+pub(super) fn push_hint_arg(
+    reg: &registry::Registry,
+    receiver: &Type,
+    name: &str,
+) -> Option<usize> {
+    let Type::Named(n, _) = receiver else {
+        return None;
+    };
+    let ty = reg
+        .find_type_qualified(n)
+        .or_else(|| reg.find_type(noeta_ast::short_type_name(n)))?;
+    ty.push_hint_args
+        .iter()
+        .find(|(m, _)| *m == name)
+        .map(|&(_, i)| i as usize)
+}
+
 fn numeric_reduce(elem: &Type) -> Option<Type> {
     matches!(
         elem,

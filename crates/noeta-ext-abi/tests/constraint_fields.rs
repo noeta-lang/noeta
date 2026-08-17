@@ -304,6 +304,24 @@ const TABLE: &[Row] = &[
         "arena_getter",
         Data(Anchor("crates/noeta-vm/src/methods.rs", "arena_getter")),
     ),
+    // "This method keeps this argument and serializes it LATER." A promise about when a value is
+    // written, which the checker acts on by recording the argument's render hint at the call — and
+    // which, unenforced, would tell an extension author the toolchain carries their value's static
+    // type to a push that in fact writes the erased word.
+    Row(
+        "ExtType",
+        "push_hint_args",
+        Constraint(
+            Anchor(
+                "crates/noeta-check/src/stdlib.rs",
+                "pub(super) fn push_hint_arg(",
+            ),
+            Anchor(
+                "tests/conformance/reactivity/view_diff_unsigned.noe",
+                "expect:",
+            ),
+        ),
+    ),
     // The traits this type claims: what makes a `T: Comparable` / `T: Error` bound accept it, and
     // (for a native `ExtTrait` name) what makes it satisfy a package-declared trait. A bound is a
     // rule, and the claim is what satisfies it.

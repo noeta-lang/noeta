@@ -560,6 +560,12 @@ impl NativeCtx for VmCtx<'_, '_> {
             .collect()
     }
 
+    fn push_hint(&mut self) -> Option<noeta_ast::RenderHint> {
+        // The call's own span is what the checker keyed the hint on. Empty for nearly every program,
+        // and this runs once per BINDING (a `view.expose`), never per push.
+        self.vm.binding_hint(&self.span).cloned()
+    }
+
     fn retain(&mut self, slot: Slot) -> CtxResult<noeta_stdlib::Retained> {
         let value = self.get(slot)?;
         // The arena takes its own reference; the slot stays table-owned.

@@ -1451,6 +1451,12 @@ struct Interpreter {
     /// twin of the VM's load-time `order_hints` table, keyed the same way so a `.sorted()` on a
     /// `List<u64>` orders identically in both engines. Empty for nearly every program.
     order_hints: HashMap<Span, Rc<RenderHint>>,
+    /// Deferred-serialization site span → the [`RenderHint`] the native dispatch reads as
+    /// `NativeCtx::push_hint`, registered as lowering's `Rvalue::Method::push` reaches each site. The
+    /// tree-walker twin of the VM's load-time `binding_hints` table, keyed the same way so a
+    /// `view.expose` of a `Signal<u64>` pushes identical bytes from both engines. Empty for nearly
+    /// every program.
+    binding_hints: HashMap<Span, Rc<RenderHint>>,
     /// For a **native** type bound under a name that is not its own — `use std.http.Framing as F` —
     /// the canonical short name a value of it carries. A pattern is written with the binding (`F.Sse`)
     /// while the value it must match is stamped with the type's own name (`Framing`), so the two are
@@ -1605,6 +1611,7 @@ impl Interpreter {
             reflection: noeta_ast::reflect::ReflectionInfo::default(),
             transient_names: std::collections::HashSet::new(),
             order_hints: HashMap::new(),
+            binding_hints: HashMap::new(),
             native_type_names: std::collections::HashMap::new(),
             type_of_sites: std::collections::HashMap::new(),
             deserialize_recipes: std::collections::HashMap::new(),
@@ -1926,6 +1933,25 @@ impl Interpreter {
     pub(crate) fn note_order_hint(&mut self, span: Span, hint: &Option<Rc<RenderHint>>) {
         if let Some(hint) = hint {
             self.order_hints.entry(span).or_insert_with(|| hint.clone());
+        }
+    }
+
+    /// The push hint registered at `span`, or `None` — the deferred twin of [`Self::order_hint`],
+    /// read when a native call that BINDS a value for later serialization builds its ctx.
+    pub(crate) fn binding_hint(&self, span: Span) -> Option<&Rc<RenderHint>> {
+        if self.binding_hints.is_empty() {
+            return None;
+        }
+        self.binding_hints.get(&span)
+    }
+
+    /// Register the push hint lowering baked at `span` (`Rvalue::Method::push`), so the native
+    /// dispatch reached from there reads it exactly as the VM reads its own load-time table.
+    pub(crate) fn note_binding_hint(&mut self, span: Span, hint: &Option<Rc<RenderHint>>) {
+        if let Some(hint) = hint {
+            self.binding_hints
+                .entry(span)
+                .or_insert_with(|| hint.clone());
         }
     }
 
