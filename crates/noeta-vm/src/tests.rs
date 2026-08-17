@@ -592,13 +592,21 @@ fn watch_fragments_are_memoized_by_text_and_scope() {
 /// calls**, and a single [`Vm::teardown`] afterwards brings heap residency back to zero. This is
 /// the mechanism the session rides on — a first entry's global bindings survive into the next, and
 /// cleanup is deferred to one final teardown rather than run after every entry.
+///
+/// Compiled through the **session** entry point, which is what makes the top level a global at all:
+/// a session replaces the entry chunk on every install, so its bindings must outlive that chunk,
+/// where a batch compile keeps the ones nothing outside the top level can reach in the chunk's own
+/// registers. This test is about the persistence, so it compiles the way a session does.
 #[test]
 fn run_top_persists_globals_across_entries_then_one_teardown_zeroes_residency() {
     let src = "mut xs = [1, 2, 3];\necho xs.len();\n";
     let source = Source::new(SourceId::FIRST, "test.noe", src);
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
-    let module = compile(&parsed.program).expect("compiles");
+    let checked = noeta_check::check_all(&parsed.program);
+    let (module, _compiler) =
+        noeta_compiler::compile_with_sites_session(&parsed.program, checked.sites, false, false)
+            .expect("compiles");
 
     let before = noeta_value::live_count();
     let mode = noeta_value::CollectorMode::Trace;
@@ -2533,23 +2541,41 @@ fn local_self_update_lowers_to_in_place_record_reuse() {
 }
 
 #[test]
-fn global_self_update_lowers_to_take_global_plus_in_place_reuse() {
-    // Phase 5.1b: a top-level (global) struct accumulator's self-update must move the global out
-    // with `TakeGlobal` and reuse it in place with `MakeStructInPlace` — not the copying
-    // `MakeStruct` the local-only 5.1a path fell back to for a global. Both ops together are the
-    // proof the global path is wired.
-    let source = Source::new(
-        SourceId::FIRST,
-        "t.noe",
+fn a_top_level_self_update_reuses_in_place_in_either_storage() {
+    // A top-level struct accumulator's self-update reuses its allocation in place (`MakeRecIP`)
+    // rather than copying — and it does so whichever storage the binding has.
+    //
+    // Held in a register of the entry frame, the accumulator is read in place like a
+    // function-local's, so the in-place op sees the sole owner it is with no help. Held in a global
+    // slot — here because a closure reaches it by name — the read would materialize a second
+    // reference, so the update must first move the value out of its slot with `TakeGlobal`. Both
+    // shapes must reuse; only one of them needs the extra op, and asserting each against the wrong
+    // one is how a storage change would silently drop the reuse.
+    let compiled = |src: &str| {
+        let source = Source::new(SourceId::FIRST, "t.noe", src);
+        let lexed = lex(&source);
+        let parsed = parse(&source, &lexed.tokens);
+        compile(&parsed.program).unwrap().disassemble()
+    };
+
+    let in_registers = compiled(
         "class P { pub x: int }\nmut acc = P { x: 0 };\nacc = P { ...acc, x: 5 };\necho acc.x;\n",
     );
-    let lexed = lex(&source);
-    let parsed = parse(&source, &lexed.tokens);
-    let module = compile(&parsed.program).unwrap();
-    let disasm = module.disassemble();
     assert!(
-        disasm.contains("TakeGlobal") && disasm.contains("MakeRecIP"),
-        "expected TakeGlobal + in-place record reuse for a global accumulator, got:\n{disasm}"
+        in_registers.contains("MakeRecIP"),
+        "expected in-place record reuse for a register-held accumulator, got:\n{in_registers}"
+    );
+    assert!(
+        !in_registers.contains("TakeGlobal"),
+        "a register-held accumulator has nothing to take out of a slot, got:\n{in_registers}"
+    );
+
+    let in_a_slot = compiled(
+        "class P { pub x: int }\nmut acc = P { x: 0 };\nread = fn() => acc.x;\nacc = P { ...acc, x: 5 };\necho acc.x + read();\n",
+    );
+    assert!(
+        in_a_slot.contains("TakeGlobal") && in_a_slot.contains("MakeRecIP"),
+        "expected TakeGlobal + in-place record reuse for a slot-held accumulator, got:\n{in_a_slot}"
     );
 }
 
@@ -2558,8 +2584,8 @@ fn local_map_self_update_lowers_to_reuse_method_call() {
     // Phase 5.1c: a function-local map accumulator updated with `m[k] = v` (desugaring to
     // `m = m.set(k, v)`) must carry the in-place-reuse token to the VM — `CallMethod ... [reuse]` —
     // so the dispatch mutates the uniquely-owned backing map in place rather than copying it. A
-    // top-level (global) map accumulator is the `TakeGlobal` case (a later slice; the IR
-    // interpreter already reuses it, and reuse is invisible, so the backends still agree).
+    // top-level map accumulator reuses too — off its own register, or via `TakeGlobal` when it is
+    // held in a global slot (see `a_top_level_self_update_reuses_in_place_in_either_storage`).
     let source = Source::new(
         SourceId::FIRST,
         "t.noe",
@@ -2577,14 +2603,16 @@ fn local_map_self_update_lowers_to_reuse_method_call() {
 
 #[test]
 fn self_append_lowers_to_in_place_concat() {
-    // Phase 5.1b: a list self-append `acc ~= rhs` must lower to `ConcatInPlace` — for a global
-    // accumulator preceded by `TakeGlobal` (to expose unique ownership), and for a function-local
-    // accumulator directly on its register. The proof the concat reuse token reaches the VM rather
-    // than the copying `Op::Binary` (`~`).
+    // A list self-append `acc ~= rhs` must lower to `ConcatInPlace` rather than the copying
+    // `Op::Binary` (`~`) — the proof the concat reuse token reaches the VM. All three storage
+    // shapes an accumulator can have are here: a function-local's register, a top-level binding held
+    // in the entry frame's registers (which reads exactly like the local), and a top-level binding
+    // held in a global slot because a closure reaches it by name, where the append is preceded by
+    // `TakeGlobal` to expose unique ownership.
     let source = Source::new(
         SourceId::FIRST,
         "t.noe",
-        "mut g = [\"a\"];\ng ~= [\"b\"];\nfn build(): List<int> {\n  mut acc = [];\n  for i in 0..3 { acc ~= [i]; }\n  return acc;\n}\necho g;\necho build();\n",
+        "mut g = [\"a\"];\ng ~= [\"b\"];\nmut s = [\"a\"];\nread = fn() => s.len();\ns ~= [\"b\"];\nfn build(): List<int> {\n  mut acc = [];\n  for i in 0..3 { acc ~= [i]; }\n  return acc;\n}\necho g;\necho s.len() + read();\necho build();\n",
     );
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
@@ -2592,12 +2620,12 @@ fn self_append_lowers_to_in_place_concat() {
     let disasm = module.disassemble();
     assert_eq!(
         disasm.matches("ConcatIP").count(),
-        2,
-        "expected two in-place concats (global + local), got:\n{disasm}"
+        3,
+        "expected three in-place concats (registers, slot, local), got:\n{disasm}"
     );
     assert!(
         disasm.contains("TakeGlobal"),
-        "expected the global self-append to be preceded by TakeGlobal, got:\n{disasm}"
+        "expected the slot-held self-append to be preceded by TakeGlobal, got:\n{disasm}"
     );
 }
 

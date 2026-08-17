@@ -1,5 +1,5 @@
 ---
-source: crates/noeta-vm/src/lib.rs
+source: crates/noeta-vm/src/tests.rs
 expression: module.disassemble()
 ---
 shapes:
@@ -18,12 +18,10 @@ code:
     1  LoadConst   r2 <- k1
     2  MakeClosure r3 <- proto 1 [0 captures]
     3  Call        r0 <- r3(r1, r2)
-    4  StoreGlobal "o" <- r0
-    5  LoadGlobal  r1 <- "o"
-    6  CallMethod  r0 <- r1.tag()
-    7  Stringify   r1 <- display(r0)
-    8  Echo        r1
-    9  Halt
+    4  CallMethod  r1 <- r0.tag()
+    5  Stringify   r0 <- display(r1)
+    6  Echo        r0
+    7  Halt
 === proto 1 ===
 params: 2, registers: 3
 code:

@@ -107,6 +107,27 @@ pub fn analyze(
     Analysis { local, celled }
 }
 
+/// Which of `names` some closure / nested `fn` inside `block` references by name — reads,
+/// bare-assignment targets and `use (…)` allow-list entries alike.
+///
+/// The question the register-promotion decision asks of the top level (see
+/// `ModuleCompiler::promotable_top_level`): a top-level binding may only leave the global table for
+/// a register in `main`'s frame if no body *other than* `main` can reach it, and every such body is
+/// either a method (compiled before `main`, so its global references are already interned) or a
+/// closure / nested `fn` in the top-level statement stream — which is exactly what this reports.
+///
+/// Deliberately the same walk the celling decision runs on ([`analyze`]), with `names` standing in
+/// as the one enclosing layer and no globals: a name that resolves outward from a nested body is
+/// reported whether it would have resolved to an enclosing local or to a module global, because for
+/// this question those are the same hazard. A nested body that binds the name itself shadows it and
+/// is not reported — the reference is to *its* binding, not the top level's.
+pub fn nested_free_names(block: &Block, names: &HashSet<String>) -> BTreeSet<String> {
+    let enclosing = [names.clone()];
+    let mut out = BTreeSet::new();
+    collect_nested_frees_block(block, &enclosing, &HashSet::new(), &mut out);
+    out
+}
+
 // --- The function's own local bindings ---------------------------------------------------------
 
 /// The names this function binds as its own locals (params, `mut`/`fn`/for/match bindings, and

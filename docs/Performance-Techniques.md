@@ -10,6 +10,7 @@ A round-up of the performance story, including the numeric-layout work and one i
 | Shapes / hidden classes (flat-slot layout) | `noeta-object` | [The Virtual Machine](The-Virtual-Machine) |
 | Inline caches on property/method sites | `noeta-vm` | [The Virtual Machine](The-Virtual-Machine) |
 | Register allocation via graph coloring | `noeta-compiler` | [The Virtual Machine](The-Virtual-Machine) |
+| Top-level bindings held in the entry frame's registers | `noeta-compiler` | [The Virtual Machine](The-Virtual-Machine#where-a-top-level-binding-lives) |
 | Tier-1 Cranelift JIT (hot-counter + OSR) | `noeta-jit` | [The Virtual Machine](The-Virtual-Machine#tier-1--the-jit) |
 | SSA register promotion + typed/unboxed values | `noeta-jit` | [The Virtual Machine](The-Virtual-Machine#registers-live-in-ssa-mem2reg) |
 | Fast call convention + call-site inline caches | `noeta-jit` | [The Virtual Machine](The-Virtual-Machine#calls-stay-native--the-fast-call-convention) |
@@ -25,6 +26,10 @@ Before optimizing, measure: [`noeta profile`](Profiling) reports where a program
 ## Memory management is a performance feature
 
 The single biggest performance decision is that memory management is *compiled*, not traced: reference counts are inserted at compile time, values are freed at their last use, and unique-owner mutations become in-place updates. There is no stop-the-world pause on the hot path, and the classic `acc ~= [x]`-in-a-loop quadratic blowup is compiled away into an in-place extension. See [Memory Management](Memory-Management).
+
+## A script pays what a function pays
+
+Noeta programs are written at the top level, so the top level has to be as fast as a function body. A top-level binding therefore lives in the entry frame's registers whenever nothing outside the top level can reach it by name, and a loop written at the top level compiles to the same instructions as the identical loop inside a `fn` — no per-iteration load and store through a by-name table. [The Virtual Machine → Where a top-level binding lives](The-Virtual-Machine#where-a-top-level-binding-lives) states the exact rule, including the cases (a `use (…)` capture, a closure, a by-name `invoke`, a `destruct`, an interactive session) that keep a binding in the global table.
 
 ## Dispatch is optimized by layout, not tricks
 

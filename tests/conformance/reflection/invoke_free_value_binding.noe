@@ -1,0 +1,26 @@
+// `invoke(name, args)` reaches a top-level **value binding** that holds a callable, not only a
+// top-level `fn` declaration. Both are top-level names; a binding to a closure is simply the other
+// way to make one, and reflection resolves the name, not the syntax that produced it.
+//
+// This is the one place a top-level binding is named by a string the compiler never reads, which
+// makes it the sharp edge of "what can reach a top-level binding": every other reference is written
+// down somewhere, and this one is decided at run time. A backend that moved such a binding out of
+// the namespace this dispatch searches would answer `Err` where the other answers `Ok` — so both
+// backends are pinned here rather than only the language rule.
+//
+// Rebinding is live, as it is for any other name: the second dispatch must see the second closure.
+// expect: stdout "Ok(4)"
+// expect: stdout "Ok(30)"
+// expect: stdout "arity"
+// expect: exit 0
+mut f = fn(x: int) => x + 1;
+echo invoke("f", [3]);
+
+f = fn(x: int) => x * 10;
+echo invoke("f", [3]);
+
+// The arity window comes from the closure's own parameter list, exactly as for a declared `fn`.
+echo match invoke("f", [1, 2]) {
+    Ok(_) => "ok",
+    Err(_) => "arity",
+};

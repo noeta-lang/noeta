@@ -12,7 +12,17 @@ The compiled artifact (pure data in `noeta-bytecode`):
 - **`Chunk`** — one function prototype: its `code`, constant pool, `num_params`, `num_registers`, and `frame_locals` (destructor-teardown pins). `Chunk::disassemble` gives stable text for snapshot tests.
 - **`Module`** — the prototype table (proto 0 is the top-level program; the rest are functions/closures/methods), the flat `shapes` layout table, the `methods` dispatch table, and `cache_slots` (the inline-cache count).
 
-Execution is frame-based: each call pushes a `Frame` with its own register file, program counter, and return slot. Register 0 of a method frame is the receiver. Top-level bindings and function names live in a by-name global environment. Notably, the dispatch loop's frame stack is a *Rust local*, not VM state — so a native builtin like `map`/`filter` re-enters the VM by running a fresh frame stack to completion (ordinary Rust recursion over the shared globals/stdout).
+Execution is frame-based: each call pushes a `Frame` with its own register file, program counter, and return slot. Register 0 of a method frame is the receiver. Function names, imported modules, and the top-level bindings something outside the top level can reach live in a by-name global environment. Notably, the dispatch loop's frame stack is a *Rust local*, not VM state — so a native builtin like `map`/`filter` re-enters the VM by running a fresh frame stack to completion (ordinary Rust recursion over the shared globals/stdout).
+
+### Where a top-level binding lives
+
+A global slot has to be *read into* a register before anything can use it, and written back after: a top-level `total = total + i` costs a load and a store where the same line inside a `fn` costs neither, because a function-local's register *is* the binding. So the compiler puts a top-level binding in the entry frame's registers whenever nothing outside the top level can reach it by name — and a script's loop then costs exactly what the same loop costs inside a function.
+
+Nothing about a program decides this, and nothing needs to: the rule is that a binding stays in the global table exactly when something could look it up there. A named `fn` is sealed, so it reaches a top-level binding only through `use (…)`; a closure, a field default and a method's `use (…)` list reach one implicitly; and an `isolate` worker is shipped the globals by slot. Any of those keeps the binding in the table. So does a free-function [`invoke(name, args)`](Attributes-and-Reflection), which resolves its name against the top level at run time and so could name any binding at all. And so does a program that declares a `destruct`, because the spec's end-of-program destruction — every top-level binding's destructor, in reverse declaration order — is what the global table's teardown performs.
+
+The interactive tools are the other case that always uses the global table. `noeta repl`, the debug console and `noeta serve`'s hot reload each compile a *second* program into the running one, replacing the entry chunk; a global slot persists across that, a retired chunk's registers do not. That is why a binding you declare at the prompt is still there in the next entry, and why a hot-swapped edit re-runs against the state the previous version left.
+
+A register-held binding is a named local of the entry frame, so `noeta dap` shows it in the same Variables view, under the same name, at the same frame as one held in a slot.
 
 ### Register allocation
 

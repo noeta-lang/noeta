@@ -1,6 +1,5 @@
 ---
-source: crates/noeta-vm/src/lib.rs
-assertion_line: 7496
+source: crates/noeta-vm/src/tests.rs
 expression: module.disassemble()
 ---
 === main ===
@@ -14,24 +13,23 @@ constants:
   k5 = 1
 code:
     0  LoadConst   r0 <- k0
-    1  StoreGlobal "total" <- r0
-    2  LoadConst   r1 <- k1
-    3  LoadConst   r2 <- k2
-    4  LoadConst   r3 <- k3
-    5  MakeList    r0 <- [r1, r2, r3]  ; reflect #0
-    6  IterSnapshot r1 <- r0
-    7  ListLen     r0 <- len r1
-    8  LoadConst   r2 <- k4
-    9  LoadConst   r3 <- k5
-   10  Binary      r4 <- r2 < r0
-   11  JumpIfFalse r4 -> 18
-   12  ListGet     r4 <- r1[r2]
-   13  LoadGlobal  r6 <- "total"
-   14  Binary      r5 <- r6 + r4
-   15  StoreGlobal "total" <- r5
-   16  Binary      r2 <- r2 + r3
-   17  Jump        -> 10
-   18  LoadGlobal  r0 <- "total"
-   19  Stringify   r1 <- display(r0)
-   20  Echo        r1
-   21  Halt
+    1  LoadConst   r2 <- k1
+    2  LoadConst   r3 <- k2
+    3  LoadConst   r4 <- k3
+    4  MakeList    r1 <- [r2, r3, r4]  ; reflect #0
+    5  IterSnapshot r2 <- r1
+    6  ListLen     r1 <- len r2
+    7  LoadConst   r3 <- k4
+    8  LoadConst   r4 <- k5
+    9  Binary      r5 <- r3 < r1
+   10  JumpIfFalse r5 -> 18
+   11  ListGet     r5 <- r2[r3]
+   12  Binary      r6 <- r0 + r5
+   13  Drop        r0 ~destruct
+   14  Move        r0 <- r6
+   15  Drop        r6
+   16  Binary      r3 <- r3 + r4
+   17  Jump        -> 9
+   18  Stringify   r1 <- display(r0)
+   19  Echo        r1
+   20  Halt

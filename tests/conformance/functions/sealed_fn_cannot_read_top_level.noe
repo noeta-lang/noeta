@@ -1,0 +1,14 @@
+// The negative half of the sealed-fn rule: a named `fn` cannot *read* a top-level binding either.
+// `use (…)` is the only door, in both directions, and it is a static error to walk past it.
+//
+// The rule is load-bearing well beyond the diagnostic. It is what makes a top-level binding
+// reachable from a bounded, enumerable set of places — the top level itself, plus whatever names it
+// in a `use (…)` list or captures in a closure — which is what lets the compiler decide where to
+// store one.
+// expect: error E0005 at 12:12
+// expect: exit 1
+mut total = 7;
+fn read(): int {
+    return total;
+}
+echo read();
