@@ -372,6 +372,22 @@ pub trait NativeCtx {
         self.capability(id).into_iter().collect()
     }
 
+    /// The **push hint** for the call now dispatching: the [`crate::RenderHint`] the checker built
+    /// from the static type of the argument this method's
+    /// [`ExtType::push_hint_args`](crate::registry::ExtType::push_hint_args) declares, or `None`
+    /// where none was declared or the argument's type contains no unsigned 64-bit integer.
+    ///
+    /// A method that keeps a value and serializes it on a later tick captures this once, here, and
+    /// serializes under it from then on — because signedness is the one thing the value itself
+    /// cannot carry, and by the time the push happens there is no call site left to ask. Cloned
+    /// rather than borrowed: it is read once per *registration*, never per push, and an owned hint
+    /// is what the caller stores anyway.
+    ///
+    /// The default is `None`, which is correct for any host that does not compile call sites.
+    fn push_hint(&mut self) -> Option<crate::RenderHint> {
+        None
+    }
+
     /// Move a slot's value into the per-run **retained arena** — the extension now owns one
     /// reference to it across dispatches (the slot itself stays valid and table-owned). The
     /// arena is a root set the backend enumerates: the cycle collector traces it, teardown

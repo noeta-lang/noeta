@@ -2,7 +2,7 @@
 //! where to read an erased word unsigned when writing a value out, and where to read one unsigned
 //! when ordering one.
 //!
-//! A fixed-width integer is erased to the underlying i64 word at runtime ([`crate::BuiltinTy::IntN`]
+//! A fixed-width integer is erased to the underlying i64 word at runtime (`noeta_ast::BuiltinTy::IntN`
 //! and `noeta_types::Type::IntN` both say so), so nothing the value carries distinguishes `u64` from
 //! `i64`. For arithmetic that is handled by the width-carrying ops the checker records in its width
 //! sites; for writing a value out, and for the ordering the collections compute, the same
@@ -37,7 +37,7 @@
 //! ones, so its slot numbers count only the fields that survive.
 //!
 //! **A hint never reaches an identity order.** A set's canonical buffer and a
-//! [`noeta_ext_abi::MapKey`]'s [`Ord`] place elements for binary search, `BTreeMap` lookup, hashing
+//! [`crate::MapKey`]'s [`Ord`] place elements for binary search, `BTreeMap` lookup, hashing
 //! and the deterministic destructor sort — they are built at one site and probed at another, so they
 //! must stay a pure function of the erased word, or a value laundered through `dyn` would probe with
 //! a different order than it was stored under and miss a member that is present. Those orders are
@@ -143,11 +143,11 @@ pub fn unsigned_order(a: i64, b: i64) -> std::cmp::Ordering {
 /// Storage and lookup keep using [`Ord`]: see the module docs for why the two must not be the same
 /// function.
 pub fn map_key_order(
-    a: &noeta_ext_abi::MapKey,
-    b: &noeta_ext_abi::MapKey,
+    a: &crate::MapKey,
+    b: &crate::MapKey,
     hint: Option<&RenderHint>,
 ) -> std::cmp::Ordering {
-    use noeta_ext_abi::MapKey;
+    use crate::MapKey;
     match (hint, a, b) {
         (Some(RenderHint::Unsigned), MapKey::Int(x), MapKey::Int(y)) => unsigned_order(*x, *y),
         (Some(hint @ RenderHint::Slots(_)), MapKey::Packed(x), MapKey::Packed(y)) => x
@@ -159,19 +159,24 @@ pub fn map_key_order(
 }
 
 /// The slot-wise observed order of two packed keys of the same type: a slot the hint marks
-/// [`RenderHint::Unsigned`] reads its word unsigned, every other slot keeps the derived
-/// [`Ord`] a packed field carries.
+/// [`RenderHint::Unsigned`] reads its word unsigned, a slot holding a nested packed struct descends
+/// into the nested hint, and every other slot keeps the derived [`Ord`] a packed field carries.
 fn packed_fields_order(
-    a: &[noeta_ext_abi::PackedKeyField],
-    b: &[noeta_ext_abi::PackedKeyField],
+    a: &[crate::PackedKeyField],
+    b: &[crate::PackedKeyField],
     hint: &RenderHint,
 ) -> std::cmp::Ordering {
-    use noeta_ext_abi::PackedKeyField;
+    use crate::PackedKeyField;
     for (i, (x, y)) in a.iter().zip(b).enumerate() {
         let ord = match (hint.slot(i as u32), x, y) {
             (Some(RenderHint::Unsigned), PackedKeyField::Int(p), PackedKeyField::Int(q)) => {
                 unsigned_order(*p, *q)
             }
+            (
+                Some(nested @ RenderHint::Slots(_)),
+                PackedKeyField::Struct(pn, p),
+                PackedKeyField::Struct(qn, q),
+            ) => pn.cmp(qn).then_with(|| packed_fields_order(p, q, nested)),
             _ => x.cmp(y),
         };
         if ord != std::cmp::Ordering::Equal {
@@ -181,21 +186,30 @@ fn packed_fields_order(
     a.len().cmp(&b.len())
 }
 
-/// A map key's rendered form under an optional hint. An integer key is the only kind a hint can
-/// reach; every other key renders through the shared [`noeta_ext_abi::MapKey::render`] contract, so
-/// a string key keeps its quoted form. Shared by both backends, whose map entries hold the same
-/// [`noeta_ext_abi::MapKey`] even though their values differ.
-pub fn map_key_display(key: &noeta_ext_abi::MapKey, hint: Option<&RenderHint>) -> String {
+/// A map key's rendered form under an optional hint. Two kinds of key hold an erased integer word
+/// and so are the two a hint can reach: a bare integer key, and a `@packed` struct key, whose
+/// declared fields are words in flat storage. Every other key renders through the shared
+/// [`crate::MapKey::render`] contract, so a string key keeps its quoted form. Shared by both
+/// backends, whose map entries hold the same [`crate::MapKey`] even though their values differ.
+///
+/// The arms mirror [`map_key_order`]'s exactly — same key kinds, same hint shapes, same slot
+/// numbering — because a rendered map and its key order are two views of the same entries and a
+/// program that reads both must see one answer. Rendering is *all* this changes: the key's own
+/// [`Ord`], which places it for lookup, is never consulted here and never takes a hint.
+pub fn map_key_display(key: &crate::MapKey, hint: Option<&RenderHint>) -> String {
     match (hint, key) {
-        (Some(RenderHint::Unsigned), noeta_ext_abi::MapKey::Int(word)) => unsigned_digits(*word),
+        (Some(RenderHint::Unsigned), crate::MapKey::Int(word)) => unsigned_digits(*word),
+        (Some(hint @ RenderHint::Slots(_)), crate::MapKey::Packed(p)) => {
+            crate::map_key::packed_names::display_hinted(&p.type_name, &p.fields, Some(hint))
+        }
         _ => key.render(),
     }
 }
 
-/// Serialize a deeply-marshalled [`noeta_ext_abi::NativeValue`] to JSON **under a hint** — the JSON
+/// Serialize a deeply-marshalled [`crate::NativeValue`] to JSON **under a hint** — the JSON
 /// twin of the display walk, and the one serializer both backends reach for a hinted door.
 ///
-/// Without a hint this *is* [`noeta_ext_abi::json_text::stringify`], byte for byte: the walk
+/// Without a hint this *is* [`crate::json_text::stringify`], byte for byte: the walk
 /// delegates the moment a branch has none, so only the hinted spine is re-walked here and every
 /// unhinted subtree is produced by the single shared engine. With one, an erased word at a
 /// [`RenderHint::Unsigned`] position is written as the unsigned value it stands for, at any depth —
@@ -206,9 +220,9 @@ pub fn map_key_display(key: &noeta_ext_abi::MapKey, hint: Option<&RenderHint>) -
 /// `none` is null), while its hint is the ordinary [`RenderHint::Variants`] every enum gets. That
 /// is why a `Variants` hint over a non-variant value takes the `some` payload's hint — the last
 /// arm below.
-pub fn json_stringify(value: &noeta_ext_abi::NativeValue, hint: Option<&RenderHint>) -> String {
-    use noeta_ext_abi::json_text::{json_string, stringify};
-    use noeta_ext_abi::{NativeValue, Scalar};
+pub fn json_stringify(value: &crate::NativeValue, hint: Option<&RenderHint>) -> String {
+    use crate::json_text::{json_string, stringify};
+    use crate::{NativeValue, Scalar};
     let Some(hint) = hint else {
         return stringify(value);
     };
@@ -309,15 +323,15 @@ fn json_object(entries: impl IntoIterator<Item = (String, String)>) -> String {
 
 /// A marshalled map key as its **quoted JSON key**, under the key's own hint. See the
 /// [`RenderHint::Entries`] arm of [`json_stringify`]: the key arrives as the text
-/// [`noeta_ext_abi::MapKey::as_native_str`] produced, so an [`RenderHint::Unsigned`] key is read
+/// [`crate::MapKey::as_native_str`] produced, so an [`RenderHint::Unsigned`] key is read
 /// back as that i64 word and re-rendered. A key whose text is not one is left alone.
 fn json_map_key(key: &str, hint: Option<&RenderHint>) -> String {
     match hint {
         Some(RenderHint::Unsigned) => match key.parse::<i64>() {
-            Ok(word) => noeta_ext_abi::json_text::json_string(&unsigned_digits(word)),
-            Err(_) => noeta_ext_abi::json_text::json_string(key),
+            Ok(word) => crate::json_text::json_string(&unsigned_digits(word)),
+            Err(_) => crate::json_text::json_string(key),
         },
-        _ => noeta_ext_abi::json_text::json_string(key),
+        _ => crate::json_text::json_string(key),
     }
 }
 
@@ -371,7 +385,7 @@ mod tests {
     /// does not describe keeps the identity order either way.
     #[test]
     fn a_map_key_orders_unsigned_only_where_the_hint_says_so() {
-        use noeta_ext_abi::{MapKey, PackedKeyField};
+        use crate::{MapKey, PackedKeyField};
         use std::cmp::Ordering;
         let (max, one) = (MapKey::Int(-1), MapKey::Int(1));
         assert_eq!(
@@ -403,14 +417,36 @@ mod tests {
             map_key_order(&key(1, -1), &key(1, 0), Some(&slots)),
             Ordering::Less
         );
+        // A NESTED packed struct descends into its own slot hint rather than falling back to the
+        // derived `Ord` — the position a flat slot walk misses.
+        let nested = |at: i64| {
+            MapKey::packed(
+                "Outer",
+                vec![PackedKeyField::Struct(
+                    "Inner".into(),
+                    vec![PackedKeyField::Int(at)].into_boxed_slice(),
+                )],
+            )
+        };
+        let outer = RenderHint::Slots(vec![(
+            0,
+            RenderHint::Slots(vec![(0, RenderHint::Unsigned)]),
+        )]);
+        assert_eq!(
+            map_key_order(&nested(-1), &nested(1), Some(&outer)),
+            Ordering::Greater
+        );
+        assert_eq!(map_key_order(&nested(-1), &nested(1), None), Ordering::Less);
     }
 
-    /// Only an integer key is reinterpreted; every other key renders through `MapKey::render`,
-    /// hint or no hint.
+    /// An integer key and a `@packed` struct key are the two kinds holding an erased word, so they
+    /// are the two a hint reaches; every other key renders through `MapKey::render`, hint or no
+    /// hint. The packed arm reads the same slot numbering `map_key_order`'s does, at every depth.
     #[test]
-    fn only_an_integer_map_key_takes_the_hint() {
-        let int_key = noeta_ext_abi::MapKey::Int(-1);
-        let str_key = noeta_ext_abi::MapKey::Str("a".into());
+    fn an_integer_and_a_packed_map_key_take_the_hint() {
+        use crate::{MapKey, PackedKeyField};
+        let int_key = MapKey::Int(-1);
+        let str_key = MapKey::Str("a".into());
         assert_eq!(
             map_key_display(&int_key, Some(&RenderHint::Unsigned)),
             "18446744073709551615"
@@ -420,11 +456,38 @@ mod tests {
             map_key_display(&str_key, Some(&RenderHint::Unsigned)),
             str_key.render()
         );
+        // A packed key: slot 0 hinted unsigned, slot 1 left signed — and unhinted it is `render()`.
+        let packed = MapKey::packed(
+            "HintedTick",
+            vec![PackedKeyField::Int(-1), PackedKeyField::Int(-1)],
+        );
+        let slots = RenderHint::Slots(vec![(0, RenderHint::Unsigned)]);
+        assert_eq!(
+            map_key_display(&packed, Some(&slots)),
+            "HintedTick {18446744073709551615, -1}"
+        );
+        assert_eq!(map_key_display(&packed, None), packed.render());
+        // A nested packed struct takes the nested hint at its slot.
+        let outer = MapKey::packed(
+            "HintedOuter",
+            vec![PackedKeyField::Struct(
+                "HintedInner".into(),
+                vec![PackedKeyField::Int(-1)].into_boxed_slice(),
+            )],
+        );
+        let outer_hint = RenderHint::Slots(vec![(
+            0,
+            RenderHint::Slots(vec![(0, RenderHint::Unsigned)]),
+        )]);
+        assert_eq!(
+            map_key_display(&outer, Some(&outer_hint)),
+            "HintedOuter {HintedInner {18446744073709551615}}"
+        );
     }
 
     // --- the hinted JSON walk -------------------------------------------------------------------
 
-    use noeta_ext_abi::{NativeValue, Scalar};
+    use crate::{NativeValue, Scalar};
 
     fn int(word: i64) -> NativeValue {
         NativeValue::Scalar(Scalar::Int(word))
@@ -436,12 +499,12 @@ mod tests {
         let value = NativeValue::List(vec![int(-1), NativeValue::Str("a".into())]);
         assert_eq!(
             json_stringify(&value, None),
-            noeta_ext_abi::json_text::stringify(&value)
+            crate::json_text::stringify(&value)
         );
         // And so is a hint that describes a position this value does not occupy.
         assert_eq!(
             json_stringify(&value, Some(&RenderHint::Unsigned)),
-            noeta_ext_abi::json_text::stringify(&value)
+            crate::json_text::stringify(&value)
         );
     }
 

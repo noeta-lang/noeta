@@ -167,6 +167,12 @@ pub const VIEW_CTX_METHODS: &[ExtFn] = &[
     },
 ];
 
+/// `View.expose(name, handle)` binds a node this view serializes on every LATER flush tick, so the
+/// checker records the bound value's JSON hint at the call and the binding keeps it — the erased word
+/// of a `u64` past bit 63 has nothing left to say it is unsigned by the time a push happens.
+/// Parameter 1 is the handle; the value is its type argument.
+pub const VIEW_PUSH_HINT_ARGS: &[(&str, u8)] = &[("expose", 1)];
+
 pub const SIGNAL_ARENA_GETTER: ArenaGetter = ("get", |e| signal_box(e).cell);
 pub const COMPUTED_ARENA_GETTER: ArenaGetter = ("get", |e| computed_box(e).memo);
 
@@ -434,6 +440,14 @@ struct ViewBinding {
     /// The serialization last pushed for this binding (set at expose/snapshot, updated by each
     /// emitting diff) — the baseline that makes a patch minimal by *value*, not just by node.
     last: String,
+    /// The **push hint** captured at `expose` (`NativeCtx::push_hint`): where in this binding's value
+    /// an erased i64 word is really a `u64`. `None` for the overwhelming majority of bindings.
+    ///
+    /// It has to live here rather than be read per push, because a push happens on a flush tick with
+    /// no call site in sight, and a fixed-width integer's signedness exists nowhere but the static
+    /// type at the site that bound it. Without it a `Signal<u64>` past bit 63 reaches the browser as
+    /// a negative number — a *data* error in a frame nothing downstream can second-guess.
+    hint: Option<noeta_ext_abi::RenderHint>,
 }
 
 // `ViewSource` (where a view binding reads its value — a signal cell or a computed body+memo) and
@@ -552,6 +566,7 @@ fn binding_value_json<C: NativeCtx + ?Sized>(
     ext: &ReactiveExt,
     node: NodeId,
     source: &ViewSource,
+    hint: Option<&noeta_ext_abi::RenderHint>,
 ) -> Result<Option<String>, CtxError> {
     if !ext.graph.is_live(node) {
         return Ok(None);
@@ -582,7 +597,23 @@ fn binding_value_json<C: NativeCtx + ?Sized>(
     };
     let value = ctx.view(slot)?;
     ctx.free(slot);
-    Ok(Some(crate::json::stringify(&value)))
+    // The hinted walk, which IS `crate::json::stringify` byte for byte without a hint — the same
+    // serializer every other JSON door reaches, so a frame and a `json.stringify` of the same value
+    // cannot disagree.
+    Ok(Some(noeta_ext_abi::json_stringify(&value, hint)))
+}
+
+/// One dirty binding's work item, copied out of the view under a transient borrow so serialization
+/// (which re-enters the backend) runs with no borrow held — everything `diff` needs about a binding
+/// that may have changed, including the push hint its frame is written under.
+struct DirtyBinding {
+    idx: usize,
+    name: String,
+    node: NodeId,
+    source: ViewSource,
+    /// The last serialization pushed for it, so a value-equal recompute pushes nothing.
+    last: String,
+    hint: Option<noeta_ext_abi::RenderHint>,
 }
 
 /// Render a frame: `{"type":<kind>,<field>:{"name":<json>,…}}` with entries sorted by name.
@@ -656,8 +687,11 @@ pub fn view_ctx_method_dispatch<C: NativeCtx + ?Sized>(
                 }
                 .into());
             };
+            // The push hint for the bound value, captured HERE and kept: every later push happens
+            // on a flush tick, where the static type that knows a `u64` from an `i64` is long gone.
+            let hint = ctx.push_hint();
             // Baseline now (may recompute a dirty computed — no view borrow is held yet).
-            let Some(json) = binding_value_json(ctx, ext, node, &source)? else {
+            let Some(json) = binding_value_json(ctx, ext, node, &source, hint.as_ref())? else {
                 return Err(StdError {
                     kind: ErrorKind::ArgType,
                     message: format!("view.expose: `{name}` is bound to a disposed handle"),
@@ -671,6 +705,7 @@ pub fn view_ctx_method_dispatch<C: NativeCtx + ?Sized>(
                 node,
                 source,
                 last: json,
+                hint,
             };
             if let Some(idx) = view.bindings.iter().position(|b| b.name == name) {
                 // Re-exposing a name replaces the binding and resets its baseline — the hot-swap
@@ -730,11 +765,12 @@ pub fn view_ctx_method_dispatch<C: NativeCtx + ?Sized>(
             let mut entries = std::collections::BTreeMap::new();
             let mut fresh: Vec<(usize, String)> = Vec::new();
             for (idx, name, node) in work {
-                let source = {
+                let (source, hint) = {
                     let views = ext.views.borrow();
-                    view_source_copy(&views[id].bindings[idx].source)
+                    let b = &views[id].bindings[idx];
+                    (view_source_copy(&b.source), b.hint.clone())
                 };
-                if let Some(json) = binding_value_json(ctx, ext, node, &source)? {
+                if let Some(json) = binding_value_json(ctx, ext, node, &source, hint.as_ref())? {
                     entries.insert(name, json.clone());
                     fresh.push((idx, json));
                 }
@@ -751,20 +787,21 @@ pub fn view_ctx_method_dispatch<C: NativeCtx + ?Sized>(
         }
         "diff" => {
             ctx_arity(method, args, 0)?;
-            let work: Vec<(usize, String, NodeId, ViewSource, String)> = {
+            let work: Vec<DirtyBinding> = {
                 let views = ext.views.borrow();
                 let view = &views[id];
                 view.dirty
                     .iter()
                     .map(|&idx| {
                         let b = &view.bindings[idx];
-                        (
+                        DirtyBinding {
                             idx,
-                            b.name.clone(),
-                            b.node,
-                            view_source_copy(&b.source),
-                            b.last.clone(),
-                        )
+                            name: b.name.clone(),
+                            node: b.node,
+                            source: view_source_copy(&b.source),
+                            last: b.last.clone(),
+                            hint: b.hint.clone(),
+                        }
                     })
                     .collect()
             };
@@ -785,8 +822,16 @@ pub fn view_ctx_method_dispatch<C: NativeCtx + ?Sized>(
             let mut entries = std::collections::BTreeMap::new();
             let mut fresh: Vec<(usize, Option<String>)> = Vec::new();
             let mut failure: Option<CtxError> = None;
-            for (idx, name, node, source, last) in work {
-                match binding_value_json(ctx, ext, node, &source) {
+            for DirtyBinding {
+                idx,
+                name,
+                node,
+                source,
+                last,
+                hint,
+            } in work
+            {
+                match binding_value_json(ctx, ext, node, &source, hint.as_ref()) {
                     Ok(Some(json)) if json != last => {
                         entries.insert(name, json.clone());
                         fresh.push((idx, Some(json)));

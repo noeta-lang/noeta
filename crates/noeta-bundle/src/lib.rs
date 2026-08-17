@@ -265,7 +265,16 @@ pub const MAGIC: &[u8; 4] = b"NOEB";
 /// branches two different layouts wore one number. That is precisely the failure this constant
 /// exists to prevent, and it is why the second to land takes 24 rather than keeping its own bump:
 /// a version number is a claim about a byte layout, and only one layout may ever hold a number.
-pub const FORMAT_VERSION: u8 = 24;
+///
+/// Bumped to 25 by the LAST position of that hint: the one with no serializing call to sit on.
+/// [`noeta_bytecode::Module`] gained `binding_hint_sites`, the span-keyed hints the VM hands a native
+/// dispatch that BINDS a value now and serializes it on a later tick — a LiveView binding, pushed
+/// afresh on every flush, where the call site that knew the value was a `u64` is long gone. postcard
+/// writes a struct's fields back to back with no tags, so a version-24 reader takes the new field's
+/// bytes as whatever follows it, silently and still well-formed — the same slide `order_hint_sites`
+/// caused at 24. It cannot be re-derived on the reading side for the reason every row above cannot:
+/// signedness lives only in the static type.
+pub const FORMAT_VERSION: u8 = 25;
 
 /// The SHA-256 of one canonical [`Module`]'s postcard encoding — the *other* half of
 /// [`FORMAT_VERSION`], and the thing that makes the changelog above enforceable.
@@ -289,7 +298,7 @@ pub const FORMAT_VERSION: u8 = 24;
 /// pair exists to prevent. The test's message says so; this doc says so; the changelog paragraph
 /// you are about to write is the third place.
 pub const MODULE_LAYOUT_DIGEST: &str =
-    "492966653de625f61b362d6ac58747a5eddc71dd58e2a91bb323c23c9fbdbd2d";
+    "b96416cfcbd552024aecdfd31473680f12909daa67c7d18ba322d606672fe83d";
 
 /// The runtime version stamped into and checked against artifacts — the building crate's
 /// package version. Any release that changes the serialized [`Module`] layout bumps this, so a

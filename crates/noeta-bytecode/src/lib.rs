@@ -1885,6 +1885,17 @@ pub struct Module {
     /// nearly every program has no entry here at all. The tree-walker reads the same hint off its
     /// IR node (`Rvalue::Method::order` / `Stmt::For::order`), so both engines order alike.
     pub order_hint_sites: Vec<(Span, noeta_ast::RenderHint)>,
+    /// **Deferred-serialization sites**: the span of a native call that BINDS a value it serializes
+    /// to JSON on some later tick (`view.expose(name, signal)`) → the
+    /// [`noeta_ast::RenderHint`] built from the bound value's static type. The VM looks the site up
+    /// by span while building the call's ctx, and the dispatch reads it as `NativeCtx::push_hint` —
+    /// so a method that stores a value can store its hint too, and serialize under it long after the
+    /// call site that knew the value's width is gone.
+    ///
+    /// A side table for the same reason [`Module::order_hint_sites`] is one, and read by the same
+    /// lookup. The tree-walker reads the same hint off its IR node (`Rvalue::Method::push`), so both
+    /// engines push identical bytes.
+    pub binding_hint_sites: Vec<(Span, noeta_ast::RenderHint)>,
     pub methods: Vec<MethodEntry>,
     /// `(type_name, proto)` for each class with a `destruct` block — the runtime-invoked
     /// destructor, compiled like a parameterless method (receiver in register 0). The VM runs

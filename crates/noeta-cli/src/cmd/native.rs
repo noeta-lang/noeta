@@ -538,8 +538,13 @@ pub(crate) fn link_native(
 mod tests {
     #[allow(unused_imports)]
     use super::*;
+    // Only the `jit`-gated AOT tests below parse a program; a Cranelift-free build compiles none of
+    // them, and an ungated import would be dead there.
+    #[cfg(feature = "jit")]
     use noeta_lexer::lex;
+    #[cfg(feature = "jit")]
     use noeta_parser::parse;
+    #[cfg(feature = "jit")]
     use noeta_span::{Source, SourceId};
 
     /// A one-proto module whose const pool + code carry the given entries, with `names` as the op
@@ -559,6 +564,7 @@ mod tests {
             packed_schemas: Vec::new(),
             map_packed_sites: Vec::new(),
             order_hint_sites: Vec::new(),
+            binding_hint_sites: Vec::new(),
             methods: Vec::new(),
             destructors: Vec::new(),
             field_defaults: Vec::new(),

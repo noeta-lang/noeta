@@ -1148,6 +1148,20 @@ pub struct ExtType {
     /// extern-type analogue of [`ExtModule::docs`]. Opt-in and sparse; keyed by name so it covers
     /// [`ExtType::methods`], [`ExtType::ctx_methods`], and [`ExtType::typed_methods`].
     pub docs: &'static [(&'static str, &'static str)],
+    /// **Deferred-serialization declarations**: `(method_name, parameter_index)` pairs naming an
+    /// argument this type *keeps* and serializes to JSON on some later tick rather than at the call.
+    /// The checker records the argument's [`crate::RenderHint`] at that call span and both backends
+    /// deliver it as [`crate::NativeCtx::push_hint`], so the method can store it beside the value and
+    /// serialize under it forever after.
+    ///
+    /// It exists because signedness is the one thing a value cannot carry: a `u64` past bit 63 is a
+    /// negative i64 word, the width lives only in the static type, and a serialization that happens
+    /// on a flush tick has no call site left to read one from. `std.reactive`'s `View.expose` is the
+    /// door — a LiveView binding, re-serialized on every push — and declaring it here rather than
+    /// naming the method in the checker keeps the front end from knowing anything about `std`.
+    ///
+    /// Opt-in and sparse; default empty, which is every other type.
+    pub push_hint_args: &'static [(&'static str, u8)],
 }
 
 impl ExtType {
@@ -1172,6 +1186,7 @@ impl ExtType {
         typed_methods: &[],
         typed_dispatch: None,
         docs: &[],
+        push_hint_args: &[],
     };
 }
 

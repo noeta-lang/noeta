@@ -479,6 +479,7 @@ const TABLE_POLICIES: &[(&str, Policy, &str)] = &[
     ("type_arg_reprs", Policy::MergeByContent, "absorb_type_args, in lockstep with type_args"),
     ("structural_eq_types", Policy::Append, "register_types"),
     ("order_hint_sites", Policy::MergeByKey, "lowering — one entry per ordering site, keyed by span"),
+    ("binding_hint_sites", Policy::MergeByKey, "lowering — one entry per deferred-serialization site, keyed by span"),
     ("transient_slots", Policy::MergeByKey, "register_types"),
     ("unsigned_slots", Policy::MergeByKey, "register_types"),
     ("transient_names", Policy::Append, "register_types — a later entry's `use` adds spellings, never retracts one"),
@@ -590,6 +591,7 @@ impl SessionCompiler {
             transient_slots: HashMap::new(),
             unsigned_slots: HashMap::new(),
             order_hint_sites: Vec::new(),
+            binding_hint_sites: Vec::new(),
             transient_names: HashSet::new(),
             native_type_names: HashMap::new(),
             packed_fields: HashMap::new(),
@@ -1032,6 +1034,7 @@ impl SessionCompiler {
             // function looks its `map(...)` call span up at run time (session-checker C5).
             map_packed_sites: self.map_packed,
             order_hint_sites: self.mc.order_hint_sites,
+            binding_hint_sites: self.mc.binding_hint_sites,
             methods: self.mc.methods,
             destructors: self.mc.destructors,
             field_defaults: self.mc.field_defaults,
@@ -1206,6 +1209,11 @@ struct ModuleCompiler {
     /// span → the [`noeta_ast::RenderHint`] the VM reads there. Baked into
     /// [`Module::order_hint_sites`]; empty for a program with no `u64` in an ordered position.
     order_hint_sites: Vec<(Span, noeta_ast::RenderHint)>,
+    /// Deferred-serialization sites, in emission order: the span of a native call that BINDS a value
+    /// it serializes on a later tick → the [`noeta_ast::RenderHint`] the VM hands the dispatch there.
+    /// Baked into [`Module::binding_hint_sites`]; empty for a program with no `u64` in a bound
+    /// position.
+    binding_hint_sites: Vec<(Span, noeta_ast::RenderHint)>,
     /// The spellings this program may write the transient marker as, resolved once from its `use`
     /// statements — see [`Self::transient_slots`].
     transient_names: HashSet<String>,
@@ -1404,6 +1412,15 @@ impl ModuleCompiler {
     fn record_order_hint(&mut self, span: Span, hint: &noeta_ast::RenderHint) {
         if !self.order_hint_sites.iter().any(|(s, _)| *s == span) {
             self.order_hint_sites.push((span, hint.clone()));
+        }
+    }
+
+    /// Record the push hint a deferred-serialization site carries, so the VM can look it up by span
+    /// when it builds the native call's ctx. The deferred twin of [`Self::record_order_hint`], and
+    /// idempotent per span for the same reason.
+    fn record_binding_hint(&mut self, span: Span, hint: &noeta_ast::RenderHint) {
+        if !self.binding_hint_sites.iter().any(|(s, _)| *s == span) {
+            self.binding_hint_sites.push((span, hint.clone()));
         }
     }
 
@@ -3813,6 +3830,7 @@ impl<'m> FnCompiler<'m> {
                 span,
                 supplied,
                 order,
+                push,
                 name_span: _,
             } => {
                 // A method whose result reveals an order the program can see, on a `u64`-carrying
@@ -3820,6 +3838,12 @@ impl<'m> FnCompiler<'m> {
                 // the op, which stays the size it is on the hot dispatch path.
                 if let Some(hint) = order {
                     self.module.record_order_hint(*span, hint);
+                }
+                // A native call that BINDS a value it serializes on a later tick: the hint travels on
+                // the same span-keyed side table, for the same reason — the ctx the dispatch runs
+                // under reads it there, so `Op::CallMethod` carries nothing extra.
+                if let Some(hint) = push {
+                    self.module.record_binding_hint(*span, hint);
                 }
                 // A generic enum-variant construction carries its reflected type (R2b.2); intern it so
                 // the `MakeEnum` op can stamp it. `None` for an ordinary method call.

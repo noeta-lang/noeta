@@ -68,6 +68,16 @@ impl<'m> Vm<'m> {
         self.order_hints.get(span)
     }
 
+    /// The push hint recorded at `span` — the deferred twin of [`Vm::order_hint`], read once when a
+    /// native call that BINDS a value for later serialization builds its ctx. Same `is_empty`
+    /// short-circuit, for the same reason: nearly every program has no entry at all.
+    pub(crate) fn binding_hint(&self, span: &Span) -> Option<&noeta_ast::RenderHint> {
+        if self.binding_hints.is_empty() {
+            return None;
+        }
+        self.binding_hints.get(span)
+    }
+
     /// A Ring 1 list method (`reverse`/`contains`/`join`). Mirrors the tree-walker's
     /// `call_list_method`; the result is a freshly-owned value (refcount 1). The receiver's
     /// elements shared from `list_items` are not retained, so any element placed into a *new*

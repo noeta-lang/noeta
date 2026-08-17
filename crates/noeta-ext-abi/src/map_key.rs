@@ -71,6 +71,7 @@ pub mod packed_names {
     use std::sync::{Mutex, OnceLock};
 
     use super::PackedKeyField;
+    use crate::RenderHint;
 
     type Names = std::sync::Arc<[compact_str::CompactString]>;
 
@@ -95,13 +96,30 @@ pub mod packed_names {
     /// The display form of a packed key — the struct's own display (`Cell {x: 3, y: 4}`), derived
     /// from the registered names; positional (`Cell {3, 4}`) only for an unregistered type.
     pub fn display(type_name: &str, fields: &[PackedKeyField]) -> String {
+        display_hinted(type_name, fields, None)
+    }
+
+    /// [`display`], with the slots the caller's [`RenderHint`] marks unsigned written as the `u64`
+    /// they stand for. A packed key holds only the erased i64 words, so nothing in it distinguishes
+    /// a `u64` field from an `i64` one — the signedness lives in the static type at the door, and
+    /// this is where a rendered map's keys read it. `None` is [`display`] exactly.
+    ///
+    /// The hint is the packed struct's own [`RenderHint::Slots`], numbered by declared field, and a
+    /// nested packed struct takes the nested hint at its slot — the display twin of
+    /// [`crate::map_key_order`]'s packed arm, and the same numbering, so a map's rendered keys and
+    /// its key order cannot disagree about which field is unsigned.
+    pub fn display_hinted(
+        type_name: &str,
+        fields: &[PackedKeyField],
+        hint: Option<&RenderHint>,
+    ) -> String {
         let names = registry()
             .lock()
             .expect("packed-name registry poisoned")
             .get(type_name)
             .cloned();
         let mut out = String::with_capacity(16 + 12 * fields.len());
-        write_struct(&mut out, type_name, fields, names.as_deref());
+        write_struct(&mut out, type_name, fields, names.as_deref(), hint);
         out
     }
 
@@ -110,6 +128,7 @@ pub mod packed_names {
         type_name: &str,
         fields: &[PackedKeyField],
         names: Option<&[compact_str::CompactString]>,
+        hint: Option<&RenderHint>,
     ) {
         use std::fmt::Write as _;
         out.push_str(type_name);
@@ -121,9 +140,15 @@ pub mod packed_names {
             if let Some(name) = names.and_then(|n| n.get(i)) {
                 let _ = write!(out, "{name}: ");
             }
+            let slot = hint.and_then(|h| h.slot(i as u32));
             match f {
                 PackedKeyField::Int(v) => {
-                    let _ = write!(out, "{v}");
+                    // The one reinterpretation, from the one place that spells it.
+                    if matches!(slot, Some(RenderHint::Unsigned)) {
+                        out.push_str(&crate::unsigned_digits(*v));
+                    } else {
+                        let _ = write!(out, "{v}");
+                    }
                 }
                 PackedKeyField::Bool(b) => {
                     let _ = write!(out, "{b}");
@@ -134,7 +159,7 @@ pub mod packed_names {
                         .expect("packed-name registry poisoned")
                         .get(nested_name.as_str())
                         .cloned();
-                    write_struct(out, nested_name, nested, nested_names.as_deref());
+                    write_struct(out, nested_name, nested, nested_names.as_deref(), slot);
                 }
             }
         }

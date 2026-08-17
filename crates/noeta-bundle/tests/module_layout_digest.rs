@@ -1037,6 +1037,12 @@ fn canonical_module() -> Module {
                 value: None,
             },
         )],
+        // A deferred-serialization site: the span a `view.expose` reads the bound value's hint at.
+        // Structurally nested for the same reason as the row above.
+        binding_hint_sites: vec![(
+            span(106),
+            noeta_ast::RenderHint::Slots(vec![(1, noeta_ast::RenderHint::Unsigned)]),
+        )],
         methods: vec![MethodEntry {
             type_name: "app.Order".to_string(),
             method: "total".to_string(),

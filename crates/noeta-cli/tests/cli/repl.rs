@@ -51,3 +51,46 @@ fn repl_recovers_from_a_bad_entry() {
         .stdout(predicate::str::contains("ok"))
         .stderr(predicate::str::contains("E0003"));
 }
+
+#[test]
+fn repl_echoes_a_u64_past_bit_63_unsigned() {
+    // The echo is a display door, and the only one the program does not contain: the host renders
+    // the entry's trailing bare expression. A fixed-width integer is erased to its i64 word, so
+    // `u64::MAX` is the word `-1` and the echo showed that until the checker started marking the
+    // door. No `echo` anywhere here — the digits can only come from the echo path itself.
+    //
+    // The echo is STRUCTURAL (a type's own `Display` has no part in it), so a `u64` field renders
+    // unsigned inside the object too, and so does a nested position. `-1i64` is the control: the
+    // erased word IS an `i64`'s value, and it must still print as one.
+    lang()
+        .arg("repl")
+        .write_stdin(
+            "x: u64 = 18446744073709551615u64\nx\nstruct Gauge { v: u64 }\n\
+             Gauge { v: x }\n[x, 1u64]\n-1i64\n",
+        )
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("18446744073709551615")
+                .and(predicate::str::contains("Gauge {v: 18446744073709551615}"))
+                .and(predicate::str::contains("[18446744073709551615, 1]"))
+                .and(predicate::str::contains("-1")),
+        );
+}
+
+#[test]
+fn an_unchecked_repl_echoes_the_erased_word() {
+    // `--no-check` runs no checker, so no entry has a static type at all — and signedness lives
+    // nowhere else. The echo then shows the 64-bit word, exactly as a value laundered through `dyn`
+    // does. Pinned so the fallback is a stated rule rather than something that drifts unnoticed.
+    lang()
+        .arg("repl")
+        .arg("--no-check")
+        .write_stdin("x: u64 = 18446744073709551615u64\nx\n")
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("-1")
+                .and(predicate::str::contains("18446744073709551615").not()),
+        );
+}

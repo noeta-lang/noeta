@@ -180,6 +180,9 @@ pub struct LoweringSites<'a> {
     /// [`Rvalue::Method::order`] / [`Stmt::For::order`] so both backends read those erased words
     /// unsigned when producing the order a program sees — the ordering twin of `render_hint_sites`.
     pub order_hint_sites: &'a HashMap<Span, noeta_ast::RenderHint>,
+    /// Deferred-serialization sites: the span of a native call that BINDS a value it serializes on a
+    /// later tick → the [`noeta_ast::RenderHint`] built from the bound value's static type.
+    pub binding_hint_sites: &'a HashMap<Span, noeta_ast::RenderHint>,
     /// `Expr::TypeTest` spans the checker answered statically → the answer. The test lowers to that
     /// constant (the scrutinee still evaluated, for its effects) instead of an [`Rvalue::TypeTest`],
     /// so no runtime matcher is consulted for a question it cannot answer. See
@@ -313,6 +316,7 @@ impl LoweringSites<'static> {
             render_hint_sites: HINTS.get_or_init(HashMap::new),
             json_hint_sites: HINTS.get_or_init(HashMap::new),
             order_hint_sites: HINTS.get_or_init(HashMap::new),
+            binding_hint_sites: HINTS.get_or_init(HashMap::new),
             folded_type_tests: FOLDED.get_or_init(HashMap::new),
             construction_sites: REPRS.get_or_init(HashMap::new),
             inferred_object_types: NAMES.get_or_init(HashMap::new),
@@ -364,6 +368,7 @@ macro_rules! lowering_sites {
             render_hint_sites: &$s.render_hint_sites,
             json_hint_sites: &$s.json_hint_sites,
             order_hint_sites: &$s.order_hint_sites,
+            binding_hint_sites: &$s.binding_hint_sites,
             folded_type_tests: &$s.folded_type_tests,
             construction_sites: &$s.construction_sites,
             inferred_object_types: &$s.inferred_object_types,
@@ -2498,6 +2503,15 @@ impl Lowerer<'_> {
             .map(|h| std::rc::Rc::new(h.clone()))
     }
 
+    /// The push hint the checker recorded at `span` (`binding_hint_sites`) — the deferred twin of
+    /// [`Self::order_hint`], shared as an `Rc` for the same reason.
+    fn push_hint(&self, span: &Span) -> Option<std::rc::Rc<noeta_ast::RenderHint>> {
+        self.sites
+            .binding_hint_sites
+            .get(span)
+            .map(|h| std::rc::Rc::new(h.clone()))
+    }
+
     fn lower_expr_unrendered(
         &mut self,
         expr: &Expr,
@@ -3078,6 +3092,7 @@ impl Lowerer<'_> {
                             type_args,
                             supplied,
                             order: self.order_hint(span),
+                            push: self.push_hint(span),
                             span: *span,
                         },
                         *span,
@@ -3795,6 +3810,7 @@ impl Lowerer<'_> {
                             type_args,
                             supplied,
                             order: self.order_hint(span),
+                            push: self.push_hint(span),
                             span: *span,
                         },
                         *span,
@@ -3842,6 +3858,7 @@ impl Lowerer<'_> {
                         reflect,
                         reflect_slot,
                         order: self.order_hint(span),
+                        push: self.push_hint(span),
                         type_args,
                         // A bare callee takes the piped value and nothing else, so there is no
                         // argument list to rebind.

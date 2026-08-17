@@ -311,6 +311,12 @@ jobs:
         run: >
           cargo clippy -p noeta-vm -p noeta-jit -p noeta-conformance -p noeta-cli
           --features "noeta-vm/jit noeta-conformance/jit" --all-targets --locked -- -D warnings
+      # The THIRD shape: the Cranelift-free CLI. `noeta-cli`'s `jit` feature gates the whole
+      # `build --native` flow, so a `--no-default-features` build compiles items nothing reaches —
+      # dead code the two steps above structurally cannot see, since each builds `noeta-cli` with
+      # the feature on. Seven such warnings once shipped under exactly that blind spot.
+      - name: Clippy (lean CLI, --no-default-features)
+        run: cargo clippy -p noeta-cli --no-default-features --all-targets --locked -- -D warnings
 
   wasm:
     name: WASM portability (wasm32-wasip1 check)

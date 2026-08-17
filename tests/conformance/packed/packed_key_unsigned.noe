@@ -1,0 +1,108 @@
+// A `@packed` struct keys a map by CONTENT, and its fields are flat words — so a `u64` field is the
+// same word an `i64` field would be, and rendering a key had to be told which slots to read
+// unsigned. The key's own order is untouched: it is an IDENTITY order, built at one insert and
+// probed at the next, so it stays a pure function of the erased words and every key is still found.
+// What the hint reaches is the order and the digits a program SEES — a rendered map, `keys()`,
+// `values()`, and iteration over either — and it reaches them at any depth, so a packed key nesting
+// a packed struct reads unsigned too.
+//
+// The negative half is at the bottom: a packed key with no `u64` under it carries no hint at all and
+// renders exactly as it always did, and a map laundered through `dyn` has no static type left at the
+// door, so it renders the erased words in the identity order. Both pin that a hint reaches only what
+// the checker put in it.
+// expect: stdout "{Tick {at: 1, lane: 0}: "one", Tick {at: 9223372036854775807, lane: 0}: "top", Tick {at: 9223372036854775808, lane: 0}: "mid", Tick {at: 18446744073709551615, lane: 0}: "big"}"
+// expect: stdout "[Tick {at: 1, lane: 0}, Tick {at: 9223372036854775807, lane: 0}, Tick {at: 9223372036854775808, lane: 0}, Tick {at: 18446744073709551615, lane: 0}]"
+// expect: stdout "["one", "top", "mid", "big"]"
+// expect: stdout "Tick {at: 1, lane: 0}"
+// expect: stdout "Tick {at: 9223372036854775807, lane: 0}"
+// expect: stdout "Tick {at: 9223372036854775808, lane: 0}"
+// expect: stdout "Tick {at: 18446744073709551615, lane: 0}"
+// expect: stdout "one"
+// expect: stdout "top"
+// expect: stdout "mid"
+// expect: stdout "big"
+// expect: stdout "big"
+// expect: stdout "mid"
+// expect: stdout "true"
+// expect: stdout "top"
+// expect: stdout "4"
+// expect: stdout "3"
+// expect: stdout "false"
+// expect: stdout "{Bucket {t: Tick {at: 1, lane: 0}, n: 2}: 2, Bucket {t: Tick {at: 18446744073709551615, lane: 0}, n: 1}: 1}"
+// expect: stdout "[Bucket {t: Tick {at: 1, lane: 0}, n: 2}, Bucket {t: Tick {at: 18446744073709551615, lane: 0}, n: 1}]"
+// expect: stdout "1"
+// expect: stdout "{Tick {at: 1, lane: 0}, Tick {at: 18446744073709551615, lane: 0}}"
+// expect: stdout "true"
+// expect: stdout "{Plain {a: -1, b: 4294967295, f: true}: 1}"
+// expect: stdout "{Tick {at: -9223372036854775808, lane: 0}: "mid", Tick {at: -1, lane: 0}: "big", Tick {at: 1, lane: 0}: "one", Tick {at: 9223372036854775807, lane: 0}: "top"}"
+// expect: exit 0
+
+@packed struct Tick { at: u64; lane: int }
+@packed struct Bucket { t: Tick; n: int }
+
+// The control type: no `u64` anywhere, so no hint exists for it at all.
+@packed struct Plain { a: int; b: u32; f: bool }
+
+// The three boundaries: the largest value an i64 also holds, the first one it does not, and the top.
+top: u64 = 9223372036854775807u64
+mid: u64 = 9223372036854775808u64
+big: u64 = 18446744073709551615u64
+one: u64 = 1u64
+
+mut m: Map<Tick, string> = {}
+m[Tick { at: big, lane: 0 }] = "big"
+m[Tick { at: one, lane: 0 }] = "one"
+m[Tick { at: mid, lane: 0 }] = "mid"
+m[Tick { at: top, lane: 0 }] = "top"
+
+// The rendered map, `keys()` and `values()` all agree — the whole point, since a rendered key that
+// disagreed with the same key out of `keys()` is what a flat-word render produced.
+echo m
+echo m.keys()
+echo m.values()
+for k in m.keys() {
+    echo k
+}
+for v in m {
+    echo v
+}
+
+// The identity order is what makes these work, and it never saw the hint: a key past bit 63 is found
+// again through the index, `has`, `get_or` and `remove`.
+echo m[Tick { at: big, lane: 0 }]
+echo m[Tick { at: mid, lane: 0 }]
+echo m.has(Tick { at: mid, lane: 0 })
+echo m.get_or(Tick { at: top, lane: 0 }, "?")
+echo m.len()
+m = m.remove(Tick { at: big, lane: 0 })
+echo m.len()
+echo m.has(Tick { at: big, lane: 0 })
+
+// A packed key nesting a packed struct: the nested slot takes the nested hint, for the digits and
+// for the order.
+mut b: Map<Bucket, int> = {}
+b[Bucket { t: Tick { at: big, lane: 0 }, n: 1 }] = 1
+b[Bucket { t: Tick { at: one, lane: 0 }, n: 2 }] = 2
+echo b
+echo b.keys()
+echo b[Bucket { t: Tick { at: big, lane: 0 }, n: 1 }]
+
+// A packed struct in a SET is the same key, reached through the same walk.
+echo [Tick { at: big, lane: 0 }, Tick { at: one, lane: 0 }].to_set()
+echo [Tick { at: big, lane: 0 }, Tick { at: one, lane: 0 }].to_set().contains(Tick { at: big, lane: 0 })
+
+// Negative half. A packed key with no `u64` under it produces no hint, so nothing about it changes —
+// including the `u32` field, which fits an i64 with room to spare.
+mut p: Map<Plain, int> = {}
+p[Plain { a: -1, b: 4294967295u32, f: true }] = 1
+echo p
+
+// Laundered through `dyn` there is no static type at the door and so no hint: the erased words, in
+// the identity order they are stored under.
+mut all: Map<Tick, string> = {}
+all[Tick { at: big, lane: 0 }] = "big"
+all[Tick { at: one, lane: 0 }] = "one"
+all[Tick { at: mid, lane: 0 }] = "mid"
+all[Tick { at: top, lane: 0 }] = "top"
+laundered: dyn = all
+echo laundered
