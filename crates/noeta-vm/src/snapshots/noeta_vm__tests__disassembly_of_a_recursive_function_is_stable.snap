@@ -1,6 +1,5 @@
 ---
-source: crates/noeta-vm/src/lib.rs
-assertion_line: 7028
+source: crates/noeta-vm/src/tests.rs
 expression: module.disassemble()
 ---
 === main ===
@@ -29,10 +28,12 @@ code:
     4  LoadConst   r2 <- k1
     5  Binary      r1 <- r0 - r2
     6  CallGlobal  r2 <- "fib"(r1)
-    7  LoadConst   r3 <- k2
-    8  Binary      r1 <- r0 - r3
-    9  Drop        r0
-   10  CallGlobal  r0 <- "fib"(r1)
-   11  Binary      r1 <- r2 + r0
-   12  Return      r1
-   13  Halt
+    7  Drop        r1 ~destruct
+    8  LoadConst   r3 <- k2
+    9  Binary      r1 <- r0 - r3
+   10  Drop        r0
+   11  CallGlobal  r0 <- "fib"(r1)
+   12  Drop        r1 ~destruct
+   13  Binary      r1 <- r2 + r0
+   14  Return      r1
+   15  Halt

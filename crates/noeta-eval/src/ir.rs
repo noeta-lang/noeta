@@ -71,6 +71,28 @@ fn is_temp(atom: &noeta_ir::Atom) -> bool {
     matches!(atom, noeta_ir::Atom::Temp(_))
 }
 
+/// The owned temporaries among a call's evaluated arguments, cloned so they can be destroyed after
+/// the call — the argument twin of the temp-receiver rule above, and the mirror of the bytecode
+/// backend's `drop_temp_args`.
+///
+/// Noeta is call-by-value, so `held.get_or("k", Res.new("d"))` builds the default whichever branch
+/// the callee takes; on the branch that discards it, nothing else ever owns that object. The call
+/// consumes `values`, so a copy is held across it and destroyed afterward — last-reference-gated, so
+/// an argument the callee *kept* (stored in a collection, or handed back as the result) correctly
+/// defers destruction to its real last owner. Returned in **reverse argument order** (reverse
+/// construction, spec §3), which is the order the VM emits its drops in.
+fn temp_arg_copies(args: &[noeta_ir::Atom], values: &[Value]) -> Vec<Value> {
+    if !args.iter().any(is_temp) {
+        return Vec::new();
+    }
+    args.iter()
+        .zip(values)
+        .rev()
+        .filter(|(atom, _)| is_temp(atom))
+        .map(|(_, value)| value.clone())
+        .collect()
+}
+
 /// Stamp a construction's reflected type onto the freshly-built value at a **method-call** site, so
 /// `type_of` recovers its type arguments after a `dyn` launder. Two producers, one field:
 ///
@@ -221,6 +243,24 @@ impl IrRefBackend {
 }
 
 impl Interpreter {
+    /// Destroy the argument-temporary copies [`temp_arg_copies`] held across a call, in the order it
+    /// collected them (reverse construction). Each destruction is last-reference-gated, so an
+    /// argument the callee kept is left to its real owner.
+    ///
+    /// Skipped when the call **aborted**: a panic or a `?` propagation unwinds past the point where
+    /// the bytecode backend's post-call drop sits, so it never runs there — and the two backends have
+    /// to agree on a panicking program. What the unwind *does* reclaim on both sides is each frame's
+    /// named locals (`panic_unwind.noe`); an unnamed temporary's destructor is not part of that
+    /// contract, and its memory comes back through the teardown backstop either way.
+    fn destroy_temp_args(&mut self, temps: Vec<Value>, aborted: bool) {
+        if aborted {
+            return;
+        }
+        for value in temps {
+            self.destroy_value(value);
+        }
+    }
+
     /// Execute a lowered program — the whole-program entry point: build the reflection manifest,
     /// run the top-level statements in the global scope, then destroy the global bindings in reverse
     /// declaration order.
@@ -1563,7 +1603,10 @@ impl Interpreter {
                 let callee = self.eval_ir_atom(callee, frame)?;
                 let tys = self.eval_ir_atoms(type_args, frame)?;
                 let values = self.eval_ir_atoms(args, frame)?;
-                self.call_masked(callee, values, *span, &tys, *supplied)
+                let temps = temp_arg_copies(args, &values);
+                let result = self.call_masked(callee, values, *span, &tys, *supplied);
+                self.destroy_temp_args(temps, result.is_err());
+                result
             }
             noeta_ir::Rvalue::Method {
                 receiver,
@@ -1599,39 +1642,47 @@ impl Interpreter {
                 {
                     let tys = self.eval_ir_atoms(type_args, frame)?;
                     let values = self.eval_ir_atoms(args, frame)?;
+                    let temps = temp_arg_copies(args, &values);
                     let recv = match self.scope.take_mut(recv_name) {
                         Some(v) => v,
                         None => self.eval_ir_atom(receiver, frame)?,
                     };
-                    if matches!(&recv, Value::Map(..)) {
-                        if name == "set" && values.len() == 2 {
-                            return self.map_set_in_place(recv, values, *span);
-                        }
-                        if name == "remove" && values.len() == 1 {
-                            return self.map_remove_in_place(recv, values, *span);
-                        }
-                    }
-                    if matches!(&recv, Value::List(_)) && name == "set" && values.len() == 2 {
-                        return self.list_set_in_place(recv, values, *span);
-                    }
-                    if matches!(&recv, Value::Set(..)) && values.len() == 1 {
-                        if name == "add" {
-                            return self.set_add_in_place(recv, values, *span);
-                        }
-                        if name == "remove" {
-                            return self.set_remove_in_place(recv, values, *span);
-                        }
-                    }
-                    // The non-collection fall-through — a user method that happens to be named
-                    // `set`/`add`/`remove` — is an ordinary consuming call, so it must carry both
-                    // channels: the VM's reuse arm gates on the runtime receiver KIND and reaches
-                    // its ordinary dispatch with them intact, and reuse is supposed to be
-                    // observationally invisible.
-                    return self.call_method_masked(recv, name, values, *span, &tys, *supplied);
+                    let result = if matches!(&recv, Value::Map(..))
+                        && name == "set"
+                        && values.len() == 2
+                    {
+                        self.map_set_in_place(recv, values, *span)
+                    } else if matches!(&recv, Value::Map(..))
+                        && name == "remove"
+                        && values.len() == 1
+                    {
+                        self.map_remove_in_place(recv, values, *span)
+                    } else if matches!(&recv, Value::List(_)) && name == "set" && values.len() == 2
+                    {
+                        self.list_set_in_place(recv, values, *span)
+                    } else if matches!(&recv, Value::Set(..)) && values.len() == 1 && name == "add"
+                    {
+                        self.set_add_in_place(recv, values, *span)
+                    } else if matches!(&recv, Value::Set(..))
+                        && values.len() == 1
+                        && name == "remove"
+                    {
+                        self.set_remove_in_place(recv, values, *span)
+                    } else {
+                        // The non-collection fall-through — a user method that happens to be named
+                        // `set`/`add`/`remove` — is an ordinary consuming call, so it must carry both
+                        // channels: the VM's reuse arm gates on the runtime receiver KIND and reaches
+                        // its ordinary dispatch with them intact, and reuse is supposed to be
+                        // observationally invisible.
+                        self.call_method_masked(recv, name, values, *span, &tys, *supplied)
+                    };
+                    self.destroy_temp_args(temps, result.is_err());
+                    return result;
                 }
                 let recv = self.eval_ir_atom(receiver, frame)?;
                 let tys = self.eval_ir_atoms(type_args, frame)?;
                 let values = self.eval_ir_atoms(args, frame)?;
+                let temps = temp_arg_copies(args, &values);
                 let result = if is_temp(receiver) {
                     // An owned temp receiver (`Resource.new().use()`): fire its destructor after the
                     // call (Phase 4.4). `call_method` consumes the receiver, so clone for the call
@@ -1639,10 +1690,16 @@ impl Interpreter {
                     // `self` (the result aliases it) correctly defers destruction.
                     let result =
                         self.call_method_masked(recv.clone(), name, values, *span, &tys, *supplied);
+                    // Reverse construction: the argument temporaries were built after the receiver,
+                    // so they are reclaimed first (and the VM's drops are emitted in that order).
+                    self.destroy_temp_args(temps, result.is_err());
                     self.destroy_value(recv);
                     result
                 } else {
-                    self.call_method_masked(recv, name, values, *span, &tys, *supplied)
+                    let result =
+                        self.call_method_masked(recv, name, values, *span, &tys, *supplied);
+                    self.destroy_temp_args(temps, result.is_err());
+                    result
                 };
                 // When this "method call" was a generic enum-variant construction, stamp the reflected
                 // type onto the freshly-built value (R2b.2) — the tree-walker twin of the VM's node tag.

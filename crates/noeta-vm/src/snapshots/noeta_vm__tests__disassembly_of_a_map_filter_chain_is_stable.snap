@@ -1,5 +1,5 @@
 ---
-source: crates/noeta-vm/src/lib.rs
+source: crates/noeta-vm/src/tests.rs
 expression: module.disassemble()
 ---
 === main ===
@@ -17,15 +17,17 @@ code:
     4  MakeList    r0 <- [r1, r2, r3, r4]  ; reflect #0
     5  MakeClosure r1 <- proto 1 [0 captures]
     6  CallMethod  r2 <- r0.filter(r1)
-    7  Drop        r0 ~destruct
-    8  MakeClosure r0 <- proto 2 [0 captures]
-    9  CallMethod  r1 <- r2.map(r0)
-   10  Drop        r2 ~destruct
-   11  CallMethod  r0 <- r1.sum()
-   12  Drop        r1 ~destruct
-   13  Stringify   r1 <- display(r0)
-   14  Echo        r1
-   15  Halt
+    7  Drop        r1 ~destruct
+    8  Drop        r0 ~destruct
+    9  MakeClosure r0 <- proto 2 [0 captures]
+   10  CallMethod  r1 <- r2.map(r0)
+   11  Drop        r0 ~destruct
+   12  Drop        r2 ~destruct
+   13  CallMethod  r0 <- r1.sum()
+   14  Drop        r1 ~destruct
+   15  Stringify   r1 <- display(r0)
+   16  Echo        r1
+   17  Halt
 === proto 1 ===
 params: 1, registers: 3
 constants:

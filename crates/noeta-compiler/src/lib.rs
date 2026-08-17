@@ -3554,6 +3554,47 @@ impl<'m> FnCompiler<'m> {
         }
     }
 
+    /// After a call consumes its argument registers, release each argument that was an owned ANF
+    /// **temporary** — the argument twin of [`Self::drop_temp_receiver`], and destructor-aware for
+    /// the same reason: Noeta is call-by-value, so `held.get_or("k", Res.new("d"))` *builds* the
+    /// default whether or not the callee keeps it, and on the branch that discards it nothing else
+    /// ever owns that object. Without this drop its register reference is reclaimed only when the
+    /// register is overwritten or the frame tears down, both of which use the plain (non-destructor)
+    /// release — so the value is freed and its `destruct` never runs.
+    ///
+    /// Every argument-taking callee **borrows** its argument registers and retains what it keeps: a
+    /// user function retains each argument into its callee window, and a built-in retains whatever
+    /// it stores or returns. So `relevant: true` is exactly right — `release_value` runtime-gates on
+    /// reachability, firing the destructor only when this register held the last reference. A
+    /// borrowed (non-temp) argument is left alone: its binding fires at its own drop.
+    ///
+    /// Collected in **reverse argument order** (reverse construction, spec §3) and emitted
+    /// immediately before the receiver's own drop, so several destructor-bearing temporaries at one
+    /// call site are reclaimed LIFO — the order the IR interpreter mirrors. Read *before* the call op
+    /// is pushed (the op takes ownership of the register list) and emitted after; the common call,
+    /// whose arguments are all names and constants, collects an empty vector and allocates nothing.
+    fn temp_arg_regs(args: &[Atom], arg_regs: &[Reg]) -> Vec<Reg> {
+        if !args.iter().any(|a| matches!(a, Atom::Temp(_))) {
+            return Vec::new();
+        }
+        args.iter()
+            .zip(arg_regs)
+            .rev()
+            .filter(|(atom, _)| matches!(atom, Atom::Temp(_)))
+            .map(|(_, &reg)| reg)
+            .collect()
+    }
+
+    /// Emit the drops [`Self::temp_arg_regs`] collected, after the call they belong to.
+    fn drop_temp_args(&mut self, regs: Vec<Reg>) {
+        for reg in regs {
+            self.code.push(Op::Drop {
+                reg,
+                relevant: true,
+            });
+        }
+    }
+
     /// Resolve a source-variable reference to a register holding its value, mirroring the
     /// tree-walker's name resolution (`Expr::Ident` evaluation).
     fn var_reg(&mut self, name: &str, span: Span) -> Result<Reg, Unsupported> {
@@ -4534,13 +4575,15 @@ impl<'m> FnCompiler<'m> {
             if let Some(builtin) = Builtin::from_name(name) {
                 // `len`/`map`/`filter`/`sum`/`assert` — the collection/assertion builtins — plus
                 // the wrong-arity constructor calls from above.
-                let args = self.atom_regs(args)?;
+                let arg_regs = self.atom_regs(args)?;
+                let drops = Self::temp_arg_regs(args, &arg_regs);
                 self.code.push(Op::CallBuiltin {
                     dst,
                     builtin,
-                    args,
+                    args: arg_regs,
                     span,
                 });
+                self.drop_temp_args(drops);
                 return Ok(());
             }
             return unsupported(
@@ -4562,28 +4605,32 @@ impl<'m> FnCompiler<'m> {
             // pass-through slot is a plain local read, so the order is observable only through
             // register pressure, but the two backends agree on it anyway.
             let type_args = self.type_arg_regs(type_args)?;
-            let args = self.atom_regs(args)?;
+            let arg_regs = self.atom_regs(args)?;
+            let drops = Self::temp_arg_regs(args, &arg_regs);
             self.code.push(Op::CallGlobal {
                 dst,
                 global,
-                args,
+                args: arg_regs,
                 type_args,
                 span,
                 supplied: noeta_bytecode::pack_supplied(supplied),
             });
+            self.drop_temp_args(drops);
             return Ok(());
         }
         let callee_reg = self.atom_reg(callee)?;
         let type_args = self.type_arg_regs(type_args)?;
-        let args = self.atom_regs(args)?;
+        let arg_regs = self.atom_regs(args)?;
+        let drops = Self::temp_arg_regs(args, &arg_regs);
         self.code.push(Op::Call {
             dst,
             callee: callee_reg,
-            args,
+            args: arg_regs,
             type_args,
             span,
             supplied: noeta_bytecode::pack_supplied(supplied),
         });
+        self.drop_temp_args(drops);
         Ok(())
     }
 
@@ -4697,6 +4744,7 @@ impl<'m> FnCompiler<'m> {
         let type_args = self.type_arg_regs(type_args)?;
         let cache = self.module.next_cache_slot();
         let method = self.module.intern_name(name);
+        let drops = Self::temp_arg_regs(args, &arg_regs);
         self.code.push(Op::CallMethod {
             dst,
             recv,
@@ -4711,6 +4759,10 @@ impl<'m> FnCompiler<'m> {
             // supplied, so every declared parameter's bit moves up by one.
             supplied: noeta_bytecode::pack_supplied(supplied.map(|m| (m << 1) | 1)),
         });
+        // An owned temporary passed as an argument is released here, whichever branch the callee took
+        // — the fused read-with-default (`m.get_or(k, Res.new("d"))` on a key that is present) builds
+        // the default and hands it back to nobody.
+        self.drop_temp_args(drops);
         // A reuse-marked call consumes the receiver itself (the VM clears it on the in-place path); the
         // receiver is always a `Var` (never an owned `Temp`), so `drop_temp_receiver` is a no-op there.
         // Only the copying path can carry an owned temp receiver that still needs its drop.
@@ -5213,6 +5265,8 @@ impl<'m> FnCompiler<'m> {
             proto,
             captures: Box::new([]),
         });
+        // `arg_regs[0]` is the synthetic unit receiver, so the declared arguments start at 1.
+        let drops = Self::temp_arg_regs(args, &arg_regs[1..]);
         self.code.push(Op::Call {
             dst,
             callee,
@@ -5222,6 +5276,7 @@ impl<'m> FnCompiler<'m> {
             // A unit receiver occupies register 0 above, so the declared parameters shift by one.
             supplied: noeta_bytecode::pack_supplied(supplied.map(|m| (m << 1) | 1)),
         });
+        self.drop_temp_args(drops);
         Ok(())
     }
 
