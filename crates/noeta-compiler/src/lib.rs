@@ -2137,6 +2137,12 @@ struct FnCompiler<'m> {
     /// defining `Stmt::Let` (or a `match`/`&&`/`??` destination) is lowered and read thereafter.
     /// Sized to the frame's `temp_count` by [`Self::init_temps`].
     temp_regs: Vec<Option<Reg>>,
+    /// Whether each frame temporary's defining rvalue provably produces a value that can never run
+    /// a `destruct` (see [`rvalue_is_destructor_free`]), indexed like [`Self::temp_regs`]. Such a
+    /// temporary needs no destructor-aware drop when it is passed as a call argument: its memory is
+    /// reclaimed by the register's next overwrite either way, and the drop's only other job — asking
+    /// whether a destructor is due — has a known answer.
+    destructor_free_temps: Vec<bool>,
     /// Register scopes, innermost last. Empty only in `main` at the global depth.
     scopes: Vec<HashMap<String, Var>>,
     /// Declared top-level globals and their mutability (tracked only in `main`).
@@ -2288,6 +2294,7 @@ impl<'m> FnCompiler<'m> {
             consts: Vec::new(),
             diags: Vec::new(),
             temp_regs: Vec::new(),
+            destructor_free_temps: Vec::new(),
             scopes: Vec::new(),
             globals: HashMap::new(),
             next_reg: 0,
@@ -2310,6 +2317,7 @@ impl<'m> FnCompiler<'m> {
     /// Called once per body before lowering.
     fn init_temps(&mut self, temp_count: u32) {
         self.temp_regs = vec![None; temp_count as usize];
+        self.destructor_free_temps = vec![false; temp_count as usize];
     }
 
     /// Allocate the register backing a temporary at its defining site (`let t = …`, or a
@@ -2562,6 +2570,7 @@ impl<'m> FnCompiler<'m> {
             // `let t = rvalue` — bind the operation's result to its frame temporary's register.
             Stmt::Let { dst, rvalue, .. } => {
                 let reg = self.define_temp(*dst);
+                self.destructor_free_temps[dst.index()] = rvalue_is_destructor_free(rvalue);
                 self.rvalue(rvalue, reg)
             }
             // A bare expression statement: evaluate for effect into a scratch register, discard.
@@ -3573,16 +3582,27 @@ impl<'m> FnCompiler<'m> {
     /// call site are reclaimed LIFO — the order the IR interpreter mirrors. Read *before* the call op
     /// is pushed (the op takes ownership of the register list) and emitted after; the common call,
     /// whose arguments are all names and constants, collects an empty vector and allocates nothing.
-    fn temp_arg_regs(args: &[Atom], arg_regs: &[Reg]) -> Vec<Reg> {
-        if !args.iter().any(|a| matches!(a, Atom::Temp(_))) {
+    fn temp_arg_regs(&self, args: &[Atom], arg_regs: &[Reg]) -> Vec<Reg> {
+        if !args.iter().any(|a| self.is_droppable_temp(a)) {
             return Vec::new();
         }
         args.iter()
             .zip(arg_regs)
             .rev()
-            .filter(|(atom, _)| matches!(atom, Atom::Temp(_)))
+            .filter(|(atom, _)| self.is_droppable_temp(atom))
             .map(|(_, &reg)| reg)
             .collect()
+    }
+
+    /// Whether an argument atom is an owned temporary that needs a destructor-aware drop: an ANF
+    /// temporary whose defining rvalue could produce a value carrying a `destruct`. A temporary the
+    /// compiler proved destructor-free skips the drop entirely — see
+    /// [`FnCompiler::destructor_free_temps`].
+    fn is_droppable_temp(&self, atom: &Atom) -> bool {
+        match atom {
+            Atom::Temp(t) => !self.destructor_free_temps[t.index()],
+            _ => false,
+        }
     }
 
     /// Emit the drops [`Self::temp_arg_regs`] collected, after the call they belong to.
@@ -4576,7 +4596,7 @@ impl<'m> FnCompiler<'m> {
                 // `len`/`map`/`filter`/`sum`/`assert` — the collection/assertion builtins — plus
                 // the wrong-arity constructor calls from above.
                 let arg_regs = self.atom_regs(args)?;
-                let drops = Self::temp_arg_regs(args, &arg_regs);
+                let drops = self.temp_arg_regs(args, &arg_regs);
                 self.code.push(Op::CallBuiltin {
                     dst,
                     builtin,
@@ -4606,7 +4626,7 @@ impl<'m> FnCompiler<'m> {
             // register pressure, but the two backends agree on it anyway.
             let type_args = self.type_arg_regs(type_args)?;
             let arg_regs = self.atom_regs(args)?;
-            let drops = Self::temp_arg_regs(args, &arg_regs);
+            let drops = self.temp_arg_regs(args, &arg_regs);
             self.code.push(Op::CallGlobal {
                 dst,
                 global,
@@ -4621,7 +4641,7 @@ impl<'m> FnCompiler<'m> {
         let callee_reg = self.atom_reg(callee)?;
         let type_args = self.type_arg_regs(type_args)?;
         let arg_regs = self.atom_regs(args)?;
-        let drops = Self::temp_arg_regs(args, &arg_regs);
+        let drops = self.temp_arg_regs(args, &arg_regs);
         self.code.push(Op::Call {
             dst,
             callee: callee_reg,
@@ -4744,7 +4764,7 @@ impl<'m> FnCompiler<'m> {
         let type_args = self.type_arg_regs(type_args)?;
         let cache = self.module.next_cache_slot();
         let method = self.module.intern_name(name);
-        let drops = Self::temp_arg_regs(args, &arg_regs);
+        let drops = self.temp_arg_regs(args, &arg_regs);
         self.code.push(Op::CallMethod {
             dst,
             recv,
@@ -5266,7 +5286,7 @@ impl<'m> FnCompiler<'m> {
             captures: Box::new([]),
         });
         // `arg_regs[0]` is the synthetic unit receiver, so the declared arguments start at 1.
-        let drops = Self::temp_arg_regs(args, &arg_regs[1..]);
+        let drops = self.temp_arg_regs(args, &arg_regs[1..]);
         self.code.push(Op::Call {
             dst,
             callee,
@@ -5800,6 +5820,25 @@ impl<'m> FnCompiler<'m> {
         self.patch_jump(jump_pos, end);
         Ok(())
     }
+}
+
+/// Whether an rvalue provably produces a value that can never run a `destruct` — so a temporary
+/// holding its result needs no destructor-aware drop where it is consumed as a call argument. The
+/// value's *memory* is reclaimed either way, by the register's next overwrite or by frame teardown;
+/// the drop's only other job is to ask whether a destructor is due, and here the answer is known.
+///
+/// A deliberately short allowlist, and it must stay one: a member has to be a value kind that
+/// neither carries a destructor nor holds a value that could. A string qualifies — it is a flat
+/// buffer with no element slots — and it is the member that pays for itself. A map key built by
+/// interpolation (`m["key${i}"] = v`) is an argument temporary in the hottest loop shape the
+/// performance ratchet measures, and inside tier-1 native code its drop is a call out to the
+/// destructor-aware release helper, once per iteration, that can never have anything to do.
+///
+/// Everything else stays off the list, including the arithmetic that looks obviously scalar: a
+/// `Binary`/`Unary` operand can be an object whose type implements the operator trait, so its result
+/// is only as scalar as its operands' runtime types, which the compiler does not know here.
+fn rvalue_is_destructor_free(rvalue: &Rvalue) -> bool {
+    matches!(rvalue, Rvalue::Interp { .. })
 }
 
 /// Whether a Core-IR constant materializes to an **immediate** (no heap allocation, no refcount):

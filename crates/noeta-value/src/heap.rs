@@ -152,14 +152,17 @@ pub fn destruct_audit_end() -> i64 {
 }
 
 /// The audit's allocation hook: count an object whose shape names a destructor-bearing type.
+/// Only a shaped object can carry a destructor, so the payload discriminant is checked **first**:
+/// a string, an int box or a list — the allocations a hot loop actually makes — never reach the
+/// thread-local at all.
 #[inline]
 fn note_destructible_alloc(payload: &Payload) {
-    if !DESTRUCT_AUDIT.with(|a| a.get()) {
-        return;
-    }
     let Payload::Object { shape, .. } = payload else {
         return;
     };
+    if !DESTRUCT_AUDIT.with(|a| a.get()) {
+        return;
+    }
     if DESTRUCTIBLE_TYPES.with(|t| t.borrow().contains(&shape.name)) {
         DESTRUCTIBLE_ALLOCS.with(|c| c.set(c.get() + 1));
     }

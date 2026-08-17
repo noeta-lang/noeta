@@ -81,6 +81,10 @@ fn is_temp(atom: &noeta_ir::Atom) -> bool {
 /// an argument the callee *kept* (stored in a collection, or handed back as the result) correctly
 /// defers destruction to its real last owner. Returned in **reverse argument order** (reverse
 /// construction, spec §3), which is the order the VM emits its drops in.
+///
+/// The bytecode backend additionally skips a temporary whose rvalue it proved destructor-free; that
+/// exclusion is an optimization, not a rule, and it is not mirrored here — what it saves there is a
+/// call out of native code, and what it would save here is one refcount test.
 fn temp_arg_copies(args: &[noeta_ir::Atom], values: &[Value]) -> Vec<Value> {
     if !args.iter().any(is_temp) {
         return Vec::new();
