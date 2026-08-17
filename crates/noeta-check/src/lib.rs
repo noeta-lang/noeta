@@ -563,7 +563,13 @@ impl SessionChecker {
         // Tier declarations first — see the note in `check_program`.
         self.checker.check_tier_decls(entry);
         self.checker.check_semantic_roles(entry);
+        // The entry's trailing bare expression is ECHOED by the session once it has run, which makes
+        // it a display door — the only one that is not written in the program. Naming it here, from
+        // the same helper the sessions read it back with, is what lets the `Stmt::Expr` arm record
+        // its render hint off the type it already computed.
+        self.checker.session_echo_span = noeta_ast::desugar::trailing_expr_span(entry);
         self.checker.check_program_in(entry, &mut self.env);
+        self.checker.session_echo_span = None;
         let diagnostics = self.checker.diags.split_off(diag_mark);
         if diagnostics
             .iter()
@@ -1558,6 +1564,13 @@ struct Checker {
     coloring: Coloring,
     /// The run configuration (see [`Config`]).
     config: Config,
+    /// The span of the expression the enclosing **session** will echo — the trailing bare
+    /// expression of the entry being checked, per [`noeta_ast::desugar::trailing_expr_span`]. Set by
+    /// [`SessionChecker::check_entry`] for the length of that entry and `None` everywhere else (a
+    /// file's trailing expression is discarded, not printed). The `Stmt::Expr` arm records the
+    /// echo's render hint when it reaches this span, using the type it has already computed — so
+    /// marking the door costs no second walk over the expression.
+    session_echo_span: Option<Span>,
     /// The span-keyed **codegen site maps** the checker produces for the backends and lowering — its
     /// codegen-hint output, grouped apart from the checker's own type-environment/coloring state. See
     /// [`SiteMaps`].
@@ -2387,6 +2400,13 @@ impl Checker {
                 // check above already produced — it is not a second walk over the expression.
                 if ty == Type::Never {
                     self.sites.diverging_stmts.insert(*span);
+                }
+                // The session-echo door: in a REPL / debug console this statement's value is
+                // rendered by the HOST once the entry has run, so its unsigned 64-bit positions
+                // need the same hint an `echo` would take — and this is the only place the static
+                // type of an echoed expression exists. Reads the type computed above; no re-walk.
+                if self.session_echo_span == Some(expr.span()) {
+                    self.note_echo_hint(&ty, expr.span());
                 }
             }
             Stmt::Return { value, span } => {

@@ -133,6 +133,21 @@ pub fn tier_expr_call(
 /// NUL so it can never collide with a user identifier and never shows up in displayed bindings.
 pub const REPL_VALUE: &str = "\0repl-value";
 
+/// The span of the expression a session **echoes** — the trailing bare expression
+/// [`rewrite_trailing_expr`] captures — or `None` when the entry ends in anything else.
+///
+/// Shared by the session checker, which records the echo's render hint at this span, and by the
+/// sessions, which read that hint back to render the value. Both ask this one function rather than
+/// each matching on `stmts.last()`, so they cannot disagree about *which* expression is echoed —
+/// and a disagreement would be silent, since a hint keyed at a span nobody looks up simply never
+/// applies.
+pub fn trailing_expr_span(program: &Program) -> Option<Span> {
+    match program.stmts.last() {
+        Some(Stmt::Expr { expr, .. }) => Some(expr.span()),
+        _ => None,
+    }
+}
+
 /// If `program`'s final statement is a bare expression, return a copy with that statement
 /// rewritten to `mut <REPL_VALUE> = <expr>;` (so the lowering path captures its value) and `true`;
 /// otherwise return the program unchanged and `false`. Only the trailing statement is touched —

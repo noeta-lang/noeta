@@ -320,8 +320,21 @@ impl VmSession {
         program: &Program,
         sites: &noeta_compiler::Sites,
     ) -> SessionOutput {
+        // The echo is a display door like any other, and a checked session is the only place its
+        // static type survives: a fixed-width integer is erased to its i64 word, so a `u64` past bit
+        // 63 would echo as the negative word it is stored as. The checker recorded the hint at the
+        // trailing expression's span; both sides name that span through the one shared helper, so
+        // they cannot disagree about which expression is echoed.
+        //
+        // Cloned out of `sites` because `describe` outlives the borrow — one clone per entry that
+        // echoes a `u64`, and none at all for every other entry.
+        let hint = noeta_ast::desugar::trailing_expr_span(program)
+            .and_then(|span| sites.echo_hint_sites.get(&span).cloned());
         self.run_capturing(program, Some(sites), |v| {
-            (!v.is_unit()).then(|| v.display())
+            (!v.is_unit()).then(|| match &hint {
+                Some(hint) => v.display_hinted(hint),
+                None => v.display(),
+            })
         })
     }
 

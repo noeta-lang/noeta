@@ -304,6 +304,22 @@ impl Checker {
         }
     }
 
+    /// Record the [`RenderHint`](noeta_ast::RenderHint) for a value a **session echoes** — the
+    /// trailing bare expression of a REPL / debug-console entry, rendered by the host once the
+    /// entry has run. The display twin of [`Self::note_render_hint`] for the one display door the
+    /// program does not contain, and it needs its own site map because lowering consumes
+    /// `render_hint_sites` (an entry marked there would have its value replaced by a *string*).
+    ///
+    /// **No `Display`-trait exemption**, unlike [`Self::note_render_hint`]: a session echoes a value
+    /// structurally — `Gauge {v: 1}`, never the type's own `to_string` — so a named type
+    /// implementing `Display` is hinted here exactly like any other, and its fields are numbered as
+    /// the echo renders them ([`HintPurpose::Display`]).
+    pub(crate) fn note_echo_hint(&mut self, ty: &Type, span: Span) {
+        if let Some(hint) = self.render_hint(ty, HintPurpose::Display, &mut Vec::new()) {
+            self.sites.echo_hint_sites.insert(span, hint);
+        }
+    }
+
     /// Record the [`RenderHint`](noeta_ast::RenderHint) for a value **about to be ordered** at
     /// `span` (`.sorted()`, `.min()`, `.max()`, `.keys()`, `.values()`, a `for` over a set or map),
     /// if `ty` contains an unsigned 64-bit integer. Nothing is recorded otherwise, so a program that
