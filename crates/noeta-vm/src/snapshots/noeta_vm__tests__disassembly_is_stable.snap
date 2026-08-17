@@ -1,6 +1,5 @@
 ---
-source: crates/noeta-vm/src/lib.rs
-assertion_line: 4197
+source: crates/noeta-vm/src/tests.rs
 expression: module.disassemble()
 ---
 === main ===
@@ -10,10 +9,8 @@ constants:
   k1 = 2
 code:
     0  LoadConst   r0 <- k0
-    1  StoreGlobal "x" <- r0
-    2  LoadGlobal  r1 <- "x"
-    3  LoadConst   r2 <- k1
-    4  Binary      r0 <- r1 + r2
-    5  Stringify   r1 <- display(r0)
-    6  Echo        r1
-    7  Halt
+    1  LoadConst   r2 <- k1
+    2  Binary      r1 <- r0 + r2
+    3  Stringify   r0 <- display(r1)
+    4  Echo        r0
+    5  Halt

@@ -1,0 +1,85 @@
+// A top-level binding behaves the same whether the compiler keeps it in the runtime global table or
+// in a register of the entry frame. That choice is invisible to a program by construction — this
+// case exercises both sides of it in one run, and the differential oracle checks the answers against
+// a backend that has no such choice to make.
+//
+// `acc`, `i`, `m` and `seen` are reachable only from the top level; `shared` is reachable from a
+// sealed `fn`'s `use (…)` list, `seed` from a closure, and `base` from a field default and a method.
+// Every value below is read after the writes that could have gone to the wrong storage.
+// expect: stdout "loop 45"
+// expect: stdout "alias 2 -> live 3"
+// expect: stdout "shared 3"
+// expect: stdout "closure 12"
+// expect: stdout "field 5 15"
+// expect: stdout "shape Type.Int"
+// expect: stdout "gen 0 1 2"
+// expect: stdout "after 2"
+// expect: exit 0
+
+// Mutated in a loop, then read after it: the register is the binding, so the loop's reads and writes
+// are the same slot the `echo` below reads.
+mut acc = 0
+mut i = 0
+while i < 10 {
+    acc = acc + i
+    i = i + 1
+}
+echo "loop ${acc}"
+
+// Aliasing survives the move. `snap` takes a reference before the last update; the update must copy
+// rather than mutate what `snap` holds, exactly as it does for a function-local map.
+mut m: Map<string, int> = {}
+m["a"] = 1
+m["b"] = 2
+snap = m
+m["c"] = m.get_or("c", 0) + 1
+echo "alias ${snap.len()} -> live ${m.len()}"
+
+// A named `fn` is sealed, so `use (shared)` is the one way it reaches a top-level binding — and a
+// binding a `fn` can write has to stay somewhere the `fn` can find it.
+mut shared = 0
+fn bump() use (shared): void {
+    shared = shared + 1
+}
+bump()
+bump()
+bump()
+echo "shared ${shared}"
+
+// A closure is not sealed and reaches a top-level binding implicitly.
+mut seed = 4
+triple = fn(x: int) => x * seed
+echo "closure ${triple(3)}"
+
+// A field DEFAULT and a method's `use (…)` list both reach a top-level binding from a body that is
+// compiled before the top level is.
+mut base = 5
+struct Boxed {
+    n: int = base
+    pub fn scaled() use (base): int { return self.n * base }
+}
+echo "field ${Boxed {}.n} ${Boxed { n: 3 }.scaled()}"
+
+// Most of reflection names types and declarations, so a top-level binding reaches it the way any
+// value does — as an operand. (The exception is a free-function `invoke(name, args)`, which names a
+// top-level binding out of a runtime string; `reflection/invoke_free_value_binding` covers it.)
+echo "shape ${type_of(acc)}"
+
+// A generator suspends and resumes between reads of the top level around it.
+fn upto(n: int): Iterator<int> {
+    mut k = 0
+    while k < n {
+        yield k
+        k = k + 1
+    }
+}
+mut seen = ""
+for v in upto(3) {
+    seen = seen ~ " " ~ "${v}"
+}
+echo "gen${seen}"
+
+// A re-`mut` of the same name rebinds in place, and the displaced value is gone.
+mut acc = 1
+acc = acc + 1
+echo "after ${acc}"

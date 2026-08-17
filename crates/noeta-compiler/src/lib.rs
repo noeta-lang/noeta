@@ -342,7 +342,11 @@ pub fn compile_with(
     // pipeline, the same tables, in the same order as a session install; see that method for why
     // there is no second copy of it. The tables are then MOVED into the `Module` (the production
     // finisher — no clone tax on `noeta run`); the session path snapshots instead.
-    let mut compiler = SessionCompiler::empty(opts.debug, opts.registry);
+    // A batch compile owns its entry chunk for the life of the module: nothing installs a second
+    // program into it and no later fragment reaches its top-level bindings by name, so the top level
+    // may keep them in `main`'s registers ([`ModuleCompiler::promotable_top_level`]).
+    let mut compiler =
+        SessionCompiler::empty(opts.debug, opts.registry, TopLevelStorage::Registers);
     let reachable = compiler.install(program, Some(Cow::Owned(sites)), opts.real_isolates)?;
     Ok(compiler.into_module(reachable))
 }
@@ -405,10 +409,41 @@ pub fn compile_session_with(
     // Identical to [`compile_with`] up to the finisher: the same install onto an empty compiler,
     // then a *snapshot* (the tables — and the launch program's facts, map-packed pairs and
     // reflection — stay alive for the session's later installs) instead of a move.
-    let mut compiler = SessionCompiler::empty(opts.debug, opts.registry);
+    //
+    // The one behavioural difference is [`TopLevelStorage`]: a session REPLACES proto 0 on every
+    // later install, so a top-level binding held in the retired chunk's registers would be
+    // unreachable to the next entry. A session's top level therefore stays in the global table,
+    // where it persists across installs by construction.
+    let mut compiler = SessionCompiler::empty(opts.debug, opts.registry, TopLevelStorage::Globals);
     let reachable = compiler.install(program, Some(Cow::Owned(sites)), opts.real_isolates)?;
     let module = compiler.snapshot(reachable);
     Ok((module, compiler))
+}
+
+/// Where this compiler's **top-level value bindings** live: the runtime global table, or `main`'s
+/// own register file.
+///
+/// A global slot must be *read into* a register to be used, so every top-level read costs a
+/// `LoadGlobal` and every write a `StoreGlobal`, where a function-local's register *is* the binding
+/// and an operand reads it in place. Holding the top level in registers is what makes the same loop
+/// cost the same whether it is written at the top level or inside a `fn`.
+///
+/// It is not always available, and the unavailable case is a property of the *compiler*, not of the
+/// program: [`Registers`](Self::Registers) is sound only when this compiler's entry chunk is the
+/// program's final `main`. A [`SessionCompiler`] that will [`install`](SessionCompiler::install) a
+/// second program overwrites proto 0 (the REPL's next entry, the debug console's next fragment, a
+/// hot-swap's re-run top level), and a binding living in the retired chunk's registers would be
+/// invisible to the replacement — where a global slot persists across installs by construction. So
+/// a session compiles [`Globals`](Self::Globals) and a batch compile compiles
+/// [`Registers`](Self::Registers); per-binding eligibility is then decided by
+/// [`ModuleCompiler::promotable_top_level`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TopLevelStorage {
+    /// Every top-level binding lives in a global slot, reachable by name from any later install.
+    Globals,
+    /// A top-level binding that nothing outside `main` can reach by name lives in a register of
+    /// `main`'s frame, exactly as a function-local does.
+    Registers,
 }
 
 /// How a table behaves when a **second** program is installed into a compiler that already holds
@@ -498,6 +533,7 @@ const TABLE_POLICIES: &[(&str, Policy, &str)] = &[
     ("global_slots", Policy::MergeByContent, "intern_global's dedup index — a rebound name keeps its slot"),
     ("debug", Policy::Fixed, "SessionCompiler::empty"),
     ("registry", Policy::Fixed, "SessionCompiler::empty"),
+    ("top_level_storage", Policy::Fixed, "SessionCompiler::empty — Globals for a session, Registers for a batch compile"),
     // ── SessionCompiler ──────────────────────────────────────────────────────────────────────
     ("mc", Policy::Nested, "the tables above"),
     ("map_packed", Policy::MergeByContent, "install: spans already paired are skipped, new ones interned in span order"),
@@ -566,14 +602,23 @@ impl SessionCompiler {
     /// default registry (an embed session that assembled its own set installs it explicitly through
     /// [`compile_with_sites_session_with_registry`], instance-registry IR5).
     pub fn new() -> SessionCompiler {
-        SessionCompiler::empty(false, noeta_ext_abi::registry::single_registry_process())
+        SessionCompiler::empty(
+            false,
+            noeta_ext_abi::registry::single_registry_process(),
+            // A session installs entry after entry, each replacing proto 0 — see [`TopLevelStorage`].
+            TopLevelStorage::Globals,
+        )
     }
 
     /// An empty compiler: the entry-`main` placeholder at proto 0 and nothing else, carrying the
     /// two install-invariant settings ([`Policy::Fixed`]). Every table starts empty *here* and only
     /// [`install`](Self::install) ever fills one, so the "build it fresh" and "extend it" spellings
     /// of a table cannot drift apart — there is only the one spelling.
-    fn empty(debug: bool, registry: &'static noeta_ext_abi::registry::Registry) -> SessionCompiler {
+    fn empty(
+        debug: bool,
+        registry: &'static noeta_ext_abi::registry::Registry,
+        top_level_storage: TopLevelStorage,
+    ) -> SessionCompiler {
         let mc = ModuleCompiler {
             protos: vec![Chunk::placeholder()],
             shapes: Vec::new(),
@@ -607,6 +652,7 @@ impl SessionCompiler {
             global_slots: HashMap::new(),
             debug,
             registry,
+            top_level_storage,
         };
         SessionCompiler {
             mc,
@@ -923,19 +969,67 @@ impl SessionCompiler {
         self.mc.register_types(hoisted);
         self.mc.compile_methods(&ir)?;
 
+        // Which top-level bindings may live in `main`'s registers instead of the global table
+        // ([`TopLevelStorage`]). Decided HERE and not inside `main`'s lowering, because the answer
+        // depends on `compile_methods` above having already run: every body compiled before `main`
+        // has interned its global references by now, so `global_slots` is a complete record of what
+        // those bodies can reach.
+        let promoted = self.mc.promotable_top_level(hoisted, &ir);
+
         // `protos[0]` — the one in-place write. The top-level statements become the entry chunk,
         // replacing the previous install's now-dead `main` (no live value references proto 0).
-        let main = {
+        let (main, forward_read) = {
             let mut fc = FnCompiler::new(&mut self.mc, true, None, Vec::new(), Vec::new());
             fc.init_temps(ir.temp_count);
             fc.setup_main_scopes(&ir.top);
+            fc.use_top_level_registers(promoted.clone());
             for stmt in &ir.top.stmts {
                 fc.stmt(stmt)?;
             }
             fc.code.push(Op::Halt);
-            fc.into_chunk(0, 0, 0, Vec::new(), Some("main".to_string()), Some(ir.span))
+            let forward_read = std::mem::take(&mut fc.promoted_forward);
+            (
+                fc.into_chunk(0, 0, 0, Vec::new(), Some("main".to_string()), Some(ir.span)),
+                forward_read,
+            )
         };
         self.mc.protos[0] = main;
+
+        // The promotion decision, verified against the runtime's own table rather than trusted.
+        //
+        // A promoted binding emits no `StoreGlobal`, so nothing interns its slot — unless some body
+        // compiled *during* `main` (a nested `fn`, a closure, an `isolate`/`async` body) referenced
+        // it by name after all, in which case that reference got a slot no store ever fills and the
+        // program would raise E0005 at it. Excluding `main`'s own pre-declaration forward reads
+        // (`FnCompiler::global_slot`, which must raise exactly that E0005) makes "a promoted name has
+        // a global slot" the exact, complete negation of the condition — and an internal invariant
+        // break, `promotable_top_level` and `freevars::nested_free_names` disagreeing about what can
+        // reach a name, never something a source program can provoke. Cheap enough to assert
+        // unconditionally: one hash lookup per promoted name.
+        for name in promoted.difference(&forward_read) {
+            assert!(
+                !self.mc.global_slots.contains_key(name),
+                "top-level binding `{name}` was promoted to a register in `main` and then \
+                 referenced through the global table: promotable_top_level and \
+                 freevars::nested_free_names disagree about what can reach it"
+            );
+        }
+        // And the same verification for the reference that names no site: a receiver-less
+        // `Op::Invoke` resolves an arbitrary runtime string against the whole global-name table, so
+        // one anywhere in the module means every top-level binding had to stay in it. Checked
+        // against the emitted ops rather than the IR walk that decided it, so the two have to agree.
+        assert!(
+            promoted.is_empty()
+                || !self.mc.protos.iter().any(|chunk| {
+                    chunk
+                        .code
+                        .iter()
+                        .any(|op| matches!(op, Op::Invoke { recv: None, .. }))
+                }),
+            "a top-level binding was promoted to a register in `main` while the module dispatches \
+             by name over the global table: noeta_ir::dispatches_top_level_by_name missed a \
+             free-function `invoke`"
+        );
 
         // `packed_schemas` / `map_packed` — MergeByContent, three sources, all deduplicated by
         // `intern_packed_schema` (a layout already interned adds nothing and keeps its index).
@@ -1279,6 +1373,10 @@ struct ModuleCompiler {
     /// imports to *its* registry. The production/CLI path holds the process-global default; an embed
     /// session threads its own assembled set. Returns `&'static`, so it outlives any borrow.
     registry: &'static noeta_ext_abi::registry::Registry,
+    /// Whether this compiler's top level may hold its value bindings in `main`'s registers rather
+    /// than the global table — see [`TopLevelStorage`] for why that is a property of the compiler and
+    /// not of the program, and [`Self::promotable_top_level`] for the per-binding condition.
+    top_level_storage: TopLevelStorage,
 }
 
 impl ModuleCompiler {
@@ -1348,6 +1446,78 @@ impl ModuleCompiler {
     /// The set of top-level global names (for the free-variable analysis' globals argument).
     fn global_names(&self) -> HashSet<String> {
         self.module_globals.keys().cloned().collect()
+    }
+
+    /// The top-level value bindings this program may hold in `main`'s **registers** instead of the
+    /// global table — the promotion condition, in one place.
+    ///
+    /// A global slot is reachable *by name* from anywhere; a register in `main`'s frame is reachable
+    /// only from `main`. So a binding may move only when nothing else can name it, and there are
+    /// exactly two kinds of "something else": a body compiled before `main` (every method,
+    /// destructor, field default and default-parameter thunk — `compile_methods` has already run, so
+    /// each of their global references is already interned in [`Self::global_slots`], which is the
+    /// runtime's own table and therefore cannot under-report), and a closure or nested `fn` in the
+    /// top-level statement stream, which is compiled *during* `main` and reported by
+    /// [`freevars::nested_free_names`] — the same walk the celling decision already trusts.
+    ///
+    /// Called once, after `register_globals`/`register_types`/`compile_methods` and before `main`
+    /// lowers. Each clause below disqualifies, and every one of them is load-bearing:
+    ///
+    /// * **Not a batch compile** ([`TopLevelStorage::Globals`]) — nothing is promotable at all.
+    /// * **The program declares a `destruct`.** `Op::Halt` releases `main`'s register window with the
+    ///   plain, non-destructor-aware release, in register order; the globals are destroyed at
+    ///   teardown with `release_value`, in reverse declaration order, which is where the spec's
+    ///   deterministic end-of-program destruction happens. A destructor-bearing value moved into a
+    ///   register would never run its `destruct`, so a program that declares one keeps its whole top
+    ///   level in the global table. (This is the same condition `into_chunk` already gates the
+    ///   panic-teardown `frame_locals` list on.)
+    /// * **Not a user value binding.** Only a top-level `x = v` / `mut x = v` is a candidate: a `fn`
+    ///   name is called through its slot (`Op::CallGlobal`) and re-bound through it by a hot swap, an
+    ///   import binds a native module value the same way, and a `$`-prefixed name is lowering's own
+    ///   state-machine storage.
+    /// * **Shadowed by a `fn` or an import of the same name**, where the global slot is shared
+    ///   between the two spellings and only one of them would move.
+    /// * **Already interned as a global** — some body compiled before `main` reads or writes it.
+    /// * **Free in a nested closure / `fn`**, which reaches it by name through the global table.
+    ///
+    /// Read `isolate`/`async`/generator bodies off the last clause: each is a `Func`/closure in the
+    /// IR, so a body that names a top-level binding disqualifies it — an isolate worker in particular
+    /// gets its globals shipped by slot, and a promoted binding has no slot to ship.
+    ///
+    /// The clauses above are all *sites*: somewhere in the program, the name is written down. The
+    /// program-level [`noeta_ir::dispatches_top_level_by_name`] covers the one case where it is not
+    /// — a free-function `invoke(name, args)` names a top-level binding out of a runtime string, so
+    /// a program that performs one keeps its whole top level in the table that dispatch reads.
+    fn promotable_top_level(&self, program: &Program, ir: &noeta_ir::Program) -> HashSet<String> {
+        if self.top_level_storage == TopLevelStorage::Globals
+            || !self.destructors.is_empty()
+            || noeta_ir::dispatches_top_level_by_name(ir)
+        {
+            return HashSet::new();
+        }
+        let top = &ir.top;
+        let mut imported: HashSet<&str> = HashSet::new();
+        let mut candidates: HashSet<String> = HashSet::new();
+        for stmt in &program.stmts {
+            match stmt {
+                noeta_ast::Stmt::Binding { name, .. } if !name.starts_with('$') => {
+                    candidates.insert(name.clone());
+                }
+                noeta_ast::Stmt::Use { names, .. } => {
+                    imported.extend(names.iter().map(|i| i.local()));
+                }
+                _ => {}
+            }
+        }
+        candidates.retain(|name| {
+            !self.module_fns.contains(name)
+                && !imported.contains(name.as_str())
+                && !self.global_slots.contains_key(name)
+        });
+        for reached in freevars::nested_free_names(top, &candidates) {
+            candidates.remove(&reached);
+        }
+        candidates
     }
 
     /// Reserve a placeholder prototype for each of a type's methods — the table pass 2 compiles
@@ -2137,8 +2307,23 @@ struct FnCompiler<'m> {
     /// defining `Stmt::Let` (or a `match`/`&&`/`??` destination) is lowered and read thereafter.
     /// Sized to the frame's `temp_count` by [`Self::init_temps`].
     temp_regs: Vec<Option<Reg>>,
-    /// Register scopes, innermost last. Empty only in `main` at the global depth.
+    /// Register scopes, innermost last. Empty only in `main` at the global depth — except when
+    /// `main` holds promoted top-level bindings, whose scope is `scopes[0]` (see
+    /// [`Self::global_scope`] and [`Self::at_global_depth`]).
     scopes: Vec<HashMap<String, Var>>,
+    /// Whether `scopes[0]` is `main`'s **top-level register scope** rather than a block scope: the
+    /// home of the top-level bindings [`ModuleCompiler::promotable_top_level`] moved out of the
+    /// global table. Pushed once, never popped, so the global depth is `scopes.len() == 1` here and
+    /// `scopes.is_empty()` everywhere else — which is the whole reason [`Self::at_global_depth`]
+    /// exists rather than the emptiness test being spelled at each site.
+    global_scope: bool,
+    /// The top-level bindings that live in `main`'s registers. Consulted at a top-level binding site
+    /// only; a *reference* resolves through `scopes[0]` like any other local, so promotion adds no
+    /// second name-resolution rule.
+    promoted: HashSet<String>,
+    /// Promoted names this chunk nevertheless emitted a global-slot reference for — a read that runs
+    /// before the declaration, which must raise E0005 (see [`Self::global_slot`]).
+    promoted_forward: HashSet<String>,
     /// Declared top-level globals and their mutability (tracked only in `main`).
     globals: HashMap<String, GlobalInfo>,
     next_reg: u16,
@@ -2289,6 +2474,9 @@ impl<'m> FnCompiler<'m> {
             diags: Vec::new(),
             temp_regs: Vec::new(),
             scopes: Vec::new(),
+            global_scope: false,
+            promoted: HashSet::new(),
+            promoted_forward: HashSet::new(),
             globals: HashMap::new(),
             next_reg: 0,
             is_main,
@@ -2425,10 +2613,44 @@ impl<'m> FnCompiler<'m> {
         idx
     }
 
-    /// Whether we are at `main`'s global depth (no register scope pushed). A binding here is
-    /// a global; once a block (or function) is entered, bindings become frame-locals.
+    /// Whether we are at `main`'s **top-level depth**: a binding here is a top-level binding (a
+    /// global slot, or a register of `main`'s frame when [`Self::promoted`] holds its name); once a
+    /// block or a function is entered, bindings become ordinary frame-locals.
+    ///
+    /// The depth is measured against `main`'s own top-level register scope when it has one, so the
+    /// answer is the same statement-for-statement whichever storage the top level uses.
     fn at_global_depth(&self) -> bool {
-        self.is_main && self.scopes.is_empty()
+        self.is_main && self.scopes.len() == usize::from(self.global_scope)
+    }
+
+    /// The global slot for `name`, and the one place this chunk reaches the slot table — so a
+    /// reference to a **promoted** name is recorded as it is emitted rather than inferred afterwards.
+    ///
+    /// There is exactly one way for a promoted name to reach a global slot in `main`: a reference
+    /// that runs *before* the declaration (`mut a = b` above `mut b = 1`). Name resolution in `main`
+    /// only ever sees the bindings declared so far — the rule that makes a forward read the runtime
+    /// E0005 the reference interpreter also raises — so such a read is emitted as an ordinary
+    /// `LoadGlobal` of a slot nothing stores, which raises exactly that. Recording it here is what
+    /// keeps the post-install verification in [`SessionCompiler::install`] exact: any *other* new
+    /// slot for a promoted name is a body outside `main` reaching it, i.e. a broken analysis.
+    fn global_slot(&mut self, name: &str) -> GlobalId {
+        if self.promoted.contains(name) {
+            self.promoted_forward.insert(name.to_string());
+        }
+        self.module.intern_global(name)
+    }
+
+    /// Give `main` a top-level register scope holding `promoted` (see [`TopLevelStorage`]). Called
+    /// once, before the first top-level statement lowers; a no-op for an empty set, so a program with
+    /// nothing promotable compiles byte-identically to one compiled with promotion switched off.
+    fn use_top_level_registers(&mut self, promoted: HashSet<String>) {
+        debug_assert!(self.is_main, "only `main` has a top level");
+        if promoted.is_empty() {
+            return;
+        }
+        self.promoted = promoted;
+        self.global_scope = true;
+        self.scopes.push(HashMap::new());
     }
 
     fn lookup_local(&self, name: &str) -> Option<Var> {
@@ -2735,7 +2957,7 @@ impl<'m> FnCompiler<'m> {
                             let value = self.alloc_reg();
                             let k = self.add_const(Const::NativeModule(qualified));
                             self.code.push(Op::LoadConst { dst: value, k });
-                            let global = self.module.intern_global(imported.local());
+                            let global = self.global_slot(imported.local());
                             self.code.push(Op::StoreGlobal { global, src: value });
                         }
                         noeta_ext_abi::registry::UseKind::MemberFn { module, func } => {
@@ -2746,7 +2968,7 @@ impl<'m> FnCompiler<'m> {
                             let value = self.alloc_reg();
                             let k = self.add_const(Const::ModuleFn { module, func });
                             self.code.push(Op::LoadConst { dst: value, k });
-                            let global = self.module.intern_global(imported.local());
+                            let global = self.global_slot(imported.local());
                             self.code.push(Op::StoreGlobal { global, src: value });
                         }
                         _ => {}
@@ -2775,7 +2997,7 @@ impl<'m> FnCompiler<'m> {
             });
             self.globals
                 .insert(name.to_string(), GlobalInfo { mutable: false });
-            let global = self.module.intern_global(name);
+            let global = self.global_slot(name);
             self.code.push(Op::StoreGlobal { global, src: t });
             return Ok(());
         }
@@ -3279,12 +3501,16 @@ impl<'m> FnCompiler<'m> {
         let (src, owned) = self.atom_reg_owned(value)?;
 
         if mut_decl {
-            if self.at_global_depth() {
+            if self.at_global_depth() && !self.promoted.contains(name) {
                 self.globals
                     .insert(name.to_string(), GlobalInfo { mutable: true });
-                let global = self.module.intern_global(name);
+                let global = self.global_slot(name);
                 self.code.push(Op::StoreGlobal { global, src });
             } else {
+                // A promoted top-level binding declares into `main`'s top-level register scope,
+                // through the same `declare_local` a function-local uses — so it adopts an owned
+                // source, re-`mut` shadows reuse its slot, it joins the panic-teardown list, and a
+                // debug compile records its `reg → name` entry, all without a second spelling.
                 self.declare_local(name, src, owned, true, name_span);
             }
             return Ok(());
@@ -3363,7 +3589,7 @@ impl<'m> FnCompiler<'m> {
         };
         if let Some(mutable) = global_mut {
             if mutable || field_assign {
-                let global = self.module.intern_global(name);
+                let global = self.global_slot(name);
                 self.code.push(Op::StoreGlobal { global, src });
             } else {
                 let idx = self.add_diag(immutable_diag(name, name_span));
@@ -3372,11 +3598,12 @@ impl<'m> FnCompiler<'m> {
             return Ok(());
         }
 
-        // Not found anywhere: a new immutable binding in the current scope.
-        if self.scopes.is_empty() {
+        // Not found anywhere: a new immutable binding in the current scope — a top-level one unless
+        // it was promoted into `main`'s register scope, which `declare_local` binds into.
+        if self.at_global_depth() && !self.promoted.contains(name) {
             self.globals
                 .insert(name.to_string(), GlobalInfo { mutable: false });
-            let global = self.module.intern_global(name);
+            let global = self.global_slot(name);
             self.code.push(Op::StoreGlobal { global, src });
         } else {
             self.declare_local(name, src, owned, false, name_span);
@@ -3574,7 +3801,7 @@ impl<'m> FnCompiler<'m> {
             }
             Resolved::Global => {
                 let dst = self.alloc_reg();
-                let global = self.module.intern_global(name);
+                let global = self.global_slot(name);
                 self.code.push(Op::LoadGlobal { dst, global, span });
                 Ok(dst)
             }
@@ -3754,7 +3981,7 @@ impl<'m> FnCompiler<'m> {
                         Resolved::Local(reg) => Some(reg),
                         Resolved::Global => {
                             let reg = self.alloc_reg();
-                            let global = self.module.intern_global(name);
+                            let global = self.global_slot(name);
                             self.code.push(Op::TakeGlobal {
                                 dst: reg,
                                 global,
@@ -4556,7 +4783,7 @@ impl<'m> FnCompiler<'m> {
             && self.module.module_fns.contains(name)
             && matches!(self.resolve(name), Resolved::Global)
         {
-            let global = self.module.intern_global(name);
+            let global = self.global_slot(name);
             // The type arguments are evaluated BEFORE the value arguments, matching the order the
             // tree-walker evaluates the two channels — they are ordinary operands, and a
             // pass-through slot is a plain local read, so the order is observable only through
@@ -4682,7 +4909,7 @@ impl<'m> FnCompiler<'m> {
                 Resolved::Local(reg) => (reg, true),
                 Resolved::Global => {
                     let reg = self.alloc_reg();
-                    let global = self.module.intern_global(name);
+                    let global = self.global_slot(name);
                     self.code.push(Op::TakeGlobal {
                         dst: reg,
                         global,
@@ -4743,7 +4970,7 @@ impl<'m> FnCompiler<'m> {
                     Resolved::Local(reg) => Some(reg),
                     Resolved::Global => {
                         let reg = self.alloc_reg();
-                        let global = self.module.intern_global(name);
+                        let global = self.global_slot(name);
                         self.code.push(Op::TakeGlobal {
                             dst: reg,
                             global,
@@ -4999,7 +5226,7 @@ impl<'m> FnCompiler<'m> {
                 // two handled cases.)
                 _ => {
                     let reg = self.alloc_reg();
-                    let global = self.module.intern_global(name);
+                    let global = self.global_slot(name);
                     self.code.push(Op::TakeGlobal {
                         dst: reg,
                         global,
@@ -6608,5 +6835,228 @@ mod tests {
         let span = Span::new_in(SourceId::FIRST, 3, 4);
         let raised: Result<(), Unsupported> = unsupported("a reason", span);
         assert_eq!(raised.unwrap_err().span, Some(span));
+    }
+
+    // ── Top-level bindings in `main`'s registers (`TopLevelStorage`) ──────────────────────────
+    //
+    // Each of these pins one clause of `ModuleCompiler::promotable_top_level`, and each is written
+    // as an ABLATION: delete the clause it names and the assertion fails, because the clause is the
+    // only thing standing between the program and a global slot. The observable is the presence of
+    // the name in `Module::global_names` — the runtime's own slot table, so "did it stay a global"
+    // is answered by the same data the VM indexes rather than by a compiler-internal set.
+
+    /// Whether the compiled module gave `name` a global slot — i.e. whether the binding stayed in the
+    /// global table rather than moving into `main`'s registers.
+    fn has_global_slot(m: &Module, name: &str) -> bool {
+        m.global_names.iter().any(|n| n == name)
+    }
+
+    /// The `Op`s of `main` (proto 0) that touch the global table at all.
+    fn main_global_ops(m: &Module) -> Vec<&noeta_bytecode::Op> {
+        m.protos[0]
+            .code
+            .iter()
+            .filter(|op| {
+                matches!(
+                    op,
+                    noeta_bytecode::Op::LoadGlobal { .. }
+                        | noeta_bytecode::Op::StoreGlobal { .. }
+                        | noeta_bytecode::Op::TakeGlobal { .. }
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_top_level_loop_nothing_else_can_reach_runs_entirely_in_registers() {
+        let m = compile_flag(
+            "mut total = 0\nmut i = 0\nwhile i < 3 {\n  total = total + i\n  i = i + 1\n}\necho total\n",
+            false,
+        );
+        assert!(!has_global_slot(&m, "total"));
+        assert!(!has_global_slot(&m, "i"));
+        assert!(
+            main_global_ops(&m).is_empty(),
+            "the whole program is registers: {:?}",
+            main_global_ops(&m)
+        );
+    }
+
+    #[test]
+    fn a_nested_fn_that_lists_the_binding_keeps_it_in_the_global_table() {
+        // A named `fn` is sealed, so `use (total)` is the ONE way it reaches a top-level binding —
+        // for a read as much as for a write. The allow-list is a reference like any other, and the
+        // binding stays where that reference can find it: the global table.
+        let m = compile_flag(
+            "mut total = 7\nfn read() use (total): int { return total }\necho read()\n",
+            false,
+        );
+        assert!(has_global_slot(&m, "total"));
+    }
+
+    #[test]
+    fn a_sealed_fn_that_writes_the_binding_keeps_it_in_the_global_table() {
+        let m = compile_flag(
+            "mut counter = 0\nfn bump() use (counter): void { counter = counter + 1 }\nbump()\necho counter\n",
+            false,
+        );
+        assert!(has_global_slot(&m, "counter"));
+    }
+
+    #[test]
+    fn a_closure_capturing_a_top_level_binding_keeps_it_in_the_global_table() {
+        // A closure is not sealed: it reaches a top-level binding implicitly, through the global table.
+        let m = compile_flag(
+            "mut base = 2\nf = fn(x: int) => x + base\necho f(3)\n",
+            false,
+        );
+        assert!(has_global_slot(&m, "base"));
+    }
+
+    #[test]
+    fn a_body_compiled_before_main_keeps_the_binding_it_reads_in_the_global_table() {
+        // The other half of the condition. A method's `use (…)` list and a field DEFAULT both reach a
+        // top-level binding, and both compile BEFORE `main` — so neither is visible to the
+        // free-variable walk over the top level, and both are caught instead by the fact that their
+        // reference has already interned the name's global slot.
+        let method = compile_flag(
+            "mut scale = 3\nstruct Box {\n  n: int\n  pub fn scaled() use (scale): int { return self.n * scale }\n}\necho Box { n: 2 }.scaled()\n",
+            false,
+        );
+        assert!(has_global_slot(&method, "scale"));
+
+        let field_default = compile_flag(
+            "mut base = 5\nstruct S {\n  n: int = base\n}\necho S {}.n\n",
+            false,
+        );
+        assert!(has_global_slot(&field_default, "base"));
+    }
+
+    #[test]
+    fn a_program_that_declares_a_destructor_keeps_its_whole_top_level_in_the_global_table() {
+        // `Op::Halt` releases `main`'s registers with the plain, non-destructor-aware release; the
+        // globals are destroyed at teardown with `release_value`. A program with a `destruct` therefore
+        // keeps every top-level binding in the global table — including `plain`, which no destructor
+        // could ever reach.
+        let m = compile_flag(
+            "class Res {\n  pub fn new(): Res { return Res {} }\n  destruct { echo \"gone\" }\n}\nmut r = Res.new()\nmut plain = 1\necho plain\n",
+            false,
+        );
+        assert!(has_global_slot(&m, "r"));
+        assert!(has_global_slot(&m, "plain"));
+    }
+
+    #[test]
+    fn an_import_of_the_same_name_keeps_the_binding_in_the_global_table() {
+        // The import and the binding share ONE slot, and a store through either spelling is meant to
+        // be seen through the other — so moving only one of them apart would make the later `use`
+        // stop displacing the binding. The checker rejects the shadowing, and `compile` deliberately
+        // does not gate on that (`noeta-db`'s bytecode query compiles regardless), so the compiler
+        // still has to make a coherent choice; the coherent one is "neither moves".
+        for src in [
+            "use std.math\nmut math = 1\necho math\n",
+            "mut math = 1\nuse std.math\necho math\n",
+        ] {
+            let source = Source::new(SourceId::FIRST, "test.noe", src);
+            let lexed = lex(&source);
+            let parsed = parse(&source, &lexed.tokens);
+            let m = compile(&parsed.program).expect("compiles even though it does not check");
+            assert!(has_global_slot(&m, "math"));
+            assert!(
+                m.protos[0]
+                    .code
+                    .iter()
+                    .any(|op| matches!(op, noeta_bytecode::Op::LoadGlobal { .. })),
+                "and the read goes through that one slot, whichever spelling wrote it last: {src:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_free_function_invoke_keeps_the_whole_top_level_in_the_global_table() {
+        // `invoke(name, args)` with no receiver resolves an arbitrary RUNTIME string against the
+        // global-name table, so it names a top-level binding without any site naming it — a program
+        // that performs one keeps every top-level binding where that dispatch looks, `plain`
+        // included. The three-argument form dispatches through the `(type, method)` table and is not
+        // this, so it disqualifies nothing.
+        let by_name = compile_flag(
+            "mut f = fn(x: int) => x + 1\nmut plain = 1\necho invoke(\"f\", [3])\necho plain\n",
+            false,
+        );
+        assert!(has_global_slot(&by_name, "f"));
+        assert!(has_global_slot(&by_name, "plain"));
+
+        let by_method = compile_flag(
+            "struct Boxy {\n  n: int\n  pub fn get(): int { return self.n }\n}\nmut plain = 1\necho invoke(Boxy { n: 2 }, \"get\", [])\necho plain\n",
+            false,
+        );
+        assert!(!has_global_slot(&by_method, "plain"));
+    }
+
+    #[test]
+    fn a_session_compile_keeps_every_top_level_binding_in_the_global_table() {
+        // The REPL, the debug console and a hot-swap re-run all install a SECOND program into the same
+        // compiler, replacing proto 0 — so a binding held in the retired chunk's registers would be
+        // invisible to the replacement. `TopLevelStorage::Globals` is what the session path is for.
+        let src = "mut total = 0\nmut i = 0\nwhile i < 3 {\n  total = total + i\n  i = i + 1\n}\necho total\n";
+        let source = Source::new(SourceId::FIRST, "test.noe", src);
+        let lexed = lex(&source);
+        let parsed = parse(&source, &lexed.tokens);
+        let checked = noeta_check::check_all(&parsed.program);
+        let (module, mut session) =
+            super::compile_with_sites_session(&parsed.program, checked.sites, false, false)
+                .expect("compiles");
+        assert!(has_global_slot(&module, "total"));
+        assert!(has_global_slot(&module, "i"));
+
+        // And the next entry still finds it — the property promotion would have broken.
+        let next = Source::new(SourceId(1), "entry.noe", "echo total\n");
+        let next_lexed = lex(&next);
+        let next_parsed = parse(&next, &next_lexed.tokens);
+        let entry = session.extend(&next_parsed.program).expect("extends");
+        assert!(has_global_slot(&entry, "total"));
+        assert!(
+            entry.protos[0]
+                .code
+                .iter()
+                .any(|op| matches!(op, noeta_bytecode::Op::LoadGlobal { .. })),
+            "the entry reads the session's binding through its slot"
+        );
+    }
+
+    #[test]
+    fn a_promoted_binding_keeps_its_debugger_name() {
+        // Promotion routes through `declare_local`, so a debug compile records the binding in the SAME
+        // `reg → name` table every function-local uses — and the debugger attaches both that table and
+        // `global_bindings` to the `main` frame, so the variable is shown either way.
+        let m = compile_dbg("mut total = 41\ntotal = total + 1\necho total\n");
+        assert!(!has_global_slot(&m, "total"));
+        assert!(
+            m.protos[0].debug_locals.iter().any(|l| l.name == "total"),
+            "a promoted binding is a named local of `main`: {:?}",
+            m.protos[0].debug_locals
+        );
+    }
+
+    #[test]
+    fn a_forward_read_of_a_promoted_binding_still_compiles_to_its_unbound_slot() {
+        // Name resolution in `main` sees only the bindings declared so far, so `b` here is the runtime
+        // E0005 the reference interpreter also raises — emitted as a `LoadGlobal` of a slot nothing
+        // stores. The program does not type-check, and `compile` deliberately does not gate on that
+        // (`noeta-db`'s bytecode query compiles regardless), so the compiler must survive it: this is
+        // the case `FnCompiler::global_slot` records so the post-install verification stays exact.
+        let src = "mut a = b\nmut b = 1\necho a\n";
+        let source = Source::new(SourceId::FIRST, "test.noe", src);
+        let lexed = lex(&source);
+        let parsed = parse(&source, &lexed.tokens);
+        let m = compile(&parsed.program).expect("compiles even though it does not check");
+        assert!(has_global_slot(&m, "b"), "the forward read keeps a slot");
+        assert!(
+            m.protos[0]
+                .code
+                .iter()
+                .any(|op| matches!(op, noeta_bytecode::Op::LoadGlobal { .. })),
+            "and reads it, which is what raises E0005"
+        );
     }
 }

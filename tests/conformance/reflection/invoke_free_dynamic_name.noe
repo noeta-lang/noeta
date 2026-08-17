@@ -1,0 +1,38 @@
+// The free-function `invoke` resolves its name from a **runtime string value**, not from anything
+// written at the call site — so the name may be computed, read from input, or chosen by a branch,
+// and it still reaches a top-level binding.
+//
+// That is the sharp edge for any backend that wants to decide *where* to keep a top-level binding:
+// the set of names reachable through this door is not knowable from the source. A literal
+// `invoke("f", …)` names `f`; `invoke(names[i], …)` names whatever the list held. Any answer keyed
+// on the spelling of the name would be wrong here, so the only correct reading is that a program
+// containing this door can reach ANY of its top-level bindings by name — including `unused`, which
+// nothing below ever mentions again.
+//
+// Both backends are pinned, because this is exactly where they could silently disagree: they index
+// the top level with different structures, and a name that resolves in one and not the other is a
+// wrong answer rather than a slow one.
+// expect: stdout "Ok(2)"
+// expect: stdout "Ok(30)"
+// expect: stdout "miss"
+// expect: stdout "unused 99"
+// expect: exit 0
+mut f = fn(x: int) => x + 1;
+mut g = fn(x: int) => x * 10;
+mut unused = 99;
+
+names = ["f", "g", "nope"];
+
+// A name the compiler cannot read: an element of a list, chosen at run time.
+echo invoke(names[0], [1]);
+echo invoke(names[1], [3]);
+
+// The same door, still a miss for a name nothing bound.
+echo match invoke(names[2], []) {
+    Ok(_) => "ok",
+    Err(_) => "miss",
+};
+
+// And a binding the dispatch never actually names still has to behave — it was reachable, which is
+// what matters, and it reads back as itself.
+echo "unused ${unused}";

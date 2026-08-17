@@ -79,6 +79,103 @@ pub struct Program {
     pub span: Span,
 }
 
+/// Whether `program` anywhere performs a **free-function `invoke(name, args)`** — the reflection
+/// surface that resolves a name against the top-level namespace at *run time*, out of a string no
+/// compiler can read.
+///
+/// It is the one query that makes a top-level *value* binding nameable without any site naming it:
+/// `invoke` with no receiver looks the string up in the runtime's global-name table and calls
+/// whatever callable it finds, so `mut f = fn(x: int) => x + 1` is reachable as `invoke("f", [3])`
+/// from a program that never writes `f` again. A backend that decided to keep such a binding
+/// somewhere other than that table would answer "no top-level function `f`" where the reference
+/// backend answers `Ok(4)` — which is why the question is asked here, of the shared IR, rather than
+/// in one backend's head.
+///
+/// The three-argument `invoke(recv, name, args)` is a *method* dispatch, resolved through the
+/// `(type, method)` table, and is not this: only `recv: None` counts.
+pub fn dispatches_top_level_by_name(program: &Program) -> bool {
+    block_dispatches_by_name(&program.top)
+}
+
+fn block_dispatches_by_name(block: &Block) -> bool {
+    block.stmts.iter().any(stmt_dispatches_by_name)
+}
+
+fn stmt_dispatches_by_name(stmt: &Stmt) -> bool {
+    // A statement carries at most one rvalue and at most one declaration; its control-flow children
+    // are the shared descent every structural collector uses ([`Stmt::for_each_child_block`]), so a
+    // new control-flow variant is picked up there rather than needing a case here. Every other
+    // variant is a leaf over atoms, which cannot contain a call of any kind.
+    let own = match stmt {
+        Stmt::Let { rvalue, .. } | Stmt::Eval { rvalue, .. } => rvalue_dispatches_by_name(rvalue),
+        Stmt::Decl(decl) => decl_dispatches_by_name(decl),
+        Stmt::Bind { .. }
+        | Stmt::Echo { .. }
+        | Stmt::Return { .. }
+        | Stmt::Break { .. }
+        | Stmt::Continue { .. }
+        | Stmt::If { .. }
+        | Stmt::While { .. }
+        | Stmt::For { .. }
+        | Stmt::Match { .. }
+        | Stmt::Logical { .. }
+        | Stmt::Coalesce { .. }
+        | Stmt::ScopeBegin { .. }
+        | Stmt::ScopeEnd { .. }
+        | Stmt::Drop(_)
+        | Stmt::DropVar { .. } => false,
+    };
+    if own {
+        return true;
+    }
+    let mut found = false;
+    stmt.for_each_child_block(|block| found |= block_dispatches_by_name(block));
+    found
+}
+
+fn rvalue_dispatches_by_name(rvalue: &Rvalue) -> bool {
+    match rvalue {
+        Rvalue::Reflect {
+            which: noeta_ast::ReflectKind::Invoke,
+            args: ReflectArgs::Dispatch { recv: None, .. },
+            ..
+        } => true,
+        // The only rvalue that nests a function body — the same invariant the free-variable
+        // analysis' `collect_nested_frees_rvalue` rests on.
+        Rvalue::Closure { func, .. } => func_dispatches_by_name(func),
+        _ => false,
+    }
+}
+
+fn decl_dispatches_by_name(decl: &Decl) -> bool {
+    let methods = |ms: &[(String, Rc<Func>)]| ms.iter().any(|(_, f)| func_dispatches_by_name(f));
+    let defaults =
+        |ds: &[(String, Thunk)]| ds.iter().any(|(_, t)| block_dispatches_by_name(&t.body));
+    match decl {
+        Decl::Fn { func, .. } => func_dispatches_by_name(func),
+        Decl::Class(def) => {
+            methods(&def.methods)
+                || defaults(&def.field_defaults)
+                || def
+                    .destructor
+                    .as_deref()
+                    .is_some_and(func_dispatches_by_name)
+        }
+        Decl::Struct(def) => methods(&def.methods) || defaults(&def.field_defaults),
+        Decl::Enum(def) => methods(&def.methods),
+        Decl::Use { .. } => false,
+    }
+}
+
+fn func_dispatches_by_name(func: &Func) -> bool {
+    block_dispatches_by_name(&func.body)
+        || func
+            .defaults
+            .iter()
+            .flatten()
+            .any(|t| block_dispatches_by_name(&t.body))
+}
+
 /// A frame-local temporary: an ANF-introduced intermediate value. Write-once, read-many
 /// within its function activation, and never captured by a closure. Identified by a dense
 /// index into the activation's flat temporary store.

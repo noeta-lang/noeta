@@ -1,0 +1,38 @@
+// End-of-program destruction for top-level bindings: every one runs its `destruct`, in reverse
+// declaration order, and a value displaced by a reassignment dies at the assignment point.
+//
+// This is the rule that decides where a program's top level is *stored*. The entry frame's registers
+// are released with a plain, non-destructor-aware release when the program halts; the deterministic
+// reverse-order destruction the spec requires happens in the global table's teardown. So a program
+// that declares a `destruct` keeps its whole top level in the global table — and the output below is
+// what that buys, on both backends.
+// expect: stdout "start"
+// expect: stdout "bye replaced"
+// expect: stdout "live 2"
+// expect: stdout "end"
+// expect: stdout "bye third"
+// expect: stdout "bye second"
+// expect: stdout "bye first"
+// expect: exit 0
+class Res {
+    pub mut tag: string
+    pub fn new(tag: string): Res { return Res { tag: tag } }
+    destruct { echo "bye ${self.tag}" }
+}
+
+echo "start"
+first = Res.new("first")
+mut second = Res.new("replaced")
+// The displaced value dies here, before anything below it runs.
+second = Res.new("second")
+third = Res.new("third")
+
+// A plain, destructor-free top-level binding in the same program is destroyed at the same point.
+mut live = 0
+mut i = 0
+while i < 2 {
+    live = live + 1
+    i = i + 1
+}
+echo "live ${live}"
+echo "end"
