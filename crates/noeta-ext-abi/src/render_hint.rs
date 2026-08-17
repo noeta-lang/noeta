@@ -159,8 +159,8 @@ pub fn map_key_order(
 }
 
 /// The slot-wise observed order of two packed keys of the same type: a slot the hint marks
-/// [`RenderHint::Unsigned`] reads its word unsigned, every other slot keeps the derived
-/// [`Ord`] a packed field carries.
+/// [`RenderHint::Unsigned`] reads its word unsigned, a slot holding a nested packed struct descends
+/// into the nested hint, and every other slot keeps the derived [`Ord`] a packed field carries.
 fn packed_fields_order(
     a: &[crate::PackedKeyField],
     b: &[crate::PackedKeyField],
@@ -172,6 +172,11 @@ fn packed_fields_order(
             (Some(RenderHint::Unsigned), PackedKeyField::Int(p), PackedKeyField::Int(q)) => {
                 unsigned_order(*p, *q)
             }
+            (
+                Some(nested @ RenderHint::Slots(_)),
+                PackedKeyField::Struct(pn, p),
+                PackedKeyField::Struct(qn, q),
+            ) => pn.cmp(qn).then_with(|| packed_fields_order(p, q, nested)),
             _ => x.cmp(y),
         };
         if ord != std::cmp::Ordering::Equal {
@@ -181,13 +186,22 @@ fn packed_fields_order(
     a.len().cmp(&b.len())
 }
 
-/// A map key's rendered form under an optional hint. An integer key is the only kind a hint can
-/// reach; every other key renders through the shared [`crate::MapKey::render`] contract, so
-/// a string key keeps its quoted form. Shared by both backends, whose map entries hold the same
-/// [`crate::MapKey`] even though their values differ.
+/// A map key's rendered form under an optional hint. Two kinds of key hold an erased integer word
+/// and so are the two a hint can reach: a bare integer key, and a `@packed` struct key, whose
+/// declared fields are words in flat storage. Every other key renders through the shared
+/// [`crate::MapKey::render`] contract, so a string key keeps its quoted form. Shared by both
+/// backends, whose map entries hold the same [`crate::MapKey`] even though their values differ.
+///
+/// The arms mirror [`map_key_order`]'s exactly — same key kinds, same hint shapes, same slot
+/// numbering — because a rendered map and its key order are two views of the same entries and a
+/// program that reads both must see one answer. Rendering is *all* this changes: the key's own
+/// [`Ord`], which places it for lookup, is never consulted here and never takes a hint.
 pub fn map_key_display(key: &crate::MapKey, hint: Option<&RenderHint>) -> String {
     match (hint, key) {
         (Some(RenderHint::Unsigned), crate::MapKey::Int(word)) => unsigned_digits(*word),
+        (Some(hint @ RenderHint::Slots(_)), crate::MapKey::Packed(p)) => {
+            crate::map_key::packed_names::display_hinted(&p.type_name, &p.fields, Some(hint))
+        }
         _ => key.render(),
     }
 }
@@ -403,14 +417,36 @@ mod tests {
             map_key_order(&key(1, -1), &key(1, 0), Some(&slots)),
             Ordering::Less
         );
+        // A NESTED packed struct descends into its own slot hint rather than falling back to the
+        // derived `Ord` — the position a flat slot walk misses.
+        let nested = |at: i64| {
+            MapKey::packed(
+                "Outer",
+                vec![PackedKeyField::Struct(
+                    "Inner".into(),
+                    vec![PackedKeyField::Int(at)].into_boxed_slice(),
+                )],
+            )
+        };
+        let outer = RenderHint::Slots(vec![(
+            0,
+            RenderHint::Slots(vec![(0, RenderHint::Unsigned)]),
+        )]);
+        assert_eq!(
+            map_key_order(&nested(-1), &nested(1), Some(&outer)),
+            Ordering::Greater
+        );
+        assert_eq!(map_key_order(&nested(-1), &nested(1), None), Ordering::Less);
     }
 
-    /// Only an integer key is reinterpreted; every other key renders through `MapKey::render`,
-    /// hint or no hint.
+    /// An integer key and a `@packed` struct key are the two kinds holding an erased word, so they
+    /// are the two a hint reaches; every other key renders through `MapKey::render`, hint or no
+    /// hint. The packed arm reads the same slot numbering `map_key_order`'s does, at every depth.
     #[test]
-    fn only_an_integer_map_key_takes_the_hint() {
-        let int_key = crate::MapKey::Int(-1);
-        let str_key = crate::MapKey::Str("a".into());
+    fn an_integer_and_a_packed_map_key_take_the_hint() {
+        use crate::{MapKey, PackedKeyField};
+        let int_key = MapKey::Int(-1);
+        let str_key = MapKey::Str("a".into());
         assert_eq!(
             map_key_display(&int_key, Some(&RenderHint::Unsigned)),
             "18446744073709551615"
@@ -419,6 +455,33 @@ mod tests {
         assert_eq!(
             map_key_display(&str_key, Some(&RenderHint::Unsigned)),
             str_key.render()
+        );
+        // A packed key: slot 0 hinted unsigned, slot 1 left signed — and unhinted it is `render()`.
+        let packed = MapKey::packed(
+            "HintedTick",
+            vec![PackedKeyField::Int(-1), PackedKeyField::Int(-1)],
+        );
+        let slots = RenderHint::Slots(vec![(0, RenderHint::Unsigned)]);
+        assert_eq!(
+            map_key_display(&packed, Some(&slots)),
+            "HintedTick {18446744073709551615, -1}"
+        );
+        assert_eq!(map_key_display(&packed, None), packed.render());
+        // A nested packed struct takes the nested hint at its slot.
+        let outer = MapKey::packed(
+            "HintedOuter",
+            vec![PackedKeyField::Struct(
+                "HintedInner".into(),
+                vec![PackedKeyField::Int(-1)].into_boxed_slice(),
+            )],
+        );
+        let outer_hint = RenderHint::Slots(vec![(
+            0,
+            RenderHint::Slots(vec![(0, RenderHint::Unsigned)]),
+        )]);
+        assert_eq!(
+            map_key_display(&outer, Some(&outer_hint)),
+            "HintedOuter {HintedInner {18446744073709551615}}"
         );
     }
 

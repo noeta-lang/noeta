@@ -153,7 +153,7 @@ echo grid[Cell { x: 3, y: 4 }]          // 42 — a fresh equal value finds it
 echo grid.keys()                        // [Cell {x: 3, y: 4}] — full struct values again
 ```
 
-Iteration/display order over packed keys is field-wise (declaration order, negatives before positives, a `u64` field by its unsigned value) — the same total order sets and `sorted()` use. Float/`f32` fields disqualify a struct as a key (`NaN != NaN` makes float keys a footgun). See [Built-ins: Map](Standard-Library#map) for the key-capability rules.
+Iteration/display order over packed keys is field-wise (declaration order, negatives before positives, a `u64` field by its unsigned value) — the same total order sets and `sorted()` use. A `u64` field's *digits* read unsigned too, at whatever depth it sits: a rendered map's keys, `keys()` and iteration all print `Tick {at: 18446744073709551615}` for a key whose field is a nested packed struct's as readily as for a flat one. Float/`f32` fields disqualify a struct as a key (`NaN != NaN` makes float keys a footgun). See [Built-ins: Map](Standard-Library#map) for the key-capability rules.
 
 ## Column (SoA) layout — `@packed(Layout.Column)`
 

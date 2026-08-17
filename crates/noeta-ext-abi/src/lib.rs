@@ -210,7 +210,14 @@
 /// and orders, and the [`NativeValue`] tree both backends marshal into. That an extension, and the
 /// native seam itself, can now name it is the point: a native function that keeps a value for a
 /// *later* serialization can keep its hint too.
-pub const ABI_VERSION: u32 = 21;
+///
+/// **22** — [`map_key::packed_names::display_hinted`]: the display form of a `@packed` struct key,
+/// with the slots a [`render_hint::RenderHint`] marks unsigned written as the `u64` they stand for.
+/// Purely additive — [`map_key::packed_names::display`] is it with no hint, byte for byte. A packed
+/// key stores its declared fields as flat words, so a `u64` field is indistinguishable from an `i64`
+/// one inside the key; the ordering walk already read the hint's slots and the rendering walk did
+/// not, which left a rendered map printing a key its own `keys()` printed differently.
+pub const ABI_VERSION: u32 = 22;
 
 pub mod args;
 pub mod channel;
