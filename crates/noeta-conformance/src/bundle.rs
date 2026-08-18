@@ -77,8 +77,7 @@ pub fn run_bundle_roundtrip(root: &Path, only: Option<&Path>) -> BundleReport {
     let mut report = BundleReport::default();
     for case in cases {
         if let Some(only) = only
-            && case.entry != only
-            && !case.entry.ends_with(only)
+            && !crate::selects(&case.entry, only)
         {
             continue;
         }

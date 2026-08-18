@@ -65,3 +65,42 @@ fn unknown_stage_exits_2() {
         .code(2)
         .stderr(predicate::str::contains("unknown stage"));
 }
+
+/// A `--file` naming nothing is a typo, and the run that follows proves nothing. It used to print
+/// "0 passed, 0 failed, 0 total" and exit 0 — which matters because a narrowed run is precisely
+/// what gets used as evidence that a fix works, so a mistyped filter turned "I verified it" into a
+/// statement about an empty set.
+#[test]
+fn a_file_filter_matching_nothing_exits_2() {
+    conformance()
+        .current_dir(workspace())
+        .args(["--file", "zzz-no-such-case.noe"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("matches no case"));
+}
+
+/// The same refusal reaches the oracles, not just the default corpus run — they take `--file` too.
+#[test]
+fn a_file_filter_matching_nothing_exits_2_for_the_differential() {
+    conformance()
+        .current_dir(workspace())
+        .args(["--differential", "--file", "zzz-no-such-case.noe"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("matches no case"));
+}
+
+/// The guard asks whether the *file* exists, never how many programs ran: a narrowed run whose one
+/// case the checker rejects legitimately executes nothing and must still pass.
+#[test]
+fn a_file_filter_that_matches_still_runs() {
+    conformance()
+        .current_dir(workspace())
+        .args(["--file", "hello.noe"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("1 passed"));
+}

@@ -78,8 +78,7 @@ pub fn run_ir_corpus(root: &Path, only: Option<&Path>) -> IrCorpusReport {
     let mut report = IrCorpusReport::default();
     for case in cases {
         if let Some(only) = only
-            && case.entry != only
-            && !case.entry.ends_with(only)
+            && !crate::selects(&case.entry, only)
         {
             continue;
         }

@@ -528,6 +528,23 @@ pub fn on_deep_stack<T: Send>(f: impl FnOnce() -> T + Send) -> T {
     })
 }
 
+/// Whether `only` selects `entry` — the `--file` narrowing rule, in one place because every oracle
+/// applies it and a filter that means different things per oracle is the "one rule spelled twice"
+/// defect this repo already knows.
+pub(crate) fn selects(entry: &Path, only: &Path) -> bool {
+    entry == only || entry.ends_with(only)
+}
+
+/// How many corpus cases a `--file` argument names. Zero means the argument matches nothing — a
+/// typo — which every oracle must refuse rather than report as an empty pass. Distinct from "the
+/// run executed zero programs", which is legitimate for a narrowed differential whose one case the
+/// checker rejects; this asks only whether the *file* exists in the corpus.
+pub fn cases_selected(root: &Path, only: &Path) -> usize {
+    let mut cases = Vec::new();
+    collect_cases(root, &mut cases);
+    cases.iter().filter(|c| selects(&c.entry, only)).count()
+}
+
 /// Discover and run every case under `root`, optionally narrowed to a single entry file.
 /// Returns a [`Report`] that can be rendered as text or JSON.
 pub fn run_corpus(root: &Path, only: Option<&Path>, stage: Stage) -> Report {
@@ -538,8 +555,7 @@ pub fn run_corpus(root: &Path, only: Option<&Path>, stage: Stage) -> Report {
     let mut report = Report::default();
     for case in cases {
         if let Some(only) = only
-            && case.entry != only
-            && !case.entry.ends_with(only)
+            && !selects(&case.entry, only)
         {
             continue;
         }

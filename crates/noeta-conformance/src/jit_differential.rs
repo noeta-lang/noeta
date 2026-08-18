@@ -182,8 +182,7 @@ pub fn run_jit_differential_with(root: &Path, only: Option<&Path>, arm: Arm) -> 
     };
     for case in cases {
         if let Some(only) = only
-            && case.entry != only
-            && !case.entry.ends_with(only)
+            && !crate::selects(&case.entry, only)
         {
             continue;
         }

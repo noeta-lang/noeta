@@ -586,8 +586,7 @@ pub fn run_aot_differential(root: &Path, only: Option<&Path>) -> Result<AotDiffR
     let mut chunk: Vec<Job> = Vec::with_capacity(width);
     for case in cases {
         if let Some(only) = only
-            && case.entry != only
-            && !case.entry.ends_with(only)
+            && !crate::selects(&case.entry, only)
         {
             continue;
         }

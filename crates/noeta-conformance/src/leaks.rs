@@ -112,8 +112,7 @@ pub fn run_leak_check(root: &Path, only: Option<&Path>) -> LeakReport {
     let mut report = LeakReport::default();
     for case in cases {
         if let Some(only) = only
-            && case.entry != only
-            && !case.entry.ends_with(only)
+            && !crate::selects(&case.entry, only)
         {
             continue;
         }

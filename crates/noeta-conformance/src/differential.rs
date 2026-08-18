@@ -127,8 +127,7 @@ pub fn run_differential(root: &Path, only: Option<&Path>) -> DiffReport {
     let mut report = DiffReport::default();
     for case in cases {
         if let Some(only) = only
-            && case.entry != only
-            && !case.entry.ends_with(only)
+            && !crate::selects(&case.entry, only)
         {
             continue;
         }

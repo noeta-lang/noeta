@@ -75,6 +75,25 @@ struct Cli {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    // A `--file` that names nothing is a typo, and every oracle below would otherwise report the
+    // empty run as a pass — "0 passed, 0 failed, 0 total", exit 0. That is the same green-looking
+    // nothing the whole-corpus guards already refuse, arriving through the one door they exempt,
+    // and it is worse here because it is what an agent runs to *verify a fix*: the narrowed check
+    // is the evidence, so a mistyped filter turns "I confirmed it" into a statement about nothing.
+    //
+    // Distinct from the run executing zero *programs*, which stays legitimate for a narrowed
+    // differential whose one case the checker rejects. This asks only whether the file exists.
+    if let Some(only) = cli.file.as_deref()
+        && noeta_conformance::cases_selected(&cli.dir, only) == 0
+    {
+        eprintln!(
+            "noeta-conformance: --file `{}` matches no case under {} — refusing to report an \
+             empty run as a pass.",
+            only.display(),
+            cli.dir.display()
+        );
+        return ExitCode::from(2);
+    }
     if cli.jit_differential {
         if cli.cancel_poll && cli.aot_bodies {
             eprintln!(
