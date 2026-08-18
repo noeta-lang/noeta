@@ -22,6 +22,7 @@
 // expect: stdout "1;18446744073709551615;"
 // expect: stdout "{"a":18446744073709551615}"
 // expect: stdout "18446744073709551615"
+// expect: stdout "18446744073709551615;18446744073709551615;"
 // expect: stdout "{1, 18446744073709551615}"
 // expect: stdout "Box {v: 18446744073709551615}"
 // expect: stdout "{"v":18446744073709551615}"
@@ -87,6 +88,20 @@ fn show_set<T>(s: Set<T>): string {
     return "${s}";
 }
 
+// A door inside a LOOP body, with nothing else in the body reading the slot. The slot the hint
+// resolves through is a register like any other, so it has to be live where the door reads it: a
+// loop whose only reader is the hint is exactly where a walk that did not count it would hand the
+// register to another local and render the erased word.
+fn repeat<T>(v: T): string {
+    mut out = "";
+    mut i = 0;
+    while i < 2 {
+        out = out ~ "${v};";
+        i = i + 1;
+    }
+    return out;
+}
+
 big: u64 = 18446744073709551615u64;
 one: u64 = 1u64;
 
@@ -106,6 +121,7 @@ echo walk_set([big, one].to_set());
 m: Map<string, u64> = {"a": big};
 echo wrap_map(m);
 echo wrap_opt(some(big));
+echo repeat(big);
 echo show_set([big, one].to_set());
 
 // A generic struct's field at `T = u64`: the field's declared type is the parameter, so its slot
