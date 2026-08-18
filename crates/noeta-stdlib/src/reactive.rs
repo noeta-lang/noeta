@@ -447,7 +447,7 @@ struct ViewBinding {
     /// no call site in sight, and a fixed-width integer's signedness exists nowhere but the static
     /// type at the site that bound it. Without it a `Signal<u64>` past bit 63 reaches the browser as
     /// a negative number — a *data* error in a frame nothing downstream can second-guess.
-    hint: Option<noeta_ext_abi::RenderHint>,
+    hint: Option<noeta_ext_abi::PushHint>,
 }
 
 // `ViewSource` (where a view binding reads its value — a signal cell or a computed body+memo) and
@@ -566,7 +566,7 @@ fn binding_value_json<C: NativeCtx + ?Sized>(
     ext: &ReactiveExt,
     node: NodeId,
     source: &ViewSource,
-    hint: Option<&noeta_ext_abi::RenderHint>,
+    hint: Option<&noeta_ext_abi::PushHint>,
 ) -> Result<Option<String>, CtxError> {
     if !ext.graph.is_live(node) {
         return Ok(None);
@@ -600,7 +600,7 @@ fn binding_value_json<C: NativeCtx + ?Sized>(
     // The hinted walk, which IS `crate::json::stringify` byte for byte without a hint — the same
     // serializer every other JSON door reaches, so a frame and a `json.stringify` of the same value
     // cannot disagree.
-    Ok(Some(noeta_ext_abi::json_stringify(&value, hint)))
+    Ok(Some(noeta_ext_abi::json_stringify_pushed(&value, hint)))
 }
 
 /// One dirty binding's work item, copied out of the view under a transient borrow so serialization
@@ -613,7 +613,7 @@ struct DirtyBinding {
     source: ViewSource,
     /// The last serialization pushed for it, so a value-equal recompute pushes nothing.
     last: String,
-    hint: Option<noeta_ext_abi::RenderHint>,
+    hint: Option<noeta_ext_abi::PushHint>,
 }
 
 /// Render a frame: `{"type":<kind>,<field>:{"name":<json>,…}}` with entries sorted by name.

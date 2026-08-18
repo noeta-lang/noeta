@@ -281,7 +281,8 @@ pub use registry::{
     TypedTypeDispatch, VariantRecipe, VariantTag, VariantValue,
 };
 pub use render_hint::{
-    RenderHint, json_stringify, map_key_display, map_key_order, unsigned_digits, unsigned_order,
+    PushHint, RenderHint, json_stringify, json_stringify_pushed, map_key_display, map_key_order,
+    unsigned_digits, unsigned_order,
 };
 pub use stream::{
     Frame, FrameDecoder, FrameStream, Framing, SseCloseIo, SseSendIo, SseSink, StreamRecvIo,

@@ -417,10 +417,12 @@ impl NativeCtx for EvalCtx<'_> {
             .collect()
     }
 
-    fn push_hint(&mut self) -> Option<noeta_ast::RenderHint> {
+    fn push_hint(&mut self) -> Option<noeta_ast::PushHint> {
         // Mirror of the VM: the call's own span is what the checker keyed the hint on, and this runs
         // once per BINDING, never per push.
-        self.interp.binding_hint(self.span).map(|h| (**h).clone())
+        self.interp
+            .binding_hint(self.span)
+            .map(|h| noeta_ast::PushHint::new((**h).clone()))
     }
 
     fn retain(&mut self, slot: Slot) -> CtxResult<noeta_stdlib::Retained> {

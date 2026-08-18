@@ -34,7 +34,8 @@ pub use pretty::Pretty;
 // the checker that builds one speaks this crate's vocabulary.
 pub use noeta_ext_abi::render_hint;
 pub use noeta_ext_abi::render_hint::{
-    RenderHint, json_stringify, map_key_display, map_key_order, unsigned_digits, unsigned_order,
+    PushHint, RenderHint, json_stringify, json_stringify_pushed, map_key_display, map_key_order,
+    unsigned_digits, unsigned_order,
 };
 pub use syntax_kind::SyntaxKind;
 

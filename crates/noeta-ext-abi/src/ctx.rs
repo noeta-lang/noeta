@@ -384,7 +384,7 @@ pub trait NativeCtx {
     /// is what the caller stores anyway.
     ///
     /// The default is `None`, which is correct for any host that does not compile call sites.
-    fn push_hint(&mut self) -> Option<crate::RenderHint> {
+    fn push_hint(&mut self) -> Option<crate::PushHint> {
         None
     }
 

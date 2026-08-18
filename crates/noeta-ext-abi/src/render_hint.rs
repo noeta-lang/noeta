@@ -220,6 +220,69 @@ pub fn map_key_display(key: &crate::MapKey, hint: Option<&RenderHint>) -> String
 /// `none` is null), while its hint is the ordinary [`RenderHint::Variants`] every enum gets. That
 /// is why a `Variants` hint over a non-variant value takes the `some` payload's hint — the last
 /// arm below.
+/// A [`RenderHint`] a native type **kept** — obtained from
+/// [`NativeCtx::push_hint`](crate::ctx::NativeCtx::push_hint) at the site that bound a value, and
+/// stored beside that value to serialize it on a later tick.
+///
+/// The rule a hint lives under is that it may be consumed by a walk producing **output a program
+/// reads**, and never by one **placing a value for later retrieval** — a hint that reached
+/// [`map_key_order`], a set's canonical buffer, or any other ordering could make a lookup miss a
+/// key that is present. For a hint consumed at its call site that rule is kept by the lowering,
+/// which hands each site only the walk it asked for. A kept hint has no call site left, so the
+/// same rule has to be carried by the type.
+///
+/// That is the whole reason this wrapper exists rather than storing the [`RenderHint`] directly.
+/// Outside this crate a `PushHint` can be constructed, cloned and stored, and handed to
+/// [`json_stringify_pushed`] — and nothing else. There is no accessor, no `Deref` and no `From`
+/// back to the hint it wraps, so no amount of determination gets one into an ordering walk. The
+/// alternative was a comment asking extensions not to, which is not a mechanism.
+///
+/// A kept hint serializes, and that is all it does:
+///
+/// ```
+/// use noeta_ext_abi::{NativeValue, PushHint, RenderHint, Scalar, json_stringify_pushed};
+/// let kept = PushHint::new(RenderHint::Unsigned);
+/// let word = NativeValue::Scalar(Scalar::Int(-1));
+/// assert_eq!(json_stringify_pushed(&word, Some(&kept)), "18446744073709551615");
+/// assert_eq!(json_stringify_pushed(&word, None), "-1");
+/// ```
+///
+/// It cannot be unwrapped, which is what keeps it out of every ordering walk:
+///
+/// ```compile_fail,E0599
+/// use noeta_ext_abi::{PushHint, RenderHint};
+/// let kept = PushHint::new(RenderHint::Unsigned);
+/// // `render_hint` is crate-private: there is no route from a kept hint back to a `RenderHint`,
+/// // so `map_key_order` and the other placement walks are unreachable from here.
+/// let _escaped: &RenderHint = kept.render_hint();
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushHint(RenderHint);
+
+impl PushHint {
+    /// Wrap a hint the caller already holds. Construction is deliberately public and harmless:
+    /// the hazard is *unwrapping* one back into a `RenderHint`, so a caller that already has a
+    /// hint gains nothing by wrapping it. Both backends build one here when a call site declares
+    /// a kept argument.
+    pub fn new(hint: RenderHint) -> Self {
+        Self(hint)
+    }
+
+    /// The wrapped hint, readable only inside this crate — see the type docs.
+    pub(crate) fn render_hint(&self) -> &RenderHint {
+        &self.0
+    }
+}
+
+/// [`json_stringify`] for a value serialized under a **kept** hint, and the only walk a
+/// [`PushHint`] can reach.
+///
+/// Byte for byte identical to `json_stringify` given the same hint — it is the one door, not a
+/// second implementation.
+pub fn json_stringify_pushed(value: &crate::NativeValue, hint: Option<&PushHint>) -> String {
+    json_stringify(value, hint.map(PushHint::render_hint))
+}
+
 pub fn json_stringify(value: &crate::NativeValue, hint: Option<&RenderHint>) -> String {
     use crate::json_text::{json_string, stringify};
     use crate::{NativeValue, Scalar};
