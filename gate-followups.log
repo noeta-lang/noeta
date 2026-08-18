@@ -1,0 +1,176 @@
+
+[1m== [fmt] cargo fmt --all --check[0m
+   $ cargo +1.97.0 fmt --all --check
+   [32mPASS[0m   2s  (log: /home/niklas/Code/lang/.claude/worktrees/push-hint-followups/target-agent/gate-logs/20260818-070108-2372004/01-cargo-fmt---all---check.log)
+
+[1m== [clippy] clippy (default features)[0m
+   $ cargo +1.97.0 clippy --workspace --exclude noeta-jit --exclude noeta-cli --all-targets --locked -- -D warnings
+   [32mPASS[0m  29s  (log: /home/niklas/Code/lang/.claude/worktrees/push-hint-followups/target-agent/gate-logs/20260818-070108-2372004/02-clippy--default-features-.log)
+
+[1m== [clippy] clippy (jit feature)[0m
+   $ cargo +1.97.0 clippy -p noeta-vm -p noeta-jit -p noeta-conformance -p noeta-cli --features 'noeta-vm/jit noeta-conformance/jit' --all-targets --locked -- -D warnings
+   [32mPASS[0m  25s  (log: /home/niklas/Code/lang/.claude/worktrees/push-hint-followups/target-agent/gate-logs/20260818-070108-2372004/03-clippy--jit-feature-.log)
+
+[1m== [clippy] clippy (lean CLI, --no-default-features)[0m
+   $ cargo +1.97.0 clippy -p noeta-cli --no-default-features --all-targets --locked -- -D warnings
+   [32mPASS[0m  20s  (log: /home/niklas/Code/lang/.claude/worktrees/push-hint-followups/target-agent/gate-logs/20260818-070108-2372004/04-clippy--lean-CLI----no-default-features-.log)
+
+[1m== [test] cargo test --workspace (Cranelift-free)[0m
+   $ cargo +1.97.0 test --workspace --exclude noeta-jit --exclude noeta-cli --locked
+   [32mPASS[0m  8m43s  (log: /home/niklas/Code/lang/.claude/worktrees/push-hint-followups/target-agent/gate-logs/20260818-070108-2372004/05-cargo-test---workspace--Cranelift-free-.log)
+
+[1m== [test] lean CLI build (--no-default-features)[0m
+   $ cargo +1.97.0 test -p noeta-cli --no-default-features --locked
+   [32mPASS[0m  6m36s  (log: /home/niklas/Code/lang/.claude/worktrees/push-hint-followups/target-agent/gate-logs/20260818-070108-2372004/06-lean-CLI-build----no-default-features-.log)
+
+[1m== [test] cargo test -p noeta-pm --all-features (registry wire fixtures + trust chain)[0m
+   $ cargo +1.97.0 test -p noeta-pm --all-features --locked
+   [32mPASS[0m  1m13s  (log: /home/niklas/Code/lang/.claude/worktrees/push-hint-followups/target-agent/gate-logs/20260818-070108-2372004/07-cargo-test--p-noeta-pm---all-features--registry-wire-fixtures---trust-chain-.log)
+
+[1m== [test] wire fixtures in sync with the registry repo[0m
+   $ /home/niklas/Code/lang/.claude/worktrees/push-hint-followups/scripts/sync-wire-fixtures.sh --check
+   [32mPASS[0m   0s  (log: /home/niklas/Code/lang/.claude/worktrees/push-hint-followups/target-agent/gate-logs/20260818-070108-2372004/08-wire-fixtures-in-sync-with-the-registry-repo.log)
+
+[1m== [test] shape: noeta-vm aot[0m
+   $ cargo +1.97.0 check -p noeta-vm --no-default-features --features aot --locked
+   [32mPASS[0m   7s  (log: /home/niklas/Code/lang/.claude/worktrees/push-hint-followups/target-agent/gate-logs/20260818-070108-2372004/09-shape--noeta-vm-aot.log)
+
+[1m== [test] shape: noeta-vm jit,aot[0m
+   $ cargo +1.97.0 check -p noeta-vm --no-default-features --features jit,aot --locked
+   [32mPASS[0m   8s  (log: /home/niklas/Code/lang/.claude/worktrees/push-hint-followups/target-agent/gate-logs/20260818-070108-2372004/10-shape--noeta-vm-jit-aot.log)
+
+[1m== [test] shape: noeta-host-real (no default)[0m
+   $ cargo +1.97.0 check -p noeta-host-real --no-default-features --locked
+   [32mPASS[0m   4s  (log: /home/niklas/Code/lang/.claude/worktrees/push-hint-followups/target-agent/gate-logs/20260818-070108-2372004/11-shape--noeta-host-real--no-default-.log)
+
+[1m== [test] shape: noeta-stdlib (no default)[0m
+   $ cargo +1.97.0 check -p noeta-stdlib --no-default-features --locked
+   [32mPASS[0m   5s  (log: /home/niklas/Code/lang/.claude/worktrees/push-hint-followups/target-agent/gate-logs/20260818-070108-2372004/12-shape--noeta-stdlib--no-default-.log)
+
+[1m== [docs] doc samples (docs/*.md)[0m
+   $ cargo +1.97.0 test -p noeta-cli --test doc_samples --no-default-features --locked
+   [32mPASS[0m   3s  (log: /home/niklas/Code/lang/.claude/worktrees/push-hint-followups/target-agent/gate-logs/20260818-070108-2372004/13-doc-samples--docs--.md-.log)
+
+[1m== [docs] docs style (no history, no milestone vocabulary)[0m
+   $ cargo +1.97.0 test -p noeta-cli --test docs_style --no-default-features --locked
+   [32mPASS[0m   0s  (log: /home/niklas/Code/lang/.claude/worktrees/push-hint-followups/target-agent/gate-logs/20260818-070108-2372004/14-docs-style--no-history--no-milestone-vocabulary-.log)
+
+[1m== [docs] rustdoc intra-doc links (noeta-ext-abi)[0m
+   $ env 'RUSTDOCFLAGS=-D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links' cargo +1.97.0 doc -p noeta-ext-abi --no-deps --locked
+   [32mPASS[0m   4s  (log: /home/niklas/Code/lang/.claude/worktrees/push-hint-followups/target-agent/gate-logs/20260818-070108-2372004/15-rustdoc-intra-doc-links--noeta-ext-abi-.log)
+
+[1m== [jit] JIT unit tests (noeta-vm)[0m
+   $ cargo +1.97.0 test -p noeta-vm --features jit --locked
+   [32mPASS[0m  1m56s  (log: /home/niklas/Code/lang/.claude/worktrees/push-hint-followups/target-agent/gate-logs/20260818-070108-2372004/16-JIT-unit-tests--noeta-vm-.log)
+
+[1m== [jit] JIT differential + leak corpus gate[0m
+   $ cargo +1.97.0 test -p noeta-conformance --features jit --locked
+   [32mPASS[0m  4m12s  (log: /home/niklas/Code/lang/.claude/worktrees/push-hint-followups/target-agent/gate-logs/20260818-070108-2372004/17-JIT-differential---leak-corpus-gate.log)
+
+[1m== [jit] JIT differential (coverage summary)[0m
+   $ cargo +1.97.0 run -p noeta-conformance --features jit --locked -- --jit-differential
+   [32mPASS[0m  1m27s  (log: /home/niklas/Code/lang/.claude/worktrees/push-hint-followups/target-agent/gate-logs/20260818-070108-2372004/18-JIT-differential--coverage-summary-.log)
+
+[1m== [jit] JIT differential (cancel-poll arm)[0m
+   $ cargo +1.97.0 run -p noeta-conformance --features jit --locked -- --jit-differential --cancel-poll
+   [32mPASS[0m  21s  (log: /home/niklas/Code/lang/.claude/worktrees/push-hint-followups/target-agent/gate-logs/20260818-070108-2372004/19-JIT-differential--cancel-poll-arm-.log)
+
+[1m== [jit] JIT differential (AOT-bodies arm)[0m
+   $ cargo +1.97.0 run -p noeta-conformance --features jit --locked -- --jit-differential --aot-bodies
+   [32mPASS[0m  21s  (log: /home/niklas/Code/lang/.claude/worktrees/push-hint-followups/target-agent/gate-logs/20260818-070108-2372004/20-JIT-differential--AOT-bodies-arm-.log)
+
+[1m== [jit] JIT-enabled CLI (integration + doc samples)[0m
+   $ cargo +1.97.0 test -p noeta-cli --locked
+   [31mFAIL[0m  4m02s  exit 101
+   ---- last 40 lines of /home/niklas/Code/lang/.claude/worktrees/push-hint-followups/target-agent/gate-logs/20260818-070108-2372004/21-JIT-enabled-CLI--integration---doc-samples-.log ----
+   | test build::build_native_strips_debug_info_from_the_shipped_binary ... ok
+   | test pm_native::doc_api_in_a_composed_toolchain_documents_the_native_package ... ok
+   | test bench::bench_baseline_says_when_it_cannot_compare ... ok
+   | test build::build_native_survives_a_broken_pipe_like_every_other_surface ... ok
+   | test bench::bench_max_regress_cannot_pass_what_it_could_not_compare ... ok
+   | test pm_native::a_version_dependency_on_the_contract_crate_composes has been running for over 60 seconds
+   | test pm_native::build_exe_of_a_native_dep_app_strips_the_mixed_crates_formatter has been running for over 60 seconds
+   | test pm_native::build_native_of_a_native_dep_app_runs_the_composed_handler has been running for over 60 seconds
+   | test pm_native::composed_toolchain_end_to_end has been running for over 60 seconds
+   | test pm_native::dev_toolchain_composition_includes_a_mixed_crates_formatter has been running for over 60 seconds
+   | test pm_native::a_version_dependency_on_the_contract_crate_composes ... ok
+   | test pm_native::build_exe_of_a_native_dep_app_strips_the_mixed_crates_formatter ... ok
+   | test pm_native::build_native_of_a_native_dep_app_runs_the_composed_handler ... ok
+   | test pm_native::composed_toolchain_end_to_end ... ok
+   | test pm_native::dev_toolchain_composition_includes_a_mixed_crates_formatter ... ok
+   | 
+   | failures:
+   | 
+   | ---- run::run_jit_stats_reports_declined_loops_with_blocking_ops stdout ----
+   | 
+   | thread 'run::run_jit_stats_reports_declined_loops_with_blocking_ops' (2524296) panicked at crates/noeta-cli/tests/cli/run.rs:933:5:
+   | blocking ops resolved to op + line:
+   | ── JIT report ──
+   | tier 1: 0 of 0 compiled prototypes native (0 bail stubs), 0 OSR loop windows, compile time 0.0 ms
+   | 
+   | no bail events — native code never fell back mid-frame
+   | 
+   | loops declined tier 1 (every loop contains a non-native op; the prototype ran interpreted):
+   |   main — blocked by:
+   |     /home/niklas/Code/lang/.claude/worktrees/push-hint-followups/target-agent/tmp/noeta_cli_test_jit_stats_declined/main.noe:6  CallMethod  r3 <- r0.len()
+   | 
+   | note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+   | 
+   | 
+   | failures:
+   |     run::run_jit_stats_reports_declined_loops_with_blocking_ops
+   | 
+   | test result: FAILED. 366 passed; 1 failed; 3 ignored; 0 measured; 0 filtered out; finished in 215.45s
+   | 
+   | error: test failed, to rerun pass `-p noeta-cli --test cli`
+   ---- end ----
+
+[1m== [jit] hot-reload e2e (#[ignore]d real-socket suites)[0m
+   $ env NOETA_GATE_TOOLCHAIN=1.97.0 bash /home/niklas/Code/lang/.claude/worktrees/push-hint-followups/scripts/hot-e2e.sh
+   [32mPASS[0m  25s  (log: /home/niklas/Code/lang/.claude/worktrees/push-hint-followups/target-agent/gate-logs/20260818-070108-2372004/22-hot-reload-e2e----ignore-d-real-socket-suites-.log)
+
+[1m== [perf] build the noeta CLI, release (the ratchet's subject)[0m
+   $ cargo +1.97.0 build --release -p noeta-cli --locked
+   [32mPASS[0m  2m32s  (log: /home/niklas/Code/lang/.claude/worktrees/push-hint-followups/target-agent/gate-logs/20260818-070108-2372004/23-build-the-noeta-CLI--release--the-ratchet-s-subject-.log)
+
+[1m== [perf] instructions-retired ratchet (startup, interpreter, tier-1 decline)[0m
+   $ env NOETA_PERF_TOOLCHAIN=1.97.0 bash /home/niklas/Code/lang/.claude/worktrees/push-hint-followups/scripts/perf-ratchet.sh
+   [32mPASS[0m   0s  (log: /home/niklas/Code/lang/.claude/worktrees/push-hint-followups/target-agent/gate-logs/20260818-070108-2372004/24-instructions-retired-ratchet--startup--interpreter--tier-1-decline-.log)
+
+gate: wasmtime: /home/niklas/.wasmtime/bin/wasmtime
+
+================================================================================
+ gate summary — tier merge, toolchain 1.97.0, 33m37s total
+================================================================================
+ [32mPASS[0m      2s  [fmt    ] cargo fmt --all --check
+ [32mPASS[0m     29s  [clippy ] clippy (default features)
+ [32mPASS[0m     25s  [clippy ] clippy (jit feature)
+ [32mPASS[0m     20s  [clippy ] clippy (lean CLI, --no-default-features)
+ [32mPASS[0m   8m43s  [test   ] cargo test --workspace (Cranelift-free)
+ [32mPASS[0m   6m36s  [test   ] lean CLI build (--no-default-features)
+ [32mPASS[0m   1m13s  [test   ] cargo test -p noeta-pm --all-features (registry wire fixtures + trust chain)
+ [32mPASS[0m      0s  [test   ] wire fixtures in sync with the registry repo
+ [32mPASS[0m      7s  [test   ] shape: noeta-vm aot
+ [32mPASS[0m      8s  [test   ] shape: noeta-vm jit,aot
+ [32mPASS[0m      4s  [test   ] shape: noeta-host-real (no default)
+ [32mPASS[0m      5s  [test   ] shape: noeta-stdlib (no default)
+ [32mPASS[0m      3s  [docs   ] doc samples (docs/*.md)
+ [32mPASS[0m      0s  [docs   ] docs style (no history, no milestone vocabulary)
+ [32mPASS[0m      4s  [docs   ] rustdoc intra-doc links (noeta-ext-abi)
+ [32mPASS[0m   1m56s  [jit    ] JIT unit tests (noeta-vm)
+ [32mPASS[0m   4m12s  [jit    ] JIT differential + leak corpus gate
+ [32mPASS[0m   1m27s  [jit    ] JIT differential (coverage summary)
+ [32mPASS[0m     21s  [jit    ] JIT differential (cancel-poll arm)
+ [32mPASS[0m     21s  [jit    ] JIT differential (AOT-bodies arm)
+ [31mFAIL[0m   4m02s  [jit    ] JIT-enabled CLI (integration + doc samples) — exit 101
+ [32mPASS[0m     25s  [jit    ] hot-reload e2e (#[ignore]d real-socket suites)
+ [32mPASS[0m   2m32s  [perf   ] build the noeta CLI, release (the ratchet's subject)
+ [32mPASS[0m      0s  [perf   ] instructions-retired ratchet (startup, interpreter, tier-1 decline)
+--------------------------------------------------------------------------------
+ 23 passed, 1 failed, 0 skipped
+
+ Reproduce the failures:
+   cargo +1.97.0 test -p noeta-cli --locked
+     log: /home/niklas/Code/lang/.claude/worktrees/push-hint-followups/target-agent/gate-logs/20260818-070108-2372004/21-JIT-enabled-CLI--integration---doc-samples-.log
+
+ GATE FAILED — do not merge.

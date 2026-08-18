@@ -158,10 +158,27 @@ pub fn hoist_loop_invariant_consts(chunk: &mut Chunk) {
         op.for_each_jump_pc_mut(|t| *t = remap[*t as usize]);
     }
     // The debug line table is pc-keyed, so it moves with the code (empty in a non-debug compile, so
-    // this is then a no-op). Every original pc is retained — a hoisted load keeps its entry, now at
-    // its pre-header position — so remapping each entry through `remap` keeps the table accurate.
+    // this is then a no-op). A *hoisted* load is the one case where an entry must not follow its op:
+    // the load moves backward, out of the loop, and `Chunk::line_span` resolves a pc to the last
+    // entry at or before it — so an entry dragged into the pre-header would own every pc from there
+    // to the statement's real position, and each of them would report that statement's line. This is
+    // the forward twin of the backward line a synthetic `Drop` would inject, which lowering already
+    // refuses to record for the same reason.
+    //
+    // It only bites when a statement's *first* op is the hoistable constant, which is why it went
+    // unseen while every top-level statement began with a `LoadGlobal`: promoting a top-level
+    // binding into a register removes that load, and `i = i + 1` then starts with `LoadConst 1`.
+    // So: attach such an entry to the statement's first surviving op instead.
     for entry in &mut chunk.line_table {
-        entry.pc = remap[entry.pc as usize];
+        let mut old = entry.pc as usize;
+        while old < n && hoisted[old] {
+            old += 1;
+        }
+        entry.pc = if old < n {
+            remap[old]
+        } else {
+            new_code.len() as u32
+        };
     }
     chunk.code = new_code;
 }
@@ -1730,5 +1747,67 @@ mod tests {
         assert!(matches!(c.code[0], Op::JumpIfFalse { target: 6, .. }));
         assert!(matches!(c.code[6], Op::Halt));
         assert_eq!(c.line_table[0].pc, 6, "the line table moves with the code");
+    }
+
+    /// A line entry is the one thing that must **not** follow a hoisted load out of its loop.
+    /// `Chunk::line_span` resolves a pc to the last entry at or before it, so an entry parked in
+    /// the pre-header owns every pc from there to its statement's real position — every op in
+    /// between then reports that statement's line.
+    ///
+    /// The shape below is `while … { <stmt A>; <stmt B> }` where B's first op is the hoistable
+    /// constant: exactly what a top-level `i = i + 1` lowers to once its binding lives in a
+    /// register rather than the global table.
+    #[test]
+    fn a_hoisted_load_does_not_drag_its_line_entry_out_of_the_loop() {
+        // 0: LoadConst (loop bound) ; 1: Binary (cond) ; 2: JumpIfFalse -> 7 ; 3: stmt A's op
+        // 4: stmt B's LoadConst (hoistable) ; 5: stmt B's Binary ; 6: Jump -> 1 ; 7: Halt
+        let code = vec![
+            Op::LoadConst { dst: 0, k: 0 },
+            Op::Binary {
+                dst: 1,
+                op: BinaryOp::Lt,
+                a: 0,
+                b: 0,
+                span: Span::new(0, 0),
+            },
+            Op::JumpIfFalse { reg: 1, target: 7 },
+            Op::Echo { reg: 0 },
+            Op::LoadConst { dst: 2, k: 0 },
+            Op::Binary {
+                dst: 3,
+                op: BinaryOp::Add,
+                a: 2,
+                b: 2,
+                span: Span::new(1, 1),
+            },
+            Op::Jump { target: 1 },
+            Op::Halt,
+        ];
+        let mut c = chunk(code, 0, 4);
+        c.consts = vec![Const::Int(1)];
+        // Entry for statement A at pc 3, and for statement B at pc 4 — B's first op is the
+        // constant the hoister will lift into the pre-header.
+        c.line_table = vec![
+            noeta_bytecode::LineEntry {
+                pc: 3,
+                span: Span::new(0, 0),
+            },
+            noeta_bytecode::LineEntry {
+                pc: 4,
+                span: Span::new(1, 1),
+            },
+        ];
+        hoist_loop_invariant_consts(&mut c);
+        let a = c.line_table[0].pc;
+        let b = c.line_table[1].pc;
+        assert!(
+            b > a,
+            "statement B's entry must stay after statement A's, not move ahead of it into the \
+             pre-header (A at {a}, B at {b})"
+        );
+        assert!(
+            matches!(c.code[b as usize], Op::Binary { .. }),
+            "B's entry lands on its first surviving op, not on the hoisted load"
+        );
     }
 }
