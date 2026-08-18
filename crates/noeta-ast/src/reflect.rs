@@ -861,6 +861,10 @@ pub fn build(
     // the artifact beside the join it feeds, because the tag and the use are separable declarations
     // (see [`ReflectionInfo::role_tags`]).
     let mut role_tags: Vec<RoleTagRecord> = Vec::new();
+    // Which top-level names are bound once and never reassigned — the precondition for describing a
+    // closure-valued binding's signature. Computed before the walk because it is a property of the
+    // whole statement list, not of the binding statement in hand.
+    let fixed = fixed_top_level_names(&program.stmts);
     for stmt in &program.stmts {
         match stmt {
             Stmt::Struct(decl) => {
@@ -1014,6 +1018,42 @@ pub fn build(
                     push_attrs(&mut manifest, &target, method.name_span, &method.attrs);
                     push_params(&mut manifest, &mut params, target, method);
                 }
+            }
+            // An **immutable top-level binding of a closure literal** — `f = fn(x: int) => …` — is a
+            // callable whose signature is written down and can never change, so it is described here
+            // under its bare name, in the same key space as a top-level `fn`.
+            //
+            // The immutability guard is the whole rule, not a conservatism. A signature reflection is
+            // read by name, and a parameter *name* is not part of a function type: `mut f = fn(a:
+            // int, b: int) => a - b` accepts `f = fn(b: int, a: int) => a - b` (same type
+            // `fn(int, int) -> int`, names swapped), after which any record taken from the
+            // initializer names the wrong positions. That is not merely a stale `params_of` answer —
+            // `plan_invoke_named` binds `invoke("f", {"a": 1, "b": 2})` through this very index, so
+            // recording a reassignable binding would silently place arguments on the wrong
+            // parameters. A name bound once without `mut` cannot reach that state (E0006), so its
+            // record stays true for the whole run.
+            //
+            // The guard is [`fixed_top_level_names`] and NOT this statement's own `mut_decl`, which
+            // cannot answer it: a reassignment is also a `mut_decl: false` binding, so matching on it
+            // here would record the *second* closure of a `mut` pair as though it were a declaration.
+            //
+            // Only a closure **literal** qualifies: `f = g` or `f = make_adder(3)` write no
+            // parameter list at the binding site, so there is nothing to describe and reflection
+            // says so by leaving the name out (`params_of("g")` is how you describe `g`).
+            Stmt::Binding {
+                name,
+                value: Expr::Closure {
+                    params: cps, ret, ..
+                },
+                ..
+            } if fixed.contains(name.as_str()) => {
+                push_signature(
+                    &mut manifest,
+                    &mut params,
+                    name.clone(),
+                    cps,
+                    closure_ret_repr(ret.as_ref()),
+                );
             }
             _ => {}
         }
@@ -1226,7 +1266,24 @@ fn push_params(
     target: String,
     decl: &crate::FnDecl,
 ) {
-    for p in &decl.params {
+    push_signature(manifest, params, target, &decl.params, fn_ret_repr(decl));
+}
+
+/// The body of [`push_params`], over a loose parameter slice and an already-decided return repr —
+/// the seam a *closure* signature enters through, since a closure is not a [`crate::FnDecl`] and
+/// decides its absent return type differently (see [`closure_ret_repr`]).
+///
+/// Kept private and reached only through [`push_params`] and the binding arm of [`build`] so the
+/// "parameters and manifest rows are one fact" invariant still has exactly one implementation: a
+/// caller cannot record a signature's `ParamSig`s while skipping its parameter-attribute rows.
+fn push_signature(
+    manifest: &mut Vec<AttributeRecord>,
+    params: &mut Vec<ParamRecord>,
+    target: String,
+    decl_params: &[crate::Param],
+    ret: TypeRepr,
+) {
+    for p in decl_params {
         push_attrs(
             manifest,
             &param_attr_target(&target, &p.name),
@@ -1236,9 +1293,66 @@ fn push_params(
     }
     params.push(ParamRecord {
         target,
-        params: param_sigs(&decl.params),
-        ret: fn_ret_repr(decl),
+        params: param_sigs(decl_params),
+        ret,
     });
+}
+
+/// The top-level names that are bound **exactly once, without `mut`** — the only names whose value,
+/// and so whose signature, is fixed for the whole run.
+///
+/// A pre-pass rather than a test on the binding statement itself, because `mut_decl` cannot answer
+/// this question alone: a *reassignment* `f = …` is syntactically a `Stmt::Binding` with
+/// `mut_decl: false` (whether a bare `name = expr` declares or reassigns is a semantic decision, not
+/// a syntactic one — see [`crate::Stmt::Binding`]). Keying off `mut_decl` alone would therefore read
+/// the second closure of a `mut f = …; f = …` pair as an immutable declaration and record it, which
+/// is precisely the misdescription the `mut` exclusion exists to prevent.
+///
+/// So a name is fixed only if **every** top-level statement that binds it is a single non-`mut`
+/// `Stmt::Binding`. Two occurrences mean at least one is a reassignment; a `mut` occurrence means
+/// more may follow. [`crate::Stmt::Destructure`] targets count as occurrences for the same reason,
+/// even though a destructure never binds a closure literal itself — it can be the reassignment half.
+fn fixed_top_level_names(stmts: &[crate::Stmt]) -> std::collections::HashSet<&str> {
+    let mut seen: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    let mut disqualified: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for stmt in stmts {
+        match stmt {
+            crate::Stmt::Binding { mut_decl, name, .. } => {
+                *seen.entry(name.as_str()).or_default() += 1;
+                if *mut_decl {
+                    disqualified.insert(name.as_str());
+                }
+            }
+            crate::Stmt::Destructure {
+                mut_decl, targets, ..
+            } => {
+                for (name, _) in targets {
+                    *seen.entry(name.as_str()).or_default() += 1;
+                    if *mut_decl {
+                        disqualified.insert(name.as_str());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    seen.into_iter()
+        .filter(|(name, count)| *count == 1 && !disqualified.contains(name))
+        .map(|(name, _)| name)
+        .collect()
+}
+
+/// A **closure**'s return type as a reflection [`TypeRepr`] — [`TypeRepr::Dyn`] when it annotates
+/// none, where [`fn_ret_repr`] answers [`TypeRepr::Unit`].
+///
+/// The two differ because the omission means different things. A named `fn` *must* declare a return
+/// type (E0022), so an omitted one is the `void` spelling written by leaving it out — a known thing.
+/// A closure's annotation is optional by design and its return is inferred from the body, which
+/// [`build`] runs too early to see; `Dyn` is then the same honest "declared nowhere" that
+/// [`param_sigs`] already gives an unannotated parameter. Recording `Unit` here would report a
+/// value-returning `fn(x: int) => x + 1` as returning nothing.
+fn closure_ret_repr(ret: Option<&TypeRef>) -> TypeRepr {
+    ret.map(typeref_to_repr).unwrap_or(TypeRepr::Dyn)
 }
 
 /// A callable's declared return type as a reflection [`TypeRepr`] — the one place the "no declared
@@ -3547,6 +3661,77 @@ mod tests {
 
     fn names(list: &[&str]) -> Vec<String> {
         list.iter().map(|n| (*n).to_string()).collect()
+    }
+
+    fn binding(mut_decl: bool, name: &str) -> crate::Stmt {
+        crate::Stmt::Binding {
+            mut_decl,
+            name: name.to_string(),
+            name_span: Span::new(0, 0),
+            ty: None,
+            value: crate::Expr::Closure {
+                params: Vec::new(),
+                ret: None,
+                body: crate::ClosureBody::Block(Vec::new()),
+                span: Span::new(0, 0),
+            },
+            span: Span::new(0, 0),
+        }
+    }
+
+    /// The immutability test a closure-valued binding is described under. `mut_decl` alone cannot
+    /// answer it: a **reassignment** is also a `mut_decl: false` binding, so a name bound twice is
+    /// excluded on the count even though neither statement carries the keyword. Getting this wrong
+    /// records the second closure of a `mut f = …; f = …` pair as a declaration, and since
+    /// `plan_invoke_named` binds through the same index, a later reassignment that keeps the type and
+    /// swaps parameter *names* would then place arguments on the wrong parameters.
+    #[test]
+    fn fixed_top_level_names_excludes_mut_and_anything_bound_twice() {
+        let stmts = vec![
+            binding(false, "once"),
+            binding(true, "declared_mut"),
+            binding(false, "reassigned"),
+            binding(false, "reassigned"),
+            binding(true, "mut_then_set"),
+            binding(false, "mut_then_set"),
+        ];
+        let fixed = fixed_top_level_names(&stmts);
+        assert!(fixed.contains("once"));
+        assert!(!fixed.contains("declared_mut"));
+        assert!(!fixed.contains("reassigned"));
+        assert!(!fixed.contains("mut_then_set"));
+    }
+
+    /// A destructure target counts as an occurrence even though it never binds a closure literal
+    /// itself — it can be the *reassignment* half of the pair, which is what would strand a stale
+    /// signature under the name.
+    #[test]
+    fn fixed_top_level_names_counts_destructure_targets() {
+        let stmts = vec![
+            binding(false, "f"),
+            crate::Stmt::Destructure {
+                mut_decl: false,
+                targets: vec![("f".to_string(), Span::new(0, 0))],
+                value: crate::Expr::Closure {
+                    params: Vec::new(),
+                    ret: None,
+                    body: crate::ClosureBody::Block(Vec::new()),
+                    span: Span::new(0, 0),
+                },
+                span: Span::new(0, 0),
+            },
+        ];
+        assert!(!fixed_top_level_names(&stmts).contains("f"));
+    }
+
+    /// A closure records [`TypeRepr::Dyn`] for an absent return annotation where a named `fn` records
+    /// [`TypeRepr::Unit`]. The omission means different things: E0022 forces a `fn` to declare one, so
+    /// leaving it out spells `void`, while a closure's is optional and its return is inferred from a
+    /// body this artifact is built too early to see. `Unit` here would report `fn(x: int) => x + 1` as
+    /// returning nothing.
+    #[test]
+    fn closure_ret_repr_is_dyn_when_unannotated() {
+        assert_eq!(closure_ret_repr(None), TypeRepr::Dyn);
     }
 
     /// The named-invoke planner's three shapes. A **gap** — the whole point of the named form, and

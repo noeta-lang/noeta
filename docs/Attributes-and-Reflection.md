@@ -452,6 +452,8 @@ for p in params_of("scale") {
 // label: Type.String optional=true
 ```
 
+**Which names have a signature.** A `fn` declaration and a method always do. A top-level *binding* does when it is immutable and its initializer is a closure literal — see [Dispatching a name and describing it are different questions](#dispatching-a-name-and-describing-it-are-different-questions), which also covers why a `mut` binding does not. An unknown name answers with the empty list, the same answer a genuinely parameterless callable gives; use `returns_of`, whose `none` has no such overlap, when you need to tell a missing target from an empty one.
+
 **Declared types and fixed widths.** `params_of` and `type_of` answer with the *same* `Type` for the same declared type — they share one decoder, so they cannot drift. A runtime scalar carries no width tag, so at **top level** a declared fixed-width scalar erases exactly as its value does: every `iN`/`uN` parameter reflects `Type.Int` and `f64` reflects `Type.Float`, while `f32` is reified and keeps `Type.F32`. In **container-element position** a width is a physically distinct storage slot and is preserved at any depth: `List<i32>` reflects `Type.List(Type.IntN(32, true))`. The practical consequence: matching a signature from `params_of` against runtime values (dependency injection, CLI/router derivation) works for every scalar width — `type_of(5)` is `Type.Int`, and so is an `i32` parameter's `type`. See [Fixed-Width Integers](Fixed-Width-Integers) for the erasure model.
 
 ### `returns_of(name): ?Type`
@@ -908,18 +910,50 @@ echo match invoke(name, "new", [2, 3]) {
 
 So there is no route from a *discovered* type name to that type's static functions — only from one you wrote. That is the gap [`construct`](#constructtfields-resultdyn-string--constructname-fields-resultdyn-string) exists to fill: it takes a runtime type name, at the price of [not being the constructor](#construct-is-the-reflective-literal-not-your-constructor).
 
-With two, `name` is a **top-level function** — the same string `params_of` takes for a free fn, so reflecting a signature and then calling it round-trips on one name:
+With two, `name` is a **top-level binding that holds a callable** — a `fn` declaration or a closure-valued binding alike, since dispatching needs only the value the name currently holds:
 
 ```noeta
 fn greet(who: string = "stranger"): string { return "hi ${who}" }
+
+mut shout = fn(who: string) => "HI ${who.upper()}"
 
 echo match invoke("greet", ["ada"]) {
     Ok(v)  => v,                         // hi ada
     Err(e) => "no such function",
 }
+
+echo match invoke("shout", ["ada"]) {
+    Ok(v)  => v,                         // HI ADA
+    Err(e) => "no such function",
+}
 ```
 
-The two-operand form searches the top-level function namespace and nothing else. A type name, a qualified `Type.method`, and a local variable holding a function are each simply not found — reaching a type's methods is what the three-operand form is for, and a function value you already hold you can just call.
+The two-operand form searches the top-level namespace and nothing else. A type name, a qualified `Type.method`, and a local variable holding a function are each simply not found — reaching a type's methods is what the three-operand form is for, and a function value you already hold you can just call.
+
+#### Dispatching a name and describing it are different questions
+
+The set of names this form can **call** is wider than the set [`params_of`](#params_ofname-listparaminfo) and [`returns_of`](#returns_ofname-type) can **describe**, and the two are answering different questions.
+
+Calling needs only the live value, so it reaches any top-level binding holding a callable. Describing a signature has to stay true for as long as the name exists, so it covers only names whose signature cannot change: `fn` declarations, which are sealed, and **immutable** bindings of a closure literal.
+
+```noeta
+fn declared(x: int): int { return x }
+
+scale = fn(factor: int, by: int = 2) => factor * by   // immutable: described
+mut hook = fn(x: int) => x + 1                        // reassignable: not described
+
+echo params_of("declared").len()         // 1
+echo params_of("scale").len()            // 2
+echo params_of("hook").len()             // 0
+```
+
+A `mut` binding is excluded because a parameter *name* is not part of a function type. `mut hook = fn(a: int, b: int) => a - b` accepts `hook = fn(b: int, a: int) => a - b` — the same type with the names swapped — so a description taken from the initializer would name the wrong positions. Declare the binding without `mut` when you want it described.
+
+A binding whose initializer is not a closure literal is excluded for a plainer reason: `alias = declared` and `made = build_handler()` write no parameter list at the binding site, so there is nothing there to describe. Describe `declared` under its own name.
+
+The **named**-argument form below binds through that signature index, so it follows the narrower set: a name with no signature to bind against is refused with ``does not take named arguments``, rather than bound against a parameter list that may no longer be the callee's. The positional form is unaffected.
+
+An unannotated closure reports `Type.Dyn` from `returns_of`, because its return type is inferred from its body rather than declared. A named `fn` must declare a return type, so an omitted one there means `void` and reports `some(Type.Unit)`.
 
 `args` accepts either shape, exactly as `construct`'s `fields` does, and in both the two- and three-operand forms:
 

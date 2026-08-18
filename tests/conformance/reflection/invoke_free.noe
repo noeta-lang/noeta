@@ -8,12 +8,25 @@
 // comma count decided at parse time, and no operand is a receiver in one reading and a name in the
 // other.
 //
-// The namespace is the **top-level function namespace only** — the same string that keys
-// `params_of` for a free fn, and the same binding a direct `greet(…)` call compiles to. It is not
-// searched in any order against anything else: a local variable, a type name, and a qualified
-// `Type.method` are all simply not top-level functions, so each is the same miss. That is what lets
-// the two backends agree, since they index the top level with different structures (a scope map that
-// holds types alongside functions vs. a global slot table that holds neither types nor locals).
+// The namespace is the **top-level binding namespace only** — the same binding a direct `greet(…)`
+// call compiles to. It is not searched in any order against anything else: a local variable, a type
+// name, and a qualified `Type.method` are all simply not top-level bindings, so each is the same
+// miss. That is what lets the two backends agree, since they index the top level with different
+// structures (a scope map that holds types alongside functions vs. a global slot table that holds
+// neither types nor locals).
+//
+// That namespace is deliberately **wider than the set `params_of` describes**; the two are different
+// questions and are not meant to coincide. Dispatching needs only the live value, so this form
+// reaches any top-level binding that holds a callable — a `fn` declaration and a closure-valued
+// binding alike (`invoke_free_value_binding.noe`). *Describing* a signature needs an answer that
+// stays true for the whole run, so `params_of`/`returns_of` cover only the names whose signature
+// cannot change: `fn` declarations, which are sealed, and **immutable** bindings of a closure literal
+// (`params_of_value_binding.noe`). A `mut` binding is thus callable here and absent from `params_of`,
+// because its parameter *names* can be replaced by a reassignment its type permits.
+//
+// The **named**-argument form is the one part of `invoke` that binds through the signature index, so
+// it follows `params_of`'s narrower set rather than this one, and says so when a name has no
+// signature to bind against.
 //
 // Every resolution failure is a `Result.Err`, never an abort — unknown name, non-string name,
 // non-list args, and arity mismatch alike — exactly as the three-argument form behaves.

@@ -1,0 +1,108 @@
+// `params_of` / `returns_of` over a top-level **value binding** — the set of names a signature
+// reflection describes, which is NOT the set `invoke`'s positional form can dispatch.
+//
+// The rule both queries answer to: **reflection describes a signature that cannot change.** A named
+// `fn` qualifies because it is sealed. An *immutable* top-level binding of a closure **literal**
+// qualifies too — the parameter list is written at the binding site and E0006 stops anything from
+// replacing it — so it is described under its bare name, in the same key space as a top-level `fn`.
+//
+// A `mut` binding is excluded, and that is the load-bearing half rather than a conservatism. A
+// parameter *name* is not part of a function type, so `mut f = fn(a: int, b: int) => a - b` accepts
+// `f = fn(b: int, a: int) => a - b` — same type, names swapped. A record taken from the initializer
+// would then name the wrong positions, and because named `invoke` binds through this very index it
+// would place arguments on the wrong parameters and return a wrong number rather than an error. So
+// the exclusion buys a real guarantee: every name this index describes, it describes truthfully for
+// the whole run. `mut` reflects as absent, and named `invoke` refuses it in the checker's own words.
+//
+// A binding that is not a closure *literal* is excluded for a simpler reason: `alias = g` and
+// `made = adder(3)` write no parameter list at the binding site, so there is nothing to describe.
+// `params_of("g")` is how you describe `g`; reflection does not follow a binding to it.
+//
+// `returns_of` splits from `params_of` on the *unannotated* case only. A named `fn` must declare a
+// return type (E0022), so an omitted one is the `void` spelling. A closure's annotation is optional
+// and its return is inferred from the body, which the reflection artifact is built too early to see
+// — so an unannotated closure reports `Type.Dyn`, the same honest "declared nowhere" an unannotated
+// parameter already gets, and never `Type.Unit`, which would report `fn(x: int) => x + 1` as
+// returning nothing.
+// expect: stdout "literal: x:Type.Int"
+// expect: stdout "annotated: x:Type.Int -> some(Type.Int)"
+// expect: stdout "unannotated ret: some(Type.Dyn)"
+// expect: stdout "defaulted: [a:Type.Int req, b:Type.Int opt]"
+// expect: stdout "zero-arg: [] -> some(Type.Dyn)"
+// expect: stdout "unannotated param: v:Type.Dyn"
+// expect: stdout "declared fn: y:Type.Int -> some(Type.Int)"
+// expect: stdout "mut: [] -> none"
+// expect: stdout "alias: [] -> none"
+// expect: stdout "made: [] -> none"
+// expect: stdout "non-callable: [] -> none"
+// expect: stdout "unbound: [] -> none"
+// expect: stdout "reassigned: []"
+// expect: stdout "reassigned positional: 7"
+// expect: stdout "reassigned named: err `swapped` does not take named arguments"
+// expect: exit 0
+
+fn g(y: int): int { return y * 2 }
+
+fn adder(n: int): dyn { return fn(x: int): int => x + n }
+
+// Described: immutable, closure literal.
+literal = fn(x: int) => x + 1
+annotated = fn(x: int): int => x + 1
+defaulted = fn(a: int, b: int = 5) => a - b
+zero_arg = fn() => 7
+unannotated_param = fn(v) => v
+
+// Not described.
+mut reassignable = fn(a: int, b: int) => a - b
+alias = g
+made = adder(3)
+count = 5
+
+fn render(target: string): string {
+    parts = params_of(target).map(fn(p) => "${p.name}:${p.type}${if p.optional then " opt" else " req"}");
+    return "[${parts.join(", ")}]";
+}
+
+fn names(target: string): string {
+    return params_of(target).map(fn(p) => "${p.name}:${p.type}").join(", ");
+}
+
+echo "literal: ${names("literal")}";
+echo "annotated: ${names("annotated")} -> ${returns_of("annotated")}";
+echo "unannotated ret: ${returns_of("literal")}";
+echo "defaulted: ${render("defaulted")}";
+echo "zero-arg: ${render("zero_arg")} -> ${returns_of("zero_arg")}";
+echo "unannotated param: ${names("unannotated_param")}";
+echo "declared fn: ${names("g")} -> ${returns_of("g")}";
+
+// A `mut` binding holding a callable: `invoke` dispatches it (pinned in
+// `invoke_free_value_binding.noe`), and the signature index deliberately does not describe it.
+echo "mut: ${render("reassignable")} -> ${returns_of("reassignable")}";
+
+// A binding whose initializer is a *reference* to a declared fn, and one whose initializer is a
+// call returning a closure — neither writes a parameter list here.
+echo "alias: ${render("alias")} -> ${returns_of("alias")}";
+echo "made: ${render("made")} -> ${returns_of("made")}";
+
+// A non-callable binding, and a name that is bound to nothing at all, answer identically — the
+// index describes signatures, so everything without one is simply absent.
+echo "non-callable: ${render("count")} -> ${returns_of("count")}";
+echo "unbound: ${render("nope")} -> ${returns_of("nope")}";
+
+// The sharp edge, pinned on its own: a **reassignment** is syntactically the same statement as an
+// immutable binding — `swapped = …` carries no `mut` keyword — so "was this declared `mut`?" cannot
+// be read off the statement in hand. The name is excluded because it is bound twice at the top level,
+// and that has to be decided over the whole statement list.
+//
+// The reassignment below keeps the type `fn(int, int) -> int` and swaps only the parameter *names*,
+// which is exactly what a signature record taken from the initializer could not survive. Positional
+// dispatch is unaffected (10 - 3 = 7 through the live closure, whose first parameter is `b`), and the
+// named form declines rather than binding `a` and `b` to the positions the initializer gave them —
+// which would have quietly computed 3 - 10.
+mut swapped = fn(a: int, b: int) => a - b
+swapped = fn(b: int, a: int) => b - a
+
+echo "reassigned: ${render("swapped")}";
+echo "reassigned positional: ${match invoke("swapped", [10, 3]) { Ok(v) => "${v}", Err(e) => "err ${e}" }}";
+swap_named: Map<string, dyn> = {"a": 10, "b": 3};
+echo "reassigned named: ${match invoke("swapped", swap_named) { Ok(v) => "ok ${v}", Err(e) => "err ${e}" }}";
