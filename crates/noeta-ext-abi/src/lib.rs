@@ -226,7 +226,23 @@
 /// A **source break** only for an [`registry::ExtType`] literal that names every field; one spreading
 /// `..ExtType::DEFAULTS` — as all 50 in-tree literals do — and every `NativeCtx` implementation
 /// compile unchanged.
-pub const ABI_VERSION: u32 = 21;
+///
+/// **22** — signedness crosses the seam from a **type parameter** too.
+/// [`render_hint::RenderHint`] gained [`render_hint::RenderHint::Param`], the position whose hint is
+/// not a property of the site but of the call that instantiated the enclosing generic, plus
+/// [`render_hint::TypeArgHints`] (one instantiation's display and JSON hints) and
+/// [`render_hint::RenderHint::resolve`], the walk that splices the two.
+///
+/// The rule it implements: generics are erased, so `fn wrap<T>(v: T)` has one compiled body for
+/// every instantiation and its door reads a static type that names no width. The signedness is at
+/// the call, and reaches the body on the hidden type-argument slot that already carries a forwarded
+/// decode recipe. Without it a `u64` written or displayed through any generic — including
+/// `json.stringify` inside a library helper — reaches the wire as a negative word.
+///
+/// A **source break** only for a `match` on `RenderHint` that names every variant; the walks in this
+/// crate treat an unresolved `Param` as no hint, which is the same untouched path a hint-free value
+/// takes.
+pub const ABI_VERSION: u32 = 22;
 
 pub mod args;
 pub mod channel;
@@ -279,8 +295,9 @@ pub use registry::{
     TypedTypeDispatch, VariantRecipe, VariantTag, VariantValue,
 };
 pub use render_hint::{
-    PushHint, RenderHint, json_stringify, json_stringify_pushed, map_key_display, map_key_order,
-    unsigned_digits, unsigned_order,
+    HintDoor, NO_TYPE_ARG, PushHint, RenderHint, TypeArgHints, json_stringify,
+    json_stringify_pushed, map_key_display, map_key_order, resolve_hint, unsigned_digits,
+    unsigned_order,
 };
 pub use stream::{
     Frame, FrameDecoder, FrameStream, Framing, SseCloseIo, SseSendIo, SseSink, StreamRecvIo,

@@ -101,6 +101,7 @@ pub fn insert_drops(program: &Program, relevance: Option<&Relevance>) -> Program
         temp_count: program.temp_count,
         type_args: program.type_args.clone(),
         type_arg_reprs: program.type_arg_reprs.clone(),
+        type_arg_hints: program.type_arg_hints.clone(),
         span: program.span,
     }
 }
@@ -242,6 +243,7 @@ fn liveness_of_body(func: &Func) -> BlockLiveness {
         temp_count: func.temp_count,
         type_args: Vec::new(),
         type_arg_reprs: Vec::new(),
+        type_arg_hints: Vec::new(),
         span: func.span,
     })
     .top
@@ -417,6 +419,7 @@ fn rewrite_stmt(
             span,
             stream,
             order,
+            order_slots,
         } => Stmt::For {
             pattern: pattern.clone(),
             iterable: iterable.clone(),
@@ -424,6 +427,7 @@ fn rewrite_stmt(
             span: *span,
             stream: *stream,
             order: order.clone(),
+            order_slots: order_slots.clone(),
         },
         Stmt::Match {
             scrutinee,

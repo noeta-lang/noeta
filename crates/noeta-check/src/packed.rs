@@ -298,8 +298,15 @@ impl Checker {
     /// the same [`HintPurpose::Json`] numbering, because the serialization it feeds *is* that walk —
     /// only the moment differs, which is the whole reason this door needs its own site map: by the
     /// time the value is written there is no call site left to read a static type from.
+    ///
+    /// A hint mentioning a **type parameter** is dropped here rather than recorded: the parameter's
+    /// instantiation reaches a door through the enclosing body's render slot, and a kept hint has
+    /// no door left to read one at. Recording it would store a hint that resolves to nothing on
+    /// every later tick, which is the unhinted reading spelled the long way.
     pub(crate) fn note_binding_hint(&mut self, ty: &Type, span: Span) {
-        if let Some(hint) = self.render_hint(ty, HintPurpose::Json, &mut Vec::new()) {
+        if let Some(hint) = self.render_hint(ty, HintPurpose::Json, &mut Vec::new())
+            && !hint.has_param()
+        {
             self.sites.binding_hint_sites.insert(span, hint);
         }
     }
@@ -314,8 +321,14 @@ impl Checker {
     /// structurally — `Gauge {v: 1}`, never the type's own `to_string` — so a named type
     /// implementing `Display` is hinted here exactly like any other, and its fields are numbered as
     /// the echo renders them ([`HintPurpose::Display`]).
+    ///
+    /// A hint mentioning a **type parameter** is dropped for the same reason it is dropped from a
+    /// binding hint: the host renders the entry's value after the entry has run, with no frame left
+    /// to read a render slot from.
     pub(crate) fn note_echo_hint(&mut self, ty: &Type, span: Span) {
-        if let Some(hint) = self.render_hint(ty, HintPurpose::Display, &mut Vec::new()) {
+        if let Some(hint) = self.render_hint(ty, HintPurpose::Display, &mut Vec::new())
+            && !hint.has_param()
+        {
             self.sites.echo_hint_sites.insert(span, hint);
         }
     }
@@ -391,8 +404,103 @@ impl Checker {
                 (!variants.is_empty()).then_some(RenderHint::Variants(variants))
             }
             Type::Named(name, args) => self.named_render_hint(name, args, purpose, stack),
+            // A **type parameter**: the one position whose width is not in the type at all. Erased
+            // generics give one compiled body to every instantiation, so the answer arrives at run
+            // time on the enclosing body's render slot; the hint records which slot, and both
+            // backends splice the instantiation's own hint in at the door. A parameter with no
+            // slot (a generic method's, a nested `fn`'s own, an enclosing type's) has no channel,
+            // so it stays unhinted and its value renders as the erased word.
+            Type::Param(p) => self.render_slot_of(p).map(RenderHint::Param),
             _ => None,
         }
+    }
+
+    /// Every hint one **concrete instantiation** answers a [`noeta_ast::RenderHint::Param`] with —
+    /// what the render slot delivers, built once here from the resolved type.
+    ///
+    /// Three answers rather than one because the doors differ in two ways the type cannot: a JSON
+    /// walk numbers an object's slots without its `#[Transient]` fields, and a display door's
+    /// **outermost** position renders a declared type through its own `to_string`, which hinting
+    /// would replace. The exemption is the same one [`Self::note_render_hint`] applies to a
+    /// concretely-typed door, applied here because this is where the concrete type is known.
+    pub(crate) fn type_arg_hints(&self, sigma: &Type) -> noeta_ext_abi::TypeArgHints {
+        let order = self.render_hint(sigma, HintPurpose::Display, &mut Vec::new());
+        let exempt =
+            matches!(sigma, Type::Named(..)) && self.satisfies(sigma, BuiltinTrait::Display);
+        noeta_ext_abi::TypeArgHints {
+            display: if exempt { None } else { order.clone() },
+            order,
+            json: self.render_hint(sigma, HintPurpose::Json, &mut Vec::new()),
+        }
+    }
+
+    /// The **render slots** a call of `key` must supply, as the callee's type parameters in
+    /// declaration order — empty for everything that has none.
+    ///
+    /// Top-level `fn`s only, which is why the lookup is [`Symbols::functions`]: a method reaches
+    /// four name-keyed entry points that carry no instantiation at all (a `dyn` receiver, either
+    /// handle form, `invoke`) and bind positionally, so hidden slots on one would be filled with a
+    /// value argument. The declaration side ([`Coloring::current_render`]) lays out the same list
+    /// from the same declaration, which is what makes the two ends agree.
+    pub(crate) fn render_slot_params(&self, key: &str) -> Vec<ParamRef> {
+        self.symbols
+            .functions
+            .get(key)
+            .and_then(|sig| sig.generic.as_ref())
+            .map(|g| g.params.iter().map(|(p, _)| p.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    /// How this call fills the callee's render slot for `param`: the instantiation's interned table
+    /// entry, a pass-through of the caller's own render slot when the instantiation *is* one of the
+    /// caller's parameters, or [`noeta_ext_abi::HiddenArg::Erased`].
+    ///
+    /// Erasing is never a diagnostic, and that is the whole difference between this slot and a
+    /// forwarding one. A forwarding slot feeds a decode recipe or a runtime name, where an absent
+    /// instantiation means the call cannot be compiled; signedness only refines an answer that
+    /// already exists, so a call that cannot name its instantiation — an inference hole, a `dyn`, a
+    /// composite that mentions the caller's own parameter — falls back to reading the erased word,
+    /// exactly as a `dyn` does.
+    pub(crate) fn render_hidden_arg(
+        &mut self,
+        param: &ParamRef,
+        subst: &Subst,
+        span: Span,
+    ) -> noeta_ext_abi::HiddenArg {
+        let Some(sigma) = subst.get(&param.id).cloned() else {
+            return noeta_ext_abi::HiddenArg::Erased;
+        };
+        if let Type::Param(p) = &sigma {
+            return match self.render_slot_of(p) {
+                Some(j) => noeta_ext_abi::HiddenArg::Forward(j),
+                None => noeta_ext_abi::HiddenArg::Erased,
+            };
+        }
+        if !self.fully_concrete(&sigma) {
+            return noeta_ext_abi::HiddenArg::Erased;
+        }
+        // Interned through the one interner, with a template naming the bare parameter and no
+        // recipe demand: a render slot consumes the entry's hints and nothing else.
+        let slot = crate::forwarding::ForwardSlot {
+            template: Type::Param(param.clone()),
+            needs_recipe: false,
+        };
+        self.intern_type_arg(&sigma, &slot, "", span)
+    }
+
+    /// The hidden-slot ordinal carrying `param`'s per-instantiation hints in the body being
+    /// checked, or `None` where nothing delivers it — see [`crate::Coloring::current_render`].
+    ///
+    /// The render slots follow the forwarding ones in the layout, which is why the forwarding
+    /// count is the base: a body's `$ty` locals are one list, and every other consumer indexes the
+    /// forwarding half by the ordinals the syntactic pre-pass gave it.
+    pub(crate) fn render_slot_of(&self, param: &ParamRef) -> Option<u32> {
+        let base = self.coloring.current_forwarding.len() as u32;
+        self.coloring
+            .current_render
+            .iter()
+            .position(|p| p.as_ref() == Some(param))
+            .map(|i| base + i as u32)
     }
 
     /// The render hint for a declared struct/class (its fields, as positional slots) or enum (its

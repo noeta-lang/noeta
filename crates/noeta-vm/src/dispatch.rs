@@ -1546,13 +1546,28 @@ impl<'m> Vm<'m> {
                         self.emit_stdout_line(&text);
                         pc += 1;
                     }
+                    // An ordering door inside a generic body: splice its hint against this frame's
+                    // render slots and leave the answer where the ordering op that follows reads it
+                    // by span. Emitted only there, so the ordinary ordering site never meets one.
+                    Op::ResolveOrderHint { span, slots } => {
+                        self.note_order_slots(span, slots, regs, fbase);
+                        pc += 1;
+                        continue;
+                    }
                     Op::JsonStringify { dst, src, hint } => {
                         // A JSON door whose value carries an unsigned 64-bit integer: deep-marshal
                         // it and run the one hinted walk, so the erased words reach the wire
                         // unsigned. Byte-identical to the tree-walker, which marshals its own value
                         // into the same neutral tree and runs the same walk.
                         let v = regs[fbase + *src as usize];
-                        let json = noeta_ast::json_stringify(&v.to_native_deep(), Some(hint));
+                        let resolved = self.resolve_hint_operand(
+                            hint,
+                            regs,
+                            fbase,
+                            noeta_stdlib::HintDoor::Json,
+                        );
+                        let json =
+                            noeta_ast::json_stringify(&v.to_native_deep(), resolved.as_deref());
                         set_reg(regs, fbase, *dst, Value::string(&json));
                         pc += 1;
                         continue;
@@ -1569,8 +1584,17 @@ impl<'m> Vm<'m> {
                         // as signed. The rendered string is what the consuming `Echo`/`BuildString`
                         // then displays (a string displays as itself).
                         if let Some(hint) = hint {
-                            let rendered = Value::from_string(v.display_hinted(hint).into());
-                            set_reg(regs, fbase, *dst, rendered);
+                            let resolved = self.resolve_hint_operand(
+                                hint,
+                                regs,
+                                fbase,
+                                noeta_stdlib::HintDoor::Display,
+                            );
+                            let text = match resolved.as_deref() {
+                                Some(hint) => v.display_hinted(hint),
+                                None => v.display(),
+                            };
+                            set_reg(regs, fbase, *dst, Value::from_string(text.into()));
                             pc += 1;
                             continue;
                         }

@@ -36,6 +36,15 @@
 //! own declared fields, while the deep marshal a JSON encoding runs on drops the `#[Transient]`
 //! ones, so its slot numbers count only the fields that survive.
 //!
+//! One position is not a property of the site: a door inside a **generic** body reads a static type
+//! that names a type parameter (`fn wrap<T>(v: T)`), and a type parameter names no width. Erased
+//! generics give one compiled body to every instantiation, so the answer lives at the call — and
+//! travels the way every other per-instantiation fact travels, on the body's hidden type-argument
+//! slot. The checker records [`RenderHint::Param`] at that position, the program's type-argument
+//! table carries each instantiation's own [`TypeArgHints`], and [`RenderHint::resolve`] splices the
+//! two at the door. A parameter the call site could not name resolves to nothing, so the value
+//! renders as the erased word — the same answer a `dyn` gets, and for the same reason.
+//!
 //! **A hint never reaches an identity order.** A set's canonical buffer and a
 //! [`crate::MapKey`]'s [`Ord`] place elements for binary search, `BTreeMap` lookup, hashing
 //! and the deterministic destructor sort — they are built at one site and probed at another, so they
@@ -69,9 +78,207 @@ pub enum RenderHint {
     /// carries) and sparse in the same way: only variants with a hinted payload appear. `Option`'s
     /// `some` and `Result`'s `Ok`/`Err` use this form like any other enum.
     Variants(Vec<(String, Vec<(u32, RenderHint)>)>),
+    /// **Whatever the enclosing generic body's type-argument slot `n` turns out to be** — the one
+    /// position whose hint is not a property of the site.
+    ///
+    /// Inside `fn wrap<T>(v: T)` the door's static type is `T`, which names no width at all: the
+    /// signedness lives at the *call*, which is where `T` becomes `u64` or `i64`. Erased generics
+    /// give one compiled body to every instantiation, so the answer cannot be baked — it arrives on
+    /// the same hidden slot that already delivers `json.try_parse::<T>`'s decode recipe, and
+    /// [`RenderHint::resolve`] splices it in at the door.
+    ///
+    /// A `Param` is a **leaf under an ordinary structure**: `fn srt<T>(xs: List<T>)` records
+    /// `Elements(Param(0))`, so the shape the walk takes is still static and only the width at the
+    /// bottom is dynamic. `n` is the slot ordinal of the enclosing body, in the layout
+    /// `noeta_check::Sites::forwarding_fns` counts.
+    ///
+    /// Nothing consumes an unresolved `Param`: every walk here treats it as no hint (the value
+    /// renders as the erased word), which is what makes an instantiation the call site could not
+    /// name degrade to the untouched path rather than to a wrong number.
+    Param(u32),
+}
+
+/// The hints of one interned type argument — what [`RenderHint::Param`] resolves to, at each answer
+/// a door can ask for.
+///
+/// Three fields rather than one, for the two reasons the checker builds a hint per stated purpose.
+/// An object's slots are numbered differently for a display or ordering walk (every declared field)
+/// than for the deep marshal a JSON encoding runs on (`#[Transient]` fields dropped). And a value
+/// whose type implements `Display` prints through its own `to_string`, so hinting the *outermost*
+/// display position would replace the form the type chose — while ordering never consults
+/// `to_string`, and a value nested in a collection or a field prints with `repr`, which does not
+/// dispatch `Display` either. So the exemption applies to exactly one position, and
+/// [`RenderHint::resolve`] tells the two apart by handing the lookup its `outermost` flag.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypeArgHints {
+    /// The hint for the **outermost** position of a display door: [`TypeArgHints::order`], or
+    /// `None` where the instantiation is a declared type that prints through its own `to_string`.
+    pub display: Option<RenderHint>,
+    /// The hint for a walk that reads the value's own declared slots and never dispatches
+    /// `Display` — every ordering door, and every non-outermost display position. `None` when the
+    /// instantiation holds no unsigned 64-bit integer anywhere.
+    pub order: Option<RenderHint>,
+    /// The hint for the marshalled value a JSON encoding walks.
+    pub json: Option<RenderHint>,
+}
+
+impl TypeArgHints {
+    /// Whether this instantiation needs no hint at any door — the overwhelmingly common case, and
+    /// the one a resolution can answer without walking anything.
+    pub fn is_empty(&self) -> bool {
+        self.display.is_none() && self.order.is_none() && self.json.is_none()
+    }
+
+    /// The hint a **display** door reads at `outermost`: the `Display` exemption applies to the
+    /// outermost position only.
+    pub fn at_display(&self, outermost: bool) -> Option<RenderHint> {
+        if outermost {
+            self.display.clone()
+        } else {
+            self.order.clone()
+        }
+    }
+}
+
+/// The slot value that names **no instantiation** — what lowering emits for a render slot the call
+/// site could not resolve ([`crate::HiddenArg::Erased`]), and what [`resolve_hint`] reads as "no
+/// hint". Negative on purpose: every real index into the type-argument table is non-negative, so no
+/// table can grow into it.
+pub const NO_TYPE_ARG: i64 = -1;
+
+/// Which door is resolving a hint — the axis on which the three per-instantiation answers differ.
+///
+/// An exhaustive choice rather than a pair of flags: the display door is the only one that exempts
+/// its outermost position (a declared type prints through its own `to_string`), and the JSON door is
+/// the only one that reads the marshalled numbering, so a fourth door added later has to say which
+/// of those it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HintDoor {
+    /// `echo`, an interpolation hole, a display-based `~` operand.
+    Display,
+    /// `.sorted()`, `.min()`, `.max()`, `.keys()`, `.values()`, a rendered set or map, a `for` over
+    /// one — every order a program observes.
+    Order,
+    /// The `json.stringify` argument, a derived `to_json()` or `inspect()` receiver.
+    Json,
+}
+
+/// Splice a door's hint against the enclosing frame's **render slots** — the one resolution both
+/// backends run, so a generic door cannot render one way compiled and another interpreted.
+///
+/// `slots` holds the frame's hidden type-argument slot values in slot order, and `table` is the
+/// program's [`TypeArgHints`] projection. A slot that is out of range, or holds [`NO_TYPE_ARG`],
+/// contributes no hint — so a call that could not name its instantiation degrades to reading the
+/// erased word rather than to a wrong number.
+///
+/// Borrowed unchanged for every hint with no parameter under it, which is every door outside a
+/// generic body.
+pub fn resolve_hint<'a>(
+    hint: &'a RenderHint,
+    slots: &[i64],
+    table: &[TypeArgHints],
+    door: HintDoor,
+) -> Option<std::borrow::Cow<'a, RenderHint>> {
+    hint.resolve(&|n: u32, outermost: bool| {
+        let entry = slots
+            .get(n as usize)
+            .filter(|v| **v >= 0)
+            .and_then(|v| table.get(*v as usize))?;
+        match door {
+            HintDoor::Display => entry.at_display(outermost),
+            HintDoor::Order => entry.order.clone(),
+            HintDoor::Json => entry.json.clone(),
+        }
+    })
 }
 
 impl RenderHint {
+    /// Whether a [`RenderHint::Param`] appears anywhere under this hint — the test that keeps
+    /// [`RenderHint::resolve`] off the path of every hint built from a concrete type.
+    pub fn has_param(&self) -> bool {
+        match self {
+            RenderHint::Unsigned => false,
+            RenderHint::Param(_) => true,
+            RenderHint::Elements(inner) => inner.has_param(),
+            RenderHint::Entries { key, value } => {
+                key.as_deref().is_some_and(RenderHint::has_param)
+                    || value.as_deref().is_some_and(RenderHint::has_param)
+            }
+            RenderHint::Slots(slots) => slots.iter().any(|(_, h)| h.has_param()),
+            RenderHint::Variants(variants) => variants
+                .iter()
+                .any(|(_, slots)| slots.iter().any(|(_, h)| h.has_param())),
+        }
+    }
+
+    /// Splice each [`RenderHint::Param`] with the hint `slot` gives for that ordinal, producing a
+    /// hint with no parameter left in it — the one resolution walk, shared by both backends so a
+    /// generic door cannot render one way compiled and another interpreted.
+    ///
+    /// Sparseness is re-established as it goes, exactly as the checker's builder establishes it:
+    /// a branch whose only unsigned position was a parameter that turned out to need no hint
+    /// (`wrap<T>` at `T = int`) collapses to `None` rather than surviving as an empty aggregate,
+    /// so the door takes the untouched path instead of walking a hint that describes nothing.
+    ///
+    /// Borrowed unchanged when there is no parameter under it, which is every hint built from a
+    /// concrete static type.
+    ///
+    /// `slot` is handed the ordinal **and** whether the parameter sits at the hint's outermost
+    /// position — the one place a display door's `Display` exemption applies. A door with no such
+    /// exemption ignores the flag.
+    pub fn resolve<'a>(
+        &'a self,
+        slot: &dyn Fn(u32, bool) -> Option<RenderHint>,
+    ) -> Option<std::borrow::Cow<'a, RenderHint>> {
+        use std::borrow::Cow;
+        if !self.has_param() {
+            return Some(Cow::Borrowed(self));
+        }
+        self.substitute(slot, true).map(Cow::Owned)
+    }
+
+    /// [`RenderHint::resolve`]'s recursive half, always producing an owned hint. `outermost` is
+    /// true only for the hint the door itself holds; every recursion is a nested position.
+    fn substitute(
+        &self,
+        slot: &dyn Fn(u32, bool) -> Option<RenderHint>,
+        outermost: bool,
+    ) -> Option<RenderHint> {
+        let nested = |h: &RenderHint| h.substitute(slot, false);
+        match self {
+            RenderHint::Unsigned => Some(RenderHint::Unsigned),
+            RenderHint::Param(n) => slot(*n, outermost),
+            RenderHint::Elements(inner) => Some(RenderHint::Elements(Box::new(nested(inner)?))),
+            RenderHint::Entries { key, value } => {
+                let key = key.as_deref().and_then(nested).map(Box::new);
+                let value = value.as_deref().and_then(nested).map(Box::new);
+                (key.is_some() || value.is_some()).then_some(RenderHint::Entries { key, value })
+            }
+            RenderHint::Slots(slots) => {
+                let slots: Vec<(u32, RenderHint)> = slots
+                    .iter()
+                    .filter_map(|(i, h)| nested(h).map(|h| (*i, h)))
+                    .collect();
+                (!slots.is_empty()).then_some(RenderHint::Slots(slots))
+            }
+            RenderHint::Variants(variants) => {
+                let variants: Vec<(String, Vec<(u32, RenderHint)>)> = variants
+                    .iter()
+                    .filter_map(|(name, slots)| {
+                        let slots: Vec<(u32, RenderHint)> = slots
+                            .iter()
+                            .filter_map(|(i, h)| nested(h).map(|h| (*i, h)))
+                            .collect();
+                        (!slots.is_empty()).then(|| (name.clone(), slots))
+                    })
+                    .collect();
+                (!variants.is_empty()).then_some(RenderHint::Variants(variants))
+            }
+        }
+    }
+
+    /// The hint for slot `index` of a [`RenderHint::Slots`], or `None` for any other shape.
+    /// The lists are short (only the hinted slots), so a scan beats a map.
     /// The hint for slot `index` of a [`RenderHint::Slots`], or `None` for any other shape.
     /// The lists are short (only the hinted slots), so a scan beats a map.
     pub fn slot(&self, index: u32) -> Option<&RenderHint> {
@@ -420,6 +627,136 @@ mod tests {
         );
         assert_eq!(variants.variant("none"), None);
         assert_eq!(variants.slot(0), None);
+    }
+
+    /// A hint built from a concrete type has no parameter under it and resolves to **itself**,
+    /// borrowed — the fast path every non-generic door takes.
+    #[test]
+    fn a_concrete_hint_resolves_to_itself_without_copying() {
+        let hint = RenderHint::Elements(Box::new(RenderHint::Unsigned));
+        assert!(!hint.has_param());
+        let none = |_: u32, _: bool| None;
+        let resolved = hint.resolve(&none).unwrap();
+        assert!(matches!(resolved, std::borrow::Cow::Borrowed(_)));
+        assert_eq!(*resolved, hint);
+    }
+
+    /// The splice itself, at every position a parameter can sit under: the structure is the site's
+    /// and the leaf is the call's.
+    #[test]
+    fn a_parameter_takes_the_instantiations_hint() {
+        let unsigned = |n: u32, _: bool| (n == 0).then_some(RenderHint::Unsigned);
+        // The bare parameter — `fn wrap<T>(v: T)`.
+        assert_eq!(
+            RenderHint::Param(0).resolve(&unsigned).as_deref(),
+            Some(&RenderHint::Unsigned)
+        );
+        // Under a list — `fn srt<T>(xs: List<T>)`.
+        assert_eq!(
+            RenderHint::Elements(Box::new(RenderHint::Param(0)))
+                .resolve(&unsigned)
+                .as_deref(),
+            Some(&RenderHint::Elements(Box::new(RenderHint::Unsigned)))
+        );
+        // A slot and a variant payload, each beside a position that was already concrete.
+        let slots = RenderHint::Slots(vec![(0, RenderHint::Param(0)), (2, RenderHint::Unsigned)]);
+        assert_eq!(
+            slots.resolve(&unsigned).as_deref(),
+            Some(&RenderHint::Slots(vec![
+                (0, RenderHint::Unsigned),
+                (2, RenderHint::Unsigned)
+            ]))
+        );
+        let variants = RenderHint::Variants(vec![("some".into(), vec![(0, RenderHint::Param(0))])]);
+        assert_eq!(
+            variants.resolve(&unsigned).as_deref(),
+            Some(&RenderHint::Variants(vec![(
+                "some".into(),
+                vec![(0, RenderHint::Unsigned)]
+            )]))
+        );
+        // An instantiation that is itself a composite splices whole (`T = List<u64>`).
+        let nested = |_: u32, _: bool| Some(RenderHint::Elements(Box::new(RenderHint::Unsigned)));
+        assert_eq!(
+            RenderHint::Param(0).resolve(&nested).as_deref(),
+            Some(&RenderHint::Elements(Box::new(RenderHint::Unsigned)))
+        );
+    }
+
+    /// An instantiation with no unsigned integer in it (`wrap<T>` at `T = int`) collapses every
+    /// branch that held only that parameter — the sparseness rule, re-established by the splice.
+    /// A branch with a concrete position beside it survives, holding only that position.
+    #[test]
+    fn a_hintless_instantiation_collapses_its_branch() {
+        let none = |_: u32, _: bool| None;
+        assert_eq!(RenderHint::Param(0).resolve(&none), None);
+        assert_eq!(
+            RenderHint::Elements(Box::new(RenderHint::Param(0))).resolve(&none),
+            None
+        );
+        assert_eq!(
+            RenderHint::Entries {
+                key: Some(Box::new(RenderHint::Param(0))),
+                value: None,
+            }
+            .resolve(&none),
+            None
+        );
+        assert_eq!(
+            RenderHint::Slots(vec![(0, RenderHint::Param(0))]).resolve(&none),
+            None
+        );
+        assert_eq!(
+            RenderHint::Variants(vec![("some".into(), vec![(0, RenderHint::Param(0))])])
+                .resolve(&none),
+            None
+        );
+        assert_eq!(
+            RenderHint::Slots(vec![(0, RenderHint::Param(0)), (1, RenderHint::Unsigned)])
+                .resolve(&none)
+                .as_deref(),
+            Some(&RenderHint::Slots(vec![(1, RenderHint::Unsigned)]))
+        );
+    }
+
+    /// The lookup is told which position it is answering for, so a display door can exempt the one
+    /// place a declared type's own `to_string` decides the form — and only that place.
+    #[test]
+    fn only_the_outermost_position_is_told_it_is_outermost() {
+        let hints = TypeArgHints {
+            display: None,
+            order: Some(RenderHint::Unsigned),
+            json: Some(RenderHint::Unsigned),
+        };
+        let at = |_: u32, outermost: bool| hints.at_display(outermost);
+        // The whole value is the parameter: the exemption applies and nothing is hinted.
+        assert_eq!(RenderHint::Param(0).resolve(&at), None);
+        // The parameter sits under a list, which renders its elements structurally.
+        assert_eq!(
+            RenderHint::Elements(Box::new(RenderHint::Param(0)))
+                .resolve(&at)
+                .as_deref(),
+            Some(&RenderHint::Elements(Box::new(RenderHint::Unsigned)))
+        );
+    }
+
+    /// An **unresolved** parameter reaching a walk is no hint at all: the erased word, which is the
+    /// answer a `dyn` gets. Nothing renders a guess.
+    #[test]
+    fn an_unresolved_parameter_renders_the_erased_word() {
+        assert_eq!(json_stringify(&int(-1), Some(&RenderHint::Param(0))), "-1");
+        assert_eq!(
+            map_key_display(&crate::MapKey::Int(-1), Some(&RenderHint::Param(0))),
+            "-1"
+        );
+        assert_eq!(
+            map_key_order(
+                &crate::MapKey::Int(-1),
+                &crate::MapKey::Int(1),
+                Some(&RenderHint::Param(0))
+            ),
+            std::cmp::Ordering::Less
+        );
     }
 
     /// The reinterpretation itself, at both boundaries: the largest word an `i64` also holds reads

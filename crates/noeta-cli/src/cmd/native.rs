@@ -573,6 +573,7 @@ mod tests {
             deserialize_recipes: Vec::new(),
             type_args: Vec::new(),
             type_arg_reprs: Vec::new(),
+            type_arg_hints: Vec::new(),
             destruct_reachable: Vec::new(),
             cache_slots: 0,
             reflection: Default::default(),

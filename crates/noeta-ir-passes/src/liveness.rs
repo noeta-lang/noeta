@@ -224,6 +224,7 @@ fn analyze_stmt(stmt: &Stmt, live: &mut VarSet) -> StmtLiveness {
             pattern,
             iterable,
             body,
+            order_slots,
             ..
         } => {
             let live_out = live.clone();
@@ -244,8 +245,12 @@ fn analyze_stmt(stmt: &Stmt, live: &mut VarSet) -> StmtLiveness {
                 }
                 top = next;
             };
-            // The iterable is evaluated once, before the loop.
-            let iter_uses = atom_uses(iterable);
+            // The iterable is evaluated once, before the loop — as are the render slots the
+            // ordering hint resolves through, which are read at the same point.
+            let mut iter_uses = atom_uses(iterable);
+            for slot in order_slots {
+                extend(&mut iter_uses, atom_uses(slot));
+            }
             *live = top;
             let dies = deaths(&iter_uses, live);
             extend(live, iter_uses);
@@ -461,12 +466,18 @@ fn collect_stmt_vars(stmt: &Stmt, out: &mut VarSet) {
             pattern,
             iterable,
             body,
+            order_slots,
             ..
         } => {
             for name in for_pattern_names(pattern) {
                 out.insert(name);
             }
             use_atom(iterable, out);
+            // A `for` over a set/map inside a generic body resolves its ordering hint through the
+            // enclosing fn's hidden type-argument slots: operands like the iterable itself.
+            for slot in order_slots {
+                use_atom(slot, out);
+            }
             collect_block_vars(body, out);
         }
         Stmt::Match {
@@ -562,12 +573,15 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
             // or closure that constructs through it CAPTURES the enclosing `$ty<i>` local, and the
             // slot must stay live across the call it re-tags after.
             reflect_slot,
+            // …and so are the render slots an ordering hint resolves through, for the same reason.
+            order_slots,
             ..
         } => {
             f(receiver);
             args.iter().for_each(&mut *f);
             type_args.iter().for_each(&mut *f);
             reflect_slot.iter().for_each(&mut *f);
+            order_slots.iter().for_each(&mut *f);
         }
         Rvalue::TraitMethod { receiver, args, .. } => {
             f(receiver);
@@ -639,11 +653,16 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
                 f(name);
             }
         }
-        Rvalue::Try { operand, .. }
-        | Rvalue::TypeArgName { operand, .. }
-        | Rvalue::MaskWidth { operand, .. }
-        | Rvalue::Render { operand, .. }
-        | Rvalue::JsonRender { operand, .. } => f(operand),
+        Rvalue::Try { operand, .. } | Rvalue::TypeArgName { operand, .. } => f(operand),
+        Rvalue::MaskWidth { operand, .. } => f(operand),
+        // A door inside a generic body reads the enclosing fn's hidden type-argument slots to
+        // resolve its hint: they are operands like any other, so a nested `fn` or closure that
+        // renders CAPTURES them and register allocation leaves their slots alone. Empty at every
+        // door whose hint is complete on its own, which is nearly all of them.
+        Rvalue::Render { operand, slots, .. } | Rvalue::JsonRender { operand, slots, .. } => {
+            f(operand);
+            slots.iter().for_each(&mut *f);
+        }
         // The forwarded `type_name::<T>()` reads the enclosing fn's hidden type-argument slot.
         Rvalue::TypeSlotName { slot, .. } => f(slot),
         // **One arm for the whole reflection surface.** A value operand, a runtime target string, a

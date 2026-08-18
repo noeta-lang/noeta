@@ -336,6 +336,21 @@ pub struct Sites {
     /// recipe), so deduplicating on that alone would fold them into one entry and let two
     /// differently-instantiated construction sites report each other's argument.
     pub type_arg_reprs: Vec<Option<noeta_ast::reflect::TypeRepr>>,
+    /// The **render-hint projection** of [`Sites::type_arg_table`], indexed identically (same
+    /// length, entry `i` describes entry `i`): each interned instantiation's own
+    /// [`noeta_ext_abi::TypeArgHints`], and empty hints where it holds no unsigned 64-bit integer
+    /// anywhere — which is nearly every instantiation.
+    ///
+    /// What a door inside a **generic** body resolves through. Its static type names a type
+    /// parameter, which names no width, so it records [`noeta_ast::RenderHint::Param`] pointing at
+    /// the render slot the call fills; the backends read this table at that slot's runtime value and
+    /// splice the answer in. Without it a `u64` written or displayed through any generic reaches the
+    /// wire as the negative word it is erased to.
+    ///
+    /// A third parallel table for the same reason [`Sites::type_arg_reprs`] is a second one: it is
+    /// grown in lockstep by the one interner ([`intern_type_arg_entry`]) and is part of that
+    /// interner's dedup key, so two instantiations that render differently can never share an entry.
+    pub type_arg_hints: Vec<noeta_ext_abi::TypeArgHints>,
     /// Call spans of **forwarding-generic** calls → the hidden type-argument slots the call must
     /// supply, in the callee's forwarding order (`Table(i)` = a concrete instantiation's table
     /// index; `Forward(j)` = pass the enclosing body's own hidden slot `j` through). Lowering
@@ -512,6 +527,7 @@ pub(crate) const SITE_POLICIES: &[(&str, SiteClass, &str)] = &[
     ("from_call_sites", SiteClass::SpanKeyed, "span → the conversion's method-table key an explicit `Target.from(x)` selected"),
     ("type_arg_table", SiteClass::TheTable, "the table itself; absorb_type_args REPLACES it with the session's merged superset"),
     ("type_arg_reprs", SiteClass::TheTable, "the table's reflection projection, indexed in lockstep; replaced with it"),
+    ("type_arg_hints", SiteClass::TheTable, "the table's render-hint projection, indexed in lockstep; replaced with it"),
     ("hidden_arg_sites", SiteClass::TableIndexed, "HiddenArg::Table(TypeArgIndex) — the one carrier; the Forward(j) beside it is a slot ordinal and passes through"),
     ("forwarded_slot_sites", SiteClass::Ordinal, "a hidden SLOT ordinal ($tyN) of the enclosing forwarding fn, read at run time"),
     ("self_type_arg_sites", SiteClass::Ordinal, "the type parameter's position in its own type's declaration order, read off the receiver's reflected tag"),
@@ -544,6 +560,7 @@ impl Sites {
             // superset — see the `TheTable` rows.
             type_arg_table: _,
             type_arg_reprs: _,
+            type_arg_hints: _,
             // Everything else: no index into the type-argument table. Three of these hold a `u32`
             // that looks like one (`dynamic_construction_sites`, `forwarded_slot_sites`,
             // `self_type_arg_sites`); `SITE_POLICIES` says what each actually indexes, and the one
@@ -622,25 +639,34 @@ impl Sites {
 pub fn intern_type_arg_entry(
     table: &mut Vec<noeta_ext_abi::TypeArgInfo>,
     reprs: &mut Vec<Option<noeta_ast::reflect::TypeRepr>>,
+    hints: &mut Vec<noeta_ext_abi::TypeArgHints>,
     info: noeta_ext_abi::TypeArgInfo,
     repr: Option<noeta_ast::reflect::TypeRepr>,
+    hint: noeta_ext_abi::TypeArgHints,
 ) -> noeta_ext_abi::TypeArgIndex {
     debug_assert_eq!(
         table.len(),
         reprs.len(),
         "the type-argument table and its reflection projection are grown in lockstep"
     );
+    debug_assert_eq!(
+        table.len(),
+        hints.len(),
+        "the type-argument table and its render-hint projection are grown in lockstep"
+    );
     // The ONE place a `TypeArgIndex` is minted. Its type — rather than the `u32` it wraps — is what
     // marks the value as "an index a live session has to renumber"; see `TypeArgIndex`.
     match table
         .iter()
         .zip(reprs.iter())
-        .position(|(e, r)| *e == info && *r == repr)
+        .zip(hints.iter())
+        .position(|((e, r), h)| *e == info && *r == repr && *h == hint)
     {
         Some(i) => noeta_ext_abi::TypeArgIndex::new(i as u32),
         None => {
             table.push(info);
             reprs.push(repr);
+            hints.push(hint);
             noeta_ext_abi::TypeArgIndex::new((table.len() - 1) as u32)
         }
     }
@@ -800,6 +826,8 @@ pub(crate) struct SiteMaps {
     pub(crate) type_arg_table: Vec<noeta_ext_abi::TypeArgInfo>,
     /// The type-argument table's reflection projection — see [`Sites::type_arg_reprs`].
     pub(crate) type_arg_reprs: Vec<Option<noeta_ast::reflect::TypeRepr>>,
+    /// The type-argument table's render-hint projection — see [`Sites::type_arg_hints`].
+    pub(crate) type_arg_hints: Vec<noeta_ext_abi::TypeArgHints>,
     /// Forwarding-call hidden-argument slots — see [`Sites::hidden_arg_sites`].
     pub(crate) hidden_arg_sites: HashMap<Span, Vec<noeta_ext_abi::HiddenArg>>,
     /// Forwarded-type-parameter turbofish sites — see [`Sites::forwarded_slot_sites`].
@@ -859,6 +887,7 @@ impl SiteMaps {
             from_call_sites: self.from_call_sites,
             type_arg_table: self.type_arg_table,
             type_arg_reprs: self.type_arg_reprs,
+            type_arg_hints: self.type_arg_hints,
             hidden_arg_sites: self.hidden_arg_sites,
             forwarded_slot_sites: self.forwarded_slot_sites,
             self_type_arg_sites: self.self_type_arg_sites,

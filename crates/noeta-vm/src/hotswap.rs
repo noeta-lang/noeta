@@ -563,12 +563,14 @@ impl<'m> Vm<'m> {
         // `.sorted()` on a `List<u64>` would otherwise order by the erased word while a cold start
         // orders unsigned. Idempotent for the spans already there.
         for (span, hint) in &extended.order_hint_sites {
-            self.order_hints.insert(*span, hint.clone());
+            self.hints.order.insert(*span, hint.clone());
         }
+        // …and the table those hints' slots index, which a swapped-in generic door resolves through.
+        self.hints.type_args = extended.type_arg_hints.clone();
         // And the push hints, for the same reason: a swapped-in `view.expose` of a `Signal<u64>`
         // would otherwise push the erased word where a cold start pushes the value.
         for (span, hint) in &extended.binding_hint_sites {
-            self.binding_hints.insert(*span, hint.clone());
+            self.hints.binding.insert(*span, hint.clone());
         }
         for repr in &extended.type_reprs[self.persist.type_reprs.len()..] {
             self.persist.type_reprs.push(Rc::new(repr.clone()));

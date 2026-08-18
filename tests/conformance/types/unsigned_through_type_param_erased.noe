@@ -1,0 +1,61 @@
+// The positions a `u64`'s signedness does NOT reach, pinned so they stay deliberate. Every one of
+// them renders the erased i64 word — `18446744073709551615` read back as `-1` — and every one of
+// them is a position where nothing in the program says which width the value had.
+//
+// A `dyn` is the original of the rule: a value laundered through it has no static type at all, so
+// there is nothing to take a signedness from. The rest are the same rule met through a generic:
+//
+//   * a `dyn` local inside a generic body, which erases the parameter it was assigned from;
+//   * a **generic type's method**, whose instantiation rides the receiver rather than a call's
+//     hidden slot — a method is reachable through a `dyn` receiver, either handle form and
+//     `invoke`, all of which bind positionally and carry no instantiation, so it takes no slot;
+//   * a generic function used as a **value** with nothing to pin its instantiation, where the
+//     erased signature is the honest answer and the wrapper carries no width either.
+//
+// The last of those is what makes the whole channel safe to add: a call that cannot name its
+// instantiation degrades to this reading rather than refusing the program.
+// expect: stdout "-1"
+// expect: stdout "-1"
+// expect: stdout "-1"
+// expect: stdout "-1"
+// expect: stdout "-1"
+// expect: exit 0
+use std.json
+
+class Holder<T> {
+    pub v: T
+
+    pub fn show(): string {
+        return "${self.v}";
+    }
+
+    pub fn wrap(): string {
+        return json.stringify(self.v);
+    }
+}
+
+fn show<T>(v: T): string {
+    return "${v}";
+}
+
+fn launder<T>(v: T): string {
+    d: dyn = v;
+    return "${d}";
+}
+
+big: u64 = 18446744073709551615u64;
+
+// A `dyn` at the door, and a `dyn` reached from inside a generic body.
+d: dyn = big;
+echo "${d}";
+echo launder(big);
+
+// A generic type's methods: the instantiation is on the receiver, not on a hidden slot.
+h: Holder<u64> = Holder { v: big };
+echo h.show();
+echo h.wrap();
+
+// The generic function as a bare value: nothing pins the instantiation, so the wrapper carries
+// none. It is still callable — a render slot never refuses a program.
+f = show;
+echo f(big);

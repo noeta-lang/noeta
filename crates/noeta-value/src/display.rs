@@ -346,6 +346,10 @@ impl Value {
         match hint {
             // Handled above; repeated here because the match is exhaustive.
             RenderHint::Unsigned => self.display(),
+            // An **unresolved** type parameter: the call site could not name its instantiation, so
+            // there is nothing to read the word as and the value renders exactly as it would with
+            // no hint at all — the same answer a `dyn` gets.
+            RenderHint::Param(_) => self.display(),
             RenderHint::Elements(inner) => self.render_sequence(Some(inner)),
             RenderHint::Entries { key, value } => heap::with_payload(self, |p| match p {
                 Payload::Map(entries) => {

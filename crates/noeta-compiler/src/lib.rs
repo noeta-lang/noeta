@@ -512,6 +512,7 @@ const TABLE_POLICIES: &[(&str, Policy, &str)] = &[
     ("deserialize_recipes", Policy::Replace, "the checker's bundle, itself accumulated across entries; an install with no sites leaves it alone"),
     ("type_args", Policy::MergeByContent, "absorb_type_args — live values index it, so it may only grow"),
     ("type_arg_reprs", Policy::MergeByContent, "absorb_type_args, in lockstep with type_args"),
+    ("type_arg_hints", Policy::MergeByContent, "absorb_type_args, in lockstep with type_args"),
     ("structural_eq_types", Policy::Append, "register_types"),
     ("order_hint_sites", Policy::MergeByKey, "lowering — one entry per ordering site, keyed by span"),
     ("binding_hint_sites", Policy::MergeByKey, "lowering — one entry per deferred-serialization site, keyed by span"),
@@ -632,6 +633,7 @@ impl SessionCompiler {
             deserialize_recipes: Vec::new(),
             type_args: Vec::new(),
             type_arg_reprs: Vec::new(),
+            type_arg_hints: Vec::new(),
             structural_eq_types: HashSet::new(),
             transient_slots: HashMap::new(),
             unsigned_slots: HashMap::new(),
@@ -750,8 +752,11 @@ impl SessionCompiler {
     /// re-absorption of an already-absorbed bundle — the operation is idempotent), so the common
     /// path pays a scan and no clone.
     pub fn absorb_type_args<'s>(&mut self, sites: &'s Sites) -> std::borrow::Cow<'s, Sites> {
-        let (remap, merged_reprs) =
-            self.merge_type_args(&sites.type_arg_table, &sites.type_arg_reprs);
+        let (remap, merged_reprs) = self.merge_type_args(
+            &sites.type_arg_table,
+            &sites.type_arg_reprs,
+            &sites.type_arg_hints,
+        );
         // Identity ⟺ the session table gained nothing AND every fresh entry sits at its own index;
         // then the incoming bundle already speaks session space and needs no rewrite.
         if self.mc.type_args.len() == sites.type_arg_table.len()
@@ -766,6 +771,7 @@ impl SessionCompiler {
         // snapshot would shrink out from under indices older code still holds.
         owned.type_arg_table = self.mc.type_args.clone();
         owned.type_arg_reprs = merged_reprs;
+        owned.type_arg_hints = self.mc.type_arg_hints.clone();
         // …and every `TableIndexed` row is rewritten into session space. The walk lives beside
         // `Sites` (which fields carry a table index is a fact about `Sites`), destructures it
         // exhaustively with no `..`, and is what the census gate checks this call against.
@@ -788,6 +794,7 @@ impl SessionCompiler {
         &mut self,
         fresh: &[noeta_ext_abi::TypeArgInfo],
         fresh_reprs: &[Option<noeta_ast::reflect::TypeRepr>],
+        fresh_hints: &[noeta_ext_abi::TypeArgHints],
     ) -> (
         Vec<noeta_ext_abi::TypeArgIndex>,
         Vec<Option<noeta_ast::reflect::TypeRepr>>,
@@ -799,11 +806,20 @@ impl SessionCompiler {
             .map(|slot| slot.map(|i| self.mc.type_reprs[i as usize].clone()))
             .collect();
         let table = &mut self.mc.type_args;
+        let hints = &mut self.mc.type_arg_hints;
         let remap: Vec<noeta_ext_abi::TypeArgIndex> = fresh
             .iter()
             .zip(fresh_reprs)
-            .map(|(info, repr)| {
-                noeta_check::intern_type_arg_entry(table, &mut reprs, info.clone(), repr.clone())
+            .zip(fresh_hints)
+            .map(|((info, repr), hint)| {
+                noeta_check::intern_type_arg_entry(
+                    table,
+                    &mut reprs,
+                    hints,
+                    info.clone(),
+                    repr.clone(),
+                    hint.clone(),
+                )
             })
             .collect();
         self.mc.type_arg_reprs = reprs
@@ -1128,6 +1144,7 @@ impl SessionCompiler {
             // function looks its `map(...)` call span up at run time (session-checker C5).
             map_packed_sites: self.map_packed,
             order_hint_sites: self.mc.order_hint_sites,
+            type_arg_hints: self.mc.type_arg_hints.clone(),
             binding_hint_sites: self.mc.binding_hint_sites,
             methods: self.mc.methods,
             destructors: self.mc.destructors,
@@ -1282,6 +1299,10 @@ struct ModuleCompiler {
     /// reflected type interned into [`Self::type_reprs`], or `None` where it has none. Becomes
     /// [`Module::type_arg_reprs`], which [`Op::RetagDynamic`] reads through a hidden slot's value.
     type_arg_reprs: Vec<Option<u32>>,
+    /// The **render-hint projection** of [`Self::type_args`], indexed identically — what a
+    /// [`noeta_bytecode::HintOperand`]'s slot registers look an instantiation up in. Merged by
+    /// content beside the table it projects, so a session install never re-points a live slot.
+    type_arg_hints: Vec<noeta_ext_abi::TypeArgHints>,
     /// Type names whose `==` is **structural** (baked into each instance's `Shape::structural_eq`):
     /// every `struct`, plus a `class` that is `Equatable` (derives it or hand-`impl`s `eq`). A
     /// `class` absent here compares by reference identity. Mirrors the tree-walker's
@@ -2898,11 +2919,13 @@ impl<'m> FnCompiler<'m> {
                 span,
                 stream,
                 order,
+                order_slots,
             } => {
                 // A loop over a `u64`-carrying set/map sorts its snapshot under this hint; the VM
                 // reads it off the module by the `IterSnapshot` span.
                 if let Some(hint) = order {
                     self.module.record_order_hint(*span, hint);
+                    self.emit_resolve_order_hint(*span, order_slots)?;
                 }
                 self.for_stmt(pattern, iterable, body, *span, *stream)
             }
@@ -3694,6 +3717,50 @@ impl<'m> FnCompiler<'m> {
     /// Produce a register holding `atom`'s value. A temporary or a directly-held local / `self`
     /// resolves to its existing register (operands are read-only); a constant, or a celled /
     /// captured / global / field name, is materialized into a fresh register.
+    /// Emit the [`noeta_bytecode::Op::ResolveOrderHint`] an ordering door in a **generic** body
+    /// needs, and nothing at all where its hint is complete on its own.
+    ///
+    /// The ordering hint travels on the module's span-keyed side table, which is the right place
+    /// for a hint (the ops that read it stay the size they are on the hot path) and the wrong place
+    /// for *registers*: a side table is invisible to the liveness walk and to the coalescing remap.
+    /// So the registers travel in the code, as this op, and the VM splices the two.
+    fn emit_resolve_order_hint(&mut self, span: Span, slots: &[Atom]) -> Result<(), Unsupported> {
+        if slots.is_empty() {
+            return Ok(());
+        }
+        let mut regs = Vec::with_capacity(slots.len());
+        for slot in slots {
+            regs.push(self.atom_reg(slot)?);
+        }
+        self.code.push(Op::ResolveOrderHint {
+            span,
+            slots: regs.into_boxed_slice(),
+        });
+        Ok(())
+    }
+
+    /// Compile a door's hint into the [`noeta_bytecode::HintOperand`] the VM resolves it through:
+    /// the hint itself, plus the registers holding the frame's hidden type-argument slots.
+    ///
+    /// `slots` is empty for every hint built from a concrete static type, so the common door pays
+    /// nothing. Inside a generic body they are ordinary `$ty<i>` reads compiled like any other
+    /// operand — which is what makes them live at the door, so register coalescing leaves them
+    /// alone and a closure that renders captures them.
+    fn hint_operand(
+        &mut self,
+        hint: &noeta_ast::RenderHint,
+        slots: &[Atom],
+    ) -> Result<noeta_bytecode::HintOperand, Unsupported> {
+        let mut regs = Vec::with_capacity(slots.len());
+        for slot in slots {
+            regs.push(self.atom_reg(slot)?);
+        }
+        Ok(noeta_bytecode::HintOperand {
+            hint: hint.clone(),
+            slots: regs,
+        })
+    }
+
     fn atom_reg(&mut self, atom: &Atom) -> Result<Reg, Unsupported> {
         match atom {
             Atom::Const(c) => {
@@ -3965,26 +4032,34 @@ impl<'m> FnCompiler<'m> {
             Rvalue::Render {
                 operand,
                 hint,
+                slots,
                 span,
             } => {
+                let hint = self.hint_operand(hint, slots)?;
                 let src = self.atom_reg(operand)?;
                 self.code.push(Op::Stringify {
                     dst,
                     src,
                     span: *span,
-                    hint: Some(Box::new((**hint).clone())),
+                    hint: Some(Box::new(hint)),
                 });
                 Ok(())
             }
             // A JSON door whose serialized value carries an unsigned 64-bit integer: the hinted
             // serializer replaces the `json.stringify` / derived `to_json` call outright, so the
             // erased words reach the wire unsigned.
-            Rvalue::JsonRender { operand, hint, .. } => {
+            Rvalue::JsonRender {
+                operand,
+                hint,
+                slots,
+                ..
+            } => {
+                let hint = self.hint_operand(hint, slots)?;
                 let src = self.atom_reg(operand)?;
                 self.code.push(Op::JsonStringify {
                     dst,
                     src,
-                    hint: Box::new((**hint).clone()),
+                    hint: Box::new(hint),
                 });
                 Ok(())
             }
@@ -4118,6 +4193,7 @@ impl<'m> FnCompiler<'m> {
                 span,
                 supplied,
                 order,
+                order_slots,
                 push,
                 name_span: _,
             } => {
@@ -4126,6 +4202,7 @@ impl<'m> FnCompiler<'m> {
                 // the op, which stays the size it is on the hot dispatch path.
                 if let Some(hint) = order {
                     self.module.record_order_hint(*span, hint);
+                    self.emit_resolve_order_hint(*span, order_slots)?;
                 }
                 // A native call that BINDS a value it serializes on a later tick: the hint travels on
                 // the same span-keyed side table, for the same reason — the ctx the dispatch runs
@@ -6652,6 +6729,9 @@ mod tests {
         Sites {
             type_arg_table: table.iter().map(|(info, _)| info.clone()).collect(),
             type_arg_reprs: table.iter().map(|(_, repr)| repr.clone()).collect(),
+            // The render-hint projection grows in lockstep with the table it projects. These
+            // instantiations hold no `u64`, so every entry is the empty answer.
+            type_arg_hints: vec![noeta_ext_abi::TypeArgHints::default(); table.len()],
             hidden_arg_sites: calls
                 .iter()
                 .enumerate()

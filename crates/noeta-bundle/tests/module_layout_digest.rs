@@ -958,17 +958,28 @@ fn all_ops() -> Vec<Op> {
         dst: 245,
         src: 246,
         span: span(64),
-        hint: Some(Box::new(noeta_ast::RenderHint::Elements(Box::new(
-            noeta_ast::RenderHint::Unsigned,
-        )))),
+        // A hint operand rather than a bare hint: the door's hint plus the registers holding the
+        // enclosing generic body's render slots. Both halves non-empty so the digest covers them.
+        hint: Some(Box::new(noeta_bytecode::HintOperand {
+            hint: noeta_ast::RenderHint::Elements(Box::new(noeta_ast::RenderHint::Param(0))),
+            slots: vec![251],
+        })),
     });
     ops.push(Op::JsonStringify {
         dst: 245,
         src: 246,
-        hint: Box::new(noeta_ast::RenderHint::Entries {
-            key: Some(Box::new(noeta_ast::RenderHint::Unsigned)),
-            value: None,
-        }),
+        hint: Box::new(noeta_bytecode::HintOperand::plain(
+            noeta_ast::RenderHint::Entries {
+                key: Some(Box::new(noeta_ast::RenderHint::Unsigned)),
+                value: None,
+            },
+        )),
+    });
+    // The ordering door's resolution op: its registers ride in the code (a side table is invisible
+    // to the liveness walk and the coalescing remap), so its encoding belongs in the digest.
+    ops.push(Op::ResolveOrderHint {
+        span: span(65),
+        slots: Box::new([252, 253]),
     });
     ops.push(Op::BuildString {
         dst: 247,
@@ -981,7 +992,7 @@ fn all_ops() -> Vec<Op> {
 
 /// How many `Op` variants [`all_ops`] builds. Stated so a *duplicate* (two literals of one variant,
 /// one variant missing) is caught — the compiler cannot see that, since neither literal is wrong.
-const OP_VARIANTS: usize = 105;
+const OP_VARIANTS: usize = 106;
 
 fn canonical_chunk() -> Chunk {
     Chunk {
@@ -1062,6 +1073,18 @@ fn canonical_module() -> Module {
             recipe: Some(every_type_recipe()),
         }],
         type_arg_reprs: vec![Some(8), None],
+        // The render-hint projection of the same table: what a hint operand's slot registers name.
+        // One entry with all three answers set, one empty, so the digest covers both shapes.
+        type_arg_hints: vec![
+            noeta_ext_abi::TypeArgHints {
+                display: Some(noeta_ast::RenderHint::Unsigned),
+                order: Some(noeta_ast::RenderHint::Unsigned),
+                json: Some(noeta_ast::RenderHint::Elements(Box::new(
+                    noeta_ast::RenderHint::Unsigned,
+                ))),
+            },
+            noeta_ext_abi::TypeArgHints::default(),
+        ],
         names: vec!["total".to_string(), "qty".to_string()],
         global_names: vec!["main".to_string(), "handler".to_string()],
         global_bindings: vec![GlobalId(9), GlobalId(10)],

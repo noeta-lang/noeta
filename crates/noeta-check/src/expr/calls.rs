@@ -382,7 +382,7 @@ impl Checker {
         // application over the slots). An instantiation the expectation leaves open (or a
         // pass-through with no matching enclosing slot) returns `None`: the caller falls back to
         // synthesis, whose `Ident` arm reports the value boundary once, exactly as before.
-        if self.symbols.forwarding.contains_key(name) {
+        if self.symbols.forwarding.contains_key(name) || !self.render_slot_params(name).is_empty() {
             let hidden = self.resolve_value_hidden_slots(name, &subst, &tps, span)?;
             self.sites.hidden_arg_sites.insert(span, hidden);
             self.sites
@@ -413,8 +413,17 @@ impl Checker {
         if self.symbols.forwarding_poisoned.contains(name) {
             return None;
         }
-        let fwd = self.symbols.forwarding.get(name).cloned()?;
-        let mut hidden = Vec::with_capacity(fwd.len());
+        let fwd = self
+            .symbols
+            .forwarding
+            .get(name)
+            .cloned()
+            .unwrap_or_default();
+        let render = self.render_slot_params(name);
+        if fwd.is_empty() && render.is_empty() {
+            return None;
+        }
+        let mut hidden = Vec::with_capacity(fwd.len() + render.len());
         for slot in &fwd {
             if params_mentioned(&slot.template, tps).iter().any(|p| {
                 subst
@@ -438,6 +447,12 @@ impl Checker {
             // program is already rejected, and falling back to synthesis would only stack the
             // generic value-boundary E0058 on top of the precise message.
             hidden.push(self.intern_type_arg(&sigma, slot, name, span));
+        }
+        // The render slots follow, and never refuse the value: an expectation that leaves the
+        // instantiation open erases them, and the wrapped value renders the erased word.
+        for param in &render {
+            let arg = self.render_hidden_arg(param, subst, span);
+            hidden.push(arg);
         }
         Some(hidden)
     }

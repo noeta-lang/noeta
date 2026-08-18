@@ -322,6 +322,7 @@ impl Interpreter {
         // backends read the same entries by construction.
         self.type_args = ir.type_args.clone();
         self.type_arg_reprs = ir.type_arg_reprs.clone();
+        self.type_arg_hints = ir.type_arg_hints.clone();
         let mut frame = Frame::new(ir.temp_count);
         // The top-level statements run directly in the global scope (no child).
         match self.exec_ir_stmts(&ir.top.stmts, &mut frame) {
@@ -495,8 +496,10 @@ impl Interpreter {
                 span,
                 stream,
                 order,
+                order_slots,
             } => {
-                self.note_order_hint(*span, order);
+                let resolved = self.resolve_order_hint(order, order_slots, frame)?;
+                self.note_order_hint(*span, resolved);
                 self.exec_ir_for(pattern, iterable, body, *span, *stream, frame)
             }
             noeta_ir::Stmt::Match {
@@ -1339,21 +1342,38 @@ impl Interpreter {
                     other => other,
                 })
             }
-            noeta_ir::Rvalue::Render { operand, hint, .. } => {
+            noeta_ir::Rvalue::Render {
+                operand,
+                hint,
+                slots,
+                ..
+            } => {
                 // Render a display-site value whose static type carries an unsigned 64-bit integer.
                 // The VM runs the identical hinted walk on its own value model, so the differential
                 // pins the two renderings equal.
+                let resolved =
+                    self.resolve_render_hint(hint, slots, noeta_stdlib::HintDoor::Display, frame)?;
                 let value = self.eval_ir_atom(operand, frame)?;
-                Ok(Value::Str(value.display_hinted(hint)))
+                Ok(Value::Str(match resolved.as_deref() {
+                    Some(hint) => value.display_hinted(hint),
+                    None => value.display(),
+                }))
             }
-            noeta_ir::Rvalue::JsonRender { operand, hint, .. } => {
+            noeta_ir::Rvalue::JsonRender {
+                operand,
+                hint,
+                slots,
+                ..
+            } => {
                 // Serialize a JSON-site value whose static type carries an unsigned 64-bit integer.
                 // The marshal is this backend's own; the walk over the marshalled tree is the shared
                 // one the VM runs, so the two encodings agree by construction.
+                let resolved =
+                    self.resolve_render_hint(hint, slots, noeta_stdlib::HintDoor::Json, frame)?;
                 let value = self.eval_ir_atom(operand, frame)?;
                 Ok(Value::Str(noeta_ast::json_stringify(
                     &crate::value_to_native_deep(&value),
-                    Some(hint),
+                    resolved.as_deref(),
                 )))
             }
             noeta_ir::Rvalue::Binary {
@@ -1626,13 +1646,16 @@ impl Interpreter {
                 span,
                 supplied,
                 order,
+                order_slots,
                 push,
                 name_span: _,
             } => {
                 // A method whose result reveals an order the program can see, on a `u64`-carrying
                 // receiver: register the hint by span, so the collection method below reads it the
-                // way the VM reads its own span-keyed table.
-                self.note_order_hint(*span, order);
+                // way the VM reads its own span-keyed table. Resolved against this frame's render
+                // slots first — inside a generic body the answer is the caller's, not the site's.
+                let resolved = self.resolve_order_hint(order, order_slots, frame)?;
+                self.note_order_hint(*span, resolved);
                 // A native call that BINDS a value it serializes on a later tick: register its push
                 // hint by span, so the ctx built for the dispatch reads it the way the VM reads its
                 // own span-keyed table.
@@ -2913,6 +2936,58 @@ impl Interpreter {
                 format!("cannot assign field `{field}` on {}", other.type_name()),
             )),
         }
+    }
+
+    /// Splice a door's hint against this frame's **render slots** — the tree-walker half of the one
+    /// resolution, whose other half the VM runs on its own registers.
+    ///
+    /// `slots` is empty for every hint that mentions no type parameter, which is every door outside
+    /// a generic body: the hint is handed back borrowed and nothing is evaluated. Otherwise each
+    /// slot's `$ty<i>` local is read and its table entry consulted through
+    /// [`noeta_ext_abi::resolve_hint`], the same function and the same table the VM reads — so a
+    /// generic door cannot render one way compiled and another interpreted.
+    fn resolve_render_hint<'h>(
+        &mut self,
+        hint: &'h noeta_ast::RenderHint,
+        slots: &[noeta_ir::Atom],
+        door: noeta_stdlib::HintDoor,
+        frame: &mut Frame,
+    ) -> Eval<Option<std::borrow::Cow<'h, noeta_ast::RenderHint>>> {
+        if slots.is_empty() {
+            return Ok(Some(std::borrow::Cow::Borrowed(hint)));
+        }
+        let mut values: Vec<i64> = Vec::with_capacity(slots.len());
+        for slot in slots {
+            values.push(match self.eval_ir_atom(slot, frame)? {
+                Value::Int(i) => i,
+                _ => noeta_stdlib::NO_TYPE_ARG,
+            });
+        }
+        Ok(noeta_stdlib::resolve_hint(
+            hint,
+            &values,
+            &self.type_arg_hints,
+            door,
+        ))
+    }
+
+    /// [`Self::resolve_render_hint`] for an ordering door, whose hint is optional and whose result
+    /// is registered by span for the collection method that reads it.
+    fn resolve_order_hint(
+        &mut self,
+        hint: &Option<Rc<noeta_ast::RenderHint>>,
+        slots: &[noeta_ir::Atom],
+        frame: &mut Frame,
+    ) -> Eval<Option<Rc<noeta_ast::RenderHint>>> {
+        let Some(hint) = hint else {
+            return Ok(None);
+        };
+        if slots.is_empty() {
+            return Ok(Some(Rc::clone(hint)));
+        }
+        let resolved =
+            self.resolve_render_hint(hint, slots, noeta_stdlib::HintDoor::Order, frame)?;
+        Ok(resolved.map(|h| Rc::new(h.into_owned())))
     }
 
     /// The reflected type a **dynamic construction site** stamps (generic-in-generic construction):

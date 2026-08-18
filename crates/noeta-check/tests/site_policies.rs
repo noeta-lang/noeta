@@ -366,7 +366,7 @@ fn the_parsers_actually_find_the_sites() {
     );
     assert_eq!(
         replaced_fields(&read(COMPILER)),
-        ["type_arg_table", "type_arg_reprs"],
+        ["type_arg_table", "type_arg_reprs", "type_arg_hints"],
         "the absorb scanner must find the replaced tables"
     );
     assert_eq!(

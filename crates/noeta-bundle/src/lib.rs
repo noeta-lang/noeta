@@ -274,7 +274,20 @@ pub const MAGIC: &[u8; 4] = b"NOEB";
 /// bytes as whatever follows it, silently and still well-formed — the same slide `order_hint_sites`
 /// caused at 24. It cannot be re-derived on the reading side for the reason every row above cannot:
 /// signedness lives only in the static type.
-pub const FORMAT_VERSION: u8 = 25;
+/// Bumped to 26 by the hint's one remaining position: the door whose static type names a **type
+/// parameter**. [`noeta_bytecode::Module`] gained `type_arg_hints` — each interned instantiation's
+/// [`noeta_ext_abi::TypeArgHints`], read when a door inside a generic body resolves which width the
+/// call bound its parameter to — and [`noeta_bytecode::Op::Stringify`]/`JsonStringify` carry a
+/// [`noeta_bytecode::HintOperand`] (the hint plus the registers holding the frame's hidden
+/// type-argument slots) where they carried a bare [`noeta_ast::RenderHint`], as does
+/// `Module::order_hint_sites`. postcard writes a struct's fields back to back with no tags, so a
+/// version-25 reader takes the new field's bytes as whatever follows it and reads a hint operand's
+/// register list as the next op — the same slide every row above describes. And
+/// [`noeta_ast::RenderHint`] gained a `Param` variant, which renumbers nothing that precedes it but
+/// has no arm in a version-25 reader. None of it can be re-derived on the reading side, for the
+/// reason every row above cannot: signedness lives only in the static type, and here it lives in
+/// the *call's* static type rather than the door's.
+pub const FORMAT_VERSION: u8 = 26;
 
 /// The SHA-256 of one canonical [`Module`]'s postcard encoding — the *other* half of
 /// [`FORMAT_VERSION`], and the thing that makes the changelog above enforceable.
@@ -298,7 +311,7 @@ pub const FORMAT_VERSION: u8 = 25;
 /// pair exists to prevent. The test's message says so; this doc says so; the changelog paragraph
 /// you are about to write is the third place.
 pub const MODULE_LAYOUT_DIGEST: &str =
-    "b96416cfcbd552024aecdfd31473680f12909daa67c7d18ba322d606672fe83d";
+    "91c09e685eb187e872c9ec906ed4496262635814460fdcdbcc9604404ec6daf7";
 
 /// The runtime version stamped into and checked against artifacts — the building crate's
 /// package version. Any release that changes the serialized [`Module`] layout bumps this, so a
