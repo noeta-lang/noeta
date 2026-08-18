@@ -194,7 +194,7 @@ b = Box.new("hi", 42)
 fields_of(b)                                            // label only
 ```
 
-A type that wants a private field on the wire says so with a derive instead — `Serialize` is written inside the declaration, so it speaks for the type where a caller-side door does not. That is the same split [`construct`](#constructname-fields--build-a-value-from-data) applies by refusing to *set* a private field, and it is why `field_specs_of` is different in kind: it describes the declaration's shape and reads no values, so it lists every field.
+A type that wants a private field on the wire says so with a derive instead — `Serialize` is written inside the declaration, so it speaks for the type where a caller-side door does not. That is the same split [`construct`](#constructtfields-resultdyn-string--constructname-fields-resultdyn-string) applies by refusing to *set* a private field, and it is why `field_specs_of` is different in kind: it describes the declaration's shape and reads no values, so it lists every field.
 
 ### `traits_of(value): List<string>` — trait-membership reflection
 
