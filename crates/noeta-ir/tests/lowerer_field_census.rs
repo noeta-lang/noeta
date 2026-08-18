@@ -164,6 +164,14 @@ const TABLE: &[Row] = &[
     // How many function frames enclose the code in hand. Incremented on the way into a body and
     // decremented on the way out — a depth, never a program property.
     Row("fn_depth", PerNode(Anchor(LOWER, "self.fn_depth += 1;"))),
+    // How many hidden type-argument slots the innermost top-level `fn` carries — the operands a
+    // door's `RenderHint::Param` resolves through. Set on the way into a top-level declaration and
+    // restored on the way out, retained through nested declarations (which reach the same locals as
+    // captures), so it describes the frame in hand rather than the program.
+    Row(
+        "hidden_slots",
+        PerNode(Anchor(LOWER, "self.hidden_slots = outer_hidden;")),
+    ),
     // Armed just before an async/generator desugar lowers its synthesized step closure and `take()`n
     // by the first closure the lowering meets. The `take` is what makes it per-node: a user's own
     // closure always finds `None`.

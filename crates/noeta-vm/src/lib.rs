@@ -538,29 +538,10 @@ struct Vm<'m> {
     /// at load from [`Module::map_packed_sites`]. The `map` builtin looks up its call span here to build
     /// a flat result instead of N boxed objects.
     map_packed: HashMap<Span, &'static noeta_object::PackedSchema>,
-    /// Ordering-site span → the [`noeta_ast::RenderHint`] naming the positions to read unsigned,
-    /// resolved at load from [`Module::order_hint_sites`]. A stdlib method that reveals an order
-    /// (`.sorted()`, `.min()`, `.max()`, `.keys()`, `.values()`) and the `for` loop's snapshot look
-    /// their span up here; empty for nearly every program.
-    order_hints: HashMap<Span, noeta_ast::RenderHint>,
-    /// Ordering-site span → the hint **already spliced against the frame that reached it**, for the
-    /// sites whose hint carries a [`noeta_ast::RenderHint::Param`].
-    ///
-    /// A generic body is compiled once and called at every instantiation, so those sites have no
-    /// single answer: the ordering op resolves the operand's slot registers as it runs and leaves
-    /// the result here for the collection method (or `IterSnapshot`) to read by span, which is the
-    /// same span-keyed hand-off the unhinted path already used. Overwritten per call rather than
-    /// merged — the previous instantiation's answer is not this one's — and empty for every program
-    /// with no generic ordering door.
-    resolved_order_hints: HashMap<Span, Option<noeta_ast::RenderHint>>,
-    /// The render-hint projection of the module's type-argument table, indexed identically — what a
-    /// hint operand's slot registers name. Empty for nearly every program.
-    type_arg_hints: Vec<noeta_stdlib::TypeArgHints>,
-    /// Deferred-serialization site span → the [`noeta_ast::RenderHint`] the native dispatch reads as
-    /// `NativeCtx::push_hint`, resolved at load from [`Module::binding_hint_sites`]. A native method
-    /// that BINDS a value it serializes on a later tick (`view.expose`) captures it once, here;
-    /// empty for nearly every program.
-    binding_hints: HashMap<Span, noeta_ast::RenderHint>,
+    /// Everything the render hints need at run time — the load-time side tables, the per-frame
+    /// splice, and the table a render slot indexes. See [`methods::HintState`]; empty for nearly
+    /// every program.
+    hints: methods::HintState,
     /// Instance-method dispatch: type name → (method name → prototype index). Two-level
     /// (audit-1 finding 7) so every lookup probes with **borrowed** `&str` keys via
     /// [`Vm::method_proto`] — the previous flat `(String, String)` key forced two heap

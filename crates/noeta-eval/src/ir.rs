@@ -2966,7 +2966,7 @@ impl Interpreter {
         Ok(noeta_stdlib::resolve_hint(
             hint,
             &values,
-            &self.type_arg_hints.clone(),
+            &self.type_arg_hints,
             door,
         ))
     }

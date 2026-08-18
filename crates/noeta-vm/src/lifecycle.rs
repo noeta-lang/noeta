@@ -706,11 +706,12 @@ impl<'m> Vm<'m> {
             .iter()
             .map(|(span, idx)| (*span, persist.packed_schemas[*idx as usize]))
             .collect();
-        let order_hints: HashMap<Span, noeta_ast::RenderHint> =
-            module.order_hint_sites.iter().cloned().collect();
-        let type_arg_hints = module.type_arg_hints.clone();
-        let binding_hints: HashMap<Span, noeta_ast::RenderHint> =
-            module.binding_hint_sites.iter().cloned().collect();
+        let hints = crate::methods::HintState {
+            order: module.order_hint_sites.iter().cloned().collect(),
+            resolved_order: HashMap::new(),
+            type_args: module.type_arg_hints.clone(),
+            binding: module.binding_hint_sites.iter().cloned().collect(),
+        };
         Vm {
             module,
             debug_session: None,
@@ -721,10 +722,7 @@ impl<'m> Vm<'m> {
             registered_workers: 0,
             persist,
             map_packed,
-            order_hints,
-            resolved_order_hints: HashMap::new(),
-            type_arg_hints,
-            binding_hints,
+            hints,
             methods,
             global_slots,
             destructors,

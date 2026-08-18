@@ -62,17 +62,17 @@ impl<'m> Vm<'m> {
     /// tree-walker reads the same hint off its IR node instead of a side table; both walk it
     /// identically.
     pub(crate) fn order_hint(&self, span: &Span) -> Option<&noeta_ast::RenderHint> {
-        if self.order_hints.is_empty() {
+        if self.hints.order.is_empty() {
             return None;
         }
-        let hint = self.order_hints.get(span)?;
+        let hint = self.hints.order.get(span)?;
         if !hint.has_param() {
             return Some(hint);
         }
         // A hint carrying a type parameter: the answer is the one the frame that reached this site
         // resolved, never the site's own — see [`Vm::resolved_order_hints`]. Absent means the call
         // could not name its instantiation, which reads the erased word.
-        self.resolved_order_hints.get(span)?.as_ref()
+        self.hints.resolved_order.get(span)?.as_ref()
     }
 
     /// Splice the ordering hint recorded at `span` against `regs`, and leave the answer where
@@ -89,18 +89,18 @@ impl<'m> Vm<'m> {
         regs: &[noeta_value::Value],
         fbase: usize,
     ) {
-        let Some(hint) = self.order_hints.get(span).cloned() else {
+        let Some(hint) = self.hints.order.get(span).cloned() else {
             return;
         };
         let values = slot_values(slots, regs, fbase);
         let resolved = noeta_stdlib::resolve_hint(
             &hint,
             &values,
-            &self.type_arg_hints,
+            &self.hints.type_args,
             noeta_stdlib::HintDoor::Order,
         )
         .map(|h| h.into_owned());
-        self.resolved_order_hints.insert(*span, resolved);
+        self.hints.resolved_order.insert(*span, resolved);
     }
 
     /// Read a hint operand's slot registers as the type-table indices they hold — the one place a
@@ -120,17 +120,17 @@ impl<'m> Vm<'m> {
             return Some(std::borrow::Cow::Borrowed(&operand.hint));
         }
         let values = slot_values(&operand.slots, regs, fbase);
-        noeta_stdlib::resolve_hint(&operand.hint, &values, &self.type_arg_hints, door)
+        noeta_stdlib::resolve_hint(&operand.hint, &values, &self.hints.type_args, door)
     }
 
     /// The push hint recorded at `span` — the deferred twin of [`Vm::order_hint`], read once when a
     /// native call that BINDS a value for later serialization builds its ctx. Same `is_empty`
     /// short-circuit, for the same reason: nearly every program has no entry at all.
     pub(crate) fn binding_hint(&self, span: &Span) -> Option<&noeta_ast::RenderHint> {
-        if self.binding_hints.is_empty() {
+        if self.hints.binding.is_empty() {
             return None;
         }
-        self.binding_hints.get(span)
+        self.hints.binding.get(span)
     }
 
     /// A Ring 1 list method (`reverse`/`contains`/`join`). Mirrors the tree-walker's
@@ -1365,4 +1365,38 @@ fn slot_values(
                 .unwrap_or(noeta_stdlib::NO_TYPE_ARG)
         })
         .collect()
+}
+
+/// Everything the **render hints** need at run time, in one place: the load-time side tables, the
+/// per-frame splice a generic door leaves behind, and the table a render slot indexes.
+///
+/// One struct rather than four `Vm` fields because they are one subsystem — a hint is recorded at
+/// load, resolved against a frame, and read by span — and because the runtime's own module map says
+/// a new subsystem lands in a module rather than in the god-file.
+///
+/// Every field is empty for a program with no `u64` at a door, which is nearly all of them; that is
+/// what the `is_empty` short-circuits in [`Vm::order_hint`] and [`Vm::binding_hint`] are for.
+#[derive(Default)]
+pub(crate) struct HintState {
+    /// Ordering-site span → the [`noeta_ast::RenderHint`] naming the positions to read unsigned,
+    /// resolved at load from `Module::order_hint_sites`. A stdlib method that reveals an order
+    /// (`.sorted()`, `.min()`, `.max()`, `.keys()`, `.values()`) and the `for` loop's snapshot look
+    /// their span up here.
+    pub(crate) order: HashMap<Span, noeta_ast::RenderHint>,
+    /// Ordering-site span → the hint **already spliced against the frame that reached it**, for the
+    /// sites whose hint carries a [`noeta_ast::RenderHint::Param`].
+    ///
+    /// A generic body is compiled once and called at every instantiation, so those sites have no
+    /// single answer: `Op::ResolveOrderHint` resolves the slot registers as it runs and leaves the
+    /// result here for the collection method (or `IterSnapshot`) to read by span — the same
+    /// span-keyed hand-off the unhinted path already used. Overwritten per call rather than merged:
+    /// the previous instantiation's answer is not this one's.
+    pub(crate) resolved_order: HashMap<Span, Option<noeta_ast::RenderHint>>,
+    /// The render-hint projection of `Module::type_args`, indexed identically — what a render slot's
+    /// runtime value names.
+    pub(crate) type_args: Vec<noeta_stdlib::TypeArgHints>,
+    /// Deferred-serialization site span → the [`noeta_ast::RenderHint`] the native dispatch reads as
+    /// `NativeCtx::push_hint`, resolved at load from `Module::binding_hint_sites`. A native method
+    /// that BINDS a value it serializes on a later tick (`view.expose`) captures it once, here.
+    pub(crate) binding: HashMap<Span, noeta_ast::RenderHint>,
 }
