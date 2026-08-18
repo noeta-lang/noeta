@@ -311,7 +311,7 @@ pub const FORMAT_VERSION: u8 = 26;
 /// pair exists to prevent. The test's message says so; this doc says so; the changelog paragraph
 /// you are about to write is the third place.
 pub const MODULE_LAYOUT_DIGEST: &str =
-    "c6c2892a62633bd780005b5a1d030f03f59d96cc92b881a23443b81554d19939";
+    "91c09e685eb187e872c9ec906ed4496262635814460fdcdbcc9604404ec6daf7";
 
 /// The runtime version stamped into and checked against artifacts — the building crate's
 /// package version. Any release that changes the serialized [`Module`] layout bumps this, so a

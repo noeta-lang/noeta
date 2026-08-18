@@ -975,6 +975,12 @@ fn all_ops() -> Vec<Op> {
             },
         )),
     });
+    // The ordering door's resolution op: its registers ride in the code (a side table is invisible
+    // to the liveness walk and the coalescing remap), so its encoding belongs in the digest.
+    ops.push(Op::ResolveOrderHint {
+        span: span(65),
+        slots: Box::new([252, 253]),
+    });
     ops.push(Op::BuildString {
         dst: 247,
         parts: Box::new([StrPart::Literal(248), StrPart::Hole(249)]),
@@ -986,7 +992,7 @@ fn all_ops() -> Vec<Op> {
 
 /// How many `Op` variants [`all_ops`] builds. Stated so a *duplicate* (two literals of one variant,
 /// one variant missing) is caught — the compiler cannot see that, since neither literal is wrong.
-const OP_VARIANTS: usize = 105;
+const OP_VARIANTS: usize = 106;
 
 fn canonical_chunk() -> Chunk {
     Chunk {
@@ -1037,10 +1043,10 @@ fn canonical_module() -> Module {
         // hint at. Non-empty (and structurally nested) so the digest covers the field's encoding.
         order_hint_sites: vec![(
             span(105),
-            noeta_bytecode::HintOperand::plain(noeta_ast::RenderHint::Entries {
+            noeta_ast::RenderHint::Entries {
                 key: Some(Box::new(noeta_ast::RenderHint::Unsigned)),
                 value: None,
-            }),
+            },
         )],
         // A deferred-serialization site: the span a `view.expose` reads the bound value's hint at.
         // Structurally nested for the same reason as the row above.
