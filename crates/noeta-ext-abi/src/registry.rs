@@ -838,6 +838,16 @@ pub enum HiddenArg {
     /// generic and forwards its `T` onward), i.e. the local `$ty<i>`. A per-body SLOT ordinal, not
     /// a table index — resolved through the slot's runtime value, so a session never renumbers it.
     Forward(u32),
+    /// **No instantiation reaches this slot**, and none is needed: the slot's only consumers are the
+    /// render hints, which answer "no hint" for it and let the value render as the erased word.
+    ///
+    /// Only a **render slot** ([`crate::RenderHint::Param`]'s channel) is ever supplied this way. A
+    /// forwarding slot feeds a decode recipe or a runtime name, where an absent instantiation is a
+    /// diagnostic — but signedness is a refinement of an answer that already exists, so a call that
+    /// cannot name its instantiation (a composite mentioning the caller's own parameter, a generic
+    /// function taken as a value against an open expectation) degrades to the unhinted reading
+    /// rather than refusing the program.
+    Erased,
 }
 
 /// One native function's static signature (for the checker and tooling). Dispatch is per-module

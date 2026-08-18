@@ -521,9 +521,15 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
     match rvalue {
         Rvalue::Use(a) => f(a),
         Rvalue::Unary { operand, .. } => f(operand),
-        Rvalue::MaskWidth { operand, .. }
-        | Rvalue::Render { operand, .. }
-        | Rvalue::JsonRender { operand, .. } => f(operand),
+        Rvalue::MaskWidth { operand, .. } => f(operand),
+        // A door inside a generic body reads the enclosing fn's hidden type-argument slots to
+        // resolve its hint: they are operands like any other, so a nested `fn` or closure that
+        // renders CAPTURES them and register allocation leaves their slots alone. Empty at every
+        // door whose hint is complete on its own, which is nearly all of them.
+        Rvalue::Render { operand, slots, .. } | Rvalue::JsonRender { operand, slots, .. } => {
+            f(operand);
+            slots.iter().for_each(&mut *f);
+        }
         Rvalue::Binary { lhs, rhs, .. } => {
             f(lhs);
             f(rhs);
@@ -560,12 +566,15 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
             // or closure that constructs through it CAPTURES the enclosing `$ty<i>` local, and the
             // slot must stay live across the call it re-tags after.
             reflect_slot,
+            // …and so are the render slots an ordering hint resolves through, for the same reason.
+            order_slots,
             ..
         } => {
             f(receiver);
             args.iter().for_each(&mut *f);
             type_args.iter().for_each(&mut *f);
             reflect_slot.iter().for_each(&mut *f);
+            order_slots.iter().for_each(&mut *f);
         }
         Rvalue::TraitMethod { receiver, args, .. } => {
             f(receiver);

@@ -708,6 +708,7 @@ impl<'m> Vm<'m> {
             .collect();
         let order_hints: HashMap<Span, noeta_ast::RenderHint> =
             module.order_hint_sites.iter().cloned().collect();
+        let type_arg_hints = module.type_arg_hints.clone();
         let binding_hints: HashMap<Span, noeta_ast::RenderHint> =
             module.binding_hint_sites.iter().cloned().collect();
         Vm {
@@ -721,6 +722,8 @@ impl<'m> Vm<'m> {
             persist,
             map_packed,
             order_hints,
+            resolved_order_hints: HashMap::new(),
+            type_arg_hints,
             binding_hints,
             methods,
             global_slots,

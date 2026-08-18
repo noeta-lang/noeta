@@ -958,17 +958,22 @@ fn all_ops() -> Vec<Op> {
         dst: 245,
         src: 246,
         span: span(64),
-        hint: Some(Box::new(noeta_ast::RenderHint::Elements(Box::new(
-            noeta_ast::RenderHint::Unsigned,
-        )))),
+        // A hint operand rather than a bare hint: the door's hint plus the registers holding the
+        // enclosing generic body's render slots. Both halves non-empty so the digest covers them.
+        hint: Some(Box::new(noeta_bytecode::HintOperand {
+            hint: noeta_ast::RenderHint::Elements(Box::new(noeta_ast::RenderHint::Param(0))),
+            slots: vec![251],
+        })),
     });
     ops.push(Op::JsonStringify {
         dst: 245,
         src: 246,
-        hint: Box::new(noeta_ast::RenderHint::Entries {
-            key: Some(Box::new(noeta_ast::RenderHint::Unsigned)),
-            value: None,
-        }),
+        hint: Box::new(noeta_bytecode::HintOperand::plain(
+            noeta_ast::RenderHint::Entries {
+                key: Some(Box::new(noeta_ast::RenderHint::Unsigned)),
+                value: None,
+            },
+        )),
     });
     ops.push(Op::BuildString {
         dst: 247,
@@ -1032,10 +1037,10 @@ fn canonical_module() -> Module {
         // hint at. Non-empty (and structurally nested) so the digest covers the field's encoding.
         order_hint_sites: vec![(
             span(105),
-            noeta_ast::RenderHint::Entries {
+            noeta_bytecode::HintOperand::plain(noeta_ast::RenderHint::Entries {
                 key: Some(Box::new(noeta_ast::RenderHint::Unsigned)),
                 value: None,
-            },
+            }),
         )],
         // A deferred-serialization site: the span a `view.expose` reads the bound value's hint at.
         // Structurally nested for the same reason as the row above.
@@ -1062,6 +1067,18 @@ fn canonical_module() -> Module {
             recipe: Some(every_type_recipe()),
         }],
         type_arg_reprs: vec![Some(8), None],
+        // The render-hint projection of the same table: what a hint operand's slot registers name.
+        // One entry with all three answers set, one empty, so the digest covers both shapes.
+        type_arg_hints: vec![
+            noeta_ext_abi::TypeArgHints {
+                display: Some(noeta_ast::RenderHint::Unsigned),
+                order: Some(noeta_ast::RenderHint::Unsigned),
+                json: Some(noeta_ast::RenderHint::Elements(Box::new(
+                    noeta_ast::RenderHint::Unsigned,
+                ))),
+            },
+            noeta_ext_abi::TypeArgHints::default(),
+        ],
         names: vec!["total".to_string(), "qty".to_string()],
         global_names: vec!["main".to_string(), "handler".to_string()],
         global_bindings: vec![GlobalId(9), GlobalId(10)],

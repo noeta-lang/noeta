@@ -76,6 +76,12 @@ pub struct Program {
     /// entry is dynamic. A parallel table because `noeta_ext_abi::TypeArgInfo` may not depend on
     /// `noeta-ast` (the lean-ABI-crate decision).
     pub type_arg_reprs: Vec<Option<noeta_ast::reflect::TypeRepr>>,
+    /// The **render-hint projection** of [`Program::type_args`], indexed identically: each interned
+    /// instantiation's [`noeta_ext_abi::TypeArgHints`]. Read at a door whose hint carries a
+    /// [`noeta_ast::RenderHint::Param`] — the slot's runtime value indexes this table, and the entry
+    /// says how that instantiation's erased words are written and ordered. Empty for a program with
+    /// no generic door over a `u64`, which is nearly all of them.
+    pub type_arg_hints: Vec<noeta_ext_abi::TypeArgHints>,
     pub span: Span,
 }
 
@@ -281,6 +287,15 @@ pub enum Rvalue {
     Render {
         operand: Atom,
         hint: std::rc::Rc<noeta_ast::RenderHint>,
+        /// The enclosing generic body's hidden type-argument slots (`$ty0`, `$ty1`, …), in slot
+        /// order — the operands a [`noeta_ast::RenderHint::Param`] under `hint` resolves through.
+        ///
+        /// **Empty** unless the hint actually mentions a parameter, which is every door outside a
+        /// generic body. Carried as ordinary operands rather than read off the frame by name so the
+        /// slots are live where the hint needs them: a free-variable walk sees a closure capture
+        /// them, a liveness walk sees them used, and register coalescing leaves their registers
+        /// alone — three analyses that would each have had to learn about hints otherwise.
+        slots: Vec<Atom>,
         span: Span,
     },
     /// Serialize a value to **JSON text** under a [`noeta_ast::RenderHint`] — the wire twin of
@@ -296,6 +311,15 @@ pub enum Rvalue {
     JsonRender {
         operand: Atom,
         hint: std::rc::Rc<noeta_ast::RenderHint>,
+        /// The enclosing generic body's hidden type-argument slots (`$ty0`, `$ty1`, …), in slot
+        /// order — the operands a [`noeta_ast::RenderHint::Param`] under `hint` resolves through.
+        ///
+        /// **Empty** unless the hint actually mentions a parameter, which is every door outside a
+        /// generic body. Carried as ordinary operands rather than read off the frame by name so the
+        /// slots are live where the hint needs them: a free-variable walk sees a closure capture
+        /// them, a liveness walk sees them used, and register coalescing leaves their registers
+        /// alone — three analyses that would each have had to learn about hints otherwise.
+        slots: Vec<Atom>,
         span: Span,
     },
     /// A non-short-circuiting infix operation. `&&`/`||` are lowered to control flow and
@@ -446,6 +470,10 @@ pub enum Rvalue {
         /// differential pins them equal. A set's canonical buffer and a map's key placement are
         /// **identity** orders and never see it — see [`noeta_ast::render_hint`].
         order: Option<std::rc::Rc<noeta_ast::RenderHint>>,
+        /// The enclosing generic body's hidden type-argument slots, in slot order — what a
+        /// [`noeta_ast::RenderHint::Param`] under `order` resolves through, and empty wherever the
+        /// hint mentions no parameter. See [`Rvalue::Render::slots`].
+        order_slots: Vec<Atom>,
         /// The **push hint** for a native method that binds one of its arguments now and serializes
         /// it to JSON on a later tick (`view.expose(name, signal)`), whose bound value's static type
         /// carries an unsigned 64-bit integer. `None` for every other call.
@@ -983,6 +1011,10 @@ pub enum Stmt {
         /// sees the order its type says. `None` for a list iterable (whose order is its data) and
         /// for every collection with no `u64` in it. See [`Rvalue::Method::order`].
         order: Option<std::rc::Rc<noeta_ast::RenderHint>>,
+        /// The enclosing generic body's hidden type-argument slots, in slot order — what a
+        /// [`noeta_ast::RenderHint::Param`] under `order` resolves through, and empty wherever the
+        /// hint mentions no parameter. See [`Rvalue::Render::slots`].
+        order_slots: Vec<Atom>,
     },
     /// `match scrutinee { arms }`. When the match is used as an expression its value is
     /// written to `dst`; in statement position `dst` is `None`. Patterns reuse the surface

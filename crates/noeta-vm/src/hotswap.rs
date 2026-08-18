@@ -565,6 +565,8 @@ impl<'m> Vm<'m> {
         for (span, hint) in &extended.order_hint_sites {
             self.order_hints.insert(*span, hint.clone());
         }
+        // …and the table those hints' slots index, which a swapped-in generic door resolves through.
+        self.type_arg_hints = extended.type_arg_hints.clone();
         // And the push hints, for the same reason: a swapped-in `view.expose` of a `Signal<u64>`
         // would otherwise push the erased word where a cold start pushes the value.
         for (span, hint) in &extended.binding_hint_sites {

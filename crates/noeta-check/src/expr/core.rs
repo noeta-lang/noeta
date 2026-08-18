@@ -1157,6 +1157,40 @@ impl Checker {
                 ));
                 Type::Unknown
             }
+            // A generic fn whose hidden slots are all **render** slots, referenced bare with nothing
+            // to pin its instantiation. Unlike a forwarding generic above this is still a value: a
+            // render slot only refines how a `u64` is written, so an unknowable instantiation erases
+            // it and the wrapper renders the erased word — the answer a `dyn` already gets.
+            //
+            // Wrapped rather than handed over raw, because the slots are real leading parameters: a
+            // call through the bare value binds positionally and would lay the first *value*
+            // argument into `$ty0`. The wrapper supplies them, so the value behaves exactly as a
+            // non-generic fn value does.
+            Expr::Ident { name, span }
+                if lookup(env, name.as_str()).is_none()
+                    && !self.symbols.forwarding.contains_key(name.as_str())
+                    && !self.render_slot_params(name.as_str()).is_empty() =>
+            {
+                let slots = self.render_slot_params(name.as_str()).len();
+                let Some((params, ret)) = self
+                    .symbols
+                    .functions
+                    .get(name.as_str())
+                    .map(|sig| (sig.params.clone(), sig.ret.clone()))
+                else {
+                    return Type::Unknown;
+                };
+                self.sites
+                    .hidden_arg_sites
+                    .insert(*span, vec![noeta_ext_abi::HiddenArg::Erased; slots]);
+                self.sites
+                    .fn_value_sites
+                    .insert(*span, (name.to_string(), params.len() as u32));
+                Type::Fn {
+                    params,
+                    ret: Box::new(ret),
+                }
+            }
             // A bare `none` in a position with no `Option` expectation to absorb (the check-mode arm
             // above handles that one) is still an `Option` — with an unfilled payload, but an
             // `Option`. It used to synthesize a plain hole, and a hole subsumes into *anything*: so

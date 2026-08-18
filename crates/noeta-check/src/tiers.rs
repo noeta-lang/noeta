@@ -1796,11 +1796,18 @@ impl Checker {
         // already index — and a session that keyed the table differently from this would silently
         // resolve a hidden slot to the wrong type.
         let repr = crate::type_to_repr_top(sigma, &self.symbols.type_kinds);
+        // The fourth projection: the instantiation's own render hints, which a door inside the
+        // callee's body resolves a `RenderHint::Param` through. Part of the dedup key like the repr,
+        // and for the same reason — two instantiations that render differently must not share an
+        // entry.
+        let hints = self.type_arg_hints(sigma);
         let idx = crate::intern_type_arg_entry(
             &mut self.sites.type_arg_table,
             &mut self.sites.type_arg_reprs,
+            &mut self.sites.type_arg_hints,
             info,
             repr,
+            hints,
         );
         noeta_ext_abi::HiddenArg::Table(idx)
     }

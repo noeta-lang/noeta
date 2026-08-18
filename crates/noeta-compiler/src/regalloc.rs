@@ -808,10 +808,23 @@ fn op_facts(op: &Op) -> OpFacts {
             f.uses.push(*reg)
         }
         Op::Echo { reg } => f.uses.push(*reg),
-        Op::Stringify { dst, src, .. } | Op::JsonStringify { dst, src, .. } => {
+        // A hinted display/JSON door in a generic body also READS the frame's render slots — the
+        // registers its hint operand names. Missing them here would let the liveness walk call a
+        // slot dead at the door and hand its register to another local.
+        Op::Stringify { dst, src, hint, .. } => {
             f.def = Some(*dst);
             f.uses.push(*src);
+            if let Some(hint) = hint {
+                f.uses.extend(hint.slots.iter().copied());
+            }
         }
+        Op::JsonStringify { dst, src, hint } => {
+            f.def = Some(*dst);
+            f.uses.push(*src);
+            f.uses.extend(hint.slots.iter().copied());
+        }
+        // The ordering door's twin: it reads the render slots and defines nothing.
+        Op::ResolveOrderHint { slots, .. } => f.uses.extend(slots.iter().copied()),
         Op::BuildString { dst, parts } => {
             f.def = Some(*dst);
             for part in parts.iter() {
@@ -1354,9 +1367,26 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
         Op::JumpIfTrue { reg, .. } => m(reg),
         Op::JumpIfFalse { reg, .. } => m(reg),
         Op::Echo { reg } => m(reg),
-        Op::Stringify { dst, src, .. } | Op::JsonStringify { dst, src, .. } => {
+        Op::Stringify { dst, src, hint, .. } => {
             m(dst);
             m(src);
+            if let Some(hint) = hint {
+                for r in hint.slots.iter_mut() {
+                    m(r);
+                }
+            }
+        }
+        Op::JsonStringify { dst, src, hint } => {
+            m(dst);
+            m(src);
+            for r in hint.slots.iter_mut() {
+                m(r);
+            }
+        }
+        Op::ResolveOrderHint { slots, .. } => {
+            for r in slots.iter_mut() {
+                m(r);
+            }
         }
         Op::BuildString { dst, parts } => {
             m(dst);

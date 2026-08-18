@@ -522,6 +522,7 @@ macro_rules! for_each_jump_pc_arms {
             | Op::Echo { .. }
             | Op::Stringify { .. }
             | Op::JsonStringify { .. }
+            | Op::ResolveOrderHint { .. }
             | Op::BuildString { .. }
             | Op::Raise { .. }
             | Op::Halt => {}
@@ -1580,7 +1581,7 @@ pub enum Op {
         dst: Reg,
         src: Reg,
         span: Span,
-        hint: Option<Box<noeta_ast::RenderHint>>,
+        hint: Option<Box<HintOperand>>,
     },
     /// `dst = json(src)` under `hint` — the wire twin of a hinted [`Op::Stringify`]. Emitted only at
     /// a JSON door whose serialized value carries an **unsigned 64-bit integer**
@@ -1591,7 +1592,27 @@ pub enum Op {
     JsonStringify {
         dst: Reg,
         src: Reg,
-        hint: Box<noeta_ast::RenderHint>,
+        hint: Box<HintOperand>,
+    },
+    /// **Splice the ordering hint recorded at `span`** against this frame's render slots, leaving
+    /// the result where the ordering op that follows reads it by span.
+    ///
+    /// Emitted immediately before a `.sorted()`/`.keys()`/`.values()` call or an
+    /// [`Op::IterSnapshot`] whose hint carries a [`noeta_ast::RenderHint::Param`] — a door inside a
+    /// **generic** body, where the width the parameter stands for is decided at the call and one
+    /// compiled body serves every instantiation. Absent everywhere else, so an ordering site whose
+    /// hint is complete on its own costs nothing.
+    ///
+    /// An op rather than registers on the side table beside the hint, and that is the whole reason
+    /// it exists: registers in a side table are invisible to the liveness walk (which would call the
+    /// slot dead and let another local take its slot) and to the coalescing remap (which would leave
+    /// the recorded number pointing at whatever now lives there). In the code they are ordinary
+    /// reads, handled by both.
+    ResolveOrderHint {
+        span: Span,
+        /// The registers holding the enclosing generic body's hidden type-argument slots, in slot
+        /// order — the values that index [`Module::type_arg_hints`].
+        slots: Box<[Reg]>,
     },
     /// `dst = concat(display(part) for part in parts)` — build an interpolated string in one pass
     /// and one output allocation (P-VMT-STR). Each `Literal` part is copied verbatim from the
@@ -1859,6 +1880,36 @@ pub enum PackedFieldDef {
     Struct(u32),
 }
 
+/// A door's **render hint together with the registers that resolve it** — everything the VM needs
+/// where the hint's positions are not all known statically.
+///
+/// A hint built from a concrete static type is complete on its own and `slots` is empty. Inside a
+/// **generic** body the door's type names a type parameter, whose width is decided at the call, so
+/// the hint carries a [`noeta_ast::RenderHint::Param`] and `slots` names the registers holding the
+/// frame's hidden type-argument slots (`$ty0`, `$ty1`, …), in slot order. The VM reads those
+/// registers, looks each value up in [`Module::type_arg_hints`], and splices — through the same
+/// `noeta_ext_abi::resolve_hint` the tree-walker runs, so the two engines cannot disagree.
+///
+/// Carried inside the hint's own box rather than beside it: the ops that hold one already pay a
+/// pointer for the hint, and a program with no `u64` at a door holds none at all.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct HintOperand {
+    pub hint: noeta_ast::RenderHint,
+    /// The frame registers holding the enclosing generic body's hidden type-argument slots, in slot
+    /// order. Empty unless `hint` mentions a parameter.
+    pub slots: Vec<Reg>,
+}
+
+impl HintOperand {
+    /// A hint that needs no resolution — the shape every door outside a generic body takes.
+    pub fn plain(hint: noeta_ast::RenderHint) -> HintOperand {
+        HintOperand {
+            hint,
+            slots: Vec::new(),
+        }
+    }
+}
+
 /// A compiled module: the prototype table plus the object-model side tables. `protos[0]` is
 /// the top-level program; the rest are functions, closures, and methods, referenced by
 /// `MakeClosure`/`Call`/the method table via their index. `shapes` is the layout table
@@ -1968,6 +2019,11 @@ pub struct Module {
     /// on it. Interned through the same pool as every other reflected type, so a repr shared with a
     /// list/object construction tag is stored once.
     pub type_arg_reprs: Vec<Option<u32>>,
+    /// The **render-hint projection** of [`Self::type_args`], indexed identically: each interned
+    /// instantiation's [`noeta_ext_abi::TypeArgHints`]. What a [`HintOperand`]'s slot registers
+    /// index — the answer to "how are this instantiation's erased words written and ordered". Empty
+    /// for a program with no generic door over a `u64`, which is nearly all of them.
+    pub type_arg_hints: Vec<noeta_ext_abi::TypeArgHints>,
     /// The interned instruction name table (P-VMT-OPSZ): every [`NameId`] in an op indexes here.
     /// Deduped module-wide by the compiler, so a name used at N sites is stored once. Holds field /
     /// method / global / type names, ext-call module+func, and `match`-literal strings; the VM
@@ -2728,6 +2784,10 @@ fn op_repr(
         Op::CondBranch { reg, target, .. } => format!("CondBranch  r{reg} unless -> {target}"),
         Op::Echo { reg } => format!("Echo        r{reg}"),
         Op::Stringify { dst, src, .. } => format!("Stringify   r{dst} <- display(r{src})"),
+        Op::ResolveOrderHint { slots, .. } => {
+            let regs: Vec<String> = slots.iter().map(|r| format!("r{r}")).collect();
+            format!("ResolveOrderHint [{}]", regs.join(", "))
+        }
         Op::JsonStringify { dst, src, .. } => format!("JsonStringi r{dst} <- json(r{src})"),
         Op::BuildString { dst, parts } => {
             let rendered = parts

@@ -2283,13 +2283,23 @@ impl Checker {
         // that has no channel to supply them through. The third element is how this call was
         // SPELLED, which is what the pre-pass's reach is a property of — see [`ForwardSpelling`],
         // and the E0058 below that is the only consumer.
+        //
+        // The callee's **render slots** follow its forwarding ones, and are supplied here too: they
+        // carry each type parameter's per-instantiation render hints, so a door in the callee's body
+        // can write a `u64` as the number it is rather than the negative word it is erased to.
         if let Some((call_span, key, spelling)) = hidden_site
-            && let Some(fwd) = self.symbols.forwarding.get(key.as_str()).cloned()
             // A poisoned callee (diverging slot set, D2a) already carries the one clear error at
             // its declaration; resolving its partial slots here would only cascade noise.
             && !self.symbols.forwarding_poisoned.contains(key.as_str())
         {
-            let mut hidden = Vec::with_capacity(fwd.len());
+            let fwd = self
+                .symbols
+                .forwarding
+                .get(key.as_str())
+                .cloned()
+                .unwrap_or_default();
+            let render = self.render_slot_params(key.as_str());
+            let mut hidden = Vec::with_capacity(fwd.len() + render.len());
             for slot in &fwd {
                 let sigma = apply_subst(&slot.template, &subst);
                 // A callee parameter the call leaves unbound (or pins only to `dyn`/a hole)
@@ -2330,6 +2340,10 @@ impl Checker {
                         ),
                     )
                     .help(help);
+                    // The slot is reported, not resolved — but the ordinals after it still have to
+                    // land where the callee reads them, so the position is filled rather than
+                    // dropped. The program does not compile either way.
+                    hidden.push(noeta_ext_abi::HiddenArg::Erased);
                     continue;
                 }
                 if self.mentions_in_scope_param(&sigma) {
@@ -2401,13 +2415,20 @@ impl Checker {
                                 // what the source does. Say nothing rather than something false.
                                 ForwardSpelling::Turbofish => {}
                             }
+                            hidden.push(noeta_ext_abi::HiddenArg::Erased);
                         }
                     }
                     continue;
                 }
                 hidden.push(self.intern_type_arg(&sigma, slot, name, span));
             }
-            self.sites.hidden_arg_sites.insert(call_span, hidden);
+            for param in &render {
+                let arg = self.render_hidden_arg(param, &subst, span);
+                hidden.push(arg);
+            }
+            if !hidden.is_empty() {
+                self.sites.hidden_arg_sites.insert(call_span, hidden);
+            }
         }
         subst_or_dyn(&generic.raw_ret, &subst, &tps)
     }

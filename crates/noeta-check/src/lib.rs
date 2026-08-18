@@ -652,6 +652,7 @@ impl SessionChecker {
         self.checker.coloring.concurrent_depth = 0;
         self.checker.coloring.loop_depth = 0;
         self.checker.coloring.current_forwarding.clear();
+        self.checker.coloring.current_render.clear();
         self.checker.coloring.index_on_list.clear();
         // Span-keyed and entry-local: each entry is parsed with its own 0-based offsets, so a
         // stale entry's exhaustive `match` could otherwise be read as *this* entry's `match` at
@@ -1443,6 +1444,28 @@ struct Coloring {
     /// nested `fn`'s own type parameter is masked to `Unknown` inside that nested body (D2b) so
     /// it can never match the shadowing parameter. Empty everywhere else.
     current_forwarding: Vec<Type>,
+    /// While checking a top-level generic `fn`'s body, its **render slots** — the hidden
+    /// type-argument slots that carry each type parameter's per-instantiation
+    /// [`noeta_ext_abi::TypeArgHints`], in slot order, laid out immediately after
+    /// [`Self::current_forwarding`].
+    ///
+    /// A door inside a generic body (`echo v`, `json.stringify(v)`, `xs.sorted()`) reads a static
+    /// type that names a type parameter, and a type parameter names no width: the signedness of a
+    /// `u64` is decided at the call. One compiled body serves every instantiation, so the answer
+    /// travels the way every other per-instantiation fact travels — on a hidden slot — and the door
+    /// records [`noeta_ast::RenderHint::Param`] pointing at it.
+    ///
+    /// **After** the forwarding slots on purpose: the forwarding layout is computed by a syntactic
+    /// pre-pass and read by ordinal in several places, and appending leaves every one of those
+    /// ordinals exactly where it was.
+    ///
+    /// A slot is `None` where a nested `fn`'s own type parameter shadows the enclosing one (D2b) —
+    /// the position is retained, since the nested body still reads the enclosing `$ty` locals by
+    /// ordinal, but nothing matches it. Empty in a method, a closure, and at top level: a method's
+    /// four name-keyed entry points (a `dyn` receiver, either handle form, `invoke`) bind
+    /// positionally and carry no instantiation, so a method that took hidden slots would read a
+    /// value argument as a table index.
+    current_render: Vec<Option<ParamRef>>,
     /// The type parameters a `type_name::<T>()` in the body being checked **would** forward — the
     /// enclosing top-level generic fn's own parameters, minus any a nested `fn` shadows (D2b).
     /// Empty in a method, in a nested fn's own shadowing parameters, and at top level.
@@ -3011,22 +3034,47 @@ impl Checker {
         } else {
             Vec::new()
         };
+        // The **render slots** (see [`Coloring::current_render`]): every type parameter of a
+        // top-level generic `fn`, so a door in its body can name the instantiation's signedness.
+        // A top-level `fn` only — a method's name-keyed entry points bind positionally and carry
+        // no instantiation. A nested `fn` retains the enclosing layout, shadowed positions masked,
+        // exactly as the forwarding layout above is retained.
+        let next_render: Vec<Option<ParamRef>> = if fwd_key.is_some() {
+            match target {
+                TargetKind::Function => decl
+                    .type_params
+                    .iter()
+                    .map(|p| Some(param_ref(p)))
+                    .collect(),
+                _ => Vec::new(),
+            }
+        } else if target == TargetKind::Function {
+            let shadowed = param_ids(&decl.type_params);
+            self.coloring
+                .current_render
+                .iter()
+                .map(|p| p.clone().filter(|p| !shadowed.contains(&p.id)))
+                .collect()
+        } else {
+            Vec::new()
+        };
         let saved_forwardable =
             std::mem::replace(&mut self.coloring.forwardable_params, next_forwardable);
         let saved_forwarding =
             std::mem::replace(&mut self.coloring.current_forwarding, next_forwarding);
+        let saved_render = std::mem::replace(&mut self.coloring.current_render, next_render);
         self.coloring.fn_depth += 1;
         // Record the hidden-slot count for lowering — for EVERY forwarding fn or method, called
         // or not, so the body's dynamic sites always have their slots. Keyed exactly as the slot
         // layout is (`fwd_key`), which is why a nested fn is absent: it retains the enclosing
         // layout for its body's SITES (D2b) but carries no slots of its own (it captures the
-        // enclosing `$ty` locals instead).
-        if let Some(key) = fwd_key
-            && !self.coloring.current_forwarding.is_empty()
-        {
-            self.sites
-                .forwarding_fns
-                .insert(key, self.coloring.current_forwarding.len() as u32);
+        // enclosing `$ty` locals instead). The render slots are counted here too, and only here:
+        // the layout is the forwarding slots followed by them.
+        if let Some(key) = fwd_key {
+            let slots = self.coloring.current_forwarding.len() + self.coloring.current_render.len();
+            if slots > 0 {
+                self.sites.forwarding_fns.insert(key, slots as u32);
+            }
         }
         // The enclosing generic type's parameters, for `type_name::<T>()` inside an INSTANCE method
         // (generic constructor reflection, Gap B): the instantiation is not in the body — one
@@ -3231,6 +3279,7 @@ impl Checker {
         self.coloring.self_type_params = saved_self_params;
         self.coloring.fn_depth -= 1;
         self.coloring.current_forwarding = saved_forwarding;
+        self.coloring.current_render = saved_render;
         self.coloring.forwardable_params = saved_forwardable;
     }
 }

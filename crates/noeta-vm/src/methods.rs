@@ -65,7 +65,62 @@ impl<'m> Vm<'m> {
         if self.order_hints.is_empty() {
             return None;
         }
-        self.order_hints.get(span)
+        let hint = self.order_hints.get(span)?;
+        if !hint.has_param() {
+            return Some(hint);
+        }
+        // A hint carrying a type parameter: the answer is the one the frame that reached this site
+        // resolved, never the site's own — see [`Vm::resolved_order_hints`]. Absent means the call
+        // could not name its instantiation, which reads the erased word.
+        self.resolved_order_hints.get(span)?.as_ref()
+    }
+
+    /// Splice the ordering hint recorded at `span` against `regs`, and leave the answer where
+    /// [`Vm::order_hint`] reads it — the VM half of the one resolution, whose other half the
+    /// tree-walker runs on its own frame.
+    ///
+    /// Costs one length test at every ordering site with a statically complete hint, and nothing at
+    /// all in a program that records none. Called from the ops that reach an order the program
+    /// observes, where the frame is still in hand.
+    pub(crate) fn note_order_slots(
+        &mut self,
+        span: &Span,
+        slots: &[noeta_bytecode::Reg],
+        regs: &[noeta_value::Value],
+        fbase: usize,
+    ) {
+        let Some(hint) = self.order_hints.get(span).cloned() else {
+            return;
+        };
+        let values = slot_values(slots, regs, fbase);
+        let resolved = noeta_stdlib::resolve_hint(
+            &hint,
+            &values,
+            &self.type_arg_hints,
+            noeta_stdlib::HintDoor::Order,
+        )
+        .map(|h| h.into_owned());
+        self.resolved_order_hints.insert(*span, resolved);
+    }
+
+    /// Read a hint operand's slot registers as the type-table indices they hold — the one place a
+    /// render slot's runtime value becomes an index, shared by every VM door.
+    ///
+    /// A slot holding anything but an integer answers `NO_TYPE_ARG`, which resolves to no hint: a
+    /// checked program cannot produce one, and inventing a reading would be worse than the erased
+    /// word.
+    pub(crate) fn resolve_hint_operand<'h>(
+        &self,
+        operand: &'h noeta_bytecode::HintOperand,
+        regs: &[noeta_value::Value],
+        fbase: usize,
+        door: noeta_stdlib::HintDoor,
+    ) -> Option<std::borrow::Cow<'h, noeta_ast::RenderHint>> {
+        if operand.slots.is_empty() {
+            return Some(std::borrow::Cow::Borrowed(&operand.hint));
+        }
+        let values = slot_values(&operand.slots, regs, fbase);
+        noeta_stdlib::resolve_hint(&operand.hint, &values, &self.type_arg_hints, door)
     }
 
     /// The push hint recorded at `span` — the deferred twin of [`Vm::order_hint`], read once when a
@@ -1294,4 +1349,20 @@ impl<'m> Vm<'m> {
             Some(&value) => self.stdlib_int(name, value, span),
         }
     }
+}
+
+/// The values a hint operand's slot registers hold, as type-table indices.
+fn slot_values(
+    slots: &[noeta_bytecode::Reg],
+    regs: &[noeta_value::Value],
+    fbase: usize,
+) -> Vec<i64> {
+    slots
+        .iter()
+        .map(|r| {
+            regs.get(fbase + *r as usize)
+                .and_then(|v| v.as_int())
+                .unwrap_or(noeta_stdlib::NO_TYPE_ARG)
+        })
+        .collect()
 }

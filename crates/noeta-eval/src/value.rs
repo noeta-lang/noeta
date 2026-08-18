@@ -886,6 +886,9 @@ impl Value {
                 Value::Int(word) => noeta_ast::unsigned_digits(*word),
                 other => other.display(),
             },
+            // An **unresolved** type parameter: the call site could not name its instantiation, so
+            // the value renders exactly as it would with no hint — the answer a `dyn` gets.
+            RenderHint::Param(_) => self.display(),
             RenderHint::Elements(inner) => match self {
                 Value::List(repr) => {
                     let parts: Vec<String> = repr

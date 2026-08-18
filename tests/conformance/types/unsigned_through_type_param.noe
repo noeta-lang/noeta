@@ -1,0 +1,123 @@
+// A `u64` reached through a **type parameter**. A fixed-width integer is erased to its i64 word, so
+// `u64::MAX` is the word `-1`, and the signedness that tells the doors otherwise lives in the static
+// type. Inside a generic body that type is `T`, which names no width at all: the answer is at the
+// call. Generics are erased, so one compiled body serves every instantiation — the instantiation
+// therefore travels on the body's hidden type-argument slot, exactly as a forwarded decode recipe
+// does, and each door splices the caller's answer into its own structural hint.
+//
+// All three doors are covered, because all three read the same static type: display, JSON, and the
+// orders a program observes. The structure around the parameter stays the site's — `List<T>` is a
+// list of whatever `T` turns out to be — so the splice reaches a parameter under a list, a map's
+// values, an option's payload, a set's elements and a generic struct's field alike.
+//
+// The controls are what make it a claim rather than a coincidence: the same generic at `i64` still
+// prints the negative word, and at `u32` prints the value that width always held.
+// expect: stdout "18446744073709551615"
+// expect: stdout "18446744073709551615"
+// expect: stdout "18446744073709551615"
+// expect: stdout "[18446744073709551615, 1]"
+// expect: stdout "[18446744073709551615,1]"
+// expect: stdout "[1, 18446744073709551615]"
+// expect: stdout "[1, 18446744073709551615]"
+// expect: stdout "1;18446744073709551615;"
+// expect: stdout "{"a":18446744073709551615}"
+// expect: stdout "18446744073709551615"
+// expect: stdout "{1, 18446744073709551615}"
+// expect: stdout "Box {v: 18446744073709551615}"
+// expect: stdout "{"v":18446744073709551615}"
+// expect: stdout "-1"
+// expect: stdout "-1"
+// expect: stdout "4294967295"
+// expect: exit 0
+use std.json
+
+struct Box<T> {
+    v: T
+}
+
+// The two scalar doors, on a bare parameter.
+fn show<T>(v: T): string {
+    return "${v}";
+}
+
+fn wrap<T>(v: T): string {
+    return json.stringify(v);
+}
+
+// A NESTED generic: `outer` never names a width either, so it forwards its own slot onward.
+fn outer<T>(v: T): string {
+    return wrap(v);
+}
+
+// The parameter under a container: the shape is the site's, the width is the call's.
+fn show_list<T>(xs: List<T>): string {
+    return "${xs}";
+}
+
+fn wrap_list<T>(xs: List<T>): string {
+    return json.stringify(xs);
+}
+
+// The ordering doors — an order a program SEES, which is the only kind a hint may reach.
+fn sort_list<T: Comparable>(xs: List<T>): List<T> {
+    return xs.sorted();
+}
+
+fn keys_of<T>(m: Map<T, string>): List<T> {
+    return m.keys();
+}
+
+fn walk_set<T>(s: Set<T>): string {
+    mut seen = "";
+    for v in s {
+        seen = seen ~ "${v};";
+    }
+    return seen;
+}
+
+fn wrap_map<T>(m: Map<string, T>): string {
+    return json.stringify(m);
+}
+
+fn wrap_opt<T>(o: ?T): string {
+    return json.stringify(o);
+}
+
+fn show_set<T>(s: Set<T>): string {
+    return "${s}";
+}
+
+big: u64 = 18446744073709551615u64;
+one: u64 = 1u64;
+
+echo show(big);
+echo wrap(big);
+echo outer(big);
+
+xs: List<u64> = [big, one];
+echo show_list(xs);
+echo wrap_list(xs);
+echo sort_list(xs);
+
+km: Map<u64, string> = {big: "big", one: "one"};
+echo keys_of(km);
+echo walk_set([big, one].to_set());
+
+m: Map<string, u64> = {"a": big};
+echo wrap_map(m);
+echo wrap_opt(some(big));
+echo show_set([big, one].to_set());
+
+// A generic struct's field at `T = u64`: the field's declared type is the parameter, so its slot
+// hint is the parameter's too.
+b: Box<u64> = Box { v: big };
+echo show(b);
+echo wrap(b);
+
+// The controls. A signed instantiation of the very same body still prints the word it is, and a
+// width that always fit an i64 is untouched either way.
+neg: i64 = -1i64;
+echo show(neg);
+echo wrap(neg);
+narrow: u32 = 4294967295u32;
+echo show(narrow);

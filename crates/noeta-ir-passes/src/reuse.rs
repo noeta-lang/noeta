@@ -88,6 +88,7 @@ pub fn thread_reuse(program: &Program, ambient_own_destructors: &HashSet<String>
         temp_count: program.temp_count,
         type_args: program.type_args.clone(),
         type_arg_reprs: program.type_arg_reprs.clone(),
+        type_arg_hints: program.type_arg_hints.clone(),
         span: program.span,
     }
 }
@@ -496,6 +497,7 @@ fn rewrite_stmt(stmt: &Stmt, od: &HashSet<String>, bound: &HashSet<String>) -> S
             span,
             stream,
             order,
+            order_slots,
         } => Stmt::For {
             pattern: pattern.clone(),
             iterable: iterable.clone(),
@@ -503,6 +505,7 @@ fn rewrite_stmt(stmt: &Stmt, od: &HashSet<String>, bound: &HashSet<String>) -> S
             span: *span,
             stream: *stream,
             order: order.clone(),
+            order_slots: order_slots.clone(),
         },
         Stmt::Match {
             scrutinee,

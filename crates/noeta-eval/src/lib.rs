@@ -1490,6 +1490,10 @@ struct Interpreter {
     /// and the same index the VM's `Op::RetagDynamic` resolves, which is what makes the two backends'
     /// tags identical rather than merely similar.
     type_arg_reprs: Vec<Option<TypeRepr>>,
+    /// The render-hint projection of [`Self::type_args`], indexed identically — each interned
+    /// instantiation's [`noeta_stdlib::TypeArgHints`], read when a door inside a generic body
+    /// resolves a [`RenderHint::Param`] through the frame's render slot.
+    type_arg_hints: Vec<noeta_stdlib::TypeArgHints>,
     /// The live **call-site shadow stack**: one `(callee name, call-site span)` per function/method
     /// activation currently on the Rust call stack, pushed at each call boundary and popped on the
     /// way out (abort included). Only read when an abort snapshots [`Self::abort_trace`], so it
@@ -1618,6 +1622,7 @@ impl Interpreter {
             packed_type_layouts: std::collections::HashMap::new(),
             type_args: Vec::new(),
             type_arg_reprs: Vec::new(),
+            type_arg_hints: Vec::new(),
             call_sites: Vec::new(),
             abort_trace: Vec::new(),
             registry: None,
@@ -1930,9 +1935,11 @@ impl Interpreter {
         self.order_hints.get(&span)
     }
 
-    pub(crate) fn note_order_hint(&mut self, span: Span, hint: &Option<Rc<RenderHint>>) {
+    pub(crate) fn note_order_hint(&mut self, span: Span, hint: Option<Rc<RenderHint>>) {
         if let Some(hint) = hint {
-            self.order_hints.entry(span).or_insert_with(|| hint.clone());
+            // Inserted, never merged: a hint carrying a type parameter resolves against the frame,
+            // so the same span answers differently at two instantiations of the same generic body.
+            self.order_hints.insert(span, hint);
         }
     }
 
