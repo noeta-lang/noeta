@@ -200,35 +200,33 @@
 /// every blocking body that has started, and one that never returns turns a leaked thread into a
 /// hung run.
 ///
-/// **21** — the [`render_hint`] surface: [`render_hint::RenderHint`] — the structural map of the
-/// unsigned 64-bit integers under a static type — and the walks that apply one,
-/// [`render_hint::json_stringify`], [`render_hint::map_key_display`], [`render_hint::map_key_order`],
-/// [`render_hint::unsigned_digits`] and [`render_hint::unsigned_order`]. Purely additive; nothing
-/// written for ABI 20 stops compiling. A `u64` past bit 63 is a negative i64 word and the signedness
-/// lives only in the static type, so writing one out correctly takes a description from the door —
-/// and the hint belongs beside the one JSON encoder its walk delegates to, the [`MapKey`] it renders
-/// and orders, and the [`NativeValue`] tree both backends marshal into. That an extension, and the
-/// native seam itself, can now name it is the point: a native function that keeps a value for a
-/// *later* serialization can keep its hint too.
+/// **21** — a value's *signedness* crosses the seam, including for a value serialized later.
+/// [`render_hint::RenderHint`] — the structural map of the unsigned 64-bit integers under a static
+/// type — moved here with the walks that apply one ([`render_hint::json_stringify`],
+/// [`render_hint::map_key_display`], [`render_hint::map_key_order`], [`render_hint::unsigned_digits`],
+/// [`render_hint::unsigned_order`], and [`map_key::packed_names::display_hinted`] for a `@packed`
+/// key's slots); [`registry::ExtType`] gained `push_hint_args`, the `(method, parameter index)` pairs
+/// naming an argument the type *keeps*; and [`ctx::NativeCtx`] gained [`ctx::NativeCtx::push_hint`],
+/// which hands that argument's hint to the dispatch as a [`render_hint::PushHint`] to store beside
+/// the value.
 ///
-/// **22** — [`map_key::packed_names::display_hinted`]: the display form of a `@packed` struct key,
-/// with the slots a [`render_hint::RenderHint`] marks unsigned written as the `u64` they stand for.
-/// Purely additive — [`map_key::packed_names::display`] is it with no hint, byte for byte. A packed
-/// key stores its declared fields as flat words, so a `u64` field is indistinguishable from an `i64`
-/// one inside the key; the ordering walk already read the hint's slots and the rendering walk did
-/// not, which left a rendered map printing a key its own `keys()` printed differently.
+/// The rule it implements: a `u64` past bit 63 is a negative i64 word and its width lives only in
+/// the static type, so writing one out correctly takes a description from the door — and a value
+/// serialized where it was *bound* rather than where it was passed has to be handed that description
+/// at binding time. A LiveView binding re-serialized on every flush tick otherwise pushes a negative
+/// number to the browser with nothing downstream able to notice.
 ///
-/// **23** — deferred serialization can carry its hint. [`registry::ExtType`] gained
-/// `push_hint_args`, the `(method, parameter index)` pairs naming an argument the type *keeps* and
-/// serializes to JSON on a later tick, and [`ctx::NativeCtx`] gained [`ctx::NativeCtx::push_hint`],
-/// which hands that argument's [`render_hint::RenderHint`] to the dispatch so it can be stored beside
-/// the value. Additive with defaults — an `ExtType` literal spreading `..ExtType::DEFAULTS` and a
-/// `NativeCtx` implementation both compile unchanged; only an `ExtType` literal naming every field
-/// needs the one line. The rule it implements: a `u64` past bit 63 is a negative i64 word and its
-/// width lives only in the static type, so a value serialized where it was *bound* rather than where
-/// it was passed has to be handed the description at binding time — a LiveView binding re-serialized
-/// on every flush tick otherwise pushes a negative number to the browser with nothing to notice.
-pub const ABI_VERSION: u32 = 23;
+/// A kept hint is a [`render_hint::PushHint`] rather than a bare `RenderHint` because the two are not
+/// interchangeable: a hint may produce output a program reads, and may never place a value for later
+/// retrieval, or a key laundered through `dyn` would probe an identity order it was not stored under.
+/// A call-site hint is kept to that rule by the lowering that hands each site its walk; a kept hint
+/// has no call site left, so the type carries the rule — no accessor, no `Deref`, no `From` back, and
+/// [`render_hint::json_stringify_pushed`] the only walk it reaches.
+///
+/// A **source break** only for an [`registry::ExtType`] literal that names every field; one spreading
+/// `..ExtType::DEFAULTS` — as all 50 in-tree literals do — and every `NativeCtx` implementation
+/// compile unchanged.
+pub const ABI_VERSION: u32 = 21;
 
 pub mod args;
 pub mod channel;
