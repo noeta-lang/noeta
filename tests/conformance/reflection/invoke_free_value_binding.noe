@@ -9,9 +9,17 @@
 // backends are pinned here rather than only the language rule.
 //
 // Rebinding is live, as it is for any other name: the second dispatch must see the second closure.
+//
+// The **named** form does not follow: it binds argument names through the signature index, which
+// describes only names whose signature cannot change (`params_of_value_binding.noe`). So an
+// *immutable* closure binding takes named arguments exactly as a declared `fn` does, and a `mut` one
+// is refused rather than bound against an initializer a reassignment may already have replaced.
 // expect: stdout "Ok(4)"
 // expect: stdout "Ok(30)"
 // expect: stdout "arity"
+// expect: stdout "immutable named: Ok(7)"
+// expect: stdout "immutable named gap: Ok(-4)"
+// expect: stdout "mut named: err `f` does not take named arguments"
 // expect: exit 0
 mut f = fn(x: int) => x + 1;
 echo invoke("f", [3]);
@@ -23,4 +31,21 @@ echo invoke("f", [3]);
 echo match invoke("f", [1, 2]) {
     Ok(_) => "ok",
     Err(_) => "arity",
+};
+
+// An immutable closure binding is describable, so its parameter names are bindable: a reordering and
+// a call that skips the defaulted parameter both resolve against the signature written at the binding
+// site, and the omitted default runs from the live closure exactly as at a direct call site.
+sub = fn(a: int, b: int = 5) => a - b;
+reorder: Map<string, dyn> = {"b": 3, "a": 10};
+echo "immutable named: ${invoke("sub", reorder)}";
+gap: Map<string, dyn> = {"a": 1};
+echo "immutable named gap: ${invoke("sub", gap)}";
+
+// `f` is `mut`, so it has no entry in the signature index and the named form declines it. The
+// positional dispatches above are unaffected — that is the whole point of the two sets.
+named_on_mut: Map<string, dyn> = {"x": 3};
+echo match invoke("f", named_on_mut) {
+    Ok(v) => "mut named: ok ${v}",
+    Err(e) => "mut named: err ${e}",
 };
