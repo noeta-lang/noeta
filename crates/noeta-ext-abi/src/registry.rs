@@ -4541,6 +4541,36 @@ fn validate(units: &[&'static (dyn Extension + Sync)]) -> Result<(), String> {
                     unit.name()
                 ));
             }
+            // `push_hint_args` names an argument a method *keeps* and serializes on a later tick.
+            // Every failure mode of a malformed pair is silent: an unknown method name matches no
+            // call, and an index past the parameter list reads `None`. Both yield no hint, and a
+            // missing hint is invisible — the `u64` it was meant to describe reaches the wire as a
+            // negative word with nothing downstream able to second-guess it. Refuse to assemble.
+            for (method, index) in t.push_hint_args {
+                let Some(f) = t
+                    .methods
+                    .iter()
+                    .chain(t.ctx_methods)
+                    .chain(t.typed_methods)
+                    .find(|f| f.name == *method)
+                else {
+                    return Err(format!(
+                        "type `{}` (unit `{}`) declares push_hint_args for `{method}`, which is \
+                         not one of its methods",
+                        t.name,
+                        unit.name()
+                    ));
+                };
+                if usize::from(*index) >= f.params.len() {
+                    return Err(format!(
+                        "type `{}` (unit `{}`) declares push_hint_args `({method}, {index})`, but \
+                         `{method}` declares {} parameter(s)",
+                        t.name,
+                        unit.name(),
+                        f.params.len()
+                    ));
+                }
+            }
             // The call-site-typed table mirrors the module side's rules (http arc H8): a dispatch
             // is required, and every entry must name its result through the turbofish — a
             // `Concrete` return would make the `::<T>` meaningless.
@@ -5892,6 +5922,74 @@ mod runtime_registry_tests {
         assert!(
             validate(&[&K]).is_err(),
             "an arena_getter naming a non-ctx method must refuse to assemble"
+        );
+    }
+
+    #[test]
+    fn a_push_hint_arg_naming_an_unknown_method_is_rejected() {
+        // Both malformed shapes fail *silently* at runtime — no call matches an unknown name, and
+        // the hint is simply absent — so the only place they can be caught is assembly.
+        const T_BAD_NAME: ExtType = ExtType {
+            name: "Viewish",
+            namespace: "k",
+            ctx_methods: &[ExtFn {
+                param_names: &["name", "handle"],
+                name: "expose",
+                params: &[SigType::String, SigType::Dyn],
+                ..ExtFn::DEFAULTS
+            }],
+            ctx_dispatch: Some(|_, _, _, _| Err(crate::panic_error("unused").into())),
+            push_hint_args: &[("reveal", 1)],
+            ..ExtType::DEFAULTS
+        };
+        static K: TypedUnit = TypedUnit("k.core", "k", &[T_BAD_NAME]);
+        assert!(
+            validate(&[&K]).is_err(),
+            "a push_hint_args pair naming a method the type does not have must refuse to assemble"
+        );
+    }
+
+    #[test]
+    fn a_push_hint_arg_past_the_parameter_list_is_rejected() {
+        const T_BAD_INDEX: ExtType = ExtType {
+            name: "Viewish",
+            namespace: "k",
+            ctx_methods: &[ExtFn {
+                param_names: &["name", "handle"],
+                name: "expose",
+                params: &[SigType::String, SigType::Dyn],
+                ..ExtFn::DEFAULTS
+            }],
+            ctx_dispatch: Some(|_, _, _, _| Err(crate::panic_error("unused").into())),
+            push_hint_args: &[("expose", 2)],
+            ..ExtType::DEFAULTS
+        };
+        static K: TypedUnit = TypedUnit("k.core", "k", &[T_BAD_INDEX]);
+        assert!(
+            validate(&[&K]).is_err(),
+            "a push_hint_args index past the method's parameters must refuse to assemble"
+        );
+    }
+
+    #[test]
+    fn a_well_formed_push_hint_arg_assembles() {
+        const T_OK: ExtType = ExtType {
+            name: "Viewish",
+            namespace: "k",
+            ctx_methods: &[ExtFn {
+                param_names: &["name", "handle"],
+                name: "expose",
+                params: &[SigType::String, SigType::Dyn],
+                ..ExtFn::DEFAULTS
+            }],
+            ctx_dispatch: Some(|_, _, _, _| Err(crate::panic_error("unused").into())),
+            push_hint_args: &[("expose", 1)],
+            ..ExtType::DEFAULTS
+        };
+        static K: TypedUnit = TypedUnit("k.core", "k", &[T_OK]);
+        assert!(
+            validate(&[&K]).is_ok(),
+            "the shape `View`/`expose` actually declares must still assemble"
         );
     }
 
