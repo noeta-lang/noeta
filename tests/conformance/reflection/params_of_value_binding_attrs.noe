@@ -1,0 +1,38 @@
+// A `#[...]` parameter attribute on a **described** top-level binding's closure — the binding half of
+// `attributes_on_params.noe`. A closure's parameter list is parsed by the same parser a `fn`'s is, so
+// its parameters can carry attributes; a described binding therefore joins the attribute manifest
+// under the same `callable#param` key, and `ParamInfo.attrs` and `attributes_of::<T>()` are two
+// renderings of that one table exactly as they are for a declared `fn`.
+//
+// The set that gets rows is the set `params_of` describes, not every binding that could parse one.
+// That keeps the signature index and the manifest telling the same story: a name is either described
+// — parameters, return type and parameter attributes together — or absent from all three. A `mut`
+// binding is absent, so its parameter attributes are not discoverable either, and a consumer walking
+// `attributes_of::<Route>()` cannot be handed a target that `params_of` will then decline to explain.
+// expect: stdout "declared#name -> path"
+// expect: stdout "handler#id -> path"
+// expect: stdout "handler#q -> query"
+// expect: stdout "attr count = 3"
+// expect: stdout "via params_of: id=path q=query"
+// expect: exit 0
+@attribute(Param)
+struct Route { source: string }
+
+fn declared(#[Route(source: "path")] name: string): string { return name }
+
+// Described: immutable, closure literal — its parameter attributes reach the manifest.
+handler = fn(#[Route(source: "path")] id: string, #[Route(source: "query")] q: string) => "${id}?${q}"
+
+// Not described, so it contributes no rows: the manifest and the signature index cover one set.
+mut untracked = fn(#[Route(source: "header")] tok: string) => tok
+
+for a in attributes_of::<Route>() {
+    echo "${a.target} -> ${a.value.source}";
+}
+
+// Exactly three rows — the `mut` binding's parameter attribute is not among them.
+echo "attr count = ${attributes_of::<Route>().len()}";
+
+// The same rows reached through the signature door rather than the manifest door.
+parts = params_of("handler").map(fn(p) => "${p.name}=${p.attrs[0].source}");
+echo "via params_of: ${parts.join(" ")}";
