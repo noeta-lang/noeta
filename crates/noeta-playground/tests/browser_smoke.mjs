@@ -302,9 +302,10 @@ if (JSPI) {
   const promisingRun = WebAssembly.promising(instance.exports.noeta_run_browser_async);
   const fanOut = [
     'use std.http.client',
+    'use std.http.HttpError',
     'use std.task.{all}',
     '',
-    'async fn run(): void {',
+    'async fn run(): Result<void, HttpError> {',
     '    rs = all([',
     '        client.get_async("https://svc.test/a"),',
     '        client.get_async("https://svc.test/b"),',
@@ -312,8 +313,9 @@ if (JSPI) {
     '    echo "${rs[0]?.status()},${rs[1]?.status()}"',
     '    echo rs[0]?.body()',
     '    echo rs[1]?.body()',
+    '    return Ok()',
     '}',
-    'run().await',
+    'run().await?',
   ].join('\n');
   const encoded = new TextEncoder().encode(fanOut);
   const input = noeta_alloc(encoded.length);
