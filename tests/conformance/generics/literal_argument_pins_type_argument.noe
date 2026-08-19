@@ -1,0 +1,85 @@
+// A **container literal written inline at a generic call** pins the call's type argument, exactly
+// as the same value bound to a local first does. `f(ys)` and `f([big])` must instantiate `f` at the
+// same `T`, and this pins the type argument ITSELF rather than anything downstream of it: erased
+// generics deliver every per-instantiation fact — a decode recipe, a runtime type name, a render
+// hint — on one hidden slot keyed by that instantiation, so a `T` the call fails to pin takes all of
+// them with it, and only one of the three is loud about it.
+//
+// `type_name::<T>()` is the loud one and therefore the right probe: it reports the instantiation as
+// a value the program can print, so a call that pinned `T` to something other than the literal's own
+// element type says so here instead of quietly writing the wrong number somewhere else.
+//
+// The shapes are the ones a literal reaches through a parameter's declared type — a list's elements,
+// a map's keys and values (each one separately), and a list of lists — plus the two literal forms
+// that flow into a parameter type mentioning `T` without a container in the way. Each is checked
+// against the identical call spelled with a local, because "they agree" is the claim.
+// expect: stdout "u64/u64"
+// expect: stdout "u64/u64"
+// expect: stdout "u64/u64"
+// expect: stdout "u64/u64"
+// expect: stdout "u64/u64"
+// expect: stdout "string/string"
+// expect: stdout "u64/u64"
+// expect: stdout "List/List"
+// expect: exit 0
+
+struct Box<T> {
+    v: T
+}
+
+fn of_list<T>(xs: List<T>): string {
+    return type_name::<T>();
+}
+
+fn of_set<T>(s: Set<T>): string {
+    return type_name::<T>();
+}
+
+fn of_map_value<T>(m: Map<string, T>): string {
+    return type_name::<T>();
+}
+
+fn of_map_key<K>(m: Map<K, string>): string {
+    return type_name::<K>();
+}
+
+fn of_nested<T>(xss: List<List<T>>): string {
+    return type_name::<T>();
+}
+
+fn of_box<T>(b: Box<T>): string {
+    return type_name::<T>();
+}
+
+// A bare parameter: the literal IS the instantiation, so `T` is the whole container type.
+fn of_bare<T>(v: T): string {
+    return type_name::<T>();
+}
+
+big: u64 = 18446744073709551615u64;
+
+xs: List<u64> = [big];
+echo of_list(xs) ~ "/" ~ of_list([big]);
+
+s: Set<u64> = #{big};
+echo of_set(s) ~ "/" ~ of_set(#{big});
+
+m: Map<string, u64> = {"a": big};
+echo of_map_value(m) ~ "/" ~ of_map_value({"a": big});
+
+km: Map<u64, string> = {big: "big"};
+echo of_map_key(km) ~ "/" ~ of_map_key({big: "big"});
+
+xss: List<List<u64>> = [[big]];
+echo of_nested(xss) ~ "/" ~ of_nested([[big]]);
+
+// A control at a NON-`u64` instantiation, so the agreement is not an artifact of one width.
+echo of_map_value({"a": "b"}) ~ "/" ~ of_map_value({"a": "b"});
+
+b: Box<u64> = Box { v: big };
+echo of_box(b) ~ "/" ~ of_box(.{ v: big });
+
+// A bare parameter takes the literal's WHOLE type, so the instantiation is the container itself
+// (`type_name` answers with a type's head name, so `List<int>` reports as `List`).
+ints: List<int> = [1, 2];
+echo of_bare(ints) ~ "/" ~ of_bare([1, 2]);

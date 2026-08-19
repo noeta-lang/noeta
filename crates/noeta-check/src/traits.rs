@@ -2243,7 +2243,12 @@ impl Checker {
                 && self.is_deferred_arg(expr, env)
                 && matches!(args[i], Type::Unknown)
             {
-                let expected = subst_or_dyn(raw, &subst, &tps);
+                // A parameter still unbound HERE is a hole, not `dyn`: the argument is about to be
+                // asked to pin it, and `dyn` is a real type the literal would adopt and report
+                // back, binding the parameter to an instantiation the call never named. See
+                // [`subst_or_hole`] — this is the one position where the difference is observable,
+                // and it decides whether every hidden slot riding the instantiation survives.
+                let expected = subst_or_hole(raw, &subst, &tps);
                 // Absorb the (substituted) parameter type into the deferred argument — one shared
                 // definition with the non-generic path, so the two agree by construction — and its
                 // resolved type then binds any still-unbound type parameter below; a mismatched or
@@ -2298,7 +2303,7 @@ impl Checker {
                 .get(key.as_str())
                 .cloned()
                 .unwrap_or_default();
-            let render = self.render_slot_params(key.as_str());
+            let render = self.render_slot_templates(key.as_str());
             let mut hidden = Vec::with_capacity(fwd.len() + render.len());
             for slot in &fwd {
                 let sigma = apply_subst(&slot.template, &subst);
@@ -2422,8 +2427,8 @@ impl Checker {
                 }
                 hidden.push(self.intern_type_arg(&sigma, slot, name, span));
             }
-            for param in &render {
-                let arg = self.render_hidden_arg(param, &subst, span);
+            for template in &render {
+                let arg = self.render_hidden_arg(template, &subst, span);
                 hidden.push(arg);
             }
             if !hidden.is_empty() {

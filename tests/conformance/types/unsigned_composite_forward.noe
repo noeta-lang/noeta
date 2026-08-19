@@ -1,0 +1,121 @@
+// A generic body forwarding an instantiation **built out of its own type parameter**. `fn
+// outer<T>(xs: List<T>)` calling `wrap(xs)` instantiates `wrap` at `List<T>`, not at `T` — a type
+// that names nothing `outer` itself knows, because `T` is erased and one compiled body serves every
+// instantiation.
+//
+// So the answer comes from the same place every other per-instantiation fact comes from: `outer`'s
+// own callers, who DO know what `T` is, on a hidden slot of `outer`'s. A body carries a slot for each
+// of its type parameters and for every composite of them its PARAMETER types name — that is where the
+// values it can pass on come from — and a call whose instantiation still mentions the caller's own
+// parameters passes that slot through instead of interning a type it cannot name. The chain is the
+// point: the composite is interned once at the outermost concrete call and forwarded down, however
+// many generic frames it crosses.
+//
+// Both directions of the layout are exercised — a composite answered by a render slot, and one
+// answered by the FORWARDING slot an explicit `::<List<T>>` registered beside it, since a slot's
+// runtime value is an index into the one type-argument table either way.
+// expect: stdout "[18446744073709551615]"
+// expect: stdout "[18446744073709551615]"
+// expect: stdout "[18446744073709551615]"
+// expect: stdout "[[18446744073709551615]]"
+// expect: stdout "[18446744073709551615]"
+// expect: stdout "{"a":18446744073709551615}"
+// expect: stdout "{"v":18446744073709551615}"
+// expect: stdout "[18446744073709551615,1]"
+// expect: stdout "[-1]"
+// expect: stdout "[18446744073709551615]"
+// expect: stdout "[-1]"
+// expect: exit 0
+use std.json
+
+struct Box<T> {
+    v: T
+}
+
+fn wrap<T>(v: T): string {
+    return json.stringify(v);
+}
+
+// One level: the composite is this body's parameter type.
+fn one<T>(xs: List<T>): string {
+    return wrap(xs);
+}
+
+// Two levels: `one` is itself reached through a generic frame, so `List<T>` is forwarded twice
+// before anyone can name it.
+fn two<T>(xs: List<T>): string {
+    return one(xs);
+}
+
+// Two levels of NESTING in the type: `List<List<T>>` forwards whole, and its `List<T>` sub-term
+// forwards on its own when only a part is handed along.
+fn nested<T>(xss: List<List<T>>): string {
+    return wrap(xss);
+}
+
+fn part<T>(xss: List<List<T>>): string {
+    return wrap(xss[0]);
+}
+
+// The other container shapes, each named by the signature that forwards it.
+fn from_map<T>(m: Map<string, T>): string {
+    return wrap(m);
+}
+
+fn from_box<T>(b: Box<T>): string {
+    return wrap(b);
+}
+
+// The same forward spelled with an EXPLICIT turbofish, which registers a *forwarding* slot for
+// `List<T>`. The render slot the inner call needs reads off that one — the table entry a forwarding
+// slot points at carries the instantiation's hints like any other.
+fn spelled<T>(xs: List<T>): string {
+    return wrap::<List<T>>(xs);
+}
+
+// The forwarding half of the layout on its own. `decoded`'s PARAMETER types name no composite, so
+// it carries no render slot for one — but its `json.try_parse::<List<T>>` turbofish registers a
+// FORWARDING slot for exactly that type, and the onward `wrap(v)` reads the instantiation off it.
+// That is the claim the two halves rest on: a slot's runtime value is an index into the one
+// type-argument table whichever channel registered it, and every entry carries the same hints.
+fn decoded<T>(text: string): string {
+    return match json.try_parse::<List<T>>(text) {
+        Ok(v) => wrap(v),
+        Err(e) => "err",
+    };
+}
+
+// A composite built in the BODY out of a bare parameter is the boundary: nothing in `built`'s
+// parameter types names `List<T>`, so no slot of `built` carries it and no caller could have
+// interned it. The value renders the erased word, which is what a render slot does when it cannot
+// name an instantiation — it degrades, it never refuses the program.
+fn built<T>(v: T): string {
+    return wrap([v]);
+}
+
+big: u64 = 18446744073709551615u64;
+one_u: u64 = 1u64;
+
+xs: List<u64> = [big];
+echo one(xs);
+echo two(xs);
+echo spelled(xs);
+
+xss: List<List<u64>> = [[big]];
+echo nested(xss);
+echo part(xss);
+
+m: Map<string, u64> = {"a": big};
+echo from_map(m);
+
+b: Box<u64> = Box { v: big };
+echo from_box(b);
+
+// The composite the caller forwards is the whole type, so a second element rides it too.
+pair: List<u64> = [big, one_u];
+echo one(pair);
+
+echo built(big);
+
+echo decoded::<u64>("[18446744073709551615]");
+echo decoded::<i64>("[-1]");

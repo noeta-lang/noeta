@@ -1445,9 +1445,15 @@ struct Coloring {
     /// it can never match the shadowing parameter. Empty everywhere else.
     current_forwarding: Vec<Type>,
     /// While checking a top-level generic `fn`'s body, its **render slots** — the hidden
-    /// type-argument slots that carry each type parameter's per-instantiation
-    /// [`noeta_ext_abi::TypeArgHints`], in slot order, laid out immediately after
-    /// [`Self::current_forwarding`].
+    /// type-argument slots that carry a per-instantiation [`noeta_ext_abi::TypeArgHints`], in slot
+    /// order, laid out immediately after [`Self::current_forwarding`].
+    ///
+    /// A slot's TEMPLATE, exactly as the forwarding half beside it: each of the fn's own type
+    /// parameters, then every composite of them its signature names
+    /// ([`Checker::render_slot_templates`], which is also what every call site lays the same list
+    /// out from). The composites are what let a body forward an instantiation it built out of its
+    /// own parameters — `fn outer<T>(xs: List<T>)` calling `wrap(xs)` instantiates `wrap` at
+    /// `List<T>`, which its bare-`T` slot cannot answer and its `List<T>` slot can.
     ///
     /// A door inside a generic body (`echo v`, `json.stringify(v)`, `xs.sorted()`) reads a static
     /// type that names a type parameter, and a type parameter names no width: the signedness of a
@@ -1465,7 +1471,7 @@ struct Coloring {
     /// four name-keyed entry points (a `dyn` receiver, either handle form, `invoke`) bind
     /// positionally and carry no instantiation, so a method that took hidden slots would read a
     /// value argument as a table index.
-    current_render: Vec<Option<ParamRef>>,
+    current_render: Vec<Option<Type>>,
     /// The type parameters a `type_name::<T>()` in the body being checked **would** forward — the
     /// enclosing top-level generic fn's own parameters, minus any a nested `fn` shadows (D2b).
     /// Empty in a method, in a nested fn's own shadowing parameters, and at top level.
@@ -3039,12 +3045,14 @@ impl Checker {
         // A top-level `fn` only — a method's name-keyed entry points bind positionally and carry
         // no instantiation. A nested `fn` retains the enclosing layout, shadowed positions masked,
         // exactly as the forwarding layout above is retained.
-        let next_render: Vec<Option<ParamRef>> = if fwd_key.is_some() {
+        let next_render: Vec<Option<Type>> = if let Some(key) = &fwd_key {
             match target {
-                TargetKind::Function => decl
-                    .type_params
-                    .iter()
-                    .map(|p| Some(param_ref(p)))
+                // The templates come from [`Checker::render_slot_templates`] — the same function
+                // every call site reads the layout from, which is what makes the two ends agree.
+                TargetKind::Function => self
+                    .render_slot_templates(key.as_str())
+                    .into_iter()
+                    .map(Some)
                     .collect(),
                 _ => Vec::new(),
             }
@@ -3053,7 +3061,7 @@ impl Checker {
             self.coloring
                 .current_render
                 .iter()
-                .map(|p| p.clone().filter(|p| !shadowed.contains(&p.id)))
+                .map(|t| t.clone().filter(|t| !mentions_param(t, &shadowed)))
                 .collect()
         } else {
             Vec::new()

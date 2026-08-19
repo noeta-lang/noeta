@@ -434,44 +434,80 @@ impl Checker {
         }
     }
 
-    /// The **render slots** a call of `key` must supply, as the callee's type parameters in
-    /// declaration order — empty for everything that has none.
+    /// The **render slots** a call of `key` must supply, as slot TEMPLATES over the callee's own
+    /// type parameters — each type parameter in declaration order, then every composite of them its
+    /// PARAMETER types name ([`render_composite_templates`]) — empty for everything that has none.
+    /// A call substitutes its instantiation into each template exactly as it does into a forwarding
+    /// one.
+    ///
+    /// The parameters and not the return type, because a slot is only ever spent on a value the
+    /// body *holds*, and what a body is given is its parameters. A return type describes a value it
+    /// has yet to produce, so a slot for one would be interned at every call of the extremely
+    /// ordinary `fn load<T>(text: string): Result<T, JsonError>` and read by nothing.
+    ///
+    /// The composites are what let a generic body hand a call an instantiation built out of its
+    /// OWN parameters. `fn outer<T>(xs: List<T>)` calling `wrap(xs)` instantiates `wrap` at
+    /// `List<T>`, which names nothing `outer`'s bare-`T` slot can answer: the value has to come
+    /// from `outer`'s callers, who know what `T` is, and it does — through `outer`'s own `List<T>`
+    /// slot, passed on with [`noeta_ext_abi::HiddenArg::Forward`] like every other pass-through.
     ///
     /// Top-level `fn`s only, which is why the lookup is [`Symbols::functions`]: a method reaches
     /// four name-keyed entry points that carry no instantiation at all (a `dyn` receiver, either
     /// handle form, `invoke`) and bind positionally, so hidden slots on one would be filled with a
     /// value argument. The declaration side ([`Coloring::current_render`]) lays out the same list
-    /// from the same declaration, which is what makes the two ends agree.
-    pub(crate) fn render_slot_params(&self, key: &str) -> Vec<ParamRef> {
-        self.symbols
+    /// by calling this same function, which is what makes the two ends agree.
+    pub(crate) fn render_slot_templates(&self, key: &str) -> Vec<Type> {
+        let Some(g) = self
+            .symbols
             .functions
             .get(key)
             .and_then(|sig| sig.generic.as_ref())
-            .map(|g| g.params.iter().map(|(p, _)| p.clone()).collect())
-            .unwrap_or_default()
+        else {
+            return Vec::new();
+        };
+        let own: ParamSet = g.params.iter().map(|(p, _)| p.id).collect();
+        let mut out: Vec<Type> = g
+            .params
+            .iter()
+            .map(|(p, _)| Type::Param(p.clone()))
+            .collect();
+        for t in &g.raw_params {
+            render_composite_templates(t, &own, &mut out);
+        }
+        out
     }
 
-    /// How this call fills the callee's render slot for `param`: the instantiation's interned table
-    /// entry, a pass-through of the caller's own render slot when the instantiation *is* one of the
-    /// caller's parameters, or [`noeta_ext_abi::HiddenArg::Erased`].
+    /// How this call fills the callee's render slot for `template`: the instantiation's interned
+    /// table entry, a pass-through of the caller's own matching slot when the instantiation still
+    /// mentions the caller's parameters, or [`noeta_ext_abi::HiddenArg::Erased`].
     ///
     /// Erasing is never a diagnostic, and that is the whole difference between this slot and a
     /// forwarding one. A forwarding slot feeds a decode recipe or a runtime name, where an absent
     /// instantiation means the call cannot be compiled; signedness only refines an answer that
     /// already exists, so a call that cannot name its instantiation — an inference hole, a `dyn`, a
-    /// composite that mentions the caller's own parameter — falls back to reading the erased word,
-    /// exactly as a `dyn` does.
+    /// composite no slot of this body carries — falls back to reading the erased word, exactly as a
+    /// `dyn` does.
     pub(crate) fn render_hidden_arg(
         &mut self,
-        param: &ParamRef,
+        template: &Type,
         subst: &Subst,
         span: Span,
     ) -> noeta_ext_abi::HiddenArg {
-        let Some(sigma) = subst.get(&param.id).cloned() else {
+        // Every parameter the template names has to be pinned to a real type. One the call left
+        // unbound — or pinned only to `dyn`/an inference hole — names no instantiation at all.
+        if all_params_mentioned(template)
+            .iter()
+            .any(|p| subst.get(&p.id).is_none_or(Type::defers_to_runtime))
+        {
             return noeta_ext_abi::HiddenArg::Erased;
-        };
-        if let Type::Param(p) = &sigma {
-            return match self.render_slot_of(p) {
+        }
+        let sigma = apply_subst(template, subst);
+        if self.mentions_in_scope_param(&sigma) {
+            // The instantiation still mentions the CALLER's own parameters (the bare `T` of
+            // `wrap(v)` inside `fn outer<T>(v: T)`, or the composite `List<T>` of `wrap(xs)` inside
+            // `fn outer<T>(xs: List<T>)`), so it can only be answered by whatever pinned those —
+            // this body's own matching slot, passed through.
+            return match self.render_forward_slot(&sigma) {
                 Some(j) => noeta_ext_abi::HiddenArg::Forward(j),
                 None => noeta_ext_abi::HiddenArg::Erased,
             };
@@ -479,13 +515,39 @@ impl Checker {
         if !self.fully_concrete(&sigma) {
             return noeta_ext_abi::HiddenArg::Erased;
         }
-        // Interned through the one interner, with a template naming the bare parameter and no
-        // recipe demand: a render slot consumes the entry's hints and nothing else.
+        // Interned through the one interner, with the slot's own template and no recipe demand: a
+        // render slot consumes the entry's hints and nothing else.
         let slot = crate::forwarding::ForwardSlot {
-            template: Type::Param(param.clone()),
+            template: template.clone(),
             needs_recipe: false,
         };
         self.intern_type_arg(&sigma, &slot, "", span)
+    }
+
+    /// The hidden-slot ordinal of the body being checked whose per-instantiation entry **is**
+    /// `sigma`, or `None` where nothing here delivers it (which erases the callee's slot).
+    ///
+    /// Both halves of the layout are searched, because both carry the same thing: a slot's runtime
+    /// value is an index into the one type-argument table, and every entry in it holds that
+    /// instantiation's [`noeta_ext_abi::TypeArgHints`] whether the slot was registered for a decode
+    /// recipe or for a render hint. So a body that already forwards `List<T>` for a
+    /// `json.try_parse::<List<T>>` answers a render slot for `List<T>` off the same ordinal instead
+    /// of erasing beside it.
+    pub(crate) fn render_forward_slot(&self, sigma: &Type) -> Option<u32> {
+        let base = self.coloring.current_forwarding.len() as u32;
+        if let Some(i) = self
+            .coloring
+            .current_render
+            .iter()
+            .position(|t| t.as_ref() == Some(sigma))
+        {
+            return Some(base + i as u32);
+        }
+        self.coloring
+            .current_forwarding
+            .iter()
+            .position(|t| t == sigma)
+            .map(|i| i as u32)
     }
 
     /// The hidden-slot ordinal carrying `param`'s per-instantiation hints in the body being
@@ -499,7 +561,7 @@ impl Checker {
         self.coloring
             .current_render
             .iter()
-            .position(|p| p.as_ref() == Some(param))
+            .position(|t| matches!(t, Some(Type::Param(p)) if p == param))
             .map(|i| base + i as u32)
     }
 
@@ -1009,5 +1071,60 @@ fn scalar_packed_kind(ty: &Type) -> Option<noeta_ast::reflect::PackedKind> {
             signed: *signed,
         }),
         _ => None,
+    }
+}
+
+/// Append every **composite** render-slot template `ty` contributes: each of its sub-terms that
+/// mentions one of `own`'s type parameters and is a shape a render hint descends through, in
+/// first-appearance order and deduplicated against what `out` already holds.
+///
+/// Why the callee's own parameter types are the source. A render slot answers "what did this
+/// instantiation turn out to be", and the only way a body can hand an onward call an instantiation
+/// that mentions its OWN parameters is out of a value it holds — whose type is the one its
+/// declaration gave it. So `fn outer<T>(xs: List<T>)` demands `List<T>` and gets it, while `outer`'s
+/// callers, which know `T`, are the ones that can intern `List<u64>` for it. Deriving the layout
+/// from the declaration alone is not an economy but the requirement: the slot layout has to be
+/// identical at the declaration and at every call site, and an inference-derived one would have to
+/// be known before the body that determines it has been checked.
+///
+/// Sub-terms and not just the top level, so a body that passes a *part* of what it was given
+/// (`fn f<T>(xss: List<List<T>>)` handing `xss[0]` on) is answered too. A [`Type::Fn`] is walked
+/// but never registered: no render hint descends into a function value, so a slot for one could
+/// only ever resolve to no hint.
+fn render_composite_templates(ty: &Type, own: &ParamSet, out: &mut Vec<Type>) {
+    if !mentions_param(ty, own) {
+        return;
+    }
+    let hintable = matches!(
+        ty,
+        Type::List(_)
+            | Type::Set(_)
+            | Type::Option(_)
+            | Type::Map(..)
+            | Type::Result(..)
+            | Type::Tuple(_)
+            | Type::Named(..)
+    );
+    if hintable && !out.contains(ty) {
+        out.push(ty.clone());
+    }
+    match ty {
+        Type::List(t) | Type::Set(t) | Type::Option(t) => render_composite_templates(t, own, out),
+        Type::Map(k, v) | Type::Result(k, v) => {
+            render_composite_templates(k, own, out);
+            render_composite_templates(v, own, out);
+        }
+        Type::Named(_, args) | Type::Tuple(args) | Type::Union(args) => {
+            for a in args {
+                render_composite_templates(a, own, out);
+            }
+        }
+        Type::Fn { params, ret } => {
+            for p in params {
+                render_composite_templates(p, own, out);
+            }
+            render_composite_templates(ret, own, out);
+        }
+        _ => {}
     }
 }

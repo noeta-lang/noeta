@@ -156,7 +156,20 @@ impl Checker {
                 ty
             }
             // A list literal absorbs an expected `List<T>`: check each element against `T`.
-            Expr::List { items, span } if matches!(expected, Type::List(_)) => {
+            //
+            // **Unless the element expectation is an inference hole** and there are elements to
+            // read one off. An absorbing arm reports the EXPECTATION rather than what it saw — that
+            // is the whole point of `List<dyn> = [1,2,3]` tagging `List(Dyn)` — so absorbing a hole
+            // would report the hole back, and at a generic call (where the hole is the callee's
+            // still-unbound type parameter, `wrap([big])` against `fn wrap<T>(v: List<T>)`) that
+            // echo is what leaves `T` unpinned and erases every hidden slot riding it. An
+            // expectation with nothing to say is not an expectation: the literal synthesizes, and
+            // its own element type is what pins the parameter. An EMPTY literal keeps the arm —
+            // there is nothing to synthesize from, and the expectation is still the best answer.
+            Expr::List { items, span }
+                if matches!(expected, Type::List(elem)
+                    if items.is_empty() || !elem.contains_unknown()) =>
+            {
                 let Type::List(elem) = expected else {
                     unreachable!()
                 };
@@ -184,8 +197,14 @@ impl Checker {
             // and each value against `V`, so heterogeneous values that are each a member of `V` (a
             // union, or `dyn`) are accepted instead of being cross-unified into a single element
             // type (`{"route": "/x", "status": 200}` against `Map<string, string|int|float|bool>`).
-            // The map analogue of the list arm; the empty case is the preceding arm.
-            Expr::Map { entries, span } if matches!(expected, Type::Map(..)) => {
+            // The map analogue of the list arm; the empty case is the preceding arm — including
+            // the same hole guard, and for the same reason (a key or value expectation that is an
+            // inference hole has nothing to say, so the literal synthesizes and pins the
+            // parameter instead of echoing the hole back).
+            Expr::Map { entries, span }
+                if matches!(expected, Type::Map(k, v)
+                    if !k.contains_unknown() && !v.contains_unknown()) =>
+            {
                 let Type::Map(kty, vty) = expected else {
                     unreachable!()
                 };
@@ -594,8 +613,11 @@ impl Checker {
     /// Kept adjacent to the arms it mirrors: a new absorbing literal arm needs a line here.
     pub(crate) fn absorbs_expectation(&self, expr: &Expr, expected: &Type) -> bool {
         match expr {
-            Expr::List { .. } => matches!(expected, Type::List(_)),
-            Expr::Map { .. } => matches!(expected, Type::Map(..)),
+            Expr::List { items, .. } => {
+                matches!(expected, Type::List(elem) if items.is_empty() || !elem.contains_unknown())
+            }
+            Expr::Map { entries, .. } => matches!(expected, Type::Map(k, v)
+                if entries.is_empty() || (!k.contains_unknown() && !v.contains_unknown())),
             Expr::Ident { name, .. } => name == "none" && matches!(expected, Type::Option(_)),
             Expr::Closure { .. } => matches!(expected, Type::Fn { .. }),
             // A target-typed `.{ … }` absorbs the expected type's *name*, and only a concrete
@@ -1169,9 +1191,9 @@ impl Checker {
             Expr::Ident { name, span }
                 if lookup(env, name.as_str()).is_none()
                     && !self.symbols.forwarding.contains_key(name.as_str())
-                    && !self.render_slot_params(name.as_str()).is_empty() =>
+                    && !self.render_slot_templates(name.as_str()).is_empty() =>
             {
-                let slots = self.render_slot_params(name.as_str()).len();
+                let slots = self.render_slot_templates(name.as_str()).len();
                 let Some((params, ret)) = self
                     .symbols
                     .functions

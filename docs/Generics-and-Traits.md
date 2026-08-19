@@ -34,6 +34,8 @@ echo pick::<string>("x", "y", false)
 
 The expected type at an annotated binding can carry the instantiation too — `r: List<int> = empty()` infers `T = int` from the **return position** (the bidirectional checker seeds `T` from the expectation, and the arguments fill only what it leaves open). Inference flows through `?` and `??` as well: `o: Order = load(text)?` seeds `T = Order` by inverting the `Result` wrapper at the checked `Try`, and `o: Order = load(text) ?? fallback` through the coalesce — no turbofish needed.
 
+A **container literal written inline at the call** instantiates from what it holds, exactly as the same value bound to a local first does: `f([x])` and `ys = [x]; f(ys)` pin `T` identically, for a list, set, map, `.{ … }` and any nesting of them. An **empty** literal holds nothing to read an instantiation off, so a parameter only it could pin stays open and is E0023 — spell it (`f::<int>([])`) or annotate the value first.
+
 ### Instantiating a generic *type* at the call site
 
 The turbofish above instantiates a **function**. A generic **type** takes one too, on the receiver of a static call:

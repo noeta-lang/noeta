@@ -1,0 +1,84 @@
+// A `u64` reaching a generic body through a container literal written **inline at the call**. The
+// signedness that tells a door to write `18446744073709551615` rather than the word `-1` rides the
+// call's type argument, so a call that fails to pin that argument writes the wrong number — and this
+// is the rendering half of the instantiation the sibling `generics/literal_argument_pins_type_
+// argument.noe` pins directly. Both halves are here because they fail together and only one of them
+// is loud: the type name is a diagnostic, the number is a silently wrong answer written into a JSON
+// response or a persisted record.
+//
+// Every literal form a generic parameter can absorb is covered, each against the identical call
+// spelled with a local, and each at both doors that read the static type — display and JSON.
+// expect: stdout "[18446744073709551615] | [18446744073709551615]"
+// expect: stdout "[18446744073709551615] | [18446744073709551615]"
+// expect: stdout "{18446744073709551615} | {18446744073709551615}"
+// expect: stdout "{"a":18446744073709551615} | {"a":18446744073709551615}"
+// expect: stdout "[18446744073709551615] | [18446744073709551615]"
+// expect: stdout "[[18446744073709551615]] | [[18446744073709551615]]"
+// expect: stdout "{"v":18446744073709551615} | {"v":18446744073709551615}"
+// expect: stdout "[] | []"
+// expect: stdout "[-1, 1] | [-1, 1]"
+// expect: exit 0
+use std.json
+
+struct Box<T> {
+    v: T
+}
+
+fn show_list<T>(xs: List<T>): string {
+    return "${xs}";
+}
+
+fn wrap_list<T>(xs: List<T>): string {
+    return json.stringify(xs);
+}
+
+fn show_set<T>(s: Set<T>): string {
+    return "${s}";
+}
+
+fn wrap_map<T>(m: Map<string, T>): string {
+    return json.stringify(m);
+}
+
+fn wrap_bare<T>(v: T): string {
+    return json.stringify(v);
+}
+
+fn wrap_nested<T>(xss: List<List<T>>): string {
+    return json.stringify(xss);
+}
+
+fn wrap_box<T>(b: Box<T>): string {
+    return json.stringify(b);
+}
+
+big: u64 = 18446744073709551615u64;
+
+xs: List<u64> = [big];
+echo show_list(xs) ~ " | " ~ show_list([big]);
+echo wrap_list(xs) ~ " | " ~ wrap_list([big]);
+
+s: Set<u64> = #{big};
+echo show_set(s) ~ " | " ~ show_set(#{big});
+
+m: Map<string, u64> = {"a": big};
+echo wrap_map(m) ~ " | " ~ wrap_map({"a": big});
+
+// A BARE parameter: the literal's whole type is the instantiation, so the hint is the list's.
+echo wrap_bare(xs) ~ " | " ~ wrap_bare([big]);
+
+xss: List<List<u64>> = [[big]];
+echo wrap_nested(xss) ~ " | " ~ wrap_nested([[big]]);
+
+b: Box<u64> = Box { v: big };
+echo wrap_box(b) ~ " | " ~ wrap_box(.{ v: big });
+
+// An EMPTY literal names no element type, so there is no instantiation to hint with — and nothing
+// to render either. A render slot never refuses a program, so this is the honest empty answer
+// rather than a diagnostic (the `type_name` twin of it IS a diagnostic, and is pinned as one).
+empty: List<u64> = [];
+echo wrap_list(empty) ~ " | " ~ wrap_list([]);
+
+// The control: the same bodies at a SIGNED instantiation still print the word they hold.
+negs: List<i64> = [-1i64, 1i64];
+echo show_list(negs) ~ " | " ~ show_list([-1i64, 1i64]);

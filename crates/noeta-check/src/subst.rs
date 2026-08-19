@@ -384,10 +384,21 @@ pub(crate) fn mentions_param(ty: &Type, params: &ParamSet) -> bool {
 /// order, deduplicated. The forwarding call-site resolution uses it to name the exact parameter a
 /// slot template needs but the call left open (D2a).
 pub(crate) fn params_mentioned(ty: &Type, params: &ParamSet) -> Vec<ParamRef> {
-    fn walk(ty: &Type, params: &ParamSet, out: &mut Vec<ParamRef>) {
+    walk_params_mentioned(ty, Some(params))
+}
+
+/// Every type parameter `ty` mentions, whatever declaration it came from — [`params_mentioned`]
+/// with no filter. What a **slot template** is asked, since a template's parameters are by
+/// construction exactly the ones whose bindings decide whether the slot resolves.
+pub(crate) fn all_params_mentioned(ty: &Type) -> Vec<ParamRef> {
+    walk_params_mentioned(ty, None)
+}
+
+fn walk_params_mentioned(ty: &Type, params: Option<&ParamSet>) -> Vec<ParamRef> {
+    fn walk(ty: &Type, params: Option<&ParamSet>, out: &mut Vec<ParamRef>) {
         match ty {
             Type::Param(p) => {
-                if params.contains(&p.id) && !out.contains(p) {
+                if params.is_none_or(|ps| ps.contains(&p.id)) && !out.contains(p) {
                     out.push(p.clone());
                 }
             }
@@ -430,6 +441,27 @@ pub(crate) fn subst_or_dyn(ty: &Type, subst: &Subst, tps: &ParamSet) -> Type {
     let mut full = subst.clone();
     for id in tps {
         full.entry(*id).or_insert(Type::Dyn);
+    }
+    apply_subst(ty, &full)
+}
+
+/// Apply a call's substitution with every still-unbound parameter of `tps` left as an **inference
+/// hole** — the form for an expectation pushed into an argument that is still allowed to *pin*
+/// those parameters, as opposed to [`subst_or_dyn`]'s form for an expectation that is final.
+///
+/// The two differ in exactly one thing, and it is the thing that decides whether a call's
+/// instantiation survives. `dyn` is a real type: a container literal checked against `List<dyn>`
+/// adopts `dyn` as its element type and reports itself as `List<dyn>`, which then binds the
+/// callee's `T` to `dyn` — an instantiation the call never named and cannot get back.
+/// [`Type::Unknown`] is the checker's "open position, synthesize here" (see
+/// [`crate::Checker::check`]), so the same literal reports what it actually holds and pins `T` to
+/// that. A hole never *binds* a parameter itself ([`bind_type_params`] skips
+/// [`Type::defers_to_runtime`]), so a position the literal genuinely cannot determine still erases
+/// exactly as before.
+pub(crate) fn subst_or_hole(ty: &Type, subst: &Subst, tps: &ParamSet) -> Type {
+    let mut full = subst.clone();
+    for id in tps {
+        full.entry(*id).or_insert(Type::Unknown);
     }
     apply_subst(ty, &full)
 }
