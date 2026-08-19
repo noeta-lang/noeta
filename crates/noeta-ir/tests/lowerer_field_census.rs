@@ -294,6 +294,18 @@ const FACTS: &[Fact] = &[
             "fn a_swapped_self_update_still_destroys_the_value_it_displaces(",
         ),
     ),
+    // A swapped type's `From` conversions, each of which must keep the source-named method-table
+    // key (`from<Cents>`) its call sites already resolved to. Unlike the four above, this table is
+    // co-located with the declarations it names — a conversion's block travels with its target — so
+    // the fold is the identity rather than a rescue. It is a fact all the same: it is read off
+    // `program.stmts`, which is what puts it here rather than beside `facts` on the `Lowerer`.
+    Fact(
+        "from_conversion_keys",
+        Anchor(
+            HOTSWAP,
+            "fn a_swapped_type_keeps_each_conversion_under_its_own_source(",
+        ),
+    ),
 ];
 
 fn workspace_root() -> PathBuf {

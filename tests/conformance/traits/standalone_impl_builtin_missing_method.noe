@@ -1,0 +1,8 @@
+// The trait's contract is the same whichever way the `impl` is written: a standalone `impl` of a
+// non-marker built-in trait must define the method the trait requires. An EMPTY body is a marker
+// impl, which only a trait with no required method (`Clone`, `Serialize`) accepts.
+// expect: error E0015 at 7:6
+// expect: exit 1
+struct Rev { n: int }
+impl Comparable for Rev {}
+echo Rev { n: 1 }.n;

@@ -89,7 +89,7 @@ A reduction folds the whole list to one value, and each one asks something of th
 | `any` / `all` | `any() -> bool` | `T = bool` | `[false,true].any()` → `true` |
 | `count` | `count() -> int` | `T = bool` | `[true,false,true].count()` → `2` (the `true`s; `len()` is the size) |
 
-`min`/`max` order by the **same total order** `sorted()` sorts by — numbers, strings, bools, and value kinds (structs and enums) ordering structurally — so `xs.min()` and `xs.sorted().first()` are always the same value. `sum`/`product` fold at the element's numeric width and wrap there, exactly as repeated `+`/`*` would.
+`min`/`max` order by the **same order** `sorted()` sorts by — numbers, strings, bools, and value kinds (structs and enums) ordering structurally, unless the element type implements `Comparable` itself, in which case its own `compare` decides all three ([Ordering your own type](Generics-and-Traits#ordering-your-own-type)) — so `xs.min()` and `xs.sorted().first()` are always the same value. `sum`/`product` fold at the element's numeric width and wrap there, exactly as repeated `+`/`*` would.
 
 Inside a generic body the element type is whatever the caller chose, so the requirement becomes a **bound**: `fn top<T: Comparable>(xs: List<T>): ?T { return xs.max() }` compiles and instantiates at every ordered type. Without the bound the ordering is not promised and the call is E0025, naming the bound to add. The arithmetic and boolean reductions have no bound that promises a number or a `bool`, so they stay available only where the element type says so directly.
 
@@ -131,7 +131,7 @@ Packed-struct keys are the spatial-hash idiom — see [Fixed-Width Ints & Packed
 
 Sorted and de-duplicated; not indexable. Display form `{1, 2, 3}` (an empty set displays as `{}`); the empty-set literal is written `#{}`, since a bare `{}` is a map.
 
-Elements are a single **orderable** type: a primitive, a key-capable native type, a key-capable `@packed` struct (ordered by content — type name, then field-wise), or any other **value kind** — structs and enums order structurally (the same ordering `@derive(Comparable)` and `.sorted()` use), so `[P {x: 2}, P {x: 1}].to_set()` canonicalizes like any primitive set. A `class` element is rejected (statically at a `Set<T>` annotation): a set stores a sorted snapshot, and a reference could be mutated after insertion.
+Elements are a single **orderable** type: a primitive, a key-capable native type, a key-capable `@packed` struct (ordered by content — type name, then field-wise), or any other **value kind** — structs and enums order structurally (the same ordering `@derive(Comparable)` gives), so `[P {x: 2}, P {x: 1}].to_set()` canonicalizes like any primitive set. That structural order is what places an element in the set and what finds it again, and it holds even for a type that writes its own `compare`: a set's order is an *identity* order, not one a type may redefine ([Ordering your own type](Generics-and-Traits#ordering-your-own-type)). A `class` element is rejected (statically at a `Set<T>` annotation): a set stores a sorted snapshot, and a reference could be mutated after insertion.
 
 ```noeta
 s = #{3, 1, 2, 1}     // set literal (sugar for [...].to_set())

@@ -1174,20 +1174,19 @@ struct Symbols {
     /// source it names rather than on the trait name, so a repeated source is E0027 and the sources
     /// recorded here are distinct in a well-formed program. A `(source → target)` lookup is
     /// therefore unambiguous by construction, and it yields the method-table key
-    /// ([`noeta_ast::conversion::from_conversion_keys`]) the call site must dispatch through.
+    /// ([`noeta_ast::conversion::from_method_key`]) the call site must dispatch through.
     from_impls: HashMap<String, Vec<FromConversion>>,
-    /// The **method-table key** each `impl From<Source>` block's `from` occupies, keyed by that
-    /// method's name span ([`noeta_ast::conversion::from_conversion_keys`]). Written by
-    /// [`Checker::record_from_impls`] before the owning type's methods are walked, and read by the
-    /// one funnel every method registration passes through
-    /// ([`Checker::collect_method_sig_classified`]) — so a conversion is registered under the key
-    /// its call sites dispatch through, whether the walk reaches it through the type's flattened
-    /// `methods` or through the `impl` block itself.
+    /// The **method-table key** each `impl From<Source>`'s `from` occupies, keyed by that method's
+    /// name span. Written by [`Checker::record_from_impls`] (an in-body block) and
+    /// [`Checker::record_standalone_from_impl`] (one written beside its target) before the owning
+    /// type's methods are walked, and read by the one funnel every method registration passes
+    /// through ([`Checker::collect_method_sig_classified`]) — so a conversion is registered under
+    /// the key its call sites dispatch through, whether the walk reaches it through the type's
+    /// flattened `methods` or through the `impl` itself.
     ///
     /// Span-keyed rather than `(type, method)`-keyed because that pair is exactly what is ambiguous
-    /// here: two conversions on one type share the name the parser flattened them under, and the
-    /// declaration span is what tells them apart. Empty for every type declaring fewer than two
-    /// conversions — those keep the plain `from`.
+    /// here: every conversion on a type is written `from`, and the declaration span is what tells
+    /// two of them apart.
     from_method_keys: HashMap<Span, String>,
     /// The subset of [`Checker::trait_impls`] that came from `@derive(...)` (not a hand-written
     /// `impl`). A **generic** type's derive is conditional on its instantiated fields

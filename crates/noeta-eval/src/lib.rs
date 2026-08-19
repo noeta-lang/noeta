@@ -3960,6 +3960,13 @@ impl Interpreter {
             }
             noeta_stdlib::ListMethod::Sorted => {
                 self.expect_std_arity(name, args, 0, span)?;
+                // A type that writes its own `compare` decides the order of its own values, here
+                // exactly as it does at `<` — so `xs.sorted()` and `a < b` cannot disagree about
+                // one type. Every other list keeps the structural order below.
+                if let ElementOrder::Own(method) = self.element_order(items) {
+                    let owned = items.to_vec();
+                    return self.sort_by_own_compare(owned, &method, span);
+                }
                 // Every element must be mutually orderable with the first (homogeneous numbers
                 // or strings — or derived-`Comparable` structs/enums, which order structurally
                 // via `compare_field`); otherwise there is no total order to sort by. A stable
@@ -5890,6 +5897,17 @@ impl Interpreter {
         let Some(first) = items.get(from) else {
             return Ok(builtin_enum("Option", "none", Vec::new()));
         };
+        // A type that writes its own `compare` decides its own extremum, exactly as it decides its
+        // own `sorted` — so `xs.min()` and `xs.sorted().first()` still cannot disagree.
+        if let ElementOrder::Own(method) = self.element_order(&items[from..]) {
+            let mut best = first.clone();
+            for item in &items[from + 1..] {
+                if self.call_own_compare(&method, item, &best, span)? == want {
+                    best = item.clone();
+                }
+            }
+            return Ok(builtin_enum("Option", "some", vec![best]));
+        }
         if items[from..]
             .iter()
             .any(|item| compare_field(first, item).is_none())
@@ -5907,6 +5925,131 @@ impl Interpreter {
             }
         }
         Ok(builtin_enum("Option", "some", vec![best.clone()]))
+    }
+
+    /// **Which order a list's elements are observed in** at `.sorted()`, `.min()` and `.max()`.
+    ///
+    /// A type that writes its own `compare` (`impl Comparable`, in the body or beside it) decides
+    /// the order of its own values, and every door a program can *see* an order through asks for
+    /// it — the same method `<` dispatches to, so one type can never order one way under `<` and
+    /// another under `sorted`. Everything else takes the runtime's structural order.
+    ///
+    /// The whole list must be values of that one type. A `compare` is written against its own
+    /// type's fields (`fn compare(other: Rev)`), so handing it a neighbor of some other type is a
+    /// call the author never wrote; a mixed list falls to the structural path, whose own
+    /// mutual-orderability guard then reports it in the words it has always used.
+    ///
+    /// The **nesting rule** this settles: a type's own `compare` orders *its own* values, and
+    /// nothing else. A `@derive(Comparable)` type holding a field of a type that writes one still
+    /// compares that field structurally, because a derived order is field-wise and structural by
+    /// definition — and because `<` on the outer type has always meant exactly that, so honoring
+    /// the field's `compare` under `sorted` alone would put the two doors back in disagreement.
+    /// A type that wants its field's order writes its own `compare` and calls it.
+    ///
+    /// Mirrors the VM's `element_order`.
+    fn element_order(&self, items: &[Value]) -> ElementOrder {
+        match items.first() {
+            Some(Value::Object(first)) => {
+                let same_type = items
+                    .iter()
+                    .all(|v| matches!(v, Value::Object(o) if o.def.name == first.def.name));
+                match first
+                    .def
+                    .methods
+                    .get(noeta_ast::COMPARE_METHOD)
+                    .filter(|_| same_type)
+                {
+                    Some(method) => ElementOrder::Own(Rc::clone(method)),
+                    None => ElementOrder::Structural,
+                }
+            }
+            Some(Value::Enum(first)) => {
+                let same_type = items
+                    .iter()
+                    .all(|v| matches!(v, Value::Enum(e) if e.enum_name == first.enum_name));
+                let method = same_type
+                    .then(|| self.scope.lookup(&first.enum_name))
+                    .flatten()
+                    .and_then(|v| match v {
+                        Value::EnumType(def) => def.method(noeta_ast::COMPARE_METHOD).cloned(),
+                        _ => None,
+                    });
+                match method {
+                    Some(method) => ElementOrder::Own(method),
+                    None => ElementOrder::Structural,
+                }
+            }
+            _ => ElementOrder::Structural,
+        }
+    }
+
+    /// Order `items` by the element type's **own** `compare`, through the shared merge sort — which
+    /// is what makes a `compare` that is not a total order a strange permutation rather than a
+    /// process-ending panic (see [`noeta_stdlib::ordering`]). The first comparison that fails
+    /// abandons the sort with that failure.
+    fn sort_by_own_compare(
+        &mut self,
+        items: Vec<Value>,
+        method: &Rc<Closure>,
+        span: Span,
+    ) -> Eval<Value> {
+        let mut failure: Option<Unwind> = None;
+        let order = noeta_stdlib::ordering::stable_order_by(&items, |a, b| {
+            if failure.is_some() {
+                return std::cmp::Ordering::Equal;
+            }
+            match self.call_own_compare(method, a, b, span) {
+                Ok(ordering) => ordering,
+                Err(unwind) => {
+                    failure = Some(unwind);
+                    std::cmp::Ordering::Equal
+                }
+            }
+        });
+        match failure {
+            Some(unwind) => Err(unwind),
+            None => Ok(Value::list(
+                order.into_iter().map(|i| items[i].clone()).collect(),
+            )),
+        }
+    }
+
+    /// Call the element type's own `compare` for one pair and read its answer. A result that is not
+    /// an `Ordering` is a runtime error in both engines' shared words — never a guessed direction.
+    fn call_own_compare(
+        &mut self,
+        method: &Rc<Closure>,
+        a: &Value,
+        b: &Value,
+        span: Span,
+    ) -> Eval<std::cmp::Ordering> {
+        let result = match a {
+            Value::Object(o) => {
+                self.call_method_on(&Rc::clone(o), &Rc::clone(method), vec![b.clone()], span)?
+            }
+            other => {
+                self.call_enum_method(other.clone(), &Rc::clone(method), vec![b.clone()], span)?
+            }
+        };
+        match &result {
+            Value::Enum(e)
+                if e.enum_name == noeta_ast::reflect::ORDERING_ENUM
+                    && let Some(ordering) = noeta_ast::ordering_of_variant(&e.variant) =>
+            {
+                Ok(ordering)
+            }
+            other => {
+                // The receiver's NOMINAL name (`Rev`), not its kind (`object`) — the reader is
+                // being pointed at one declaration's `compare`.
+                let receiver = match a {
+                    Value::Object(o) => o.def.name().to_string(),
+                    Value::Enum(e) => e.enum_name.clone(),
+                    _ => a.type_name().to_string(),
+                };
+                let error = noeta_stdlib::compare_result_error(&receiver, other.type_name());
+                Err(self.runtime_error(std_error_code(error.kind), span, error.message))
+            }
+        }
     }
 
     /// Materialize a list's elements at or after `from` as primitive [`Scalar`](noeta_stdlib::Scalar)s
@@ -7639,6 +7782,15 @@ fn std_error_code(kind: noeta_stdlib::ErrorKind) -> DiagnosticCode {
         noeta_stdlib::ErrorKind::Panic => DiagnosticCode::Panic,
         noeta_stdlib::ErrorKind::ReactiveCycle => DiagnosticCode::ReactiveCycle,
     }
+}
+
+/// **Which comparator a list's elements are ordered by** at an observed-order door — the answer
+/// [`Interp::element_order`] gives, and the one distinction the two ordering doors make.
+enum ElementOrder {
+    /// The runtime's structural order: fields in declared order, all the way down.
+    Structural,
+    /// Every element is a value of one type that writes its own `compare` — this method.
+    Own(Rc<Closure>),
 }
 
 /// Field-wise (declared order) ordering of two same-type objects, the behavior synthesized by

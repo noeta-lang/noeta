@@ -1605,3 +1605,35 @@ fn an_unregistered_consumer_holds_the_whole_queue() {
         "and its `Sites` bundle stays with it"
     );
 }
+
+/// **A swapped type keeps its conversions under their source-named keys.** A `From` conversion does
+/// not occupy the plain `from` slot — it occupies `from<Source>`, so a type may declare several —
+/// and the fragment's lowering has to name each body the same way the running module's table and
+/// the checker's call-site resolution do. Get that wrong and the swap re-registers the type with
+/// two conversions in one slot: `Money.from(cents)` reaches whichever body was registered last, and
+/// silently returns the other conversion's answer rather than failing.
+///
+/// The fragment carries the target with its conversions, so this is where the naming rule has to
+/// hold for a swapped declaration; the whole-program key table it reads is a `ProgramFacts` entry
+/// for the same reason every other table there is one.
+#[test]
+fn a_swapped_type_keeps_each_conversion_under_its_own_source() {
+    // Both conversions are *called* from inside the program, not from the probe: which conversion a
+    // `Target.from(x)` means is a typing decision, so it is resolved where the checker runs.
+    let app = |tag: &str| {
+        format!(
+            "struct Cents {{ v: int }}\n\
+             struct Dimes {{ v: int }}\n\
+             struct Money {{ v: int\n\
+             \x20   impl From<Cents> {{ pub fn from(value: Cents): Money {{ return Money {{ v: value.v / 100 }}; }} }}\n\
+             \x20   impl From<Dimes> {{ pub fn from(value: Dimes): Money {{ return Money {{ v: value.v / 10 }}; }} }}\n\
+             }}\n\
+             fn converted(): string {{\n\
+             \x20   dollars = Money.from(Cents {{ v: 250 }});\n\
+             \x20   tens = Money.from(Dimes {{ v: 30 }});\n\
+             \x20   return \"{tag} ${{dollars.v}} ${{tens.v}}\";\n\
+             }}\n"
+        )
+    };
+    oracle(&app("v1"), &app("v2"), "echo converted()\n");
+}

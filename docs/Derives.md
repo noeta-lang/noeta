@@ -7,7 +7,7 @@
 | Derivable | Effect |
 |---|---|
 | `Equatable` | Structural equality. |
-| `Comparable` | Field-wise ordering, in declaration order (recurses into nested objects and enum payloads). On an **enum**: variant declaration order first (`Low < Medium < High`), then payload fields. Also what `.sorted()` uses. |
+| `Comparable` | Field-wise **structural** ordering, in declaration order (recurses into nested objects and enum payloads, comparing each structurally in turn). On an **enum**: variant declaration order first (`Low < Medium < High`), then payload fields. This is the order `< <= > >=`, `.sorted()`, `.min()` and `.max()` then use — a type wanting a different one writes its own `compare` instead ([Ordering your own type](Generics-and-Traits#ordering-your-own-type)); it cannot do both, since a type implements each trait once. |
 | `Display` | A structural `to_string` — a **marker**: the structural default you already get, kept so a competing hand-written `impl Display` is a coherence error. |
 | `Error` | `message()` returns `"${self}"` — the type's display story (a hand-written `impl Display`'s `to_string()`, or the structural rendering under `@derive(Display)`). Requires the type to have `Display` at all (E0050 otherwise); `@derive(Error, via: field)` instead forwards `message()` into the field's own `Error` implementation. See [Error Handling](Error-Handling#deriving-error). |
 | `Clone` | A structural clone — a marker like `Display` (value semantics already copy). |

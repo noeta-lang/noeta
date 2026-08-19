@@ -843,6 +843,16 @@ impl<'m> Vm<'m> {
         // materialized elements, exactly as `list_reduction_scalars` does.
         let list = v.realize_list();
         let items = list.list_items().expect("list receiver");
+        // A type that writes its own `compare` decides its own extremum, exactly as it decides its
+        // own `sorted` — so `xs.min()` and `xs.sorted().first()` still cannot disagree. Folded
+        // before the structural guard below, and outside the `outcome` match so the re-entrant
+        // calls do not run with the temporary list's borrow held.
+        if self.elements_order_by_own_compare(&items[from..]) {
+            let tail: Vec<Value> = items[from..].to_vec();
+            let folded = self.fold_extremum_by_own_compare(&tail, want, span);
+            list.release();
+            return folded;
+        }
         let outcome = match items.get(from) {
             None => Ok(make_none()),
             Some(&first) => {
@@ -868,6 +878,167 @@ impl<'m> Vm<'m> {
         };
         list.release();
         outcome.map_err(|e| self.std_dispatch_error(e, span))
+    }
+
+    /// **Whether a list's elements are ordered by the element type's own `compare`** at an
+    /// observed-order door (`.sorted()`, `.min()`, `.max()`).
+    ///
+    /// A type that writes its own `compare` (`impl Comparable`, in the body or beside it) decides
+    /// the order of its own values, and every door a program can *see* an order through asks for
+    /// it — the same method `<` dispatches to, so one type can never order one way under `<` and
+    /// another under `sorted`. Everything else takes the runtime's structural order.
+    ///
+    /// The whole list must be values of that one type. A `compare` is written against its own
+    /// type's fields (`fn compare(other: Rev)`), so handing it a neighbor of some other type is a
+    /// call the author never wrote; a mixed list falls to the structural path, whose own
+    /// mutual-orderability guard then reports it in the words it has always used.
+    ///
+    /// The **nesting rule** this settles: a type's own `compare` orders *its own* values, and
+    /// nothing else. A `@derive(Comparable)` type holding a field of a type that writes one still
+    /// compares that field structurally, because a derived order is field-wise and structural by
+    /// definition — and because `<` on the outer type has always meant exactly that, so honoring
+    /// the field's `compare` under `sorted` alone would put the two doors back in disagreement.
+    ///
+    /// Mirrors the tree-walker's `element_order`.
+    pub(crate) fn elements_order_by_own_compare(&self, items: &[Value]) -> bool {
+        let Some(&first) = items.first() else {
+            return false;
+        };
+        let Some(name) = first
+            .shape()
+            .filter(|_| first.is_object() || first.is_enum())
+            .map(|s| s.name.clone())
+        else {
+            return false;
+        };
+        items
+            .iter()
+            .all(|v| (v.is_object() || v.is_enum()) && v.shape().is_some_and(|s| s.name == name))
+            && self
+                .method_proto(&name, noeta_ast::COMPARE_METHOD)
+                .is_some()
+    }
+
+    /// Order `items` by the element type's **own** `compare`, through the shared merge sort — which
+    /// is what makes a `compare` that is not a total order a strange permutation rather than a
+    /// process-ending panic (see [`noeta_stdlib::ordering`]). The first comparison that fails
+    /// abandons the sort with that failure. The result owns a reference to each element.
+    pub(crate) fn sort_by_own_compare(
+        &mut self,
+        items: &[Value],
+        span: Span,
+    ) -> Result<Value, Abort> {
+        // Every element is retained BEFORE the first comparison, and each retain then transfers
+        // into the result (a permutation names every index exactly once). The elements arrive
+        // borrowed from the receiver, and this comparator runs user code between reads of them —
+        // code that may drop the very binding the receiver came from, which the structural
+        // comparator beside this one can never do.
+        for &element in items {
+            retain(element);
+        }
+        let mut failed = false;
+        let order = noeta_stdlib::ordering::stable_order_by(items, |&a, &b| {
+            if failed {
+                return std::cmp::Ordering::Equal;
+            }
+            match self.call_own_compare(a, b, span) {
+                Ok(ordering) => ordering,
+                Err(Abort) => {
+                    failed = true;
+                    std::cmp::Ordering::Equal
+                }
+            }
+        });
+        if failed {
+            for &element in items {
+                release(element);
+            }
+            return Err(Abort);
+        }
+        Ok(Value::list(order.into_iter().map(|i| items[i]).collect()))
+    }
+
+    /// The extremum of `items` under the element type's own `compare` — `want` is `Less` for `min`
+    /// and `Greater` for `max`, matching the structural fold beside it. A tie keeps the earlier
+    /// element, exactly as the sort does. The result owns a reference to the winner.
+    fn fold_extremum_by_own_compare(
+        &mut self,
+        items: &[Value],
+        want: std::cmp::Ordering,
+        span: Span,
+    ) -> Result<Value, Abort> {
+        if items.is_empty() {
+            return Ok(make_none());
+        }
+        // Retained up front for the reason [`Self::sort_by_own_compare`] states: user code runs
+        // between reads of borrowed elements. The winner's retain transfers into the `some`; every
+        // other one is given back below, on both exits.
+        for &element in items {
+            retain(element);
+        }
+        let mut best = 0usize;
+        let mut failed = false;
+        for i in 1..items.len() {
+            match self.call_own_compare(items[i], items[best], span) {
+                Ok(ordering) => {
+                    if ordering == want {
+                        best = i;
+                    }
+                }
+                Err(Abort) => {
+                    failed = true;
+                    break;
+                }
+            }
+        }
+        for (i, &element) in items.iter().enumerate() {
+            if failed || i != best {
+                release(element);
+            }
+        }
+        if failed {
+            return Err(Abort);
+        }
+        Ok(make_some(items[best]))
+    }
+
+    /// Call the element type's own `compare` for one pair and read its answer, re-entering the VM
+    /// the way every other protocol dispatch out of a built-in does (`Display::to_string`). A
+    /// result that is not an `Ordering` is a runtime error in both engines' shared words — never a
+    /// guessed direction, which would place a value under one reading and look for it under
+    /// another.
+    fn call_own_compare(
+        &mut self,
+        a: Value,
+        b: Value,
+        span: Span,
+    ) -> Result<std::cmp::Ordering, Abort> {
+        // The receiver's NOMINAL name (`Rev`), not its kind (`object`) — the reader is being
+        // pointed at one declaration's `compare`. Mirrors the tree-walker's wording.
+        let receiver_type = a
+            .shape()
+            .map(|s| s.name.clone())
+            .unwrap_or_else(|| a.type_name().to_string());
+        // `run_method_handle` consumes its arguments; the empty type resolves the method through
+        // the receiver's own shape, which is the bound-method path.
+        retain(a);
+        retain(b);
+        let result =
+            self.run_method_handle("", noeta_ast::COMPARE_METHOD, false, vec![a, b], span)?;
+        let ordering = result
+            .shape()
+            .filter(|s| s.name == noeta_ast::reflect::ORDERING_ENUM)
+            .and_then(|s| s.variant.as_deref())
+            .and_then(noeta_ast::ordering_of_variant);
+        let found = result.type_name().to_string();
+        self.release_value(result);
+        match ordering {
+            Some(ordering) => Ok(ordering),
+            None => {
+                let error = noeta_stdlib::compare_result_error(&receiver_type, &found);
+                Err(self.std_dispatch_error(error, span))
+            }
+        }
     }
 
     /// Materialize a list's elements at or after `from` as primitive scalars for the boxed reduction

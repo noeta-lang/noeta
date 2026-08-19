@@ -1552,23 +1552,23 @@ impl ModuleCompiler {
     /// Reserve a placeholder prototype for each of a type's methods — the table pass 2 compiles
     /// each body into, and the [`MethodEntry`] rows the VM's own name-keyed table is loaded from.
     ///
-    /// The key is the method's declared name, except for one of **several** `From` conversions on a
-    /// single type: the parser flattened those under the one name they were written with, and each
-    /// takes the key named after the source it converts
-    /// ([`noeta_ast::conversion::from_conversion_keys`]) — the same rule the checker registered the
-    /// signature under and lowering named the body with, so all three address one prototype.
+    /// The key is the method's declared name, except for a `From` conversion: those arrive
+    /// flattened under the one name they were written with, and each takes the key named after the
+    /// source it converts ([`noeta_ast::conversion::from_conversion_keys_program`]) — the same rule
+    /// the checker registered the signature under and lowering named the body with, so all three
+    /// address one prototype. Whole-program, because a conversion may be written beside its target
+    /// (`impl From<Cents> for Money { … }`) rather than inside it.
     ///
     /// One worker for the three declaration kinds, which otherwise ran the identical loop.
     fn reserve_method_protos(
         &mut self,
         type_name: &noeta_ast::Name,
         methods: &[noeta_ast::FnDecl],
-        impls: &[noeta_ast::ImplBlock],
+        from_keys: &HashMap<Span, String>,
     ) -> HashMap<String, u32> {
-        let keys = noeta_ast::conversion::from_conversion_keys(impls);
         let mut fns = HashMap::new();
         for method in methods {
-            let key = keys
+            let key = from_keys
                 .get(&method.name_span)
                 .cloned()
                 .unwrap_or_else(|| method.name.to_string());
@@ -1631,6 +1631,11 @@ impl ModuleCompiler {
     /// Pass 1: register every top-level `type`/`class`/`enum`/`use` so bodies compiled later
     /// can resolve them, and reserve a placeholder prototype for each class `fn`.
     fn register_types(&mut self, program: &Program) {
+        // The method-table key each declared `From` conversion occupies, over the WHOLE program:
+        // a conversion written beside its target (`impl From<Cents> for Money { … }`) is not in
+        // that target's own `impls`, and reading only those would leave its `from` under the bare
+        // name — where a second conversion would overwrite it.
+        let from_keys = noeta_ast::conversion::from_conversion_keys_program(&program.stmts);
         // Every **prelude enum** is namable like any other, so `Ordering.Less`, `Type.Unit`,
         // `Semantic.TrustBoundary`, `Layout.Row`, and `Cancelled.Cancelled` lower to `MakeEnum`
         // rather than failing name resolution at run time. The declarations come from the one
@@ -1717,7 +1722,7 @@ impl ModuleCompiler {
                     }
                     // Reserve a prototype per method, shared by associated-fn and instance-method
                     // dispatch (a struct `fn` is callable both ways, exactly like a class method).
-                    let fns = self.reserve_method_protos(&decl.name, &decl.methods, &decl.impls);
+                    let fns = self.reserve_method_protos(&decl.name, &decl.methods, &from_keys);
                     self.types
                         .insert(decl.name.to_string(), TypeInfo::Struct { fields, fns });
                 }
@@ -1748,7 +1753,7 @@ impl ModuleCompiler {
                     {
                         self.tojson_derives.push(decl.name.to_string());
                     }
-                    let fns = self.reserve_method_protos(&decl.name, &decl.methods, &decl.impls);
+                    let fns = self.reserve_method_protos(&decl.name, &decl.methods, &from_keys);
                     // Reserve a prototype for the `destruct` block (compiled like a method).
                     if decl.destructor.is_some() {
                         let proto = self.protos.len() as u32;
@@ -1796,7 +1801,7 @@ impl ModuleCompiler {
                     }
                     // Reserve a prototype per method, shared by associated-fn and instance-method
                     // dispatch (the unified body, object-model slice 3).
-                    let fns = self.reserve_method_protos(&decl.name, &decl.methods, &decl.impls);
+                    let fns = self.reserve_method_protos(&decl.name, &decl.methods, &from_keys);
                     self.types
                         .insert(decl.name.to_string(), TypeInfo::Enum { variants, fns });
                 }

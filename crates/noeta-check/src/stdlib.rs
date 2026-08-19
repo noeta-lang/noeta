@@ -695,6 +695,12 @@ fn string_method(name: &str) -> Option<Type> {
 /// entries in key order. `to_set`, `add`, `union`, `contains` and `has` are absent on purpose: those
 /// build or probe an identity order, which must stay a pure function of the erased word. The list
 /// reductions are spelled here beside [`numeric_reduce`], which types them, so the two cannot drift.
+///
+/// The same line divides the two comparators the runtime uses. An element type that writes its own
+/// `compare` decides the order at exactly the doors listed here — the ones a program observes —
+/// while a set's canonical buffer and a map's key placement keep the structural order for the
+/// reason a `u64` hint is withheld from them: they place a value at one site and probe it at
+/// another, so a reading that could change between the two loses a member that is present.
 pub(super) fn reveals_order(recv: &Type, name: &str) -> bool {
     use noeta_ext_abi::{ListMethod, MapMethod};
     match recv {

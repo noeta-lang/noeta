@@ -797,10 +797,38 @@ fn a_coherence_conflict_labels_both_implementations() {
 }
 
 #[test]
-fn standalone_impl_with_methods_is_unsupported() {
-    // Pass 1 supports only empty-body capability impls; a body with methods is rejected (E0015).
-    let src = "struct Route { path: string }\nimpl Clone for Route {\n  pub fn extra(): int { return 1; }\n}\n";
-    assert_eq!(codes(src), ["E0015"]);
+fn a_standalone_impl_of_a_builtin_trait_may_carry_methods() {
+    // The trait's kind imposes no restriction of its own: a standalone `impl Comparable for T { … }`
+    // is the same declaration as the in-body `impl Comparable { … }`, and the backends' hoist grafts
+    // either one onto `T` before lowering.
+    let src = "struct Rev { n: int }\nimpl Comparable for Rev {\n  pub fn compare(other: Rev): Ordering { return other.n.compare(self.n); }\n}\n";
+    assert!(codes(src).is_empty(), "{:?}", codes(src));
+}
+
+#[test]
+fn a_standalone_impl_is_held_to_the_traits_contract() {
+    // …and is held to the same contract as the in-body form: the required method must be there
+    // (E0015), with the right arity, `pub`, and the return the trait fixes.
+    let empty = "struct Rev { n: int }\nimpl Comparable for Rev {}\n";
+    assert_eq!(codes(empty), ["E0015"]);
+    let private = "struct Rev { n: int }\nimpl Comparable for Rev {\n  fn compare(other: Rev): Ordering { return other.n.compare(self.n); }\n}\n";
+    assert_eq!(codes(private), ["E0015"]);
+}
+
+#[test]
+fn an_operator_traits_return_type_is_fixed_by_the_language() {
+    // `a < b` and `a == b` are `bool` because of the OPERATOR, so `compare`/`eq` are read rather
+    // than passed on and their return types are not the implementor's to choose. Unchecked, `echo a
+    // == b` printed the `int` the body returned.
+    let cmp = "struct Rev { n: int }\nimpl Comparable for Rev {\n  pub fn compare(other: Rev): int { return 1; }\n}\n";
+    assert_eq!(codes(cmp), ["E0015"]);
+    let eq = "struct Rev { n: int }\nimpl Equatable for Rev {\n  pub fn eq(other: Rev): int { return 7; }\n}\n";
+    assert_eq!(codes(eq), ["E0015"]);
+    // A trait whose return the implementor DOES decide is left alone: `x.len()` is typed from the
+    // signature the type wrote, so every reader agrees whatever it says.
+    let len =
+        "struct Bag { n: int }\nimpl Length for Bag {\n  pub fn len(): int { return self.n; }\n}\n";
+    assert!(codes(len).is_empty(), "{:?}", codes(len));
 }
 
 #[test]

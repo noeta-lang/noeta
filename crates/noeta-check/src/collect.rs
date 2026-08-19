@@ -276,10 +276,10 @@ impl Checker {
             Receiver::inherent(uses_self)
         };
         // The key this method occupies in the type's table. It is the declared name for everything
-        // except one of **several** `From` conversions on one type, which the parser flattened
-        // under a shared `from` and which [`Symbols::from_method_keys`] tells apart by span. Read
-        // once, here, so every index below — visibility, receiver discipline, the signature itself
-        // — is written under the same key the call site resolves.
+        // except a `From` conversion, which is written under a shared `from` and which
+        // [`Symbols::from_method_keys`] tells apart by span — for either spelling, in the target's
+        // body or beside it. Read once, here, so every index below — visibility, receiver
+        // discipline, the signature itself — is written under the same key the call site resolves.
         let key = self.method_key(m);
         if let Some(trait_name) = trait_provided {
             self.note_trait_supplied(type_name, &key, m, trait_name);
@@ -1029,6 +1029,14 @@ impl Checker {
         // the target's parameters (stored there for exactly this purpose). BEFORE the UT5
         // default-fallback below, whose `register_synth_method` skips an already-registered key —
         // so a method the impl really provides wins over the trait's default.
+        // A standalone `impl From<Source> for Target { … }` files its conversion under the same
+        // source-named method-table key an in-body one does — here, so `method_key` below reads it
+        // when the signature registers, and so a `?` site resolves `(source → target)` through it.
+        for stmt in &program.stmts {
+            if let Stmt::Impl(d) = stmt {
+                self.record_standalone_from_impl(d);
+            }
+        }
         for stmt in &program.stmts {
             let Stmt::Impl(d) = stmt else { continue };
             let type_params = self
@@ -1727,38 +1735,69 @@ impl Checker {
     /// of statement order and then dispatch through the right one. Arity/validity of the block is
     /// checked in pass 2 (`check_trait_impl`); a malformed block records nothing.
     pub(crate) fn record_from_impls(&mut self, target: &str, impls: &[noeta_ast::ImplBlock]) {
-        let keys = noeta_ast::conversion::from_conversion_keys(impls);
-        self.symbols.from_method_keys.extend(
-            keys.iter()
-                .map(|(span, key)| (*span, key.clone()))
-                .collect::<Vec<_>>(),
-        );
         for block in impls {
-            if block.trait_name == BuiltinTrait::From.name() && block.trait_args.len() == 1 {
-                // In the target's scope, like every other in-body `impl` argument.
-                let source = from_ref_q(
-                    &block.trait_args[0],
-                    &self.imports.extern_types,
-                    &self.target_scope(target),
-                );
-                let Some(m) = block
-                    .methods
-                    .iter()
-                    .find(|m| Some(m.name.as_str()) == BuiltinTrait::From.required_method_name())
-                else {
-                    continue;
-                };
-                let method = keys
-                    .get(&m.name_span)
-                    .cloned()
-                    .unwrap_or_else(|| m.name.to_string());
-                self.symbols
-                    .from_impls
-                    .entry(target.to_string())
-                    .or_default()
-                    .push(FromConversion { source, method });
-            }
+            self.record_from_impl(
+                target,
+                block.trait_name.as_str(),
+                &block.trait_args,
+                &block.methods,
+            );
         }
+    }
+
+    /// [`Self::record_from_impls`] for the **standalone** spelling — `impl From<Source> for Target
+    /// { … }`, which declares the same conversion from beside the type rather than inside it. Both
+    /// forms must record, because the backends' hoist flattens the standalone one onto the target
+    /// before a method table is built: a conversion the checker did not key would type-check under
+    /// the bare `from` while the table it dispatches through holds `from<Source>`.
+    pub(crate) fn record_standalone_from_impl(&mut self, decl: &noeta_ast::ImplDecl) {
+        let target = decl.target.to_string();
+        self.record_from_impl(
+            &target,
+            decl.trait_name.as_str(),
+            &decl.trait_args,
+            &decl.methods,
+        );
+    }
+
+    /// The one recording rule, over whichever impl form the caller holds: a `From` block naming one
+    /// source resolves it in the target's scope and files the conversion under the method-table key
+    /// [`noeta_ast::conversion`] names it with.
+    fn record_from_impl(
+        &mut self,
+        target: &str,
+        trait_name: &str,
+        trait_args: &[noeta_ast::TypeRef],
+        methods: &[noeta_ast::FnDecl],
+    ) {
+        if trait_name != BuiltinTrait::From.name() || trait_args.len() != 1 {
+            return;
+        }
+        let Some(m) = methods
+            .iter()
+            .find(|c| Some(c.name.as_str()) == BuiltinTrait::From.required_method_name())
+        else {
+            return;
+        };
+        let key =
+            noeta_ast::conversion::from_method_key(&noeta_ast::shape::type_source(&trait_args[0]));
+        self.symbols
+            .from_method_keys
+            .insert(m.name_span, key.clone());
+        // In the target's scope, like every other impl argument.
+        let source = from_ref_q(
+            &trait_args[0],
+            &self.imports.extern_types,
+            &self.target_scope(target),
+        );
+        self.symbols
+            .from_impls
+            .entry(target.to_string())
+            .or_default()
+            .push(FromConversion {
+                source,
+                method: key,
+            });
     }
 
     pub(crate) fn record_trait_impls<'a>(

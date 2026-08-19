@@ -23,6 +23,8 @@ Each backend is reduced to thin glue: project args onto `Arg`, call `string_meth
 
 Collection methods (list/map/set) manipulate backend-specific value representations and so cannot live here wholesale; they are implemented per backend with the differential as the guard. What *does* live here for them is the method **set** — the [`ListMethod`] and [`MapMethod`] enums — so each backend's dispatch `match` is exhaustive: a method one backend offers, the other must handle or fail to compile. Their misuse also routes through the shared [`arity_error`]/[`type_error`] builders, so the two backends' diagnostics stay identical.
 
+The **algorithm** can be shared even where the elements cannot. [`ordering::stable_order_by`] is the merge sort `.sorted()` runs when the element type supplies its own `compare`: it answers with a permutation of the indices, which both backends apply to their own element representation. Sharing it is not tidiness — a user comparator need not be a total order, `slice::sort_by` is documented as permitted to *panic* on one that is not, and two independently written sorts would put two different permutations of an inconsistent comparison in front of the differential.
+
 ## The Ring 1 string surface
 
 | Method | Arity | Result | Notes |

@@ -1,0 +1,14 @@
+// A `compare` need not be a total order — nothing can make it one — so the sort must not assume it
+// is. The bottom-up merge sort both engines share never inspects its comparator's consistency, so
+// an inconsistent one yields a deterministic permutation of the input rather than a panic, and the
+// two engines yield the SAME one.
+// expect: stdout "[W {n: 3}, W {n: 2}, W {n: 1}]"
+// expect: stdout "some(W {n: 3})"
+// expect: exit 0
+struct W { n: int }
+impl Comparable for W {
+    // Never `Equal`, never `Greater`: everything reports as less than everything.
+    pub fn compare(other: W): Ordering { return Ordering.Less; }
+}
+echo [W { n: 1 }, W { n: 2 }, W { n: 3 }].sorted();
+echo [W { n: 1 }, W { n: 2 }, W { n: 3 }].min();

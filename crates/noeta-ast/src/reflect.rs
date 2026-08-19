@@ -852,6 +852,10 @@ pub fn build(
 ) -> ReflectionInfo {
     let mut manifest = Vec::new();
     let mut types = Vec::new();
+    // The method-table key each declared `From` conversion occupies, over the whole program — so a
+    // conversion written beside its target (`impl From<Cents> for Money { … }`) is discoverable
+    // under the same `from<Cents>` name `invoke` dispatches it by, exactly as an in-body one is.
+    let from_keys = crate::conversion::from_conversion_keys_program(&program.stmts);
     // Every callable's declared parameter list, keyed by target (bare fn name or `Type.method`) — the
     // index `params_of(target)` surfaces, built in source order alongside the attribute manifest.
     let mut params: Vec<ParamRecord> = Vec::new();
@@ -893,7 +897,7 @@ pub fn build(
                 // well-formed `#[Get("/users")]` on a struct method type-check and then vanish from
                 // `attributes_of::<Get>()` with no diagnostic.
                 for method in &decl.methods {
-                    let target = method_target(decl.name.as_str(), method, &decl.impls);
+                    let target = method_target(decl.name.as_str(), method, &from_keys);
                     push_attrs(&mut manifest, &target, method.name_span, &method.attrs);
                     push_params(&mut manifest, &mut params, target, method);
                 }
@@ -919,7 +923,7 @@ pub fn build(
                 // A method's attributes are keyed by its qualified `Class.method` name, so a
                 // `#[...]` on a method surfaces distinctly from the same name on another class.
                 for method in &decl.methods {
-                    let target = method_target(decl.name.as_str(), method, &decl.impls);
+                    let target = method_target(decl.name.as_str(), method, &from_keys);
                     push_attrs(&mut manifest, &target, method.name_span, &method.attrs);
                     push_params(&mut manifest, &mut params, target, method);
                 }
@@ -988,7 +992,7 @@ pub fn build(
                 // An enum method's attributes are keyed by its qualified `Enum.method` name, the same
                 // convention class/struct methods use (object-model slice 3).
                 for method in &decl.methods {
-                    let target = method_target(decl.name.as_str(), method, &decl.impls);
+                    let target = method_target(decl.name.as_str(), method, &from_keys);
                     push_attrs(&mut manifest, &target, method.name_span, &method.attrs);
                     push_params(&mut manifest, &mut params, target, method);
                 }
@@ -1014,7 +1018,7 @@ pub fn build(
             // asymmetry the `Stmt::Struct` arm had before it gained its own `push_attrs`.
             Stmt::Impl(decl) => {
                 for method in &decl.methods {
-                    let target = format!("{}.{}", decl.target, method.name);
+                    let target = method_target(decl.target.as_str(), method, &from_keys);
                     push_attrs(&mut manifest, &target, method.name_span, &method.attrs);
                     push_params(&mut manifest, &mut params, target, method);
                 }
@@ -1225,17 +1229,23 @@ fn collect_trait_impls(program: &Program, native: &NativeTraitImpls) -> Vec<Trai
 /// The `Type.method` key one of a type's methods is discoverable under — what `params_of(target)`
 /// takes and what an attribute row on that method is keyed by.
 ///
-/// Its declared name, except for one of **several** `From` conversions on a single type, which take
-/// the source-named keys they dispatch under ([`crate::conversion::from_conversion_keys`]). Keying
-/// them by the shared `from` would put two different signatures under one name and answer for
-/// whichever the walk reached last — and would name something `invoke` cannot reach either, since
-/// the runtime method table has no plain `from` for such a type. The discovery surface and the
-/// dispatch surface therefore say the same thing: `params_of("AppError.from<JsonError>")` describes
-/// exactly what `invoke(AppError, "from<JsonError>", …)` calls.
+/// Its declared name, except for a `From` conversion, which takes the source-named key it dispatches
+/// under ([`crate::conversion::from_conversion_keys_program`]). Keying two of them by the shared
+/// `from` would put two different signatures under one name and answer for whichever the walk
+/// reached last — and would name something `invoke` cannot reach either, since the runtime method
+/// table has no plain `from` for such a type. The discovery surface and the dispatch surface
+/// therefore say the same thing: `params_of("AppError.from<JsonError>")` describes exactly what
+/// `invoke(AppError, "from<JsonError>", …)` calls.
 ///
-/// A type declaring one conversion is unaffected — its `from` is `from` everywhere.
-fn method_target(type_name: &str, method: &crate::FnDecl, impls: &[crate::ImplBlock]) -> String {
-    match crate::conversion::from_conversion_keys(impls).get(&method.name_span) {
+/// Uniform across both spellings and both counts: a conversion written beside its target
+/// (`impl From<JsonError> for AppError { … }`) is discoverable under the same key as one written
+/// inside it, and a type declaring a single conversion still names it after its source.
+fn method_target(
+    type_name: &str,
+    method: &crate::FnDecl,
+    from_keys: &std::collections::HashMap<Span, String>,
+) -> String {
+    match from_keys.get(&method.name_span) {
         Some(key) => format!("{type_name}.{key}"),
         None => format!("{type_name}.{}", method.name),
     }

@@ -1,0 +1,28 @@
+// A type's own `compare` orders ITS OWN values, and nothing else. `@derive(Comparable)` is
+// field-wise STRUCTURAL ordering by definition, so `Row`'s order compares its `Rev` field
+// structurally even though `Rev` writes its own `compare` — and `<` and `.sorted()` therefore still
+// answer alike about `Row`, which is the property that matters. A `Row` that wants its field's
+// order writes its own `compare` and calls it, as `Pair` does below.
+// expect: stdout "true"
+// expect: stdout "[Row {r: Rev {n: 1}}, Row {r: Rev {n: 2}}]"
+// expect: stdout "false"
+// expect: stdout "[Pair {r: Rev {n: 2}}, Pair {r: Rev {n: 1}}]"
+// expect: exit 0
+struct Rev { n: int }
+impl Comparable for Rev {
+    pub fn compare(other: Rev): Ordering { return other.n.compare(self.n); }
+}
+
+@derive(Comparable)
+struct Row { r: Rev }
+
+echo Row { r: Rev { n: 1 } } < Row { r: Rev { n: 2 } };
+echo [Row { r: Rev { n: 2 } }, Row { r: Rev { n: 1 } }].sorted();
+
+struct Pair { r: Rev }
+impl Comparable for Pair {
+    pub fn compare(other: Pair): Ordering { return self.r.compare(other.r); }
+}
+
+echo Pair { r: Rev { n: 1 } } < Pair { r: Rev { n: 2 } };
+echo [Pair { r: Rev { n: 1 } }, Pair { r: Rev { n: 2 } }].sorted();

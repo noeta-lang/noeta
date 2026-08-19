@@ -181,6 +181,38 @@ impl Checker {
             }
             Some(_) => {}
         }
+        // A trait whose method's return the LANGUAGE fixes ([`BuiltinTrait::fixed_return`] —
+        // `Equatable::eq` is a `bool`, `Comparable::compare` an `Ordering`) must be given it, in
+        // writing. Both are operator protocols, and that is the whole reason: `a == b` and `a < b`
+        // are `bool` expressions because of the operator, not because of the method, so a `compare`
+        // returning an `int` hands a value of the wrong type to an expression every reader — and
+        // the checker — types as `bool`. It has to be caught here, since there is no later door:
+        // `echo a == b` printed `7`.
+        //
+        // The annotation is *required* rather than merely matched-when-present, because an omitted
+        // return leaves the same hole open. That is no imposition: a trait method is an outward
+        // contract, which is why the same funnel already requires it to be `pub`.
+        if let Some(fixed) = t.fixed_return()
+            && let Some(m) = methods.iter().find(|m| m.name == req_name)
+        {
+            let want = fixed.name();
+            let declared = m.ret.as_ref().map(|_| self.annot_field(&m.ret));
+            let matches = declared
+                .as_ref()
+                .is_some_and(|got| Self::sig_types_compatible(&fixed.as_type(), got));
+            if !matches {
+                let message = match &declared {
+                    Some(got) => format!("`{req_name}` must return `{want}`, found `{got}`"),
+                    None => format!("`{req_name}` must declare that it returns `{want}`"),
+                };
+                self.error(DiagnosticCode::InvalidImpl, m.name_span, message)
+                    .help(format!(
+                        "`{trait_name}` powers an operator whose result the language fixes, so the \
+                     method's answer is read rather than passed on — write `fn {req_name}(…): \
+                     {want}`"
+                    ));
+            }
+        }
         // A built-in trait declares receiver-ness the same way a `.noe` trait does — with `static`
         // ([`BuiltinTrait::declares_static`]) — and it is enforced by the same rule, spelled once
         // (static-trait-methods arc). This USED to be a bespoke `if t == BuiltinTrait::From` that
@@ -254,12 +286,18 @@ impl Checker {
         }
     }
 
-    /// Validate a standalone `impl Trait for T {}` declaration. Three checks beyond the shared
+    /// Validate a standalone `impl Trait for T { … }` declaration. Two checks beyond the shared
     /// trait-side validation ([`Self::check_trait_impl`], also run): `T` must be a struct, class, or
-    /// enum **the program declares**, not a built-in or an unresolved name (E0013); the **package
-    /// orphan rule** ([`Self::check_package_orphan`], E0070); and the **built-in body restriction** —
-    /// a *user* trait's standalone impl may carry method bodies (hoisted onto the target), but a
-    /// built-in trait's must stay an empty-body marker (E0015).
+    /// enum **the program declares**, not a built-in or an unresolved name (E0013); and the
+    /// **package orphan rule** ([`Self::check_package_orphan`], E0070).
+    ///
+    /// **The trait's kind imposes no restriction of its own.** A standalone impl carries method
+    /// bodies for a built-in trait exactly as it does for a user trait — `impl Comparable for T { …
+    /// }` is the same declaration as the in-body `impl Comparable { … }`, and the backends' hoist
+    /// ([`noeta_ir::hoist_standalone_impl_methods`]) grafts either one onto `T`'s method table
+    /// before lowering, so the `(type, method)` dispatch both engines run cannot tell them apart.
+    /// The two spellings therefore share every rule: the trait's required method must be present
+    /// with the right arity, its methods must be `pub`, and the type may implement the trait once.
     ///
     /// "The program declares" is the whole linked program, not the one file: the checker runs
     /// downstream of the linker, so an imported type is a declared type like any other and a module
@@ -306,25 +344,6 @@ impl Checker {
             );
         }
         self.check_package_orphan(decl);
-        // A standalone `impl` with a method body is supported for **user traits** (L1, UT2 — its
-        // methods are hoisted onto the target type by the loader). A built-in trait's standalone
-        // impl is still marker-only: its operator/protocol methods live in the type's own body.
-        if !decl.methods.is_empty()
-            && !self
-                .symbols
-                .user_traits
-                .contains_key(decl.trait_name.as_str())
-        {
-            self.error(
-                DiagnosticCode::InvalidImpl,
-                decl.span,
-                "a standalone `impl` with methods is not yet supported for a built-in trait",
-            )
-            .help(
-                "only an empty-body capability impl (e.g. `impl Serialize for X {}`) is \
-                     supported here; write trait methods inside the type's own `class` body",
-            );
-        }
         self.check_trait_impl(
             decl.target.as_str(),
             decl.trait_name.as_str(),

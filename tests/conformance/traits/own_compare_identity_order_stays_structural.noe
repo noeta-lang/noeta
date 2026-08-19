@@ -1,0 +1,33 @@
+// A type's own `compare` decides every order a program OBSERVES. It never decides an IDENTITY
+// order — where a `set` places a value in its canonical buffer, and where a map places a key. Those
+// are built at one site and probed at another, so they stay a pure function of the value's own
+// words: a placement that ran user code at insertion and different user code at lookup would lose
+// a member that is present, which is worse than an order a reader finds surprising.
+//
+// So the set below iterates in ascending `n` (structural) while `sorted()` gives descending (the
+// type's own order), and every member is still found. Both are correct, and both are stated.
+// expect: stdout "[Rev {n: 3}, Rev {n: 2}, Rev {n: 1}]"
+// expect: stdout "{Rev {n: 1}, Rev {n: 2}, Rev {n: 3}}"
+// expect: stdout "1"
+// expect: stdout "2"
+// expect: stdout "3"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: exit 0
+struct Rev { n: int }
+impl Comparable for Rev {
+    pub fn compare(other: Rev): Ordering { return other.n.compare(self.n); }
+}
+
+xs = [Rev { n: 1 }, Rev { n: 3 }, Rev { n: 2 }];
+echo xs.sorted();
+s = xs.to_set();
+echo s;
+for r in s { echo r.n; }
+// The find-again property: every element put in is found again.
+echo s.contains(Rev { n: 1 });
+echo s.contains(Rev { n: 2 });
+echo s.contains(Rev { n: 3 });
+echo s.contains(Rev { n: 9 });

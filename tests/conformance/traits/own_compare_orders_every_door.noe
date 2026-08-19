@@ -1,0 +1,43 @@
+// A type that writes its own `compare` decides the order of its own values at EVERY door a program
+// can observe one through: `< <= > >=`, `.sorted()`, `.min()` and `.max()`. `Rev` orders by
+// descending `n`, so the smallest `Rev` is the one with the largest field — and every door agrees,
+// which is the whole property. (A structural comparator would answer the opposite on all five.)
+// expect: stdout "false"
+// expect: stdout "true"
+// expect: stdout "[Rev {n: 3}, Rev {n: 2}, Rev {n: 1}]"
+// expect: stdout "some(Rev {n: 3})"
+// expect: stdout "some(Rev {n: 1})"
+// expect: stdout "true"
+// expect: stdout "[Size.Large, Size.Small]"
+// expect: stdout "some(Size.Large)"
+// expect: exit 0
+struct Rev { n: int }
+impl Comparable for Rev {
+    pub fn compare(other: Rev): Ordering { return other.n.compare(self.n); }
+}
+
+a = Rev { n: 1 };
+b = Rev { n: 2 };
+echo a < b;
+echo a > b;
+
+xs = [Rev { n: 1 }, Rev { n: 3 }, Rev { n: 2 }];
+echo xs.sorted();
+echo xs.min();
+echo xs.max();
+// `min` is `sorted().first()` — the property the two share a comparator to keep.
+echo xs.min() == xs.sorted().first();
+
+// An ENUM's own `compare` reaches the same doors — a different dispatch path in the tree-walker
+// (the method table hangs off the enum's definition, not off the value), so it is pinned here too.
+// `Size` orders large-first, against the variant declaration order a derive would give.
+enum Size {
+    Small;
+    Large;
+    pub fn rank(): int { return match self { Size.Small => 1, Size.Large => 2 }; }
+    impl Comparable {
+        pub fn compare(other: Size): Ordering { return other.rank().compare(self.rank()); }
+    }
+}
+echo [Size.Small, Size.Large].sorted();
+echo [Size.Small, Size.Large].min();

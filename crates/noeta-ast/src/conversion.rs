@@ -58,17 +58,73 @@ pub fn from_method_key(source: &str) -> String {
 /// identically (and collide as the coherence conflict they are), and two impls naming different
 /// sources cannot collide.
 pub fn from_conversion_keys(impls: &[ImplBlock]) -> HashMap<Span, String> {
+    let mut out = HashMap::new();
+    collect_conversion_keys(
+        impls
+            .iter()
+            .map(|b| (b.trait_name.as_str(), b.trait_args.as_slice(), &b.methods)),
+        &mut out,
+    );
+    out
+}
+
+/// **The method-table key every conversion in the whole program occupies**, keyed by the span of
+/// each `from` — [`from_conversion_keys`] asked of both spellings at once.
+///
+/// A conversion is written either **in the target's body** (`impl From<Cents> { … }`) or **beside
+/// it** (`impl From<Cents> for Money { … }`), and the two are the same declaration: the backends'
+/// hoist grafts the standalone form's methods onto the target before lowering, so by the time a
+/// method table is built there is one flattened `from` per conversion and nothing left to say which
+/// spelling it came from. Its key must therefore be decided from the whole program rather than from
+/// one type's `impls` — otherwise the standalone form's `from` keeps the bare name, two of them
+/// collide in the table, and `Money.from(cents)` silently dispatches to whichever conversion the
+/// walk registered last.
+///
+/// Asked by everything that builds or resolves a method table — the checker's signature
+/// registration, IR lowering, the bytecode compiler's prototype reservation, and the reflection
+/// manifest — so the key is one answer to one question rather than four walks written to agree.
+pub fn from_conversion_keys_program(stmts: &[crate::Stmt]) -> HashMap<Span, String> {
+    use crate::Stmt;
+    let mut out = HashMap::new();
+    for stmt in stmts {
+        match stmt {
+            Stmt::Struct(d) => collect_conversion_keys(blocks(&d.impls), &mut out),
+            Stmt::Class(d) => collect_conversion_keys(blocks(&d.impls), &mut out),
+            Stmt::Enum(d) => collect_conversion_keys(blocks(&d.impls), &mut out),
+            Stmt::Impl(d) => collect_conversion_keys(
+                std::iter::once((d.trait_name.as_str(), d.trait_args.as_slice(), &d.methods)),
+                &mut out,
+            ),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The in-body impl blocks of one type as the shared `(trait, args, methods)` triples.
+fn blocks(
+    impls: &[ImplBlock],
+) -> impl Iterator<Item = (&str, &[crate::TypeRef], &Vec<crate::FnDecl>)> {
     impls
         .iter()
-        .filter(|b| b.trait_name.as_str() == FROM_TRAIT && b.trait_args.len() == 1)
-        .flat_map(|b| {
-            let key = from_method_key(&shape::type_source(&b.trait_args[0]));
-            b.methods
-                .iter()
-                .filter(|m| m.name.as_str() == FROM_METHOD)
-                .map(move |m| (m.name_span, key.clone()))
-        })
-        .collect()
+        .map(|b| (b.trait_name.as_str(), b.trait_args.as_slice(), &b.methods))
+}
+
+/// The one rule, over whichever impl form the caller has: a `From` block carrying exactly one type
+/// argument names its `from` after that source.
+fn collect_conversion_keys<'a>(
+    impls: impl Iterator<Item = (&'a str, &'a [crate::TypeRef], &'a Vec<crate::FnDecl>)>,
+    out: &mut HashMap<Span, String>,
+) {
+    for (trait_name, args, methods) in impls {
+        if trait_name != FROM_TRAIT || args.len() != 1 {
+            continue;
+        }
+        let key = from_method_key(&shape::type_source(&args[0]));
+        for m in methods.iter().filter(|m| m.name.as_str() == FROM_METHOD) {
+            out.insert(m.name_span, key.clone());
+        }
+    }
 }
 
 /// The source a conversion key names, or `None` if the name is not one — the inverse of

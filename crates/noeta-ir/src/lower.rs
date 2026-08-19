@@ -617,6 +617,19 @@ pub fn hoist_impl_methods_with_registry(
                 .collect()
         };
 
+    // The **method-table key** a declaration occupies, which is its declared name except for a
+    // `From` conversion — named after the source it converts. The skip below must ask this rather
+    // than the name: a type may legitimately carry several `from` bodies (one per source), and
+    // deduplicating them by name drops every conversion after the first, leaving a call the checker
+    // resolved to `from<Dimes>` with no body to reach.
+    let from_keys = noeta_ast::conversion::from_conversion_keys_program(&program.stmts);
+    let table_key = |m: &FnDecl| -> String {
+        from_keys
+            .get(&m.name_span)
+            .cloned()
+            .unwrap_or_else(|| m.name.to_string())
+    };
+
     let mut additions: StdHashMap<String, Vec<FnDecl>> = StdHashMap::new();
     for stmt in &program.stmts {
         if let AstStmt::Impl(decl) = stmt {
@@ -725,7 +738,10 @@ pub fn hoist_impl_methods_with_registry(
         }
         let add = additions.get(name.as_str()).cloned().unwrap_or_default();
         for m in add.into_iter().chain(synthesized) {
-            if !methods.iter().any(|existing| existing.name == m.name) {
+            if !methods
+                .iter()
+                .any(|existing| table_key(existing) == table_key(&m))
+            {
                 methods.push(m);
                 changed = true;
             }
@@ -966,6 +982,21 @@ pub struct ProgramFacts {
     /// is nameable only there, so a self-update of it is in that same body — which is in the
     /// fragment whenever it changed, and its own `ClassDef` is then in the IR in hand.
     pub own_destructors: HashSet<String>,
+    /// The **method-table key** each declared `From` conversion's `from` occupies, by the span of
+    /// that `from` — [`noeta_ast::conversion::from_conversion_keys_program`].
+    ///
+    /// A conversion is named after the source it converts (`from<Cents>`), and the two spellings
+    /// that declare one — in the target's body, or beside it as `impl From<Cents> for Money { … }`
+    /// — are indistinguishable by the time the hoist has flattened them onto the type. So the key
+    /// is a fact about the *program*, not about the type's own `impls`: a lowering that read only
+    /// the latter would name a standalone conversion's body the bare `from`, and two of them would
+    /// then occupy one table slot.
+    ///
+    /// It travels with the program for the same reason the rest of this bundle does: a hot swap of
+    /// the target class carries the class and not the standalone `impl` beside it, so a fragment
+    /// deriving this table alone would rename the surviving conversion out from under every call
+    /// site that already resolved it.
+    pub from_conversion_keys: HashMap<Span, String>,
 }
 
 impl ProgramFacts {
@@ -983,6 +1014,9 @@ impl ProgramFacts {
                 .collect(),
             module_globals: module_global_names(program),
             own_destructors: own_destructor_class_names(program),
+            from_conversion_keys: noeta_ast::conversion::from_conversion_keys_program(
+                &program.stmts,
+            ),
         }
     }
 
@@ -1008,6 +1042,7 @@ impl ProgramFacts {
         self.expr_tiers.extend(own.expr_tiers);
         self.module_globals.extend(own.module_globals);
         self.own_destructors.extend(own.own_destructors);
+        self.from_conversion_keys.extend(own.from_conversion_keys);
         self
     }
 
@@ -1019,6 +1054,7 @@ impl ProgramFacts {
         self.expr_tiers.extend(other.expr_tiers);
         self.module_globals.extend(other.module_globals);
         self.own_destructors.extend(other.own_destructors);
+        self.from_conversion_keys.extend(other.from_conversion_keys);
     }
 }
 
@@ -1763,8 +1799,7 @@ impl Lowerer<'_> {
             AstStmt::Class(decl) => {
                 let (methods, destructor, field_defaults) =
                     self.lower_type_body(&decl.name, |lw| {
-                        let methods =
-                            lw.lower_type_methods(&decl.name, &decl.methods, &decl.impls)?;
+                        let methods = lw.lower_type_methods(&decl.name, &decl.methods)?;
                         // The `destruct` block lowers to a parameterless block [`Func`] (fields
                         // resolve against the receiver, like a method), so the VM can compile it to
                         // a prototype.
@@ -1799,7 +1834,7 @@ impl Lowerer<'_> {
                 // object-model slice 3), lowered to IR funcs exactly like a struct's. Variant/derive
                 // data stays on the surface `decl`.
                 let methods = self.lower_type_body(&decl.name, |lw| {
-                    lw.lower_type_methods(&decl.name, &decl.methods, &decl.impls)
+                    lw.lower_type_methods(&decl.name, &decl.methods)
                 })?;
                 out.push(Stmt::Decl(Decl::Enum(EnumDef {
                     decl: Rc::new(decl.clone()),
@@ -1813,7 +1848,7 @@ impl Lowerer<'_> {
                 // lowered to IR funcs exactly like a class's — minus any `destruct` (structs have
                 // none). Field/derive data stays on the surface `decl`.
                 let (methods, field_defaults) = self.lower_type_body(&decl.name, |lw| {
-                    let methods = lw.lower_type_methods(&decl.name, &decl.methods, &decl.impls)?;
+                    let methods = lw.lower_type_methods(&decl.name, &decl.methods)?;
                     let field_defaults = lw.lower_field_defaults(&decl.fields)?;
                     Ok((methods, field_defaults))
                 })?;
@@ -1954,17 +1989,19 @@ impl Lowerer<'_> {
         &mut self,
         type_name: &noeta_ast::Name,
         methods: &[FnDecl],
-        impls: &[noeta_ast::ImplBlock],
     ) -> Result<Vec<(String, Rc<Func>)>, Unsupported> {
-        // A type declaring several `From` conversions carries several `from` bodies, which the
-        // parser flattened into `methods` under the one name they were written with. Each takes the
-        // key named after the source it converts, so the table both backends build from this list
-        // has one entry per conversion — and it is the same key the checker registered the
-        // signature under, because both ask [`noeta_ast::conversion::from_conversion_keys`].
-        let keys = noeta_ast::conversion::from_conversion_keys(impls);
+        // A `From` conversion's body arrives in `methods` under the one name it was written with —
+        // flattened there by the parser (an in-body block) or by the hoist (a standalone impl) —
+        // and takes the key named after the source it converts, so the table both backends build
+        // from this list has one entry per conversion. It is the same key the checker registered
+        // the signature under, because both ask [`noeta_ast::conversion`]. The map is a program
+        // fact ([`ProgramFacts::from_conversion_keys`]) rather than a per-type one: a standalone
+        // conversion's block is not in the target's own `impls`.
         let mut out = Vec::with_capacity(methods.len());
         for m in methods {
-            let key = keys
+            let key = self
+                .facts
+                .from_conversion_keys
                 .get(&m.name_span)
                 .cloned()
                 .unwrap_or_else(|| m.name.to_string());

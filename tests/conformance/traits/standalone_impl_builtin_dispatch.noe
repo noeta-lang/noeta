@@ -1,0 +1,39 @@
+// A standalone `impl BuiltinTrait for T { … }` is the same declaration as the in-body `impl
+// BuiltinTrait { … }`: its methods are grafted onto `T` before lowering, so both backends dispatch
+// them through the ordinary `(type, method)` table. `Comparable` lights up `< <= > >=`, `Display`
+// lights up `echo`/`${}`, and `Add` lights up `+` — from outside the type's body, which is the only
+// place a bodiless `struct` can say any of it.
+// expect: stdout "false"
+// expect: stdout "true"
+// expect: stdout "Rev#7"
+// expect: stdout "it is Rev#7"
+// expect: stdout "3"
+// expect: exit 0
+struct Rev { n: int }
+
+impl Comparable for Rev {
+    pub fn compare(other: Rev): Ordering {
+        return other.n.compare(self.n);
+    }
+}
+
+impl Display for Rev {
+    pub fn to_string(): string {
+        return "Rev#${self.n}";
+    }
+}
+
+impl Add for Rev {
+    pub fn add(other: Rev): Rev {
+        return Rev { n: self.n + other.n };
+    }
+}
+
+a = Rev { n: 1 };
+b = Rev { n: 2 };
+echo a < b;
+echo a > b;
+r = Rev { n: 7 };
+echo r;
+echo "it is ${r}";
+echo (Rev { n: 1 } + Rev { n: 2 }).n;

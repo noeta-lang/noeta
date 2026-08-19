@@ -3050,7 +3050,7 @@ impl BinaryOp {
             self,
             BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
         )
-        .then_some("compare")
+        .then_some(COMPARE_METHOD)
     }
 
     /// Map an `Ordering` variant name (`"Less"`/`"Equal"`/`"Greater"`, as returned by a
@@ -3086,6 +3086,11 @@ pub const SELF_TYPE: &str = "Self";
 /// is the canonical spelling shared by both backends so their values display and match identically.
 pub const ORDERING_VARIANTS: [&str; 3] = ["Less", "Equal", "Greater"];
 
+/// The method a `Comparable` implementation provides, and the name both engines look a type's
+/// **own** order up under — at `< <= > >=`, and at `.sorted()`/`.min()`/`.max()`. Spelled once so
+/// an ordering door cannot come to ask for a different name than the operator does.
+pub const COMPARE_METHOD: &str = "compare";
+
 /// The `Ordering` variant name for a `std::cmp::Ordering`. Keeps the primitive `.compare()` in
 /// both backends mapping to the same surface variant.
 pub fn ordering_variant(ordering: std::cmp::Ordering) -> &'static str {
@@ -3093,6 +3098,21 @@ pub fn ordering_variant(ordering: std::cmp::Ordering) -> &'static str {
         std::cmp::Ordering::Less => "Less",
         std::cmp::Ordering::Equal => "Equal",
         std::cmp::Ordering::Greater => "Greater",
+    }
+}
+
+/// The `std::cmp::Ordering` an `Ordering` variant name denotes — the inverse of
+/// [`ordering_variant`], and how a runtime **reads** the value a user's `compare` returned.
+///
+/// `None` for anything else, which is a `compare` that returned something other than an `Ordering`
+/// variant. The caller reports that rather than guessing at a direction: an ordering the runtime
+/// invented would place a value under one order and find it under another.
+pub fn ordering_of_variant(variant: &str) -> Option<std::cmp::Ordering> {
+    match variant {
+        "Less" => Some(std::cmp::Ordering::Less),
+        "Equal" => Some(std::cmp::Ordering::Equal),
+        "Greater" => Some(std::cmp::Ordering::Greater),
+        _ => None,
     }
 }
 

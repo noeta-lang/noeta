@@ -424,6 +424,20 @@ pub fn unorderable_error(method: &str) -> StdError {
     }
 }
 
+/// The canonical error for a type whose own `compare` answered with something that is not an
+/// `Ordering` — a `dyn` return the checker could not pin, most often. Both engines raise it with
+/// these words, because the alternative is each inventing a direction: an order the runtime guessed
+/// would place a value under one reading and look for it under another.
+pub fn compare_result_error(type_name: &str, found: &str) -> StdError {
+    StdError {
+        kind: ErrorKind::ArgType,
+        message: format!(
+            "`{type_name}.compare` must answer with an `Ordering` (`Ordering.Less`, \
+             `Ordering.Equal`, `Ordering.Greater`), found {found}"
+        ),
+    }
+}
+
 /// Build the canonical "slice out of bounds" error for `slice(start, end)` on a list of
 /// length `len`. Public so both backends render the bounds error identically (→ `IndexOutOfBounds`).
 pub fn slice_bounds_error(start: i64, end: i64, len: usize) -> StdError {

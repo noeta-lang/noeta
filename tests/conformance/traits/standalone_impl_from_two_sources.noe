@@ -1,0 +1,34 @@
+// A conversion is named after the source it converts (`from<Cents>`), and that holds for the
+// standalone spelling too — so a target may declare several of them from outside its body, each
+// reachable explicitly and each usable by `?`. Naming them all `from` would put two bodies in one
+// method-table slot, and the call would reach whichever was registered last.
+// expect: stdout "2"
+// expect: stdout "3"
+// expect: stdout "Err(High {m: "wrapped: boom"})"
+// expect: exit 0
+struct Cents { v: int }
+struct Dimes { v: int }
+struct Money { v: int }
+
+impl From<Cents> for Money {
+    pub fn from(value: Cents): Money { return Money { v: value.v / 100 }; }
+}
+
+impl From<Dimes> for Money {
+    pub fn from(value: Dimes): Money { return Money { v: value.v / 10 }; }
+}
+
+echo Money.from(Cents { v: 250 }).v;
+echo Money.from(Dimes { v: 30 }).v;
+
+struct Low { m: string }
+impl Error for Low { pub fn message(): string { return self.m; } }
+struct High { m: string }
+impl Error for High { pub fn message(): string { return self.m; } }
+impl From<Low> for High {
+    pub fn from(value: Low): High { return High { m: "wrapped: ${value.m}" }; }
+}
+
+fn inner(): Result<int, Low> { return Err(Low { m: "boom" }); }
+fn outer(): Result<int, High> { v = inner()?; return Ok(v); }
+echo outer();

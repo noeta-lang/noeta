@@ -1,0 +1,11 @@
+// A type implements each trait once. `@derive(Comparable)` and a standalone `impl Comparable for T`
+// are two implementations of one trait, so they cannot both apply — neither wins, and the collision
+// is reported rather than resolved (E0027). Removing either one leaves a program that runs.
+// expect: error E0027 at 8:6
+// expect: exit 1
+@derive(Comparable)
+struct Rev { n: int }
+impl Comparable for Rev {
+    pub fn compare(other: Rev): Ordering { return other.n.compare(self.n); }
+}
+echo Rev { n: 1 } < Rev { n: 2 };

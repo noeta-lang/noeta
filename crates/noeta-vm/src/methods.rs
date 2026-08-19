@@ -259,6 +259,12 @@ impl<'m> Vm<'m> {
             }
             noeta_stdlib::ListMethod::Sorted => {
                 self.stdlib_arity(name, args, 0, span)?;
+                // A type that writes its own `compare` decides the order of its own values, here
+                // exactly as it does at `<` — so `xs.sorted()` and `a < b` cannot disagree about
+                // one type. Every other list keeps the structural order below.
+                if self.elements_order_by_own_compare(&items) {
+                    return self.sort_by_own_compare(&items, span);
+                }
                 // Mutual orderability check against the first element (homogeneous numbers or
                 // strings — or derived-`Comparable` structs/enums, which order structurally via
                 // `compare_values`); a stable sort then matches the tree-walker element-for-element.

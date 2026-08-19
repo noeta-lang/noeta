@@ -303,6 +303,29 @@ Traits are a **fixed built-in set** — naming an unknown one is E0014. Operator
 
 `Ordering` is a namable built-in enum (`Ordering.Less` / `Equal` / `Greater`); calling `.compare()` on a primitive returns it.
 
+### Ordering your own type
+
+A type that implements `Comparable` decides the order of its own values at **every door a program can observe one through**: the operators `< <= > >=`, and `.sorted()`, `.min()` and `.max()` over a list of it. One comparator, so those can never disagree — `xs.min()` is `xs.sorted().first()` for any type, whatever its `compare` says.
+
+```noeta
+struct Rev { n: int }
+impl Comparable for Rev {
+    pub fn compare(other: Rev): Ordering { return other.n.compare(self.n) }
+}
+
+xs = [Rev { n: 1 }, Rev { n: 3 }, Rev { n: 2 }]
+echo xs.sorted()      // [Rev {n: 3}, Rev {n: 2}, Rev {n: 1}]
+echo xs.min()         // some(Rev {n: 3})
+```
+
+Two rules bound it, and both are worth knowing before you write a `compare`.
+
+**A `compare` orders its own type's values, and nothing else.** `@derive(Comparable)` is *field-wise structural* ordering by definition, so a derived type holding a field whose type writes its own `compare` still compares that field structurally. If you want the field's order, write the outer type's `compare` and call it — `return self.field.compare(other.field)`. This is what keeps `<` and `.sorted()` answering alike about the outer type, since the operator has always compared a derived type's fields structurally.
+
+**A `compare` never decides where a `set` or a `map` puts a value.** Those are *identity* orders: a value is placed at one moment and looked for at another, so the placement stays a pure function of the value's own fields. A set of a type that orders descending therefore iterates ascending, while `.sorted()` over the same elements gives you the type's own order — and every member you put in is still found. Running your code at insertion and again at lookup could lose a member that is present, which is a worse outcome than an iteration order that surprises a reader.
+
+A `compare` is not required to be a total order, and nothing checks that it is. One that isn't (reporting both `a < b` and `b < a`) yields some permutation of the input rather than a sorted list; it is never a crash, and both engines produce the same permutation.
+
 ## Bounds
 
 Constrain a parameter to a built-in trait with `<T: Trait>`:
@@ -367,6 +390,8 @@ class Money {
 echo (Money.new(3) < Money.new(5))   // true
 ```
 
+**`Equatable` and `Comparable` answer to the operator, so their return types are fixed.** `a == b` is a `bool` and `a < b` is a `bool` because of the operator, not because of the method behind it: `eq`'s answer *is* the result of `==` and `compare`'s is read as a direction, so they must be declared `bool` and `Ordering` respectively (E0015, and the return type is required rather than optional here). Every other trait leaves the return to you — `x.len()` is typed from the signature `Length`'s implementor wrote, so whatever it says, every reader agrees.
+
 **`Callable` makes an object invocable.** A type implementing `Callable` with a `call` method can be applied like a function — `obj(args)` dispatches to `obj.call(args)`, with the receiver's state in scope. The arity is the method's own (the protocol does not pin it), and the call is arity/argument-checked against the method's signature like any method call. A user type without a `call` method is statically not callable (E0007).
 
 ```noeta
@@ -380,7 +405,24 @@ add10 = Adder { base: 10 }
 echo add10(5)     // 15
 ```
 
-There is also a **standalone** `impl Trait for T { ... }`, which must target a struct, class, or enum **the program declares** — a target no module declares is E0013, a wrong or missing required method is E0015. "The program" is the whole linked program rather than the one file: a module may implement a trait for a sibling module's type, or for a type declared in the entry, so where in your package you put an impl is a matter of layout. Across a *package* boundary it is not free: the [orphan rule](#the-orphan-rule) requires the impl to sit with the trait or with the type (E0070). A standalone impl of a **user** trait may carry method bodies (hoisted onto the target type); an impl of a **built-in** trait must stay an empty-body marker (a body is E0015 — those methods live in the type's own body).
+There is also a **standalone** `impl Trait for T { ... }`, which must target a struct, class, or enum **the program declares** — a target no module declares is E0013, a wrong or missing required method is E0015. "The program" is the whole linked program rather than the one file: a module may implement a trait for a sibling module's type, or for a type declared in the entry, so where in your package you put an impl is a matter of layout. Across a *package* boundary it is not free: the [orphan rule](#the-orphan-rule) requires the impl to sit with the trait or with the type (E0070). It carries method bodies for any trait, built-in or user-declared — a bodiless `struct` has nowhere inside it to write one, and this is where its operators and protocols go:
+
+```noeta
+struct Rev { n: int }
+
+impl Comparable for Rev {
+    pub fn compare(other: Rev): Ordering { return other.n.compare(self.n) }   // descending
+}
+
+impl Display for Rev {
+    pub fn to_string(): string { return "Rev#${self.n}" }
+}
+
+echo (Rev { n: 1 } < Rev { n: 2 })                                // false — `Rev` orders the other way
+echo [Rev { n: 1 }, Rev { n: 3 }].sorted()                        // [Rev {n: 3}, Rev {n: 1}]
+```
+
+An empty body is the right thing only for a **marker** trait — one with no required method, like `Clone` or `Serialize<Json>` — where the impl is declaring a capability rather than supplying behavior.
 
 **A standalone impl travels with its type.** Wherever the target type reaches — a sibling module, a consumer of your package, a consumer that never names the type and only ever holds it as a `dyn Trait` — its standalone impls go with it, and every surface that reads trait membership sees them: the `dyn Trait` coercion, trait-method dispatch, the precise `x is dyn Trait` test, a `<T: Trait>` bound, and `traits_of(x)`. Which spelling you choose is a matter of layout, never of reach — an in-body `impl Trait { … }` block and a standalone `impl Trait for T { … }` declare the same thing, and a type that must be written one way to be usable from another module is a bug, not a rule.
 

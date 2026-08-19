@@ -111,6 +111,46 @@ pub enum BuiltinTrait {
 /// a marker trait with no hand-written method.
 pub type RequiredMethod = Option<(&'static str, Option<usize>)>;
 
+/// A return type the **language itself** fixes for a built-in trait's method — a closed set,
+/// because only two are fixed at all.
+///
+/// The distinction is *who decides the type of the expression the method's value flows into*. For
+/// `Add`, `Index`, `Length` and the rest, that is the implementor: `x.len()` is typed from the
+/// signature the type wrote, so a `len` returning a string types as a string and every reader
+/// agrees. For the two traits here it is the **operator**: `a == b` is a `bool` and `a < b` is a
+/// `bool` no matter what `eq`/`compare` say, because the operator — not the method — is what the
+/// program wrote. An unpinned return therefore leaks a value of the wrong type out of an expression
+/// whose static type says otherwise (`echo a == b` printing `7`), which is why these two are
+/// checked at the `impl` and the others are not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FixedReturn {
+    /// `Equatable::eq` — the value `==` yields, and the one `!=` negates.
+    Bool,
+    /// `Comparable::compare` — the `Ordering` `< <= > >=` each read a direction out of, and the
+    /// one `.sorted()`/`.min()`/`.max()` place a value by.
+    Ordering,
+}
+
+impl FixedReturn {
+    /// The type as a program writes it, for the diagnostic.
+    pub fn name(self) -> &'static str {
+        match self {
+            FixedReturn::Bool => "bool",
+            FixedReturn::Ordering => noeta_ast::reflect::ORDERING_ENUM,
+        }
+    }
+
+    /// The same as a [`Type`], for the checker to compare a declared return against.
+    pub fn as_type(self) -> crate::Type {
+        match self {
+            FixedReturn::Bool => crate::Type::Bool,
+            FixedReturn::Ordering => {
+                crate::Type::Named(noeta_ast::reflect::ORDERING_ENUM.to_string(), Vec::new())
+            }
+        }
+    }
+}
+
 /// The per-variant metadata of a [`BuiltinTrait`]: the name users write, the single method an `impl`
 /// block must provide (with its user-facing arity, i.e. excluding the receiver), the infix operator
 /// it overloads (if any), and whether it may be derived.
@@ -127,6 +167,9 @@ struct Info {
     operator: Option<BinaryOp>,
     /// Whether `@derive(Name)` is accepted for this trait.
     derivable: bool,
+    /// The return type the language fixes for [`Self::required_method`], where it fixes one — see
+    /// [`FixedReturn`].
+    fixed_return: Option<FixedReturn>,
 }
 
 impl BuiltinTrait {
@@ -135,58 +178,97 @@ impl BuiltinTrait {
     /// [`BinaryOp::overload_method`].
     fn info(self) -> Info {
         use BuiltinTrait::*;
-        let (name, required_method, operator, derivable): (
+        let (name, required_method, operator, derivable, fixed_return): (
             &'static str,
             RequiredMethod,
             Option<BinaryOp>,
             bool,
+            Option<FixedReturn>,
         ) = match self {
-            Add => ("Add", Some(("add", Some(1))), Some(BinaryOp::Add), false),
-            Sub => ("Sub", Some(("sub", Some(1))), Some(BinaryOp::Sub), false),
-            Mul => ("Mul", Some(("mul", Some(1))), Some(BinaryOp::Mul), false),
-            Div => ("Div", Some(("div", Some(1))), Some(BinaryOp::Div), false),
+            Add => (
+                "Add",
+                Some(("add", Some(1))),
+                Some(BinaryOp::Add),
+                false,
+                None,
+            ),
+            Sub => (
+                "Sub",
+                Some(("sub", Some(1))),
+                Some(BinaryOp::Sub),
+                false,
+                None,
+            ),
+            Mul => (
+                "Mul",
+                Some(("mul", Some(1))),
+                Some(BinaryOp::Mul),
+                false,
+                None,
+            ),
+            Div => (
+                "Div",
+                Some(("div", Some(1))),
+                Some(BinaryOp::Div),
+                false,
+                None,
+            ),
             Concat => (
                 "Concat",
                 Some(("concat", Some(1))),
                 Some(BinaryOp::Concat),
                 false,
+                None,
             ),
-            Equatable => ("Equatable", Some(("eq", Some(1))), None, true),
-            Comparable => ("Comparable", Some(("compare", Some(1))), None, true),
-            Display => ("Display", Some(("to_string", Some(0))), None, true),
+            Equatable => (
+                "Equatable",
+                Some(("eq", Some(1))),
+                None,
+                true,
+                Some(FixedReturn::Bool),
+            ),
+            Comparable => (
+                "Comparable",
+                Some(("compare", Some(1))),
+                None,
+                true,
+                Some(FixedReturn::Ordering),
+            ),
+            Display => ("Display", Some(("to_string", Some(0))), None, true, None),
             // The failure-value protocol: one nullary method, `message(): string`. Derivable
             // (error-ergonomics): the synthesized `message()` returns `"${self}"` — the type's
             // display story (requires Display, impl'd or derived; E0050 otherwise) — or forwards
             // into a field's own `message()` via `via:`.
-            Error => ("Error", Some(("message", Some(0))), None, true),
+            Error => ("Error", Some(("message", Some(0))), None, true, None),
             // The declared-conversion protocol: one associated function `from(value: Source):
             // Target`. Not derivable (a conversion body cannot be synthesized from fields).
             // Spelled in `noeta_ast::conversion`, which is also where a conversion's method-table
             // key is derived — the compiler reads that module and depends on no type-system crate,
             // so the trait's two words live there and are read here.
-            From => (FROM_TRAIT, Some((FROM_METHOD, Some(1))), None, false),
-            Clone => ("Clone", None, None, true),
-            Serialize => ("Serialize", None, None, true),
-            Deserialize => ("Deserialize", None, None, true),
-            Index => ("Index", Some(("get", Some(1))), None, false),
-            Length => ("Length", Some(("len", Some(0))), None, false),
-            Iterable => ("Iterable", Some(("iter", Some(0))), None, false),
+            From => (FROM_TRAIT, Some((FROM_METHOD, Some(1))), None, false, None),
+            Clone => ("Clone", None, None, true, None),
+            Serialize => ("Serialize", None, None, true, None),
+            Deserialize => ("Deserialize", None, None, true, None),
+            Index => ("Index", Some(("get", Some(1))), None, false, None),
+            Length => ("Length", Some(("len", Some(0))), None, false, None),
+            Iterable => ("Iterable", Some(("iter", Some(0))), None, false, None),
             // `Callable` makes an object invocable as `obj(args)` (dispatched to its `call`
             // method); the arity is the method's own business, so it is not pinned here.
-            Callable => ("Callable", Some(("call", None)), None, false),
-            Members => ("Members", Some(("get", Some(1))), None, false),
-            DynamicCall => ("DynamicCall", Some(("call", Some(2))), None, false),
-            TryAdd => ("TryAdd", Some(("try_add", Some(1))), None, false),
+            Callable => ("Callable", Some(("call", None)), None, false, None),
+            Members => ("Members", Some(("get", Some(1))), None, false, None),
+            DynamicCall => ("DynamicCall", Some(("call", Some(2))), None, false, None),
+            TryAdd => ("TryAdd", Some(("try_add", Some(1))), None, false, None),
             // The data-boundary invariant protocol: one nullary method, `validate(): Result<void,
             // E>`. Not derivable (an invariant is not synthesizable from fields). The return shape
             // is pinned separately by the checker (`Result<void, string | Error>`).
-            Validate => ("Validate", Some(("validate", Some(0))), None, false),
+            Validate => ("Validate", Some(("validate", Some(0))), None, false, None),
         };
         Info {
             name,
             required_method,
             operator,
             derivable,
+            fixed_return,
         }
     }
 
@@ -238,6 +320,12 @@ impl BuiltinTrait {
     /// Whether `@derive(Name)` is accepted for this trait.
     pub fn derivable(self) -> bool {
         self.info().derivable
+    }
+
+    /// The return type the **language** fixes for this trait's required method, or `None` where the
+    /// implementor decides it — see [`FixedReturn`] for which two, and why only those two.
+    pub fn fixed_return(self) -> Option<FixedReturn> {
+        self.info().fixed_return
     }
 
     /// How many **generic type arguments** `@derive(Name<…>)` requires for this trait. Only
@@ -362,6 +450,34 @@ mod tests {
         assert!(Gt.ordering_satisfies("Greater") && !Gt.ordering_satisfies("Equal"));
         assert!(Ge.ordering_satisfies("Greater") && Ge.ordering_satisfies("Equal"));
         assert!(!Lt.ordering_satisfies("Greater") && !Gt.ordering_satisfies("Less"));
+    }
+
+    /// Exactly the two **operator** protocols whose result type the language fixes carry a
+    /// [`FixedReturn`], and each names the type that operator yields. Every other trait's return is
+    /// the implementor's — `x.len()` is typed from the signature `Length`'s implementor wrote — so a
+    /// third entry here would be the table claiming an authority it does not have.
+    #[test]
+    fn only_the_operator_protocols_fix_their_return_type() {
+        let fixed: Vec<(&str, &str)> = BUILTIN_TRAITS
+            .iter()
+            .filter_map(|t| t.fixed_return().map(|r| (t.name(), r.name())))
+            .collect();
+        assert_eq!(
+            fixed,
+            vec![("Equatable", "bool"), ("Comparable", "Ordering")]
+        );
+        // The `Type` the checker compares against is the same one the message names.
+        assert_eq!(FixedReturn::Bool.as_type().to_string(), "bool");
+        assert_eq!(FixedReturn::Ordering.as_type().to_string(), "Ordering");
+        // A fixed return belongs to the trait's REQUIRED method, so a trait carrying one must have
+        // a required method for it to be about.
+        for t in BUILTIN_TRAITS {
+            assert!(
+                t.fixed_return().is_none() || t.required_method().is_some(),
+                "{} fixes a return with no method to fix it on",
+                t.name()
+            );
+        }
     }
 
     #[test]

@@ -58,6 +58,7 @@ pub mod map_key;
 pub mod math;
 pub mod metrics;
 pub mod net;
+pub mod ordering;
 pub mod quat;
 pub mod random;
 pub mod reactive;
