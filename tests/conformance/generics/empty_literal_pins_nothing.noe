@@ -1,0 +1,21 @@
+// The boundary of the rule beside it: an **empty** container literal at a generic call determines
+// nothing, so it pins nothing.
+//
+// A non-empty literal reports what it holds, and that is what instantiates the callee's type
+// parameter. `[]` holds nothing to read an element type off, so the parameter stays open — and a
+// callee that consumes the instantiation through a hidden slot (here `type_name::<T>()`, a runtime
+// type name) has no answer to consume. That is E0023 at CHECK time with the spelling that fixes it,
+// not a `"dyn"` invented at run time.
+//
+// Pinned as its own case because the fix for the non-empty literal must not reach this far: an
+// expectation with nothing to say is not an expectation, but an argument with nothing to say is not
+// an instantiation either, and inventing one from the callee's own parameter is the defect this
+// pair fences off from both sides.
+// expect: error E0023 at 21:6
+// expect: exit 1
+
+fn of_list<T>(xs: List<T>): string {
+    return type_name::<T>();
+}
+
+echo of_list([]);

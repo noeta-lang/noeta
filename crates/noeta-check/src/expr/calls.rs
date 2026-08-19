@@ -382,7 +382,9 @@ impl Checker {
         // application over the slots). An instantiation the expectation leaves open (or a
         // pass-through with no matching enclosing slot) returns `None`: the caller falls back to
         // synthesis, whose `Ident` arm reports the value boundary once, exactly as before.
-        if self.symbols.forwarding.contains_key(name) || !self.render_slot_params(name).is_empty() {
+        if self.symbols.forwarding.contains_key(name)
+            || !self.render_slot_templates(name).is_empty()
+        {
             let hidden = self.resolve_value_hidden_slots(name, &subst, &tps, span)?;
             self.sites.hidden_arg_sites.insert(span, hidden);
             self.sites
@@ -419,7 +421,7 @@ impl Checker {
             .get(name)
             .cloned()
             .unwrap_or_default();
-        let render = self.render_slot_params(name);
+        let render = self.render_slot_templates(name);
         if fwd.is_empty() && render.is_empty() {
             return None;
         }
@@ -450,8 +452,8 @@ impl Checker {
         }
         // The render slots follow, and never refuse the value: an expectation that leaves the
         // instantiation open erases them, and the wrapped value renders the erased word.
-        for param in &render {
-            let arg = self.render_hidden_arg(param, subst, span);
+        for template in &render {
+            let arg = self.render_hidden_arg(template, subst, span);
             hidden.push(arg);
         }
         Some(hidden)
