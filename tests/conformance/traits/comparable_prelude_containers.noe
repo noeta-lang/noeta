@@ -1,0 +1,53 @@
+// **`?T` and `Result<T, E>` are ordered exactly when their payloads are.**
+//
+// Both are prelude enums, and both backends order an enum by variant declaration index first and
+// then its payload — so `none` sorts below every `some(x)`, and two `some`s sort by what they hold.
+// That is the same structural rule a user enum gets from `@derive(Comparable)`, and it has to be
+// reachable the same ways: `<`, `sorted`, `min`/`max`, and a `T: Comparable` bound.
+//
+// There is nowhere to write the derive — the prelude declares these — so the payload is what
+// answers. A payload with no ordering leaves the container with none either.
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "true"
+// expect: stdout "[none, some(1), some(2)]"
+// expect: stdout "some(none)"
+// expect: stdout "some(some(2))"
+// expect: stdout "true"
+// expect: stdout "[Ok(1), Ok(2), Err(a)]"
+// expect: stdout "some(some(1))"
+// expect: stdout "some(some(Money {cents: 900}))"
+// expect: stdout "[none, some(1), some(2)]"
+// expect: exit 0
+
+@derive(Comparable)
+struct Money { cents: int }
+
+a: ?int = some(1);
+b: ?int = some(2);
+nothing: ?int = none;
+
+echo a < b;
+echo b < a;
+echo nothing < a;
+
+echo [b, nothing, a].sorted();
+echo [b, nothing, a].min();
+echo [b, nothing, a].max();
+
+// A `Result` follows both payloads, and `Ok`/`Err` order by variant declaration index.
+ok1: Result<int, string> = Ok(1);
+ok2: Result<int, string> = Ok(2);
+bad: Result<int, string> = Err("a");
+echo ok1 < ok2;
+echo [ok2, bad, ok1].sorted();
+
+// Through a bound, and over a payload that is itself a declared-ordering value kind.
+fn smallest<T: Comparable>(xs: List<T>): ?T { return xs.min(); }
+echo smallest([b, a]);
+echo [some(Money { cents: 25 }), some(Money { cents: 900 })].max();
+
+// A bounded type parameter answers inside the container exactly as it does bare, so a generic body
+// may sort a `List<?T>` under the same `T: Comparable` a `List<T>` needs.
+fn ordered_opts<T: Comparable>(xs: List<?T>): List<?T> { return xs.sorted(); }
+echo ordered_opts([b, nothing, a]);

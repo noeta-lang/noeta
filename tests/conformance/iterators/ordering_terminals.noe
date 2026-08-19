@@ -1,0 +1,70 @@
+// **The iterator's ordering terminals, `min()` and `max()`.**
+//
+// A lazy pipeline ends the same ways an eager list does. `sum` and `count` were already terminals;
+// `min`/`max` complete the set, so `xs.iter().take(k).min()` is a thing you can write instead of
+// `xs.iter().take(k).collect().min()` — and the two are the same value, because both end in the one
+// eager reduction rather than in two folds that could drift.
+//
+// They demand of the element type exactly what the eager `min`/`max` demand, and what `<` demands:
+// an ordering. `?T` with `none` for a drained iterator, matching the eager `none` for an empty list.
+//
+// A `u64` element reads unsigned here too. The width lives on the static type, so the door is
+// marked the same way the list's is — including through the width-preserving adapters, where the
+// elements have long since become erased i64 words.
+// expect: stdout "some(1)"
+// expect: stdout "some(5)"
+// expect: stdout "some(1)"
+// expect: stdout "true"
+// expect: stdout "some(2)"
+// expect: stdout "none"
+// expect: stdout "none"
+// expect: stdout "some(pear)"
+// expect: stdout "some(apple)"
+// expect: stdout "some(5)"
+// expect: stdout "some(Money {cents: 25})"
+// expect: stdout "some(Money {cents: 900})"
+// expect: stdout "some(18446744073709551615)"
+// expect: stdout "some(18446744073709551615)"
+// expect: stdout "some(-7)"
+// expect: stdout "some(-7)"
+// expect: stdout "some(1)"
+// expect: exit 0
+
+@derive(Comparable)
+struct Money { cents: int }
+
+xs = [3, 1, 5, 2];
+echo xs.iter().min();
+echo xs.iter().max();
+
+// The adapter chain and its eager spelling agree.
+echo xs.iter().take(2).min();
+echo xs.iter().take(2).min() == xs.iter().take(2).collect().min();
+echo xs.iter().drop(3).max();
+
+// A drained iterator is `none`, like an empty list.
+empty: List<int> = [];
+echo empty.iter().min();
+echo xs.iter().drop(9).max();
+
+// Every ordered element type the eager reduction takes.
+words = ["pear", "fig", "apple"];
+echo words.iter().max();
+echo words.iter().min();
+echo words.iter().map(fn(w) => w.len()).max();
+echo [Money { cents: 900 }, Money { cents: 25 }].iter().min();
+echo [Money { cents: 900 }, Money { cents: 25 }].iter().max();
+
+// A `u64` reads unsigned, straight off the list and through an adapter.
+big: List<u64> = [1u64, 18446744073709551615u64];
+echo big.iter().max();
+echo big.iter().take(2).max();
+
+// A narrow signed width keeps its sign.
+narrow: List<i32> = [5i32, -7i32];
+echo narrow.iter().min();
+echo narrow.iter().take(2).min();
+
+// A generic body reaches them under the bound that promises the ordering.
+fn smallest<T: Comparable>(xs: List<T>): ?T { return xs.iter().min(); }
+echo smallest([3, 1, 2]);

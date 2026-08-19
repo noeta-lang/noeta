@@ -1,0 +1,35 @@
+// **`<` orders two `int`s exactly, not as `f64`.**
+//
+// Adjacent values near `i64::MAX` are the visible case: `f64` has 53 bits of mantissa, so both of
+// these round to the same double and every comparison between them comes out `false` — including
+// `a < b`, which is true. `sorted()` and `min()`/`max()` were always exact (they fold through the
+// runtime's one comparator), so the operator disagreeing with them was the tell.
+//
+// The three doors are checked against each other here, because agreement is the property: one
+// comparator serves `<`, `sorted` and the extremum reductions, and there is no second opinion for
+// them to drift from.
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "false"
+// expect: stdout "true"
+// expect: stdout "[9223372036854775806, 9223372036854775807]"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: exit 0
+
+a = 9223372036854775806;
+b = 9223372036854775807;
+
+echo a < b;
+echo b < a;
+echo a == b;
+echo a <= b;
+
+echo [b, a].sorted();
+echo [b, a].min() == some(a);
+echo [b, a].max() == some(b);
+
+// And the same at the negative end, where the rounding lands the other way.
+lo = -9223372036854775807;
+echo lo < lo + 1;

@@ -304,6 +304,11 @@ impl Checker {
     pub(crate) fn elem_facts(&self, recv: &Type) -> crate::stdlib::ElemFacts {
         let elem = match recv {
             Type::List(elem) | Type::Set(elem) => elem.as_ref(),
+            // An `Iterator<T>` is a collection of `T`s too — its terminals answer the same
+            // question about the same element type as the eager list methods do.
+            Type::Named(n, args) if n == crate::stdlib::ITERATOR => {
+                args.first().unwrap_or(&Type::Dyn)
+            }
             _ => return crate::stdlib::ElemFacts::default(),
         };
         crate::stdlib::ElemFacts {
@@ -311,27 +316,30 @@ impl Checker {
         }
     }
 
-    /// Report a built-in list method refused because the **element type** does not meet what the
-    /// method demands of it, and say which demand. `true` when this reported; the caller then skips
-    /// the generic "has no method", which is the wrong story — the method exists, this list's
-    /// elements cannot supply what it computes with.
+    /// Report a built-in collection method refused because the **element type** does not meet what
+    /// the method demands of it, and say which demand. `true` when this reported; the caller then
+    /// skips the generic "has no method", which is the wrong story — the method exists, this
+    /// receiver's elements cannot supply what it computes with.
     ///
     /// The ordering case on an in-scope unbounded type parameter is `E0025`, the same diagnostic
-    /// `a < b` gives for the same missing bound, because it is the same fact: `xs.max()` orders
-    /// `T`s. Everything else is `E0007` naming the requirement.
+    /// `a < b` gives for the same missing bound, because it is the same fact: `xs.sorted()` and
+    /// `xs.max()` order `T`s. Everything else is `E0007` naming the requirement.
     pub(crate) fn report_unmet_element_requirement(
         &mut self,
         recv: &Type,
         name: &str,
         span: Span,
     ) -> bool {
-        let Type::List(elem) = recv else {
+        let elem = match recv {
+            Type::List(elem) => (**elem).clone(),
+            Type::Named(n, args) if n == crate::stdlib::ITERATOR => {
+                args.first().cloned().unwrap_or(Type::Dyn)
+            }
+            _ => return false,
+        };
+        let Some(req) = crate::stdlib::ElemReq::of_method(recv, name) else {
             return false;
         };
-        let Some(req) = crate::stdlib::ElemReq::of_list_method(name) else {
-            return false;
-        };
-        let elem = (**elem).clone();
         // Met means the method's absence is not this rule's doing — leave the caller's message.
         if req.met_by(&elem, self.elem_facts(recv)) {
             return false;
@@ -343,21 +351,25 @@ impl Checker {
                 DiagnosticCode::TraitBoundNotSatisfied,
                 span,
                 format!(
-                    "`{name}()` orders the list's elements, which requires `{p}: Comparable`, \
+                    "`{name}()` orders the elements, which requires `{p}: Comparable`, \
                      but `{p}` is an unbounded type parameter"
                 ),
             )
             .help(format!(
-                "declare the bound (`<{p}: Comparable>`); the extremum is taken under the same \
-                 total order `.sorted()` sorts by"
+                "declare the bound (`<{p}: Comparable>`); the order is the one `<` gives, so a `T` \
+                 that can be sorted is a `T` that can be compared"
             ));
             return true;
         }
+        let elements = match recv {
+            Type::List(_) => "this list's elements",
+            _ => "this iterator's elements",
+        };
         self.error(
             DiagnosticCode::TypeMismatch,
             span,
             format!(
-                "`{name}()` needs {}, but this list's elements are `{elem}`",
+                "`{name}()` needs {}, but {elements} are `{elem}`",
                 req.wants()
             ),
         )

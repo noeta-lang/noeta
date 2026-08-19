@@ -54,7 +54,7 @@ xs[1] = 20             // sugar for  xs = xs.set(1, 20)  (needs a mut binding)
 | `reverse` | `reverse() -> List<T>` | `[3,1,2].reverse()` → `[2, 1, 3]` |
 | `contains` | `contains(x: T) -> bool` | `[1,2,3].contains(2)` → `true` |
 | `join` | `join(sep?: string) -> string` | `["a","b"].join("-")` → `a-b`; `[1,2,3].join()` → `123` (sep defaults to empty) |
-| `sorted` | `sorted() -> List<T>` | `[3,1,2].sorted()` → `[1, 2, 3]` |
+| `sorted` | `sorted() -> List<T>` | needs an ordered `T` (see [Reductions](#reductions)); `[3,1,2].sorted()` → `[1, 2, 3]` |
 | `slice` | `slice(start: int, end?: int) -> List<T>` | `[1,2,3,4].slice(1,3)` → `[2, 3]`; `[1,2,3,4].slice(1)` → `[2, 3, 4]` (end defaults to the length) |
 | `first` | `first() -> ?T` | `[1,2].first()` → `some(1)`; `[].first()` → `none` |
 | `last` | `last() -> ?T` | `[1,2].last()` → `some(2)` |
@@ -89,10 +89,17 @@ A reduction folds the whole list to one value, and each one asks something of th
 | `any` / `all` | `any() -> bool` | `T = bool` | `[false,true].any()` → `true` |
 | `count` | `count() -> int` | `T = bool` | `[true,false,true].count()` → `2` (the `true`s; `len()` is the size) |
 
-`min`/`max` order by the **same total order** `sorted()` sorts by — numbers, strings, bools, and value kinds (structs and enums) ordering structurally — so `xs.min()` and `xs.sorted().first()` are always the same value. `sum`/`product` fold at the element's numeric width and wrap there, exactly as repeated `+`/`*` would.
+`min`/`max` order by the **same total order** `sorted()` sorts by, so `xs.min()` and `xs.sorted().first()` are always the same value. `sum`/`product` fold at the element's numeric width and wrap there, exactly as repeated `+`/`*` would.
+
+### What "an ordered `T`" means
+
+`sorted()`, `min()` and `max()` hand the program an order, so they ask the element type for the same thing `<` asks for: an ordering it **declares**. Numbers, strings and bools have one built in; `?T` and `Result<T, E>` have one when their payloads do (variant first — `none` sorts below every `some(x)`); a native type declares one (`Uuid` orders by its bytes, which for `uuid_v7` is creation time); and a struct, class or enum you write declares one with [`@derive(Comparable)`](Derives), which orders it field-wise. Without it the call is E0007 naming the element type.
+
+The declaration is the point rather than a formality: a value kind orders field-wise, in declaration order, so *swapping two fields* would silently re-sort every list of that type. `@derive(Comparable)` is where you say that the field order is the sort order.
 
 Inside a generic body the element type is whatever the caller chose, so the requirement becomes a **bound**: `fn top<T: Comparable>(xs: List<T>): ?T { return xs.max() }` compiles and instantiates at every ordered type. Without the bound the ordering is not promised and the call is E0025, naming the bound to add. The arithmetic and boolean reductions have no bound that promises a number or a `bool`, so they stay available only where the element type says so directly.
 
+A **set** asks for less, and `to_set()` accordingly takes any value kind: a set sorts to get membership and de-duplication, not to answer a question about order, so no declaration is required to put a value in one.
 
 ## Map
 
@@ -131,7 +138,7 @@ Packed-struct keys are the spatial-hash idiom — see [Fixed-Width Ints & Packed
 
 Sorted and de-duplicated; not indexable. Display form `{1, 2, 3}` (an empty set displays as `{}`); the empty-set literal is written `#{}`, since a bare `{}` is a map.
 
-Elements are a single **orderable** type: a primitive, a key-capable native type, a key-capable `@packed` struct (ordered by content — type name, then field-wise), or any other **value kind** — structs and enums order structurally (the same ordering `@derive(Comparable)` and `.sorted()` use), so `[P {x: 2}, P {x: 1}].to_set()` canonicalizes like any primitive set. A `class` element is rejected (statically at a `Set<T>` annotation): a set stores a sorted snapshot, and a reference could be mutated after insertion.
+Elements are a single **orderable** type: a primitive, a key-capable native type, a key-capable `@packed` struct (ordered by content — type name, then field-wise), or any other **value kind** — structs and enums order structurally, so `[P {x: 2}, P {x: 1}].to_set()` canonicalizes like any primitive set whether or not `P` declares an ordering. That is the difference between a set and `sorted()`: the buffer a set keeps is how it gets membership and de-duplication, not an order the program asked for, so building one takes no `Comparable`. A `class` element is rejected (statically at a `Set<T>` annotation): a set stores a sorted snapshot, and a reference could be mutated after insertion.
 
 ```noeta
 s = #{3, 1, 2, 1}     // set literal (sugar for [...].to_set())
@@ -198,11 +205,15 @@ The constructors — and `panic` — are ordinary values you can pass around: `r
 | `zip` | `zip(other: Iterator<B>) -> Iterator<(T, B)>` | pair up (stops at the shorter) |
 | `count` | `count() -> int` | drain and count |
 | `sum` | `sum() -> int \| float` | drain and total |
+| `min` / `max` | `min() -> ?T` | drain and take the extremum; `none` if already drained |
 
 ```noeta
 echo [1,2,3,4,5].iter().map(fn(n) => n * 10).take(3).collect()   // [10, 20, 30]
 echo [1,2,3].iter().zip(["a","b","c"].iter()).collect()          // [(1, "a"), (2, "b"), (3, "c")]
+echo [3,1,5,2].iter().take(2).min()                              // some(1)
 ```
+
+`count`, `sum`, `min` and `max` are **terminals**: they drain the iterator and hand back a plain value. `sum`, `min` and `max` answer exactly what their eager `List` twins answer over the same elements — `xs.iter().take(k).min()` and `xs.iter().take(k).collect().min()` are the same value — and `min`/`max` ask the element type for the same declared ordering the list's do. An iterator's `count` is the number of elements left, which is the list's `len()` rather than the list's `count()` (that one is a `List<bool>` reduction).
 
 Generators (`yield`) produce iterators too — see [Concurrency](Concurrency#generators--yield).
 

@@ -436,7 +436,7 @@ pub(super) fn method_return(
         Type::Map(key, val) => map_method(name, key, val),
         Type::Bytes => bytes_method(name),
         Type::Named(n, args) if n == ITERATOR => {
-            iterator_method(name, args.first().unwrap_or(&Type::Dyn))
+            iterator_method(name, args.first().unwrap_or(&Type::Dyn), facts)
         }
         Type::Named(n, args) if n == FUTURE => {
             future_method(name, args.first().unwrap_or(&Type::Dyn))
@@ -566,7 +566,14 @@ fn iterable_iter(elem: Type) -> Type {
     Type::Named(ITERATOR.to_string(), vec![elem])
 }
 
-fn iterator_method(name: &str, elem: &Type) -> Option<Type> {
+fn iterator_method(name: &str, elem: &Type, facts: ElemFacts) -> Option<Type> {
+    // The element-type gate, read from the one requirement table (the list's gate reads it too), so
+    // an iterator terminal and its eager twin can never disagree about what an element must be.
+    if let Some(req) = ElemReq::of_iterator_method(name)
+        && !req.met_by(elem, facts)
+    {
+        return None;
+    }
     Some(match name {
         "next" => opt(elem.clone()),
         "collect" => list(elem.clone()),
@@ -588,6 +595,11 @@ fn iterator_method(name: &str, elem: &Type) -> Option<Type> {
         // `xs.iter().take(k).sum()` agrees with `xs.sum()`; a non-numeric element stays `Unknown` (as
         // the eager `sum` builtin does, so it never newly rejects).
         "sum" => numeric_reduce(elem).unwrap_or(Type::Unknown),
+        // The **ordering** terminals, the lazy twins of the eager list reductions: `?T`, `none` on
+        // a drained iterator, picking the extremum under the one total order the runtime has — so
+        // `xs.iter().take(k).min()` and `xs.iter().take(k).collect().min()` are the same value.
+        // Their element requirement is the [`ElemReq::Ordered`] gate above, which is the list's.
+        "min" | "max" => opt(elem.clone()),
         _ => return None,
     })
 }
@@ -691,10 +703,11 @@ fn string_method(name: &str) -> Option<Type> {
 /// Whether the built-in method `name` on receiver `recv` produces or reveals an order a program can
 /// **observe** — the doors [`crate::Sites::order_hint_sites`] is recorded at.
 ///
-/// `sorted`/`min`/`max` compute an order over a list's elements; `keys`/`values` hand back a map's
-/// entries in key order. `to_set`, `add`, `union`, `contains` and `has` are absent on purpose: those
-/// build or probe an identity order, which must stay a pure function of the erased word. The list
-/// reductions are spelled here beside [`numeric_reduce`], which types them, so the two cannot drift.
+/// `sorted`/`min`/`max` compute an order over a list's elements, and `min`/`max` do the same over an
+/// iterator's remaining ones; `keys`/`values` hand back a map's entries in key order. `to_set`,
+/// `add`, `union`, `contains` and `has` are absent on purpose: those build or probe an identity
+/// order, which must stay a pure function of the erased word. The list reductions are spelled here
+/// beside [`numeric_reduce`], which types them, so the two cannot drift.
 pub(super) fn reveals_order(recv: &Type, name: &str) -> bool {
     use noeta_ext_abi::{ListMethod, MapMethod};
     match recv {
@@ -702,6 +715,9 @@ pub(super) fn reveals_order(recv: &Type, name: &str) -> bool {
             matches!(ListMethod::from_name(name), Some(ListMethod::Sorted))
                 || matches!(name, "min" | "max")
         }
+        // An iterator's ordering terminals observe the same order over the same elements, so a
+        // `u64` element reads unsigned through `xs.iter().min()` exactly as through `xs.min()`.
+        Type::Named(n, _) if n == ITERATOR => matches!(name, "min" | "max"),
         Type::Map(..) => matches!(
             MapMethod::from_name(name),
             Some(MapMethod::Keys | MapMethod::Values)
@@ -757,14 +773,22 @@ pub(super) struct ElemFacts {
     pub orderable: bool,
 }
 
-/// What a built-in `List` method demands of its **element type**, for the methods that demand
-/// anything at all. The single table behind both the availability gate in [`list_method`] and the
-/// refusal diagnostic the checker raises when it is not met, so a method can never be refused for
-/// a reason the diagnostic does not name.
+/// What a built-in collection method demands of its **element type**, for the methods that demand
+/// anything at all. The single table behind both the availability gate in [`list_method`] /
+/// [`iterator_method`] and the refusal diagnostic the checker raises when it is not met, so a
+/// method can never be refused for a reason the diagnostic does not name.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum ElemReq {
-    /// An **ordering** over the elements: `min`/`max` pick an extremum under the same total order
-    /// `.sorted()` uses, so they need exactly what an ordering operator needs — `Comparable`.
+    /// An **ordering** over the elements: `sorted`, `min` and `max` all hand the program an order
+    /// it can see, computed by one comparator, so they need exactly what an ordering operator
+    /// needs — `Comparable`.
+    ///
+    /// The **identity** orders are deliberately not here. `to_set`, a set literal, `add`, `union`
+    /// and a map's key placement also sort, but the buffer they sort is how a set gets membership
+    /// and de-duplication — it is not an ordering the program asked for, and it is the same
+    /// distinction [`reveals_order`] draws for the unsigned render hint. So a value kind lands in a
+    /// `Set<T>` without declaring an ordering, and asking for that order back — `sorted()` — is
+    /// what requires the declaration.
     Ordered,
     /// A **number**: the arithmetic folds and the element-wise array methods compute with `+`/`*`
     /// and a width, which only a numeric element has.
@@ -778,7 +802,7 @@ impl ElemReq {
     /// any element type.
     pub(super) fn of_list_method(name: &str) -> Option<ElemReq> {
         Some(match name {
-            "min" | "max" => ElemReq::Ordered,
+            "sorted" | "min" | "max" => ElemReq::Ordered,
             "sum" | "product" | "checked_sum" | "scale" | "abs" | "neg" | "clamp" => {
                 ElemReq::Numeric
             }
@@ -787,14 +811,37 @@ impl ElemReq {
         })
     }
 
+    /// The requirement each element-gated **iterator** method carries — its own table, because the
+    /// two surfaces overlap by name and not by meaning: an iterator's `count` is the number of
+    /// remaining elements (no `bool` involved), and its `sum` stays open at a non-numeric element
+    /// so it never newly rejects. The ordering terminals are the shared half, and they read the
+    /// same [`ElemReq::Ordered`] the list's do — one opinion about what orders.
+    pub(super) fn of_iterator_method(name: &str) -> Option<ElemReq> {
+        match name {
+            "min" | "max" => Some(ElemReq::Ordered),
+            _ => None,
+        }
+    }
+
+    /// The requirement `name` carries on `recv`, whichever built-in surface `recv` is — the one
+    /// entry point the checker's gate and its refusal diagnostic both ask, so a receiver kind
+    /// cannot be gated by one table and explained by the other.
+    pub(super) fn of_method(recv: &Type, name: &str) -> Option<ElemReq> {
+        match recv {
+            Type::List(_) => ElemReq::of_list_method(name),
+            Type::Named(n, _) if n == ITERATOR => ElemReq::of_iterator_method(name),
+            _ => None,
+        }
+    }
+
     /// Whether `elem` meets this requirement.
     ///
     /// An element that **defers to the runtime** (`dyn`, an inference hole) meets every one of
-    /// them, which is the gradual rule the rest of the checker follows and the same tolerance
-    /// `.sorted()` already has: a `List<dyn>` may well hold numbers, so refusing the fold statically
-    /// would reject a correct program to catch an incorrect one the runtime catches anyway. An
-    /// erased **type parameter** is not that case — its instantiation is a fact the declaration can
-    /// state, which is what a bound is for, so it meets `Ordered` only through `Comparable`.
+    /// them, which is the gradual rule the rest of the checker follows: a `List<dyn>` may well hold
+    /// numbers, so refusing the fold statically would reject a correct program to catch an
+    /// incorrect one the runtime catches anyway. An erased **type parameter** is not that case —
+    /// its instantiation is a fact the declaration can state, which is what a bound is for, so it
+    /// meets `Ordered` only through `Comparable`.
     pub(super) fn met_by(self, elem: &Type, facts: ElemFacts) -> bool {
         match self {
             ElemReq::Ordered => facts.orderable,
@@ -1072,7 +1119,7 @@ fn builtin_method_required(receiver: &Type, name: &str) -> Option<usize> {
 
 fn iterator_params(name: &str, elem: &Type) -> Option<Vec<Type>> {
     Some(match name {
-        "next" | "collect" | "count" | "enumerate" | "sum" => vec![],
+        "next" | "collect" | "count" | "enumerate" | "sum" | "min" | "max" => vec![],
         "take" | "drop" => vec![Type::Int],
         // `chain` takes another iterator over the same element type.
         "chain" => vec![iterable_iter(elem.clone())],

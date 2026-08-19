@@ -1,0 +1,20 @@
+// **What the iterator's ordering terminals demand of the element type.**
+//
+// The negative half of `ordering_terminals.noe`, and it is the *same* half the eager list
+// reductions have: `min`/`max` order the elements, so they need what `<` needs. An iterator is not
+// a loophole around that — the requirement is read from one table for both surfaces, so a pipeline
+// cannot quietly order a type the eager spelling refuses.
+//
+// An unbounded type parameter is E0025 with a one-word fix; a concrete element type that carries no
+// ordering is E0007 naming the element.
+// expect: error E0025 at 16:42
+// expect: error E0007 at 19:6
+// expect: exit 1
+
+struct Plain { b: int }
+
+fn smallest<T>(xs: List<T>): ?T { return xs.iter().min(); }
+
+parts = [Plain { b: 2 }, Plain { b: 1 }];
+echo parts.iter().max();
+echo smallest([1, 2]);
