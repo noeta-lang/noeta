@@ -31,10 +31,10 @@
 // expect: stdout "through dyn, observed: {-1, 1}"
 // expect: stdout "sets equal across the boundary: true"
 // expect: stdout "maps equal across the boundary: true"
-// expect: stdout "composed, found: true"
-// expect: stdout "composed, absent: false"
-// expect: stdout "composed, keyed: yes"
-// expect: stdout "composed, observed: {1, 18446744073709551615}"
+// expect: stdout "composed, found: true {1, 18446744073709551615}"
+// expect: stdout "composed, absent: false {1, 18446744073709551615}"
+// expect: stdout "composed, keyed: a {1: "b", 18446744073709551615: "a"}"
+// expect: stdout "composed, sorted: [1, 18446744073709551615]"
 // expect: stdout "composed, equal: true"
 // expect: exit 0
 
@@ -135,46 +135,36 @@ echo "sets equal across the boundary: ${erased.build(d, o) == anyset}";
 echo "maps equal across the boundary: ${erased.pair_map(d, o) == pairs}";
 
 // And the third channel a hint can arrive on: an instantiation a generic body **builds** and hands
-// to another generic, whose slot value is composed out of the leaf the body does hold. The set and
-// the map here are built where the static type says `u64` outright, wrapped one level deeper inside
-// a generic frame, and probed two frames in under a composed hint — so if a composed hint reached a
-// placement order the probe would search under an order nothing stored under. The observed order
-// two frames in is the hinted one, in the same breath, because "membership survives" would also be
-// true of a build that dropped the hint on the way.
-fn probe_first<U>(xss: List<Set<U>>, u: U): bool {
-    return xss[0].contains(u);
+// to another generic, whose slot value is composed out of the leaf the body does hold. What such a
+// callee can do with the value is exactly one thing — `shown`'s parameter is a bare `U`, so it can
+// only write it out — and that is the point: the composed hint reaches a rendering and an ordering,
+// and nothing else. The buffer it renders was PLACED inside the building body and PROBED there, by
+// the erased word, in the same expression; the last line probes one built inside against one built
+// outside, where a placement order that had moved under the hint would compare unequal.
+fn shown<U>(x: U): string {
+    return "${x}";
 }
 
-fn keyed_first<U>(ms: List<Map<U, string>>, k: U): string {
-    return ms[0].get_or(k, "missing");
+fn built_shown<T>(a: T, b: T, probe: T): string {
+    s = [a, b].to_set();
+    return "${s.contains(probe)} ${shown(s)}";
 }
 
-fn shown_first<U>(xss: List<Set<U>>): string {
-    return "${xss[0]}";
+fn built_keyed<T>(k: T, j: T, probe: T): string {
+    m = {k: "a", j: "b"};
+    return "${m.get_or(probe, "missing")} ${shown(m)}";
 }
 
-fn first_equals<U>(xss: List<Set<U>>, other: Set<U>): bool {
-    return xss[0] == other;
+fn built_sorted<T>(a: T, b: T): string {
+    return shown([a, b].sorted());
 }
 
-fn nest_and_probe<T>(xs: Set<T>, x: T): bool {
-    return probe_first([xs], x);
+fn built_equal<T>(a: T, b: T, other: Set<T>): bool {
+    return [a, b].to_set() == other;
 }
 
-fn nest_and_key<T>(m: Map<T, string>, k: T): string {
-    return keyed_first([m], k);
-}
-
-fn nest_and_show<T>(xs: Set<T>): string {
-    return shown_first([xs]);
-}
-
-fn nest_and_compare<T>(xs: Set<T>, other: Set<T>): bool {
-    return first_equals([xs], other);
-}
-
-echo "composed, found: ${nest_and_probe(outside, big)}";
-echo "composed, absent: ${nest_and_probe(outside, absent)}";
-echo "composed, keyed: ${nest_and_key(by_key, big)}";
-echo "composed, observed: ${nest_and_show(outside)}";
-echo "composed, equal: ${nest_and_compare(outside, [big, one].to_set())}";
+echo "composed, found: ${built_shown(big, one, big)}";
+echo "composed, absent: ${built_shown(big, one, absent)}";
+echo "composed, keyed: ${built_keyed(big, one, big)}";
+echo "composed, sorted: ${built_sorted(big, one)}";
+echo "composed, equal: ${built_equal(big, one, outside)}";
