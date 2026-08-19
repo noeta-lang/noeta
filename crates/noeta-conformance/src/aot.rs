@@ -674,26 +674,7 @@ fn workspace_module(
     let db = LangDatabase::default();
     // A case with package subdirectories is a dependency graph (see the JIT differential's twin of
     // this function for why the deps have to be synthesized rather than dropped).
-    let deps = crate::dep_sources(entry, (raw.modules.len() + 1) as u32);
-    let ws = if deps.is_empty() {
-        noeta_db::workspace(
-            &db,
-            &raw.entry,
-            &raw.modules,
-            noeta_lexer::Edition::DEFAULT,
-            &raw.paths,
-        )
-    } else {
-        noeta_db::workspace_with_deps(
-            &db,
-            &raw.entry,
-            &raw.modules,
-            &deps,
-            &noeta_span::PackageUses::new(),
-            noeta_lexer::Edition::DEFAULT,
-            &raw.paths,
-        )
-    };
+    let ws = crate::case_workspace(&db, raw, entry);
     if noeta_db::linked(&db, ws).program.is_err() {
         report.not_run.link_failed += 1;
         return None;

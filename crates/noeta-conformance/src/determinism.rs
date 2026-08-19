@@ -196,7 +196,7 @@ pub fn digest_corpus(root: &Path) -> DeterminismReport {
             .into_owned();
         if case.multi {
             match crate::read_case_workspace(&case.entry) {
-                Ok(raw) => digest_workspace(&name, &raw, &mut report),
+                Ok(raw) => digest_workspace(&name, &raw, &case.entry, &mut report),
                 Err(_) => report.not_run.read_failed += 1,
             }
         } else {
@@ -244,15 +244,14 @@ fn digest_single(name: &str, text: &str, report: &mut DeterminismReport) {
 }
 
 /// The multi-file analogue of [`digest_single`].
-fn digest_workspace(name: &str, raw: &noeta_loader::RawWorkspace, report: &mut DeterminismReport) {
+fn digest_workspace(
+    name: &str,
+    raw: &noeta_loader::RawWorkspace,
+    entry: &Path,
+    report: &mut DeterminismReport,
+) {
     let db = LangDatabase::default();
-    let ws = noeta_db::workspace(
-        &db,
-        &raw.entry,
-        &raw.modules,
-        noeta_lexer::Edition::DEFAULT,
-        &raw.paths,
-    );
+    let ws = crate::case_workspace(&db, raw, entry);
 
     if noeta_db::linked(&db, ws).program.is_err() {
         report.not_run.link_failed += 1;

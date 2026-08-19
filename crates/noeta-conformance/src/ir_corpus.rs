@@ -84,7 +84,7 @@ pub fn run_ir_corpus(root: &Path, only: Option<&Path>) -> IrCorpusReport {
         }
         if case.multi {
             match crate::read_case_workspace(&case.entry) {
-                Ok(raw) => run_workspace(&raw, &mut report),
+                Ok(raw) => run_workspace(&raw, &case.entry, &mut report),
                 Err(_) => report.not_run.read_failed += 1,
             }
         } else {
@@ -125,15 +125,9 @@ fn run_single(text: &str, report: &mut IrCorpusReport) {
     run(&parsed.0.program, checked, report);
 }
 
-fn run_workspace(raw: &noeta_loader::RawWorkspace, report: &mut IrCorpusReport) {
+fn run_workspace(raw: &noeta_loader::RawWorkspace, entry: &Path, report: &mut IrCorpusReport) {
     let db = LangDatabase::default();
-    let ws = noeta_db::workspace(
-        &db,
-        &raw.entry,
-        &raw.modules,
-        noeta_lexer::Edition::DEFAULT,
-        &raw.paths,
-    );
+    let ws = crate::case_workspace(&db, raw, entry);
 
     let program = match &noeta_db::linked(&db, ws).program {
         Ok(program) => program,

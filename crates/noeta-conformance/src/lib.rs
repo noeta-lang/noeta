@@ -55,12 +55,19 @@ pub use leaks::{Leak, LeakReport, run_leak_check};
 pub use report::{CaseResult, CaseStatus, NotRun, Report};
 pub use wasm::{WasmDiffFailure, WasmDiffReport, run_wasm_differential};
 
-/// Which pipeline stages to run a case through. Narrowing the stage makes an agent's
-/// inner loop fast (`--stage parser` reruns only lexing+parsing).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// Which pipeline stages to run a case through. Narrowing the stage makes an agent's inner loop
+/// fast, and narrows what a pass *means*: only [`Stage::Eval`] runs the program, so the front-end
+/// stages check the `// expect: error` lines and nothing else. Every report says which stage it
+/// ran, because "1265 passed" reads identically either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Stage {
+    /// Load the case — lex, parse and link — and check its diagnostics. Nothing runs.
     Lexer,
+    /// The same front end as [`Stage::Lexer`]: the loader lexes and parses in one step, so the two
+    /// names select the same work and the same assertions.
     Parser,
+    /// The whole pipeline: load, check, and execute the program on every selected [`Engine`].
     #[default]
     Eval,
 }
@@ -74,6 +81,107 @@ impl Stage {
             _ => None,
         }
     }
+
+    /// The stage's name on the command line and in the report.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Stage::Lexer => "lexer",
+            Stage::Parser => "parser",
+            Stage::Eval => "eval",
+        }
+    }
+
+    /// Whether this stage executes the program (and can therefore check stdout, stderr and the
+    /// exit code).
+    pub fn runs_the_program(self) -> bool {
+        self == Stage::Eval
+    }
+}
+
+impl std::fmt::Display for Stage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Which executor ran a case's program when its `// expect:` header was checked.
+///
+/// The language is implemented twice, so "the expectations hold" is a claim about an *engine*: a
+/// header validated against the reference interpreter alone says nothing about the bytecode VM,
+/// and a regression living in one backend passes a run that never drove it. So an expectation run
+/// drives **both** by default, every failure names the engine that produced it, and every report
+/// names the engines it validated against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Engine {
+    /// The Core-IR interpreter (`noeta-eval`) — the reference semantics.
+    Reference,
+    /// The bytecode VM (`noeta-vm`) executing the module `noeta-compiler` produced — the pair
+    /// `noeta run` uses.
+    Vm,
+}
+
+impl Engine {
+    /// The engine's name on the command line, in the report, and in the JSON.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Engine::Reference => "reference",
+            Engine::Vm => "vm",
+        }
+    }
+
+    /// The engine in a sentence, for the report's summary line.
+    pub fn description(self) -> &'static str {
+        match self {
+            Engine::Reference => "the reference interpreter",
+            Engine::Vm => "the bytecode VM",
+        }
+    }
+}
+
+impl std::fmt::Display for Engine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Which engines an expectation run validates against — the `--engine` selection.
+///
+/// [`Engines::Both`] is the default because the alternative is a check that reads as a verdict on
+/// the language and is a verdict on one half of it. The single-engine selections exist to *narrow*
+/// a known failure ("does this reproduce on the VM alone?"), never as the cheap default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Engines {
+    /// The reference interpreter and the bytecode VM, each checked against the same header.
+    #[default]
+    Both,
+    /// The reference interpreter only.
+    Reference,
+    /// The bytecode VM only.
+    Vm,
+}
+
+impl Engines {
+    /// The accepted spellings, for an error message.
+    pub const ACCEPTED: &'static str = "reference, vm, or both";
+
+    pub fn parse(name: &str) -> Option<Engines> {
+        match name {
+            "reference" => Some(Engines::Reference),
+            "vm" => Some(Engines::Vm),
+            "both" => Some(Engines::Both),
+            _ => None,
+        }
+    }
+
+    /// The engines this selection runs, in the order they run.
+    pub fn engines(self) -> &'static [Engine] {
+        match self {
+            Engines::Both => &[Engine::Reference, Engine::Vm],
+            Engines::Reference => &[Engine::Reference],
+            Engines::Vm => &[Engine::Vm],
+        }
+    }
 }
 
 /// What actually happened when a case ran: its captured stdout and stderr, exit code, and the
@@ -83,6 +191,16 @@ struct Outcome {
     stderr: String,
     exit_code: i32,
     errors: Vec<ErrorExpectation>,
+}
+
+/// One engine's answer for a case — or the reason that engine could not produce one, which is
+/// always a failure (the harness never counts "this backend declined to run it" as a pass).
+struct EngineOutcome {
+    /// The engine that produced it. `None` when no program ran at all — a front-end-only stage, a
+    /// load failure, or a checker rejection — where the answer is the front end's and would be
+    /// identical on every engine.
+    engine: Option<Engine>,
+    outcome: Result<Outcome, String>,
 }
 
 /// Whether any diagnostic is an **error** — the gate on running a program and on a failing exit.
@@ -129,18 +247,25 @@ pub fn ensure_std_registry() {
     noeta_stdlib::registry::default_seeded();
 }
 
-/// Run a single named case (already-loaded source text) and compare it to its header.
+/// Run a single named case (already-loaded source text) and compare it to its header, on **every**
+/// engine — see [`run_case_with`] to narrow that.
 pub fn run_case(name: &str, text: &str, stage: Stage) -> CaseResult {
+    run_case_with(name, text, stage, Engines::default())
+}
+
+/// As [`run_case`], against a chosen set of [`Engines`].
+pub fn run_case_with(name: &str, text: &str, stage: Stage, engines: Engines) -> CaseResult {
     ensure_std_registry();
     let expectations = match Expectations::parse(text) {
         Ok(expectations) => expectations,
         Err(message) => return CaseResult::malformed(name, message),
     };
-    let outcome = run_linked_source(name, text, stage);
-    compare(name, &expectations, &outcome, stage)
+    let outcomes = run_linked_source(name, text, stage, engines.engines());
+    compare(name, &expectations, &outcomes, stage)
 }
 
-fn compare(name: &str, expected: &Expectations, actual: &Outcome, stage: Stage) -> CaseResult {
+/// Compare one engine's outcome against the header, returning every way it differs.
+fn differences(expected: &Expectations, actual: &Outcome, stage: Stage) -> Vec<String> {
     let mut failures = Vec::new();
 
     // stdout and exit code only become meaningful once the program is evaluated, so
@@ -195,17 +320,67 @@ fn compare(name: &str, expected: &Expectations, actual: &Outcome, stage: Stage) 
         }
     }
 
-    if failures.is_empty() {
+    failures
+}
+
+/// Compare every engine's outcome against the header and fold them into one [`CaseResult`].
+///
+/// Each failure is **attributed** to the engine that produced it, because the interesting shape is
+/// one engine failing while the other passes: that is a backend divergence wearing a wrong-output
+/// costume, and an unattributed line would leave a reader guessing which half is wrong.
+fn compare(
+    name: &str,
+    expected: &Expectations,
+    outcomes: &[EngineOutcome],
+    stage: Stage,
+) -> CaseResult {
+    let mut failures = Vec::new();
+    let mut executed_on = Vec::new();
+    for produced in outcomes {
+        // A failure from a named engine is labelled; the front end's own answer (no engine ran)
+        // stands unlabelled, because there is nothing to distinguish it from.
+        let attribute = |failure: String| match produced.engine {
+            Some(engine) => format!("[{engine}] {failure}"),
+            None => failure,
+        };
+        match &produced.outcome {
+            Err(reason) => failures.push(attribute(reason.clone())),
+            Ok(outcome) => {
+                if let Some(engine) = produced.engine {
+                    executed_on.push(engine);
+                }
+                failures.extend(
+                    differences(expected, outcome, stage)
+                        .into_iter()
+                        .map(attribute),
+                );
+            }
+        }
+    }
+
+    let mut result = if failures.is_empty() {
         CaseResult::pass(name)
     } else {
         CaseResult::fail(name, failures)
-    }
+    };
+    result.executed_on = executed_on;
+    result
 }
 
-/// Run a multi-file case rooted at `entry` (the `main.noe` of a module fixture): sibling
-/// modules are loaded and linked (M1.9) and the merged program is checked and run like any
-/// other case. The expectation header lives in the entry file.
+/// Run a multi-file case rooted at `entry` (the `main.noe` of a module fixture) on **every** engine:
+/// sibling modules are loaded and linked and the merged program is checked and run like any other
+/// case. The expectation header lives in the entry file.
 pub fn run_case_path(entry: &Path, display: &str, stage: Stage) -> CaseResult {
+    run_case_path_with(entry, display, stage, Engines::default())
+}
+
+/// As [`run_case_path`], against a chosen set of [`Engines`].
+pub fn run_case_path_with(
+    entry: &Path,
+    display: &str,
+    stage: Stage,
+    engines: Engines,
+) -> CaseResult {
     let text = match std::fs::read_to_string(entry) {
         Ok(text) => text,
         Err(err) => return CaseResult::malformed(display, format!("could not read: {err}")),
@@ -214,8 +389,8 @@ pub fn run_case_path(entry: &Path, display: &str, stage: Stage) -> CaseResult {
         Ok(expectations) => expectations,
         Err(message) => return CaseResult::malformed(display, message),
     };
-    let outcome = run_linked(entry, stage);
-    compare(display, &expectations, &outcome, stage)
+    let outcomes = run_linked(entry, stage, engines.engines());
+    compare(display, &expectations, &outcomes, stage)
 }
 
 /// The **root package** a multi-file case declares, if it declares one: a case directory holding a
@@ -364,6 +539,48 @@ pub(crate) fn dep_sources(entry: &Path, next_id: u32) -> Vec<noeta_db::DepSource
         .collect()
 }
 
+/// The salsa [`Workspace`](noeta_db::Workspace) a multi-file case is linked, checked and run in —
+/// **with** the dependency packages the case declares as subdirectories ([`dep_sources`]), and the
+/// deps-free workspace when it declares none.
+///
+/// One helper because the alternative was measured: six oracles each built this themselves, three
+/// carrying the dependency graph and three dropping it, so one case was a *different program*
+/// depending on which oracle was looking. Concretely, dropping the deps left three package fixtures
+/// checker-rejected (never leak-checked at all) and made five negative fixtures — the orphan rule,
+/// a derived-path collision, an unknown module in a block `use` — link and run something that is
+/// not what the case is about, while reporting it as measured. Both readings are green.
+pub(crate) fn case_workspace(
+    db: &noeta_db::LangDatabase,
+    raw: &noeta_loader::RawWorkspace,
+    entry: &Path,
+) -> noeta_db::Workspace {
+    // `next_id` continues the numbering past the entry and its siblings, matching the loader's own
+    // assignment, so a diagnostic's span resolves to the same file on both paths.
+    let deps = dep_sources(entry, (raw.modules.len() + 1) as u32);
+    if deps.is_empty() {
+        noeta_db::workspace(
+            db,
+            &raw.entry,
+            &raw.modules,
+            noeta_lexer::Edition::DEFAULT,
+            &raw.paths,
+        )
+    } else {
+        // No `@name` tables: the corpus's dependency graph is synthesized from the case's
+        // subdirectories, not from a `noeta.toml`, so no package binds a `[directives]` local name
+        // — an empty `PackageUses` is behavior-identical.
+        noeta_db::workspace_with_deps(
+            db,
+            &raw.entry,
+            &raw.modules,
+            &deps,
+            &noeta_span::PackageUses::new(),
+            noeta_lexer::Edition::DEFAULT,
+            &raw.paths,
+        )
+    }
+}
+
 /// Load + link `entry` and run the merged program to an [`Outcome`]. Lex/parse errors render
 /// against the source they came from; check/runtime diagnostics against the entry source.
 /// Run a case from source text alone, linked **with no siblings**.
@@ -380,7 +597,12 @@ pub(crate) fn dep_sources(entry: &Path, next_id: u32) -> Vec<noeta_db::DepSource
 /// unrelated cases, several of them deliberately malformed, and the loader fails every entry in a
 /// directory when one module there is broken — so reading siblings would make one negative case
 /// poison its neighbours. Linking the entry alone runs the rewrite tables and merges nothing.
-fn run_linked_source(name: &str, text: &str, stage: Stage) -> Outcome {
+fn run_linked_source(
+    name: &str,
+    text: &str,
+    stage: Stage,
+    engines: &[Engine],
+) -> Vec<EngineOutcome> {
     let linked = match noeta_loader::link(
         name,
         text,
@@ -389,9 +611,18 @@ fn run_linked_source(name: &str, text: &str, stage: Stage) -> Outcome {
         noeta_loader::ModulePath::Declared,
     ) {
         Ok(linked) => linked,
-        Err(load_diagnostics) => return load_failure(&load_diagnostics),
+        Err(load_diagnostics) => return vec![front_end(load_failure(&load_diagnostics))],
     };
-    outcome_of_linked(linked, stage)
+    outcomes_of_linked(linked, stage, engines)
+}
+
+/// An outcome no engine produced: the front end's own answer, identical whichever backend would
+/// have run. A load failure, a checker rejection, and a front-end-only stage all end here.
+fn front_end(outcome: Outcome) -> EngineOutcome {
+    EngineOutcome {
+        engine: None,
+        outcome: Ok(outcome),
+    }
 }
 
 /// The outcome of a load that never produced a program: its diagnostics, rendered against whichever
@@ -408,7 +639,7 @@ fn load_failure(load_diagnostics: &[noeta_loader::LoadDiagnostic]) -> Outcome {
     }
 }
 
-fn run_linked(entry: &Path, stage: Stage) -> Outcome {
+fn run_linked(entry: &Path, stage: Stage, engines: &[Engine]) -> Vec<EngineOutcome> {
     // A case with package subdirectories links through the dependency-aware path so its sources
     // carry real package provenance; one without keeps the deps-free path byte-for-byte.
     let deps = entry.parent().map(dep_packages).unwrap_or_default();
@@ -430,31 +661,39 @@ fn run_linked(entry: &Path, stage: Stage) -> Outcome {
     };
     let linked = match load {
         Ok(Ok(linked)) => linked,
-        Ok(Err(load_diagnostics)) => return load_failure(&load_diagnostics),
+        Ok(Err(load_diagnostics)) => return vec![front_end(load_failure(&load_diagnostics))],
         Err(err) => {
-            return Outcome {
+            return vec![front_end(Outcome {
                 stdout: format!("could not read: {err}"),
                 stderr: String::new(),
                 exit_code: 1,
                 errors: Vec::new(),
-            };
+            })];
         }
     };
-    outcome_of_linked(linked, stage)
+    outcomes_of_linked(linked, stage, engines)
 }
 
-/// Check and run an already-linked program. Shared by both case paths — the multi-file one that
-/// loads a directory and the single-file one that links an entry alone — so the two cannot drift
-/// into disagreeing about what a case means.
-fn outcome_of_linked(linked: noeta_loader::Linked, stage: Stage) -> Outcome {
+/// Check and run an already-linked program, once per requested [`Engine`]. Shared by both case
+/// paths — the multi-file one that loads a directory and the single-file one that links an entry
+/// alone — so the two cannot drift into disagreeing about what a case means.
+///
+/// The front end runs **once** and its result is shared: loading, linking and checking are the same
+/// work whichever backend executes afterwards, and a case the checker rejects has no program to run
+/// at all, so it yields one engine-independent outcome rather than one identical copy per engine.
+fn outcomes_of_linked(
+    linked: noeta_loader::Linked,
+    stage: Stage,
+    engines: &[Engine],
+) -> Vec<EngineOutcome> {
     // The loader already lexed + parsed cleanly; the lexer/parser stages have nothing more to do.
     if stage != Stage::Eval {
-        return Outcome {
+        return vec![front_end(Outcome {
             stdout: String::new(),
             stderr: String::new(),
             exit_code: 0,
             errors: Vec::new(),
-        };
+        })];
     }
 
     // Check/runtime diagnostics may land on a declaration merged in from a sibling module, so they
@@ -470,24 +709,57 @@ fn outcome_of_linked(linked: noeta_loader::Linked, stage: Stage) -> Outcome {
         noeta_check::CheckOptions::for_workspace(linked.provenance.clone()),
     );
     if has_error(&checked.diagnostics) {
-        return Outcome {
+        return vec![front_end(Outcome {
             stdout: String::new(),
             stderr: String::new(),
             exit_code: 1,
             errors: errors_of_mapped(&linked.sources, &checked.diagnostics),
-        };
+        })];
     }
+    engines
+        .iter()
+        .map(|&engine| EngineOutcome {
+            engine: Some(engine),
+            outcome: run_on(engine, &linked, &checked),
+        })
+        .collect()
+}
+
+/// Execute an already-checked program on one engine.
+///
+/// The two arms are the same pair `noeta run` chooses between, driven the same way: the reference
+/// lowers to the drop-annotated Core IR and interprets it; the VM compiles that same program to a
+/// bytecode module and runs it on the sandbox host. A module the compiler refuses is an `Err` here
+/// rather than a silent skip — a check-clean corpus program that stops compiling is exactly the
+/// regression this arm exists to see, and the differential already pins that number at 100%.
+fn run_on(
+    engine: Engine,
+    linked: &noeta_loader::Linked,
+    checked: &noeta_check::Checked,
+) -> Result<Outcome, String> {
     // A check that produced only warnings runs — and the warnings stay in the reported list, ahead
     // of anything the run itself reports, so a case can assert one and its output in one header.
-    let mut diagnostics = checked.diagnostics;
-    let result = reference::reference_run(&linked.program, checked.sites);
+    let mut diagnostics = checked.diagnostics.clone();
+    let result = match engine {
+        Engine::Reference => reference::reference_run(&linked.program, checked.sites.clone()),
+        Engine::Vm => {
+            let module = noeta_compiler::compile_with_sites(
+                &linked.program,
+                checked.sites.clone(),
+                false,
+                false,
+            )
+            .map_err(|unsupported| unsupported.to_string())?;
+            noeta_vm::VmBackend::new().run_module(&module)
+        }
+    };
     diagnostics.extend(result.diagnostics);
-    Outcome {
+    Ok(Outcome {
         errors: errors_of_mapped(&linked.sources, &diagnostics),
         stdout: result.stdout,
         stderr: result.stderr,
         exit_code: result.exit_code,
-    }
+    })
 }
 
 /// Run `f` on a worker thread with a large stack, returning its result.
@@ -545,14 +817,29 @@ pub fn cases_selected(root: &Path, only: &Path) -> usize {
     cases.iter().filter(|c| selects(&c.entry, only)).count()
 }
 
-/// Discover and run every case under `root`, optionally narrowed to a single entry file.
-/// Returns a [`Report`] that can be rendered as text or JSON.
+/// Discover and run every case under `root`, optionally narrowed to a single entry file, checking
+/// each header against **every** engine. Returns a [`Report`] that can be rendered as text or JSON.
 pub fn run_corpus(root: &Path, only: Option<&Path>, stage: Stage) -> Report {
+    run_corpus_with(root, only, stage, Engines::default())
+}
+
+/// As [`run_corpus`], against a chosen set of [`Engines`].
+pub fn run_corpus_with(root: &Path, only: Option<&Path>, stage: Stage, engines: Engines) -> Report {
     let mut cases = Vec::new();
     collect_cases(root, &mut cases);
     cases.sort_by(|a, b| a.entry.cmp(&b.entry));
 
-    let mut report = Report::default();
+    let mut report = Report {
+        cases: Vec::new(),
+        stage,
+        // What the run *can* validate against: a front-end-only stage executes no program, so
+        // claiming an engine there would be the same overstatement this field exists to prevent.
+        engines: if stage.runs_the_program() {
+            engines.engines().to_vec()
+        } else {
+            Vec::new()
+        },
+    };
     for case in cases {
         if let Some(only) = only
             && !selects(&case.entry, only)
@@ -566,10 +853,10 @@ pub fn run_corpus(root: &Path, only: Option<&Path>, stage: Stage) -> Report {
             .to_string_lossy()
             .into_owned();
         if case.multi {
-            report.push(run_case_path(&case.entry, &display, stage));
+            report.push(run_case_path_with(&case.entry, &display, stage, engines));
         } else {
             match std::fs::read_to_string(&case.entry) {
-                Ok(text) => report.push(run_case(&display, &text, stage)),
+                Ok(text) => report.push(run_case_with(&display, &text, stage, engines)),
                 Err(err) => report.push(CaseResult::malformed(
                     &display,
                     format!("could not read: {err}"),
@@ -643,6 +930,16 @@ mod tests {
         reference::reference_run(&parsed.program, checked.sites).stdout
     }
 
+    /// The captured stdout of a single-engine run, which is what these two tests compare.
+    fn stdout_of(outcomes: Vec<EngineOutcome>) -> String {
+        let [produced] = <[EngineOutcome; 1]>::try_from(outcomes)
+            .unwrap_or_else(|got| panic!("one engine ran, got {}", got.len()));
+        produced
+            .outcome
+            .unwrap_or_else(|reason| panic!("the engine produced no outcome: {reason}"))
+            .stdout
+    }
+
     /// **A module-qualified native name resolves the same with or without linking.**
     /// `use std.http` then `http.Framing` names a native enum through the module it lives in, and
     /// lowering binds that spelling from the program's own `use` statements — so the name reaches
@@ -657,9 +954,17 @@ mod tests {
     fn a_module_qualified_native_type_resolves_with_or_without_linking() {
         let source = "use std.http\necho variants_of::<http.Framing>().len()\n";
 
-        let linked = run_linked_source("linked", source, Stage::Eval);
+        // The control below is the reference interpreter without the loader, so the linked side is
+        // the reference interpreter too: the question is what *linking* changes, not what the
+        // backends do (that is the differential's).
+        let linked = stdout_of(run_linked_source(
+            "linked",
+            source,
+            Stage::Eval,
+            &[Engine::Reference],
+        ));
         assert_eq!(
-            linked.stdout.trim(),
+            linked.trim(),
             "3",
             "linked, the module-qualified native enum resolves to its three variants"
         );
@@ -667,9 +972,35 @@ mod tests {
         let unlinked = run_unlinked_control("unlinked", source);
         assert_eq!(
             unlinked.trim(),
-            linked.stdout.trim(),
+            linked.trim(),
             "unlinked, the same name resolves to the same enum — lowering binds it from this \
              program's own imports, so the two paths cannot answer differently"
+        );
+    }
+
+    /// **A native verbatim tier lexes in the single-file salsa front end.**
+    ///
+    /// `@json { … }` is declared by an extension and by no `.noe` file, so nothing in the text says
+    /// its body is verbatim: a front end that lexes without the installed extensions' tier names
+    /// tokenizes the body as code and reports a parse error on source the loader accepts. That is
+    /// not a cosmetic difference — six oracles drive single-file cases through this path, and a case
+    /// that "fails to parse" there is silently excluded from all of them, which is how a corpus
+    /// fixture came to claim in its own header that the differential proved its two backends agreed
+    /// while no backend had ever run it.
+    #[test]
+    fn a_native_verbatim_tier_lexes_in_the_single_file_front_end() {
+        ensure_std_registry();
+        let db = noeta_db::LangDatabase::default();
+        let text = "id = \"u-7\"\ndoc = @json { {\"id\": ${id}} }\necho doc\n";
+        let source = Source::new(SourceId::FIRST, "tier", text);
+        let src = noeta_db::source_program(&db, &source, noeta_lexer::Edition::DEFAULT);
+
+        let lex = &noeta_db::tokens(&db, src).0.diagnostics;
+        let parse = &noeta_db::ast(&db, src).0.diagnostics;
+        assert!(
+            !noeta_diagnostics::has_errors(lex.iter().chain(parse.iter())),
+            "the single-file front end could not read a native tier's verbatim body: {:?}",
+            lex.iter().chain(parse.iter()).collect::<Vec<_>>()
         );
     }
 
@@ -686,6 +1017,72 @@ mod tests {
     fn wrong_stdout_fails() {
         let case = "// expect: stdout \"goodbye\"\necho \"hello\";\n";
         assert_eq!(run_case("x", case, Stage::Eval).status, CaseStatus::Fail);
+    }
+
+    /// **Both engines check the header, and each failure says which one produced it.**
+    ///
+    /// This is the gate on the harness's central claim. Checking a header against the reference
+    /// interpreter alone leaves the bytecode VM — the thing `noeta run` actually executes —
+    /// unexercised, so a regression that lives only in the VM passes a run that reads as "the
+    /// corpus is green". Drop the VM arm and this case reports one failure instead of two.
+    #[test]
+    fn a_wrong_expectation_is_reported_by_every_engine_that_ran_it() {
+        let case = "// expect: stdout \"goodbye\"\necho \"hello\";\n";
+        let result = run_case("x", case, Stage::Eval);
+        assert_eq!(result.status, CaseStatus::Fail);
+        assert_eq!(
+            result.executed_on,
+            vec![Engine::Reference, Engine::Vm],
+            "the default run executes the program on both engines"
+        );
+        for engine in [Engine::Reference, Engine::Vm] {
+            assert!(
+                result
+                    .failures
+                    .iter()
+                    .any(|f| f.starts_with(&format!("[{engine}] stdout:"))),
+                "{engine} did not report the wrong stdout: {:?}",
+                result.failures
+            );
+        }
+    }
+
+    /// Narrowing to one engine narrows what ran — and the result says so, rather than reading like
+    /// a verdict on both.
+    #[test]
+    fn narrowing_to_one_engine_runs_only_that_engine() {
+        let case = "// expect: stdout \"hello\"\n// expect: exit 0\necho \"hello\";\n";
+        for (selection, expected) in [
+            (Engines::Reference, vec![Engine::Reference]),
+            (Engines::Vm, vec![Engine::Vm]),
+            (Engines::Both, vec![Engine::Reference, Engine::Vm]),
+        ] {
+            let result = run_case_with("hello", case, Stage::Eval, selection);
+            assert_eq!(result.status, CaseStatus::Pass, "{:?}", result.failures);
+            assert_eq!(result.executed_on, expected, "for {selection:?}");
+        }
+    }
+
+    /// A case the front end rejects has no program to run, so no engine claims it — the count of
+    /// executed cases stays a count of programs that really executed, on both engines.
+    #[test]
+    fn a_case_the_front_end_rejects_claims_no_engine() {
+        let case = "// expect: error E0002 at 3:6\n// expect: exit 1\necho \"oops;\n";
+        let result = run_case("bad", case, Stage::Eval);
+        assert_eq!(result.status, CaseStatus::Pass, "{:?}", result.failures);
+        assert!(result.executed_on.is_empty());
+    }
+
+    /// A front-end stage runs no program at all, on any engine — and a header's stdout goes
+    /// unchecked there, which is why the report says so instead of printing a bare "1 passed".
+    #[test]
+    fn a_front_end_stage_runs_no_engine() {
+        let case = "// expect: stdout \"never printed\"\necho \"hello\";\n";
+        for stage in [Stage::Lexer, Stage::Parser] {
+            let result = run_case("x", case, stage);
+            assert_eq!(result.status, CaseStatus::Pass, "at {stage}");
+            assert!(result.executed_on.is_empty(), "at {stage}");
+        }
     }
 
     #[test]

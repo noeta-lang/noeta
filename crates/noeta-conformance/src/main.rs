@@ -1,8 +1,8 @@
 //! `noeta-conformance` — the development harness that tests the **language implementation** against
-//! its `.noe` corpus: the expectation runner, the differential oracle (VM vs tree-walker), and the
-//! leak oracle. This is a dev-only tool (it ships test fixtures and cross-checks two backends), so it
-//! is a **separate binary** from the user-facing `lang` CLI — which keeps the `lang test` verb free
-//! for running a user program's own `@test {}` blocks (object-model slice 6).
+//! its `.noe` corpus: the expectation runner (both engines), the differential oracle (VM vs
+//! reference interpreter), and the leak oracle. This is a dev-only tool (it ships test fixtures and
+//! cross-checks two backends), so it is a **separate binary** from the user-facing `noeta` CLI —
+//! which keeps the `noeta test` verb free for running a user program's own `@test {}` blocks.
 //!
 //! Invoke with `cargo run -p noeta-conformance -- [flags]`.
 
@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
-use noeta_conformance::{Stage, run_corpus, run_differential, run_leak_check};
+use noeta_conformance::{Engines, Stage, run_corpus_with, run_differential, run_leak_check};
 
 #[derive(Parser)]
 #[command(
@@ -25,25 +25,34 @@ struct Cli {
     /// Only run cases whose path ends with this (e.g. `orders/empty.noe`).
     #[arg(long, value_name = "PATH")]
     file: Option<PathBuf>,
-    /// Run only through this pipeline stage: `lexer`, `parser`, or `eval`.
+    /// Stop after this pipeline stage: `eval` (the default) loads, checks and runs each program;
+    /// `lexer` and `parser` load and check only, so they assert the `// expect: error` lines and
+    /// leave stdout, stderr and the exit code unchecked.
     #[arg(long, value_name = "STAGE")]
     stage: Option<String>,
-    /// Cross-check the M1 bytecode VM against the M0 tree-walker (the differential oracle) instead
-    /// of running expectations. Programs the VM cannot compile yet are skipped; any divergence on a
-    /// compiled program fails.
+    /// Which engine runs each program while its `// expect:` header is checked: `both` (the
+    /// default — the reference interpreter and the bytecode VM), `reference`, or `vm`. Both is the
+    /// default because a header checked against one engine says nothing about the other, so a
+    /// regression living in a single backend would pass. Narrow it to localize a known failure.
+    #[arg(long, value_name = "ENGINE")]
+    engine: Option<String>,
+    /// Cross-check the bytecode VM against the reference interpreter (the differential oracle)
+    /// instead of checking expectations: the two must produce identical output on every program,
+    /// whatever the `// expect:` headers say. Programs the VM cannot compile yet are skipped; any
+    /// divergence on a compiled program fails.
     #[arg(long)]
     differential: bool,
     /// Run the leak oracle: execute every corpus program on both backends and report any heap still
     /// live after it returns (residency 0 is the goal). Exits non-zero if any program leaks.
     #[arg(long)]
     check_leaks: bool,
-    /// Run the JIT differential oracle (milestone P-JIT): execute every compilable corpus program
+    /// Run the JIT differential oracle: execute every compilable corpus program
     /// through the interpreter *and* the forced tier-1 JIT and assert byte-identical results plus
     /// zero heap residency under JIT. Requires the `jit` build feature. Any divergence or leak fails.
     #[arg(long)]
     jit_differential: bool,
     /// With `--jit-differential`: arm the forced-JIT run with a **never-set** cancellation flag, so
-    /// the JIT emits its loop-header cancellation poll (isolate-cancel, JIT half) on every compiled
+    /// the JIT emits its loop-header cancellation poll on every compiled
     /// body. The program must still produce a byte-identical result — that is the whole claim the
     /// poll rests on. Without this flag the oracle covers the production, poll-free codegen.
     #[arg(long)]
@@ -54,14 +63,14 @@ struct Cli {
     /// no linker. Mutually exclusive with `--cancel-poll` (they are two different codegen shapes).
     #[arg(long)]
     aot_bodies: bool,
-    /// Run the **linked** AOT differential oracle (parallel-path audit row 9): for every corpus
+    /// Run the **linked** AOT differential oracle: for every corpus
     /// program, AOT-compile it, `cc`-link it against the real `libnoeta_aot.a`, staple its bundle on,
     /// and assert the artifact's stdout, stderr and exit code match the interpreted run through the
     /// same runtime entry. Needs a C toolchain (`NOETA_CC`, else `cc`) and the runtime archive
     /// (`NOETA_AOT_RUNTIME_LIB`, else built here). Minutes, not seconds — the gate arm.
     #[arg(long)]
     aot_differential: bool,
-    /// Run the wasm differential oracle (P-WASM W1.3): compile every corpus program to a `.noeb`
+    /// Run the wasm differential oracle: compile every corpus program to a `.noeb`
     /// and execute it through the wasm runner under wasmtime (`--sandbox`), asserting stdout,
     /// exit code, and rendered stderr byte-identical to the native VM. Needs `wasmtime` (or
     /// `NOETA_WASMTIME`) and a built runner (`cargo build -p noeta-wasm-runner --target
@@ -94,6 +103,17 @@ fn main() -> ExitCode {
         );
         return ExitCode::from(2);
     }
+    // `--stage` and `--engine` shape the *expectation* run and nothing else. Accepting them
+    // silently alongside an oracle flag would answer a question nobody asked: `--differential
+    // --engine reference` reads as "the differential, reference only", which is not a thing the
+    // differential can be.
+    if let Some(flag) = misplaced_run_flag(&cli) {
+        eprintln!(
+            "noeta-conformance: {flag} shapes the expectation run and has no meaning for the \
+             oracle flags — run it on its own."
+        );
+        return ExitCode::from(2);
+    }
     if cli.jit_differential {
         if cli.cancel_poll && cli.aot_bodies {
             eprintln!(
@@ -121,15 +141,36 @@ fn main() -> ExitCode {
             cli.json,
             cli.file.as_deref(),
             cli.stage.as_deref(),
+            cli.engine.as_deref(),
             &cli.dir,
         )
     }
+}
+
+/// Whether a flag that only shapes the expectation run was passed to an oracle, by name.
+fn misplaced_run_flag(cli: &Cli) -> Option<&'static str> {
+    let oracle = cli.differential
+        || cli.check_leaks
+        || cli.jit_differential
+        || cli.aot_differential
+        || cli.wasm_differential;
+    if !oracle {
+        return None;
+    }
+    if cli.stage.is_some() {
+        return Some("--stage");
+    }
+    if cli.engine.is_some() {
+        return Some("--engine");
+    }
+    None
 }
 
 fn cmd_test(
     json: bool,
     file: Option<&std::path::Path>,
     stage: Option<&str>,
+    engine: Option<&str>,
     dir: &std::path::Path,
 ) -> ExitCode {
     let stage = match stage {
@@ -144,8 +185,21 @@ fn cmd_test(
         },
         None => Stage::default(),
     };
+    let engines = match engine {
+        Some(name) => match Engines::parse(name) {
+            Some(engines) => engines,
+            None => {
+                eprintln!(
+                    "noeta-conformance: unknown engine `{name}` (expected {})",
+                    Engines::ACCEPTED
+                );
+                return ExitCode::from(2);
+            }
+        },
+        None => Engines::default(),
+    };
 
-    let report = run_corpus(dir, file, stage);
+    let report = run_corpus_with(dir, file, stage, engines);
 
     if json {
         println!("{}", report.to_json());
@@ -153,11 +207,26 @@ fn cmd_test(
         print!("{}", report.to_human());
     }
 
-    if report.all_passed() {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
+    if !report.all_passed() {
+        return ExitCode::FAILURE;
     }
+    // A whole-corpus run that executed no program is a broken harness, not a pass — the same
+    // green-looking nothing the oracles already refuse. Narrowed runs are exempt (one negative case
+    // legitimately runs nothing), and so is a front-end stage, which is *defined* as running none.
+    if file.is_none()
+        && stage.runs_the_program()
+        && report.executed() == 0
+        && !report.cases.is_empty()
+    {
+        eprintln!(
+            "noeta-conformance: every one of the {} case(s) under {} was excluded before it ran — \
+             that is a broken harness, not a pass.",
+            report.cases.len(),
+            dir.display()
+        );
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
 }
 
 /// Run the differential oracle over the corpus: the M1 VM cross-checked against the M0 tree-walker.

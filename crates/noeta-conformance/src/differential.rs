@@ -40,11 +40,16 @@ pub struct DiffReport {
     pub matched: usize,
     /// Every case excluded before the comparison, by reason (see [`NotRun`]).
     pub not_run: crate::NotRun,
-    /// Cases the checker rejected that declare **no** `// expect: error` — a rejection nobody asked
-    /// for. This is the teeth on the exclusion accounting: a corpus fixture invalidated by a
+    /// Cases excluded before they ran that declare **no** `// expect: error` — a rejection nobody
+    /// asked for. This is the teeth on the exclusion accounting: a corpus fixture invalidated by a
     /// language change stops running and silently leaves backend coverage, and every count that
-    /// would reveal it (`matched`, then `checker_rejected`) moves by exactly one either way. Naming
-    /// the cases turns that into a failure that says which file.
+    /// would reveal it (`matched`, then the exclusion tally) moves by exactly one either way.
+    /// Naming the cases turns that into a failure that says which file.
+    ///
+    /// It covers every gate a case can fall out at — parse, link and check alike. Scoped to the
+    /// checker's alone, it missed a case whose `@json` block the single-file front end could not
+    /// lex: it counted as `parse_failed`, ran on no backend, and its own header comment claimed the
+    /// differential proved the two backends agreed on it.
     pub unexpected_rejections: Vec<String>,
     /// Programs the VM compiled but whose result diverged — these are failures.
     pub mismatches: Vec<Mismatch>,
@@ -94,9 +99,9 @@ impl DiffReport {
         if !self.unexpected_rejections.is_empty() {
             let _ = writeln!(
                 out,
-                "{} case(s) REJECTED BY THE CHECKER WITHOUT DECLARING AN ERROR — they no longer \
-                 run, so they cover neither backend. Either fix the fixture or declare the \
-                 diagnostic with `// expect: error <CODE> at <line>:<col>`:",
+                "{} case(s) EXCLUDED WITHOUT DECLARING AN ERROR — they no longer run, so they \
+                 cover neither backend. Either fix the fixture or declare the diagnostic with \
+                 `// expect: error <CODE> at <line>:<col>`:",
                 self.unexpected_rejections.len()
             );
             for name in &self.unexpected_rejections {
@@ -155,7 +160,7 @@ pub fn run_differential(root: &Path, only: Option<&Path>) -> DiffReport {
     report
 }
 
-/// Record a checker rejection that the case's own header does not account for. A case carrying
+/// Record an exclusion that the case's own header does not account for. A case carrying
 /// `// expect: error …` is a deliberate negative fixture and belongs in the exclusion tally
 /// silently; one without is a fixture that stopped compiling, which is what this catches.
 fn note_rejection(name: &str, text: &str, report: &mut DiffReport) {
@@ -188,6 +193,7 @@ fn compare_backends(name: &str, text: &str, report: &mut DiffReport) {
             .chain(parsed.0.diagnostics.iter()),
     ) {
         report.not_run.parse_failed += 1;
+        note_rejection(name, text, report);
         return;
     }
 
@@ -239,34 +245,13 @@ fn compare_backends_workspace(
     // deps — otherwise its `use <pkg>.…` resolves to nothing, the link fails, and the case would
     // sit silently in the "not run" tally rather than being compared. Package-less cases (every
     // pre-existing one) take the same deps-free workspace they always did.
-    let deps = crate::dep_sources(entry, (raw.modules.len() + 1) as u32);
-    let ws = if deps.is_empty() {
-        noeta_db::workspace(
-            &db,
-            &raw.entry,
-            &raw.modules,
-            noeta_lexer::Edition::DEFAULT,
-            &raw.paths,
-        )
-    } else {
-        // No `@name` tables: the corpus's dependency graph is synthesized from the case's
-        // subdirectories (`crate::dep_sources`), not from a `noeta.toml`, so no package binds a
-        // `[directives]` local name — an empty `PackageUses` is behavior-identical.
-        noeta_db::workspace_with_deps(
-            &db,
-            &raw.entry,
-            &raw.modules,
-            &deps,
-            &noeta_span::PackageUses::new(),
-            noeta_lexer::Edition::DEFAULT,
-            &raw.paths,
-        )
-    };
+    let ws = crate::case_workspace(&db, raw, entry);
 
     let program = match &noeta_db::linked(&db, ws).program {
         Ok(program) => program,
         Err(_) => {
             report.not_run.link_failed += 1;
+            note_rejection(name, raw.entry.text(), report);
             return;
         }
     };

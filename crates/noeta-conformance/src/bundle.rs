@@ -89,7 +89,7 @@ pub fn run_bundle_roundtrip(root: &Path, only: Option<&Path>) -> BundleReport {
             .into_owned();
         if case.multi {
             match crate::read_case_workspace(&case.entry) {
-                Ok(raw) => roundtrip_workspace(&name, &raw, &mut report),
+                Ok(raw) => roundtrip_workspace(&name, &raw, &case.entry, &mut report),
                 Err(_) => report.not_run.read_failed += 1,
             }
         } else {
@@ -199,15 +199,14 @@ fn roundtrip_single(name: &str, text: &str, report: &mut BundleReport) {
 }
 
 /// The workspace analogue of [`roundtrip_single`] for a multi-file fixture.
-fn roundtrip_workspace(name: &str, raw: &noeta_loader::RawWorkspace, report: &mut BundleReport) {
+fn roundtrip_workspace(
+    name: &str,
+    raw: &noeta_loader::RawWorkspace,
+    entry: &Path,
+    report: &mut BundleReport,
+) {
     let db = LangDatabase::default();
-    let ws = noeta_db::workspace(
-        &db,
-        &raw.entry,
-        &raw.modules,
-        noeta_lexer::Edition::DEFAULT,
-        &raw.paths,
-    );
+    let ws = crate::case_workspace(&db, raw, entry);
 
     if noeta_db::linked(&db, ws).program.is_err() {
         report.not_run.link_failed += 1;

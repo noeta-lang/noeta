@@ -34,7 +34,37 @@ fn conformance_corpus_passes() {
             "conformance failures:\n{}",
             report.to_human()
         );
+        assert_engine_reach(&report);
     });
+}
+
+/// **The reach assertion on the expectation runner**: every corpus program is checked against its
+/// header on *both* engines, so this gate is a verdict on the language rather than on the reference
+/// interpreter's half of it.
+///
+/// It is asserted rather than reported for the reason every other reach floor here exists: an
+/// all-green run over an engine that executed nothing is indistinguishable from an all-green run
+/// that covered everything, and the pass is what gets cited. The two counts must be *equal* — a
+/// program the reference ran and the VM did not is a program the compiler refused, which the run
+/// already fails on — and the floor stops the whole set silently draining away.
+fn assert_engine_reach(report: &noeta_conformance::Report) {
+    use noeta_conformance::Engine;
+    let on_reference = report.executed_on(Engine::Reference);
+    let on_vm = report.executed_on(Engine::Vm);
+    assert_eq!(
+        on_reference,
+        on_vm,
+        "the two engines ran different programs; {}",
+        report.coverage_line()
+    );
+    // Measured at 893 on 2026-08-19 — the corpus programs that survive the front end. If it drops,
+    // find out which cases stopped running before touching this number.
+    const MIN_EXECUTED: usize = 850;
+    assert!(
+        on_vm >= MIN_EXECUTED,
+        "only {on_vm} case(s) executed a program (floor {MIN_EXECUTED}); {}",
+        report.coverage_line()
+    );
 }
 
 /// The leak oracle's **known debt**: `(backend, program)` pairs tolerated as leaking at clean exit
@@ -164,6 +194,36 @@ fn differential_backends_agree() {
             0,
             "the VM must compile 100% of the comparable corpus (Thrust-A gate); got:\n{}",
             report.to_human()
+        );
+    });
+}
+
+/// **The two front ends agree on which cases have a program to run.**
+///
+/// The expectation runner loads and links each case through `noeta-loader`, the way `noeta run`
+/// does; every oracle drives the same case through the salsa query graph. Nothing held the two to
+/// the same answer, and they drifted: a case whose `@json` block only one of them could lex ran
+/// under the expectation runner and counted as `parse_failed` in every oracle — excluded from the
+/// differential, the leak oracle, the bundle round-trip and both JIT arms at once, while its own
+/// header comment claimed the differential covered it.
+///
+/// Equality is the assertion because both sides already gate their own gaps to zero (the VM
+/// compiles 100% of the comparable corpus, and a program the compiler refuses fails the expectation
+/// run). A difference means one front end sees a program the other does not, which is a finding
+/// either way round.
+#[test]
+fn both_front_ends_run_the_same_corpus_programs() {
+    on_deep_stack(|| {
+        let root = corpus_root();
+        let expectations = run_corpus(&root, None, Stage::Eval);
+        let differential = run_differential(&root, None);
+        assert_eq!(
+            expectations.executed_on(noeta_conformance::Engine::Vm),
+            differential.supported(),
+            "the loader's front end and the salsa graph disagree about which cases have a program \
+             to run:\n{}{}",
+            expectations.coverage_line(),
+            differential.to_human(),
         );
     });
 }
