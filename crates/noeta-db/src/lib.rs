@@ -366,14 +366,21 @@ fn ext_verbatim_tier_names(db: &dyn salsa::Database) -> Vec<String> {
     ext_tiers(db).verbatim_names()
 }
 
-/// Tokenize the source. Memoized; re-runs only when `SourceProgram::text` changes.
+/// Tokenize the source. Memoized; re-runs when `SourceProgram::text` or the installed extensions
+/// change.
+///
+/// Seeded with the **installed extensions'** verbatim tier names, because a native tier is declared
+/// by an extension and by no `.noe` file: nothing in the text announces that `@json { … }` has a
+/// verbatim body, so lexing without them tokenizes the body as code and the parse fails on source
+/// the loader accepts. [`ast`] widens the set again with the file's *own* declarations, which only
+/// this pass can discover.
 #[salsa::tracked(returns(ref))]
 pub fn tokens(db: &dyn salsa::Database, src: SourceProgram) -> Tokens {
     let source = source_of(db, src);
     let mut lexed = noeta_lexer::lex_in(
         &source,
         edition_of(db, src),
-        &noeta_lexer::TextTiers::default(),
+        &noeta_lexer::TextTiers::with(ext_verbatim_tier_names(db)),
     );
     // Stamped for the same reason as in [`tokens_in`]: a lex error must name the file it is in.
     noeta_loader::retarget_diagnostics(&mut lexed.diagnostics, source.id());

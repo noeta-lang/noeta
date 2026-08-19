@@ -539,6 +539,48 @@ pub(crate) fn dep_sources(entry: &Path, next_id: u32) -> Vec<noeta_db::DepSource
         .collect()
 }
 
+/// The salsa [`Workspace`](noeta_db::Workspace) a multi-file case is linked, checked and run in —
+/// **with** the dependency packages the case declares as subdirectories ([`dep_sources`]), and the
+/// deps-free workspace when it declares none.
+///
+/// One helper because the alternative was measured: six oracles each built this themselves, three
+/// carrying the dependency graph and three dropping it, so one case was a *different program*
+/// depending on which oracle was looking. Concretely, dropping the deps left three package fixtures
+/// checker-rejected (never leak-checked at all) and made five negative fixtures — the orphan rule,
+/// a derived-path collision, an unknown module in a block `use` — link and run something that is
+/// not what the case is about, while reporting it as measured. Both readings are green.
+pub(crate) fn case_workspace(
+    db: &noeta_db::LangDatabase,
+    raw: &noeta_loader::RawWorkspace,
+    entry: &Path,
+) -> noeta_db::Workspace {
+    // `next_id` continues the numbering past the entry and its siblings, matching the loader's own
+    // assignment, so a diagnostic's span resolves to the same file on both paths.
+    let deps = dep_sources(entry, (raw.modules.len() + 1) as u32);
+    if deps.is_empty() {
+        noeta_db::workspace(
+            db,
+            &raw.entry,
+            &raw.modules,
+            noeta_lexer::Edition::DEFAULT,
+            &raw.paths,
+        )
+    } else {
+        // No `@name` tables: the corpus's dependency graph is synthesized from the case's
+        // subdirectories, not from a `noeta.toml`, so no package binds a `[directives]` local name
+        // — an empty `PackageUses` is behavior-identical.
+        noeta_db::workspace_with_deps(
+            db,
+            &raw.entry,
+            &raw.modules,
+            &deps,
+            &noeta_span::PackageUses::new(),
+            noeta_lexer::Edition::DEFAULT,
+            &raw.paths,
+        )
+    }
+}
+
 /// Load + link `entry` and run the merged program to an [`Outcome`]. Lex/parse errors render
 /// against the source they came from; check/runtime diagnostics against the entry source.
 /// Run a case from source text alone, linked **with no siblings**.
@@ -933,6 +975,32 @@ mod tests {
             linked.trim(),
             "unlinked, the same name resolves to the same enum — lowering binds it from this \
              program's own imports, so the two paths cannot answer differently"
+        );
+    }
+
+    /// **A native verbatim tier lexes in the single-file salsa front end.**
+    ///
+    /// `@json { … }` is declared by an extension and by no `.noe` file, so nothing in the text says
+    /// its body is verbatim: a front end that lexes without the installed extensions' tier names
+    /// tokenizes the body as code and reports a parse error on source the loader accepts. That is
+    /// not a cosmetic difference — six oracles drive single-file cases through this path, and a case
+    /// that "fails to parse" there is silently excluded from all of them, which is how a corpus
+    /// fixture came to claim in its own header that the differential proved its two backends agreed
+    /// while no backend had ever run it.
+    #[test]
+    fn a_native_verbatim_tier_lexes_in_the_single_file_front_end() {
+        ensure_std_registry();
+        let db = noeta_db::LangDatabase::default();
+        let text = "id = \"u-7\"\ndoc = @json { {\"id\": ${id}} }\necho doc\n";
+        let source = Source::new(SourceId::FIRST, "tier", text);
+        let src = noeta_db::source_program(&db, &source, noeta_lexer::Edition::DEFAULT);
+
+        let lex = &noeta_db::tokens(&db, src).0.diagnostics;
+        let parse = &noeta_db::ast(&db, src).0.diagnostics;
+        assert!(
+            !noeta_diagnostics::has_errors(lex.iter().chain(parse.iter())),
+            "the single-file front end could not read a native tier's verbatim body: {:?}",
+            lex.iter().chain(parse.iter()).collect::<Vec<_>>()
         );
     }
 

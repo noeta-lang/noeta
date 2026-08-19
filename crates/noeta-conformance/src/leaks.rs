@@ -124,7 +124,7 @@ pub fn run_leak_check(root: &Path, only: Option<&Path>) -> LeakReport {
             .into_owned();
         if case.multi {
             match crate::read_case_workspace(&case.entry) {
-                Ok(raw) => measure_workspace(&name, &raw, &mut report),
+                Ok(raw) => measure_workspace(&name, &raw, &case.entry, &mut report),
                 Err(_) => report.not_run.read_failed += 1,
             }
         } else {
@@ -211,15 +211,14 @@ fn destructible_types(module: &noeta_bytecode::Module) -> std::collections::Hash
 }
 
 /// Measure one multi-file fixture on both backends (the workspace analogue of [`measure_single`]).
-fn measure_workspace(name: &str, raw: &noeta_loader::RawWorkspace, report: &mut LeakReport) {
+fn measure_workspace(
+    name: &str,
+    raw: &noeta_loader::RawWorkspace,
+    entry: &Path,
+    report: &mut LeakReport,
+) {
     let db = LangDatabase::default();
-    let ws = noeta_db::workspace(
-        &db,
-        &raw.entry,
-        &raw.modules,
-        noeta_lexer::Edition::DEFAULT,
-        &raw.paths,
-    );
+    let ws = crate::case_workspace(&db, raw, entry);
 
     let program = match &noeta_db::linked(&db, ws).program {
         Ok(program) => program,

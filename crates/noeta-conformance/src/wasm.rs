@@ -167,7 +167,7 @@ pub fn run_wasm_differential(root: &Path, only: Option<&Path>) -> Result<WasmDif
             .into_owned();
         if case.multi {
             match crate::read_case_workspace(&case.entry) {
-                Ok(raw) => diff_workspace(&name, &raw, &tools, &mut report),
+                Ok(raw) => diff_workspace(&name, &raw, &case.entry, &tools, &mut report),
                 Err(_) => report.not_run.read_failed += 1,
             }
         } else {
@@ -214,17 +214,12 @@ fn diff_single(name: &str, text: &str, tools: &WasmTools, report: &mut WasmDiffR
 fn diff_workspace(
     name: &str,
     raw: &noeta_loader::RawWorkspace,
+    entry: &Path,
     tools: &WasmTools,
     report: &mut WasmDiffReport,
 ) {
     let db = LangDatabase::default();
-    let ws = noeta_db::workspace(
-        &db,
-        &raw.entry,
-        &raw.modules,
-        noeta_lexer::Edition::DEFAULT,
-        &raw.paths,
-    );
+    let ws = crate::case_workspace(&db, raw, entry);
 
     if noeta_db::linked(&db, ws).program.is_err() {
         report.not_run.link_failed += 1;

@@ -198,6 +198,36 @@ fn differential_backends_agree() {
     });
 }
 
+/// **The two front ends agree on which cases have a program to run.**
+///
+/// The expectation runner loads and links each case through `noeta-loader`, the way `noeta run`
+/// does; every oracle drives the same case through the salsa query graph. Nothing held the two to
+/// the same answer, and they drifted: a case whose `@json` block only one of them could lex ran
+/// under the expectation runner and counted as `parse_failed` in every oracle — excluded from the
+/// differential, the leak oracle, the bundle round-trip and both JIT arms at once, while its own
+/// header comment claimed the differential covered it.
+///
+/// Equality is the assertion because both sides already gate their own gaps to zero (the VM
+/// compiles 100% of the comparable corpus, and a program the compiler refuses fails the expectation
+/// run). A difference means one front end sees a program the other does not, which is a finding
+/// either way round.
+#[test]
+fn both_front_ends_run_the_same_corpus_programs() {
+    on_deep_stack(|| {
+        let root = corpus_root();
+        let expectations = run_corpus(&root, None, Stage::Eval);
+        let differential = run_differential(&root, None);
+        assert_eq!(
+            expectations.executed_on(noeta_conformance::Engine::Vm),
+            differential.supported(),
+            "the loader's front end and the salsa graph disagree about which cases have a program \
+             to run:\n{}{}",
+            expectations.coverage_line(),
+            differential.to_human(),
+        );
+    });
+}
+
 /// The bundle gate (P-AOT L1.0 + L1.3): every module the VM compiles must survive a
 /// serialize→deserialize→serialize round-trip byte-for-byte (structural), *and* the decoded module
 /// must run byte-identically to the source-compiled one on the sandbox (execution) — the two
