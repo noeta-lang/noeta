@@ -45,7 +45,6 @@ TypeMismatch	`{}::<T>(...)` needs a native receiver
 TypeMismatch	`{}` expects a bool on the left, found {}
 TypeMismatch	`{}` expects a bool on the right, found {}
 TypeMismatch	`{}` expects a bool on the {}, found {}
-TypeMismatch	`{}` expects a list of numbers, found an element of type {}
 TypeMismatch	`{}` expects a list, found {}
 TypeMismatch	`{}` expects a numeric argument
 TypeMismatch	`{}` is a {}, not a record or class type
