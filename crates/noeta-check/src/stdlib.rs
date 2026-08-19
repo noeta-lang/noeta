@@ -409,7 +409,16 @@ fn opt(t: Type) -> Type {
 /// The return type of a method call on a **built-in** receiver kind (`receiver.name(args)`), or
 /// `None` if `name` is not a known built-in method on that kind. User-defined method returns are
 /// resolved by the checker itself (it owns the class→method table).
-pub(super) fn method_return(reg: &registry::Registry, receiver: &Type, name: &str) -> Option<Type> {
+///
+/// `facts` carries what only the enclosing declaration's scope can answer about the receiver's
+/// element type — see [`ElemFacts`]. [`Checker::elem_facts`](crate::Checker::elem_facts) builds it
+/// from the receiver, so every call site asks the same question the same way.
+pub(super) fn method_return(
+    reg: &registry::Registry,
+    receiver: &Type,
+    name: &str,
+    facts: ElemFacts,
+) -> Option<Type> {
     // `compare` is defined on every value (Comparable) and yields the prelude `Ordering` enum.
     if name == "compare" {
         return Some(Type::Named("Ordering".to_string(), vec![]));
@@ -422,7 +431,7 @@ pub(super) fn method_return(reg: &registry::Registry, receiver: &Type, name: &st
         // `to_int`/`to_i8`…, `to_float`/`to_f64`, `to_f32` — each a total, 0-arity cast.
         Type::Float | Type::F32 | Type::F64 => float_conversion_return(name),
         Type::String => string_method(name),
-        Type::List(elem) => list_method(name, elem),
+        Type::List(elem) => list_method(name, elem, facts),
         Type::Set(elem) => set_method(name, elem),
         Type::Map(key, val) => map_method(name, key, val),
         Type::Bytes => bytes_method(name),
@@ -733,7 +742,119 @@ fn numeric_reduce(elem: &Type) -> Option<Type> {
     .then(|| elem.clone())
 }
 
-fn list_method(name: &str, elem: &Type) -> Option<Type> {
+/// What the enclosing [`Checker`](crate::Checker) knows about a collection's **element type** that
+/// the `Type` cannot answer on its own — the facts the built-in method tables need injected.
+///
+/// A [`Type::Param`] carries a name and a declaration site, not its bounds, so "does this element
+/// order?" is answerable only where the parameter's bounds are in scope. Passing the answer in
+/// (rather than re-deriving it here) is what keeps the ordering rule spelled **once**: `a < b`,
+/// `.sorted()`, `.min()` and `.max()` all read [`Checker::operand_satisfies_operator`] through
+/// [`Checker::elem_facts`](crate::Checker::elem_facts).
+#[derive(Clone, Copy, Default)]
+pub(super) struct ElemFacts {
+    /// Whether the element type carries a total order: `Comparable` by the satisfaction model, a
+    /// `Comparable`-bounded type parameter, or an open type that defers to the runtime.
+    pub orderable: bool,
+}
+
+/// What a built-in `List` method demands of its **element type**, for the methods that demand
+/// anything at all. The single table behind both the availability gate in [`list_method`] and the
+/// refusal diagnostic the checker raises when it is not met, so a method can never be refused for
+/// a reason the diagnostic does not name.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ElemReq {
+    /// An **ordering** over the elements: `min`/`max` pick an extremum under the same total order
+    /// `.sorted()` uses, so they need exactly what an ordering operator needs — `Comparable`.
+    Ordered,
+    /// A **number**: the arithmetic folds and the element-wise array methods compute with `+`/`*`
+    /// and a width, which only a numeric element has.
+    Numeric,
+    /// A `List<bool>`: the boolean folds reduce with `&&`/`||`.
+    Bool,
+}
+
+impl ElemReq {
+    /// The requirement each element-gated list method carries; `None` for a method that works over
+    /// any element type.
+    pub(super) fn of_list_method(name: &str) -> Option<ElemReq> {
+        Some(match name {
+            "min" | "max" => ElemReq::Ordered,
+            "sum" | "product" | "checked_sum" | "scale" | "abs" | "neg" | "clamp" => {
+                ElemReq::Numeric
+            }
+            "any" | "all" | "count" => ElemReq::Bool,
+            _ => return None,
+        })
+    }
+
+    /// Whether `elem` meets this requirement.
+    ///
+    /// An element that **defers to the runtime** (`dyn`, an inference hole) meets every one of
+    /// them, which is the gradual rule the rest of the checker follows and the same tolerance
+    /// `.sorted()` already has: a `List<dyn>` may well hold numbers, so refusing the fold statically
+    /// would reject a correct program to catch an incorrect one the runtime catches anyway. An
+    /// erased **type parameter** is not that case — its instantiation is a fact the declaration can
+    /// state, which is what a bound is for, so it meets `Ordered` only through `Comparable`.
+    pub(super) fn met_by(self, elem: &Type, facts: ElemFacts) -> bool {
+        match self {
+            ElemReq::Ordered => facts.orderable,
+            ElemReq::Numeric => elem.defers_to_runtime() || numeric_reduce(elem).is_some(),
+            ElemReq::Bool => elem.defers_to_runtime() || matches!(elem, Type::Bool),
+        }
+    }
+
+    /// The prose naming what the element type must be, for the refusal diagnostic's message.
+    pub(super) fn wants(self) -> &'static str {
+        match self {
+            ElemReq::Ordered => "an ordered element type",
+            ElemReq::Numeric => "a numeric element type",
+            ElemReq::Bool => "a `bool` element type",
+        }
+    }
+
+    /// The refusal diagnostic's help line: how to give the elements what the method needs.
+    pub(super) fn help(self) -> &'static str {
+        match self {
+            ElemReq::Ordered => {
+                "elements order when they are numbers, strings, or a type carrying \
+                 `@derive(Comparable)` / `impl Comparable`; a type parameter orders under a \
+                 `Comparable` bound"
+            }
+            ElemReq::Numeric => {
+                "the arithmetic reductions and the element-wise methods compute at the element's \
+                 numeric width, so the elements must be numbers; `map` them to a number first"
+            }
+            ElemReq::Bool => {
+                "`any`/`all`/`count` reduce booleans; `map` the elements to a predicate result \
+                 first, or use `filter(…).len()` to count matches"
+            }
+        }
+    }
+}
+
+/// Whether `name` is a built-in `List` method under **any** element type.
+///
+/// The question a method bundle's conflict check asks, where no element type is in hand: an
+/// element-gated method (`sum`, `max`, …) is still a name a bundle may not take, even though
+/// [`list_method`] answers `None` for it at an element that does not meet its requirement.
+pub(super) fn is_list_method(name: &str) -> bool {
+    ElemReq::of_list_method(name).is_some()
+        || list_method(name, &Type::Dyn, ElemFacts { orderable: true }).is_some()
+}
+
+fn list_method(name: &str, elem: &Type, facts: ElemFacts) -> Option<Type> {
+    // The element-type gate, read from the one requirement table so this and the refusal
+    // diagnostic cannot drift: a method whose demand the element does not meet is simply absent.
+    if let Some(req) = ElemReq::of_list_method(name)
+        && !req.met_by(elem, facts)
+    {
+        return None;
+    }
+    // The element type the arithmetic arms compute in: the element itself when it is a number, and
+    // the gradual hole when it merely *defers* (the `List<dyn>` the gate above admits), so such a
+    // fold stays as tolerant downstream as every other gradual position rather than committing to
+    // the top.
+    let num = || numeric_reduce(elem).unwrap_or(Type::Unknown);
     Some(match name {
         "reverse" | "sorted" | "slice" | "set" => list(elem.clone()),
         "contains" => Type::Bool,
@@ -748,24 +869,27 @@ fn list_method(name: &str, elem: &Type) -> Option<Type> {
         "filter" => list(elem.clone()),
         // Numeric reductions (packed-reductions arc): `sum`/`product` return the **element type**,
         // wrapping at its width — folding `List<i32>` gives an `i32`, exactly as repeated `+`/`*`
-        // would (settled decision). `min`/`max` return `?T` (`none` for an empty list, like
-        // `first`/`last`). A packed scalar list folds its raw buffer; a boxed numeric list folds
-        // element-wise — one shared kernel, so both agree. (`sum` keeps its historical `Unknown` for a
-        // non-numeric element so it never newly rejects; the newer reductions require a number.)
-        "sum" => numeric_reduce(elem).unwrap_or(Type::Unknown),
-        "product" if numeric_reduce(elem).is_some() => elem.clone(),
-        "min" | "max" if numeric_reduce(elem).is_some() => opt(elem.clone()),
+        // would (settled decision). A packed scalar list folds its raw buffer; a boxed numeric list
+        // folds element-wise — one shared kernel, so both agree. The numeric requirement is the
+        // gate above, not a per-arm guard.
+        "sum" | "product" => num(),
         // `checked_sum()` (array-ops arc): the opt-in overflow-reporting sum — `?T`, `none` on
-        // integer overflow. Numeric lists only (the unchecked `sum` still wraps).
-        "checked_sum" if numeric_reduce(elem).is_some() => opt(elem.clone()),
+        // integer overflow (the unchecked `sum` still wraps).
+        "checked_sum" => opt(num()),
+        // The **ordering** reductions: `min`/`max` return `?T` (`none` for an empty list, like
+        // `first`/`last`), picking the extremum under the same total order `.sorted()` sorts by. So
+        // they need what an ordering operator needs — an element type that is `Comparable` — which
+        // is the [`ElemReq::Ordered`] gate above, and which a bare type parameter meets through a
+        // `Comparable` bound exactly as `a < b` does.
+        "min" | "max" => opt(elem.clone()),
         // Element-wise array-programming methods (array-ops arc): `scale(s)` (list × scalar),
         // `abs()`, `neg()`, and `clamp(lo, hi)` — each returns a list of the same numeric element
         // type (element-wise, wrapping for ints). Packed lists fold their buffer, boxed lists their
         // scalars — one shared `noeta-stdlib` kernel, so both agree.
-        "scale" | "abs" | "neg" | "clamp" if numeric_reduce(elem).is_some() => list(elem.clone()),
+        "scale" | "abs" | "neg" | "clamp" => list(num()),
         // `List<bool>` reductions: `any`/`all` → `bool`, `count` → the number of `true` elements.
-        "any" | "all" if matches!(elem, Type::Bool) => Type::Bool,
-        "count" if matches!(elem, Type::Bool) => Type::Int,
+        "any" | "all" => Type::Bool,
+        "count" => Type::Int,
         "map" => list(Type::Dyn),
         // `to_bytes` serializes a `List<@packed>` to its raw flat buffer (P-PACK 4.4).
         "to_bytes" => Type::Bytes,

@@ -1,0 +1,31 @@
+// **What each list reduction demands of the element type, and what it says when the elements
+// cannot supply it.**
+//
+// The negative half of the ordering reductions. A reduction that needs an ordering, an arithmetic
+// width, or a boolean is not "a method the type does not have" — the method exists, and this list's
+// elements cannot supply what it computes with. Saying so is the difference between a fixable
+// program and a hunt for a typo.
+//
+// Ordering on an **unbounded type parameter** is the one with a one-word fix, and it is the same
+// diagnostic `a < b` gives for the same missing promise (E0025): declare `<T: Comparable>`. The
+// arithmetic and boolean requirements are properties of the element type itself, so they report the
+// element (E0007) rather than a bound to add.
+// expect: error E0025 at 20:42
+// expect: error E0007 at 21:50
+// expect: error E0007 at 22:55
+// expect: error E0007 at 23:64
+// expect: error E0007 at 25:50
+// expect: exit 1
+
+fn extremum<T>(xs: List<T>): ?T { return xs.max(); }
+fn total<T: Comparable>(xs: List<T>): T { return xs.sum(); }
+fn some_of<T: Comparable>(xs: List<T>): bool { return xs.any(); }
+fn scaled<T: Comparable>(xs: List<T>, by: T): List<T> { return xs.scale(by); }
+
+fn longest(words: List<string>): string { return words.product(); }
+
+echo extremum([1, 2]);
+echo total([1, 2]);
+echo some_of([true]);
+echo scaled([1, 2], 2);
+echo longest(["a"]);

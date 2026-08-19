@@ -5795,6 +5795,19 @@ impl Interpreter {
         span: Span,
     ) -> Eval<Value> {
         if let Some(op) = noeta_stdlib::NumReduce::from_name(method) {
+            // `min`/`max` are ORDERING reductions, not arithmetic ones: they pick an extremum under
+            // the runtime's total order — the same order `sorted` sorts by — so a list whose
+            // elements are strings, bools, structs or enums folds through the comparator instead of
+            // the numeric kernel. Every numeric list still takes the kernel below, keeping the
+            // packed buffer fold and the `u64` unsigned reading. Mirrors the VM's
+            // `call_list_reduction`.
+            if matches!(
+                op,
+                noeta_stdlib::NumReduce::Min | noeta_stdlib::NumReduce::Max
+            ) && !list_folds_numerically(list, from)
+            {
+                return self.fold_list_extremum(list, op, method, from, span);
+            }
             // Packed scalar fast path (a single-field packed element is a contiguous native-width
             // buffer, so `[from..]` is a byte sub-slice); otherwise fold the materialized scalars.
             let folded = match list {
@@ -5843,6 +5856,51 @@ impl Interpreter {
             noeta_stdlib::RedBool::Bool(b) => Value::Bool(b),
             noeta_stdlib::RedBool::Int(i) => Value::Int(i),
         })
+    }
+
+    /// `min`/`max` over a list the numeric kernel does not fold: the extremum under the runtime's
+    /// **total order** — the identical comparator, and the identical mutual-orderability guard,
+    /// [`noeta_stdlib::ListMethod::Sorted`] uses — so `xs.min()` and `xs.sorted().first()` can never
+    /// disagree. `none` for an empty list, matching the numeric path. A tie keeps the earlier
+    /// element, which is unobservable: the comparator reports `Equal` only for values that are
+    /// structurally equal, and the one case where equal values print differently (`-0.0` vs `0.0`)
+    /// is numeric and never reaches here. Mirrors the VM's `fold_list_extremum`.
+    fn fold_list_extremum(
+        &mut self,
+        list: &ListRepr,
+        op: noeta_stdlib::NumReduce,
+        method: &str,
+        from: usize,
+        span: Span,
+    ) -> Eval<Value> {
+        let want = match op {
+            noeta_stdlib::NumReduce::Max => std::cmp::Ordering::Greater,
+            noeta_stdlib::NumReduce::Min => std::cmp::Ordering::Less,
+            noeta_stdlib::NumReduce::Sum | noeta_stdlib::NumReduce::Product => {
+                unreachable!("the caller routes only the ordering reductions here")
+            }
+        };
+        let items = list.to_rc_vec();
+        let Some(first) = items.get(from) else {
+            return Ok(builtin_enum("Option", "none", Vec::new()));
+        };
+        if items[from..]
+            .iter()
+            .any(|item| compare_field(first, item).is_none())
+        {
+            let error = noeta_stdlib::unorderable_error(method);
+            return Err(self.runtime_error(std_error_code(error.kind), span, error.message));
+        }
+        // A `List<u64>` (or a list carrying one where no runtime description can say so) orders
+        // under the checker's hint for this call, exactly as `sorted` does.
+        let elem = self.order_hint(span).and_then(|h| h.elements()).cloned();
+        let mut best = first;
+        for item in &items[from + 1..] {
+            if compare_field_hinted(item, best, elem.as_ref()) == Some(want) {
+                best = item;
+            }
+        }
+        Ok(builtin_enum("Option", "some", vec![best.clone()]))
     }
 
     /// Materialize a list's elements at or after `from` as primitive [`Scalar`](noeta_stdlib::Scalar)s
@@ -6992,6 +7050,31 @@ pub(crate) fn value_nominal_name(value: &Value) -> Option<String> {
         Value::Enum(e) => Some(e.enum_name.clone()),
         Value::Extern(e) => Some(e.borrow().type_identity().to_string()),
         _ => None,
+    }
+}
+
+/// Whether a `min`/`max` over `list` (elements at or after `from`) folds through the **numeric**
+/// kernel, or through the runtime's general ordering instead.
+///
+/// A packed scalar list answers from its schema, so the decision costs no materialization; every
+/// other list answers from its first in-range element. An empty range folds numerically — both
+/// paths give `none`, so the cheap one wins. Mirrors the VM's `list_folds_numerically`.
+fn list_folds_numerically(list: &ListRepr, from: usize) -> bool {
+    match list {
+        ListRepr::Packed(p) if p.seam_view().fields.len() == 1 => {
+            noeta_stdlib::packed_field_folds_numerically(&p.seam_view().fields[0])
+        }
+        _ => match list.get(from) {
+            None => true,
+            Some(v) => matches!(
+                value_to_scalar(&v),
+                Some(
+                    noeta_stdlib::Scalar::Int(_)
+                        | noeta_stdlib::Scalar::Float(_)
+                        | noeta_stdlib::Scalar::F32(_)
+                )
+            ),
+        },
     }
 }
 

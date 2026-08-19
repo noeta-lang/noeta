@@ -476,7 +476,7 @@ impl Checker {
         if let Some(t) = self.native_method_assoc_return(recv, name) {
             return t;
         }
-        if let Some(t) = stdlib::method_return(self.reg(), recv, name) {
+        if let Some(t) = stdlib::method_return(self.reg(), recv, name, self.elem_facts(recv)) {
             return t;
         }
         if let Type::Named(n, _) = recv
@@ -840,7 +840,8 @@ impl Checker {
         if let Expr::Ident { name: tn, .. } = receiver
             && lookup(env, tn.as_str()).is_none()
             && let Some(recv_ty) = builtin_receiver_type(tn.as_str())
-            && let Some(ret) = stdlib::method_return(self.reg(), &recv_ty, name)
+            && let Some(ret) =
+                stdlib::method_return(self.reg(), &recv_ty, name, self.elem_facts(&recv_ty))
         {
             let mut params = vec![recv_ty.clone()];
             params.extend(stdlib::method_params(self.reg(), &recv_ty, name).unwrap_or_default());
@@ -937,7 +938,8 @@ impl Checker {
             };
         }
         if !matches!(recv, Type::Unknown | Type::Dyn)
-            && let Some(ret) = stdlib::method_return(self.reg(), &recv, name)
+            && let Some(ret) =
+                stdlib::method_return(self.reg(), &recv, name, self.elem_facts(&recv))
         {
             let params = stdlib::method_params(self.reg(), &recv, name).unwrap_or_default();
             self.sites.bound_handle_sites.insert(member_span);

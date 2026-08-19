@@ -1830,6 +1830,7 @@ impl Checker {
                 // missing its `?`) reached production looking correct.
                 if matches!(ret, Type::Unknown)
                     && (closed_to_new_methods(&recv) || user_type_is_closed(self, &recv))
+                    && !self.report_unmet_element_requirement(&recv, name, span)
                 {
                     self.error(
                         DiagnosticCode::TypeMismatch,
@@ -1934,7 +1935,8 @@ impl Checker {
         if let Some(params) = stdlib::method_params(self.reg(), recv, "call") {
             let required =
                 stdlib::method_required(self.reg(), recv, "call").unwrap_or(params.len());
-            let result = stdlib::method_return(self.reg(), recv, "call").unwrap_or(Type::Dyn);
+            let result = stdlib::method_return(self.reg(), recv, "call", self.elem_facts(recv))
+                .unwrap_or(Type::Dyn);
             self.finalize_closure_args(&params, args, arg_exprs, env);
             self.check_args(&params, required, args, arg_exprs, span, "call");
             return Some(result);

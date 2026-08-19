@@ -76,6 +76,24 @@ echo [1,2,3,4].filter(fn(n) => n % 2 == 0)
 
 - `xs.len()`, `xs.map(f)`, `xs.filter(pred)`, `xs.sum()` (int for `List<int>`, else float). To pass one as a value, take an unbound method handle: `f = list.len`, `xss.map(list.len)`.
 
+### Reductions
+
+A reduction folds the whole list to one value, and each one asks something of the **element type**.
+
+| Method | Signature | Needs | Example → result |
+|---|---|---|---|
+| `min` / `max` | `min() -> ?T` | an ordered `T` | `["b","a"].max()` → `some(b)`; `[].max()` → `none` |
+| `sum` / `product` | `sum() -> T` | a numeric `T` | `[1,2,3].sum()` → `6` |
+| `checked_sum` | `checked_sum() -> ?T` | a numeric `T` | `none` instead of wrapping on integer overflow |
+| `scale` / `abs` / `neg` / `clamp` | `scale(s: T) -> List<T>` | a numeric `T` | `[1,2].scale(3)` → `[3, 6]` |
+| `any` / `all` | `any() -> bool` | `T = bool` | `[false,true].any()` → `true` |
+| `count` | `count() -> int` | `T = bool` | `[true,false,true].count()` → `2` (the `true`s; `len()` is the size) |
+
+`min`/`max` order by the **same total order** `sorted()` sorts by — numbers, strings, bools, and value kinds (structs and enums) ordering structurally — so `xs.min()` and `xs.sorted().first()` are always the same value. `sum`/`product` fold at the element's numeric width and wrap there, exactly as repeated `+`/`*` would.
+
+Inside a generic body the element type is whatever the caller chose, so the requirement becomes a **bound**: `fn top<T: Comparable>(xs: List<T>): ?T { return xs.max() }` compiles and instantiates at every ordered type. Without the bound the ordering is not promised and the call is E0025, naming the bound to add. The arithmetic and boolean reductions have no bound that promises a number or a `bool`, so they stay available only where the element type says so directly.
+
+
 ## Map
 
 String-keyed; keys iterate and print in sorted order. Empty is `{}`.

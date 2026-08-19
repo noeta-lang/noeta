@@ -1,0 +1,78 @@
+// **`min`/`max` are ordering reductions, and they order whatever `.sorted()` orders.**
+//
+// The extremum is taken under the runtime's single total order — the same one `.sorted()` sorts by
+// and a set canonicalizes by — so `xs.min()` and `xs.sorted().first()` are the same value by
+// construction, for numbers, strings, bools and structurally-ordered value kinds alike.
+//
+// That is what makes them reachable from a **generic body**: an element type is ordered when it is
+// `Comparable`, and a type parameter is `Comparable` when its declaration says so. `fn mx<T:
+// Comparable>(xs: List<T>): ?T { return xs.max() }` needs nothing the bound does not already
+// promise, and it instantiates at every ordered element type.
+//
+// Empty is `none`, like `first`/`last`. A `u64` element orders by its unsigned value, at a concrete
+// type and through the type parameter alike — the width is on the *static type*, which is exactly
+// what a bound carries into the body.
+// expect: stdout "some(3)"
+// expect: stdout "some(1)"
+// expect: stdout "some(c)"
+// expect: stdout "some(a)"
+// expect: stdout "some(true)"
+// expect: stdout "some(false)"
+// expect: stdout "some(c)"
+// expect: stdout "some(a)"
+// expect: stdout "some(3.5)"
+// expect: stdout "some(0.5)"
+// expect: stdout "some(Money {cents: 900})"
+// expect: stdout "some(Money {cents: 25})"
+// expect: stdout "none"
+// expect: stdout "none"
+// expect: stdout "some(18446744073709551615)"
+// expect: stdout "some(1)"
+// expect: stdout "some(18446744073709551615)"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: exit 0
+
+@derive(Comparable)
+struct Money {
+    cents: int
+}
+
+fn mx<T: Comparable>(xs: List<T>): ?T { return xs.max(); }
+fn mn<T: Comparable>(xs: List<T>): ?T { return xs.min(); }
+
+// Numbers keep the buffer-direct fold they always had.
+echo [3, 1, 2].max();
+echo [3, 1, 2].min();
+
+// Strings and bools order too — the same order `sorted` uses.
+echo ["b", "a", "c"].max();
+echo ["b", "a", "c"].min();
+echo [false, true].max();
+echo [false, true].min();
+
+// The generic body, instantiated at a non-numeric element type.
+echo mx(["b", "a", "c"]);
+echo mn(["b", "a", "c"]);
+echo mx([0.5, 3.5, 1.5]);
+echo mn([0.5, 3.5, 1.5]);
+
+// A value kind orders structurally, exactly as `@derive(Comparable)` and `.sorted()` define it.
+echo mx([Money { cents: 25 }, Money { cents: 900 }]);
+echo mn([Money { cents: 25 }, Money { cents: 900 }]);
+
+// Empty is `none` on both the numeric and the ordering path.
+empty: List<string> = [];
+echo empty.max();
+echo mn(empty);
+
+// A `u64` reads unsigned wherever its static type says so — concretely and through the bound.
+big: List<u64> = [1u64, 18446744073709551615u64];
+echo big.max();
+echo big.min();
+echo mx(big);
+
+// `min`/`max` and `sorted` cannot disagree: they are the same order.
+words = ["pear", "fig", "apple"];
+echo words.min() == words.sorted().first();
+echo words.max() == words.sorted().last();

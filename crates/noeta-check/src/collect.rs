@@ -1695,6 +1695,7 @@ impl Checker {
                             self.reg(),
                             &Type::Named(type_name.clone(), Vec::new()),
                             method,
+                            crate::stdlib::ElemFacts::default(),
                         )
                         .is_some();
                     if provided {

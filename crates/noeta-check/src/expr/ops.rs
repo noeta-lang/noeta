@@ -295,6 +295,76 @@ impl Checker {
         self.satisfies(operand, t)
     }
 
+    /// The element facts a built-in method table needs about `recv` — today, whether a collection's
+    /// element type carries a total order.
+    ///
+    /// Built from the **same** predicate `a < b` consults, so `xs.max()` and `a < b` can never
+    /// disagree about whether a `T` is ordered: the ordering rule is spelled once, here, and the
+    /// method table reads its answer. A non-collection receiver has no element and reports nothing.
+    pub(crate) fn elem_facts(&self, recv: &Type) -> crate::stdlib::ElemFacts {
+        let elem = match recv {
+            Type::List(elem) | Type::Set(elem) => elem.as_ref(),
+            _ => return crate::stdlib::ElemFacts::default(),
+        };
+        crate::stdlib::ElemFacts {
+            orderable: self.operand_satisfies_operator(elem, BuiltinTrait::Comparable),
+        }
+    }
+
+    /// Report a built-in list method refused because the **element type** does not meet what the
+    /// method demands of it, and say which demand. `true` when this reported; the caller then skips
+    /// the generic "has no method", which is the wrong story — the method exists, this list's
+    /// elements cannot supply what it computes with.
+    ///
+    /// The ordering case on an in-scope unbounded type parameter is `E0025`, the same diagnostic
+    /// `a < b` gives for the same missing bound, because it is the same fact: `xs.max()` orders
+    /// `T`s. Everything else is `E0007` naming the requirement.
+    pub(crate) fn report_unmet_element_requirement(
+        &mut self,
+        recv: &Type,
+        name: &str,
+        span: Span,
+    ) -> bool {
+        let Type::List(elem) = recv else {
+            return false;
+        };
+        let Some(req) = crate::stdlib::ElemReq::of_list_method(name) else {
+            return false;
+        };
+        let elem = (**elem).clone();
+        // Met means the method's absence is not this rule's doing — leave the caller's message.
+        if req.met_by(&elem, self.elem_facts(recv)) {
+            return false;
+        }
+        if req == crate::stdlib::ElemReq::Ordered
+            && let Some(p) = self.unbounded_type_param(&elem, BuiltinTrait::Comparable)
+        {
+            self.error(
+                DiagnosticCode::TraitBoundNotSatisfied,
+                span,
+                format!(
+                    "`{name}()` orders the list's elements, which requires `{p}: Comparable`, \
+                     but `{p}` is an unbounded type parameter"
+                ),
+            )
+            .help(format!(
+                "declare the bound (`<{p}: Comparable>`); the extremum is taken under the same \
+                 total order `.sorted()` sorts by"
+            ));
+            return true;
+        }
+        self.error(
+            DiagnosticCode::TypeMismatch,
+            span,
+            format!(
+                "`{name}()` needs {}, but this list's elements are `{elem}`",
+                req.wants()
+            ),
+        )
+        .help(req.help());
+        true
+    }
+
     /// The name of an in-scope type parameter (`operand`) that lacks `trait_name` among its bounds,
     /// or `None` if `operand` is not such a parameter — used to pick the diagnostic flavor.
     pub(crate) fn unbounded_type_param(&self, operand: &Type, t: BuiltinTrait) -> Option<String> {

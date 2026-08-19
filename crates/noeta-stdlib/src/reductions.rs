@@ -47,6 +47,24 @@ pub enum BoolReduce {
     Count,
 }
 
+/// Whether a **packed scalar list** whose single element field is `field` folds through the numeric
+/// kernel for `min`/`max`.
+///
+/// `min`/`max` are ordering reductions over any element type the runtime can order, so a packed
+/// `List<bool>` (and a packed struct list) takes the general ordering fold instead — the same total
+/// order `sorted` sorts by. Every numeric width keeps the buffer-direct kernel. Spelled once here so
+/// the two backends cannot split on which packed lists are numeric.
+pub fn packed_field_folds_numerically(field: &PackedField) -> bool {
+    match field {
+        PackedField::Int
+        | PackedField::Float
+        | PackedField::F32
+        | PackedField::F64
+        | PackedField::IntN { .. } => true,
+        PackedField::Bool | PackedField::Struct(_) => false,
+    }
+}
+
 impl NumReduce {
     pub fn from_name(name: &str) -> Option<NumReduce> {
         Some(match name {

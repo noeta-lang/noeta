@@ -386,6 +386,51 @@ fn ordering_on_an_unbounded_type_parameter_is_reported() {
 }
 
 #[test]
+fn ordering_reductions_follow_the_same_bound_the_operator_does() {
+    // `xs.max()` orders `T`s, so it asks exactly what `a < b` asks — and is refused the same way,
+    // with the same code, when the declaration never promised it.
+    let unbounded = "fn top<T>(xs: List<T>): ?T { return xs.max(); }\n";
+    assert_eq!(codes(unbounded), ["E0025"]);
+    let bounded = "fn top<T: Comparable>(xs: List<T>): ?T { return xs.max(); }\n";
+    assert!(codes(bounded).is_empty());
+    let low = "fn low<T: Comparable>(xs: List<T>): ?T { return xs.min(); }\n";
+    assert!(codes(low).is_empty());
+}
+
+#[test]
+fn ordering_reductions_reach_every_ordered_concrete_element() {
+    // The requirement is `Comparable`, not "a number": strings, bools and value kinds order too,
+    // under the same total order `sorted` uses. A type with no ordering is refused, naming what it
+    // needs rather than claiming the method does not exist.
+    assert!(codes("echo [\"b\", \"a\"].max();\n").is_empty());
+    assert!(codes("echo [true, false].min();\n").is_empty());
+    assert!(
+        codes("@derive(Comparable)\nstruct M { c: int }\necho [M { c: 1 }].max();\n").is_empty()
+    );
+    assert_eq!(
+        codes("class P { pub v: int }\nfn f(ps: List<P>): ?P { return ps.max(); }\n"),
+        ["E0007"]
+    );
+}
+
+#[test]
+fn arithmetic_and_boolean_reductions_stay_element_typed() {
+    // No bound promises a number or a `bool`, so these stay available only where the element type
+    // says so directly — and the refusal names the requirement.
+    assert_eq!(
+        codes("fn t<T: Comparable>(xs: List<T>): T { return xs.sum(); }\n"),
+        ["E0007"]
+    );
+    assert_eq!(
+        codes("fn t<T: Comparable>(xs: List<T>): bool { return xs.any(); }\n"),
+        ["E0007"]
+    );
+    // A `dyn` element *defers* rather than failing the requirement — which is what lets the unbound
+    // handle `list.sum`, whose receiver type is `List<dyn>`, resolve at all.
+    assert!(codes("f = list.sum;\necho f([1, 2, 3]);\n").is_empty());
+}
+
+#[test]
 fn arithmetic_on_an_unbounded_type_parameter_is_reported() {
     // The operator-trait check is not ordering-only: `+` on an unbounded `T` needs `Add`.
     let unbounded = "fn sum<T>(a: T, b: T): T { return a + b; }\n";
@@ -1153,6 +1198,26 @@ fn narrowing_a_concrete_value_is_rejected() {
     // Narrowing only makes sense out of an open type; an already-concrete `int` has nothing to narrow.
     let src = "fn f(n: int): ?int {\n  return n.as<int>();\n}\n";
     assert_eq!(codes(src), ["E0028"]);
+}
+
+#[test]
+fn narrowing_to_an_erased_width_is_rejected() {
+    // No value carries a width, so a narrow to one could never succeed for any input — refused
+    // rather than typed `?u64` and handed a `none` the program reads as a head mismatch. Every
+    // member of the family, including the `f64` half.
+    for width in ["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f64"] {
+        let src = format!("fn f(v: dyn): ?{width} {{\n  return v.as<{width}>();\n}}\n");
+        assert_eq!(codes(&src), ["E0028"], "narrowing to `{width}`");
+    }
+}
+
+#[test]
+fn narrowing_to_a_reified_or_container_width_is_clean() {
+    // `f32` has its own runtime tag, and a container's element width lives in the buffer's schema —
+    // both are real narrowing heads, so neither is touched by the erased-width rule.
+    assert!(codes("fn f(v: dyn): ?f32 {\n  return v.as<f32>();\n}\n").is_empty());
+    assert!(codes("fn f(v: dyn): ?List<i32> {\n  return v.as<List<i32>>();\n}\n").is_empty());
+    assert!(codes("fn f(v: dyn): ?int {\n  return v.as<int>();\n}\n").is_empty());
 }
 
 #[test]

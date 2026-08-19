@@ -1090,13 +1090,10 @@ impl Checker {
                     }
                 }
                 noeta_ext_abi::BundleReceiver::Bulk => {
-                    if stdlib::method_return(
-                        self.reg(),
-                        &Type::List(Box::new(Type::Dyn)),
-                        m.sig.name,
-                    )
-                    .is_some()
-                    {
+                    // Element-type-independent: a bundle may not take a built-in list method's
+                    // name whatever the element turns out to be, so this asks the name question
+                    // rather than resolving a return at some stand-in element type.
+                    if stdlib::is_list_method(m.sig.name) {
                         conflicts.push(format!("`{}` is a built-in list method", m.sig.name));
                     }
                 }
