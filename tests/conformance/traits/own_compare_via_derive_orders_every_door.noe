@@ -1,0 +1,24 @@
+// `@derive(Comparable, via: field)` synthesizes the type's `compare` — delegating to one field
+// precisely so its siblings do NOT constrain the order — and that synthesized method is the type's
+// own order at every door a program observes: `<`, `.sorted()`, `.min()`, `.max()`.
+//
+// `label` is declared first here, so a structural comparator would order by it and answer the
+// opposite of the declared one on all four. The set keeps the structural order all the same: a
+// set's placement is an identity order, built at one site and probed at another.
+// expect: stdout "true"
+// expect: stdout "[Money {label: "z", cents: 100}, Money {label: "a", cents: 300}]"
+// expect: stdout "some(Money {label: "z", cents: 100})"
+// expect: stdout "some(Money {label: "a", cents: 300})"
+// expect: stdout "{Money {label: "a", cents: 300}, Money {label: "z", cents: 100}}"
+// expect: exit 0
+@derive(Comparable, via: cents)
+struct Money { label: string; cents: int }
+
+a = Money { label: "z", cents: 100 };
+b = Money { label: "a", cents: 300 };
+echo a < b;
+xs = [b, a];
+echo xs.sorted();
+echo xs.min();
+echo xs.max();
+echo xs.to_set();
