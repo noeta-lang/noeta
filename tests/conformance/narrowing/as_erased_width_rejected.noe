@@ -1,0 +1,38 @@
+// **A fixed-width scalar is not a narrowing target.**
+//
+// A width is a property of *storage*, not of a value: every integer width is the same runtime word,
+// and an `f64` is a `float` bit for bit. So no value carries the width, the shared runtime matcher
+// reaches no head for `iN`/`f64`, and `.as<iN>()` answers `none` for every input — including a
+// value that really was written as that width. A cast that is unsatisfiable in every possible
+// program is refused at check time (E0028) rather than certified `?u64` and handed back a `none`
+// the program reads as "the value was some other type".
+//
+// The same erasure gives `x is iN` only a *warning* (E0063): a test has settleable cases the
+// checker answers and folds. A narrow has none — `.as<T>()` demands an open source, and an open
+// source is exactly where the width is gone.
+// expect: error E0028 at 25:15
+// expect: error E0028 at 26:15
+// expect: error E0028 at 27:15
+// expect: error E0028 at 28:15
+// expect: error E0028 at 29:15
+// expect: error E0028 at 30:15
+// expect: error E0028 at 31:15
+// expect: error E0028 at 32:15
+// expect: error E0028 at 33:15
+// expect: exit 1
+
+fn widths(v: dyn): int {
+    echo v.as<i8>();
+    echo v.as<i16>();
+    echo v.as<i32>();
+    echo v.as<i64>();
+    echo v.as<u8>();
+    echo v.as<u16>();
+    echo v.as<u32>();
+    echo v.as<u64>();
+    echo v.as<f64>();
+    return 0;
+}
+
+n: u64 = 5u64;
+echo widths(n);

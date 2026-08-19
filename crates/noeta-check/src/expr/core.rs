@@ -1758,6 +1758,47 @@ impl Checker {
                 // Unresolvable shapes are E0058 here rather than a silent `none` at run time.
                 self.check_narrow_target(ty, *span, ".as<…>()");
                 let target = self.annot(ty);
+                // A bare **erased-width scalar** target (`iN`/`f64`) is not a narrowing target at
+                // all. A width is a property of *storage*, not of a value — every integer width is
+                // the same runtime word and an `f64` *is* a `float` bit for bit — so the shared
+                // runtime matcher reaches no head for it and `.as<iN>()` answers `none` for every
+                // possible input, in every possible program.
+                //
+                // The same erasure gives `x is iN` only a *warning* (E0063), because that surface
+                // has settleable cases: where the scrutinee's static type names the width the
+                // checker answers the test itself and folds the constant. A narrow has none — a
+                // source whose static type is concrete is already the E0028 below, so every
+                // `.as<iN>()` that gets this far has an open source, which is exactly where the
+                // width is gone. Refusing it beats certifying the expression `?u64` and handing
+                // back a `none` the program reads as "the value was some other type".
+                //
+                // `f32` is exempt (reified at runtime — a real narrowing head) and so is a
+                // parametrized target like `List<i32>` (a packed element's width lives in the
+                // buffer's schema); both are filtered by matching only a *bare* erased-width name,
+                // the same shape the `is` rule filters on and through the same predicate.
+                if let TypeRef::Named {
+                    name,
+                    args,
+                    span: target_span,
+                } = ty
+                    && args.is_empty()
+                    && let Some(base) = erased_scalar_width_base(name.as_str())
+                {
+                    self.error(
+                        DiagnosticCode::InvalidNarrow,
+                        *target_span,
+                        format!(
+                            "`{name}` shares one runtime representation with `{base}`, and no \
+                             value carries its width — so `.as<{name}>()` can never succeed"
+                        ),
+                    )
+                    .help(format!(
+                        "narrow to the base type instead (`.as<{base}>()`), then annotate the \
+                         result where a `{name}` is wanted; a width is a property of storage, not \
+                         something the value carries"
+                    ));
+                    return Type::Option(Box::new(target));
+                }
                 // Narrowing is the explicit way *out* of an open type: the dynamic top `dyn`, an
                 // un-inferred hole (which defers), a **union** (a *closed* `dyn`), or an abstract
                 // **kind-type** (`Enum`/`Struct`/`Class` — narrow to a concrete member). A value

@@ -144,7 +144,7 @@ d: dyn = Color.Green
 echo d is Enum          // true
 ```
 
-**`.as<T>()`** is a *checked narrowing* of a `dyn` or union to `?T` — `some(x)` if the runtime head constructor is `T`, else `none`. Narrowing an already-concrete (non-dynamic) value is E0028.
+**`.as<T>()`** is a *checked narrowing* of a `dyn` or union to `?T` — `some(x)` if the runtime head constructor is `T`, else `none`. Narrowing an already-concrete (non-dynamic) value is E0028, and so is narrowing **to** a fixed-width scalar (`i8`…`u64`, `f64`): a width is a property of storage, not of a value, so no value carries one and the narrow could never succeed — narrow to `int`/`float` and annotate the result. `f32` is a normal target (it is reified at runtime), as is a container like `List<i32>` (a packed element's width lives in the buffer's schema). See [Fixed-Width Ints](Fixed-Width-Integers).
 
 ```noeta
 struct Point { x: int  y: int }

@@ -1,0 +1,49 @@
+// **The narrowing targets a laundered scalar can be reached through.**
+//
+// The companion to the refused fixed-width targets: what a `dyn` holding a number *can* be narrowed
+// to. The base types (`int`, `float`) name the runtime head the value actually carries, `number`
+// names the union of all three numeric heads, and `f32` is reified — it has its own runtime tag, so
+// it is a real narrowing target and not an erased width. A container target is likewise a real one:
+// a packed element's width lives once in the buffer's schema, not on each element.
+//
+// A value written as a `u64` narrows to `int` — that is the same word — and the `u64` reading is
+// recovered by annotating the result, which is what makes the width a storage property again.
+// expect: stdout "some(5)"
+// expect: stdout "none"
+// expect: stdout "some(2.5)"
+// expect: stdout "none"
+// expect: stdout "some(1.5)"
+// expect: stdout "some(1.5)"
+// expect: stdout "some(7)"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "18446744073709551615"
+// expect: exit 0
+
+n: u64 = 5u64;
+laundered: dyn = n;
+echo laundered.as<int>();      // some(5)  — the word is an integer word
+echo laundered.as<string>();   // none     — a real head mismatch
+
+f: float = 2.5;
+wide: dyn = f;
+echo wide.as<float>();         // some(2.5)
+echo wide.as<string>();        // none
+
+small: f32 = 1.5f32;
+reified: dyn = small;
+echo reified.as<f32>();        // some(1.5) — `f32` is reified, so it narrows
+echo reified.as<float>();      // some(1.5) — and it is a `float` too
+
+i: int = 7;
+any: dyn = i;
+echo any.as<number>();         // some(7)
+
+widths: List<i32> = [1, 2];
+held: dyn = widths;
+echo held is List<i32>;        // true  — the element width is in the buffer's schema
+echo held is List<i64>;        // false
+
+// The `u64` reading comes back from the annotation, not from the value.
+back: u64 = (laundered.as<int>() ?? 0).to_u64();
+echo back - 6u64;              // wraps unsigned: 18446744073709551615

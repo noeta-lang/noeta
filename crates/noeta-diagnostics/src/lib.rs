@@ -117,9 +117,22 @@ pub enum DiagnosticCode {
     /// `impl Trait for T {}` must target a type declared in the same module — so a trait is only
     /// ever implemented for a local type.)
     ConflictingTraitImpl,
-    /// A checked narrowing (`x.as<T>()`) was applied to a value whose static type is already
-    /// concrete (not `dyn`). Narrowing converts the open top `dyn` back to a `?T`; a value that is
-    /// already a known concrete type has nothing dynamic to narrow, so the `as` is a mistake.
+    /// A checked narrowing (`x.as<T>()`) that cannot mean anything. Two causes:
+    ///
+    /// - the **source** is already concrete (not `dyn`, a union, or a kind-type). Narrowing
+    ///   converts the open top `dyn` back to a `?T`; a value that is already a known concrete type
+    ///   has nothing dynamic to narrow, so the `as` is a mistake.
+    /// - the **target** is a bare fixed-width scalar (`i8`…`u64`, `f64`). A width is a property of
+    ///   storage, not of a value — every integer width is the same runtime word and an `f64` *is* a
+    ///   `float` bit for bit — so no value carries the width and the narrow answers `none` for
+    ///   every input, in every program. The fix is to narrow to the base type (`.as<int>()` /
+    ///   `.as<float>()`) and annotate the result. `f32` is exempt (reified at runtime, a real
+    ///   narrowing head) and so is a parametrized target like `List<i32>` (a packed element's width
+    ///   lives in the buffer's schema).
+    ///
+    /// The width half is an **error** where the same erasure makes `x is iN` only a warning
+    /// ([`Self::ErasedWidthNarrow`]): a test has settleable cases the checker folds, a narrow has
+    /// none — its source is open by construction, which is exactly where the width is gone.
     InvalidNarrow,
     /// A `#[Foo(...)]` data attribute names a type that is not usable in annotation position — `Foo`
     /// is not a struct marked `@attribute`. Attributes are structs opted in with that directive

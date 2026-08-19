@@ -159,8 +159,8 @@ impl DiagnosticCode {
                 title: "invalid narrowing",
                 group: "Types, inference, and narrowing",
                 severity: Severity::Error,
-                summary: "`.as<T>()` applied to a value whose static type is already concrete — there is nothing dynamic to narrow.",
-                detail: "",
+                summary: "`.as<T>()` applied to a value whose static type is already concrete — there is nothing dynamic to narrow — or aimed at a fixed-width scalar, which no value carries.",
+                detail: "Narrowing converts an open type (`dyn`, a union, a kind-type) back to a checked `?T`; a value with a single known concrete type does not need it. A **fixed-width** target (`i8`…`u64`, `f64`) is refused for the opposite reason: a width is a property of storage, not of a value — every integer width is the same runtime word and an `f64` is a `float` bit for bit — so the narrow could never succeed for any input. Narrow to the base type (`.as<int>()`, `.as<float>()`) and annotate the result where the width is wanted. `f32` is exempt: it is reified at runtime with its own narrowing head. So is a parametrized target like `List<i32>`, whose element width lives in the buffer's schema.",
                 docs: "Type-System",
             },
             DiagnosticCode::NonIntegerBitwise => Explanation {
