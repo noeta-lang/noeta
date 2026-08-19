@@ -5919,13 +5919,13 @@ impl Interpreter {
             match value_to_scalar(item) {
                 Some(s) => scalars.push(s),
                 None => {
+                    // One shared constructor, so an ordering reduction reports the same
+                    // "not a single orderable type" its own comparator path would.
+                    let error = noeta_stdlib::reduction_element_error(method, item.type_name());
                     return Err(self.runtime_error(
-                        DiagnosticCode::TypeMismatch,
+                        std_error_code(error.kind),
                         span,
-                        format!(
-                            "`{method}` expects a list of numbers, found an element of type {}",
-                            item.type_name()
-                        ),
+                        error.message,
                     ));
                 }
             }

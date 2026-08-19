@@ -895,13 +895,10 @@ impl<'m> Vm<'m> {
         }
         list.release();
         if let Some(type_name) = bad {
-            return Err(self.error(
-                DiagnosticCode::TypeMismatch,
-                span,
-                format!(
-                    "`{method}` expects a list of numbers, found an element of type {type_name}"
-                ),
-            ));
+            // One shared constructor, so an ordering reduction reports the same
+            // "not a single orderable type" its own comparator path would.
+            let error = noeta_stdlib::reduction_element_error(method, type_name);
+            return Err(self.std_dispatch_error(error, span));
         }
         Ok(scalars)
     }

@@ -47,6 +47,26 @@ pub enum BoolReduce {
     Count,
 }
 
+/// The error a list reduction raises for an element it cannot fold — the one constructor, so the
+/// two backends give one message and the *order* of a list's elements cannot change which.
+///
+/// An **ordering** reduction (`min`/`max`) reports the list as not a single orderable type: the same
+/// message `sorted` gives for the same list. That matters because the ordering reductions reach the
+/// numeric kernel whenever the list *starts* with a number, so `[1, "a"]` and `["a", 1]` arrive here
+/// from opposite paths and must still read alike. An arithmetic or boolean reduction names the
+/// domain it needed instead — there is no ordering question in a `sum`.
+pub fn reduction_element_error(method: &str, found: &str) -> StdError {
+    match NumReduce::from_name(method) {
+        Some(NumReduce::Min | NumReduce::Max) => crate::unorderable_error(method),
+        _ => StdError {
+            kind: ErrorKind::ArgType,
+            message: format!(
+                "`{method}` expects a list of numbers, found an element of type {found}"
+            ),
+        },
+    }
+}
+
 /// Whether a **packed scalar list** whose single element field is `field` folds through the numeric
 /// kernel for `min`/`max`.
 ///
@@ -452,6 +472,52 @@ pub fn reduce_bool_scalars(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_ordering_reduction_reports_unorderability_whatever_reached_it() {
+        // `[1, "a"]` reaches the arithmetic kernel (its head is a number) and `["a", 1]` the
+        // comparator, so the two paths must agree — otherwise the *order* of a list's elements
+        // decides what the error says about it.
+        assert_eq!(
+            reduction_element_error("max", "string").message,
+            crate::unorderable_error("max").message
+        );
+        assert_eq!(
+            reduction_element_error("min", "string").message,
+            crate::unorderable_error("min").message
+        );
+        // An arithmetic or boolean reduction has no ordering question, so it names its domain.
+        assert!(
+            reduction_element_error("sum", "string")
+                .message
+                .contains("expects a list of numbers")
+        );
+        assert!(
+            reduction_element_error("any", "string")
+                .message
+                .contains("expects a list of numbers")
+        );
+    }
+
+    #[test]
+    fn only_the_numeric_packed_widths_fold_through_the_kernel() {
+        for field in [
+            PackedField::Int,
+            PackedField::Float,
+            PackedField::F32,
+            PackedField::F64,
+            PackedField::IntN {
+                bits: 8,
+                signed: true,
+            },
+        ] {
+            assert!(packed_field_folds_numerically(&field), "{field:?}");
+        }
+        assert!(!packed_field_folds_numerically(&PackedField::Bool));
+        assert!(!packed_field_folds_numerically(&PackedField::Struct(vec![
+            PackedField::Int
+        ])));
+    }
 
     fn packed(field: PackedField, bytes: &[u8]) -> impl Fn(NumReduce) -> Option<RedNum> + '_ {
         move |op| reduce_num_packed(op, &field, bytes).unwrap()

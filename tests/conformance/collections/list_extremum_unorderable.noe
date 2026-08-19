@@ -1,0 +1,12 @@
+// **A list `min`/`max` cannot order reports it the way `sorted()` does — from either path.**
+//
+// An ordering reduction over a numeric list still folds the packed buffer directly, so a list that
+// merely *starts* with a number reaches the arithmetic kernel while one starting with a string
+// reaches the comparator. Two paths, one message: `[1, "a"]` is the same unorderable list from
+// either end, and it says the same thing `sorted()` says about it. This case takes the arithmetic
+// path (the head is a number) — the one that has no comparator of its own to speak for it.
+// expect: stdout "first"
+// expect: exit 1
+echo "first";
+mixed: List<dyn> = [1, "a"];
+echo mixed.max();
