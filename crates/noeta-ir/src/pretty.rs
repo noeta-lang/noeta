@@ -435,6 +435,11 @@ impl Printer<'_> {
             Rvalue::SelfRenderSlot { operand, index, .. } => {
                 format!("render_slot({}[{index}])", atom(operand))
             }
+            Rvalue::ComposeTypeArg { slots, cases, .. } => format!(
+                "compose_type_arg([{}], {} cases)",
+                slots.iter().map(atom).collect::<Vec<_>>().join(", "),
+                cases.len()
+            ),
             Rvalue::TypeSlotName { slot, .. } => format!("type_name(${})", atom(slot)),
             Rvalue::MakeGen { step, .. } => format!("make_gen({})", atom(step)),
             Rvalue::MakeFuture { thunk, .. } => format!("make_future({})", atom(thunk)),

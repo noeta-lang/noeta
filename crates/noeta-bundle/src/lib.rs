@@ -301,7 +301,17 @@ pub const MAGIC: &[u8; 4] = b"NOEB";
 /// matched against it; the bytes of an affected entry differ, and no reader can tell which fidelity
 /// it is looking at. None of it can be re-derived on the reading side, for the reason every row
 /// above cannot: signedness lives only in the static type.
-pub const FORMAT_VERSION: u8 = 27;
+/// Bumped to 28 by the last position of that hint: the instantiation a generic body **builds** out
+/// of its own type parameters and hands to another generic — `wrap([v])` inside `fn built<T>(v: T)`,
+/// which instantiates `wrap` at `List<T>`. Nothing in `built`'s signature names `List<T>`, so no
+/// slot of `built` carries it whole and no caller could have interned a type the body invents; the
+/// leaf is on a slot, though, and the shape around it is static, so [`noeta_bytecode::Op`] gained
+/// `ComposeTypeArg` — declared beside `SelfRenderSlot`, so every discriminant after it shifts, which
+/// is the same wire break the inserted `SelfRenderSlot` was at version 27. Its `cases` (the
+/// checker's precomputed answer per combination of leaf values) are carried on the op, so no module
+/// table moves. It cannot be re-derived on the reading side, for the reason every row above cannot:
+/// signedness lives only in the static type — and here in a static type no signature spells.
+pub const FORMAT_VERSION: u8 = 28;
 
 /// The SHA-256 of one canonical [`Module`]'s postcard encoding — the *other* half of
 /// [`FORMAT_VERSION`], and the thing that makes the changelog above enforceable.
@@ -325,7 +335,7 @@ pub const FORMAT_VERSION: u8 = 27;
 /// pair exists to prevent. The test's message says so; this doc says so; the changelog paragraph
 /// you are about to write is the third place.
 pub const MODULE_LAYOUT_DIGEST: &str =
-    "a721d685e86f5fe151378d659cee4370a99d8365639989ab268bc8146455e51c";
+    "aa55f592d9f73adb83579b8ed8664228b48fd8a983ec817daa9a5775973163ba";
 
 /// The runtime version stamped into and checked against artifacts — the building crate's
 /// package version. Any release that changes the serialized [`Module`] layout bumps this, so a

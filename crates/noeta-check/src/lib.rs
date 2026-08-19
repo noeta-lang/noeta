@@ -428,6 +428,11 @@ pub fn check_all_session_opts(program: &Program, opts: CheckOptions) -> (Checked
         diverging_stmts: checker.sites.diverging_stmts.clone(),
         sites: {
             let mut sites = checker.sites.clone().into_sites(checker.relevance.clone());
+            packed::finish_hint_compositions(
+                &checker.hint_compositions,
+                &checker.slot_feeds,
+                &mut sites,
+            );
             // Slice E2: seed the from-scratch producer's schema-availability channel (the
             // accumulator projection above cannot — the layouts read `symbols`).
             sites.packed_type_layouts = sorted_packed_layouts(&checker.packed_layouts_public());
@@ -632,6 +637,11 @@ impl SessionChecker {
             .sites
             .clone()
             .into_sites(self.checker.relevance.clone());
+        packed::finish_hint_compositions(
+            &self.checker.hint_compositions,
+            &self.checker.slot_feeds,
+            &mut sites,
+        );
         // Slice E2: a checked session compile can also produce a `List<packed>` from scratch, so its
         // snapshot carries every `@packed` struct's layout for `make_packed`'s by-name resolution.
         sites.packed_type_layouts = sorted_packed_layouts(&self.checker.packed_layouts_public());
@@ -1494,6 +1504,16 @@ struct Coloring {
     /// positionally and carry no instantiation, so a method that took hidden slots would read a
     /// value argument as a table index.
     current_render: Vec<Option<Type>>,
+    /// The key the body being checked carries its hidden slots under — its bare name for a
+    /// top-level `fn`, `Type.method` for a method, and the ENCLOSING one inside a nested `fn`, which
+    /// reads those very slots through closure capture. `None` at top level, in a closure and in a
+    /// destructor, none of which has a layout.
+    ///
+    /// The layout itself is [`Self::current_forwarding`] and [`Self::current_render`]; this is its
+    /// NAME, which is what identifies one body's slot to a call site in another
+    /// ([`Checker::note_slot_feed`]). Saved and restored around each declaration, exactly as the
+    /// layout beside it is.
+    current_slot_key: Option<String>,
     /// The type parameters a `type_name::<T>()` in the body being checked **would** forward — the
     /// enclosing top-level generic fn's own parameters, minus any a nested `fn` shadows (D2b).
     /// Empty in a method, in a nested fn's own shadowing parameters, and at top level.
@@ -1626,6 +1646,22 @@ struct Checker {
     /// codegen-hint output, grouped apart from the checker's own type-environment/coloring state. See
     /// [`SiteMaps`].
     sites: SiteMaps,
+    /// The **render-slot compositions** recorded so far, still as drafts: a call inside a generic
+    /// body filling a render slot at an instantiation the body BUILT out of its own type parameters
+    /// (`wrap([v])` inside `fn built<T>(v: T)`) records one here and refers to it by index.
+    ///
+    /// Drafts rather than the finished [`noeta_ext_abi::HintComposition`]s because a composition's
+    /// cases enumerate the type-argument table, which is not complete until every body has been
+    /// checked — [`Checker::finish_hint_compositions`] turns these into
+    /// [`Sites::type_arg_compositions`] once it is. Empty for a program whose generic bodies build no
+    /// composite, which is nearly all of them.
+    hint_compositions: Vec<packed::CompositionDraft>,
+    /// What a call can put into a callee's render slot, keyed `(the callee's slot key, the slot
+    /// ordinal)` and carrying the CALLER's own slot key beside each answer — the edges
+    /// [`Checker::finish_hint_compositions`] closes to decide which composed values can reach a
+    /// composition's leaves. See [`Checker::note_slot_feed`], which is the only writer. Empty for a
+    /// program whose generic bodies build no composite.
+    slot_feeds: HashMap<(String, u32), Vec<(Option<String>, packed::SlotFeed)>>,
     /// The destructor-relevance of each binding (memory-management migration, Phase 3.2b): the
     /// drop-insertion pass reads it to mark a `DropVar`'s `relevant` bit, which Phase 4 uses to skip
     /// the destructor check for a value whose type can run no destructor.
@@ -1903,6 +1939,7 @@ impl Checker {
         let expr_types = std::mem::take(&mut sites.expr_types);
         let diverging_stmts = std::mem::take(&mut sites.diverging_stmts);
         let mut sites = sites.into_sites(relevance);
+        packed::finish_hint_compositions(&self.hint_compositions, &self.slot_feeds, &mut sites);
         sites.packed_type_layouts = packed_type_layouts;
         Checked {
             diagnostics: self.diags,
@@ -3093,6 +3130,14 @@ impl Checker {
         let saved_forwarding =
             std::mem::replace(&mut self.coloring.current_forwarding, next_forwarding);
         let saved_render = std::mem::replace(&mut self.coloring.current_render, next_render);
+        // The layout's NAME, following the layout: a declaration with slots of its own keys them by
+        // `fwd_key`; a nested `fn` keeps the enclosing one, whose slots its body reads.
+        let next_slot_key = match (&fwd_key, target) {
+            (Some(key), _) => Some(key.clone()),
+            (None, TargetKind::Function) => self.coloring.current_slot_key.clone(),
+            (None, _) => None,
+        };
+        let saved_slot_key = std::mem::replace(&mut self.coloring.current_slot_key, next_slot_key);
         self.coloring.fn_depth += 1;
         // Record the hidden-slot count for lowering — for EVERY forwarding fn or method, called
         // or not, so the body's dynamic sites always have their slots. Keyed exactly as the slot
@@ -3323,6 +3368,7 @@ impl Checker {
         self.coloring.fn_depth -= 1;
         self.coloring.current_forwarding = saved_forwarding;
         self.coloring.current_render = saved_render;
+        self.coloring.current_slot_key = saved_slot_key;
         self.coloring.forwardable_params = saved_forwardable;
     }
 }

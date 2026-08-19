@@ -361,7 +361,7 @@ fn the_parsers_actually_find_the_sites() {
     );
     assert_eq!(
         remapped_fields(&src),
-        ["hidden_arg_sites"],
+        ["hidden_arg_sites", "type_arg_compositions"],
         "the destructure scanner must find the bound field(s)"
     );
     assert_eq!(

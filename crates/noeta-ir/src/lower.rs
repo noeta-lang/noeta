@@ -256,6 +256,11 @@ pub struct LoweringSites<'a> {
     /// (`Table(i)` → an int const; `Forward(j)` → the enclosing body's `$ty<j>` local). They land
     /// in the call node's own `type_args` channel, beside the value arguments.
     pub hidden_arg_sites: &'a HashMap<Span, Vec<noeta_ext_abi::HiddenArg>>,
+    /// The **render-slot compositions** a `HiddenArg::Compose` indexes: how a call inside a generic
+    /// body fills a render slot at an instantiation the body BUILT out of its own type parameters.
+    /// Lowering bakes each composition's cases into the [`Rvalue::ComposeTypeArg`] it emits, so the
+    /// index never reaches either backend.
+    pub type_arg_compositions: &'a Vec<noeta_ext_abi::HintComposition>,
     /// **Dynamic** construction sites (generic-in-generic construction): a fresh-constructor call
     /// span → the enclosing body's hidden slot index whose table entry names the instantiation to
     /// stamp on the object the call built. Lowered onto [`Rvalue::Method::reflect_slot`].
@@ -306,6 +311,7 @@ impl LoweringSites<'static> {
             OnceLock::new();
         static TYPE_ARG_HINTS: OnceLock<Vec<noeta_ext_abi::TypeArgHints>> = OnceLock::new();
         static HIDDEN: OnceLock<HashMap<Span, Vec<noeta_ext_abi::HiddenArg>>> = OnceLock::new();
+        static COMPOSITIONS: OnceLock<Vec<noeta_ext_abi::HintComposition>> = OnceLock::new();
         static SLOTS: OnceLock<HashMap<Span, u32>> = OnceLock::new();
         static SELF_TY: OnceLock<HashMap<Span, (String, u32)>> = OnceLock::new();
         static COUNTS: OnceLock<HashMap<String, u32>> = OnceLock::new();
@@ -345,6 +351,7 @@ impl LoweringSites<'static> {
             type_arg_hints: TYPE_ARG_HINTS.get_or_init(Vec::new),
             dynamic_construction_sites: SLOTS.get_or_init(HashMap::new),
             hidden_arg_sites: HIDDEN.get_or_init(HashMap::new),
+            type_arg_compositions: COMPOSITIONS.get_or_init(Vec::new),
             forwarded_slot_sites: SLOTS.get_or_init(HashMap::new),
             self_type_arg_sites: SELF_TY.get_or_init(HashMap::new),
             forwarding_fns: COUNTS.get_or_init(HashMap::new),
@@ -399,6 +406,7 @@ macro_rules! lowering_sites {
             type_arg_hints: &$s.type_arg_hints,
             dynamic_construction_sites: &$s.dynamic_construction_sites,
             hidden_arg_sites: &$s.hidden_arg_sites,
+            type_arg_compositions: &$s.type_arg_compositions,
             forwarded_slot_sites: &$s.forwarded_slot_sites,
             self_type_arg_sites: &$s.self_type_arg_sites,
             forwarding_fns: &$s.forwarding_fns,
@@ -1861,8 +1869,8 @@ impl Lowerer<'_> {
     /// These travel in the call node's own `type_args` channel rather than prepended onto the
     /// value arguments, so a forwarding call's parameter positions — and therefore its `supplied`
     /// binding map — are exactly those of the same call without forwarding.
-    fn type_arg_atoms(&mut self, span: &Span) -> Vec<Atom> {
-        let Some(slots) = self.sites.hidden_arg_sites.get(span) else {
+    fn type_arg_atoms(&mut self, span: &Span, out: &mut Vec<Stmt>) -> Vec<Atom> {
+        let Some(slots) = self.sites.hidden_arg_sites.get(span).cloned() else {
             return Vec::new();
         };
         slots
@@ -1876,6 +1884,12 @@ impl Lowerer<'_> {
                     name: hidden_param_name(*j),
                     span: *span,
                 },
+                // A render slot naming an instantiation this body BUILT out of its own type
+                // parameters: no slot of this body carries it whole, so it is composed out of the
+                // slots that carry its leaves. See [`Rvalue::ComposeTypeArg`].
+                noeta_ext_abi::HiddenArg::Compose(id) => {
+                    self.compose_type_arg_atom(*id, *span, out)
+                }
                 // A render slot the call site could not name. `NO_TYPE_ARG` indexes nothing, so
                 // every consumer resolves it to "no hint" and the value renders as the erased word.
                 noeta_ext_abi::HiddenArg::Erased => {
@@ -2561,13 +2575,9 @@ impl Lowerer<'_> {
     /// [`noeta_ast::RenderHint::Param`] — and an **empty vector** for every hint that does not,
     /// which is every door outside a generic body.
     ///
-    /// The whole slot list, in slot order, so a `Param(n)` indexes it directly. The leading
-    /// [`Self::hidden_slots`] are ordinary [`Atom::Var`] reads of the `$ty<i>` locals — the same
-    /// reads [`Self::type_arg_atoms`]'s pass-through arm and [`Self::reflect_slot_atom`] build —
-    /// which is what makes a closure capture them and a register allocator leave them alone. The
-    /// [`Self::self_render_slots`] after them are reads of the **receiver's** reflected tag
-    /// ([`Rvalue::SelfRenderSlot`]), emitted into `out` here so the ordinary operand machinery
-    /// carries them for the same three analyses.
+    /// The whole slot list, in slot order, so a `Param(n)` indexes it directly — each entry built by
+    /// [`Self::slot_atom`], which is where the two channels a slot's value can come from are
+    /// explained.
     fn hint_slots(
         &mut self,
         hint: &noeta_ast::RenderHint,
@@ -2577,28 +2587,68 @@ impl Lowerer<'_> {
         if !hint.has_param() {
             return Vec::new();
         }
-        let mut slots: Vec<Atom> = (0..self.hidden_slots)
-            .map(|i| Atom::Var {
-                name: hidden_param_name(i),
+        (0..self.hidden_slots + self.self_render_slots)
+            .map(|i| self.slot_atom(i, span, out))
+            .collect()
+    }
+
+    /// The operand carrying render slot `ordinal` of the body being lowered — the one place a slot
+    /// ordinal becomes a value, so a door's splice and a composition's lookup read the same thing.
+    ///
+    /// The layout is one list in sections and this is the seam between the two channels: the
+    /// leading [`Self::hidden_slots`] are ordinary [`Atom::Var`] reads of the `$ty<i>` locals a call
+    /// filled — the same reads [`Self::type_arg_atoms`]'s pass-through arm and
+    /// [`Self::reflect_slot_atom`] build, which is what makes a closure capture them and a register
+    /// allocator leave them alone — and the [`Self::self_render_slots`] after them are reads of the
+    /// **receiver's** reflected tag ([`Rvalue::SelfRenderSlot`]), emitted into `out` so the ordinary
+    /// operand machinery carries them for the same analyses.
+    fn slot_atom(&mut self, ordinal: u32, span: Span, out: &mut Vec<Stmt>) -> Atom {
+        if ordinal < self.hidden_slots {
+            return Atom::Var {
+                name: hidden_param_name(ordinal),
                 span,
-            })
-            .collect();
-        for index in 0..self.self_render_slots {
-            let atom = self.emit(
-                out,
-                Rvalue::SelfRenderSlot {
-                    operand: Atom::Var {
-                        name: "self".to_string(),
-                        span,
-                    },
-                    index,
+            };
+        }
+        self.emit(
+            out,
+            Rvalue::SelfRenderSlot {
+                operand: Atom::Var {
+                    name: "self".to_string(),
                     span,
                 },
+                index: ordinal - self.hidden_slots,
                 span,
-            );
-            slots.push(atom);
-        }
-        slots
+            },
+            span,
+        )
+    }
+
+    /// The atom a [`noeta_ext_abi::HiddenArg::Compose`] render slot is filled with: the composition
+    /// applied to the enclosing body's own leaf slots. The instantiation is one this body built out
+    /// of its type parameters, so nothing static names it and nothing this body holds carries it
+    /// whole — see [`Rvalue::ComposeTypeArg`].
+    fn compose_type_arg_atom(&mut self, id: u32, span: Span, out: &mut Vec<Stmt>) -> Atom {
+        // A composition with no case answers `NO_TYPE_ARG` for every combination of its leaves —
+        // which is what a `List<T>` built in a program that never instantiates it at `u64` composes
+        // to — so it folds to the constant and the body emits no op at all.
+        let composition = self.sites.type_arg_compositions.get(id as usize);
+        let Some(composition) = composition.filter(|c| !c.cases.is_empty()).cloned() else {
+            return Atom::Const(Const::Int(noeta_ext_abi::NO_TYPE_ARG));
+        };
+        let slots: Vec<Atom> = composition
+            .leaves
+            .iter()
+            .map(|ordinal| self.slot_atom(*ordinal, span, out))
+            .collect();
+        self.emit(
+            out,
+            Rvalue::ComposeTypeArg {
+                slots,
+                cases: composition.cases.iter().cloned().collect(),
+                span,
+            },
+            span,
+        )
     }
 
     /// [`Self::hint_slots`] for an optional hint — the shape the two ordering doors hold theirs in.
@@ -3133,7 +3183,7 @@ impl Lowerer<'_> {
                             *span,
                         );
                         let (arg_atoms, supplied) = self.lower_args(args, *span, out)?;
-                        let type_args = self.type_arg_atoms(span);
+                        let type_args = self.type_arg_atoms(span, out);
                         return Ok(self.emit(
                             out,
                             Rvalue::Call {
@@ -3217,7 +3267,7 @@ impl Lowerer<'_> {
                     // A call of a FORWARDING generic METHOD (Axis A) supplies its type arguments
                     // through their own channel, exactly as a free function's call does — so
                     // `supplied` still indexes the value parameters.
-                    let type_args = self.type_arg_atoms(span);
+                    let type_args = self.type_arg_atoms(span, out);
                     let reflect = self.sites.construction_sites.get(span).cloned();
                     // …and its dynamic twin: a generic type's fresh constructor whose instantiation
                     // is the enclosing self-less member's own type parameter, delivered on a slot.
@@ -3253,7 +3303,7 @@ impl Lowerer<'_> {
                     let (arg_atoms, supplied) = self.lower_args(args, *span, out)?;
                     // A call of a FORWARDING generic (F2b) supplies its type arguments through
                     // their own channel, so the value arguments — and `supplied` — are untouched.
-                    let type_args = self.type_arg_atoms(span);
+                    let type_args = self.type_arg_atoms(span, out);
                     Ok(self.emit(
                         out,
                         Rvalue::Call {
@@ -3288,7 +3338,7 @@ impl Lowerer<'_> {
                 // parameters, and those no longer shift. While the type arguments rode in the
                 // argument list this had to be thrown away at every forwarding call site, so a
                 // forwarding call could not use a named argument that skipped a default.
-                let type_args = self.type_arg_atoms(span);
+                let type_args = self.type_arg_atoms(span, out);
                 Ok(self.emit(
                     out,
                     Rvalue::Call {
@@ -3943,7 +3993,7 @@ impl Lowerer<'_> {
                         arg_atoms.push(self.lower_expr(&a.value, out)?);
                     }
                     let (arg_atoms, supplied) = self.permute_args(arg_atoms, *span);
-                    let type_args = self.type_arg_atoms(span);
+                    let type_args = self.type_arg_atoms(span, out);
                     let reflect = self.sites.construction_sites.get(span).cloned();
                     // …and its dynamic twin: a generic type's fresh constructor whose instantiation
                     // is the enclosing self-less member's own type parameter, delivered on a slot.
@@ -3981,7 +4031,7 @@ impl Lowerer<'_> {
                         arg_atoms.push(self.lower_expr(&a.value, out)?);
                     }
                     let (arg_atoms, supplied) = self.permute_args(arg_atoms, *span);
-                    let type_args = self.type_arg_atoms(span);
+                    let type_args = self.type_arg_atoms(span, out);
                     Ok(self.emit(
                         out,
                         Rvalue::Call {
@@ -4003,7 +4053,7 @@ impl Lowerer<'_> {
                 span,
             } => {
                 let receiver = self.lower_expr(receiver, out)?;
-                let type_args = self.type_arg_atoms(span);
+                let type_args = self.type_arg_atoms(span, out);
                 let reflect = self.sites.construction_sites.get(span).cloned();
                 let reflect_slot = self.reflect_slot_atom(span);
                 let order_slots = self.order_slots_at(span, out);
@@ -4034,7 +4084,7 @@ impl Lowerer<'_> {
             // `x |> f` ⟶ `f(x)`.
             _ => {
                 let callee = self.lower_expr(right, out)?;
-                let type_args = self.type_arg_atoms(&span);
+                let type_args = self.type_arg_atoms(&span, out);
                 Ok(self.emit(
                     out,
                     Rvalue::Call {

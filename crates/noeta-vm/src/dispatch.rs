@@ -1812,6 +1812,7 @@ impl<'m> Vm<'m> {
                     | Op::TypeArgName { .. }
                     | Op::TypeSlotName { .. }
                     | Op::SelfRenderSlot { .. }
+                    | Op::ComposeTypeArg { .. }
                     | Op::FieldsOf { .. }
                     | Op::TraitsOf { .. }
                     | Op::Retag { .. }
@@ -3685,6 +3686,25 @@ impl<'m> Vm<'m> {
                         None => vm_type_repr(&value).render_slot_arg(*index as usize, reprs()),
                     };
                     set_reg(regs, fbase, *dst, Value::int(slot));
+                    pc += 1;
+                }
+                // A render slot this frame composes out of its own leaf slots, because the
+                // instantiation is one the body BUILT and no slot carries that type whole. The
+                // lookup is the shared one, so the tree-walker cannot compose a different entry
+                // from the same leaves; an unlisted combination is `NO_TYPE_ARG` and the value
+                // renders as its erased word.
+                Op::ComposeTypeArg { dst, slots, cases } => {
+                    let leaves: Vec<i64> = slots
+                        .iter()
+                        .map(|r| {
+                            regs[fbase + *r as usize]
+                                .as_int()
+                                .unwrap_or(noeta_stdlib::NO_TYPE_ARG)
+                        })
+                        .collect();
+                    let composed =
+                        noeta_stdlib::compose_type_arg(cases, &module.type_arg_hints, &leaves);
+                    set_reg(regs, fbase, *dst, Value::int(composed));
                     pc += 1;
                 }
                 Op::TypeSlotName { dst, src, span } => {

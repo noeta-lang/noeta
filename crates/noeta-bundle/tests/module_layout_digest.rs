@@ -776,6 +776,14 @@ fn all_ops() -> Vec<Op> {
         src: 165,
         index: 166,
     });
+    ops.push(Op::ComposeTypeArg {
+        dst: 164,
+        slots: Box::new([165, 166]),
+        cases: Box::new([noeta_ext_abi::HintCase {
+            leaves: Box::new([7, -1]),
+            composed: 3,
+        }]),
+    });
     ops.push(Op::TypeSlotName {
         dst: 167,
         src: 168,
@@ -999,7 +1007,7 @@ fn all_ops() -> Vec<Op> {
 
 /// How many `Op` variants [`all_ops`] builds. Stated so a *duplicate* (two literals of one variant,
 /// one variant missing) is caught — the compiler cannot see that, since neither literal is wrong.
-const OP_VARIANTS: usize = 107;
+const OP_VARIANTS: usize = 108;
 
 fn canonical_chunk() -> Chunk {
     Chunk {

@@ -4701,6 +4701,21 @@ impl<'m> FnCompiler<'m> {
                 });
                 Ok(())
             }
+            // A render slot composed out of this frame's own leaf slots, for an instantiation the
+            // body BUILT: the leaves become ordinary register reads and the checker's cases ride
+            // the op, so both backends run the one shared lookup over the one table.
+            Rvalue::ComposeTypeArg { slots, cases, .. } => {
+                let mut regs = Vec::with_capacity(slots.len());
+                for slot in slots {
+                    regs.push(self.atom_reg(slot)?);
+                }
+                self.code.push(Op::ComposeTypeArg {
+                    dst,
+                    slots: regs.into_boxed_slice(),
+                    cases: cases.iter().cloned().collect(),
+                });
+                Ok(())
+            }
             // The fn-side twin: `type_name::<T>()` over a FORWARDED parameter reads the hidden
             // type-argument slot's table entry instead of the receiver's tag.
             Rvalue::TypeSlotName { slot, span } => {

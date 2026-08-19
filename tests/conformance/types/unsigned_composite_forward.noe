@@ -14,6 +14,15 @@
 // Both directions of the layout are exercised — a composite answered by a render slot, and one
 // answered by the FORWARDING slot an explicit `::<List<T>>` registered beside it, since a slot's
 // runtime value is an index into the one type-argument table either way.
+//
+// And the other half of the same question: a composite the body BUILDS. `wrap([v])` inside
+// `fn built<T>(v: T)` instantiates `wrap` at `List<T>`, which no signature names, so no slot carries
+// it whole and no caller could have interned it. The leaf is on a slot, though, and the shape around
+// it is static, so the answer is composed out of the slots the body does hold — one case per
+// combination of values those slots can carry, precomputed while the table is being built. Every
+// shape a hint descends through is here, both channels are (a free fn's hidden slot, a generic
+// type's receiver tag), and so are the two ways the composition itself nests: a composite built two
+// deep in one step, and one composed again a frame later.
 // expect: stdout "[18446744073709551615]"
 // expect: stdout "[18446744073709551615]"
 // expect: stdout "[18446744073709551615]"
@@ -22,7 +31,17 @@
 // expect: stdout "{"a":18446744073709551615}"
 // expect: stdout "{"v":18446744073709551615}"
 // expect: stdout "[18446744073709551615,1]"
-// expect: stdout "[-1]"
+// expect: stdout "[18446744073709551615]"
+// expect: stdout "[[18446744073709551615]]"
+// expect: stdout "{"k":18446744073709551615}"
+// expect: stdout "{"v":18446744073709551615}"
+// expect: stdout "[18446744073709551615]"
+// expect: stdout "18446744073709551615"
+// expect: stdout "[18446744073709551615]"
+// expect: stdout "{"18446744073709551615":1}"
+// expect: stdout "{"s":18446744073709551615}"
+// expect: stdout "[7]"
+// expect: stdout "[[18446744073709551615]]"
 // expect: stdout "[18446744073709551615]"
 // expect: stdout "[-1]"
 // expect: exit 0
@@ -85,12 +104,75 @@ fn decoded<T>(text: string): string {
     };
 }
 
-// A composite built in the BODY out of a bare parameter is the boundary: nothing in `built`'s
-// parameter types names `List<T>`, so no slot of `built` carries it and no caller could have
-// interned it. The value renders the erased word, which is what a render slot does when it cannot
-// name an instantiation — it degrades, it never refuses the program.
+// A composite built in the BODY out of a bare parameter. Nothing in `built`'s parameter types names
+// `List<T>`, so no slot of `built` carries it and no caller could have interned it — but `T` is on a
+// slot, and `List<u64>`'s hints are `Elements` of whatever `T` turned out to be. The instantiation
+// is composed out of that slot at the call.
 fn built<T>(v: T): string {
     return wrap([v]);
+}
+
+// Two levels of nesting built in one step, and the other container shapes: the composition is over
+// the composite's whole shape, so nesting costs it nothing.
+fn built_deep<T>(v: T): string {
+    return wrap([[v]]);
+}
+
+fn built_map<T>(v: T): string {
+    return wrap({"k": v});
+}
+
+fn built_box<T>(v: T): string {
+    return wrap(Box { v: v });
+}
+
+// A NESTED `fn` reads the enclosing body's slots through closure capture, so it composes off the
+// same ones.
+fn built_nested<T>(v: T): string {
+    fn inner(x: T): string {
+        return wrap([x]);
+    }
+    return inner(v);
+}
+
+// The receiver channel: an instance method of a generic type has no hidden slot at all, and reads
+// its instantiation off the receiver's reflected tag. A composite it builds composes off that read
+// exactly as a free function's does off a hidden slot — and so does the BARE parameter, which its
+// own layout carries no slot for either.
+class Probe<T> {
+    pub tag: T
+
+    pub fn new(tag: T): Probe<T> {
+        return Probe { tag: tag };
+    }
+
+    pub fn built(v: T): string {
+        _ = self.tag;
+        return wrap([v]);
+    }
+
+    pub fn bare(v: T): string {
+        _ = self.tag;
+        return wrap(v);
+    }
+}
+
+// Composed, then composed AGAIN one frame down: `deep_a` hands `deep_b` a `List<T>` it built, and
+// `deep_b` builds `List<U>` on top of that. The second composition's leaf is the first's answer, so
+// the entry it needs has to exist before it can be named — which is why the enumeration is a
+// fixpoint.
+fn deep_b<U>(u: U): string {
+    return wrap([u]);
+}
+
+fn deep_a<T>(v: T): string {
+    return deep_b([v]);
+}
+
+// Two leaves, one composition: a `Map` built from two parameters composes over both slots, and the
+// side that renders nothing is the same nothing an unnameable slot contributes.
+fn built_pair<K, V>(k: K, v: V): string {
+    return wrap({k: v});
 }
 
 big: u64 = 18446744073709551615u64;
@@ -116,6 +198,24 @@ pair: List<u64> = [big, one_u];
 echo one(pair);
 
 echo built(big);
+echo built_deep(big);
+echo built_map(big);
+echo built_box(big);
+echo built_nested(big);
+
+p = Probe.new(big);
+echo p.bare(big);
+echo p.built(big);
+
+echo built_pair(big, one_u);
+echo built_pair("s", big);
+
+// A composite built at an instantiation that renders nothing composes to nothing, and the value
+// takes the untouched path — the composition costs a program with no `u64` in it exactly one table
+// scan that finds no case.
+echo built(7);
+
+echo deep_a(big);
 
 echo decoded::<u64>("[18446744073709551615]");
 echo decoded::<i64>("[-1]");

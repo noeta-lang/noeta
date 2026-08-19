@@ -1943,6 +1943,25 @@ impl Interpreter {
                     self.type_arg_reprs.iter().map(Option::as_ref),
                 )))
             }
+            // A render slot the enclosing body composes out of its own leaf slots, because the
+            // instantiation is one the body BUILT (`wrap([v])` inside `fn built<T>(v: T)`) and no
+            // slot of it carries that type whole. The lookup is the shared one, so the VM cannot
+            // compose a different entry from the same leaves; a combination no case names is
+            // `NO_TYPE_ARG`, and the value renders as its erased word.
+            noeta_ir::Rvalue::ComposeTypeArg { slots, cases, .. } => {
+                let mut leaves = Vec::with_capacity(slots.len());
+                for slot in slots {
+                    leaves.push(match self.eval_ir_atom(slot, frame)? {
+                        Value::Int(i) => i,
+                        _ => noeta_stdlib::NO_TYPE_ARG,
+                    });
+                }
+                Ok(Value::Int(noeta_stdlib::compose_type_arg(
+                    cases,
+                    &self.type_arg_hints,
+                    &leaves,
+                )))
+            }
             // `type_name::<T>()` where `T` is a FORWARDED parameter of the enclosing generic fn:
             // the instantiation's qualified name, read off the hidden slot's table entry. The same
             // slot, entry and field the dynamic `attributes_of` arm above reads, so a forwarded

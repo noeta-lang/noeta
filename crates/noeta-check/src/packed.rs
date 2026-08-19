@@ -497,6 +497,8 @@ impl Checker {
         template: &Type,
         subst: &Subst,
         span: Span,
+        callee: &str,
+        slot: u32,
     ) -> noeta_ext_abi::HiddenArg {
         // Every parameter the template names has to be pinned to a real type. One the call left
         // unbound — or pinned only to `dyn`/an inference hole — names no instantiation at all.
@@ -511,10 +513,20 @@ impl Checker {
             // The instantiation still mentions the CALLER's own parameters (the bare `T` of
             // `wrap(v)` inside `fn outer<T>(v: T)`, or the composite `List<T>` of `wrap(xs)` inside
             // `fn outer<T>(xs: List<T>)`), so it can only be answered by whatever pinned those —
-            // this body's own matching slot, passed through.
+            // this body's own matching slot, passed through, or composed out of the slots that do
+            // pin its leaves when no single slot carries it whole.
             return match self.render_forward_slot(&sigma) {
-                Some(j) => noeta_ext_abi::HiddenArg::Forward(j),
-                None => noeta_ext_abi::HiddenArg::Erased,
+                Some(j) => {
+                    self.note_slot_feed(callee, slot, SlotFeed::Forward(j));
+                    noeta_ext_abi::HiddenArg::Forward(j)
+                }
+                None => {
+                    let arg = self.composed_hidden_arg(&sigma);
+                    if let noeta_ext_abi::HiddenArg::Compose(id) = arg {
+                        self.note_slot_feed(callee, slot, SlotFeed::Composed(id));
+                    }
+                    arg
+                }
             };
         }
         if !self.fully_concrete(&sigma) {
@@ -553,6 +565,97 @@ impl Checker {
             .iter()
             .position(|t| t == sigma)
             .map(|i| i as u32)
+    }
+
+    /// Record that this call can put `feed` into the callee's render slot `slot` — the only two
+    /// answers the composition enumeration needs.
+    ///
+    /// A composition's cases enumerate what its **leaf slots** can hold, and a leaf slot holds one
+    /// of the program's own interned instantiations unless a *composed* value reaches it. Composed
+    /// values reach only render slots, and only through these two edges: a call that composes one
+    /// directly, and a call that passes an enclosing render slot through. (A forwarding slot never
+    /// carries one — it is filled by an interning site or by another forwarding slot — so a
+    /// receiver's tag never does either, and neither does a leaf read off one.) Without the edges
+    /// the enumeration would have to treat every composed entry as reachable from every leaf, and
+    /// each round would intern a deeper composite no program can produce.
+    fn note_slot_feed(&mut self, callee: &str, slot: u32, feed: SlotFeed) {
+        // A pass-through of a slot that carries no composed value teaches the enumeration nothing.
+        if let SlotFeed::Forward(j) = feed
+            && !self.is_render_slot(j)
+        {
+            return;
+        }
+        let owner = self.coloring.current_slot_key.clone();
+        self.slot_feeds
+            .entry((callee.to_string(), slot))
+            .or_default()
+            .push((owner, feed));
+    }
+
+    /// Whether slot ordinal `j` of the body being checked is one of its **own render slots** — the
+    /// middle section of the layout, and the only one a composed value can reach.
+    fn is_render_slot(&self, j: u32) -> bool {
+        let base = self.coloring.current_forwarding.len() as u32;
+        j >= base && j < base + self.coloring.current_render.len() as u32
+    }
+
+    /// How this call fills a render slot naming an instantiation **this body built** out of its own
+    /// type parameters — `wrap([v])` inside `fn built<T>(v: T)`, which instantiates `wrap` at
+    /// `List<T>`.
+    ///
+    /// [`Self::render_forward_slot`] has already failed, and it had to: nothing in `built`'s
+    /// parameter types names `List<T>`, so no slot of `built` carries it and no caller of `built`
+    /// could have interned a type the body invents. The slot layout is declaration-derived — it has
+    /// to be identical at the declaration and at every call site — so an instantiation a body
+    /// *constructs* is out of its reach by construction.
+    ///
+    /// What the body does hold is the composite's **leaves**, each on a slot its callers filled, and
+    /// the shape around them is static: `List<u64>`'s hints are `Elements` of whatever `T`'s turned
+    /// out to be. So the answer is arithmetic on the slots this body already has, and
+    /// [`noeta_ext_abi::HintComposition`] is that arithmetic, precomputed per combination of leaf
+    /// values once the table is complete ([`Self::finish_hint_compositions`]).
+    ///
+    /// [`noeta_ext_abi::HiddenArg::Erased`] where the composite renders nothing under any door —
+    /// `List<T>` at `T = int` composes to no hint, and so does every composite over a parameter with
+    /// no slot at all. Erasing is always available here, and never a diagnostic, for the same reason
+    /// it is on the two arms beside it.
+    fn composed_hidden_arg(&mut self, sigma: &Type) -> noeta_ext_abi::HiddenArg {
+        let template = self.type_arg_hints(sigma);
+        if template.is_empty() {
+            return noeta_ext_abi::HiddenArg::Erased;
+        }
+        let mut leaves: Vec<u32> = [&template.display, &template.order, &template.json]
+            .into_iter()
+            .flatten()
+            .flat_map(noeta_ast::RenderHint::param_slots)
+            .collect();
+        leaves.sort_unstable();
+        leaves.dedup();
+        // Which of this body's own slots each leaf is, so the enumeration can ask what that slot can
+        // hold. `None` where the leaf is not a render slot of this body — a forwarding slot or a
+        // read of the receiver's tag, neither of which a composed value ever reaches.
+        let owner = self.coloring.current_slot_key.clone();
+        let leaf_slots: Vec<Option<(String, u32)>> = leaves
+            .iter()
+            .map(|j| match (&owner, self.is_render_slot(*j)) {
+                (Some(key), true) => Some((key.clone(), *j)),
+                _ => None,
+            })
+            .collect();
+        let draft = CompositionDraft {
+            head: sigma.head_name(),
+            template,
+            leaves,
+            leaf_slots,
+        };
+        let id = match self.hint_compositions.iter().position(|d| *d == draft) {
+            Some(i) => i,
+            None => {
+                self.hint_compositions.push(draft);
+                self.hint_compositions.len() - 1
+            }
+        };
+        noeta_ext_abi::HiddenArg::Compose(id as u32)
     }
 
     /// The render-slot ordinal carrying `param`'s per-instantiation hints in the body being
@@ -1134,6 +1237,293 @@ fn scalar_packed_kind(ty: &Type) -> Option<noeta_ast::reflect::PackedKind> {
         }),
         _ => None,
     }
+}
+
+/// A render-slot composition while the check is still running: what
+/// [`Checker::composed_hidden_arg`] recorded at a call, before
+/// [`Checker::finish_hint_compositions`] can enumerate its cases.
+///
+/// The template is the built instantiation's own hints over the enclosing body's slots — a
+/// [`noeta_ast::RenderHint::Param`] at each leaf, the composite's shape around them — so composing
+/// one case is substituting the leaves' hints into it. `head` is the instantiation's qualified head
+/// name, which is what the entry it interns is called.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct CompositionDraft {
+    /// The built instantiation's qualified head name (`List`, `Map`, `app.storage.Box`).
+    pub(crate) head: String,
+    /// Its hints over the enclosing body's slots, with a `Param` at every leaf.
+    pub(crate) template: noeta_ext_abi::TypeArgHints,
+    /// The slot ordinals those `Param`s name, ascending and deduplicated.
+    pub(crate) leaves: Vec<u32>,
+    /// Which of the enclosing body's own render slots each leaf is, positionally — `(the body's
+    /// slot key, the ordinal)`. `None` for a leaf that is not one, which is a leaf no composed value
+    /// can reach; see [`Checker::note_slot_feed`].
+    pub(crate) leaf_slots: Vec<Option<(String, u32)>>,
+}
+
+/// What one call can put into a callee's render slot, as far as the composition enumeration cares.
+/// Recorded by [`Checker::note_slot_feed`], which is where the two forms are explained.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SlotFeed {
+    /// This call composes the value: the slot can hold whatever composition `id` yields.
+    Composed(u32),
+    /// This call passes the enclosing body's own render slot `j` through, so the slot can hold
+    /// whatever *that* one can.
+    Forward(u32),
+}
+
+/// Fill every [`Checker::composed_hidden_arg`] composition's case table into `sites`, once its
+/// type-argument table is complete — the last thing done to that table.
+///
+/// A composition's answer is a pure function of what its leaf slots hold, and a leaf slot holds a
+/// table index. The set of *distinct answers* is therefore finite and small: only an entry carrying
+/// hints can change one, and a program's hint-carrying instantiations number in the handful (every
+/// other entry, and every slot the call site could not name, contributes the same nothing
+/// [`noeta_ext_abi::NO_TYPE_ARG`] does). So each combination is enumerated here and its composed
+/// hints interned, and the runtime lookup is a scan of the result.
+///
+/// Iterated to a fixpoint, because a composed entry is itself a candidate leaf value for the next
+/// composition: `a<T>` handing `[v]` to `b<U>`, which hands `[u]` on again, needs `List<List<u64>>`
+/// to exist before `b`'s composition can name it. Bounded, because polymorphic recursion
+/// (`fn f<T>(v: T) { f([v]) }`) builds a deeper type every round and no static table can enumerate
+/// that; a combination the bound does not reach is simply absent, which is the erased word.
+///
+/// **The table does not grow for a program that renders nothing.** A composed entry is interned only
+/// where its hints are non-empty, and hints are non-empty only under an unsigned 64-bit integer — so
+/// a composition over `List<T>` in a program that never instantiates it at `u64` enumerates its
+/// combinations, finds every one composes to nothing, and appends no entry.
+///
+/// A function over the produced [`Sites`] rather than over the checker, because a session snapshots
+/// its bundle once per entry while the checker lives on: the composed entries belong to the bundle
+/// that is about to be lowered, and a session install merges each bundle's table by content anyway.
+pub(crate) fn finish_hint_compositions(
+    drafts: &[CompositionDraft],
+    feeds: &HashMap<(String, u32), Vec<(Option<String>, SlotFeed)>>,
+    sites: &mut crate::Sites,
+) {
+    /// How many rounds of composed-entry discovery to run. Each round can deepen a type by one
+    /// composition, and a chain of generic frames that deep is already past what any real program
+    /// forwards; polymorphic recursion never terminates and is cut here.
+    const ROUNDS: usize = 4;
+    /// The largest combination space one composition is enumerated over. A composition reads one
+    /// leaf almost always and two at most in practice; this only stops a pathological arity from
+    /// making the enumeration exponential, and a composition past it erases like any other the
+    /// checker cannot name.
+    const MAX_COMBINATIONS: usize = 256;
+
+    if drafts.is_empty() {
+        return;
+    }
+    // The program's OWN interned instantiations — what any leaf can hold before a composition has
+    // produced anything. Snapshotted before the first round, because everything appended below is a
+    // composed entry and reaches a leaf only along a recorded edge.
+    let interned: Vec<i64> = std::iter::once(noeta_ext_abi::NO_TYPE_ARG)
+        .chain(
+            sites
+                .type_arg_hints
+                .iter()
+                .enumerate()
+                .filter(|(_, h)| !h.is_empty())
+                .map(|(i, _)| i as i64),
+        )
+        .collect();
+    let reaching = compositions_reaching_each_leaf(drafts, feeds);
+    let mut cases: Vec<Vec<noeta_ext_abi::HintCase>> = vec![Vec::new(); drafts.len()];
+    for _ in 0..ROUNDS {
+        let mut grew = false;
+        for (id, draft) in drafts.iter().enumerate() {
+            // Each leaf ranges over the program's own instantiations, plus the answers of exactly
+            // the compositions whose output can arrive on that leaf's slot. A composition whose
+            // leaves nothing composed reaches — which is nearly every one — settles in one round.
+            let per_leaf: Vec<Vec<i64>> = (0..draft.leaves.len())
+                .map(|at| {
+                    let mut vs = interned.clone();
+                    for from in &reaching[id][at] {
+                        vs.extend(cases[*from as usize].iter().map(|c| c.composed));
+                    }
+                    vs.sort_unstable();
+                    vs.dedup();
+                    vs
+                })
+                .collect();
+            if per_leaf
+                .iter()
+                .try_fold(1usize, |n, vs| n.checked_mul(vs.len()))
+                .is_none_or(|n| n > MAX_COMBINATIONS)
+            {
+                continue;
+            }
+            for key in combinations(&per_leaf) {
+                if cases[id]
+                    .iter()
+                    .any(|c| c.leaves.as_ref() == key.as_slice())
+                {
+                    continue;
+                }
+                let composed = compose_case(draft, &key, &sites.type_arg_hints);
+                if composed.is_empty() {
+                    continue;
+                }
+                let idx = crate::intern_type_arg_entry(
+                    &mut sites.type_arg_table,
+                    &mut sites.type_arg_reprs,
+                    &mut sites.type_arg_hints,
+                    noeta_ext_abi::TypeArgInfo {
+                        name: draft.head.clone(),
+                        // A composed entry answers the hints projection and nothing else: it is
+                        // reachable only from a render slot, which is interned with no recipe demand
+                        // and may legitimately be `NO_TYPE_ARG`. Giving one a recipe would let a
+                        // recipe-consuming door resolve off it, turning a check-time diagnostic into
+                        // a runtime abort.
+                        recipe: None,
+                    },
+                    None,
+                    composed,
+                );
+                cases[id].push(noeta_ext_abi::HintCase {
+                    leaves: key.into_boxed_slice(),
+                    composed: i64::from(idx.get()),
+                });
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    sites.type_arg_compositions = drafts
+        .iter()
+        .zip(cases)
+        .map(|(draft, cases)| noeta_ext_abi::HintComposition {
+            leaves: draft.leaves.clone().into_boxed_slice(),
+            cases: cases.into_boxed_slice(),
+        })
+        .collect();
+}
+
+/// The composed hints when `draft`'s leaf slots hold exactly `key` — the substitution
+/// [`Checker::finish_hint_compositions`] interns one entry per distinct answer of.
+///
+/// Each door substitutes the answer *it* would read, which is what keeps the three apart: a display
+/// door's outermost position exempts a type that prints through its own `to_string`, and every
+/// nested position (which is where a composition's leaves always sit) reads the ordering hint
+/// instead. A leaf holding [`noeta_ext_abi::NO_TYPE_ARG`], or an entry with no hint of its own,
+/// substitutes nothing — and the sparseness [`noeta_ast::RenderHint::resolve`] re-establishes
+/// collapses the branch above it, so a composite whose only unsigned position was that leaf composes
+/// to no hint at all rather than to an empty aggregate.
+fn compose_case(
+    draft: &CompositionDraft,
+    key: &[i64],
+    table: &[noeta_ext_abi::TypeArgHints],
+) -> noeta_ext_abi::TypeArgHints {
+    let entry = |n: u32| -> Option<&noeta_ext_abi::TypeArgHints> {
+        let at = draft.leaves.iter().position(|l| *l == n)?;
+        let v = *key.get(at)?;
+        (v >= 0).then(|| table.get(v as usize)).flatten()
+    };
+    let splice =
+        |hint: &Option<noeta_ast::RenderHint>,
+         pick: &dyn Fn(&noeta_ext_abi::TypeArgHints, bool) -> Option<noeta_ast::RenderHint>|
+         -> Option<noeta_ast::RenderHint> {
+            hint.as_ref()?
+                .resolve(&|n, outermost| entry(n).and_then(|e| pick(e, outermost)))
+                .map(std::borrow::Cow::into_owned)
+        };
+    noeta_ext_abi::TypeArgHints {
+        display: splice(&draft.template.display, &|e, outermost| {
+            e.at_display(outermost)
+        }),
+        order: splice(&draft.template.order, &|e, _| e.order.clone()),
+        json: splice(&draft.template.json, &|e, _| e.json.clone()),
+    }
+}
+
+/// Every tuple picking one value from each of `per_leaf`, in odometer order — the combinations one
+/// composition is enumerated over. The empty tuple when `per_leaf` is empty, which is the
+/// composition whose hints mention no parameter at all (`Map<u64, T>` at a `T` with no slot) and
+/// therefore has exactly one answer.
+fn combinations(per_leaf: &[Vec<i64>]) -> Vec<Vec<i64>> {
+    let mut out: Vec<Vec<i64>> = vec![Vec::new()];
+    for values in per_leaf {
+        out = out
+            .into_iter()
+            .flat_map(|prefix| {
+                values.iter().map(move |v| {
+                    let mut next = prefix.clone();
+                    next.push(*v);
+                    next
+                })
+            })
+            .collect();
+    }
+    out
+}
+
+/// For each composition and each of its leaves, the compositions whose output can arrive there —
+/// `reaching[id][leaf]`.
+///
+/// A leaf is a slot of the body the composition sits in, and a slot's value comes from that body's
+/// callers. [`Checker::note_slot_feed`] recorded the two edges a *composed* value can travel: a call
+/// that composes one into the slot, and a call that passes an enclosing render slot through. This
+/// closes the pass-through edges transitively, so `a<T>` handing `b<U>` a `List<T>` it built — and
+/// `b` building `List<U>` on top of that — knows it must enumerate `b`'s leaf over `a`'s answers as
+/// well as over the program's own instantiations.
+///
+/// Without it every composed entry would be a candidate leaf for every composition, and each round
+/// would intern a `List<List<…>>` one level deeper than the last — types no program can produce,
+/// interned into the table that ships.
+fn compositions_reaching_each_leaf(
+    drafts: &[CompositionDraft],
+    feeds: &HashMap<(String, u32), Vec<(Option<String>, SlotFeed)>>,
+) -> Vec<Vec<Vec<u32>>> {
+    // The compositions that can arrive on one slot, closed over pass-throughs. Depth-bounded rather
+    // than visited-set-bounded because a pass-through cycle is a body forwarding its own slot to
+    // itself, and the answer there is the fixpoint the outer round loop already takes.
+    fn at(
+        slot: &(String, u32),
+        feeds: &HashMap<(String, u32), Vec<(Option<String>, SlotFeed)>>,
+        depth: usize,
+        out: &mut Vec<u32>,
+    ) {
+        if depth == 0 {
+            return;
+        }
+        for (owner, feed) in feeds.get(slot).into_iter().flatten() {
+            match feed {
+                SlotFeed::Composed(id) => out.push(*id),
+                // The caller passes its own render slot `j` through, so whatever reaches THAT slot
+                // reaches this one. A caller with no slot key of its own carries nothing.
+                SlotFeed::Forward(j) => {
+                    if let Some(key) = owner {
+                        at(&(key.clone(), *j), feeds, depth - 1, out);
+                    }
+                }
+            }
+        }
+    }
+    /// How many pass-through frames to follow. A chain of generic frames deeper than this forwards
+    /// its own slot through more hands than any real program does, and the cut only costs the
+    /// erased word.
+    const DEPTH: usize = 16;
+
+    drafts
+        .iter()
+        .map(|draft| {
+            draft
+                .leaf_slots
+                .iter()
+                .map(|slot| {
+                    let mut out = Vec::new();
+                    if let Some(slot) = slot {
+                        at(slot, feeds, DEPTH, &mut out);
+                    }
+                    out.sort_unstable();
+                    out.dedup();
+                    out
+                })
+                .collect()
+        })
+        .collect()
 }
 
 /// Append every **composite** render-slot template `ty` contributes: each of its sub-terms that

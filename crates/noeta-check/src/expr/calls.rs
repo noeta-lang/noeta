@@ -452,8 +452,8 @@ impl Checker {
         }
         // The render slots follow, and never refuse the value: an expectation that leaves the
         // instantiation open erases them, and the wrapped value renders the erased word.
-        for template in &render {
-            let arg = self.render_hidden_arg(template, subst, span);
+        for (i, template) in render.iter().enumerate() {
+            let arg = self.render_hidden_arg(template, subst, span, name, (fwd.len() + i) as u32);
             hidden.push(arg);
         }
         Some(hidden)

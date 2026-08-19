@@ -826,6 +826,11 @@ fn op_facts(op: &Op) -> OpFacts {
         }
         // The ordering door's twin: it reads the render slots and defines nothing.
         Op::ResolveHint { slots, .. } => f.uses.extend(slots.iter().copied()),
+        // A composed render slot reads the frame's leaf slots and defines the composed index.
+        Op::ComposeTypeArg { dst, slots, .. } => {
+            f.def = Some(*dst);
+            f.uses.extend(slots.iter().copied());
+        }
         Op::BuildString { dst, parts } => {
             f.def = Some(*dst);
             for part in parts.iter() {
@@ -1386,6 +1391,12 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
             }
         }
         Op::ResolveHint { slots, .. } => {
+            for r in slots.iter_mut() {
+                m(r);
+            }
+        }
+        Op::ComposeTypeArg { dst, slots, .. } => {
+            m(dst);
             for r in slots.iter_mut() {
                 m(r);
             }

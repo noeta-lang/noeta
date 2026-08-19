@@ -187,6 +187,77 @@ pub enum HintDoor {
     Json,
 }
 
+/// How a call inside a generic body fills a render slot naming an instantiation the body **built**
+/// out of its own type parameters — `wrap([v])` inside `fn built<T>(v: T)`, which instantiates
+/// `wrap` at `List<T>`.
+///
+/// Nothing in `built`'s parameter types names `List<T>`, so no slot of `built` carries it and no
+/// caller of `built` could have interned it: the instantiation exists only because this body
+/// constructed it. What the body *does* hold is `T`, on a slot its callers filled — so the answer is
+/// arithmetic on that: `List<u64>` is `Elements` of whatever `T` turned out to be, and the shape
+/// around the leaf is static even though the leaf is not.
+///
+/// The composition is that arithmetic, precomputed. Its [`Self::leaves`] name the enclosing body's
+/// slots the built type reads, and [`Self::cases`] maps each combination of values those slots can
+/// hold onto the table entry the combination composes to. The values are the same
+/// [`TypeArgHints`]-table indices every other render slot carries, so the callee is handed an
+/// ordinary slot value and resolves it through the ordinary splice — the composition is spent at
+/// the call and nothing downstream knows it happened.
+///
+/// A combination with no case is [`NO_TYPE_ARG`], which is every combination composing to no hint at
+/// all — a `List<int>` needs none — and every one a bounded enumeration did not reach. Degrading is
+/// the rule for a render slot, so an instantiation this cannot name reads the erased word rather
+/// than refusing the program.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HintComposition {
+    /// The enclosing body's render-slot ordinals the built instantiation reads, ascending — the
+    /// slots lowering emits reads of, in the order [`HintCase::leaves`] is written.
+    pub leaves: Box<[u32]>,
+    /// One row per combination of leaf values the enumeration reached, in the order it found them.
+    /// Lowering carries these to the op that performs the lookup; a combination absent here is
+    /// [`NO_TYPE_ARG`].
+    pub cases: Box<[HintCase]>,
+}
+
+/// One row of a [`HintComposition`]: what the built instantiation composes to when the body's leaf
+/// slots hold exactly these values.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct HintCase {
+    /// The leaf slots' runtime values, positionally matching [`HintComposition::leaves`]. Each is a
+    /// [`TypeArgHints`]-table index or [`NO_TYPE_ARG`].
+    pub leaves: Box<[i64]>,
+    /// The table index whose hints the composed instantiation carries.
+    pub composed: i64,
+}
+
+/// The table index `cases` yields for the leaf slots' runtime values — the one lookup both backends
+/// run, so a composed instantiation cannot resolve one way compiled and another interpreted.
+/// [`NO_TYPE_ARG`] for a combination no case names, which is how a composition degrades.
+///
+/// Each leaf is **canonicalized against `table` first**: an entry with no hint of its own is the
+/// same nothing [`NO_TYPE_ARG`] is, and the composed answer cannot tell them apart. That is what
+/// keeps the case list to one row per combination of the program's *hint-carrying* instantiations —
+/// a handful at most — instead of one per combination of every entry the table holds. `fn f<K, V>`
+/// called at `K = string` still has a real table entry on its key slot, and it composes exactly as
+/// an unnamed one does.
+///
+/// A linear scan over that handful, at a call that would otherwise render the erased word.
+pub fn compose_type_arg(cases: &[HintCase], table: &[TypeArgHints], leaves: &[i64]) -> i64 {
+    let canonical = |v: &i64| -> i64 {
+        match usize::try_from(*v).ok().and_then(|i| table.get(i)) {
+            Some(hints) if !hints.is_empty() => *v,
+            _ => NO_TYPE_ARG,
+        }
+    };
+    cases
+        .iter()
+        .find(|c| {
+            c.leaves.len() == leaves.len()
+                && c.leaves.iter().zip(leaves).all(|(k, v)| *k == canonical(v))
+        })
+        .map_or(NO_TYPE_ARG, |c| c.composed)
+}
+
 /// Splice a door's hint against the enclosing frame's **render slots** — the one resolution both
 /// backends run, so a generic door cannot render one way compiled and another interpreted.
 ///
@@ -232,6 +303,42 @@ impl RenderHint {
             RenderHint::Variants(variants) => variants
                 .iter()
                 .any(|(_, slots)| slots.iter().any(|(_, h)| h.has_param())),
+        }
+    }
+
+    /// Every slot ordinal a [`RenderHint::Param`] under this hint names, ascending and deduplicated
+    /// — the leaves a [`HintComposition`] over this hint has to read, and the order its case keys
+    /// are written in.
+    pub fn param_slots(&self) -> Vec<u32> {
+        let mut out = Vec::new();
+        self.collect_param_slots(&mut out);
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    fn collect_param_slots(&self, out: &mut Vec<u32>) {
+        match self {
+            RenderHint::Unsigned => {}
+            RenderHint::Param(n) => out.push(*n),
+            RenderHint::Elements(inner) => inner.collect_param_slots(out),
+            RenderHint::Entries { key, value } => {
+                for h in [key, value].into_iter().flatten() {
+                    h.collect_param_slots(out);
+                }
+            }
+            RenderHint::Slots(slots) => {
+                for (_, h) in slots {
+                    h.collect_param_slots(out);
+                }
+            }
+            RenderHint::Variants(variants) => {
+                for (_, slots) in variants {
+                    for (_, h) in slots {
+                        h.collect_param_slots(out);
+                    }
+                }
+            }
         }
     }
 
