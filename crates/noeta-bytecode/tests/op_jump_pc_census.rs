@@ -70,6 +70,7 @@ const NOT_A_JUMP_PC: &[(&str, &str)] = &[
     ("Construct.err_shape", "index into the shape table"),
     ("Retag.repr", "index into the reflect table"),
     ("TypeArgName.index", "type-argument position"),
+    ("SelfRenderSlot.index", "type-argument position"),
     ("FromBytes.schema", "index into the packed-schema table"),
     ("Invoke.ok_shape", "index into the shape table"),
     ("Invoke.err_shape", "index into the shape table"),

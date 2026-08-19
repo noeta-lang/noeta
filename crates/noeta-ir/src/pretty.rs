@@ -432,6 +432,9 @@ impl Printer<'_> {
                 param,
                 ..
             } => format!("type_name::<{param}>({}[{index}])", atom(operand)),
+            Rvalue::SelfRenderSlot { operand, index, .. } => {
+                format!("render_slot({}[{index}])", atom(operand))
+            }
             Rvalue::TypeSlotName { slot, .. } => format!("type_name(${})", atom(slot)),
             Rvalue::MakeGen { step, .. } => format!("make_gen({})", atom(step)),
             Rvalue::MakeFuture { thunk, .. } => format!("make_future({})", atom(thunk)),

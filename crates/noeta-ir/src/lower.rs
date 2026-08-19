@@ -275,6 +275,10 @@ pub struct LoweringSites<'a> {
     /// Forwarding generic fns and methods → their hidden-slot count, keyed as the callable traces
     /// (a bare `fn` name, or `Type.method`); lowered as the leading parameters `$ty0`, `$ty1`, … .
     pub forwarding_fns: &'a HashMap<String, u32>,
+    /// Instance methods of a generic type → how many render slots they read off the receiver,
+    /// keyed as `forwarding_fns` is. Slot `hidden + i` of such a body is type argument `i` of
+    /// `self`'s reflected tag.
+    pub self_render_fns: &'a HashMap<String, u32>,
     /// Forwarding-fn-as-value sites (poly-deferrals D2c): `Expr::Ident` spans → `(fn name,
     /// adopted arity)`. The reference lowers to a synthesized closure calling the fn; the inner
     /// call reuses this same span, so `hidden_arg_sites` binds the resolved slots into the value.
@@ -344,6 +348,7 @@ impl LoweringSites<'static> {
             forwarded_slot_sites: SLOTS.get_or_init(HashMap::new),
             self_type_arg_sites: SELF_TY.get_or_init(HashMap::new),
             forwarding_fns: COUNTS.get_or_init(HashMap::new),
+            self_render_fns: COUNTS.get_or_init(HashMap::new),
             fn_value_sites: FN_VALUES.get_or_init(HashMap::new),
         }
     }
@@ -397,6 +402,7 @@ macro_rules! lowering_sites {
             forwarded_slot_sites: &$s.forwarded_slot_sites,
             self_type_arg_sites: &$s.self_type_arg_sites,
             forwarding_fns: &$s.forwarding_fns,
+            self_render_fns: &$s.self_render_fns,
             fn_value_sites: &$s.fn_value_sites,
         }
     };
@@ -741,6 +747,7 @@ pub fn lower_with_sites_opts(
         temps: 0,
         fn_depth: 0,
         hidden_slots: 0,
+        self_render_slots: 0,
         sites,
         real_isolates,
         synth_step_name: None,
@@ -782,6 +789,16 @@ struct Lowerer<'a> {
     /// closures, which reach the same locals as captures (D2b). `0` at module top level and inside
     /// any top-level declaration that carries no slots.
     hidden_slots: u32,
+    /// How many render slots the innermost **top-level** declaration enclosing this code reads off
+    /// its **receiver** — the enclosing generic type's own parameters, when this is one of its
+    /// instance methods — the checker's `self_render_fns`, keyed exactly as `forwarding_fns` is.
+    ///
+    /// They follow the hidden `$ty` slots in the one slot list a
+    /// [`noeta_ast::RenderHint::Param`] indexes, so slot `hidden_slots + i` is type argument `i` of
+    /// `self`'s reflected tag ([`Lowerer::hint_slots`]). Set and retained exactly as
+    /// [`Self::hidden_slots`] is, so a closure inside such a method resolves a door through the
+    /// receiver it captures. `0` at top level and in every declaration that is not one.
+    self_render_slots: u32,
     /// The checker's lowering-site maps (see [`LoweringSites`]) — the span-keyed hints that drive
     /// packed/fused/streamed lowering. Empty on the boxed/unfused REPL/IR-corpus path.
     sites: LoweringSites<'a>,
@@ -841,6 +858,7 @@ fn every_lowerer_field_is_named_by_the_census() {
         temps: 0,
         fn_depth: 0,
         hidden_slots: 0,
+        self_render_slots: 0,
         sites: LoweringSites::empty(),
         real_isolates: false,
         synth_step_name: None,
@@ -856,6 +874,7 @@ fn every_lowerer_field_is_named_by_the_census() {
         temps: _,
         fn_depth: _,
         hidden_slots: _,
+        self_render_slots: _,
         sites: _,
         real_isolates: _,
         synth_step_name: _,
@@ -1622,7 +1641,7 @@ impl Lowerer<'_> {
                 // A loop over a set/map whose element or key carries a `u64` sorts its snapshot
                 // under this hint, so the program sees the order its type states.
                 let order = self.order_hint(span);
-                let order_slots = self.order_slots(order.as_ref(), *span);
+                let order_slots = self.order_slots(order.as_ref(), *span, out);
                 let iterable = self.lower_expr(iterable, out)?;
                 match pattern {
                     AstForPattern::Single { .. } => {
@@ -1983,8 +2002,15 @@ impl Lowerer<'_> {
         // The slot count a door in this body resolves against. A nested declaration keeps the
         // enclosing one — it reads the same `$ty` locals through capture — so only depth 0 sets it.
         let outer_hidden = self.hidden_slots;
+        // …and the receiver-read half of that list (`self_render_fns`), retained the same way: a
+        // closure inside a method captures the very `self` its enclosing body reads.
+        let outer_self_render = self.self_render_slots;
         if self.fn_depth == 0 {
             self.hidden_slots = hidden;
+            self.self_render_slots = name
+                .as_deref()
+                .and_then(|n| self.sites.self_render_fns.get(n).copied())
+                .unwrap_or(0);
         }
         self.fn_depth += 1;
         let mut param_names: Vec<String> = (0..hidden).map(hidden_param_name).collect();
@@ -2031,6 +2057,7 @@ impl Lowerer<'_> {
         self.temps = outer;
         self.fn_depth -= 1;
         self.hidden_slots = outer_hidden;
+        self.self_render_slots = outer_self_render;
         Ok(Func {
             name,
             captures,
@@ -2513,16 +2540,16 @@ impl Lowerer<'_> {
     /// and this is where an expression becomes an atom.
     fn lower_expr(&mut self, expr: &Expr, out: &mut Vec<Stmt>) -> Result<Atom, Unsupported> {
         let atom = self.lower_expr_unrendered(expr, out)?;
-        let Some(hint) = self.sites.render_hint_sites.get(&expr.span()) else {
+        let Some(hint) = self.sites.render_hint_sites.get(&expr.span()).cloned() else {
             return Ok(atom);
         };
         let span = expr.span();
-        let slots = self.hint_slots(hint, span);
+        let slots = self.hint_slots(&hint, span, out);
         Ok(self.emit(
             out,
             Rvalue::Render {
                 operand: atom,
-                hint: std::rc::Rc::new(hint.clone()),
+                hint: std::rc::Rc::new(hint),
                 slots,
                 span,
             },
@@ -2530,40 +2557,71 @@ impl Lowerer<'_> {
         ))
     }
 
-    /// The enclosing generic body's hidden type-argument slot operands, for a hint that mentions a
+    /// The enclosing body's render-slot operands, for a hint that mentions a
     /// [`noeta_ast::RenderHint::Param`] — and an **empty vector** for every hint that does not,
     /// which is every door outside a generic body.
     ///
-    /// The whole slot list, in slot order, so a `Param(n)` indexes it directly. They ride as
-    /// ordinary [`Atom::Var`] reads of the `$ty<i>` locals — the same reads
-    /// [`Self::type_arg_atoms`]'s pass-through arm and [`Self::reflect_slot_atom`] build — which is
-    /// what makes a closure capture them and a register allocator leave them alone.
-    fn hint_slots(&self, hint: &noeta_ast::RenderHint, span: Span) -> Vec<Atom> {
+    /// The whole slot list, in slot order, so a `Param(n)` indexes it directly. The leading
+    /// [`Self::hidden_slots`] are ordinary [`Atom::Var`] reads of the `$ty<i>` locals — the same
+    /// reads [`Self::type_arg_atoms`]'s pass-through arm and [`Self::reflect_slot_atom`] build —
+    /// which is what makes a closure capture them and a register allocator leave them alone. The
+    /// [`Self::self_render_slots`] after them are reads of the **receiver's** reflected tag
+    /// ([`Rvalue::SelfRenderSlot`]), emitted into `out` here so the ordinary operand machinery
+    /// carries them for the same three analyses.
+    fn hint_slots(
+        &mut self,
+        hint: &noeta_ast::RenderHint,
+        span: Span,
+        out: &mut Vec<Stmt>,
+    ) -> Vec<Atom> {
         if !hint.has_param() {
             return Vec::new();
         }
-        (0..self.hidden_slots)
+        let mut slots: Vec<Atom> = (0..self.hidden_slots)
             .map(|i| Atom::Var {
                 name: hidden_param_name(i),
                 span,
             })
-            .collect()
+            .collect();
+        for index in 0..self.self_render_slots {
+            let atom = self.emit(
+                out,
+                Rvalue::SelfRenderSlot {
+                    operand: Atom::Var {
+                        name: "self".to_string(),
+                        span,
+                    },
+                    index,
+                    span,
+                },
+                span,
+            );
+            slots.push(atom);
+        }
+        slots
     }
 
     /// [`Self::hint_slots`] for an optional hint — the shape the two ordering doors hold theirs in.
     fn order_slots(
-        &self,
+        &mut self,
         hint: Option<&std::rc::Rc<noeta_ast::RenderHint>>,
         span: Span,
+        out: &mut Vec<Stmt>,
     ) -> Vec<Atom> {
-        hint.map(|h| self.hint_slots(h, span)).unwrap_or_default()
+        match hint {
+            Some(h) => {
+                let h = h.clone();
+                self.hint_slots(&h, span, out)
+            }
+            None => Vec::new(),
+        }
     }
 
     /// [`Self::order_slots`] for the ordering hint recorded at `span` — the form a method call's
     /// node literal asks for, beside its `order: self.order_hint(span)`.
-    fn order_slots_at(&self, span: &Span) -> Vec<Atom> {
-        match self.sites.order_hint_sites.get(span) {
-            Some(hint) => self.hint_slots(hint, *span),
+    fn order_slots_at(&mut self, span: &Span, out: &mut Vec<Stmt>) -> Vec<Atom> {
+        match self.sites.order_hint_sites.get(span).cloned() {
+            Some(hint) => self.hint_slots(&hint, *span, out),
             None => Vec::new(),
         }
     }
@@ -2584,6 +2642,15 @@ impl Lowerer<'_> {
             .binding_hint_sites
             .get(span)
             .map(|h| std::rc::Rc::new(h.clone()))
+    }
+
+    /// [`Self::hint_slots`] for the push hint recorded at `span` — the operands a kept hint is
+    /// spliced against **at the binding call**, since the tick that serializes has no frame.
+    fn push_slots(&mut self, span: &Span, out: &mut Vec<Stmt>) -> Vec<Atom> {
+        match self.sites.binding_hint_sites.get(span).cloned() {
+            Some(hint) => self.hint_slots(&hint, *span, out),
+            None => Vec::new(),
+        }
     }
 
     fn lower_expr_unrendered(
@@ -2927,7 +2994,7 @@ impl Lowerer<'_> {
                 // the wire unsigned instead of as their signed reinterpretation. Decided before the
                 // callee shape is examined at all, because the door is the *call*, not the spelling:
                 // only `to_json` serializes its receiver, and every other form its single argument.
-                if let Some(hint) = self.sites.json_hint_sites.get(span) {
+                if let Some(hint) = self.sites.json_hint_sites.get(span).cloned() {
                     let operand = match callee.as_ref() {
                         // A receiver-serializing door (`v.to_json()`, `v.inspect()`) takes no
                         // arguments; every other spelling passes the value as its one argument.
@@ -2941,12 +3008,15 @@ impl Lowerer<'_> {
                                 .expect("a hinted serializing call has its one argument")
                         }
                     };
+                    // The slot reads a receiver-channel hint needs are emitted BEFORE the door
+                    // that consumes them, into the same statement list.
+                    let slots = self.hint_slots(&hint, *span, out);
                     return Ok(self.emit(
                         out,
                         Rvalue::JsonRender {
                             operand,
-                            hint: std::rc::Rc::new(hint.clone()),
-                            slots: self.hint_slots(hint, *span),
+                            hint: std::rc::Rc::new(hint),
+                            slots,
                             span: *span,
                         },
                         *span,
@@ -3152,6 +3222,10 @@ impl Lowerer<'_> {
                     // …and its dynamic twin: a generic type's fresh constructor whose instantiation
                     // is the enclosing self-less member's own type parameter, delivered on a slot.
                     let reflect_slot = self.reflect_slot_atom(span);
+                    // Emitted into `out` before the call node that consumes them: a receiver-read
+                    // render slot is an ordinary computation, not an operand read off the frame.
+                    let order_slots = self.order_slots_at(span, out);
+                    let push_slots = self.push_slots(span, out);
                     Ok(self.emit(
                         out,
                         Rvalue::Method {
@@ -3167,8 +3241,9 @@ impl Lowerer<'_> {
                             type_args,
                             supplied,
                             order: self.order_hint(span),
-                            order_slots: self.order_slots_at(span),
+                            order_slots,
                             push: self.push_hint(span),
+                            push_slots,
                             span: *span,
                         },
                         *span,
@@ -3820,15 +3895,16 @@ impl Lowerer<'_> {
                 // value is the serializer's one argument, already lowered as `left_atom`. Same site
                 // map and same emitted form as the written-out call — a spelling must not decide
                 // whether a `u64` reaches the wire correctly.
-                if let Some(hint) = self.sites.json_hint_sites.get(span)
+                if let Some(hint) = self.sites.json_hint_sites.get(span).cloned()
                     && args.is_empty()
                 {
+                    let slots = self.hint_slots(&hint, *span, out);
                     return Ok(self.emit(
                         out,
                         Rvalue::JsonRender {
                             operand: left_atom,
-                            hint: std::rc::Rc::new(hint.clone()),
-                            slots: self.hint_slots(hint, *span),
+                            hint: std::rc::Rc::new(hint),
+                            slots,
                             span: *span,
                         },
                         *span,
@@ -3872,6 +3948,10 @@ impl Lowerer<'_> {
                     // …and its dynamic twin: a generic type's fresh constructor whose instantiation
                     // is the enclosing self-less member's own type parameter, delivered on a slot.
                     let reflect_slot = self.reflect_slot_atom(span);
+                    // Emitted into `out` before the call node that consumes them: a receiver-read
+                    // render slot is an ordinary computation, not an operand read off the frame.
+                    let order_slots = self.order_slots_at(span, out);
+                    let push_slots = self.push_slots(span, out);
                     Ok(self.emit(
                         out,
                         Rvalue::Method {
@@ -3887,8 +3967,9 @@ impl Lowerer<'_> {
                             type_args,
                             supplied,
                             order: self.order_hint(span),
-                            order_slots: self.order_slots_at(span),
+                            order_slots,
                             push: self.push_hint(span),
+                            push_slots,
                             span: *span,
                         },
                         *span,
@@ -3925,6 +4006,8 @@ impl Lowerer<'_> {
                 let type_args = self.type_arg_atoms(span);
                 let reflect = self.sites.construction_sites.get(span).cloned();
                 let reflect_slot = self.reflect_slot_atom(span);
+                let order_slots = self.order_slots_at(span, out);
+                let push_slots = self.push_slots(span, out);
                 Ok(self.emit(
                     out,
                     Rvalue::Method {
@@ -3936,8 +4019,9 @@ impl Lowerer<'_> {
                         reflect,
                         reflect_slot,
                         order: self.order_hint(span),
-                        order_slots: self.order_slots_at(span),
+                        order_slots,
                         push: self.push_hint(span),
+                        push_slots,
                         type_args,
                         // A bare callee takes the piped value and nothing else, so there is no
                         // argument list to rebind.

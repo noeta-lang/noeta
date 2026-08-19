@@ -2925,7 +2925,7 @@ impl<'m> FnCompiler<'m> {
                 // reads it off the module by the `IterSnapshot` span.
                 if let Some(hint) = order {
                     self.module.record_order_hint(*span, hint);
-                    self.emit_resolve_order_hint(*span, order_slots)?;
+                    self.emit_resolve_hint(*span, noeta_ext_abi::HintDoor::Order, order_slots)?;
                 }
                 self.for_stmt(pattern, iterable, body, *span, *stream)
             }
@@ -3717,14 +3717,20 @@ impl<'m> FnCompiler<'m> {
     /// Produce a register holding `atom`'s value. A temporary or a directly-held local / `self`
     /// resolves to its existing register (operands are read-only); a constant, or a celled /
     /// captured / global / field name, is materialized into a fresh register.
-    /// Emit the [`noeta_bytecode::Op::ResolveOrderHint`] an ordering door in a **generic** body
-    /// needs, and nothing at all where its hint is complete on its own.
+    /// Emit the [`noeta_bytecode::Op::ResolveHint`] a side-table door in a **generic** body needs,
+    /// and nothing at all where its hint is complete on its own.
     ///
-    /// The ordering hint travels on the module's span-keyed side table, which is the right place
-    /// for a hint (the ops that read it stay the size they are on the hot path) and the wrong place
-    /// for *registers*: a side table is invisible to the liveness walk and to the coalescing remap.
-    /// So the registers travel in the code, as this op, and the VM splices the two.
-    fn emit_resolve_order_hint(&mut self, span: Span, slots: &[Atom]) -> Result<(), Unsupported> {
+    /// An ordering hint and a kept push hint both travel on a module side table keyed by span,
+    /// which is the right place for a hint (the ops that read it stay the size they are on the hot
+    /// path) and the wrong place for *registers*: a side table is invisible to the liveness walk and
+    /// to the coalescing remap. So the registers travel in the code, as this op, and the VM splices
+    /// the two. `door` says which of the two tables at this span is being resolved.
+    fn emit_resolve_hint(
+        &mut self,
+        span: Span,
+        door: noeta_ext_abi::HintDoor,
+        slots: &[Atom],
+    ) -> Result<(), Unsupported> {
         if slots.is_empty() {
             return Ok(());
         }
@@ -3732,8 +3738,9 @@ impl<'m> FnCompiler<'m> {
         for slot in slots {
             regs.push(self.atom_reg(slot)?);
         }
-        self.code.push(Op::ResolveOrderHint {
+        self.code.push(Op::ResolveHint {
             span,
+            door,
             slots: regs.into_boxed_slice(),
         });
         Ok(())
@@ -4195,6 +4202,7 @@ impl<'m> FnCompiler<'m> {
                 order,
                 order_slots,
                 push,
+                push_slots,
                 name_span: _,
             } => {
                 // A method whose result reveals an order the program can see, on a `u64`-carrying
@@ -4202,13 +4210,16 @@ impl<'m> FnCompiler<'m> {
                 // the op, which stays the size it is on the hot dispatch path.
                 if let Some(hint) = order {
                     self.module.record_order_hint(*span, hint);
-                    self.emit_resolve_order_hint(*span, order_slots)?;
+                    self.emit_resolve_hint(*span, noeta_ext_abi::HintDoor::Order, order_slots)?;
                 }
                 // A native call that BINDS a value it serializes on a later tick: the hint travels on
                 // the same span-keyed side table, for the same reason — the ctx the dispatch runs
                 // under reads it there, so `Op::CallMethod` carries nothing extra.
                 if let Some(hint) = push {
                     self.module.record_binding_hint(*span, hint);
+                    // …and, inside a generic body, spliced HERE — the tick that serializes has no
+                    // frame to read a render slot from, and this call does.
+                    self.emit_resolve_hint(*span, noeta_ext_abi::HintDoor::Json, push_slots)?;
                 }
                 // A generic enum-variant construction carries its reflected type (R2b.2); intern it so
                 // the `MakeEnum` op can stamp it. `None` for an ordinary method call.
@@ -4671,6 +4682,22 @@ impl<'m> FnCompiler<'m> {
                     index: *index,
                     names: Box::new((type_name.clone(), param.clone())),
                     span: *span,
+                });
+                Ok(())
+            }
+            // The render-slot twin of the arm above: same tag, same argument position, but the
+            // answer is the table INDEX a door's hint resolves through rather than a name — and it
+            // never aborts, because an unnameable instantiation renders the erased word.
+            Rvalue::SelfRenderSlot {
+                operand,
+                index,
+                span: _,
+            } => {
+                let src = self.atom_reg(operand)?;
+                self.code.push(Op::SelfRenderSlot {
+                    dst,
+                    src,
+                    index: *index,
                 });
                 Ok(())
             }

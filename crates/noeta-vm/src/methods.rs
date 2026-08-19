@@ -70,37 +70,45 @@ impl<'m> Vm<'m> {
             return Some(hint);
         }
         // A hint carrying a type parameter: the answer is the one the frame that reached this site
-        // resolved, never the site's own — see [`Vm::resolved_order_hints`]. Absent means the call
+        // resolved, never the site's own — see [`HintState::resolved_order`]. Absent means the call
         // could not name its instantiation, which reads the erased word.
         self.hints.resolved_order.get(span)?.as_ref()
     }
 
-    /// Splice the ordering hint recorded at `span` against `regs`, and leave the answer where
-    /// [`Vm::order_hint`] reads it — the VM half of the one resolution, whose other half the
-    /// tree-walker runs on its own frame.
+    /// Splice the side-table hint recorded at `span` for `door` against `regs`, and leave the answer
+    /// where [`Vm::order_hint`] / [`Vm::binding_hint`] read it — the VM half of the one resolution,
+    /// whose other half the tree-walker runs on its own frame.
     ///
-    /// Costs one length test at every ordering site with a statically complete hint, and nothing at
-    /// all in a program that records none. Called from the ops that reach an order the program
-    /// observes, where the frame is still in hand.
-    pub(crate) fn note_order_slots(
+    /// Costs one length test at every site with a statically complete hint, and nothing at all in a
+    /// program that records none. Called from the op that precedes such a door, where the frame is
+    /// still in hand.
+    pub(crate) fn note_hint_slots(
         &mut self,
         span: &Span,
+        door: noeta_stdlib::HintDoor,
         slots: &[noeta_bytecode::Reg],
         regs: &[noeta_value::Value],
         fbase: usize,
     ) {
-        let Some(hint) = self.hints.order.get(span).cloned() else {
+        // One arm per door, exhaustively, so a door added later has to say which table it reads.
+        let hint = match door {
+            noeta_stdlib::HintDoor::Order => self.hints.order.get(span).cloned(),
+            noeta_stdlib::HintDoor::Json => self.hints.binding.get(span).cloned(),
+            // No display door keeps its hint in a side table: every one of them carries a
+            // `HintOperand`, whose slots resolve in the op itself.
+            noeta_stdlib::HintDoor::Display => None,
+        };
+        let Some(hint) = hint else {
             return;
         };
         let values = slot_values(slots, regs, fbase);
-        let resolved = noeta_stdlib::resolve_hint(
-            &hint,
-            &values,
-            &self.hints.type_args,
-            noeta_stdlib::HintDoor::Order,
-        )
-        .map(|h| h.into_owned());
-        self.hints.resolved_order.insert(*span, resolved);
+        let resolved = noeta_stdlib::resolve_hint(&hint, &values, &self.hints.type_args, door)
+            .map(|h| h.into_owned());
+        match door {
+            noeta_stdlib::HintDoor::Order => self.hints.resolved_order.insert(*span, resolved),
+            noeta_stdlib::HintDoor::Json => self.hints.resolved_binding.insert(*span, resolved),
+            noeta_stdlib::HintDoor::Display => None,
+        };
     }
 
     /// Read a hint operand's slot registers as the type-table indices they hold — the one place a
@@ -116,11 +124,7 @@ impl<'m> Vm<'m> {
         fbase: usize,
         door: noeta_stdlib::HintDoor,
     ) -> Option<std::borrow::Cow<'h, noeta_ast::RenderHint>> {
-        if operand.slots.is_empty() {
-            return Some(std::borrow::Cow::Borrowed(&operand.hint));
-        }
-        let values = slot_values(&operand.slots, regs, fbase);
-        noeta_stdlib::resolve_hint(&operand.hint, &values, &self.hints.type_args, door)
+        resolve_hint_operand(operand, &self.hints.type_args, regs, fbase, door)
     }
 
     /// The push hint recorded at `span` — the deferred twin of [`Vm::order_hint`], read once when a
@@ -130,7 +134,15 @@ impl<'m> Vm<'m> {
         if self.hints.binding.is_empty() {
             return None;
         }
-        self.hints.binding.get(span)
+        let hint = self.hints.binding.get(span)?;
+        if !hint.has_param() {
+            return Some(hint);
+        }
+        // A kept hint inside a generic body: the answer is the one the frame that reached this call
+        // resolved. The tick that serializes has no frame, so the splice already happened —
+        // `Op::ResolveHint` ran immediately before this call. Absent means the call could not name
+        // its instantiation, which pushes the erased word.
+        self.hints.resolved_binding.get(span)?.as_ref()
     }
 
     /// A Ring 1 list method (`reverse`/`contains`/`join`). Mirrors the tree-walker's
@@ -1351,8 +1363,24 @@ impl<'m> Vm<'m> {
     }
 }
 
+/// [`Vm::resolve_hint_operand`] against a table handed in rather than read off the VM — the one
+/// resolution, reachable from tier-1 native glue, which has the module but no `&Vm`.
+pub(crate) fn resolve_hint_operand<'h>(
+    operand: &'h noeta_bytecode::HintOperand,
+    table: &[noeta_stdlib::TypeArgHints],
+    regs: &[noeta_value::Value],
+    fbase: usize,
+    door: noeta_stdlib::HintDoor,
+) -> Option<std::borrow::Cow<'h, noeta_ast::RenderHint>> {
+    if operand.slots.is_empty() {
+        return Some(std::borrow::Cow::Borrowed(&operand.hint));
+    }
+    let values = slot_values(&operand.slots, regs, fbase);
+    noeta_stdlib::resolve_hint(&operand.hint, &values, table, door)
+}
+
 /// The values a hint operand's slot registers hold, as type-table indices.
-fn slot_values(
+pub(crate) fn slot_values(
     slots: &[noeta_bytecode::Reg],
     regs: &[noeta_value::Value],
     fbase: usize,
@@ -1387,7 +1415,7 @@ pub(crate) struct HintState {
     /// sites whose hint carries a [`noeta_ast::RenderHint::Param`].
     ///
     /// A generic body is compiled once and called at every instantiation, so those sites have no
-    /// single answer: `Op::ResolveOrderHint` resolves the slot registers as it runs and leaves the
+    /// single answer: `Op::ResolveHint` resolves the slot registers as it runs and leaves the
     /// result here for the collection method (or `IterSnapshot`) to read by span — the same
     /// span-keyed hand-off the unhinted path already used. Overwritten per call rather than merged:
     /// the previous instantiation's answer is not this one's.
@@ -1399,4 +1427,12 @@ pub(crate) struct HintState {
     /// `NativeCtx::push_hint`, resolved at load from `Module::binding_hint_sites`. A native method
     /// that BINDS a value it serializes on a later tick (`view.expose`) captures it once, here.
     pub(crate) binding: HashMap<Span, noeta_ast::RenderHint>,
+    /// Deferred-serialization site span → the hint **already spliced against the frame that reached
+    /// the binding call**, for the sites whose hint carries a [`noeta_ast::RenderHint::Param`].
+    ///
+    /// The `resolved_order` story with one difference that is the whole point: an ordering door
+    /// resolves for the op that follows it in the same frame, while a kept hint resolves for a tick
+    /// that has no frame at all. The binding call is the last moment the instantiation is knowable,
+    /// so that is where it is read and this is where it waits.
+    pub(crate) resolved_binding: HashMap<Span, Option<noeta_ast::RenderHint>>,
 }

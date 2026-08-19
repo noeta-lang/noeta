@@ -299,14 +299,14 @@ impl Checker {
     /// only the moment differs, which is the whole reason this door needs its own site map: by the
     /// time the value is written there is no call site left to read a static type from.
     ///
-    /// A hint mentioning a **type parameter** is dropped here rather than recorded: the parameter's
-    /// instantiation reaches a door through the enclosing body's render slot, and a kept hint has
-    /// no door left to read one at. Recording it would store a hint that resolves to nothing on
-    /// every later tick, which is the unhinted reading spelled the long way.
+    /// A hint mentioning a **type parameter** is recorded like any other and resolved at the
+    /// **binding call**, not at the tick that serializes. The later tick has no frame to read a
+    /// render slot from, but the call that binds the value does — and it is the site that knows the
+    /// instantiation, since that is where the generic body was entered. Both backends splice there
+    /// and keep the already-resolved hint, so a `view.expose` of a `T = u64` pushes the number on
+    /// every tick instead of the negative word it is erased to.
     pub(crate) fn note_binding_hint(&mut self, ty: &Type, span: Span) {
-        if let Some(hint) = self.render_hint(ty, HintPurpose::Json, &mut Vec::new())
-            && !hint.has_param()
-        {
+        if let Some(hint) = self.render_hint(ty, HintPurpose::Json, &mut Vec::new()) {
             self.sites.binding_hint_sites.insert(span, hint);
         }
     }
@@ -322,9 +322,14 @@ impl Checker {
     /// implementing `Display` is hinted here exactly like any other, and its fields are numbered as
     /// the echo renders them ([`HintPurpose::Display`]).
     ///
-    /// A hint mentioning a **type parameter** is dropped for the same reason it is dropped from a
-    /// binding hint: the host renders the entry's value after the entry has run, with no frame left
-    /// to read a render slot from.
+    /// A hint mentioning a **type parameter** cannot arise here, and the guard says so rather than
+    /// assuming it. A render slot exists only inside a generic body — the enclosing `fn`'s hidden
+    /// slots, or the receiver channel of a generic type's instance method — and the echoed
+    /// statement is the entry's **trailing top-level statement**, which is inside neither. So there
+    /// is no instantiation to name, no frame that could name one, and nothing to resolve: a hint
+    /// that named a parameter would resolve to nothing on every entry, which is the unhinted
+    /// reading spelled the long way. Dropped rather than stored, so nothing downstream has to
+    /// re-derive that.
     pub(crate) fn note_echo_hint(&mut self, ty: &Type, span: Span) {
         if let Some(hint) = self.render_hint(ty, HintPurpose::Display, &mut Vec::new())
             && !hint.has_param()
@@ -488,19 +493,72 @@ impl Checker {
         self.intern_type_arg(&sigma, &slot, "", span)
     }
 
-    /// The hidden-slot ordinal carrying `param`'s per-instantiation hints in the body being
-    /// checked, or `None` where nothing delivers it — see [`crate::Coloring::current_render`].
+    /// The render-slot ordinal carrying `param`'s per-instantiation hints in the body being
+    /// checked, or `None` where nothing delivers it.
     ///
-    /// The render slots follow the forwarding ones in the layout, which is why the forwarding
-    /// count is the base: a body's `$ty` locals are one list, and every other consumer indexes the
-    /// forwarding half by the ordinals the syntactic pre-pass gave it.
+    /// A body's slots are one list in three sections — the forwarding slots, the `fn`'s own render
+    /// slots ([`crate::Coloring::current_render`]), then the ones read off the receiver
+    /// ([`crate::Coloring::self_type_params`]) — and each section's base is the length of
+    /// everything before it. Appending rather than interleaving is what leaves every ordinal the
+    /// forwarding pre-pass minted exactly where it was.
+    ///
+    /// The two render sections differ only in **where the slot's value comes from**, which is
+    /// lowering's business: the first two are the hidden `$ty` locals a call fills, the third is a
+    /// read of the receiver's reflected tag. The hint records one ordinal either way, and one
+    /// splice resolves it.
     pub(crate) fn render_slot_of(&self, param: &ParamRef) -> Option<u32> {
         let base = self.coloring.current_forwarding.len() as u32;
-        self.coloring
+        if let Some(i) = self
+            .coloring
             .current_render
             .iter()
             .position(|p| p.as_ref() == Some(param))
-            .map(|i| base + i as u32)
+        {
+            return Some(base + i as u32);
+        }
+        let self_base = base + self.coloring.current_render.len() as u32;
+        self.coloring
+            .self_type_params
+            .iter()
+            .position(|p| p.as_ref() == Some(param))
+            .map(|i| self_base + i as u32)
+    }
+
+    /// Intern the render hints of every **type argument** of a generic construction, so a door
+    /// inside one of that type's instance methods can find them again from the receiver's tag.
+    ///
+    /// The receiver channel resolves a slot by matching the tag's argument against the
+    /// type-argument table's reflection projection ([`noeta_ast::reflect::TypeRepr::render_slot_arg`]),
+    /// and a table only holds what some site put there. A generic `fn`'s call site interns its
+    /// instantiation because it *fills* a slot; a construction fills none, so this is where the
+    /// same instantiation is recorded for the method bodies to read.
+    ///
+    /// Only an argument that actually renders something is interned — which is nearly none of them
+    /// — so a program with no `u64` under a generic type carries no extra entry. Nested arguments
+    /// are interned too (`Holder<Holder<u64>>` records the inner instantiation as well), because
+    /// the inner type's own methods read their own receiver's tag.
+    pub(crate) fn note_self_render_args(&mut self, ty: &Type, span: Span) {
+        let Type::Named(_, args) = ty else { return };
+        for arg in args.clone() {
+            self.intern_render_hints(&arg, span);
+        }
+    }
+
+    /// Intern one instantiation into the type-argument table **for its hints alone** — nothing
+    /// else about the entry is read, so it carries no recipe demand.
+    ///
+    /// Skipped where the instantiation renders nothing, which is nearly every one: the table (and
+    /// the scan a receiver-read slot runs over it) stays empty for a program with no `u64` under a
+    /// generic type. Its own arguments follow through [`Self::intern_type_arg`], which recurses.
+    pub(crate) fn intern_render_hints(&mut self, sigma: &Type, span: Span) {
+        if !self.fully_concrete(sigma) || self.type_arg_hints(sigma).is_empty() {
+            return;
+        }
+        let slot = crate::forwarding::ForwardSlot {
+            template: sigma.clone(),
+            needs_recipe: false,
+        };
+        self.intern_type_arg(sigma, &slot, "", span);
     }
 
     /// The render hint for a declared struct/class (its fields, as positional slots) or enum (its
@@ -653,6 +711,10 @@ impl Checker {
             if is_nongeneric_nominal(&repr) {
                 return;
             }
+            // The tag this stamps is the only channel an instance method of a generic type has for
+            // its instantiation, so the arguments it names are interned here — see
+            // [`Self::note_self_render_args`].
+            self.note_self_render_args(&ty, span);
             self.sites.construction_sites.insert(span, repr);
         }
     }

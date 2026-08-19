@@ -1,14 +1,17 @@
 // The positions a `u64`'s signedness does NOT reach, pinned so they stay deliberate. Every one of
 // them renders the erased i64 word — `18446744073709551615` read back as `-1` — and every one of
-// them is a position where nothing in the program says which width the value had.
+// them is a position where nothing the value or the program carries says which width it had.
 //
 // A `dyn` is the original of the rule: a value laundered through it has no static type at all, so
 // there is nothing to take a signedness from. The rest are the same rule met through a generic:
 //
 //   * a `dyn` local inside a generic body, which erases the parameter it was assigned from;
-//   * a **generic type's method**, whose instantiation rides the receiver rather than a call's
-//     hidden slot — a method is reachable through a `dyn` receiver, either handle form and
-//     `invoke`, all of which bind positionally and carry no instantiation, so it takes no slot;
+//   * a generic type's method reached through an instance whose **tag** was written where the
+//     instantiation was not known — a literal inside a plain generic `fn` types as `Holder<T>`,
+//     and `T` is erased to `dyn` there, so the object records `Holder<dyn>` and its methods read
+//     the argument back as nothing. (A construction site that DOES know the instantiation — a
+//     written literal, or a fresh constructor called on the type — stamps it, and those methods
+//     render the number: see `unsigned_through_type_param.noe`.)
 //   * a generic function used as a **value** with nothing to pin its instantiation, where the
 //     erased signature is the honest answer and the wrapper carries no width either.
 //
@@ -43,6 +46,10 @@ fn launder<T>(v: T): string {
     return "${d}";
 }
 
+fn hold<T>(v: T): Holder<T> {
+    return Holder { v: v };
+}
+
 big: u64 = 18446744073709551615u64;
 
 // A `dyn` at the door, and a `dyn` reached from inside a generic body.
@@ -50,8 +57,9 @@ d: dyn = big;
 echo "${d}";
 echo launder(big);
 
-// A generic type's methods: the instantiation is on the receiver, not on a hidden slot.
-h: Holder<u64> = Holder { v: big };
+// A generic type's methods, on an instance built where the instantiation was a type parameter:
+// the tag says `Holder<dyn>`, so the receiver channel has nothing to hand the door.
+h: Holder<u64> = hold(big);
 echo h.show();
 echo h.wrap();
 

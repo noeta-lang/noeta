@@ -752,6 +752,28 @@ pub(crate) fn type_to_repr_top(
     }
 }
 
+/// [`type_to_repr_top`] at the fidelity a **type argument reified inside a tag** carries — the
+/// projection the type-argument table holds.
+///
+/// The two differ in exactly one place, and it is the place that matters here: a bare fixed-width
+/// scalar. A scalar *value* carries no width in its storage, so `type_of(x)` on a `u64` answers
+/// `Int` and [`type_to_repr_top`] erases it to match; a `u64` sitting in a tag's **argument** list
+/// (`Holder<u64>` → `Class("Holder", [IntN { signed: false, bits: 64 }])`) is reified, because the
+/// tag describes the declared type rather than the value. Reading a tag's argument back means
+/// comparing against that reified form, so this is what the table records.
+///
+/// Every other type projects identically — the `top` flag reaches only the `IntN`/`F64` arms — so
+/// the tag a construction site stamps (always a nominal generic) is unchanged either way.
+pub(crate) fn type_to_repr_tag(
+    ty: &Type,
+    kinds: &HashMap<String, noeta_types::TypeKind>,
+) -> Option<noeta_ast::reflect::TypeRepr> {
+    match ty {
+        Type::Dyn | Type::DynTrait(_) | Type::Unknown | Type::Union(_) | Type::Kind(_) => None,
+        concrete => Some(type_to_repr(concrete, kinds, false)),
+    }
+}
+
 /// Total projection of a checker [`Type`] onto a reflection [`TypeRepr`], used for the nested
 /// element/argument types once a concrete head is committed. A nested hole, `dyn`, or union erases
 /// to [`TypeRepr::Dyn`] (the runtime erases generics anyway; nested-union fidelity is out of scope).
@@ -3070,10 +3092,10 @@ impl Checker {
         // layout for its body's SITES (D2b) but carries no slots of its own (it captures the
         // enclosing `$ty` locals instead). The render slots are counted here too, and only here:
         // the layout is the forwarding slots followed by them.
-        if let Some(key) = fwd_key {
+        if let Some(key) = &fwd_key {
             let slots = self.coloring.current_forwarding.len() + self.coloring.current_render.len();
             if slots > 0 {
-                self.sites.forwarding_fns.insert(key, slots as u32);
+                self.sites.forwarding_fns.insert(key.clone(), slots as u32);
             }
         }
         // The enclosing generic type's parameters, for `type_name::<T>()` inside an INSTANCE method
@@ -3100,6 +3122,19 @@ impl Checker {
                 .iter()
                 .map(|p| (!own.contains(p.name.as_str())).then(|| p.clone()))
                 .collect();
+            // The same parameters are this method's **receiver-read render slots** (see
+            // `Sites::self_render_fns`): a door in the body whose static type names one of them
+            // records a `RenderHint::Param` at `base + i`, and lowering fills that slot by reading
+            // type argument `i` off the receiver's tag. Recorded here, from the very list the
+            // lookup searches, so the count and the parameters it counts cannot drift apart — the
+            // masked (shadowed) positions are counted too, because the ordinals are positional.
+            if let Some(key) = &fwd_key
+                && !self.coloring.self_type_params.is_empty()
+            {
+                self.sites
+                    .self_render_fns
+                    .insert(key.clone(), self.coloring.self_type_params.len() as u32);
+            }
         }
         let saved_type_params = self.coloring.type_params.clone();
         // Read the shadowing off the scope BEFORE it is layered over (E0075, warning): the entry a

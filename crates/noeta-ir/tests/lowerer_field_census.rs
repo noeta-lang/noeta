@@ -172,6 +172,15 @@ const TABLE: &[Row] = &[
         "hidden_slots",
         PerNode(Anchor(LOWER, "self.hidden_slots = outer_hidden;")),
     ),
+    // The receiver-read half of that same slot list — how many of the enclosing generic type's own
+    // parameters a door in this body reads off `self`'s reflected tag. Set and restored at the same
+    // two sites as `hidden_slots`, and retained through nested declarations for the same reason (a
+    // closure captures the very `self` its enclosing method reads), so it describes the frame in
+    // hand rather than the program.
+    Row(
+        "self_render_slots",
+        PerNode(Anchor(LOWER, "self.self_render_slots = outer_self_render;")),
+    ),
     // Armed just before an async/generator desugar lowers its synthesized step closure and `take()`n
     // by the first closure the lowering meets. The `take` is what makes it per-node: a user's own
     // closure always finds `None`.

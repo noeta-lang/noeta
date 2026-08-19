@@ -242,7 +242,19 @@
 /// A **source break** only for a `match` on `RenderHint` that names every variant; the walks in this
 /// crate treat an unresolved `Param` as no hint, which is the same untouched path a hint-free value
 /// takes.
-pub const ABI_VERSION: u32 = 22;
+/// **23** — [`render_hint::HintDoor`] gained `Hash`/`Serialize`/`Deserialize`, and a
+/// [`render_hint::PushHint`] handed to a dispatch is now **already resolved**: a kept hint built
+/// inside a generic body is spliced against the frame at the call that binds the value, so what an
+/// extension stores beside that value names a concrete instantiation rather than a type parameter.
+/// Purely additive on the surface — nothing written for ABI 22 stops compiling, and
+/// [`render_hint::json_stringify_pushed`] is still the only walk a kept hint reaches — and counted
+/// anyway, per the rule above, because it changes what the value an extension keeps *means*.
+///
+/// The rule it implements: the tick that serializes a bound value has no frame, so it cannot read a
+/// render slot. The binding call can, and it is the site that knows the instantiation — so a
+/// LiveView binding of a generic `u64` pushes the number rather than the negative word it is erased
+/// to. The derives are what let a door carry its identity in the code that performs the splice.
+pub const ABI_VERSION: u32 = 23;
 
 pub mod args;
 pub mod channel;

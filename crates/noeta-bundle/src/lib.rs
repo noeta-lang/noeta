@@ -287,7 +287,21 @@ pub const MAGIC: &[u8; 4] = b"NOEB";
 /// has no arm in a version-25 reader. None of it can be re-derived on the reading side, for the
 /// reason every row above cannot: signedness lives only in the static type, and here it lives in
 /// the *call's* static type rather than the door's.
-pub const FORMAT_VERSION: u8 = 26;
+/// Bumped to 27 by the two positions of that hint that have **no call frame to resolve against**.
+/// [`noeta_bytecode::Op`] gained `SelfRenderSlot`, declared beside `TypeSlotName` — a door inside a
+/// generic *type's* instance method reads its instantiation off the receiver's reflected tag, since
+/// a method carries no hidden slot — and every discriminant after it shifts, which is the same wire
+/// break the inserted `RetagDynamic` was at version 15. `Op::ResolveOrderHint` became
+/// `Op::ResolveHint` with a leading `door` field, because a **kept** hint (a LiveView binding, which
+/// serializes on a later tick with no frame left) is now spliced at the call that binds the value
+/// and resolved through the same op: postcard writes the new field's byte where a version-26 reader
+/// expects the slot list's length prefix. And the type-argument table's reflection projection
+/// (`Module::type_arg_reprs` through `Module::type_reprs`) records a fixed-width scalar at TAG
+/// fidelity — `IntN { signed, bits }` rather than `Int` — so a receiver's tag argument can be
+/// matched against it; the bytes of an affected entry differ, and no reader can tell which fidelity
+/// it is looking at. None of it can be re-derived on the reading side, for the reason every row
+/// above cannot: signedness lives only in the static type.
+pub const FORMAT_VERSION: u8 = 27;
 
 /// The SHA-256 of one canonical [`Module`]'s postcard encoding — the *other* half of
 /// [`FORMAT_VERSION`], and the thing that makes the changelog above enforceable.
@@ -311,7 +325,7 @@ pub const FORMAT_VERSION: u8 = 26;
 /// pair exists to prevent. The test's message says so; this doc says so; the changelog paragraph
 /// you are about to write is the third place.
 pub const MODULE_LAYOUT_DIGEST: &str =
-    "91c09e685eb187e872c9ec906ed4496262635814460fdcdbcc9604404ec6daf7";
+    "a721d685e86f5fe151378d659cee4370a99d8365639989ab268bc8146455e51c";
 
 /// The runtime version stamped into and checked against artifacts — the building crate's
 /// package version. Any release that changes the serialized [`Module`] layout bumps this, so a

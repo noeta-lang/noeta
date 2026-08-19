@@ -711,6 +711,7 @@ impl<'m> Vm<'m> {
             resolved_order: HashMap::new(),
             type_args: module.type_arg_hints.clone(),
             binding: module.binding_hint_sites.iter().cloned().collect(),
+            resolved_binding: HashMap::new(),
         };
         Vm {
             module,

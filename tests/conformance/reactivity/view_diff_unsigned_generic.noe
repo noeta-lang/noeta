@@ -1,0 +1,76 @@
+// A LiveView binding made from **inside a generic body**. The value is pushed as JSON on a flush
+// tick, long after the call that bound it — and inside a generic body the bound value's static type
+// is a type parameter, which names no width at all. So the hint is spliced at the **binding call**,
+// which is the last moment an instantiation is knowable, and the binding keeps the resolved answer;
+// every later `snapshot()` and `diff()` serializes under it.
+//
+// Both channels a parameter's instantiation can travel are exercised, because a kept hint has to
+// work through either: a top-level generic `fn`, whose caller fills a hidden slot, and a generic
+// type's instance method, which reads its receiver's tag. The controls are the negative half — an
+// `int` binding, a narrower unsigned width that fits an i64 already, and an instantiation nothing
+// names, which pushes the erased word rather than refusing the program.
+// expect: stdout "{"type":"snapshot","values":{"boxed":{"reading":18446744073709551615,"label":"m"},"listed":[18446744073709551615,1],"narrow":4294967295,"plain":7,"viafn":18446744073709551615,"viamethod":18446744073709551615}}"
+// expect: stdout "{"type":"patch","changes":{"viafn":9223372036854775808,"viamethod":9223372036854775808}}"
+// expect: stdout "{"type":"snapshot","values":{"erased":-1}}"
+// expect: exit 0
+use std.reactive.{signal, view, Signal, View}
+
+@derive(Serialize<Json>)
+struct Meter {
+    reading: u64
+    label: string
+}
+
+// The fn channel: `T`'s instantiation arrives on this body's hidden render slot.
+fn bind<T>(v: View, name: string, s: Signal<T>): unit {
+    v.expose(name, s);
+}
+
+// The receiver channel: `T` is the class's own parameter, read off the tag `Binder.new` stamped.
+class Binder<T> {
+    pub tag: T
+
+    pub fn new(tag: T): Binder<T> {
+        return Binder { tag: tag };
+    }
+
+    pub fn bind(v: View, name: string, s: Signal<T>): unit {
+        _ = self.tag;
+        v.expose(name, s);
+    }
+}
+
+viafn = signal(18446744073709551615u64)
+viamethod = signal(18446744073709551615u64)
+
+// The hint is structural, so a parameter under a list or a struct field travels the same way.
+listed = signal([18446744073709551615u64, 1u64])
+boxed = signal(Meter { reading: 18446744073709551615u64, label: "m" })
+
+// Controls: an `int`, and a `u32` that fits an i64 with room to spare.
+plain = signal(7)
+narrow = signal(4294967295u32)
+
+v = view()
+bind(v, "viafn", viafn)
+bind(v, "listed", listed)
+bind(v, "boxed", boxed)
+bind(v, "plain", plain)
+bind(v, "narrow", narrow)
+
+b = Binder.new(18446744073709551615u64)
+b.bind(v, "viamethod", viamethod)
+
+echo v.snapshot()
+
+// A later tick has no call site left; the binding kept the resolved hint.
+viafn.set(9223372036854775808u64)
+viamethod.set(9223372036854775808u64)
+echo v.diff() ?? "none"
+
+// The negative control: a binding made through a `dyn` handle names no instantiation, so the tick
+// pushes the erased word. A render slot never refuses a program.
+erased: Signal<dyn> = signal(18446744073709551615u64)
+w = view()
+bind(w, "erased", erased)
+echo w.snapshot()
