@@ -497,6 +497,7 @@ macro_rules! for_each_jump_pc_arms {
             | Op::TypeOf { .. }
             | Op::TypeArgName { .. }
             | Op::TypeSlotName { .. }
+            | Op::SelfRenderSlot { .. }
             | Op::FieldsOf { .. }
             | Op::TraitsOf { .. }
             | Op::FromBytes { .. }
@@ -522,7 +523,7 @@ macro_rules! for_each_jump_pc_arms {
             | Op::Echo { .. }
             | Op::Stringify { .. }
             | Op::JsonStringify { .. }
-            | Op::ResolveOrderHint { .. }
+            | Op::ResolveHint { .. }
             | Op::BuildString { .. }
             | Op::Raise { .. }
             | Op::Halt => {}
@@ -1222,6 +1223,27 @@ pub enum Op {
         names: Box<(String, String)>,
         span: Span,
     },
+    /// A **render slot read off the receiver**: `dst` = the [`Module::type_args`] index whose
+    /// interned instantiation is type argument `index` of `src`'s reflected type tag, or
+    /// [`noeta_ext_abi::NO_TYPE_ARG`] where nothing names it.
+    ///
+    /// Emitted immediately before a door inside an **instance method of a generic type**, whose
+    /// hint carries a [`noeta_ast::RenderHint::Param`] naming a slot in the receiver-read section.
+    /// Such a method has no hidden `$ty` parameter to read — its four name-keyed entry points bind
+    /// positionally, so a leading type-argument parameter would be taken for a value argument —
+    /// but it does have the receiver, whose tag its construction site stamped with the
+    /// instantiation. The register this fills then takes its place in the door's [`HintOperand`]
+    /// slot list, so the hint, the splice and the table are the ones every other generic door uses.
+    ///
+    /// Never aborts, unlike [`Op::TypeArgName`]: a tag carrying no such argument, or one no
+    /// construction site interned, reads as no hint and the value renders as the erased word —
+    /// exactly what a `dyn` gets. Signedness refines an answer that already exists, so an
+    /// unnameable instantiation degrades instead of refusing the program.
+    SelfRenderSlot {
+        dst: Reg,
+        src: Reg,
+        index: u32,
+    },
     /// `type_name::<T>()` where `T` is a **forwarded type parameter of the enclosing top-level
     /// generic fn** (poly-values F2b): `dst = ` the qualified name of the [`Module::type_args`]
     /// entry whose index the hidden slot register `src` holds.
@@ -1594,24 +1616,35 @@ pub enum Op {
         src: Reg,
         hint: Box<HintOperand>,
     },
-    /// **Splice the ordering hint recorded at `span`** against this frame's render slots, leaving
-    /// the result where the ordering op that follows reads it by span.
+    /// **Splice the hint recorded at `span` for `door`** against this frame's render slots, leaving
+    /// the result where the op that follows reads it by span.
     ///
-    /// Emitted immediately before a `.sorted()`/`.keys()`/`.values()` call or an
-    /// [`Op::IterSnapshot`] whose hint carries a [`noeta_ast::RenderHint::Param`] — a door inside a
-    /// **generic** body, where the width the parameter stands for is decided at the call and one
-    /// compiled body serves every instantiation. Absent everywhere else, so an ordering site whose
-    /// hint is complete on its own costs nothing.
+    /// Emitted immediately before the two doors whose hint lives in a side table rather than in an
+    /// operand, and only when that hint carries a [`noeta_ast::RenderHint::Param`] — a door inside a
+    /// **generic** body, where the width the parameter stands for is decided per instantiation and
+    /// one compiled body serves them all:
+    ///
+    /// * [`HintDoor::Order`] before a `.sorted()`/`.keys()`/`.values()` call or an
+    ///   [`Op::IterSnapshot`] ([`Module::order_hint_sites`]);
+    /// * [`HintDoor::Json`] before a native call that **binds** a value to serialize on a later tick
+    ///   ([`Module::binding_hint_sites`]) — that tick has no frame left, so the splice happens here,
+    ///   at the call that does know the instantiation, and the resolved hint is what gets kept.
+    ///
+    /// Absent everywhere else, so a site whose hint is complete on its own costs nothing. `door` is
+    /// carried because one call span can hold both hints and their two resolutions are different
+    /// answers.
     ///
     /// An op rather than registers on the side table beside the hint, and that is the whole reason
     /// it exists: registers in a side table are invisible to the liveness walk (which would call the
     /// slot dead and let another local take its slot) and to the coalescing remap (which would leave
     /// the recorded number pointing at whatever now lives there). In the code they are ordinary
     /// reads, handled by both.
-    ResolveOrderHint {
+    ResolveHint {
         span: Span,
-        /// The registers holding the enclosing generic body's hidden type-argument slots, in slot
-        /// order — the values that index [`Module::type_arg_hints`].
+        /// Which side table's hint at `span` this resolves, and under which door's answer.
+        door: noeta_ext_abi::HintDoor,
+        /// The registers holding the enclosing body's render slots, in slot order — the values that
+        /// index [`Module::type_arg_hints`].
         slots: Box<[Reg]>,
     },
     /// `dst = concat(display(part) for part in parts)` — build an interpolated string in one pass
@@ -2557,6 +2590,9 @@ fn op_repr(
         Op::TypeSlotName { dst, src, .. } => {
             format!("TypeSlotName r{dst} <- type_args[r{src}].name")
         }
+        Op::SelfRenderSlot { dst, src, index } => {
+            format!("SelfRenderSlot r{dst} <- slot of r{src}.typearg[{index}]")
+        }
         Op::TypeOf { dst, src } => format!("TypeOf      r{dst} <- type_of(r{src})"),
         Op::FieldsOf {
             dst,
@@ -2784,9 +2820,9 @@ fn op_repr(
         Op::CondBranch { reg, target, .. } => format!("CondBranch  r{reg} unless -> {target}"),
         Op::Echo { reg } => format!("Echo        r{reg}"),
         Op::Stringify { dst, src, .. } => format!("Stringify   r{dst} <- display(r{src})"),
-        Op::ResolveOrderHint { slots, .. } => {
+        Op::ResolveHint { slots, door, .. } => {
             let regs: Vec<String> = slots.iter().map(|r| format!("r{r}")).collect();
-            format!("ResolveOrderHint [{}]", regs.join(", "))
+            format!("ResolveHint  {door:?} [{}]", regs.join(", "))
         }
         Op::JsonStringify { dst, src, .. } => format!("JsonStringi r{dst} <- json(r{src})"),
         Op::BuildString { dst, parts } => {

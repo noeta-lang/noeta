@@ -1,0 +1,130 @@
+// **A render hint never reaches an identity order.** A set's canonical buffer and a map key's `Ord`
+// place elements for binary search and lookup: they are written at one site and probed at another,
+// so they have to stay a pure function of the erased i64 word. The orders a program *observes* —
+// `sorted()`, `keys()`, a rendered set or map, a `for` over one — are the hinted ones, and they are
+// computed on the way out.
+//
+// The two sites here are as far apart as the channel allows: a `u64` set and map are built at top
+// level, where the static type says `u64` outright, and probed inside a generic type's instance
+// method, where the door resolves its hint off the receiver's tag — and back the other way, built
+// inside the method and probed outside it. If a hint ever reached the placement order, one side
+// would probe under a different order than the other stored under and miss a member that is there:
+// `u64::MAX` sorts last unsigned and first signed, so the two orders disagree on exactly these
+// values.
+//
+// The observed orders are checked in the same breath, because "membership survives" would also be
+// true of a build that simply dropped the hint everywhere — and the last block reads the same set
+// back through a `dyn` instantiation, where the observed order goes back to the erased word's while
+// membership does not move. That pair is the whole invariant in two lines.
+// expect: stdout "found max: true"
+// expect: stdout "found one: true"
+// expect: stdout "found absent: false"
+// expect: stdout "keyed max: yes"
+// expect: stdout "keyed one: also"
+// expect: stdout "observed inside: {1, 18446744073709551615}"
+// expect: stdout "observed outside: {1, 18446744073709551615}"
+// expect: stdout "built inside, found outside: true"
+// expect: stdout "built inside, keyed outside: deep"
+// expect: stdout "sorted inside: [1, 18446744073709551615]"
+// expect: stdout "through dyn, found: true"
+// expect: stdout "through dyn, keyed: yes"
+// expect: stdout "through dyn, observed: {-1, 1}"
+// expect: stdout "sets equal across the boundary: true"
+// expect: stdout "maps equal across the boundary: true"
+// expect: exit 0
+
+class Probe<T> {
+    pub tag: T
+
+    pub fn new(tag: T): Probe<T> {
+        return Probe { tag: tag };
+    }
+
+    // Probe INSIDE: the hint here resolves through the receiver, and must not touch the lookup.
+    pub fn has(xs: Set<T>, x: T): bool {
+        _ = self.tag;
+        return xs.contains(x);
+    }
+
+    pub fn keyed(m: Map<T, string>, k: T): string {
+        _ = self.tag;
+        return m.get_or(k, "missing");
+    }
+
+    // The observed order, from inside — this one IS hinted.
+    pub fn shown(xs: Set<T>): string {
+        _ = self.tag;
+        return "${xs}";
+    }
+
+    pub fn sorted_(xs: List<T>): string {
+        _ = self.tag;
+        return "${xs.sorted()}";
+    }
+
+    // Build INSIDE, for the other direction.
+    pub fn build(a: T, b: T): Set<T> {
+        _ = self.tag;
+        return [a, b].to_set();
+    }
+
+    pub fn build_map(k: T): Map<T, string> {
+        _ = self.tag;
+        return {k: "deep"};
+    }
+
+    pub fn pair_map(k: T, j: T): Map<T, string> {
+        _ = self.tag;
+        return {k: "a", j: "b"};
+    }
+}
+
+big: u64 = 18446744073709551615u64;
+one: u64 = 1u64;
+absent: u64 = 7u64;
+
+p = Probe.new(big);
+
+// Stored outside, probed inside.
+outside: Set<u64> = [big, one].to_set();
+echo "found max: ${p.has(outside, big)}";
+echo "found one: ${p.has(outside, one)}";
+echo "found absent: ${p.has(outside, absent)}";
+
+by_key: Map<u64, string> = {big: "yes", one: "also"};
+pairs: Map<dyn, string> = {big: "a", one: "b"};
+echo "keyed max: ${p.keyed(by_key, big)}";
+echo "keyed one: ${p.keyed(by_key, one)}";
+
+// The observed order is the unsigned one on both sides of the boundary.
+echo "observed inside: ${p.shown(outside)}";
+echo "observed outside: ${outside}";
+
+// Built inside, probed outside.
+inside = p.build(big, one);
+echo "built inside, found outside: ${inside.contains(big)}";
+deep = p.build_map(big);
+echo "built inside, keyed outside: ${deep.get_or(big, "missing")}";
+
+echo "sorted inside: ${p.sorted_([big, one])}";
+
+// The sharpest asymmetry the channel allows: the set and the map are built where the static type
+// says `u64` outright, and probed through an instantiation that resolves to no hint at all. If the
+// hint had reached the placement order, the buffer would be sorted unsigned on one side of this and
+// searched signed on the other — `u64::MAX` sorts last unsigned and first signed, so the probe would
+// miss a member that is right there.
+d: dyn = big;
+anyset: Set<dyn> = outside;
+anymap: Map<dyn, string> = by_key;
+erased: Probe<dyn> = Probe.new(d);
+echo "through dyn, found: ${erased.has(anyset, d)}";
+echo "through dyn, keyed: ${erased.keyed(anymap, d)}";
+echo "through dyn, observed: ${anyset}";
+
+// And the same asymmetry read through **equality**, which is where a reordered canonical buffer
+// shows even without a probe: a set and a map built inside the erased instantiation compare equal
+// to the ones built outside it, because both were placed by the erased word and only the rendering
+// ever differed.
+o: dyn = one;
+echo "sets equal across the boundary: ${erased.build(d, o) == anyset}";
+echo "maps equal across the boundary: ${erased.pair_map(d, o) == pairs}";

@@ -671,7 +671,8 @@ fn op_facts(op: &Op) -> OpFacts {
         }
         Op::FromBytes { dst, src, .. }
         | Op::TypeArgName { dst, src, .. }
-        | Op::TypeSlotName { dst, src, .. } => {
+        | Op::TypeSlotName { dst, src, .. }
+        | Op::SelfRenderSlot { dst, src, .. } => {
             f.def = Some(*dst);
             f.uses.push(*src);
         }
@@ -824,7 +825,7 @@ fn op_facts(op: &Op) -> OpFacts {
             f.uses.extend(hint.slots.iter().copied());
         }
         // The ordering door's twin: it reads the render slots and defines nothing.
-        Op::ResolveOrderHint { slots, .. } => f.uses.extend(slots.iter().copied()),
+        Op::ResolveHint { slots, .. } => f.uses.extend(slots.iter().copied()),
         Op::BuildString { dst, parts } => {
             f.def = Some(*dst);
             for part in parts.iter() {
@@ -1220,7 +1221,8 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
         }
         Op::FromBytes { dst, src, .. }
         | Op::TypeArgName { dst, src, .. }
-        | Op::TypeSlotName { dst, src, .. } => {
+        | Op::TypeSlotName { dst, src, .. }
+        | Op::SelfRenderSlot { dst, src, .. } => {
             m(dst);
             m(src);
         }
@@ -1383,7 +1385,7 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
                 m(r);
             }
         }
-        Op::ResolveOrderHint { slots, .. } => {
+        Op::ResolveHint { slots, .. } => {
             for r in slots.iter_mut() {
                 m(r);
             }

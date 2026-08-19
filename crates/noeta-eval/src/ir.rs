@@ -1346,7 +1346,7 @@ impl Interpreter {
                 operand,
                 hint,
                 slots,
-                ..
+                span,
             } => {
                 // Render a display-site value whose static type carries an unsigned 64-bit integer.
                 // The VM runs the identical hinted walk on its own value model, so the differential
@@ -1354,10 +1354,15 @@ impl Interpreter {
                 let resolved =
                     self.resolve_render_hint(hint, slots, noeta_stdlib::HintDoor::Display, frame)?;
                 let value = self.eval_ir_atom(operand, frame)?;
-                Ok(Value::Str(match resolved.as_deref() {
-                    Some(hint) => value.display_hinted(hint),
-                    None => value.display(),
-                }))
+                match resolved.as_deref() {
+                    Some(hint) => Ok(Value::Str(value.display_hinted(hint))),
+                    // No hint after the splice: this door is an ORDINARY display door and must
+                    // behave as one, `Display` dispatch included. That is the whole meaning of the
+                    // outermost `Display` exemption — a concrete-typed door at such a type records
+                    // no hint at all and keeps its dispatch, so a door that names a parameter
+                    // instantiated at that type has to arrive at the same place.
+                    None => Ok(Value::Str(self.display_value(&value, *span)?)),
+                }
             }
             noeta_ir::Rvalue::JsonRender {
                 operand,
@@ -1648,6 +1653,7 @@ impl Interpreter {
                 order,
                 order_slots,
                 push,
+                push_slots,
                 name_span: _,
             } => {
                 // A method whose result reveals an order the program can see, on a `u64`-carrying
@@ -1658,8 +1664,10 @@ impl Interpreter {
                 self.note_order_hint(*span, resolved);
                 // A native call that BINDS a value it serializes on a later tick: register its push
                 // hint by span, so the ctx built for the dispatch reads it the way the VM reads its
-                // own span-keyed table.
-                self.note_binding_hint(*span, push);
+                // own span-keyed table — spliced against this frame's render slots first, because
+                // the tick that serializes will have none.
+                let pushed = self.resolve_push_hint(push, push_slots, frame)?;
+                self.note_binding_hint(*span, &pushed);
                 // In-place collection self-update (Phase 5.1c): a marked `m = m.set(k,v)` moves the
                 // receiver out of its (reassigned) binding so a uniquely-owned map can be mutated in
                 // place; mirrors the VM's reuse-aware dispatch. A non-map receiver (e.g. a user method
@@ -1922,6 +1930,18 @@ impl Interpreter {
                         noeta_ast::reflect::missing_type_arg_message(type_name, param),
                     )),
                 }
+            }
+            // The render-slot twin of the arm above: the same tag and the same argument position,
+            // answering with the type-argument table index a door's hint resolves through. It
+            // degrades where that one aborts — an argument the tag does not carry, or one no
+            // construction site interned, is `NO_TYPE_ARG`, so the value renders as its erased
+            // word. The VM reads its own table's reprs through the same helper.
+            noeta_ir::Rvalue::SelfRenderSlot { operand, index, .. } => {
+                let v = self.eval_ir_atom(operand, frame)?;
+                Ok(Value::Int(crate::eval_type_repr(&v).render_slot_arg(
+                    *index as usize,
+                    self.type_arg_reprs.iter().map(Option::as_ref),
+                )))
             }
             // `type_name::<T>()` where `T` is a FORWARDED parameter of the enclosing generic fn:
             // the instantiation's qualified name, read off the hidden slot's table entry. The same
@@ -2987,6 +3007,27 @@ impl Interpreter {
         }
         let resolved =
             self.resolve_render_hint(hint, slots, noeta_stdlib::HintDoor::Order, frame)?;
+        Ok(resolved.map(|h| Rc::new(h.into_owned())))
+    }
+
+    /// [`Self::resolve_order_hint`] for a **kept** hint — same splice, the JSON door's answer, and
+    /// resolved at the call that binds the value rather than at the walk that reads it. The tick
+    /// that serializes has no frame; this call does, and it is the one that knows the
+    /// instantiation.
+    fn resolve_push_hint(
+        &mut self,
+        hint: &Option<Rc<noeta_ast::RenderHint>>,
+        slots: &[noeta_ir::Atom],
+        frame: &mut Frame,
+    ) -> Eval<Option<Rc<noeta_ast::RenderHint>>> {
+        let Some(hint) = hint else {
+            return Ok(None);
+        };
+        if slots.is_empty() {
+            return Ok(Some(Rc::clone(hint)));
+        }
+        let resolved =
+            self.resolve_render_hint(hint, slots, noeta_stdlib::HintDoor::Json, frame)?;
         Ok(resolved.map(|h| Rc::new(h.into_owned())))
     }
 

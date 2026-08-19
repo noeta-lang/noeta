@@ -37,13 +37,30 @@
 //! ones, so its slot numbers count only the fields that survive.
 //!
 //! One position is not a property of the site: a door inside a **generic** body reads a static type
-//! that names a type parameter (`fn wrap<T>(v: T)`), and a type parameter names no width. Erased
-//! generics give one compiled body to every instantiation, so the answer lives at the call — and
-//! travels the way every other per-instantiation fact travels, on the body's hidden type-argument
-//! slot. The checker records [`RenderHint::Param`] at that position, the program's type-argument
-//! table carries each instantiation's own [`TypeArgHints`], and [`RenderHint::resolve`] splices the
-//! two at the door. A parameter the call site could not name resolves to nothing, so the value
-//! renders as the erased word — the same answer a `dyn` gets, and for the same reason.
+//! that names a type parameter (`fn wrap<T>(v: T)`, or `self.v` inside `class Holder<T>`), and a
+//! type parameter names no width. Erased generics give one compiled body to every instantiation, so
+//! the answer lives outside the body. The checker records [`RenderHint::Param`] at that position,
+//! the program's type-argument table carries each instantiation's own [`TypeArgHints`], and
+//! [`RenderHint::resolve`] splices the two at the door — one hint, one splice, whichever way the
+//! instantiation arrived. Two channels deliver it, because a body has one or the other:
+//!
+//! * a generic `fn`'s own parameters ride the **hidden type-argument slot** that already carries a
+//!   forwarded decode recipe, filled by the call;
+//! * a generic *type*'s parameters ride the **receiver's reflected tag**, which its construction
+//!   site stamped. A method takes no hidden slot — its four name-keyed entry points (a `dyn`
+//!   receiver, either handle form, `invoke`) bind positionally, so a leading slot would be read as a
+//!   value argument — and it does not need one, because it has a receiver.
+//!
+//! A parameter neither channel can name resolves to nothing, so the value renders as the erased word
+//! — the same answer a `dyn` gets, and for the same reason. That is also what a resolution to
+//! *nothing* means at a display door's outermost position: the instantiation is a type that prints
+//! through its own `to_string`, and the door has to behave exactly as an unhinted one does, `Display`
+//! dispatch included, or a type would render one way at a concrete door and another through a
+//! parameter instantiated to it.
+//!
+//! A hint the checker records for a value a native method **keeps** ([`PushHint`]) is spliced at the
+//! binding call rather than at the walk that reads it: the later tick has no frame to read a slot
+//! from, and the call that bound the value is the last moment an instantiation is knowable.
 //!
 //! **A hint never reaches an identity order.** A set's canonical buffer and a
 //! [`crate::MapKey`]'s [`Ord`] place elements for binary search, `BTreeMap` lookup, hashing
@@ -85,12 +102,15 @@ pub enum RenderHint {
     /// signedness lives at the *call*, which is where `T` becomes `u64` or `i64`. Erased generics
     /// give one compiled body to every instantiation, so the answer cannot be baked — it arrives on
     /// the same hidden slot that already delivers `json.try_parse::<T>`'s decode recipe, and
-    /// [`RenderHint::resolve`] splices it in at the door.
+    /// [`RenderHint::resolve`] splices it in at the door. Inside `class Holder<T>`'s methods the
+    /// same hint reads the same table through the other channel, the receiver's reflected tag; see
+    /// the module docs.
     ///
     /// A `Param` is a **leaf under an ordinary structure**: `fn srt<T>(xs: List<T>)` records
     /// `Elements(Param(0))`, so the shape the walk takes is still static and only the width at the
-    /// bottom is dynamic. `n` is the slot ordinal of the enclosing body, in the layout
-    /// `noeta_check::Sites::forwarding_fns` counts.
+    /// bottom is dynamic. `n` is a slot ordinal of the enclosing body, in one list: the forwarding
+    /// slots `noeta_check::Sites::forwarding_fns` counts, then the receiver-read ones
+    /// `noeta_check::Sites::self_render_fns` counts.
     ///
     /// Nothing consumes an unresolved `Param`: every walk here treats it as no hint (the value
     /// renders as the erased word), which is what makes an instantiation the call site could not
@@ -152,7 +172,11 @@ pub const NO_TYPE_ARG: i64 = -1;
 /// its outermost position (a declared type prints through its own `to_string`), and the JSON door is
 /// the only one that reads the marshalled numbering, so a fourth door added later has to say which
 /// of those it is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Serializable and hashable because a door whose hint is spliced by a **preceding op** carries the
+/// answer forward keyed by `(site, door)`: one site can hold a hint for more than one door, and the
+/// two resolutions are different hints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum HintDoor {
     /// `echo`, an interpolation hole, a display-based `~` operand.
     Display,
@@ -430,6 +454,11 @@ pub fn map_key_display(key: &crate::MapKey, hint: Option<&RenderHint>) -> String
 /// A [`RenderHint`] a native type **kept** — obtained from
 /// [`NativeCtx::push_hint`](crate::ctx::NativeCtx::push_hint) at the site that bound a value, and
 /// stored beside that value to serialize it on a later tick.
+///
+/// It is **already resolved**: a hint built inside a generic body names a type parameter, and the
+/// splice happens at the binding call, whose frame is the last thing that knows the instantiation.
+/// So what is stored here describes a width, never a parameter, and the later tick has nothing left
+/// to look up.
 ///
 /// The rule a hint lives under is that it may be consumed by a walk producing **output a program
 /// reads**, and never by one **placing a value for later retrieval** — a hint that reached

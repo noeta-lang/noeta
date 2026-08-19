@@ -771,6 +771,11 @@ fn all_ops() -> Vec<Op> {
         names: Box::new(("app.Repo".to_string(), "T".to_string())),
         span: span(33),
     });
+    ops.push(Op::SelfRenderSlot {
+        dst: 164,
+        src: 165,
+        index: 166,
+    });
     ops.push(Op::TypeSlotName {
         dst: 167,
         src: 168,
@@ -975,10 +980,12 @@ fn all_ops() -> Vec<Op> {
             },
         )),
     });
-    // The ordering door's resolution op: its registers ride in the code (a side table is invisible
-    // to the liveness walk and the coalescing remap), so its encoding belongs in the digest.
-    ops.push(Op::ResolveOrderHint {
+    // A side-table door's resolution op: its registers ride in the code (a side table is invisible
+    // to the liveness walk and the coalescing remap), so its encoding belongs in the digest — and
+    // so does the door it names, which decides which table the resolved hint lands in.
+    ops.push(Op::ResolveHint {
         span: span(65),
+        door: noeta_ext_abi::HintDoor::Json,
         slots: Box::new([252, 253]),
     });
     ops.push(Op::BuildString {
@@ -992,7 +999,7 @@ fn all_ops() -> Vec<Op> {
 
 /// How many `Op` variants [`all_ops`] builds. Stated so a *duplicate* (two literals of one variant,
 /// one variant missing) is caught — the compiler cannot see that, since neither literal is wrong.
-const OP_VARIANTS: usize = 106;
+const OP_VARIANTS: usize = 107;
 
 fn canonical_chunk() -> Chunk {
     Chunk {

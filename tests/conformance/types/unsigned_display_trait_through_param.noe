@@ -1,0 +1,75 @@
+// A type that renders itself, reached through a **type parameter**. `Display` owns the outermost
+// position of a display door: `"${m}"` on a value whose type declares `impl Display` prints what
+// `to_string` returns, and hinting that position would replace the form the type chose. At a
+// concretely-typed door the checker settles it by recording no hint at all, which leaves an ordinary
+// display door with its dispatch intact.
+//
+// A door inside a generic body cannot be settled that way — the instantiation may or may not be a
+// `Display` type, and one compiled body serves both — so the hint is recorded and the exemption is
+// applied when it is spliced. Splicing to *nothing* therefore has to mean exactly what an unhinted
+// door means, dispatch included; anything else prints one form at a concrete type and another at a
+// parameter instantiated to it.
+//
+// Both channels an instantiation travels are covered: a generic `fn`'s hidden slot, and a generic
+// type's receiver tag. The controls are the two neighbours — the same type without `Display`, which
+// IS hinted and renders its `u64` field unsigned, and a bare `u64`, which is hinted at the outermost
+// position because a scalar declares no `Display`.
+// expect: stdout "money(18446744073709551615)"
+// expect: stdout "money(18446744073709551615)"
+// expect: stdout "money(18446744073709551615)"
+// expect: stdout "Plain {n: 18446744073709551615}"
+// expect: stdout "Plain {n: 18446744073709551615}"
+// expect: stdout "Plain {n: 18446744073709551615}"
+// expect: stdout "18446744073709551615"
+// expect: stdout "18446744073709551615"
+// expect: exit 0
+
+class Money {
+    pub cents: u64
+
+    pub fn new(c: u64): Money {
+        return Money { cents: c };
+    }
+
+    impl Display {
+        pub fn to_string(): string {
+            return "money(${self.cents})";
+        }
+    }
+}
+
+struct Plain {
+    n: u64
+}
+
+class Wrap<T> {
+    pub v: T
+
+    pub fn new(v: T): Wrap<T> {
+        return Wrap { v: v };
+    }
+
+    pub fn show(): string {
+        return "${self.v}";
+    }
+}
+
+fn show<T>(v: T): string {
+    return "${v}";
+}
+
+m = Money.new(18446744073709551615u64);
+echo "${m}";
+echo show(m);
+echo Wrap.new(m).show();
+
+// The control: the same shape without `Display`, which the hint does reach.
+p = Plain { n: 18446744073709551615u64 };
+echo "${p}";
+echo show(p);
+echo Wrap.new(p).show();
+
+// And a scalar, whose outermost position is hinted because it declares no `Display`.
+big: u64 = 18446744073709551615u64;
+echo show(big);
+echo Wrap.new(big).show();

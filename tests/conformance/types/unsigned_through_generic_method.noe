@@ -1,0 +1,141 @@
+// A `u64` reached through a **generic type's own parameter**, from inside one of its instance
+// methods. The body is compiled once for every instantiation, and a method can carry no hidden
+// type-argument parameter — its name-keyed entry points (a `dyn` receiver, either handle form,
+// `invoke`) bind positionally, so a leading slot would be read as a value argument. What it does
+// carry is the receiver, whose reflected tag its construction site stamped with the instantiation;
+// the door reads type argument `i` off that tag and resolves its hint through it.
+//
+// All three doors, because all three read the same static type — display, JSON, and the orders a
+// program observes — and the structure around the parameter stays the site's, so `List<T>` under a
+// `Holder<u64>` is a list of `u64`. A door inside a **closure** in a method is covered too: the slot
+// read is an ordinary operand, so the closure captures `self` for it like any other free variable.
+//
+// The controls are what make it a claim rather than a coincidence: the same class at `i64` still
+// prints the negative word, at `u32` prints the value that width always held, and a class parameter
+// SHADOWED by a method's own `<U>` reads the method's parameter (which has no receiver channel) and
+// so falls back to the erased word.
+// expect: stdout "18446744073709551615"
+// expect: stdout "18446744073709551615"
+// expect: stdout "18446744073709551615"
+// expect: stdout "Holder {v: 18446744073709551615}"
+// expect: stdout "{"v":18446744073709551615}"
+// expect: stdout "18446744073709551615"
+// expect: stdout "[1, 18446744073709551615]"
+// expect: stdout "[18446744073709551615,1]"
+// expect: stdout "18446744073709551615;1;"
+// expect: stdout "{1, 18446744073709551615}"
+// expect: stdout "{"a":18446744073709551615}"
+// expect: stdout "Holder {v: 18446744073709551615}"
+// expect: stdout "-1"
+// expect: stdout "4294967295"
+// expect: stdout "-1"
+// expect: exit 0
+use std.json
+
+class Holder<T> {
+    pub v: T
+
+    pub fn new(v: T): Holder<T> {
+        return Holder { v: v };
+    }
+
+    // Display and JSON, on a bare class parameter.
+    pub fn show(): string {
+        return "${self.v}";
+    }
+
+    pub fn wrap(): string {
+        return json.stringify(self.v);
+    }
+
+    // The parameter under a structure the site owns: the shape is static, only the width is not,
+    // and the JSON walk numbers the wrapper's slots exactly as the display walk renders them.
+    pub fn boxed(): string {
+        return "${Holder { v: self.v }}";
+    }
+
+    pub fn boxed_json(): string {
+        return json.stringify(Holder { v: self.v });
+    }
+
+    // A door inside a **closure** in a method resolves through the receiver the closure captures
+    // — the slot read is an ordinary operand, so the free-variable walk brings `self` in with it.
+    pub fn viaclosure(): string {
+        f = fn() => "${self.v}";
+        return f();
+    }
+
+    // A method's OWN type parameter shadows the class's: it names a different parameter, and one
+    // with no receiver channel, so the door reads the erased word.
+    pub fn shadowed<U>(other: U): string {
+        _ = self.v;
+        return "${other}";
+    }
+}
+
+class Bag<T> {
+    xs: List<T>
+    by_name: Map<string, T>
+
+    pub fn new(xs: List<T>, by_name: Map<string, T>): Bag<T> {
+        return Bag { xs: xs, by_name: by_name };
+    }
+
+    // The three ordering doors a program observes.
+    pub fn sorted(): string {
+        return "${self.xs.sorted()}";
+    }
+
+    pub fn wrap(): string {
+        return json.stringify(self.xs);
+    }
+
+    pub fn walk(): string {
+        mut out = "";
+        for x in self.xs {
+            out = out ~ "${x};";
+        }
+        return out;
+    }
+
+    pub fn as_set(): string {
+        return "${self.xs.to_set()}";
+    }
+
+    pub fn keyed(): string {
+        return json.stringify(self.by_name);
+    }
+
+}
+
+big: u64 = 18446744073709551615u64;
+one: u64 = 1u64;
+
+h = Holder.new(big);
+echo h.show();
+echo h.wrap();
+echo "${h.v}";
+echo h.boxed();
+echo h.boxed_json();
+echo h.viaclosure();
+
+b = Bag.new([big, one], {"a": big});
+echo b.sorted();
+echo b.wrap();
+echo b.walk();
+echo b.as_set();
+echo b.keyed();
+
+// A generic type instantiated at another generic type: the inner instantiation is interned too, so
+// the inner methods read their own receiver's tag.
+nested = Holder.new(Holder.new(big));
+echo nested.show();
+
+// Controls: the same bodies at a signed and at a narrower unsigned width.
+neg: i64 = -1;
+echo Holder.new(neg).show();
+small: u32 = 4294967295u32;
+echo Holder.new(small).show();
+
+// The shadowing control: `shadowed`'s own `<U>` is not the class's, and has no receiver channel.
+echo h.shadowed(big);

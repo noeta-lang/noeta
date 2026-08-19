@@ -483,6 +483,14 @@ pub enum Rvalue {
         /// that knew its width is gone. Both backends hand it to the dispatch as
         /// `NativeCtx::push_hint`, so the frames they emit are byte-identical.
         push: Option<std::rc::Rc<noeta_ast::RenderHint>>,
+        /// The enclosing body's render slots — what a [`noeta_ast::RenderHint::Param`] under `push`
+        /// resolves through, and empty wherever the hint mentions no parameter. See
+        /// [`Rvalue::Render::slots`].
+        ///
+        /// A kept hint is resolved **here**, at the call that binds the value, and stored already
+        /// spliced: the later tick that serializes has no frame left to read a slot from, but the
+        /// binding site does, and it is the site that knows the instantiation.
+        push_slots: Vec<Atom>,
         span: Span,
     },
     /// A **trait** method call with a baked-in route: `receiver.name(args)` where the checker
@@ -760,6 +768,27 @@ pub enum Rvalue {
         /// The enclosing type and parameter names, for the abort message only.
         type_name: String,
         param: String,
+        span: Span,
+    },
+    /// A **render slot read off the receiver** — the index into [`Program::type_args`] naming type
+    /// argument `index` of `operand`'s reflected type tag, or
+    /// [`noeta_ext_abi::NO_TYPE_ARG`](noeta_ext_abi::NO_TYPE_ARG) where nothing names it.
+    ///
+    /// The receiver-side twin of a hidden `$ty` slot, and it exists because a generic *type*'s
+    /// instance method has no hidden slot to read: its four name-keyed entry points (a `dyn`
+    /// receiver, either handle form, `invoke`) bind positionally, so a leading type-argument
+    /// parameter would be read as a value argument. What the method does have is a receiver, whose
+    /// tag its construction site stamped with the very instantiation. Lowering emits one of these
+    /// per receiver-read slot immediately before a door in such a body, and the resulting atom
+    /// takes its place in the door's `slots` list — so the hint, the splice and the table are the
+    /// same ones every other generic door uses.
+    ///
+    /// `operand` is always `self` as lowering emits it. Unlike [`Rvalue::TypeArgName`] this never
+    /// aborts: an argument the tag does not carry, or one no construction site interned, reads as
+    /// no hint and the value renders as its erased word — the answer a `dyn` already gets.
+    SelfRenderSlot {
+        operand: Atom,
+        index: u32,
         span: Span,
     },
     /// `type_name::<T>()` where `T` is a **forwarded type parameter of the enclosing top-level

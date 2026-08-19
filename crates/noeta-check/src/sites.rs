@@ -401,6 +401,24 @@ pub struct Sites {
     /// type-argument parameters (`$ty0`, `$ty1`, …) and records the count on `Func::hidden`, which
     /// is what tells every binder how many slots to lay down before the value arguments start.
     pub forwarding_fns: HashMap<String, u32>,
+    /// **Instance methods of a generic type** → how many of their render slots are read off the
+    /// receiver, keyed exactly as [`Sites::forwarding_fns`] is (`Type.method`).
+    ///
+    /// A body's render slots are laid out as the forwarding slots, then the `fn`'s own render
+    /// slots, then these — and the first two of those are the hidden `$ty` parameters
+    /// [`Sites::forwarding_fns`] counts, so that count *is* the base ordinal of this section. A
+    /// method carries no hidden parameter of its own for its class's arguments (its four
+    /// name-keyed entry points bind positionally and would read a value argument as a table
+    /// index); it carries a receiver instead, and slot `base + i` is filled at the door by reading
+    /// type argument `i` off that receiver's reflected tag
+    /// ([`noeta_ast::reflect::TypeRepr::render_slot_arg`]).
+    ///
+    /// Populated for exactly the methods [`Coloring::self_type_params`] is populated for — an
+    /// instance method of a generic type, and nothing else — so the count and the parameters it
+    /// counts come from one decision.
+    ///
+    /// [`Coloring::self_type_params`]: crate::Coloring::self_type_params
+    pub self_render_fns: HashMap<String, u32>,
     /// **Forwarding-fn-as-value** sites (poly-deferrals D2c): `Expr::Ident` spans where a
     /// forwarding generic fn is used as a VALUE with its instantiation pinned by the expected
     /// type → `(fn name, adopted arity)`. Lowering wraps the reference in a synthesized closure
@@ -532,6 +550,7 @@ pub(crate) const SITE_POLICIES: &[(&str, SiteClass, &str)] = &[
     ("forwarded_slot_sites", SiteClass::Ordinal, "a hidden SLOT ordinal ($tyN) of the enclosing forwarding fn, read at run time"),
     ("self_type_arg_sites", SiteClass::Ordinal, "the type parameter's position in its own type's declaration order, read off the receiver's reflected tag"),
     ("forwarding_fns", SiteClass::Ordinal, "the callable's hidden-slot COUNT (Func::hidden), keyed by traced name"),
+    ("self_render_fns", SiteClass::Ordinal, "the method's receiver-read render-slot COUNT, keyed by traced name; the ordinals sit after forwarding_fns' slots"),
     ("fn_value_sites", SiteClass::Ordinal, "the fn's VALUE-parameter arity; its hidden atoms live in hidden_arg_sites under the same span"),
     ("destructor_relevance", SiteClass::Content, "spans, (span, param name) pairs and type names; nothing numbered"),
 ];
@@ -603,6 +622,7 @@ impl Sites {
             forwarded_slot_sites: _,
             self_type_arg_sites: _,
             forwarding_fns: _,
+            self_render_fns: _,
             fn_value_sites: _,
             destructor_relevance: _,
         } = self;
@@ -836,6 +856,8 @@ pub(crate) struct SiteMaps {
     pub(crate) self_type_arg_sites: HashMap<Span, (String, u32)>,
     /// Forwarding fns' hidden-parameter counts — see [`Sites::forwarding_fns`].
     pub(crate) forwarding_fns: HashMap<String, u32>,
+    /// Receiver-read render-slot counts — see [`Sites::self_render_fns`].
+    pub(crate) self_render_fns: HashMap<String, u32>,
     /// Forwarding-fn-as-value wrap sites — see [`Sites::fn_value_sites`].
     pub(crate) fn_value_sites: HashMap<Span, (String, u32)>,
 }
@@ -892,6 +914,7 @@ impl SiteMaps {
             forwarded_slot_sites: self.forwarded_slot_sites,
             self_type_arg_sites: self.self_type_arg_sites,
             forwarding_fns: self.forwarding_fns,
+            self_render_fns: self.self_render_fns,
             fn_value_sites: self.fn_value_sites,
             destructor_relevance,
         }

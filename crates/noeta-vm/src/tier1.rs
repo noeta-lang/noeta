@@ -605,11 +605,34 @@ extern "C" fn jit_run_leaf_op(
             span: _,
             hint,
         } => {
-            // A hinted render is the display walk, not a passthrough — leave it to tier 0.
-            if hint.is_some() {
-                return bail;
-            }
             let v = regs[base + *src as usize];
+            // A hinted render is the display walk rather than a passthrough — and it is the SAME
+            // walk in either tier: the interpreter's hinted arm does not dispatch `Display` either
+            // (the checker exempts a `Display` type's outermost position from the hint, so a hinted
+            // site is one the type did not claim), so nothing here can push a frame and the walk
+            // runs natively.
+            //
+            // Leaving it to tier 0 would keep a display door inside a generic body interpreted at
+            // every instantiation, including the ones with no `u64` in them at all. The resolution
+            // itself is cheap where it matters: a bare parameter resolves to a payload-free
+            // `RenderHint::Unsigned`, so the hot scalar door allocates nothing to decide.
+            if let Some(hint) = hint
+                && let Some(hint) = crate::methods::resolve_hint_operand(
+                    hint,
+                    &module.type_arg_hints,
+                    regs,
+                    base,
+                    noeta_stdlib::HintDoor::Display,
+                )
+                .as_deref()
+            {
+                let text = v.display_hinted(hint);
+                set_reg(regs, base, *dst, Value::from_string(text.into()));
+                return noeta_jit_abi::OUTCOME_CONTINUE;
+            }
+            // A hint that spliced to nothing leaves an ordinary display door, which falls through
+            // to the object/enum bail below — the interpreter would dispatch `Display` there, and
+            // that runs bytecode.
             // A user object/enum may light up `Display` — its `to_string` runs bytecode, which
             // pushes a frame. Bail on **every** object/enum (a conservative superset of the
             // interpreter's `method_proto` test: one without `to_string` merely re-runs in tier 0).

@@ -1795,7 +1795,11 @@ impl Checker {
         // session re-runs it to absorb a freshly-checked table into the one its running values
         // already index — and a session that keyed the table differently from this would silently
         // resolve a hidden slot to the wrong type.
-        let repr = crate::type_to_repr_top(sigma, &self.symbols.type_kinds);
+        // At TAG fidelity (`type_to_repr_tag`), because that is what this projection is read as: a
+        // construction tag to stamp, and — for a door inside a generic type's instance method — a
+        // tag ARGUMENT to match the receiver's against. The two fidelities differ only for a bare
+        // fixed-width scalar, which no construction tag is.
+        let repr = crate::type_to_repr_tag(sigma, &self.symbols.type_kinds);
         // The fourth projection: the instantiation's own render hints, which a door inside the
         // callee's body resolves a `RenderHint::Param` through. Part of the dedup key like the repr,
         // and for the same reason — two instantiations that render differently must not share an
@@ -1809,6 +1813,19 @@ impl Checker {
             repr,
             hints,
         );
+        // A generic instantiation's own **arguments** are interned beside it, for the receiver-read
+        // render slots (`Checker::note_self_render_args`): an instance of `Holder<u64>` presents
+        // `u64` on its tag, and a door in `Holder`'s methods resolves its hint by finding that
+        // argument in this very table. The entry recorded here describes `Holder<u64>` as a whole
+        // and says nothing about `u64` on its own, so the arguments would otherwise be nameable at
+        // a construction site and unnameable one call further in. Recursion terminates on the
+        // finite type tree, and prunes immediately at an argument that renders nothing — which is
+        // every argument of every program that never mentions a `u64`.
+        if let Type::Named(_, args) = sigma {
+            for arg in args.clone() {
+                self.intern_render_hints(&arg, span);
+            }
+        }
         noeta_ext_abi::HiddenArg::Table(idx)
     }
 

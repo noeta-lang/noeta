@@ -1546,11 +1546,11 @@ impl<'m> Vm<'m> {
                         self.emit_stdout_line(&text);
                         pc += 1;
                     }
-                    // An ordering door inside a generic body: splice its hint against this frame's
-                    // render slots and leave the answer where the ordering op that follows reads it
-                    // by span. Emitted only there, so the ordinary ordering site never meets one.
-                    Op::ResolveOrderHint { span, slots } => {
-                        self.note_order_slots(span, slots, regs, fbase);
+                    // A side-table door inside a generic body: splice its hint against this
+                    // frame's render slots and leave the answer where the door that follows reads it
+                    // by span. Emitted only there, so an ordinary site never meets one.
+                    Op::ResolveHint { span, door, slots } => {
+                        self.note_hint_slots(span, *door, slots, regs, fbase);
                         pc += 1;
                         continue;
                     }
@@ -1583,17 +1583,23 @@ impl<'m> Vm<'m> {
                         // holds an unsigned 64-bit integer, whose erased word `display` would read
                         // as signed. The rendered string is what the consuming `Echo`/`BuildString`
                         // then displays (a string displays as itself).
-                        if let Some(hint) = hint {
-                            let resolved = self.resolve_hint_operand(
-                                hint,
-                                regs,
-                                fbase,
-                                noeta_stdlib::HintDoor::Display,
-                            );
-                            let text = match resolved.as_deref() {
-                                Some(hint) => v.display_hinted(hint),
-                                None => v.display(),
-                            };
+                        // …and where the splice leaves NO hint, the door is an ordinary display
+                        // door and falls through to the code below, `Display` dispatch included.
+                        // That is what the outermost `Display` exemption means: a concrete-typed
+                        // door at such a type records no hint at all and keeps its dispatch, so a
+                        // door naming a parameter instantiated at that type must arrive at the same
+                        // place — and an instantiation nothing could name must too.
+                        if let Some(hint) = hint
+                            && let Some(hint) = self
+                                .resolve_hint_operand(
+                                    hint,
+                                    regs,
+                                    fbase,
+                                    noeta_stdlib::HintDoor::Display,
+                                )
+                                .as_deref()
+                        {
+                            let text = v.display_hinted(hint);
                             set_reg(regs, fbase, *dst, Value::from_string(text.into()));
                             pc += 1;
                             continue;
@@ -1805,6 +1811,7 @@ impl<'m> Vm<'m> {
                     | Op::TypeOf { .. }
                     | Op::TypeArgName { .. }
                     | Op::TypeSlotName { .. }
+                    | Op::SelfRenderSlot { .. }
                     | Op::FieldsOf { .. }
                     | Op::TraitsOf { .. }
                     | Op::Retag { .. }
@@ -3652,6 +3659,32 @@ impl<'m> Vm<'m> {
                     };
                     let result = Value::string(&name);
                     set_reg(regs, fbase, *dst, result);
+                    pc += 1;
+                }
+                Op::SelfRenderSlot { dst, src, index } => {
+                    // The receiver's own tag is the instantiation an instance method of a generic
+                    // type cannot carry on a hidden slot — the same read `Op::TypeArgName` above
+                    // performs, answering with the table index a hint resolves through instead of
+                    // a name, and degrading to `NO_TYPE_ARG` where that one aborts.
+                    //
+                    // The table's reflection projection is interned through the repr pool here, so
+                    // it is rebuilt as a borrow rather than cloned; the tree-walker holds the same
+                    // reprs inline and hands the same sequence to the same helper.
+                    let value = regs[fbase + *src as usize];
+                    let reprs = || {
+                        module
+                            .type_arg_reprs
+                            .iter()
+                            .map(|r| r.and_then(|k| module.type_reprs.get(k as usize)))
+                    };
+                    // `vm_type_repr` clones the tag it finds; borrowing it when it is there keeps a
+                    // door inside a loop from allocating one per iteration, and the fallback is
+                    // that very function, so the two arms cannot answer differently.
+                    let slot = match value.reflect() {
+                        Some(tag) => tag.render_slot_arg(*index as usize, reprs()),
+                        None => vm_type_repr(&value).render_slot_arg(*index as usize, reprs()),
+                    };
+                    set_reg(regs, fbase, *dst, Value::int(slot));
                     pc += 1;
                 }
                 Op::TypeSlotName { dst, src, span } => {

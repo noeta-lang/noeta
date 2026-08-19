@@ -2285,6 +2285,42 @@ impl TypeRepr {
         self.type_args().get(index).map(|t| t.head_name())
     }
 
+    /// The **render slot value** for type argument `index` of this tag: the index into the
+    /// program's type-argument table whose interned instantiation is that very argument, or
+    /// [`noeta_ext_abi::NO_TYPE_ARG`] where nothing names it.
+    ///
+    /// The receiver-side twin of a generic `fn`'s hidden render slot. A generic *type*'s method is
+    /// compiled once for every instantiation and its four name-keyed entry points bind
+    /// positionally, so it can carry no hidden slot; what it does carry is a receiver, and the
+    /// receiver's reflected tag is the instantiation. This turns that tag back into the ordinary
+    /// slot value a [`noeta_ext_abi::RenderHint::Param`] resolves through, so the door itself, the
+    /// splice and the table are the *same* ones a generic `fn`'s door uses.
+    ///
+    /// `reprs` is the table's reflection projection in table order — entry `i` describes entry `i`
+    /// — and the first entry whose repr equals the argument wins. Both backends hold that
+    /// projection in their own shape (the VM interns reprs in a pool, the tree-walker holds them
+    /// inline), so they hand this the same sequence and read the same answer.
+    ///
+    /// Never an abort and never a diagnostic, unlike [`TypeRepr::type_arg_name`]: a tag that
+    /// carries no such argument, or an argument no site interned, yields
+    /// [`noeta_ext_abi::NO_TYPE_ARG`], which every walk reads as "no hint" — the value renders as
+    /// the erased word, which is the answer a `dyn` already gets. Signedness only refines an answer
+    /// that already exists, so an unnameable instantiation degrades rather than refusing.
+    pub fn render_slot_arg<'a>(
+        &self,
+        index: usize,
+        reprs: impl IntoIterator<Item = Option<&'a TypeRepr>>,
+    ) -> i64 {
+        let Some(arg) = self.type_args().get(index).copied() else {
+            return noeta_ext_abi::NO_TYPE_ARG;
+        };
+        reprs
+            .into_iter()
+            .position(|r| r == Some(arg))
+            .map(|i| i as i64)
+            .unwrap_or(noeta_ext_abi::NO_TYPE_ARG)
+    }
+
     /// This type's **type arguments** (runtime type-argument reflection, R3), in order: a container's
     /// element/key/value types, a generic nominal type's arguments. Empty for a scalar or a
     /// non-generic nominal. Used to compare a narrow target's arguments against a value's reflected tag.

@@ -566,8 +566,10 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
             // or closure that constructs through it CAPTURES the enclosing `$ty<i>` local, and the
             // slot must stay live across the call it re-tags after.
             reflect_slot,
-            // …and so are the render slots an ordering hint resolves through, for the same reason.
+            // …and so are the render slots an ordering hint resolves through, and the ones a KEPT
+            // hint is spliced against at this very call, for the same reason.
             order_slots,
+            push_slots,
             ..
         } => {
             f(receiver);
@@ -575,6 +577,7 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
             type_args.iter().for_each(&mut *f);
             reflect_slot.iter().for_each(&mut *f);
             order_slots.iter().for_each(&mut *f);
+            push_slots.iter().for_each(&mut *f);
         }
         Rvalue::TraitMethod { receiver, args, .. } => {
             f(receiver);
@@ -646,7 +649,9 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
                 f(name);
             }
         }
-        Rvalue::Try { operand, .. } | Rvalue::TypeArgName { operand, .. } => f(operand),
+        Rvalue::Try { operand, .. }
+        | Rvalue::TypeArgName { operand, .. }
+        | Rvalue::SelfRenderSlot { operand, .. } => f(operand),
         Rvalue::TypeSlotName { slot, .. } => f(slot),
         // One arm for the whole reflection surface: values, target strings, type names and
         // `invoke`'s three parts are all just operand atoms once lowering has run.

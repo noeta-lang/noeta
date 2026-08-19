@@ -1955,10 +1955,16 @@ impl Interpreter {
     /// Register the push hint lowering baked at `span` (`Rvalue::Method::push`), so the native
     /// dispatch reached from there reads it exactly as the VM reads its own load-time table.
     pub(crate) fn note_binding_hint(&mut self, span: Span, hint: &Option<Rc<RenderHint>>) {
-        if let Some(hint) = hint {
-            self.binding_hints
-                .entry(span)
-                .or_insert_with(|| hint.clone());
+        // Overwritten per call rather than kept from the first, for the same reason the VM's
+        // resolved map is: inside a generic body the answer belongs to the frame that reached this
+        // call, and the previous instantiation's is not this one's.
+        match hint {
+            Some(hint) => {
+                self.binding_hints.insert(span, hint.clone());
+            }
+            None => {
+                self.binding_hints.remove(&span);
+            }
         }
     }
 
