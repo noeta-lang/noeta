@@ -530,6 +530,10 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
             f(operand);
             slots.iter().for_each(&mut *f);
         }
+        // A render slot composed out of the enclosing body's own leaf slots, for an instantiation
+        // this body built: the leaf reads are operands like the door's above, and for the same
+        // reasons.
+        Rvalue::ComposeTypeArg { slots, .. } => slots.iter().for_each(&mut *f),
         Rvalue::Binary { lhs, rhs, .. } => {
             f(lhs);
             f(rhs);

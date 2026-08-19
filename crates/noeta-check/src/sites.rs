@@ -368,6 +368,17 @@ pub struct Sites {
     /// absorbing a fresh table (see [`intern_type_arg_entry`]) remaps this map and nothing else —
     /// which is what [`Sites::remap_type_arg_indices`] spells out, exhaustively.
     pub hidden_arg_sites: HashMap<Span, Vec<noeta_ext_abi::HiddenArg>>,
+    /// The **render-slot compositions** a
+    /// [`HiddenArg::Compose`](noeta_ext_abi::HiddenArg::Compose) in [`Sites::hidden_arg_sites`]
+    /// indexes: how a call inside a generic body fills a render slot naming an instantiation the
+    /// body BUILT out of its own type parameters (`wrap([v])` inside `fn built<T>(v: T)`).
+    ///
+    /// Carries [`Sites::type_arg_table`] indices on both sides of each case — the leaf slots' values
+    /// and the entry they compose to — so a session absorbing a fresh table rewrites them exactly as
+    /// it rewrites `hidden_arg_sites`. Consumed entirely by lowering, which bakes each composition's
+    /// cases into the op that performs the lookup, so the *index* into this list never leaves the
+    /// compile.
+    pub type_arg_compositions: Vec<noeta_ext_abi::HintComposition>,
     /// Spans whose turbofish is a **FORWARDED type parameter** of the enclosing top-level generic
     /// `fn` → the hidden slot index holding the instantiation's entry in [`Sites::type_arg_table`].
     ///
@@ -547,6 +558,7 @@ pub(crate) const SITE_POLICIES: &[(&str, SiteClass, &str)] = &[
     ("type_arg_reprs", SiteClass::TheTable, "the table's reflection projection, indexed in lockstep; replaced with it"),
     ("type_arg_hints", SiteClass::TheTable, "the table's render-hint projection, indexed in lockstep; replaced with it"),
     ("hidden_arg_sites", SiteClass::TableIndexed, "HiddenArg::Table(TypeArgIndex) — the one carrier; the Forward(j) beside it is a slot ordinal and passes through"),
+    ("type_arg_compositions", SiteClass::TableIndexed, "HintCase leaves and composed are both type-arg TABLE indices (or NO_TYPE_ARG); the HintComposition::leaves beside them are slot ordinals"),
     ("forwarded_slot_sites", SiteClass::Ordinal, "a hidden SLOT ordinal ($tyN) of the enclosing forwarding fn, read at run time"),
     ("self_type_arg_sites", SiteClass::Ordinal, "the type parameter's position in its own type's declaration order, read off the receiver's reflected tag"),
     ("forwarding_fns", SiteClass::Ordinal, "the callable's hidden-slot COUNT (Func::hidden), keyed by traced name"),
@@ -575,6 +587,7 @@ impl Sites {
             // Carries a type-arg TABLE index. Bound, because it is rewritten below — and the gate
             // reads exactly that: a binding here must be a `TableIndexed` row of `SITE_POLICIES`.
             hidden_arg_sites,
+            type_arg_compositions,
             // The tables themselves. Not remapped but REPLACED, by the caller, with the merged
             // superset — see the `TheTable` rows.
             type_arg_table: _,
@@ -634,6 +647,24 @@ impl Sites {
                 {
                     *slot = noeta_ext_abi::HiddenArg::Table(to);
                 }
+            }
+        }
+        // A composition's cases are table indices on BOTH sides — the leaf slots' values it matches
+        // on and the entry it composes to — and a value the fresh check never interned stays
+        // `NO_TYPE_ARG`, which indexes nothing in either numbering.
+        let rewrite = |v: &mut i64| {
+            if *v >= 0
+                && let Some(&to) = remap.get(*v as usize)
+            {
+                *v = i64::from(to.get());
+            }
+        };
+        for composition in type_arg_compositions.iter_mut() {
+            for case in composition.cases.iter_mut() {
+                for leaf in case.leaves.iter_mut() {
+                    rewrite(leaf);
+                }
+                rewrite(&mut case.composed);
             }
         }
     }
@@ -850,6 +881,8 @@ pub(crate) struct SiteMaps {
     pub(crate) type_arg_hints: Vec<noeta_ext_abi::TypeArgHints>,
     /// Forwarding-call hidden-argument slots — see [`Sites::hidden_arg_sites`].
     pub(crate) hidden_arg_sites: HashMap<Span, Vec<noeta_ext_abi::HiddenArg>>,
+    /// Render-slot compositions — see [`Sites::type_arg_compositions`].
+    pub(crate) type_arg_compositions: Vec<noeta_ext_abi::HintComposition>,
     /// Forwarded-type-parameter turbofish sites — see [`Sites::forwarded_slot_sites`].
     pub(crate) forwarded_slot_sites: HashMap<Span, u32>,
     /// Enclosing-type type-argument reflection sites — see [`Sites::self_type_arg_sites`].
@@ -911,6 +944,7 @@ impl SiteMaps {
             type_arg_reprs: self.type_arg_reprs,
             type_arg_hints: self.type_arg_hints,
             hidden_arg_sites: self.hidden_arg_sites,
+            type_arg_compositions: self.type_arg_compositions,
             forwarded_slot_sites: self.forwarded_slot_sites,
             self_type_arg_sites: self.self_type_arg_sites,
             forwarding_fns: self.forwarding_fns,

@@ -668,6 +668,10 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
             f(operand);
             slots.iter().for_each(&mut *f);
         }
+        // A render slot composed out of the enclosing body's own leaf slots, for an instantiation
+        // this body built: the leaf reads are operands like the door's above, and for the same
+        // reasons.
+        Rvalue::ComposeTypeArg { slots, .. } => slots.iter().for_each(&mut *f),
         // The forwarded `type_name::<T>()` reads the enclosing fn's hidden type-argument slot.
         Rvalue::TypeSlotName { slot, .. } => f(slot),
         // **One arm for the whole reflection surface.** A value operand, a runtime target string, a

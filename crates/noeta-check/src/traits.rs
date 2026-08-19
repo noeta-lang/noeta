@@ -2438,8 +2438,9 @@ impl Checker {
                 }
                 hidden.push(self.intern_type_arg(&sigma, slot, name, span));
             }
-            for template in &render {
-                let arg = self.render_hidden_arg(template, &subst, span);
+            for (i, template) in render.iter().enumerate() {
+                let arg =
+                    self.render_hidden_arg(template, &subst, span, &key, (fwd.len() + i) as u32);
                 hidden.push(arg);
             }
             if !hidden.is_empty() {

@@ -498,6 +498,7 @@ macro_rules! for_each_jump_pc_arms {
             | Op::TypeArgName { .. }
             | Op::TypeSlotName { .. }
             | Op::SelfRenderSlot { .. }
+            | Op::ComposeTypeArg { .. }
             | Op::FieldsOf { .. }
             | Op::TraitsOf { .. }
             | Op::FromBytes { .. }
@@ -1243,6 +1244,27 @@ pub enum Op {
         dst: Reg,
         src: Reg,
         index: u32,
+    },
+    /// A render slot **composed** out of this frame's own slots: `dst` = the [`Module::type_args`]
+    /// index the composition's `cases` give for the values in `slots`, or
+    /// [`noeta_ext_abi::NO_TYPE_ARG`] where no case names that combination.
+    ///
+    /// Emitted at a call inside a generic body that instantiates its callee at a type the body
+    /// **built** out of its own parameters — `wrap([v])` inside `fn built<T>(v: T)` instantiates
+    /// `wrap` at `List<T>`. Nothing in `built`'s signature names `List<T>`, so no slot of `built`
+    /// carries it whole and no caller could have interned a type the body invents; what `built`
+    /// holds is the leaf, on a slot its callers filled, and the shape around the leaf is static.
+    /// The checker precomputed one case per combination of leaf values, so this is a scan of a
+    /// handful of rows.
+    ///
+    /// `slots` are the leaf reads, positionally matching each case's own leaves: hidden `$ty<i>`
+    /// registers, or the result of an [`Op::SelfRenderSlot`] inside a generic type's method. Never
+    /// aborts, for the same reason that one does not — an unnameable instantiation renders the
+    /// erased word.
+    ComposeTypeArg {
+        dst: Reg,
+        slots: Box<[Reg]>,
+        cases: Box<[noeta_ext_abi::HintCase]>,
     },
     /// `type_name::<T>()` where `T` is a **forwarded type parameter of the enclosing top-level
     /// generic fn** (poly-values F2b): `dst = ` the qualified name of the [`Module::type_args`]
@@ -2589,6 +2611,14 @@ fn op_repr(
         } => format!("TypeArgName r{dst} <- r{src}.typearg[{index}]"),
         Op::TypeSlotName { dst, src, .. } => {
             format!("TypeSlotName r{dst} <- type_args[r{src}].name")
+        }
+        Op::ComposeTypeArg { dst, slots, cases } => {
+            let regs: Vec<String> = slots.iter().map(|r| format!("r{r}")).collect();
+            format!(
+                "ComposeTypeArg r{dst} <- [{}] over {} cases",
+                regs.join(", "),
+                cases.len()
+            )
         }
         Op::SelfRenderSlot { dst, src, index } => {
             format!("SelfRenderSlot r{dst} <- slot of r{src}.typearg[{index}]")

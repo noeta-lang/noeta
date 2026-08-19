@@ -838,6 +838,16 @@ pub enum HiddenArg {
     /// generic and forwards its `T` onward), i.e. the local `$ty<i>`. A per-body SLOT ordinal, not
     /// a table index — resolved through the slot's runtime value, so a session never renumbers it.
     Forward(u32),
+    /// A **composed instantiation**: run composition `id` against the enclosing body's own slots and
+    /// pass what it yields. The instantiation is one this body BUILT out of its type parameters
+    /// (`wrap([v])` inside `fn built<T>(v: T)` instantiates `wrap` at `List<T>`), so no slot of this
+    /// body carries it whole and no caller could have interned it — but the leaf is on a slot, and
+    /// the shape around the leaf is static. See [`crate::HintComposition`].
+    ///
+    /// Only a **render slot** is ever supplied this way, for the same reason [`Self::Erased`] is: the
+    /// composition yields the hints projection and nothing else, and it degrades to
+    /// [`crate::NO_TYPE_ARG`] for a combination it cannot name.
+    Compose(u32),
     /// **No instantiation reaches this slot**, and none is needed: the slot's only consumers are the
     /// render hints, which answer "no hint" for it and let the value render as the erased word.
     ///

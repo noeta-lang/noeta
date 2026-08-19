@@ -254,7 +254,17 @@
 /// render slot. The binding call can, and it is the site that knows the instantiation — so a
 /// LiveView binding of a generic `u64` pushes the number rather than the negative word it is erased
 /// to. The derives are what let a door carry its identity in the code that performs the splice.
-pub const ABI_VERSION: u32 = 23;
+/// **24** — [`registry::HiddenArg`] gained `Compose`, and [`render_hint::HintComposition`] and
+/// [`render_hint::compose_type_arg`] exist to serve it. A source break only for code that *matches*
+/// `HiddenArg` exhaustively, which is the checker→lowering seam and nothing an extension writes.
+///
+/// The rule it implements: a generic body that BUILDS a composite out of its own type parameters —
+/// `wrap([v])` inside `fn built<T>(v: T)` — instantiates the callee at a type nothing in its
+/// signature names, so no slot of its own carries it and no caller could have interned it. The
+/// composite's leaf is on a slot, though, and the shape around the leaf is static, so the slot value
+/// the callee needs is arithmetic on the one this body holds. A `u64` therefore keeps its width
+/// across that frame instead of arriving as its signed reinterpretation.
+pub const ABI_VERSION: u32 = 24;
 
 pub mod args;
 pub mod channel;
@@ -307,9 +317,9 @@ pub use registry::{
     TypedTypeDispatch, VariantRecipe, VariantTag, VariantValue,
 };
 pub use render_hint::{
-    HintDoor, NO_TYPE_ARG, PushHint, RenderHint, TypeArgHints, json_stringify,
-    json_stringify_pushed, map_key_display, map_key_order, resolve_hint, unsigned_digits,
-    unsigned_order,
+    HintCase, HintComposition, HintDoor, NO_TYPE_ARG, PushHint, RenderHint, TypeArgHints,
+    compose_type_arg, json_stringify, json_stringify_pushed, map_key_display, map_key_order,
+    resolve_hint, unsigned_digits, unsigned_order,
 };
 pub use stream::{
     Frame, FrameDecoder, FrameStream, Framing, SseCloseIo, SseSendIo, SseSink, StreamRecvIo,

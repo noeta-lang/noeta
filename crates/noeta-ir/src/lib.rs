@@ -791,6 +791,26 @@ pub enum Rvalue {
         index: u32,
         span: Span,
     },
+    /// The table index a render slot gets when the instantiation is one the enclosing body
+    /// **built** out of its own type parameters — `wrap([v])` inside `fn built<T>(v: T)`, which
+    /// instantiates `wrap` at `List<T>`.
+    ///
+    /// Nothing in `built`'s signature names `List<T>`, so no slot of `built` carries it whole and
+    /// no caller could have interned a type the body invents. What the body holds is the
+    /// composite's leaves, each on a slot its callers filled, and the shape around them is static —
+    /// so the answer is a lookup on those slots' values, precomputed by the checker into `cases`
+    /// (see [`noeta_ext_abi::HintComposition`]).
+    ///
+    /// `slots` are the leaf reads, positionally matching each case's own leaves: hidden `$ty<i>`
+    /// locals, or [`Rvalue::SelfRenderSlot`] reads of the receiver's tag inside a generic type's
+    /// method. Operands like any other, so a closure that composes captures them and register
+    /// allocation leaves them alone. A combination no case names is
+    /// [`noeta_ext_abi::NO_TYPE_ARG`] — the erased word, never a refusal.
+    ComposeTypeArg {
+        slots: Vec<Atom>,
+        cases: std::rc::Rc<[noeta_ext_abi::HintCase]>,
+        span: Span,
+    },
     /// `type_name::<T>()` where `T` is a **forwarded type parameter of the enclosing top-level
     /// generic fn** (poly-values F2b): the instantiation's qualified name, read out of
     /// [`Program::type_args`] at the index the hidden slot holds.
