@@ -389,8 +389,9 @@ pub enum ListMethod {
     Contains,
     /// `join(sep)` → a string of the elements' display forms separated by `sep`.
     Join,
-    /// `sorted()` → a new list sorted by the primitive ordering (homogeneous numbers or
-    /// strings); a non-orderable or mixed-kind element is an error.
+    /// `sorted()` → a new list sorted by the runtime's one total order. The checker requires the
+    /// element type to declare that ordering (`Comparable`); a mixed-kind element that slips
+    /// through a gradual position is the runtime error.
     Sorted,
     /// `slice(start, end)` → the sublist `[start, end)`; out-of-range bounds are an error.
     Slice,

@@ -1,0 +1,37 @@
+// **A set asks for identity, not for an ordering — so `to_set` takes an element type that
+// `.sorted()` refuses.**
+//
+// The boundary that keeps the two apart. `sorted`, `min` and `max` hand the *program* an order, so
+// they require the element type to have declared one (`@derive(Comparable)` / `impl Comparable`, or
+// a `Comparable` bound). A set sorts too, but the sorted buffer is how it gets membership and
+// de-duplication — a placement order, not an answer. It is the same line the unsigned render hint
+// draws: an observed order is hinted, an identity order never is.
+//
+// So a plain value kind is a perfectly good set element, and a generic body may build a set out of
+// a `T` it knows nothing about. Ask that `T` for its order and the declaration is what is missing.
+// expect: stdout "2"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "1"
+// expect: stdout "true"
+// expect: stdout "[Ranked {rank: 1}, Ranked {rank: 2}]"
+// expect: exit 0
+
+struct Plain { b: int }
+
+@derive(Comparable)
+struct Ranked { rank: int }
+
+// No ordering declared anywhere on `Plain`, and the set still canonicalizes and de-duplicates.
+s = [Plain { b: 2 }, Plain { b: 1 }, Plain { b: 2 }].to_set();
+echo s.len();
+echo s.contains(Plain { b: 1 });
+echo s.contains(Plain { b: 9 });
+
+// A generic body builds one from a parameter with no bound at all.
+fn distinct<T>(a: T, b: T): int { return [a, b].to_set().len(); }
+echo distinct(Plain { b: 3 }, Plain { b: 3 });
+echo distinct("x", "y") == 2;
+
+// Declaring the ordering is what opens the sorting door.
+echo [Ranked { rank: 2 }, Ranked { rank: 1 }].sorted();

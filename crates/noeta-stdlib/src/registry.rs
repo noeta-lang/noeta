@@ -322,12 +322,18 @@ const FRAME_DOCS: &[(&str, &str)] = &[
 ];
 
 /// The `id` unit's extern type: `Uuid` (X2 — pure, byte-ordered, key-capable).
+///
+/// It declares `Comparable`, because it is: a UUID compares by its 16 bytes at every door the
+/// runtime has — `compare`, a set's canonical order, a map key's placement — and a version-7 UUID's
+/// whole purpose is that byte order being creation order. Declaring it is what lets `<`, `sorted`,
+/// `min`/`max` and a `T: Comparable` bound reach the ordering the type already has.
 const ID_TYPES: &[ExtType] = &[ExtType {
     name: crate::id::TYPE_NAME,
     namespace: "std.id",
     methods: UUID_METHODS,
     dispatch: uuid_method_dispatch,
     key_capable: true,
+    traits: &["Comparable"],
     docs: UUID_METHOD_DOCS,
     ..ExtType::DEFAULTS
 }];

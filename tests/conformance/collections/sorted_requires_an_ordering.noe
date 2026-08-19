@@ -1,0 +1,20 @@
+// **`.sorted()` needs the same ordering `<` needs, and says so at the same place.**
+//
+// A value kind orders field-wise, but *field order is a layout decision* — swapping two fields of a
+// struct would silently re-sort every list of it. `@derive(Comparable)` is the declaration that
+// turns the layout into a promise, so asking for the order is asking for the promise: the same
+// requirement `a < b` carries, and the same one `.min()`/`.max()` carry, from one table.
+//
+// An unbounded type parameter is E0025 (one word fixes it); a concrete element type with no
+// ordering is E0007 naming the element.
+// expect: error E0025 at 16:46
+// expect: error E0007 at 19:6
+// expect: exit 1
+
+struct Plain { b: int }
+
+fn ordered<T>(xs: List<T>): List<T> { return xs.sorted(); }
+
+parts = [Plain { b: 2 }, Plain { b: 1 }];
+echo parts.sorted();
+echo ordered([2, 1]);

@@ -45,10 +45,12 @@ or trigger-gated**:
    local proof are done), and editions S3/S4 (awaits a deliberate post-1.0 breaking change).
 2. **Design-gated**: Tauri packaging, capability-enforcement (static effect analysis — deferred by
    the owner), synced store R&D, TaskScope patterns.
-3. **Trigger-gated tails**: the perf cluster (held outright since 2026-08-14 — seven rows, none
-   carrying a measurement that says which is worth doing), the arc scope-cut menus, the OTEL surface
+3. **Trigger-gated tails**: the perf cluster — each row now carries a 2026-08-16 measurement
+   saying it **appears nowhere in the profiles** of the benchmarks Noeta is behind on, so the
+   trigger is a workload that exercises it (packed lists, objects, a hot extern method, a checker
+   profile) rather than a decision to start — plus the arc scope-cut menus, the OTEL surface
    residuals, the attested watch ledger (design note filed), the wasm-serve component packaging, and
-   the small remaining tooling rows — each fires on its stated trigger, none on its own.
+   the small remaining tooling rows. Each fires on its stated trigger, none on its own.
 
 **That claim is now true, and it was audited rather than assumed.** The `backlog-burndown` arc (2026-08-12 → 2026-08-15) took the un-gated remainder: the reflection-boundary visibility holes, the two oracles that reported passes over things they never examined, four doors that shipped on one side only, two identity guards, cancellation reaching work blocked outside the interpreter, and the `noeta fmt` safety gate — which now compares programs structurally instead of comparing a hand-written rendering of them. Its six slices and their war stories are in git history; the arc directory is deleted, as the discipline below requires.
 

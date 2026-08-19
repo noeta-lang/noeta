@@ -1830,9 +1830,14 @@ impl Checker {
                 // string") on a program the checker called clean — the editor shows nothing and
                 // Run fails, which is exactly how the playground's `client.get(url)` (a `Result`,
                 // missing its `?`) reached production looking correct.
+                // The element-requirement refusal is asked FIRST and without the closedness guard,
+                // because it is a property of the *method* rather than of whether the receiver
+                // admits new members: an `Iterator<T>` is not closed to new methods (a native type
+                // may grow some), yet `it.min()` on an unordered `T` is still the method existing
+                // and this element being unable to supply what it orders by.
                 if matches!(ret, Type::Unknown)
-                    && (closed_to_new_methods(&recv) || user_type_is_closed(self, &recv))
                     && !self.report_unmet_element_requirement(&recv, name, span)
+                    && (closed_to_new_methods(&recv) || user_type_is_closed(self, &recv))
                 {
                     self.error(
                         DiagnosticCode::TypeMismatch,

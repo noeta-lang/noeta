@@ -10,6 +10,8 @@
 // expect: stdout "true"
 // expect: stdout "[Size.Large, Size.Small]"
 // expect: stdout "some(Size.Large)"
+// expect: stdout "some(Rev {n: 3})"
+// expect: stdout "some(Rev {n: 1})"
 // expect: exit 0
 struct Rev { n: int }
 impl Comparable for Rev {
@@ -41,3 +43,8 @@ enum Size {
 }
 echo [Size.Small, Size.Large].sorted();
 echo [Size.Small, Size.Large].min();
+
+// An ITERATOR's ordering terminals are the same door over the same elements, so they answer with
+// the type's own order too — `xs.iter().min()` and `xs.min()` cannot differ.
+echo xs.iter().min();
+echo xs.iter().max();

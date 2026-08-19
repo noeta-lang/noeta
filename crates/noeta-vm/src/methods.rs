@@ -917,6 +917,41 @@ impl<'m> Vm<'m> {
                     Value::int(int_total)
                 }
             }
+            M::Min | M::Max => {
+                self.stdlib_arity(name, args, 0, span)?;
+                // Both shapes end in the eager list reduction, which is what makes `it.min()` and
+                // `it.collect().min()` the same value by construction rather than by a
+                // re-derivation that could drift: a directly list-backed iterator hands over its
+                // remaining range (so a packed buffer keeps its buffer-direct fold), and an adapter
+                // chain drains into a temporary list first. Mirrors the tree-walker.
+                if let Some((list, from)) = recv.iter_drain_list() {
+                    return self.call_list_reduction(list, name, from, span);
+                }
+                let mut out = Vec::new();
+                let result = {
+                    let mut apply =
+                        |func: Value, arg: Value| self.call_value(func, vec![arg], span);
+                    loop {
+                        match recv.iter_next_apply(&mut apply) {
+                            Ok(Some(e)) => out.push(e),
+                            Ok(None) => break Ok(()),
+                            Err(err) => break Err(err),
+                        }
+                    }
+                };
+                if let Err(err) = result {
+                    for v in out {
+                        release(v); // free the elements drained before the closure aborted
+                    }
+                    return Err(self.iter_abort(err, span));
+                }
+                // The temporary owns the drained elements; the reduction borrows it and retains
+                // whichever element it hands back, so releasing it here frees exactly the rest.
+                let drained = Value::list(out);
+                let folded = self.call_list_reduction(drained, name, 0, span);
+                drained.release();
+                folded?
+            }
         })
     }
 

@@ -216,15 +216,15 @@ fn arithmetic(op: BinaryOp, left: &Value, right: &Value) -> Result<Value, OpErro
 }
 
 fn compare(op: BinaryOp, left: &Value, right: &Value) -> Result<Value, OpError> {
-    let ordering = match (left, right) {
-        (Value::Str(a), Value::Str(b)) => Some(a.cmp(b)),
-        // `false < true` — the checker declares bool `Comparable` (`builtin_satisfies`), so the
-        // runtime orders it (conventionally, like Rust/Python). Mirrors the VM's `compare`.
-        (Value::Bool(a), Value::Bool(b)) => Some(a.cmp(b)),
-        _ => match (as_f64(left), as_f64(right)) {
-            (Some(a), Some(b)) => a.partial_cmp(&b),
-            _ => return Err(type_mismatch(op, left, right)),
-        },
+    // **One comparator** — `crate::compare_primitive`, the same function a set's canonical order,
+    // `.compare()`, `sorted` and the extremum reductions read. Mirrors the VM's `compare`; see it
+    // for what a second hand-rolled ladder here used to leave out.
+    let ordering = match crate::compare_primitive(left, right) {
+        Some(ordering) => Some(ordering),
+        // Two numbers with no ordering between them is NaN, where every comparison is false rather
+        // than an error. Any other missing ordering is a pairing that has none — the type error.
+        None if as_f64(left).is_some() && as_f64(right).is_some() => None,
+        None => return Err(type_mismatch(op, left, right)),
     };
     // A `None` ordering only happens for NaN, where every comparison is false.
     let result = ordering.is_some_and(|ordering| match op {

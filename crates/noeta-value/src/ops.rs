@@ -450,8 +450,8 @@ pub fn set_order(left: Value, right: Value) -> Option<Ordering> {
 /// down), an enum pair orders by variant index then payload (how an `?int`/enum field inside a
 /// derived struct orders), anything else goes through [`compare_primitive`]. Returns `None` for
 /// an incomparable pairing (the caller turns that into a runtime type error). Also the comparator
-/// `.sorted()` uses — the checker gates `.sorted()` on `Comparable` elements, and derived
-/// `Comparable` structs/enums order exactly like this.
+/// `.sorted()` uses — the checker gates `.sorted()`, `.min()` and `.max()` on `Comparable`
+/// elements, and derived `Comparable` structs/enums order exactly like this.
 pub fn compare_values(a: Value, b: Value) -> Option<Ordering> {
     compare_values_hinted(a, b, None)
 }
@@ -478,16 +478,18 @@ pub fn compare_values_hinted(a: Value, b: Value, hint: Option<&RenderHint>) -> O
 }
 
 fn compare(op: BinaryOp, left: Value, right: Value) -> Result<Value, OpError> {
-    let ordering = match (left.as_string(), right.as_string()) {
-        (Some(a), Some(b)) => Some(a.cmp(&b)),
-        // `false < true` — bool is checker-declared `Comparable`; mirrors `compare_primitive`.
-        _ => match (left.as_bool(), right.as_bool()) {
-            (Some(a), Some(b)) => Some(a.cmp(&b)),
-            _ => match (as_f64(left), as_f64(right)) {
-                (Some(a), Some(b)) => a.partial_cmp(&b),
-                _ => return Err(type_mismatch(op, left, right)),
-            },
-        },
+    // **One comparator.** `< <= > >=` read [`compare_primitive`] — the same function a set's
+    // canonical order, `.compare()`, `sorted` and the extremum reductions read — rather than
+    // keeping a second, poorer opinion beside it. A hand-rolled string/bool/number ladder here
+    // silently left out every kind `compare_primitive` had since grown: an extern type that orders
+    // by contract (a `Uuid` sorts and canonicalizes, so it must compare) and a key-capable
+    // `@packed` struct. It also read two `int`s as `f64`, which loses the low bits past 2^53.
+    let ordering = match compare_primitive(left, right) {
+        Some(ordering) => Some(ordering),
+        // Two numbers with no ordering between them is NaN, where every comparison is false rather
+        // than an error. Any other missing ordering is a pairing that has none — the type error.
+        None if as_f64(left).is_some() && as_f64(right).is_some() => None,
+        None => return Err(type_mismatch(op, left, right)),
     };
     // A `None` ordering only happens for NaN, where every comparison is false.
     let result = ordering.is_some_and(|ordering| match op {

@@ -4532,6 +4532,35 @@ impl Interpreter {
                     Value::Int(int_total)
                 })
             }
+            M::Min | M::Max => {
+                self.expect_std_arity(name, args, 0, span)?;
+                // Both shapes end in the eager list reduction, which is what makes
+                // `it.min()` and `it.collect().min()` the same value by construction rather than by
+                // a re-derivation that could drift: a directly list-backed iterator hands over its
+                // remaining range (so a packed buffer keeps its buffer-direct fold), and an adapter
+                // chain drains into a temporary list first. Mirrors the VM.
+                let direct = match &*state.borrow() {
+                    IterState::List {
+                        list: Value::List(repr),
+                        cursor,
+                    } => Some((repr.clone(), *cursor)),
+                    _ => None,
+                };
+                if let Some((repr, cursor)) = direct {
+                    if let IterState::List { cursor, .. } = &mut *state.borrow_mut() {
+                        *cursor = repr.len(); // drain
+                    }
+                    return self.call_list_reduction_from(&repr, name, cursor, span);
+                }
+                let mut out = Vec::new();
+                while let Some(v) = self.iter_advance(state, span)? {
+                    out.push(v);
+                }
+                let Value::List(repr) = Value::list(out) else {
+                    unreachable!("`Value::list` builds a list value");
+                };
+                self.call_list_reduction_from(&repr, name, 0, span)
+            }
         }
     }
 
@@ -6221,7 +6250,9 @@ impl Interpreter {
             // Derived structural comparison on an enum: `@derive(Comparable)` without a
             // hand-written `compare` orders by variant declaration index, then payload fields —
             // the enum twin of the object arm above (and of the VM's `enum_structural_compare`).
-            if op.comparable_method().is_some() && def.derives_comparable {
+            if op.comparable_method().is_some()
+                && (def.derives_comparable || noeta_ast::prelude_enum_orders(&e.enum_name))
+            {
                 return match enum_structural_compare(e, &right) {
                     Some(ordering) => Ok(Value::Bool(
                         op.ordering_satisfies(noeta_ast::ordering_variant(ordering)),
@@ -6237,6 +6268,29 @@ impl Interpreter {
                     )),
                 };
             }
+        }
+        // The prelude enums that order without a declaration (`?T`, `Result<T, E>`). Reached here
+        // rather than in the arm above because they have no `EnumType` binding to look up: a
+        // program constructs them through `some`/`none`/`Ok`/`Err`, never by naming the enum. Last,
+        // so a program that declares its own enum under one of those names keeps its own behavior.
+        if let Value::Enum(e) = &left
+            && op.comparable_method().is_some()
+            && noeta_ast::prelude_enum_orders(&e.enum_name)
+        {
+            return match enum_structural_compare(e, &right) {
+                Some(ordering) => Ok(Value::Bool(
+                    op.ordering_satisfies(noeta_ast::ordering_variant(ordering)),
+                )),
+                None => Err(self.runtime_error(
+                    DiagnosticCode::TypeMismatch,
+                    span,
+                    format!(
+                        "cannot compare {} and {}",
+                        left.type_name(),
+                        right.type_name()
+                    ),
+                )),
+            };
         }
         // Element-wise array-programming ops (array-ops arc): `+`/`-`/`*` on two lists of the same
         // numeric element type fold element-wise into a new list (`~` is concat, so the operator is

@@ -9,6 +9,11 @@
 // expect: stdout "true"
 // expect: stdout "true"
 // expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
 // expect: exit 0
 use std.{id, time}
 
@@ -29,3 +34,13 @@ ordered = [c, a, b].sorted();
 echo ordered[0] == a;
 echo ordered[1] == b;
 echo ordered[2] == c;
+
+// `Uuid` DECLARES `Comparable`, so every ordering door reaches the byte order it already has: the
+// operators, the extremum reductions, and a `Comparable` bound in a generic body.
+echo a < c;
+echo c < a;
+echo [c, a, b].min() == some(a);
+echo [c, a, b].max() == some(c);
+
+fn latest<T: Comparable>(xs: List<T>): ?T { return xs.max(); }
+echo latest([c, a, b]) == some(c);

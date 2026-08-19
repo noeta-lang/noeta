@@ -28,6 +28,12 @@ pub enum IterMethod {
     Count,
     /// `sum()` → the sum of the remaining numeric elements (drains the iterator, Track I.1b.2).
     Sum,
+    /// `min()` → the smallest remaining element as `?T` (`none` when the iterator is already
+    /// drained), under the runtime's total order. Drains the iterator.
+    Min,
+    /// `max()` → the largest remaining element as `?T` (`none` when the iterator is already
+    /// drained), under the runtime's total order. Drains the iterator.
+    Max,
     /// `map(f)` → an iterator yielding `f(element)` for each element (Track I.1c).
     Map,
     /// `filter(f)` → an iterator yielding the elements for which `f(element)` is true (Track I.1c).
@@ -46,6 +52,8 @@ impl IterMethod {
             "zip" => Some(IterMethod::Zip),
             "count" => Some(IterMethod::Count),
             "sum" => Some(IterMethod::Sum),
+            "min" => Some(IterMethod::Min),
+            "max" => Some(IterMethod::Max),
             "map" => Some(IterMethod::Map),
             "filter" => Some(IterMethod::Filter),
             _ => None,

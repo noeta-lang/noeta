@@ -665,12 +665,15 @@ impl Checker {
         if self.symbols.records.contains_key(key_name) || self.symbols.enums.contains_key(key_name)
         {
             // A set additionally admits any **value kind** (derive-soundness follow-up F2): a
-            // non-packed struct or an enum orders structurally (`set_order` — the same total
-            // ordering `@derive(Comparable)` gives), so `Set<P>`/`Set<Dir>` are fine. That order
-            // is the set's IDENTITY order and stays structural even for a type that writes its own
-            // `compare`, because it places a value at one site and probes it at another. A `class`
-            // stays out of both roles: a set stores a sorted snapshot, and a reference could be
-            // mutated after insertion. Maps still need a `MapKey` form, which only the
+            // non-packed struct or an enum orders structurally (`set_order`), so `Set<P>`/`Set<Dir>`
+            // are fine whether or not the type declares `Comparable`. That is deliberate and is the
+            // line `ElemReq::Ordered` draws: a set's buffer is how it gets membership and
+            // de-duplication, not an order the program asked for, so it needs no declaration — while
+            // `sorted()`/`min()`/`max()`, which hand that order back, do. It stays structural for the
+            // same reason even when the element type DOES declare a `compare`: a set places a value
+            // at one site and probes it at another, so its placement may not run user code. A
+            // `class` stays out of both roles: a set stores a sorted snapshot, and a reference could
+            // be mutated after insertion. Maps still need a `MapKey` form, which only the
             // packed/int/string/extern kinds above have.
             if for_set {
                 return Some(!matches!(

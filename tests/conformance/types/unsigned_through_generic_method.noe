@@ -73,7 +73,7 @@ class Holder<T> {
     }
 }
 
-class Bag<T> {
+class Bag<T: Comparable> {
     xs: List<T>
     by_name: Map<string, T>
 
