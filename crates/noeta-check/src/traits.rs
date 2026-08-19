@@ -2248,7 +2248,21 @@ impl Checker {
                 // definition with the non-generic path, so the two agree by construction — and its
                 // resolved type then binds any still-unbound type parameter below; a mismatched or
                 // unguiding param synthesizes standalone (unchanged from the closure-only behavior).
-                args[i] = self.absorb_deferred_arg(expr, Some(&expected), env);
+                //
+                // …**unless the expectation would erase the very parameter this argument could
+                // pin**. `subst_or_dyn` writes `dyn` for a parameter nothing has bound yet, and a
+                // collection literal adopts whatever type it is handed — so `firstof([x, y])`
+                // against `xs: List<T>` typed its argument `List<dyn>` and then bound `T = dyn`
+                // from it, while the same call through a binding resolved `T` in full. A literal
+                // that means something on its own is therefore typed on its own here, and binds
+                // the parameter from its own element type. A closure has no standalone meaning and
+                // keeps the erased expectation, which is what lets its inferred return bind the
+                // parameter instead (`fn pick<T>(f: () -> T): T`).
+                let erases = params_mentioned(raw, &tps)
+                    .iter()
+                    .any(|p| !subst.contains_key(&p.id));
+                let standalone = erases && matches!(expr, Expr::List { .. } | Expr::Map { .. });
+                args[i] = self.absorb_deferred_arg(expr, (!standalone).then_some(&expected), env);
             }
             let arg = args[i].clone();
             bind_type_params(raw, &arg, &tps, &mut subst);

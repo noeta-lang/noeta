@@ -1,0 +1,69 @@
+// A **collection literal** written directly at a generic call's argument pins the type parameter,
+// exactly as a binding of the same value does.
+//
+// The two are checked by different routes and have to arrive at the same place. A literal is a
+// *deferred* argument — it has no type until something says what is expected of it — so it is
+// typed against the parameter with everything bound so far substituted in. Early in the argument
+// list "everything so far" can be nothing, and the substitution writes `dyn` for a parameter
+// nothing has named yet; a literal handed `List<dyn>` becomes a `List<dyn>` and then *pins* the
+// parameter to `dyn`, from an expectation that was only ever a placeholder.
+//
+// So a literal that means something on its own is typed on its own where the expectation would
+// erase, and binds the parameter from its own element type. A closure keeps the erased expectation
+// — it has no standalone meaning, and its inferred return is what binds the parameter there.
+//
+// `type_of` reads the static type, so it is the direct question; the `u64` rows are the visible
+// consequence, since a parameter pinned to `dyn` carries no width and renders the erased word.
+// expect: stdout "Type.List(Type.IntN(64, false))"
+// expect: stdout "Type.Class(Bag, [Type.IntN(64, false)])"
+// expect: stdout "Type.Class(Bag, [Type.IntN(64, false)])"
+// expect: stdout "Type.Map(Type.String, Type.IntN(64, false))"
+// expect: stdout "18446744073709551615"
+// expect: stdout "18446744073709551615"
+// expect: stdout "18446744073709551615"
+// expect: stdout "pick 9"
+// expect: exit 0
+
+class Bag<T> {
+    pub xs: List<T>
+
+    pub fn new(xs: List<T>): Bag<T> {
+        return Bag { xs: xs };
+    }
+}
+
+fn first_of<T>(xs: List<T>): T {
+    return xs[0];
+}
+
+fn value_of<T>(m: Map<string, T>): T {
+    return m.get_or("k", xs_default());
+}
+
+fn xs_default<T>(): T {
+    return first_of([]);
+}
+
+// A closure argument has no standalone meaning, so it still absorbs the erased expectation and
+// binds the parameter from its own inferred return.
+fn pick<T>(f: () -> T): T {
+    return f();
+}
+
+big: u64 = 18446744073709551615u64;
+
+echo "${type_of([big, big])}";
+
+// Through a binding, and through the literal written in place: the same instantiation.
+via_binding: List<u64> = [big, big];
+echo "${type_of(Bag.new(via_binding))}";
+echo "${type_of(Bag.new([big, big]))}";
+
+echo "${type_of({"k": big})}";
+
+// The visible consequence: a parameter pinned to `dyn` would render the erased word.
+echo "${first_of([big, big])}";
+echo "${Bag.new([big, big]).xs[0]}";
+echo "${first_of([18446744073709551615u64])}";
+
+echo "pick ${pick(fn() => 9)}";
