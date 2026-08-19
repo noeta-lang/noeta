@@ -34,7 +34,37 @@ fn conformance_corpus_passes() {
             "conformance failures:\n{}",
             report.to_human()
         );
+        assert_engine_reach(&report);
     });
+}
+
+/// **The reach assertion on the expectation runner**: every corpus program is checked against its
+/// header on *both* engines, so this gate is a verdict on the language rather than on the reference
+/// interpreter's half of it.
+///
+/// It is asserted rather than reported for the reason every other reach floor here exists: an
+/// all-green run over an engine that executed nothing is indistinguishable from an all-green run
+/// that covered everything, and the pass is what gets cited. The two counts must be *equal* — a
+/// program the reference ran and the VM did not is a program the compiler refused, which the run
+/// already fails on — and the floor stops the whole set silently draining away.
+fn assert_engine_reach(report: &noeta_conformance::Report) {
+    use noeta_conformance::Engine;
+    let on_reference = report.executed_on(Engine::Reference);
+    let on_vm = report.executed_on(Engine::Vm);
+    assert_eq!(
+        on_reference,
+        on_vm,
+        "the two engines ran different programs; {}",
+        report.coverage_line()
+    );
+    // Measured at 893 on 2026-08-19 — the corpus programs that survive the front end. If it drops,
+    // find out which cases stopped running before touching this number.
+    const MIN_EXECUTED: usize = 850;
+    assert!(
+        on_vm >= MIN_EXECUTED,
+        "only {on_vm} case(s) executed a program (floor {MIN_EXECUTED}); {}",
+        report.coverage_line()
+    );
 }
 
 /// The leak oracle's **known debt**: `(backend, program)` pairs tolerated as leaking at clean exit

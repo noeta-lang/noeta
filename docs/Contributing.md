@@ -27,6 +27,15 @@ cargo run -p noeta-conformance -- --file hello.noe # one conformance fixture —
 
 You need a recent stable Rust (1.95+).
 
+### What a conformance run proves
+
+The two conformance commands answer **different** questions, and each prints which one it answered:
+
+- **The expectation run** (no oracle flag) checks every case against its `// expect:` header, executing the program on the reference interpreter *and* the bytecode VM. Both, because a header checked against one engine is a claim about half the implementation — a regression living in a single backend would pass — so every failure names the engine that produced it and the summary counts what each engine ran. `--engine reference` / `--engine vm` narrows that to localize a failure you already have. `--stage lexer` / `--stage parser` stop before execution: they assert the `// expect: error` lines and leave stdout, stderr and the exit code unchecked, which the summary says out loud.
+- **The differential** (`--differential`) compares the two backends' full output against *each other* on every program, whatever the headers say. It is the oracle for behavior no header pins down.
+
+A `--file` that matches no case exits 2 rather than reporting an empty run as a pass — the narrowed run is what gets cited as the evidence a fix works, so it has to be a statement about something.
+
 ## The compilation pipeline
 
 Source flows through sharp, single-purpose crates: lexer → parser → checker → IR → RC passes → two backends. Each stage is a separate crate with explicit input/output types and no hidden shared mutable state, so a change is local to one crate and verifiable by that crate's snapshots. The full diagram and crate map are on [Architecture & Pipeline](Architecture-and-Pipeline). Every crate carries a `README.md` as its primary documentation — start there when working in one.
@@ -37,6 +46,8 @@ The language is implemented twice — a reference interpreter (`noeta-eval`) and
 
 1. **A feature lands in both backends** (or is explicitly oracle-exempt). Shared semantics go in `noeta-stdlib` so the two agree by construction rather than by luck.
 2. **The differential must stay green** — `--differential` at 0 skipped, backends agree — after every change.
+
+Agreement is not the whole claim, though: two backends agree perfectly on the wrong answer whenever the fault is in what they share. That is what the `// expect:` headers pin, and why the expectation run drives both engines rather than the reference alone — the differential says the halves match, the headers say the language does what it says.
 
 ## The new-feature template
 
@@ -54,7 +65,7 @@ A language feature is added as a **vertical slice**, in this order:
 ## Testing architecture
 
 - **Per-stage snapshots** (`insta`) — tokens, AST, and rendered diagnostics are pinned at each boundary.
-- **Conformance corpus** (`tests/conformance/**.noe`) — executable end-to-end behavior with `// expect:` headers, run through both backends and asserted identical.
+- **Conformance corpus** (`tests/conformance/**.noe`) — executable end-to-end behavior with `// expect:` headers, checked against both engines and asserted identical between them. The two assertions are separate and both are gated: the expectation runner pins each case's *stated* output on the reference interpreter and the VM alike, and the differential pins the two backends to *each other* over their whole observable result.
 - **Property tests** (`proptest`) — invariants like parse→print→parse round-trips, and the static-≤-dynamic last-use property for the RC passes.
 - **Structured fuzzing** (`noeta-fuzz`) — a generator that turns a `&[u8]` into a *syntactically valid* Noeta program, so the properties under test are evaluated past the parser rather than bouncing off it. Byte-level mutation is near-useless against a language front-end: almost every mutated buffer fails to lex, the component declines it, and every property passes vacuously. Generation is total — bytes are consumed left to right, and once they run out every further choice reads as `0`, with each choice list ordered so `0` is the most terminal alternative — so exhaustion winds a program down instead of truncating it mid-token, and any buffer yields something parseable. That contract is what lets one generator serve both a seeded deterministic sweep and a `proptest` driver that shrinks the *driver bytes* (fewer bytes, smaller program) into a paste-ready reproducer.
 - **What the fuzzer adds over the corpus.** Every corpus file has exactly one layout: the one its author wrote and `noeta fmt` already normalized. The generator varies what a corpus of any size barely samples — nesting, collapsed versus exploded block bodies, blank-line runs, semicolon presence, header parentheses, method-chain breaks, comment placement at every depth, and the whole config space rather than the three configurations the corpus pins. Its first run over `noeta fmt` found six printer defects, none reachable from the corpus, three of which relocated or deleted a comment under the *default* config.

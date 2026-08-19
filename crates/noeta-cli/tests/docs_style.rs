@@ -150,6 +150,42 @@ fn user_facing_help_carries_no_internal_vocabulary() {
     );
 }
 
+/// The same rules over the **conformance harness's** help, for the same reason: `--help` is read by
+/// whoever is trying to verify a change, and a flag that announces an internal milestone tells that
+/// reader nothing about what the flag does. Its `///` comments are the help text; the `//!` header
+/// and ordinary comments are not printed and are not scanned.
+#[test]
+fn the_harness_help_carries_no_internal_vocabulary() {
+    let src = repo_root().join("crates/noeta-conformance/src/main.rs");
+    let text = std::fs::read_to_string(&src).expect("the harness surface is readable");
+    // The flag block only: a `///` on a private function below it is rustdoc for a maintainer, and
+    // holding internal notes to the user-facing rule would be a different (and wrong) claim.
+    let help: String = text
+        .lines()
+        .skip_while(|l| !l.starts_with("struct Cli {"))
+        .take_while(|l| !l.starts_with('}'))
+        .filter(|l| l.trim_start().starts_with("///"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        help.contains("--jit-differential"),
+        "the harness's flag help moved — this scan is reading the wrong lines"
+    );
+    let mut violations = Vec::new();
+    scan(
+        "crates/noeta-conformance/src/main.rs",
+        "main",
+        &help,
+        &mut violations,
+    );
+    assert!(
+        violations.is_empty(),
+        "`noeta-conformance --help` is read by whoever is verifying a change \
+         (AGENTS.md → Writing docs):\n\n{}\n",
+        violations.join("\n")
+    );
+}
+
 /// The gate is only worth having if it fails on the thing it is meant to catch. Pins each rule
 /// against a sentence of exactly the shape that reached `main`.
 #[test]
