@@ -16,7 +16,8 @@
 //!
 //! External tools are discovered, never assumed: the runner `.wasm` via `NOETA_WASM_RUNNER` (or the
 //! `wasm-release` path under `CARGO_TARGET_DIR`, which this repo always sets), wasmtime via
-//! `NOETA_WASMTIME` (or `$PATH`). Missing tooling is a loud setup error, not a skip — the oracle
+//! `NOETA_WASMTIME`, then `$PATH`, then the directories its own installer writes to. Missing tooling
+//! is a loud setup error, not a skip — the oracle
 //! keeps the `0 skipped` posture, and `main` additionally fails a whole-corpus run that executed
 //! zero programs, so "green" can never mean "tested nothing".
 
@@ -91,13 +92,45 @@ struct WasmTools {
     workdir: PathBuf,
 }
 
+/// The install locations wasmtime's own installer uses, searched after `$PATH`.
+///
+/// `$PATH` alone is not enough, and the failure it produces is a lie rather than an inconvenience:
+/// `https://wasmtime.dev/install.sh` drops the binary in `~/.wasmtime/bin` and edits a shell rc
+/// file, so a non-interactive process never sees it and this oracle reports "wasmtime not found" on
+/// a machine where wasmtime is installed and working. An agent then records the arm as unrunnable
+/// and skips it — which has happened, on this repo, with wasmtime sitting in the first candidate
+/// below.
+///
+/// `scripts/gate.sh` has probed exactly these since it hit the same thing; this is that list, in
+/// the harness, so a direct `--wasm-differential` finds what the gate finds. Two spellings of one
+/// lookup is how they drift.
+fn wasmtime_install_candidates() -> Vec<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let mut out = Vec::new();
+    if let Some(home) = home {
+        out.push(home.join(".wasmtime/bin/wasmtime"));
+        out.push(home.join(".cargo/bin/wasmtime"));
+        out.push(home.join(".local/bin/wasmtime"));
+    }
+    out.push(PathBuf::from("/usr/local/bin/wasmtime"));
+    out.push(PathBuf::from("/opt/homebrew/bin/wasmtime"));
+    out.push(PathBuf::from("/opt/wasmtime/bin/wasmtime"));
+    out
+}
+
 /// Discover wasmtime + the built runner, or explain exactly what is missing.
 fn discover_tools() -> Result<WasmTools, String> {
     let wasmtime = std::env::var_os("NOETA_WASMTIME")
         .map(PathBuf::from)
         .or_else(|| which("wasmtime"))
+        .or_else(|| {
+            wasmtime_install_candidates()
+                .into_iter()
+                .find(|c| c.is_file())
+        })
         .ok_or_else(|| {
-            "wasmtime not found: install it (https://wasmtime.dev) or set NOETA_WASMTIME"
+            "wasmtime not found on $PATH or in its installer's directories: install it \
+             (https://wasmtime.dev) or set NOETA_WASMTIME"
                 .to_string()
         })?;
     let runner = std::env::var_os("NOETA_WASM_RUNNER")
@@ -353,5 +386,31 @@ fn compare(
         ))
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The oracle must look where wasmtime's own installer puts it, not only on `$PATH` — a
+    /// non-interactive process never sources the rc file that installer edits, and the resulting
+    /// "not found" reads as "this machine cannot run the arm" when the machine can. `scripts/gate.sh`
+    /// probes the same list; if one grows an entry the other should too.
+    #[test]
+    fn the_probe_covers_the_installer_directory() {
+        let candidates = wasmtime_install_candidates();
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.ends_with(".wasmtime/bin/wasmtime")),
+            "the installer's own directory must be probed, got {candidates:?}"
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c == &PathBuf::from("/usr/local/bin/wasmtime")),
+            "a system install must be probed, got {candidates:?}"
+        );
     }
 }
