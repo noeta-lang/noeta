@@ -3086,6 +3086,27 @@ pub const SELF_TYPE: &str = "Self";
 /// is the canonical spelling shared by both backends so their values display and match identically.
 pub const ORDERING_VARIANTS: [&str; 3] = ["Less", "Equal", "Greater"];
 
+/// The prelude enums that carry a **structural ordering with no declaration**: `?T` and
+/// `Result<T, E>`.
+///
+/// Every other enum earns `< <= > >=` by declaring it — `@derive(Comparable)`, or a hand-written
+/// `compare`. These two have nowhere to write that: the language declares them, and a program
+/// constructs their values through `some`/`none`/`Ok`/`Err` without ever naming the enum. So the
+/// ordering they already have at every *other* door — a set's canonical buffer, `sorted`, a derived
+/// struct's `?int` field — has to be reachable through the operator too, or `List<?int>` is a shape
+/// nothing can sort and no bound accepts.
+///
+/// Read by both backends' operator dispatch and by the checker's satisfaction model, so the three
+/// cannot split on which enums this covers. Consulted only *after* a declared `compare` or derive
+/// has had its chance, so a program that declares its own enum under one of these names keeps its
+/// own behavior.
+pub const STRUCTURALLY_ORDERED_PRELUDE_ENUMS: [&str; 2] = ["Option", "Result"];
+
+/// Whether `enum_name` is one of [`STRUCTURALLY_ORDERED_PRELUDE_ENUMS`].
+pub fn prelude_enum_orders(enum_name: &str) -> bool {
+    STRUCTURALLY_ORDERED_PRELUDE_ENUMS.contains(&enum_name)
+}
+
 /// The `Ordering` variant name for a `std::cmp::Ordering`. Keeps the primitive `.compare()` in
 /// both backends mapping to the same surface variant.
 pub fn ordering_variant(ordering: std::cmp::Ordering) -> &'static str {

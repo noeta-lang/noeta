@@ -2586,6 +2586,27 @@ impl Checker {
         if ty.defers_to_runtime() {
             return true;
         }
+        // `?T` and `Result<T, E>` are the prelude enums both backends order structurally — variant
+        // declaration index first, then the payload (see
+        // [`noeta_ast::STRUCTURALLY_ORDERED_PRELUDE_ENUMS`], which is what the operator dispatch
+        // reads). So they satisfy `Comparable` exactly when their payloads do, which is the same
+        // recursion [`Self::type_orderable`] performs when it decides whether an `?int` *field* may
+        // take part in a structural derive: one answer for the field and for the bare type.
+        //
+        // A payload is asked through [`Self::operand_satisfies_operator`] — the same door the
+        // container itself came in by — so a `Comparable`-bounded type parameter answers inside a
+        // `?T` exactly as it does bare, and `fn f<T: Comparable>(xs: List<?T>)` can sort. It
+        // terminates because a payload is structurally smaller than the container.
+        if t == BuiltinTrait::Comparable {
+            match ty {
+                Type::Option(inner) => return self.operand_satisfies_operator(inner, t),
+                Type::Result(ok, err) => {
+                    return self.operand_satisfies_operator(ok, t)
+                        && self.operand_satisfies_operator(err, t);
+                }
+                _ => {}
+            }
+        }
         if let Type::Named(n, args) = ty {
             if !self.has_builtin_trait(n, t) {
                 return false;

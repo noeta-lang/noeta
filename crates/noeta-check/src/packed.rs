@@ -385,6 +385,13 @@ impl Checker {
             Type::List(e) | Type::Set(e) => Some(RenderHint::Elements(Box::new(
                 self.render_hint(e, purpose, stack)?,
             ))),
+            // An `Iterator<T>` describes its elements exactly as a `List<T>` does — the ordering
+            // doors on one (`min`/`max`) read the element hint through the same `Elements` shape as
+            // the doors on the other, so an iterator terminal cannot read a `u64` differently from
+            // its eager twin.
+            Type::Named(n, args) if n == crate::stdlib::ITERATOR => Some(RenderHint::Elements(
+                Box::new(self.render_hint(args.first()?, purpose, stack)?),
+            )),
             Type::Map(k, v) => {
                 let key = self.render_hint(k, purpose, stack).map(Box::new);
                 let value = self.render_hint(v, purpose, stack).map(Box::new);

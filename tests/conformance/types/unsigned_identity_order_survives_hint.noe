@@ -38,7 +38,7 @@
 // expect: stdout "composed, equal: true"
 // expect: exit 0
 
-class Probe<T> {
+class Probe<T: Comparable> {
     pub tag: T
 
     pub fn new(tag: T): Probe<T> {
@@ -155,7 +155,7 @@ fn built_keyed<T>(k: T, j: T, probe: T): string {
     return "${m.get_or(probe, "missing")} ${shown(m)}";
 }
 
-fn built_sorted<T>(a: T, b: T): string {
+fn built_sorted<T: Comparable>(a: T, b: T): string {
     return shown([a, b].sorted());
 }
 

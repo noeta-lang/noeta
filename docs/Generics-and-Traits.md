@@ -318,7 +318,7 @@ echo max("a", "b")      // b
 
 Bounds are enforced statically at both ends:
 
-- **Body-side requirement** — using `>` requires `Comparable`, `+` requires `Add`; on an *unbounded* `T` that operation is E0025 at the definition. The requirement follows `T` into a **collection** of it: `xs.max()` on a `List<T>` orders `T`s, so it needs the same `Comparable` and is refused the same way without it.
+- **Body-side requirement** — using `>` requires `Comparable`, `+` requires `Add`; on an *unbounded* `T` that operation is E0025 at the definition. The requirement follows `T` into a **collection** of it: `xs.sorted()`, `xs.max()` and `xs.iter().min()` all order `T`s, so each needs the same `Comparable` and is refused the same way without it.
 - **Call-site check** — instantiating with a type that does not satisfy the bound is E0025. The first argument pins `T`; later arguments are checked against that substitution (E0007 on mismatch).
 - An unknown bound name is E0014.
 

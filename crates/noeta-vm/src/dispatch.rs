@@ -1417,9 +1417,11 @@ impl<'m> Vm<'m> {
                         // for enums, computed synchronously (no method to call).
                         if (left.is_object() || left.is_enum())
                             && op.comparable_method().is_some()
-                            && self
-                                .comparable_derives
-                                .contains(&left.shape().unwrap().name)
+                            && (self.comparable_derives.contains(&left.shape().unwrap().name)
+                                // The prelude enums that order without a declaration, because
+                                // there is nowhere to write one: `?T` and `Result<T, E>` already
+                                // order at every other door, and this is the operator's.
+                                || noeta_ast::prelude_enum_orders(&left.shape().unwrap().name))
                         {
                             match structural_compare(left, right) {
                                 Some(ordering) => {
