@@ -517,7 +517,9 @@ impl Checker {
             // pin its leaves when no single slot carries it whole.
             return match self.render_forward_slot(&sigma) {
                 Some(j) => {
-                    self.note_slot_feed(callee, slot, SlotFeed::Forward(j));
+                    if let Some(feed) = self.forwarded_slot_feed(j) {
+                        self.note_slot_feed(callee, slot, feed);
+                    }
                     noeta_ext_abi::HiddenArg::Forward(j)
                 }
                 None => {
@@ -579,17 +581,18 @@ impl Checker {
     /// the enumeration would have to treat every composed entry as reachable from every leaf, and
     /// each round would intern a deeper composite no program can produce.
     fn note_slot_feed(&mut self, callee: &str, slot: u32, feed: SlotFeed) {
-        // A pass-through of a slot that carries no composed value teaches the enumeration nothing.
-        if let SlotFeed::Forward(j) = feed
-            && !self.is_render_slot(j)
-        {
-            return;
-        }
-        let owner = self.coloring.current_slot_key.clone();
         self.slot_feeds
             .entry((callee.to_string(), slot))
             .or_default()
-            .push((owner, feed));
+            .push(feed);
+    }
+
+    /// The pass-through edge for `j`, or `None` where that slot can carry no composed value — which
+    /// is every slot outside this body's own render section, and every body with no slot key at all.
+    /// A pass-through of one teaches the enumeration nothing.
+    fn forwarded_slot_feed(&self, j: u32) -> Option<SlotFeed> {
+        let key = self.coloring.current_slot_key.clone()?;
+        self.is_render_slot(j).then_some(SlotFeed::Forward(key, j))
     }
 
     /// Whether slot ordinal `j` of the body being checked is one of its **own render slots** — the
@@ -1263,14 +1266,18 @@ pub(crate) struct CompositionDraft {
 
 /// What one call can put into a callee's render slot, as far as the composition enumeration cares.
 /// Recorded by [`Checker::note_slot_feed`], which is where the two forms are explained.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) enum SlotFeed {
     /// This call composes the value: the slot can hold whatever composition `id` yields.
     Composed(u32),
-    /// This call passes the enclosing body's own render slot `j` through, so the slot can hold
-    /// whatever *that* one can.
-    Forward(u32),
+    /// This call passes the CALLER's own render slot through — its slot key and the ordinal — so the
+    /// callee's slot can hold whatever that one can.
+    Forward(String, u32),
 }
+
+/// Every call's answer to "what can reach this render slot", keyed `(the callee's slot key, the slot
+/// ordinal)`. See [`Checker::note_slot_feed`].
+pub(crate) type SlotFeeds = HashMap<(String, u32), Vec<SlotFeed>>;
 
 /// Fill every [`Checker::composed_hidden_arg`] composition's case table into `sites`, once its
 /// type-argument table is complete — the last thing done to that table.
@@ -1298,7 +1305,7 @@ pub(crate) enum SlotFeed {
 /// that is about to be lowered, and a session install merges each bundle's table by content anyway.
 pub(crate) fn finish_hint_compositions(
     drafts: &[CompositionDraft],
-    feeds: &HashMap<(String, u32), Vec<(Option<String>, SlotFeed)>>,
+    feeds: &SlotFeeds,
     sites: &mut crate::Sites,
 ) {
     /// How many rounds of composed-entry discovery to run. Each round can deepen a type by one
@@ -1474,30 +1481,21 @@ fn combinations(per_leaf: &[Vec<i64>]) -> Vec<Vec<i64>> {
 /// interned into the table that ships.
 fn compositions_reaching_each_leaf(
     drafts: &[CompositionDraft],
-    feeds: &HashMap<(String, u32), Vec<(Option<String>, SlotFeed)>>,
+    feeds: &SlotFeeds,
 ) -> Vec<Vec<Vec<u32>>> {
     // The compositions that can arrive on one slot, closed over pass-throughs. Depth-bounded rather
     // than visited-set-bounded because a pass-through cycle is a body forwarding its own slot to
     // itself, and the answer there is the fixpoint the outer round loop already takes.
-    fn at(
-        slot: &(String, u32),
-        feeds: &HashMap<(String, u32), Vec<(Option<String>, SlotFeed)>>,
-        depth: usize,
-        out: &mut Vec<u32>,
-    ) {
+    fn at(slot: &(String, u32), feeds: &SlotFeeds, depth: usize, out: &mut Vec<u32>) {
         if depth == 0 {
             return;
         }
-        for (owner, feed) in feeds.get(slot).into_iter().flatten() {
+        for feed in feeds.get(slot).into_iter().flatten() {
             match feed {
                 SlotFeed::Composed(id) => out.push(*id),
-                // The caller passes its own render slot `j` through, so whatever reaches THAT slot
-                // reaches this one. A caller with no slot key of its own carries nothing.
-                SlotFeed::Forward(j) => {
-                    if let Some(key) = owner {
-                        at(&(key.clone(), *j), feeds, depth - 1, out);
-                    }
-                }
+                // The caller passes its own render slot through, so whatever reaches THAT slot
+                // reaches this one.
+                SlotFeed::Forward(key, j) => at(&(key.clone(), *j), feeds, depth - 1, out),
             }
         }
     }

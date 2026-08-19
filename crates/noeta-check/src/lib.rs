@@ -1656,12 +1656,11 @@ struct Checker {
     /// [`Sites::type_arg_compositions`] once it is. Empty for a program whose generic bodies build no
     /// composite, which is nearly all of them.
     hint_compositions: Vec<packed::CompositionDraft>,
-    /// What a call can put into a callee's render slot, keyed `(the callee's slot key, the slot
-    /// ordinal)` and carrying the CALLER's own slot key beside each answer — the edges
+    /// What a call can put into a callee's render slot — the edges
     /// [`Checker::finish_hint_compositions`] closes to decide which composed values can reach a
     /// composition's leaves. See [`Checker::note_slot_feed`], which is the only writer. Empty for a
     /// program whose generic bodies build no composite.
-    slot_feeds: HashMap<(String, u32), Vec<(Option<String>, packed::SlotFeed)>>,
+    slot_feeds: packed::SlotFeeds,
     /// The destructor-relevance of each binding (memory-management migration, Phase 3.2b): the
     /// drop-insertion pass reads it to mark a `DropVar`'s `relevant` bit, which Phase 4 uses to skip
     /// the destructor check for a value whose type can run no destructor.
