@@ -3693,6 +3693,23 @@ impl PackedLayout {
 mod tests {
     use super::*;
 
+    /// The `@semantic` role vocabulary exists twice: here, as the prelude enum's variants, and in
+    /// `noeta-ext-abi` as a `&[&str]` the registry's assembly-time `@role` check resolves a tag
+    /// against. The ABI crate sits below this one and cannot read [`SEMANTIC_VARIANTS`], so the copy
+    /// is unavoidable — but an *uncompared* copy drifts, and both drift directions are silent to the
+    /// author: a variant added here and not there makes a legitimate `@role(Semantic.X)` refuse to
+    /// assemble, and one removed here but left there admits a tag that resolves to nothing. This is
+    /// the comparison.
+    #[test]
+    fn semantic_variants_mirror_the_abi() {
+        assert_eq!(
+            SEMANTIC_VARIANTS,
+            noeta_ext_abi::registry::BUILTIN_SEMANTIC_VARIANTS,
+            "the ABI's `BUILTIN_SEMANTIC_VARIANTS` must list exactly the prelude `Semantic` enum's \
+             variants — the registry resolves a native `@role` tag against it at assembly"
+        );
+    }
+
     fn boxed(t: TypeRepr) -> Box<TypeRepr> {
         Box::new(t)
     }

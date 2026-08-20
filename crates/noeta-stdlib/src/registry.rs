@@ -7320,6 +7320,20 @@ mod tests {
         SandboxHost::new()
     }
 
+    /// std's own declarations must pass the registry's assembly sweep — including the
+    /// **cross-reference** half, which resolves every field that names something declared elsewhere
+    /// (a `traits` entry, a `BoundedVar` bound, a `docs` key, a tier's `config`/`handler`, a derive's
+    /// handler, a backed enum's variant constants). Those all fail *silently* at runtime when the
+    /// name resolves to nothing, so assembly is where they are caught — and this is the assertion
+    /// that the shape std actually ships still assembles under them. The panicking `Registry::new`
+    /// runs on every real path; `try_new` is used here so a failure reports the message rather than
+    /// aborting the test binary.
+    #[test]
+    fn the_std_units_assemble() {
+        noeta_ext_abi::registry::Registry::try_new(std_units())
+            .expect("std's own extension units must pass the registry's assembly sweep");
+    }
+
     #[test]
     fn shell_quote_is_injection_safe() {
         // Safe tokens pass through unquoted; anything with shell metacharacters is single-quoted.
