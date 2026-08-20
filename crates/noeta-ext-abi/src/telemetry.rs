@@ -505,6 +505,13 @@ impl MetricStore {
     /// `otel.metric.overflow=true` series instead, so the instrument's series map is bounded while
     /// every measurement still lands in exactly one series — a counter's total stays exact, only its
     /// breakdown stops.
+    ///
+    /// The overflow series aggregates by the instrument's own kind, so what "folding" costs differs
+    /// by kind: a sum keeps its total and a histogram keeps its count, sum and distribution, but a
+    /// **gauge** is last-value, so folded measurements overwrite each other and only the most recent
+    /// survives. That loss belongs to gauge aggregation rather than to this cap — there is no total
+    /// for a gauge to preserve — and it is deterministic (observation order), so both backends still
+    /// collect the same value.
     pub fn observe(
         &mut self,
         inst: InstrumentId,
@@ -1112,6 +1119,139 @@ mod tests {
         assert_eq!(points[1].value, MetricValue::Int(1));
         assert!(is_overflow_point(&points[2]));
         assert_eq!(points[2].value, MetricValue::Int(50));
+    }
+
+    /// **A histogram's `count` and `sum` survive folding, and so does its bucket distribution.** The
+    /// overflow series is an ordinary histogram aggregator over the folded measurements, not a fresh
+    /// start with different bounds: it carries the same [`DEFAULT_HISTOGRAM_BOUNDS`], its buckets
+    /// account for every folded observation, and the instrument's total count and total sum across
+    /// all series are still exactly what was recorded. The counter test above says the same thing
+    /// about a sum; a histogram has three numbers to lose instead of one.
+    #[test]
+    fn overflow_folding_preserves_a_histograms_count_sum_and_buckets() {
+        let mut store = MetricStore::with_cardinality_limit(2);
+        let inst = store.get_or_create("h", "ms", InstrumentKind::Histogram);
+        // Six distinct attribute sets, one measurement each. The first two keep their own series;
+        // the last four fold into one.
+        let values = [3.0f64, 7.0, 600.0, 3.0, 7.0, 600.0];
+        for (i, v) in values.iter().enumerate() {
+            store.observe(
+                inst,
+                MetricValue::Float(*v),
+                attrs(&[("id", AttrValue::Int(i as i64))]),
+                10,
+            );
+        }
+
+        let collected = store.collect(100);
+        let MetricPoints::Histogram(points) = &collected[0].points else {
+            panic!("histogram");
+        };
+        assert_eq!(points.len(), 3, "2 ordinary series + the overflow series");
+
+        let overflow = points.last().expect("a series");
+        assert_eq!(
+            overflow.attributes,
+            vec![(OVERFLOW_ATTRIBUTE_KEY.into(), AttrValue::Bool(true))],
+            "the last point is the overflow series"
+        );
+        assert_eq!(overflow.count, 4, "every folded measurement is counted");
+        assert_eq!(
+            overflow.sum,
+            600.0 + 3.0 + 7.0 + 600.0,
+            "and every folded measurement is summed"
+        );
+        assert_eq!(
+            overflow.bounds, DEFAULT_HISTOGRAM_BOUNDS,
+            "the overflow series buckets on the same bounds as every other series"
+        );
+        // bounds = [0,5,10,25,50,75,100,250,500,750,…]; the folded 3 → <=5, 7 → <=10, 600 ×2 → <=750.
+        assert_eq!(overflow.buckets[1], 1);
+        assert_eq!(overflow.buckets[2], 1);
+        assert_eq!(overflow.buckets[9], 2);
+        assert_eq!(
+            overflow.buckets.iter().sum::<u64>(),
+            overflow.count,
+            "the distribution accounts for exactly the folded measurements"
+        );
+
+        // The instrument as a whole still reports what it was given — nothing dropped, nothing
+        // double-counted, which is the same guarantee the counter's total gets.
+        assert_eq!(
+            points.iter().map(|p| p.count).sum::<u64>(),
+            values.len() as u64
+        );
+        assert_eq!(
+            points.iter().map(|p| p.sum).sum::<f64>(),
+            values.iter().sum::<f64>()
+        );
+    }
+
+    /// **A gauge has no total to preserve, and folding says so plainly.** Its aggregation is
+    /// last-value, so the overflow series holds the most recent folded measurement and the earlier
+    /// folded ones are gone — that loss is inherent to gauge aggregation, not to the overflow
+    /// policy, and the spec asks only that every measurement reach exactly one aggregator. The
+    /// survivor is the *last* one in observation order, so it is deterministic rather than
+    /// arbitrary, which is what lets both backends collect identical gauges.
+    #[test]
+    fn a_folded_gauge_keeps_the_last_measurement() {
+        let mut store = MetricStore::with_cardinality_limit(2);
+        let inst = store.get_or_create("g", "", InstrumentKind::Gauge);
+        for (i, v) in [10i64, 20, 30, 40, 50].iter().enumerate() {
+            store.observe(
+                inst,
+                MetricValue::Int(*v),
+                attrs(&[("id", AttrValue::Int(i as i64))]),
+                10,
+            );
+        }
+
+        let collected = store.collect(100);
+        let MetricPoints::Gauge(points) = &collected[0].points else {
+            panic!("gauge");
+        };
+        assert_eq!(points.len(), 3);
+        assert_eq!(points[0].value, MetricValue::Int(10), "its own series");
+        assert_eq!(points[1].value, MetricValue::Int(20), "its own series");
+        assert!(is_overflow_point(points.last().expect("a series")));
+        assert_eq!(
+            points[2].value,
+            MetricValue::Int(50),
+            "the last folded measurement wins — a gauge overwrites, and 30 and 40 are gone"
+        );
+    }
+
+    /// **The overflow series' cumulative start is the moment folding began, and it never moves.** A
+    /// cumulative data point whose `start_unix_ms` walked forward with each fold would tell a
+    /// collector the series had restarted, which is how a cumulative exporter loses a rate.
+    #[test]
+    fn the_overflow_series_start_time_is_when_folding_began_and_does_not_move() {
+        let mut store = MetricStore::with_cardinality_limit(2);
+        let inst = store.get_or_create("c", "", InstrumentKind::Counter);
+        // Each measurement carries a later clock reading than the one before it.
+        for (i, now) in [100u64, 200, 300, 400, 500].iter().enumerate() {
+            store.observe(
+                inst,
+                MetricValue::Int(1),
+                attrs(&[("id", AttrValue::Int(i as i64))]),
+                *now,
+            );
+        }
+
+        let collected = store.collect(999);
+        let points = sum_points(&collected[0]);
+        assert_eq!(points[0].start_unix_ms, 100, "when that series started");
+        assert_eq!(points[1].start_unix_ms, 200, "when that series started");
+
+        let overflow = points.last().expect("a series");
+        assert!(is_overflow_point(overflow));
+        assert_eq!(
+            overflow.start_unix_ms, 300,
+            "the third distinct set was the first to fold, so folding began at 300 — not 400 or \
+             500, which would mean the series restarted twice"
+        );
+        assert_eq!(overflow.unix_ms, 999, "collection stamps the window's end");
+        assert_eq!(overflow.value, MetricValue::Int(3), "three sets folded");
     }
 
     /// Every instrument kind is capped, not just counters — a histogram's buckets and a gauge's
