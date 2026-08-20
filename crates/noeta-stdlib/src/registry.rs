@@ -327,13 +327,18 @@ const FRAME_DOCS: &[(&str, &str)] = &[
 /// runtime has — `compare`, a set's canonical order, a map key's placement — and a version-7 UUID's
 /// whole purpose is that byte order being creation order. Declaring it is what lets `<`, `sorted`,
 /// `min`/`max` and a `T: Comparable` bound reach the ordering the type already has.
+///
+/// It declares `Display` for the same reason: the type renders itself as the canonical hyphenated
+/// form and answers `to_string()` with exactly that text, so `${id}` and `id.to_string()` agree.
+/// Declaring it is what lets `T: Display` and `id is dyn Display` see the rendering `echo` already
+/// uses.
 const ID_TYPES: &[ExtType] = &[ExtType {
     name: crate::id::TYPE_NAME,
     namespace: "std.id",
     methods: UUID_METHODS,
     dispatch: uuid_method_dispatch,
     key_capable: true,
-    traits: &["Comparable"],
+    traits: &["Comparable", "Display"],
     docs: UUID_METHOD_DOCS,
     ..ExtType::DEFAULTS
 }];
@@ -7318,6 +7323,20 @@ mod tests {
 
     fn host() -> SandboxHost {
         SandboxHost::new()
+    }
+
+    /// std's own declarations must pass the registry's assembly sweep — including the
+    /// **cross-reference** half, which resolves every field that names something declared elsewhere
+    /// (a `traits` entry, a `BoundedVar` bound, a `docs` key, a tier's `config`/`handler`, a derive's
+    /// handler, a backed enum's variant constants). Those all fail *silently* at runtime when the
+    /// name resolves to nothing, so assembly is where they are caught — and this is the assertion
+    /// that the shape std actually ships still assembles under them. The panicking `Registry::new`
+    /// runs on every real path; `try_new` is used here so a failure reports the message rather than
+    /// aborting the test binary.
+    #[test]
+    fn the_std_units_assemble() {
+        noeta_ext_abi::registry::Registry::try_new(std_units())
+            .expect("std's own extension units must pass the registry's assembly sweep");
     }
 
     #[test]

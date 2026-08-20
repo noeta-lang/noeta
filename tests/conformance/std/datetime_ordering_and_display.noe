@@ -1,0 +1,53 @@
+// **`Instant` and `Zoned` are `Comparable`; all three datetime types are `Display`.**
+//
+// The ordering was always there — `ExternValue::cmp_value` is a total order over the timestamp, and
+// the runtime reaches it for `<`, `.compare()`, `.sorted()` and `.min()`/`.max()` alike. What was
+// missing was the *declaration*, and `is_before`/`is_after` are the hand-written stand-ins that
+// existed because of it: they compare the same two timestamps `<` does. Both spellings stay, and
+// this pins that they agree.
+//
+// `Duration` deliberately stays unordered (a calendar span has no total order without a reference
+// date) — `datetime_duration_unordered.noe` is that half.
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "2024-07-11T01:34:00Z"
+// expect: stdout "true"
+// expect: stdout "2024-07-11T01:34:00Z"
+// expect: stdout "PT3H"
+// expect: exit 0
+use std.{datetime}
+
+fn smallest<T: Comparable>(xs: List<T>): ?T { return xs.min(); }
+fn largest<T: Comparable>(xs: List<T>): ?T { return xs.max(); }
+fn show<T: Display>(x: T): string { return x.to_string(); }
+
+t = datetime.from_unix_ms(1720661640000)  // 2024-07-11T01:34:00Z
+soon = t.add(datetime.hours(3))
+
+// `<` reaches the ordering the type already had, and agrees with the stand-in method.
+echo t < soon
+echo soon > t
+echo (t < soon) == t.is_before(soon)
+echo (t > soon) == t.is_after(soon)
+echo t.compare(soon) == Ordering.Less
+
+// The ordering reductions and `.sorted()` are the same relation.
+echo [soon, t].sorted().first() == some(t)
+echo smallest([soon, t]) == some(t)
+echo largest([soon, t]) == some(soon)
+
+// A `Zoned` orders by its timestamp, so the same doors open.
+echo t.in_zone("UTC") < soon.in_zone("UTC")
+
+// `Display`: `to_string()` is the text the value already rendered as.
+echo t.to_string()
+echo "${t}" == t.to_string()
+echo show(t)
+echo show(t.diff(soon))

@@ -3919,14 +3919,153 @@ pub fn install_default(provider: fn() -> Vec<&'static (dyn Extension + Sync)>) {
 /// D3). Mirrors `noeta_ast::reflect::SEMANTIC_VARIANTS` — `noeta-ext-abi` is dep-free of `noeta-ast`,
 /// so `validate`'s native `@role` check keeps its own copy to resolve a tag naming the
 /// built-in `Semantic` vocabulary (every variant fieldless, so a named one is valid iff it appears
-/// here). If the prelude list changes, update this mirror.
-const BUILTIN_SEMANTIC_VARIANTS: &[&str] = &[
+/// here). Pinned to its original by `semantic_variants_mirror_the_abi` in `noeta-ast`, the lowest
+/// crate that can see both sides — a mirror nothing compares drifts silently, and a drifted one
+/// refuses a legitimate `@role` tag at assembly or admits one that resolves to nothing.
+pub const BUILTIN_SEMANTIC_VARIANTS: &[&str] = &[
     "EntryPoint",
     "PersistenceBoundary",
     "TrustBoundary",
     "Sink",
     "Layer",
 ];
+
+/// The **built-in trait vocabulary** — every name a native declaration may put in its `traits` list
+/// ([`ExtType::traits`] / [`ExtEnum::traits`] / [`ExtFielded::traits`]) or in a
+/// [`SigType::BoundedVar`] bound and have answered as an *intrinsic* trait.
+///
+/// Mirrors `noeta_types::BUILTIN_TRAITS`, for the same reason [`BUILTIN_SEMANTIC_VARIANTS`] mirrors
+/// its prelude list: this crate sits **below** the type system (`noeta-ast` depends on it, and
+/// `noeta-types` depends on `noeta-ast`), so it cannot name the `BuiltinTrait` enum. Both mirrors are
+/// pinned to their originals by lockstep tests in the crates that can see both sides
+/// (`builtin_trait_names_mirror_the_type_system` in `noeta-check`, `semantic_variants_mirror_the_abi`
+/// in `noeta-ast`) — a mirror nothing compares is the defect this list exists to prevent, one level up.
+pub const BUILTIN_TRAIT_NAMES: &[&str] = &[
+    "Add",
+    "Sub",
+    "Mul",
+    "Div",
+    "Concat",
+    "Equatable",
+    "Comparable",
+    "Display",
+    "Error",
+    "From",
+    "Clone",
+    "Serialize",
+    "Deserialize",
+    "Index",
+    "Length",
+    "Iterable",
+    "Callable",
+    "Members",
+    "DynamicCall",
+    "TryAdd",
+    "Validate",
+];
+
+/// Whether `name` resolves to a trait the assembled `units` can answer for: a built-in
+/// ([`BUILTIN_TRAIT_NAMES`]) or a native [`ExtTrait`] declared by some unit, named by its **short**
+/// name or its **qualified** identity — exactly the two spellings `Checker::seed_ext_traits`'s
+/// `advertises` and `Checker::native_declares_builtin_trait` accept. A name that resolves to neither
+/// is dead data: both lookups drop it silently, so the type quietly holds no such trait.
+fn trait_name_resolves(units: &[&'static (dyn Extension + Sync)], name: &str) -> bool {
+    BUILTIN_TRAIT_NAMES.contains(&name)
+        || units
+            .iter()
+            .flat_map(|u| u.traits())
+            .any(|t| t.name == name || t.is_qualified(name))
+}
+
+/// The first [`SigType::BoundedVar`] bound in `sig` that names no trait, nested positions included
+/// (`List<BoundedVar>`, a closure parameter, an `Optional` tail) — the ABI twin of the checker's own
+/// bound-collection walk, so a bound buried under a wrapper is validated exactly like a top-level one.
+///
+/// Written as a **search** rather than a collection because it runs over every registered signature
+/// at process start: the happy path must not allocate, and the answer is a single name either way.
+fn first_unresolved_bound(
+    units: &[&'static (dyn Extension + Sync)],
+    sig: &SigType,
+) -> Option<&'static str> {
+    match sig {
+        SigType::BoundedVar(_, bounds) => bounds
+            .iter()
+            .copied()
+            .find(|b| !trait_name_resolves(units, b)),
+        SigType::List(t) | SigType::Option(t) | SigType::Future(t) | SigType::Optional(t) => {
+            first_unresolved_bound(units, t)
+        }
+        SigType::Map(k, v) | SigType::Result(k, v) => {
+            first_unresolved_bound(units, k).or_else(|| first_unresolved_bound(units, v))
+        }
+        SigType::Union(ts) | SigType::Generic(_, ts) => {
+            ts.iter().find_map(|t| first_unresolved_bound(units, t))
+        }
+        SigType::Fn(params, ret) => params
+            .iter()
+            .find_map(|p| first_unresolved_bound(units, p))
+            .or_else(|| first_unresolved_bound(units, ret)),
+        _ => None,
+    }
+}
+
+/// The first [`SigType::Assoc`] projection in `sig` naming none of `declared`, nested positions
+/// included — the `Assoc` twin of [`first_unresolved_bound`], so `List<Self::Wide>` is checked like a
+/// bare `Self::Wide`, and allocation-free for the same reason.
+fn first_unknown_assoc(declared: &[ExtAssocType], sig: &SigType) -> Option<&'static str> {
+    match sig {
+        SigType::Assoc(name) => (!declared.iter().any(|a| a.name == *name)).then_some(*name),
+        SigType::List(t) | SigType::Option(t) | SigType::Future(t) | SigType::Optional(t) => {
+            first_unknown_assoc(declared, t)
+        }
+        SigType::Map(k, v) | SigType::Result(k, v) => {
+            first_unknown_assoc(declared, k).or_else(|| first_unknown_assoc(declared, v))
+        }
+        SigType::Union(ts) | SigType::Generic(_, ts) => {
+            ts.iter().find_map(|t| first_unknown_assoc(declared, t))
+        }
+        SigType::Fn(params, ret) => params
+            .iter()
+            .find_map(|p| first_unknown_assoc(declared, p))
+            .or_else(|| first_unknown_assoc(declared, ret)),
+        _ => None,
+    }
+}
+
+/// The [`SigType`]s an [`ExtFn`] mentions — its parameters, then its declared return — as a borrowing
+/// iterator, so one walk covers a signature completely without materializing a list.
+/// [`RetTy::SameAsArg`] / [`RetTy::NumericPreserving`] name no type of their own; a
+/// [`RetTy::TypeArg`] carries its error type inside the wrapper.
+fn sig_types_of(f: &ExtFn) -> impl Iterator<Item = SigType> + '_ {
+    let ret = match f.ret {
+        RetTy::Concrete(s) => Some(s),
+        RetTy::TypeArg(TypeArgWrap::Result(e)) => Some(e),
+        RetTy::TypeArg(_) | RetTy::SameAsArg(_) | RetTy::NumericPreserving => None,
+    };
+    f.params.iter().copied().chain(ret)
+}
+
+/// Whether `path` names a registered module function — the `"module.func"` spelling an
+/// [`ExtTier::handler`] and an [`ExtDeriveMethod::handler`] both use. The module part is matched the
+/// way the resolvers match it: by the registered module name, or by its root-qualified path
+/// (`std.template`), across every assembled unit.
+fn native_fn_path_resolves(units: &[&'static (dyn Extension + Sync)], path: &str) -> bool {
+    let Some((module, func)) = path.rsplit_once('.') else {
+        return false;
+    };
+    units.iter().any(|u| {
+        u.modules().iter().any(|m| {
+            // `qualified_matches` rather than a built `"{root}.{name}"`: this runs once per module
+            // per lookup, and a `format!` there is an allocation per module at every process start.
+            (m.name == module || qualified_matches(u.root(), m.name, module))
+                && m.functions
+                    .iter()
+                    .chain(m.ctx_functions)
+                    .chain(m.typed_functions)
+                    .any(|f| f.name == func)
+        })
+    })
+}
 
 /// Assembly-time check for one native `@role` tag (Slice D3): its `enum_name` must resolve to a
 /// `@semantic` enum — the built-in `Semantic` prelude enum, or a native enum (across every unit)
@@ -4617,7 +4756,448 @@ fn validate(units: &[&'static (dyn Extension + Sync)]) -> Result<(), String> {
             }
         }
     }
+    validate_cross_references(units)?;
     Ok(())
+}
+
+/// The **stringly-typed cross-references** a declaration carries — every field whose value NAMES
+/// something declared elsewhere (a trait, a method, a member, an attribute, a module function, a
+/// tier). Each is resolved here, at assembly.
+///
+/// They share one failure mode, and it is the reason they are checked together rather than beside
+/// the machinery that reads them: **an unresolved name is silently absent.** Every consumer is a
+/// `filter_map`/`find` that yields `None` and moves on, so nothing reports it — the trait is simply
+/// not held, the doc simply not shown, the runner simply not found. `std.id.Uuid` shipped refused by
+/// `<` and `min`/`max` because its `traits` list was never filled in, and `traits: &["Comparbale"]`
+/// has exactly that shape: it compiles, registers nothing, and leaves the type unordered.
+///
+/// Assembly is the one point every path passes (CLI, composed shim, embed session, lazy default), so
+/// each check names the offending string, the declaration that carries it, and the unit.
+fn validate_cross_references(units: &[&'static (dyn Extension + Sync)]) -> Result<(), String> {
+    // Every loop below runs at PROCESS START, over every registered declaration — so the happy path
+    // allocates nothing. A name is formatted into a message only once one has already failed to
+    // resolve, which is why the owner of each signature is passed as its pieces rather than as a
+    // built `String`.
+    for unit in units {
+        // --- `traits`: the built-in / native trait a native declaration advertises ---
+        //
+        // It feeds `Checker::satisfies`, so an unresolved name is a type quietly missing `<`,
+        // `.sorted()`, `min`/`max` and every `T: Trait` bound it looks like it holds.
+        let advertisers = unit
+            .types()
+            .iter()
+            .map(|t| ("extern type", t.namespace, t.name, t.traits))
+            .chain(
+                unit.enums()
+                    .iter()
+                    .map(|e| ("enum", e.namespace, e.name, e.traits)),
+            )
+            .chain(unit.classes().iter().chain(unit.structs()).map(|f| {
+                let kind = match f.kind {
+                    FieldedKind::Class => "class",
+                    FieldedKind::Struct => "struct",
+                };
+                (kind, f.namespace, f.name, f.traits)
+            }));
+        for (kind, namespace, name, traits) in advertisers {
+            for declared in traits {
+                if !trait_name_resolves(units, declared) {
+                    return Err(format!(
+                        "native {kind} `{namespace}.{name}` of unit `{}` declares trait \
+                         `{declared}`, which is neither a built-in trait nor a registered native \
+                         trait — an unresolved name is dropped silently, leaving the type \
+                         advertising a trait it does not hold",
+                        unit.name()
+                    ));
+                }
+            }
+        }
+        // --- signatures: `BoundedVar` trait bounds and `param_names` arity ---
+        //
+        // Plain nested loops over a shared per-signature check, rather than one chained iterator:
+        // this visits EVERY registered signature at every process start, and the iterator
+        // machinery for a five-way `chain` of `flat_map`s was itself the larger half of what the
+        // sweep cost. `owner` travels as its pieces so the label is built only on the error path.
+        for m in unit.modules() {
+            for f in m
+                .functions
+                .iter()
+                .chain(m.ctx_functions)
+                .chain(m.typed_functions)
+            {
+                check_signature(units, f, ("module", m.name, ""), unit.name())?;
+            }
+        }
+        for t in unit.types() {
+            for f in t.methods.iter().chain(t.ctx_methods).chain(t.typed_methods) {
+                check_signature(units, f, ("type", t.namespace, t.name), unit.name())?;
+            }
+        }
+        for e in unit.enums() {
+            for f in e.methods {
+                check_signature(units, f, ("enum", e.namespace, e.name), unit.name())?;
+            }
+        }
+        for c in unit.classes().iter().chain(unit.structs()) {
+            for f in c.methods {
+                check_signature(units, f, ("type", c.namespace, c.name), unit.name())?;
+            }
+        }
+        for tr in unit.traits() {
+            for m in tr.methods {
+                check_signature(units, &m.sig, ("trait", tr.namespace, tr.name), unit.name())?;
+            }
+        }
+        // A trait method's `Self::Name` must name one of the trait's own `assoc_types` — the table
+        // `seed_ext_traits` folds each derivation into. An unknown projection resolves to a gradual
+        // hole, so the method's declared result type is silently `dyn`.
+        for tr in unit.traits() {
+            for m in tr.methods {
+                if let Some(assoc) =
+                    sig_types_of(&m.sig).find_map(|sig| first_unknown_assoc(tr.assoc_types, &sig))
+                {
+                    return Err(format!(
+                        "method `{}` of native trait `{}.{}` (unit `{}`) names `Self::{assoc}`, \
+                         which is not one of the trait's associated types — an unresolved \
+                         projection degrades to `dyn`, so the declared result type is lost",
+                        m.sig.name,
+                        tr.namespace,
+                        tr.name,
+                        unit.name()
+                    ));
+                }
+            }
+        }
+        // --- `docs`: per-member prose keyed by member NAME ---
+        //
+        // A key matching no member renders nothing at all — the signature shows bare, exactly as an
+        // undocumented one does, so the prose is written, shipped, and never seen. `docs` is opt-in
+        // and empty for nearly every declaration, so each arm checks that first and the membership
+        // test streams the member names rather than collecting them.
+        for m in unit.modules() {
+            for (key, _) in m.docs {
+                if !m
+                    .functions
+                    .iter()
+                    .chain(m.ctx_functions)
+                    .chain(m.typed_functions)
+                    .any(|f| f.name == *key)
+                {
+                    return Err(undocumentable(
+                        &format!("module `{}`", m.name),
+                        key,
+                        unit.name(),
+                    ));
+                }
+            }
+        }
+        for t in unit.types() {
+            for (key, _) in t.docs {
+                if !t
+                    .methods
+                    .iter()
+                    .chain(t.ctx_methods)
+                    .chain(t.typed_methods)
+                    .any(|f| f.name == *key)
+                {
+                    return Err(undocumentable(
+                        &format!("extern type `{}.{}`", t.namespace, t.name),
+                        key,
+                        unit.name(),
+                    ));
+                }
+            }
+        }
+        for e in unit.enums() {
+            for (key, _) in e.docs {
+                if !e.variants.iter().any(|v| v.name == *key)
+                    && !e.methods.iter().any(|f| f.name == *key)
+                {
+                    return Err(undocumentable(
+                        &format!("enum `{}.{}`", e.namespace, e.name),
+                        key,
+                        unit.name(),
+                    ));
+                }
+            }
+        }
+        for c in unit.classes().iter().chain(unit.structs()) {
+            for (key, _) in c.docs {
+                if !c.fields.iter().any(|f| f.name == *key)
+                    && !c.methods.iter().any(|f| f.name == *key)
+                {
+                    return Err(undocumentable(
+                        &format!("type `{}.{}`", c.namespace, c.name),
+                        key,
+                        unit.name(),
+                    ));
+                }
+            }
+        }
+        for tr in unit.traits() {
+            for (key, _) in tr.docs {
+                if !tr.methods.iter().any(|m| m.sig.name == *key) {
+                    return Err(undocumentable(
+                        &format!("trait `{}.{}`", tr.namespace, tr.name),
+                        key,
+                        unit.name(),
+                    ));
+                }
+            }
+        }
+        // --- a backed enum's variant constants must match its declared backing ---
+        //
+        // `.value()`'s static type comes from `backing` and its runtime value from the variant, so a
+        // mismatch types as `string` and yields an `int` (or has no value to yield at all).
+        for e in unit.enums() {
+            for v in e.variants {
+                let ok = match (e.backing, v.value) {
+                    // A plain/algebraic enum has no `.value()` at all, so no variant may carry one.
+                    (EnumBacking::None, VariantValue::None) => true,
+                    // A backed variant is fieldless and carries a constant of the backing's kind.
+                    (EnumBacking::Str, VariantValue::Str(_))
+                    | (EnumBacking::Int, VariantValue::Int(_)) => v.fields.is_empty(),
+                    _ => false,
+                };
+                if !ok {
+                    return Err(format!(
+                        "variant `{}` of native enum `{}.{}` (unit `{}`) declares a {} value, but \
+                         the enum declares `backing: {:?}` — `.value()` is typed from the backing \
+                         and produced from the variant, so every variant of a backed enum carries a \
+                         fieldless constant of that kind and a non-backed enum's carries none",
+                        v.name,
+                        e.namespace,
+                        e.name,
+                        unit.name(),
+                        match v.value {
+                            VariantValue::None => "missing",
+                            VariantValue::Str(_) => "string",
+                            VariantValue::Int(_) => "int",
+                        },
+                        e.backing
+                    ));
+                }
+            }
+        }
+        // --- an attribute field's default must be of the field's own type ---
+        for a in unit.attributes() {
+            for f in a.fields {
+                let ok = matches!(
+                    (f.ty, f.default),
+                    (_, None)
+                        | (AttrFieldType::Dyn, _)
+                        | (AttrFieldType::Int, Some(AttrFieldDefault::Int(_)))
+                        | (AttrFieldType::Str, Some(AttrFieldDefault::Str(_)))
+                );
+                if !ok {
+                    return Err(format!(
+                        "field `{}` of native attribute `{}.{}` (unit `{}`) declares a default of a \
+                         different type than the field — the default is materialized straight into \
+                         the attribute value",
+                        f.name,
+                        a.namespace,
+                        a.name,
+                        unit.name()
+                    ));
+                }
+            }
+        }
+        // --- a tier's `config` knob attribute and its expression `handler` ---
+        for t in unit.tiers() {
+            // `config` names the knob attribute a `@<tier>(args)` block stamps. The program-side
+            // twin (`@tier(…, config: T)`) is already E0051 when it names no `@attribute` struct;
+            // the native side had no such check, and a name matching nothing stamps an attribute
+            // that resolves to nothing at the USER's call site.
+            if let Some(config) = t.config
+                && !units
+                    .iter()
+                    .flat_map(|u| u.attributes())
+                    .any(|a| a.name == config || qualified_matches(a.namespace, a.name, config))
+            {
+                return Err(format!(
+                    "tier `{}` of unit `{}` declares `config: {config}`, which is not a registered \
+                     native attribute — a tier's knobs are an attribute's fields",
+                    t.name,
+                    unit.name()
+                ));
+            }
+            // An expression tier's blocks desugar to a call of `handler`. Without one the desugar
+            // has no callee and the block lowers to a `panic`, so the tier is dead on arrival.
+            match (t.expr, t.handler) {
+                (Some(_), None) => {
+                    return Err(format!(
+                        "tier `{}` of unit `{}` declares `expr:` without a `handler:` — an \
+                         expression tier's blocks desugar to a call of its handler, so one without \
+                         a handler has no value to produce",
+                        t.name,
+                        unit.name()
+                    ));
+                }
+                (None, Some(handler)) => {
+                    return Err(format!(
+                        "tier `{}` of unit `{}` declares `handler: {handler}` without an `expr:` — \
+                         only an expression tier's blocks desugar to a handler call",
+                        t.name,
+                        unit.name()
+                    ));
+                }
+                _ => {}
+            }
+            if let Some(handler) = t.handler
+                && !native_fn_path_resolves(units, handler)
+            {
+                return Err(format!(
+                    "tier `{}` of unit `{}` declares `handler: {handler}`, which is not a \
+                     registered `module.func` — its `@{} {{ … }}` blocks would desugar to a call \
+                     that resolves to nothing",
+                    t.name,
+                    unit.name(),
+                    t.name
+                ));
+            }
+            // `config` and `expr` are mutually exclusive (the program side is E0051): an expression
+            // tier's block is a value and decorates no fn, so there is nothing to stamp knobs onto.
+            if t.config.is_some() && t.expr.is_some() {
+                return Err(format!(
+                    "tier `{}` of unit `{}` declares both `config:` and `expr:` — an expression \
+                     tier's block is a value and decorates no declaration, so it has no knobs",
+                    t.name,
+                    unit.name()
+                ));
+            }
+        }
+        // --- a tier runner's `tier`, and a derive method's `handler` ---
+        //
+        // A runner is matched to its declaration by NAME under the unit's root (std's runners live
+        // in the CLI layer, the declarations in the stdlib), so the resolution is root-scoped. A
+        // runner whose name matches nothing is never found: `noeta <tier>` reports no runner for a
+        // tier that plainly exists.
+        for r in unit.tier_runners() {
+            let root = unit.root();
+            if !units
+                .iter()
+                .filter(|u| u.root() == root)
+                .flat_map(|u| u.tiers())
+                .any(|t| t.name == r.tier)
+            {
+                return Err(format!(
+                    "tier runner `{}` of unit `{}` names no tier declared under root `{root}` — a \
+                     runner is matched to its declaration by name within its own root",
+                    r.tier,
+                    unit.name()
+                ));
+            }
+        }
+        // A derive recipe synthesizes `fn <name>(…) { return <handler>(self, …) }`, and the
+        // handler's own registered signature is the typing authority at that call — so an
+        // unregistered handler makes every `@derive(<Name>)` synthesize a call to nothing.
+        for d in unit.derives() {
+            for m in d.methods {
+                if !native_fn_path_resolves(units, m.handler) {
+                    return Err(format!(
+                        "derive `{}` of unit `{}` forwards `{}` to handler `{}`, which is not a \
+                         registered `module.func`",
+                        d.name,
+                        unit.name(),
+                        m.name,
+                        m.handler
+                    ));
+                }
+            }
+        }
+    }
+    // Two more first-wins registration axes the uniqueness sweep above did not cover. A duplicate
+    // derive or directive name silently shadows: the second declaration is unreachable, and which
+    // one wins depends on unit order.
+    let dup = |mut names: Vec<(&str, &str)>| -> Option<(String, String, String)> {
+        names.sort_unstable();
+        names
+            .windows(2)
+            .find(|w| w[0].0 == w[1].0)
+            .map(|w| (w[0].0.to_string(), w[0].1.to_string(), w[1].1.to_string()))
+    };
+    for (axis, names) in [
+        (
+            "derive",
+            units
+                .iter()
+                .flat_map(|e| e.derives().iter().map(|d| (d.name, e.name())))
+                .collect::<Vec<_>>(),
+        ),
+        (
+            "directive",
+            units
+                .iter()
+                .flat_map(|e| e.directives().iter().map(|d| (d.name, e.name())))
+                .collect::<Vec<_>>(),
+        ),
+    ] {
+        if let Some((name, a, b)) = dup(names) {
+            return Err(format!(
+                "duplicate {axis} `{name}` in the assembled registry (units `{a}` and `{b}`)"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The two per-signature rules — a [`SigType::BoundedVar`]'s trait bounds must resolve, and
+/// `param_names` must be positionally parallel to `params`. Split out so the sweep's five kinds share
+/// one body, and kept allocation-free: it runs over every registered signature at process start, and
+/// the message is built only once something has already failed.
+fn check_signature(
+    units: &[&'static (dyn Extension + Sync)],
+    f: &ExtFn,
+    owner: (&str, &str, &str),
+    unit: &str,
+) -> Result<(), String> {
+    // A `BoundedVar`'s bounds are the SAME trait-name space as `traits`, resolved the same way
+    // (`collect_var_bounds` → `BuiltinTrait::from_name` in the checker) and dropped just as
+    // silently: an unresolved bound is a parameter that accepts anything, where the declaration
+    // says E0025.
+    if let Some(bound) = sig_types_of(f).find_map(|sig| first_unresolved_bound(units, &sig)) {
+        return Err(format!(
+            "`{}` of {} declares a type-variable bound `{bound}`, which is neither a built-in trait \
+             nor a registered native trait — an unresolved bound is dropped, so the parameter \
+             accepts any type",
+            f.name,
+            owner_label(owner, unit)
+        ));
+    }
+    // `param_names` is positionally parallel to `params`: name every parameter or none. A short
+    // list silently unnames the tail (a `name:` label there is refused as unbound).
+    if !f.param_names.is_empty() && f.param_names.len() != f.params.len() {
+        return Err(format!(
+            "`{}` of {} declares {} parameter name(s) for {} parameter(s) — `param_names` is \
+             positionally parallel to `params`: name every parameter or none",
+            f.name,
+            owner_label(owner, unit),
+            f.param_names.len(),
+            f.params.len()
+        ));
+    }
+    Ok(())
+}
+
+/// Render a signature owner for a diagnostic — `module `math``, `type `std.id.Uuid`` — built ONLY on
+/// the error path. The pieces travel as a tuple through the sweep because building this string per
+/// signature, for every registered signature, at every process start, is measurable in the startup
+/// instruction count.
+fn owner_label((kind, namespace, name): (&str, &str, &str), unit: &str) -> String {
+    if name.is_empty() {
+        format!("{kind} `{namespace}` (unit `{unit}`)")
+    } else {
+        format!("{kind} `{namespace}.{name}` (unit `{unit}`)")
+    }
+}
+
+/// The shared "a docs key matches no member" message — one spelling for the five kinds that carry a
+/// `docs` table, built only when a key has already failed to match.
+fn undocumentable(owner: &str, key: &str, unit: &str) -> String {
+    format!(
+        "{owner} of unit `{unit}` documents `{key}`, which is not one of its members — a docs key \
+         matching no member renders nothing at all"
+    )
 }
 
 /// Enforce the documented [`SigType::Optional`] convention — "once a parameter is `Optional`,
@@ -6180,6 +6760,700 @@ mod runtime_registry_tests {
         assert!(
             caught.is_err(),
             "a broken key_capable contract must panic in debug"
+        );
+    }
+
+    // --- stringly-typed cross-references (the census) ---
+    //
+    // Each field below NAMES something declared elsewhere, and each fails the same way when the
+    // name resolves to nothing: silently. The consumer is a `filter_map`/`find` that yields `None`
+    // and moves on, so the trait is simply not held, the doc simply not shown, the runner simply
+    // not found. `std.id.Uuid` shipped refused by `<` and `min`/`max` because its `traits` list was
+    // empty; `traits: &["Comparbale"]` has the same shape and is worse, because it *looks* right.
+
+    /// A unit that can carry one of everything, so a cross-reference test names only the field it
+    /// is about. Rooted `x`; every hook defaults to empty.
+    #[derive(Default)]
+    struct XUnit {
+        modules: &'static [ExtModule],
+        types: &'static [ExtType],
+        enums: &'static [ExtEnum],
+        classes: &'static [ExtClass],
+        structs: &'static [ExtStruct],
+        traits: &'static [ExtTrait],
+        tiers: &'static [ExtTier],
+        tier_runners: &'static [ExtTierRunner],
+        attributes: &'static [ExtAttribute],
+        derives: &'static [ExtDerive],
+        name: &'static str,
+        root: &'static str,
+    }
+
+    impl XUnit {
+        const fn new() -> XUnit {
+            XUnit {
+                modules: &[],
+                types: &[],
+                enums: &[],
+                classes: &[],
+                structs: &[],
+                traits: &[],
+                tiers: &[],
+                tier_runners: &[],
+                attributes: &[],
+                derives: &[],
+                name: "x.core",
+                root: "x",
+            }
+        }
+    }
+
+    impl Extension for XUnit {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+        fn root(&self) -> &'static str {
+            self.root
+        }
+        fn modules(&self) -> &'static [ExtModule] {
+            self.modules
+        }
+        fn types(&self) -> &'static [ExtType] {
+            self.types
+        }
+        fn enums(&self) -> &'static [ExtEnum] {
+            self.enums
+        }
+        fn classes(&self) -> &'static [ExtClass] {
+            self.classes
+        }
+        fn structs(&self) -> &'static [ExtStruct] {
+            self.structs
+        }
+        fn traits(&self) -> &'static [ExtTrait] {
+            self.traits
+        }
+        fn tiers(&self) -> &'static [ExtTier] {
+            self.tiers
+        }
+        fn tier_runners(&self) -> &'static [ExtTierRunner] {
+            self.tier_runners
+        }
+        fn attributes(&self) -> &'static [ExtAttribute] {
+            self.attributes
+        }
+        fn derives(&self) -> &'static [ExtDerive] {
+            self.derives
+        }
+    }
+
+    /// A native trait an `x`-rooted declaration may advertise.
+    const X_WIDGET: ExtTrait = ExtTrait {
+        name: "Widget",
+        namespace: "x",
+        ..ExtTrait::DEFAULTS
+    };
+
+    #[test]
+    fn a_type_advertising_an_unknown_trait_is_rejected() {
+        // The typo case, and the whole reason this check exists: `Comparbale` compiles, resolves to
+        // no `BuiltinTrait` and no `ExtTrait`, is dropped by the checker's `filter_map`, and leaves
+        // the type quietly unordered — refused by `<`, `min`/`max` and every `T: Comparable` bound
+        // while its declaration says otherwise.
+        const TYPO: ExtType = ExtType {
+            name: "Uuidish",
+            namespace: "x",
+            traits: &["Comparbale"],
+            ..ExtType::DEFAULTS
+        };
+        static U: XUnit = XUnit {
+            types: &[TYPO],
+            ..XUnit::new()
+        };
+        let err = validate(&[&U]).expect_err("a misspelled trait name must refuse to assemble");
+        assert!(
+            err.contains("Comparbale") && err.contains("x.Uuidish") && err.contains("x.core"),
+            "the message must name the offending string, the type and the unit: {err}"
+        );
+    }
+
+    #[test]
+    fn an_enum_and_a_fielded_type_advertising_an_unknown_trait_are_rejected_too() {
+        // Every kind carries the same field and the same silent drop, so every kind is checked.
+        const BAD_ENUM: ExtEnum = ExtEnum {
+            name: "Mode",
+            namespace: "x",
+            variants: &[ExtVariant {
+                name: "A",
+                fields: &[],
+                value: VariantValue::None,
+            }],
+            traits: &["Displya"],
+            ..ExtEnum::DEFAULTS
+        };
+        static E: XUnit = XUnit {
+            enums: &[BAD_ENUM],
+            ..XUnit::new()
+        };
+        let err = validate(&[&E]).expect_err("a native enum's traits are checked");
+        assert!(err.contains("Displya") && err.contains("x.Mode"), "{err}");
+
+        const BAD_CLASS: ExtClass = ExtClass {
+            name: "Handle",
+            namespace: "x",
+            traits: &["Erorr"],
+            ..ExtClass::DEFAULTS
+        };
+        static C: XUnit = XUnit {
+            classes: &[BAD_CLASS],
+            ..XUnit::new()
+        };
+        let err = validate(&[&C]).expect_err("a native class's traits are checked");
+        assert!(err.contains("Erorr") && err.contains("x.Handle"), "{err}");
+
+        const BAD_STRUCT: ExtStruct = ExtStruct {
+            name: "Point",
+            namespace: "x",
+            traits: &["Equtable"],
+            ..ExtStruct::STRUCT_DEFAULTS
+        };
+        static S: XUnit = XUnit {
+            structs: &[BAD_STRUCT],
+            ..XUnit::new()
+        };
+        let err = validate(&[&S]).expect_err("a native struct's traits are checked");
+        assert!(err.contains("Equtable") && err.contains("x.Point"), "{err}");
+    }
+
+    #[test]
+    fn the_trait_spellings_the_stdlib_declares_still_assemble() {
+        // The three live shapes: a built-in name, several built-in names, and a native `ExtTrait`
+        // by short name and by qualified identity (both spellings `seed_ext_traits` accepts).
+        const COMPARABLE: ExtType = ExtType {
+            name: "Uuidish",
+            namespace: "x",
+            traits: &["Comparable"],
+            ..ExtType::DEFAULTS
+        };
+        const ERROR_DISPLAY: ExtType = ExtType {
+            name: "Errorish",
+            namespace: "x",
+            traits: &["Error", "Display"],
+            ..ExtType::DEFAULTS
+        };
+        const SHORT: ExtType = ExtType {
+            name: "Buttonish",
+            namespace: "x",
+            traits: &["Widget"],
+            ..ExtType::DEFAULTS
+        };
+        const QUALIFIED: ExtType = ExtType {
+            name: "Sliderish",
+            namespace: "x",
+            traits: &["x.Widget"],
+            ..ExtType::DEFAULTS
+        };
+        static U: XUnit = XUnit {
+            types: &[COMPARABLE, ERROR_DISPLAY, SHORT, QUALIFIED],
+            traits: &[X_WIDGET],
+            ..XUnit::new()
+        };
+        validate(&[&U]).expect("the trait shapes the stdlib actually declares must assemble");
+    }
+
+    #[test]
+    fn a_type_variable_bound_naming_no_trait_is_rejected() {
+        // A `BoundedVar`'s bounds are the same name space as `traits`, resolved the same way and
+        // dropped just as silently: an unresolved bound leaves the parameter accepting any type
+        // where the declaration promises E0025. Nested inside a `List` to prove the walk recurses.
+        const M: ExtModule = ExtModule {
+            name: "sync",
+            functions: &[ExtFn {
+                param_names: &["items"],
+                name: "publish",
+                params: &[SigType::List(&SigType::BoundedVar(0, &["Megreable"]))],
+                ..ExtFn::DEFAULTS
+            }],
+            ..ExtModule::DEFAULTS
+        };
+        static U: XUnit = XUnit {
+            modules: &[M],
+            ..XUnit::new()
+        };
+        let err = validate(&[&U])
+            .expect_err("a type-variable bound naming no trait must refuse to assemble");
+        assert!(
+            err.contains("Megreable") && err.contains("publish"),
+            "{err}"
+        );
+
+        // The same signature over a real native trait assembles.
+        const OK: ExtModule = ExtModule {
+            name: "sync",
+            functions: &[ExtFn {
+                param_names: &["items"],
+                name: "publish",
+                params: &[SigType::List(&SigType::BoundedVar(0, &["Widget"]))],
+                ..ExtFn::DEFAULTS
+            }],
+            ..ExtModule::DEFAULTS
+        };
+        static OK_U: XUnit = XUnit {
+            modules: &[OK],
+            traits: &[X_WIDGET],
+            ..XUnit::new()
+        };
+        validate(&[&OK_U]).expect("a bound naming a registered trait assembles");
+    }
+
+    #[test]
+    fn a_docs_key_naming_no_member_is_rejected() {
+        // Prose under a key nothing matches renders exactly like no prose at all, so the doc is
+        // written, shipped, and never seen.
+        const M: ExtModule = ExtModule {
+            name: "math",
+            functions: &[ExtFn {
+                param_names: &["x"],
+                name: "abs",
+                params: &[SigType::Int],
+                ..ExtFn::DEFAULTS
+            }],
+            docs: &[("asb", "absolute value")],
+            ..ExtModule::DEFAULTS
+        };
+        static U: XUnit = XUnit {
+            modules: &[M],
+            ..XUnit::new()
+        };
+        let err =
+            validate(&[&U]).expect_err("a docs key matching no member must refuse to assemble");
+        assert!(err.contains("asb") && err.contains("math"), "{err}");
+
+        // An enum's one table legitimately covers both variants and methods.
+        const E: ExtEnum = ExtEnum {
+            name: "Mode",
+            namespace: "x",
+            variants: &[ExtVariant {
+                name: "Fast",
+                fields: &[],
+                value: VariantValue::None,
+            }],
+            docs: &[("Fast", "the quick one")],
+            ..ExtEnum::DEFAULTS
+        };
+        static OK_U: XUnit = XUnit {
+            enums: &[E],
+            ..XUnit::new()
+        };
+        validate(&[&OK_U]).expect("a docs key naming a variant assembles");
+    }
+
+    #[test]
+    fn a_partially_named_parameter_list_is_rejected() {
+        // `param_names` is positionally parallel to `params`: a short list silently unnames the
+        // tail, and a `name:` label there is then refused as unbound at the CALLER's site.
+        const M: ExtModule = ExtModule {
+            name: "text",
+            functions: &[ExtFn {
+                param_names: &["sep"],
+                name: "split",
+                params: &[SigType::String, SigType::Int],
+                ..ExtFn::DEFAULTS
+            }],
+            ..ExtModule::DEFAULTS
+        };
+        static U: XUnit = XUnit {
+            modules: &[M],
+            ..XUnit::new()
+        };
+        let err =
+            validate(&[&U]).expect_err("a partially-named parameter list must refuse to assemble");
+        assert!(
+            err.contains("split") && err.contains("param_names"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_trait_method_projecting_an_undeclared_associated_type_is_rejected() {
+        // `Self::Wide` on a trait that declares no `Wide` resolves to a gradual hole, so the
+        // method's declared result type silently becomes `dyn`.
+        const T: ExtTrait = ExtTrait {
+            name: "Kernels",
+            namespace: "x",
+            methods: &[ExtTraitMethod {
+                sig: ExtFn {
+                    param_names: &["other"],
+                    name: "dot",
+                    params: &[SigType::SelfTy],
+                    ret: RetTy::Concrete(SigType::Assoc("Wide")),
+                },
+                ..ExtTraitMethod::DEFAULTS
+            }],
+            ..ExtTrait::DEFAULTS
+        };
+        static U: XUnit = XUnit {
+            traits: &[T],
+            ..XUnit::new()
+        };
+        let err = validate(&[&U])
+            .expect_err("a `Self::Name` naming no associated type must refuse to assemble");
+        assert!(
+            err.contains("Self::Wide") && err.contains("x.Kernels"),
+            "{err}"
+        );
+
+        const OK: ExtTrait = ExtTrait {
+            assoc_types: &[ExtAssocType {
+                name: "Wide",
+                derivation: AssocDerivation::Widen,
+            }],
+            ..T
+        };
+        static OK_U: XUnit = XUnit {
+            traits: &[OK],
+            ..XUnit::new()
+        };
+        validate(&[&OK_U]).expect("the `vec.Kernels` shape must still assemble");
+    }
+
+    #[test]
+    fn a_backed_enums_variant_constants_must_match_its_backing() {
+        // `.value()`'s static type comes from `backing` and its value from the variant, so a
+        // mismatch types as `string` and yields an `int` — or has nothing to yield at all.
+        const MISSING: ExtEnum = ExtEnum {
+            name: "SameSite",
+            namespace: "x",
+            backing: EnumBacking::Str,
+            variants: &[ExtVariant {
+                name: "Lax",
+                fields: &[],
+                value: VariantValue::None,
+            }],
+            ..ExtEnum::DEFAULTS
+        };
+        static M: XUnit = XUnit {
+            enums: &[MISSING],
+            ..XUnit::new()
+        };
+        let err = validate(&[&M])
+            .expect_err("a backed enum's variant with no constant must refuse to assemble");
+        assert!(err.contains("Lax") && err.contains("backing"), "{err}");
+
+        const WRONG_KIND: ExtEnum = ExtEnum {
+            variants: &[ExtVariant {
+                name: "Lax",
+                fields: &[],
+                value: VariantValue::Int(1),
+            }],
+            ..MISSING
+        };
+        static W: XUnit = XUnit {
+            enums: &[WRONG_KIND],
+            ..XUnit::new()
+        };
+        assert!(
+            validate(&[&W]).is_err(),
+            "an int constant under a string backing must refuse to assemble"
+        );
+
+        const OK: ExtEnum = ExtEnum {
+            variants: &[ExtVariant {
+                name: "Lax",
+                fields: &[],
+                value: VariantValue::Str("lax"),
+            }],
+            ..MISSING
+        };
+        static O: XUnit = XUnit {
+            enums: &[OK],
+            ..XUnit::new()
+        };
+        validate(&[&O]).expect("the `SameSite` shape must still assemble");
+    }
+
+    #[test]
+    fn a_tier_naming_no_knob_attribute_is_rejected() {
+        // The program-side twin (`@tier(…, config: T)`) is already E0051 when it names no
+        // `@attribute` struct. The native side had no such check, so a typo stamped an attribute
+        // that resolved to nothing — at the USER's call site, on a line they never wrote.
+        const T: ExtTier = ExtTier {
+            name: "bench",
+            sites: &[TierSite::Function],
+            config: Some("x.bench.Bnech"),
+            text: None,
+            expr: None,
+            handler: None,
+        };
+        static U: XUnit = XUnit {
+            tiers: &[T],
+            ..XUnit::new()
+        };
+        let err = validate(&[&U])
+            .expect_err("a tier whose `config:` names no attribute must refuse to assemble");
+        assert!(err.contains("Bnech") && err.contains("bench"), "{err}");
+
+        const OK_ATTR: ExtAttribute = ExtAttribute {
+            name: "Bench",
+            namespace: "x.bench",
+            fields: &[],
+            targets: &[],
+        };
+        const OK_T: ExtTier = ExtTier {
+            config: Some("x.bench.Bench"),
+            ..T
+        };
+        static OK_U: XUnit = XUnit {
+            tiers: &[OK_T],
+            attributes: &[OK_ATTR],
+            ..XUnit::new()
+        };
+        validate(&[&OK_U]).expect("the `@bench` shape std declares must still assemble");
+    }
+
+    #[test]
+    fn an_expression_tiers_handler_must_exist_and_be_registered() {
+        // An expr tier's `@name { … }` block desugars to a call of its handler. Without one the
+        // desugar has no callee and the block lowers to a `panic` — the tier is dead on arrival.
+        const NO_HANDLER: ExtTier = ExtTier {
+            name: "json",
+            sites: &[],
+            config: None,
+            text: Some("json"),
+            expr: Some("string"),
+            handler: None,
+        };
+        static A: XUnit = XUnit {
+            tiers: &[NO_HANDLER],
+            ..XUnit::new()
+        };
+        assert!(
+            validate(&[&A]).is_err(),
+            "an expression tier with no handler must refuse to assemble"
+        );
+
+        const UNKNOWN: ExtTier = ExtTier {
+            handler: Some("x.template.rendre"),
+            ..NO_HANDLER
+        };
+        const TEMPLATE: ExtModule = ExtModule {
+            name: "template",
+            functions: &[ExtFn {
+                param_names: &["statics", "holes"],
+                name: "render",
+                params: &[
+                    SigType::List(&SigType::String),
+                    SigType::List(&SigType::Dyn),
+                ],
+                ret: RetTy::Concrete(SigType::String),
+            }],
+            ..ExtModule::DEFAULTS
+        };
+        static B: XUnit = XUnit {
+            tiers: &[UNKNOWN],
+            modules: &[TEMPLATE],
+            ..XUnit::new()
+        };
+        let err = validate(&[&B])
+            .expect_err("a handler naming no registered module function must refuse to assemble");
+        assert!(err.contains("x.template.rendre"), "{err}");
+
+        const OK_T: ExtTier = ExtTier {
+            handler: Some("x.template.render"),
+            ..NO_HANDLER
+        };
+        static C: XUnit = XUnit {
+            tiers: &[OK_T],
+            modules: &[TEMPLATE],
+            ..XUnit::new()
+        };
+        validate(&[&C]).expect("the `@json` shape std declares must still assemble");
+    }
+
+    #[test]
+    fn a_tier_runner_naming_no_tier_under_its_root_is_rejected() {
+        // A runner is matched to its declaration by name **within its own root** — std's runners
+        // live in the CLI layer and the declarations in the stdlib, two units sharing root `std`.
+        // A runner whose name matches nothing is simply never found: `noeta <tier>` reports no
+        // runner for a tier that plainly exists.
+        fn run(_: &mut dyn crate::CommandCtx, _: &TierRun<'_>) -> u8 {
+            0
+        }
+        const DECL: ExtTier = ExtTier {
+            name: "audit",
+            sites: &[TierSite::Function],
+            config: None,
+            text: None,
+            expr: None,
+            handler: None,
+        };
+        static DECLARER: XUnit = XUnit {
+            name: "x.core",
+            tiers: &[DECL],
+            ..XUnit::new()
+        };
+        static TYPO_RUNNER: XUnit = XUnit {
+            name: "x.runners",
+            tier_runners: &[ExtTierRunner { tier: "audti", run }],
+            ..XUnit::new()
+        };
+        let err = validate(&[&DECLARER, &TYPO_RUNNER])
+            .expect_err("a runner naming no tier under its root must refuse to assemble");
+        assert!(err.contains("audti") && err.contains("x.runners"), "{err}");
+
+        static OK_RUNNER: XUnit = XUnit {
+            name: "x.runners",
+            tier_runners: &[ExtTierRunner { tier: "audit", run }],
+            ..XUnit::new()
+        };
+        validate(&[&DECLARER, &OK_RUNNER])
+            .expect("a runner attaching across units of one root is the std shape");
+
+        // A same-named tier under a DIFFERENT root does not satisfy it — that is the resolution
+        // `find_tier_runner_scoped` performs, and a cross-root match would attach the wrong runner.
+        static OTHER_ROOT: XUnit = XUnit {
+            name: "y.core",
+            root: "y",
+            tiers: &[DECL],
+            ..XUnit::new()
+        };
+        assert!(
+            validate(&[&OTHER_ROOT, &OK_RUNNER]).is_err(),
+            "a tier of another root does not satisfy a runner's name"
+        );
+    }
+
+    #[test]
+    fn a_derive_forwarding_to_an_unregistered_handler_is_rejected() {
+        // A derive recipe synthesizes `fn m(…) { return <handler>(self, …) }` and the handler's own
+        // registered signature is the typing authority at that call — so an unregistered handler
+        // makes every `@derive(Name)` synthesize a call to nothing.
+        const D: ExtDerive = ExtDerive {
+            name: "Jsonish",
+            methods: &[ExtDeriveMethod {
+                name: "to_json",
+                arity: 0,
+                handler: "x.json.stringifi",
+            }],
+            validate: None,
+        };
+        const JSON: ExtModule = ExtModule {
+            name: "json",
+            functions: &[ExtFn {
+                param_names: &["value"],
+                name: "stringify",
+                params: &[SigType::Dyn],
+                ret: RetTy::Concrete(SigType::String),
+            }],
+            ..ExtModule::DEFAULTS
+        };
+        static U: XUnit = XUnit {
+            derives: &[D],
+            modules: &[JSON],
+            ..XUnit::new()
+        };
+        let err = validate(&[&U])
+            .expect_err("a derive handler naming no registered function must refuse to assemble");
+        assert!(
+            err.contains("x.json.stringifi") && err.contains("Jsonish"),
+            "{err}"
+        );
+
+        const OK_D: ExtDerive = ExtDerive {
+            methods: &[ExtDeriveMethod {
+                name: "to_json",
+                arity: 0,
+                handler: "x.json.stringify",
+            }],
+            ..D
+        };
+        static OK_U: XUnit = XUnit {
+            derives: &[OK_D],
+            modules: &[JSON],
+            ..XUnit::new()
+        };
+        validate(&[&OK_U]).expect("the shape std's `@derive` recipes declare must still assemble");
+    }
+
+    #[test]
+    fn a_duplicate_derive_or_directive_name_is_rejected() {
+        // Both axes are first-wins at lookup, like every other registration axis the sweep covers:
+        // the second declaration is unreachable and which one wins depends on unit order.
+        const D: ExtDerive = ExtDerive {
+            name: "Jsonish",
+            methods: &[],
+            validate: None,
+        };
+        static A: XUnit = XUnit {
+            name: "x.a",
+            derives: &[D],
+            ..XUnit::new()
+        };
+        static B: XUnit = XUnit {
+            name: "x.b",
+            derives: &[D],
+            ..XUnit::new()
+        };
+        let err = validate(&[&A, &B])
+            .expect_err("two units declaring one derive name must refuse to assemble");
+        assert!(err.contains("derive `Jsonish`"), "{err}");
+
+        const DIR: ExtDirective = ExtDirective {
+            name: "openapi",
+            sites: &[TierSite::Type],
+            max_args: Some(1),
+            named_keys: &[],
+            detail: "",
+            doc: "",
+            params: &[],
+            expand: None,
+        };
+        static DA: DirectiveUnit = DirectiveUnit("x.a", &[DIR]);
+        static DB: DirectiveUnit = DirectiveUnit("x.b", &[DIR]);
+        let err = validate(&[&DA, &DB])
+            .expect_err("two units declaring one directive name must refuse to assemble");
+        assert!(err.contains("directive `openapi`"), "{err}");
+    }
+
+    /// A unit carrying only `@`-directives (an [`ExtDirective`] is not `Default`-able inside
+    /// [`XUnit`]'s `const` constructor, so the duplicate-name axis gets its own carrier).
+    struct DirectiveUnit(&'static str, &'static [ExtDirective]);
+    impl Extension for DirectiveUnit {
+        fn name(&self) -> &'static str {
+            self.0
+        }
+        fn root(&self) -> &'static str {
+            "x"
+        }
+        fn modules(&self) -> &'static [ExtModule] {
+            &[]
+        }
+        fn directives(&self) -> &'static [ExtDirective] {
+            self.1
+        }
+    }
+
+    #[test]
+    fn an_attribute_field_default_of_the_wrong_type_is_rejected() {
+        const A: ExtAttribute = ExtAttribute {
+            name: "Timeout",
+            namespace: "x.test",
+            fields: &[ExtAttrField {
+                name: "ms",
+                ty: AttrFieldType::Int,
+                default: Some(AttrFieldDefault::Str("")),
+            }],
+            targets: &[],
+        };
+        static U: XUnit = XUnit {
+            attributes: &[A],
+            ..XUnit::new()
+        };
+        let err = validate(&[&U])
+            .expect_err("a default of a different type than its field must refuse to assemble");
+        assert!(
+            err.contains("ms") && err.contains("x.test.Timeout"),
+            "{err}"
         );
     }
 

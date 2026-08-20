@@ -709,6 +709,10 @@ const REGEX_TYPES: &[ExtType] = &[
         // Immutable, ordered by source, hashed by source — so a pattern can key a map, which is
         // what lets a user express a compile cache in Noeta itself.
         key_capable: true,
+        // `key_capable` already PROMISES `cmp_value` is a total order, and it is (by source). The
+        // trait is that same order stated where `<`, `.sorted()`, `.min()`/`.max()` and a
+        // `T: Comparable` bound can read it — without it a `Pattern` could key a map but not sort.
+        traits: &["Comparable"],
         docs: PATTERN_DOCS,
         ..ExtType::DEFAULTS
     },
@@ -717,8 +721,11 @@ const REGEX_TYPES: &[ExtType] = &[
         namespace: "std.regex",
         methods: MATCH_METHODS,
         dispatch: match_method_dispatch,
-        // Ordered (so a match list sorts) but not a key: matches are results, not identities.
+        // Ordered (so a match list sorts) but not a key: matches are results, not identities. The
+        // ordering is `(start, end, text)`, total over matches — declared, because a sentence that
+        // says "so a match list sorts" is only true once `Comparable` is on the type.
         key_capable: false,
+        traits: &["Comparable"],
         docs: MATCH_DOCS,
         ..ExtType::DEFAULTS
     },
