@@ -1,12 +1,19 @@
 // Track A.9 + A.8 — `race(list)` awaits concurrently, returns the FIRST result, and cancels the
-// losers. `y` (sleep 1) finishes first at t=1 and wins; `x` (sleep 3) and `z` (sleep 2) are cancelled
-// — cooperatively, so they never resume past their `sleep` and their "end" lines never print. Ties
-// break by list order, so the sandbox is deterministic and both backends agree.
+// losers. `y` (sleep 50) finishes first and wins; `x` (sleep 500) and `z` (sleep 250) are cancelled
+// — cooperatively, so they never resume past their `sleep` and their "end" lines never print.
+//
+// The gaps are hundreds of milliseconds because this case also runs on a REAL host (the linked
+// `--native` differential), not only under the sandbox's logical clock. There, the executor sleeps
+// real time to the earliest deadline and wakes late, so every deadline the overshoot crossed is due
+// at the same poll — and several ready racers in one poll cycle is a tie, which breaks by list
+// order (`race_tie_list_order.noe` pins that rule). Milliseconds apart, a loaded machine crosses all
+// three deadlines in one sleep and `x` wins; gaps that dominate scheduler jitter make the shortest
+// sleep the winner on either host, which is what this case is here to assert.
 // expect: stdout "x start"
 // expect: stdout "y start"
 // expect: stdout "z start"
 // expect: stdout "y end"
-// expect: stdout "winner=1"
+// expect: stdout "winner=50"
 // expect: exit 0
 use std.task.{sleep, race}
 async fn work(name: string, ms: int): int {
@@ -16,7 +23,7 @@ async fn work(name: string, ms: int): int {
     return ms
 }
 concurrent {
-    rs = [spawn work("x", 3), spawn work("y", 1), spawn work("z", 2)]
+    rs = [spawn work("x", 500), spawn work("y", 50), spawn work("z", 250)]
     w = race(rs)
     echo "winner=" ~ w
 }

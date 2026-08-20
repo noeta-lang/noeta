@@ -1,12 +1,17 @@
-// Track A.3b — real structured concurrency. Two tasks run in a `concurrent { }` scope: `a` sleeps 2,
-// `b` sleeps 1. `a` suspends at its `sleep`, `b` runs, `b` finishes first (shorter sleep), then `a` —
-// deterministic interleaving that only the async state machine's yield-to-sibling can produce. The
+// Track A.3b — real structured concurrency. Two tasks run in a `concurrent { }` scope: `a` sleeps
+// 150, `b` sleeps 50. `a` suspends at its `sleep`, `b` runs, `b` finishes first (shorter sleep), then
+// `a` — the interleaving that only the async state machine's yield-to-sibling can produce. The
 // handles are awaited for their results (`Future<int>` → `int`).
+//
+// The 100 ms gap is what makes that interleave hold on a REAL host too (the linked `--native`
+// differential): there the executor sleeps real time to the earliest deadline and wakes late, so
+// sleeps a millisecond apart both come due at the same poll and the tasks complete in spawn order
+// instead. See `all.noe` for the long form.
 // expect: stdout "a start"
 // expect: stdout "b start"
 // expect: stdout "b end"
 // expect: stdout "a end"
-// expect: stdout "sum=3"
+// expect: stdout "sum=200"
 // expect: stdout "done"
 // expect: exit 0
 use std.task.{sleep}
@@ -17,8 +22,8 @@ async fn work(name: string, ms: int): int {
     return ms
 }
 concurrent {
-    a = spawn work("a", 2)
-    b = spawn work("b", 1)
+    a = spawn work("a", 150)
+    b = spawn work("b", 50)
     echo "sum=" ~ (a.await + b.await)
 }
 echo "done"

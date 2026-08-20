@@ -1,13 +1,20 @@
 // Track A.9 — `all(list)` awaits every future concurrently and returns their results as a `List<T>`
 // **in list order** (not completion order). The tasks run concurrently: at t=0 all three start; the
-// shorter sleeps finish first (b at t=1, a at t=2, c at t=3), but the returned list keeps input order.
+// shorter sleeps finish first (b, then a, then c), but the returned list keeps input order.
+//
+// The gaps are 100 ms because this case also runs on a REAL host (the linked `--native`
+// differential), where the executor sleeps real time to the earliest deadline and wakes late. Every
+// deadline that one overshooting sleep crossed is due at the same poll, and the scheduler then
+// resumes those tasks in spawn order — so with the sleeps a millisecond apart the completion
+// interleave this case exists to assert collapses into spawn order on a loaded machine. A gap that
+// dominates scheduler jitter gets the same interleave on either host.
 // expect: stdout "a start"
 // expect: stdout "b start"
 // expect: stdout "c start"
 // expect: stdout "b end"
 // expect: stdout "a end"
 // expect: stdout "c end"
-// expect: stdout "all=2,1,3"
+// expect: stdout "all=150,50,250"
 // expect: exit 0
 use std.task.{sleep, all}
 async fn work(name: string, ms: int): int {
@@ -17,7 +24,7 @@ async fn work(name: string, ms: int): int {
     return ms
 }
 concurrent {
-    hs = [spawn work("a", 2), spawn work("b", 1), spawn work("c", 3)]
+    hs = [spawn work("a", 150), spawn work("b", 50), spawn work("c", 250)]
     xs = all(hs)
     echo "all=" ~ xs.join(",")
 }

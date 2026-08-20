@@ -38,7 +38,7 @@ pub const TASK_CTX_FNS: &[ExtFn] = &[
         ret: RetTy::Concrete(SigType::List(&VAR_A)),
     },
     // `race(List<Future<A>>) -> A` (Track A.9 + A.8): first ready result wins, losers cancelled;
-    // ties break deterministically by list order.
+    // ties break deterministically by list order — see the dispatch arm for what counts as a tie.
     ExtFn {
         param_names: &["futures"],
         name: "race",
@@ -130,6 +130,26 @@ pub fn task_ctx_dispatch(
         // `race` itself does not wait for the losers to stop — it hands the winner back at once —
         // but the enclosing `concurrent` block's closing brace does, which is where a real-isolate
         // loser is joined after it honors the request at its next safepoint (isolate-cancel).
+        //
+        // **What counts as a tie**, since this is the arm people read that question into: the loop
+        // below scans the list in order each round, so the winner is the earliest LIST position
+        // among everything ready in the round that first produced anything. That is the whole rule,
+        // and it is a rule about readiness rather than completion because readiness is all a poll
+        // can observe — arbitrary real time may pass between two rounds (a preempted thread, a
+        // blocking host call, a collection), and every future that became ready inside that window
+        // did so unobserved. Recording a completion timestamp would not recover an ordering: a
+        // task's "completion" *is* the round in which the scheduler resumed it, and the scheduler
+        // resumes in spawn order, so the timestamp would record this tie-break rather than discover
+        // anything. Only a pure timer leaf carries an earlier fact (its deadline), and preferring it
+        // would give one future kind a rule the others cannot have.
+        //
+        // Under the sandbox executor the tie is unreachable for timers: `advance` *jumps* logical
+        // time to exactly the next deadline, so only the earliest-deadline timer is ever due at a
+        // poll. The real executor sleeps real time to that deadline and wakes late, so every
+        // deadline the overshoot crossed comes due together — which is why a corpus case whose
+        // answer is a timer ordering states it in gaps a loaded scheduler cannot close, and why
+        // `tests/conformance/async/race_tie_list_order.noe` pins the tie itself with futures that
+        // never suspend at all.
         "race" => {
             noeta_ext_abi::ctx_arity(func, args, 1)?;
             let n = expect_list(ctx, func, args[0], "a list of futures")?;

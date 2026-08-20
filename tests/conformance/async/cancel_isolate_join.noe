@@ -5,19 +5,21 @@
 // "work end" never prints. On the CLI's real path the same program cancels a genuine OS thread at
 // its next safepoint (see `crates/noeta-cli/tests/cli/isolates.rs`); what both paths guarantee, and
 // what this case pins, is that the *reported* outcome matches what actually happened.
+// The 100 ms gate sleep is what makes the cancel land at the suspension on a REAL host too
+// (the linked `--native` differential), where the clock moves on its own — see `cancel_join.noe`.
 // expect: stdout "work start"
 // expect: stdout "cancelled"
 // expect: exit 0
 use std.task.{sleep}
 async fn work(): int {
     echo "work start"
-    sleep(10).await
+    sleep(500).await
     echo "work end"
     return 5
 }
 concurrent {
     h = isolate work()
-    sleep(1).await
+    sleep(100).await
     h.cancel()
     echo match h.join() {
         Ok(v)  => "ok=" ~ v,

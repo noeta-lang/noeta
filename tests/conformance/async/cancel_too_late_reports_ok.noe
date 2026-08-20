@@ -2,11 +2,13 @@
 // happened. A request that arrives after the work is already done changes nothing, and `join` says
 // `Ok(v)` — never `Err(Cancelled)` for work that ran to completion.
 //
-// `quick` needs one round to finish, and the top-level `sleep(5).await` drives the scope's tasks,
+// `quick` needs one round to finish, and the scope-level `sleep(100).await` drives the scope's tasks,
 // so by the time `h.cancel()` runs the task has a stored result. Cancelling it is a no-op and the
 // join reports the value. (The same rule is what the real-thread isolate path had to be rebuilt to
 // obey: it used to latch "cancelled" the moment it asked, and reported that for a worker that then
 // ran to completion anyway — see `crates/noeta-cli/tests/cli/isolates.rs`.)
+// The 100 ms gate sleep is what makes the cancel land at the suspension on a REAL host too
+// (the linked `--native` differential), where the clock moves on its own — see `cancel_join.noe`.
 // expect: stdout "quick ran"
 // expect: stdout "ok=7"
 // expect: exit 0
@@ -17,7 +19,7 @@ async fn quick(): int {
 }
 concurrent {
     h = spawn quick()
-    sleep(5).await
+    sleep(100).await
     h.cancel()
     echo match h.join() {
         Ok(v)  => "ok=" ~ v,

@@ -2,19 +2,21 @@
 // is marked cancelled on the first call and never polled again; the second call is a no-op. A
 // subsequent `join` still reports `Err(Cancelled)`, and the task's "end" line never prints. Both
 // backends agree.
+// The 100 ms gate sleep is what makes the cancel land at the suspension on a REAL host too
+// (the linked `--native` differential), where the clock moves on its own — see `cancel_join.noe`.
 // expect: stdout "work start"
 // expect: stdout "cancelled"
 // expect: exit 0
 use std.task.{sleep}
 async fn work(): int {
     echo "work start"
-    sleep(10).await
+    sleep(500).await
     echo "work end"
     return 7
 }
 concurrent {
     h = spawn work()
-    sleep(1).await
+    sleep(100).await
     h.cancel()
     h.cancel()
     echo match h.join() {

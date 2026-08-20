@@ -133,9 +133,9 @@ async fn work(name: string, ms: int): int {
 }
 
 concurrent {
-    hs = [spawn work("a", 2), spawn work("b", 1), spawn work("c", 3)]
+    hs = [spawn work("a", 150), spawn work("b", 50), spawn work("c", 250)]
     xs = all(hs)                        // awaits all; results in input order
-    echo "all=" ~ xs.join(",")         // all=2,1,3
+    echo "all=" ~ xs.join(",")         // all=150,50,250
 }
 ```
 
@@ -144,8 +144,10 @@ concurrent {
 | Combinator | Behavior |
 |---|---|
 | `all(list)` | Awaits every future concurrently; returns results in **input order**. |
-| `race(list)` | Returns the first result at once; every loser is cancelled. The block's closing brace still joins the losers — see [Cancellation](#cancellation). |
+| `race(list)` | Returns the first result at once; every loser is cancelled. Several futures ready in the same poll is a tie, and a tie breaks by **list order**. The block's closing brace still joins the losers — see [Cancellation](#cancellation). |
 | `map_bounded(items, n, f)` | Applies async `f` to each item with at most `n` in flight; results in item order. |
+
+**What "first" means for `race`.** A combinator does not observe completions; it observes **readiness at a poll**. Arbitrary real time can pass between two polls — a preempted thread, a long synchronous call, a garbage collection — so every future that became ready in that window is equally first, and `race` returns the earliest of them in list order. That matters when your futures are wall-clock timers: the executor sleeps until the nearest deadline and wakes a little late, and any deadline that overshoot crossed comes due at the same poll. So `race([sleep(1), sleep(2)])` on a busy machine is a coin flip decided by list order, while `race([sleep(50), sleep(250)])` is decided by the sleeps. Where the outcome must follow time, leave gaps that a loaded scheduler cannot close.
 
 ### Nested `concurrent` interleaves
 
@@ -388,5 +390,7 @@ A child's stdout and stderr are drained continuously in the background, so a cha
 ## Determinism
 
 In the sandbox executor (used for the differential oracle) time is a logical clock, so interleavings are reproducible and both backends agree. On the CLI, `noeta run` uses a real (tokio) executor and real OS-thread isolates. See [Concurrency Internals](Concurrency-Internals) for the "simulate deterministically, deploy real" design.
+
+The practical difference is granularity. A logical clock stops at every deadline exactly, so tasks sleeping 1 ms and 2 ms resume in separate rounds; a real one sleeps until the nearest deadline and wakes late, so both come due at the same poll and resume in spawn order. Program in gaps a loaded scheduler cannot close — tens of milliseconds, not one — wherever the *order* of your tasks is part of the answer.
 
 A streaming body is deterministic under the sandbox too: the responder decodes a scripted body that is a pure function of the request, so a reading loop terminates in-oracle and both backends observe the identical frames.

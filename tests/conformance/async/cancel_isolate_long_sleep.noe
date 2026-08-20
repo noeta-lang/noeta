@@ -8,6 +8,8 @@
 // parked in the real executor's wall-clock sleep reaches no safepoint. The request now carries a
 // wake that ends that sleep, so both paths stop at the same place for the same reason — see
 // `crates/noeta-cli/tests/cli/isolates.rs::run_real_isolate_cancel_reaches_a_worker_parked_in_one_long_sleep`.
+// The 200 ms gate sleep gives the worker THREAD time to start and print on a real host; a
+// one-millisecond gate can be due before the isolate has run at all — see `cancel_join.noe`.
 // expect: stdout "napping"
 // expect: stdout "cancelled"
 // expect: exit 0
@@ -20,7 +22,7 @@ async fn nap(ms: int): int {
 }
 concurrent {
     h = isolate nap(600000)
-    sleep(1).await
+    sleep(200).await
     h.cancel()
     echo match h.join() {
         Ok(v)  => "ok=" ~ v,

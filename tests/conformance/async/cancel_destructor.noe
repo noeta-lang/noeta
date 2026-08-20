@@ -4,6 +4,8 @@
 // `Res`'s `destruct` fires there — cancellation frees no differently than a normal join (the leak
 // oracle confirms residency 0). "work end" never prints (cooperative stop); "drop work" does. Both
 // backends agree, and the order is deterministic under the sandbox clock.
+// The 100 ms gate sleep is what makes the cancel land at the suspension on a REAL host too
+// (the linked `--native` differential), where the clock moves on its own — see `cancel_join.noe`.
 // expect: stdout "use work"
 // expect: stdout "cancelled"
 // expect: stdout "drop work"
@@ -17,13 +19,13 @@ class Res {
 async fn work(): int {
     r = Res.new("work")
     echo "use ${r.tag}"
-    sleep(10).await
+    sleep(500).await
     echo "work end"
     return 5
 }
 concurrent {
     h = spawn work()
-    sleep(1).await
+    sleep(100).await
     h.cancel()
     echo match h.join() {
         Ok(v)  => "ok=" ~ v,

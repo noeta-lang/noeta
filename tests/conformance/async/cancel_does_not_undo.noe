@@ -6,6 +6,8 @@
 // them is reverted. This is the whole reason `join` reports `Err(Cancelled)` rather than "nothing
 // happened": a cancelled task can have left arbitrary observable effects behind, and a caller that
 // needs them undone has to undo them itself.
+// The 100 ms gate sleep is what makes the cancel land at the suspension on a REAL host too
+// (the linked `--native` differential), where the clock moves on its own — see `cancel_join.noe`.
 // expect: stdout "wrote a"
 // expect: stdout "wrote b"
 // expect: stdout "cancelled"
@@ -18,13 +20,13 @@ async fn work(): int {
     echo "wrote a"
     fs.write("b.txt", "2")
     echo "wrote b"
-    sleep(10).await
+    sleep(500).await
     fs.write("c.txt", "3")
     return 5
 }
 concurrent {
     h = spawn work()
-    sleep(1).await
+    sleep(100).await
     h.cancel()
     echo match h.join() {
         Ok(v)  => "ok=" ~ v,

@@ -3,16 +3,18 @@
 // where the cancellation is observed; cancel-aware code uses `h.join()` instead. `work` is cancelled
 // while suspended at its `sleep`, then awaited — the await raises E0056 at the driver. Both backends
 // raise it identically.
-// expect: error E0056 at 17:10
+// The 100 ms gate sleep is what makes the cancel land at the suspension on a REAL host too
+// (the linked `--native` differential), where the clock moves on its own — see `cancel_join.noe`.
+// expect: error E0056 at 19:10
 // expect: exit 1
 use std.task.{sleep}
 async fn work(): int {
-    sleep(10).await
+    sleep(500).await
     return 5
 }
 concurrent {
     h = spawn work()
-    sleep(1).await
+    sleep(100).await
     h.cancel()
     echo h.await
 }

@@ -1,0 +1,28 @@
+// Track A.9 + A.8 — the `race` TIE-BREAK rule, pinned on its own.
+//
+// `race` does not observe completion times; it observes readiness at a poll. Between two polls an
+// arbitrary amount of real time can pass, so every future that became ready in that window is
+// equally first and the winner is the earliest in LIST order. None of these three bodies suspends,
+// so all three complete in the same scheduler round on any host and under any clock — the tie is
+// structural here, not a timing accident, which is what makes this the one case that says what
+// happens when several racers are ready at once.
+//
+// Every racer's line prints: `race` polls the whole list each round, and the losers had already run
+// to completion before the cancellation reached them (`cancel_does_not_undo.noe` is the general
+// rule). `winner=a` is the assertion — a `race` that returned the last-ready racer, or that stopped
+// at `futures[0]` without letting its siblings run, prints something else.
+// expect: stdout "a ran"
+// expect: stdout "b ran"
+// expect: stdout "c ran"
+// expect: stdout "winner=a"
+// expect: exit 0
+use std.task.{race}
+async fn ready(name: string): string {
+    echo name ~ " ran"
+    return name
+}
+concurrent {
+    rs = [spawn ready("a"), spawn ready("b"), spawn ready("c")]
+    w = race(rs)
+    echo "winner=" ~ w
+}

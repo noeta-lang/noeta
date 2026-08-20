@@ -1,9 +1,13 @@
 // Track A.7 — a nested `concurrent` block interleaves with the OUTER scope's siblings. `slow` is
 // spawned in the outer scope, then an inner `concurrent { }` spawns `a`/`b`. The scheduler polls every
 // open scope each round, so `slow` starts and its long sleep advances *while* the inner block runs —
-// rather than the inner block completing atomically first. Deterministic under the sandbox clock: at
-// t=0 all three start; t=1 the short sleepers finish; the inner join returns; awaiting `s` advances to
-// t=3 and `slow` finishes. (Before A.7 `slow start` appeared only after `inner done`.)
+// rather than the inner block completing atomically first. At t=0 all three start; the short sleepers
+// finish first and the inner join returns; awaiting `s` then reaches `slow`'s deadline.
+//
+// The 200 ms gap is what makes that ordering hold on a REAL host too (the linked `--native`
+// differential): there the executor sleeps real time to the earliest deadline and wakes late, so
+// sleeps a couple of milliseconds apart all come due at the same poll and `slow end` lands before the
+// short sleepers' ends instead. See `all.noe` for the long form.
 // expect: stdout "slow start"
 // expect: stdout "a start"
 // expect: stdout "b start"
@@ -11,21 +15,21 @@
 // expect: stdout "b end"
 // expect: stdout "inner done"
 // expect: stdout "slow end"
-// expect: stdout "s=3"
+// expect: stdout "s=300"
 // expect: stdout "outer done"
 // expect: exit 0
 use std.task.{sleep}
 async fn slow(): int {
     echo "slow start"
-    sleep(3).await
+    sleep(300).await
     echo "slow end"
-    return 3
+    return 300
 }
 async fn quick(name: string): int {
     echo name ~ " start"
-    sleep(1).await
+    sleep(100).await
     echo name ~ " end"
-    return 1
+    return 100
 }
 concurrent {
     s = spawn slow()
