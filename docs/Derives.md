@@ -179,7 +179,7 @@ echo Point { x: 1 }.describe()   // a thing!
 
 ## Derive errors
 
-Deriving a built-in the compiler has no recipe for (`@derive(Add)`, `@derive(Validate)`) or wrong generic arity (`@derive(Comparable<int>)`, `@derive(Serialize)` without a format) is E0014. The refusal names the routes still open to *that* trait — `Add` delegates through a field, `Validate` wants an `impl` — so a diagnostic and this page never disagree about what the language allows. Spelling a derive as the data-attribute `#[derive(...)]` is E0017 — `@derive` is a codegen directive, not an attribute.
+Deriving a built-in the compiler has no recipe for (`@derive(Add)`, `@derive(Validate)`) or wrong generic arity (`@derive(Comparable<int>)`, `@derive(Serialize)` without a format) is E0014. The refusal names the routes still open to *that* trait: `Add` delegates through a field, `Validate` wants an `impl`. Spelling a derive as the data-attribute `#[derive(...)]` is E0017 — `@derive` is a codegen directive, not an attribute.
 
 ## Bridging a required member
 

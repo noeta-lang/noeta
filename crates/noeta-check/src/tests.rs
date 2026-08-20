@@ -629,6 +629,15 @@ fn a_member_binding_on_a_builtin_offers_via_only_where_via_applies() {
         help.contains("`impl Validate") && !help.contains("use `via:"),
         "{help}"
     );
+    // `Clone` has a recipe and no `via:` template: neither of the other two answers applies, and
+    // telling its author to write an `impl` would be worse advice than the binding they wrote.
+    let src = "@derive(Clone, clone: x)\nclass P {\n  x: int\n}\n";
+    assert_eq!(codes(src), ["E0050"]);
+    let help = helps(src).remove(0);
+    assert!(
+        help.contains("drop the binding") && help.contains("`@derive(Clone)`"),
+        "{help}"
+    );
 }
 
 #[test]

@@ -1527,9 +1527,9 @@ impl Checker {
     /// bridged), a **method bundle**, or an **extension's recipe**. `via: <field>` cuts across the
     /// first two, delegating a trait through a field instead of synthesizing it.
     ///
-    /// So a refusal here must say *which* route was unavailable and which of the others still
-    /// applies to the trait in hand. A single sentence listing the recipe built-ins would tell a
-    /// reader one `via:` away from what they wanted that the language cannot do it.
+    /// So a refusal here must say *which* route was unavailable, and which of the others still
+    /// reaches the trait in hand. A fixed sentence listing the recipe built-ins cannot: to a reader
+    /// one `via:` away from what they wanted, it reads as "the language does not do this".
     pub(crate) fn check_derives(
         &mut self,
         type_name: &str,
@@ -1724,9 +1724,17 @@ impl Checker {
                 } else {
                     "a built-in trait"
                 };
+                // What replaces the binding depends on the trait, and all three answers exist: a
+                // delegable built-in wants `via:`, one the compiler already synthesizes wants the
+                // binding simply dropped, and one with neither wants the `impl`.
                 let help = if delegable(t) {
                     format!(
                         "use `via: <field>` to delegate `{}` through a field",
+                        spec.name
+                    )
+                } else if t.has_builtin_recipe() {
+                    format!(
+                        "drop the binding — `@derive({})` synthesizes the whole implementation",
                         spec.name
                     )
                 } else {
