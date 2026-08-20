@@ -585,7 +585,7 @@ class Point {
 echo Point.new(1, 2) < Point.new(1, 3)   // true
 ```
 
-The derivable built-ins are `Equatable`, `Comparable`, `Display`, `Error`, `Clone`, and `Serialize<Json>`; a fully-defaulted user trait derives too, and the `member:`/`via:` bindings bridge or delegate what a plain derive cannot reach. The full story — the derivable table, user-trait derives, bridging, delegation, native recipes, field constraints, and conditional generic derives — lives on [Derives](Derives).
+The built-ins a bare `@derive` synthesizes are `Equatable`, `Comparable`, `Display`, `Error`, `Clone`, `Serialize<Json>` and `Deserialize<Json>`; a fully-defaulted user trait derives too, and the `member:`/`via:` bindings bridge or delegate what a plain derive cannot reach. The full story — the recipe table, user-trait derives, bridging, delegation, native recipes, field constraints, and conditional generic derives — lives on [Derives](Derives).
 
 ## Coherence
 

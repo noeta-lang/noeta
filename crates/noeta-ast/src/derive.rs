@@ -18,9 +18,9 @@
 //! is a [`DerivePlanError`] listing the candidates — ambiguity is a diagnostic, never a guess.
 //!
 //! [`plan_builtin_via`] is the built-in-trait counterpart of `via:` — a small per-trait template
-//! table (`Equatable`/`Comparable`/`Display` forward through the field; the operator traits
-//! unwrap-op-rewrap and require a single-field type) — kept in lockstep with `noeta-types`'
-//! authoritative trait table by a test there.
+//! table over [`VIA_DELEGABLE_BUILTINS`] (`Equatable`/`Comparable`/`Display`/`Error` forward
+//! through the field; the operator traits unwrap-op-rewrap and require a single-field type) —
+//! kept in lockstep with `noeta-types`' authoritative trait table by a test there.
 //!
 //! Both the checker (validation + signature registration) and the backends' hoist
 //! (`hoist_standalone_impl_methods`) call these, so what is diagnosed and what is materialized can
@@ -56,6 +56,26 @@ impl DerivePlanError {
 /// this — the two spellings drifted apart once already, when the checker's cascade used the enum
 /// and lowering's used a bare `"Error"`.
 pub const ERROR_TRAIT: &str = "Error";
+
+/// The built-in traits `@derive(Trait, via: <field>)` delegates through a field — exactly the
+/// template table [`plan_builtin_via`] implements, in the order a diagnostic lists them.
+///
+/// Named once because three places need the set and none of them owns it: the template's own
+/// rejection help, the checker's refusal of a built-in that carries no recipe, and the lockstep
+/// test in `noeta-types` that asserts the templates and the trait table agree. Literals for the
+/// same reason [`ERROR_TRAIT`] is one — this crate does not depend on `noeta-types` — and that
+/// test is what pins each spelling to a real `BuiltinTrait`.
+pub const VIA_DELEGABLE_BUILTINS: &[&str] = &[
+    "Equatable",
+    "Comparable",
+    "Display",
+    ERROR_TRAIT,
+    "Add",
+    "Sub",
+    "Mul",
+    "Div",
+    "Concat",
+];
 
 /// How a caller resolves the names a `@derive` can refer to.
 ///
@@ -335,7 +355,9 @@ fn deduce_field_bridge(
                 m.name
             ),
             format!(
-                "bind it to a method with {}, or implement the trait with `impl {trait_name} for <Type> {{ … }}`",
+                "bind it to a method with {}, delegate the whole trait through a field with \
+                 `@derive({trait_name}, via: <field>)`, or implement it with `impl {trait_name} \
+                 for <Type> {{ … }}`",
                 explicit("<method>")
             ),
         ));
@@ -373,7 +395,8 @@ fn deduce_field_bridge(
                 m.ret.as_ref().map(type_ref_str).unwrap_or_default()
             ),
             format!(
-                "add a matching field, bind a method with {}, or implement the trait explicitly",
+                "add a matching field, bind a member with {}, delegate the whole trait through a \
+                 field with `@derive({trait_name}, via: <field>)`, or implement it explicitly",
                 explicit("<member>")
             ),
         )),
@@ -392,9 +415,9 @@ fn deduce_field_bridge(
     }
 }
 
-/// The built-in traits `via:` can delegate — a small template table (kept in lockstep with
-/// `noeta-types`' authoritative trait table by a test there). Each entry synthesizes the trait's
-/// one required method through the field:
+/// The built-in traits `via:` can delegate — the small template table [`VIA_DELEGABLE_BUILTINS`]
+/// names (kept in lockstep with `noeta-types`' authoritative trait table by a test there). Each
+/// entry synthesizes the trait's one required method through the field:
 ///
 /// - `Equatable`/`Comparable` compare the fields (`self.f == other.f` / `self.f.compare(other.f)`);
 /// - `Display` forwards `to_string`;
@@ -519,8 +542,8 @@ pub fn plan_builtin_via(
         other => Err(DerivePlanError::new(
             format!("`via:` delegation does not support `{other}`"),
             format!(
-                "the delegable built-ins are Equatable, Comparable, Display, Error, Add, Sub, \
-                 Mul, Div, Concat; implement `impl {other}` explicitly (field `{}`)",
+                "the delegable built-ins are {}; implement `impl {other}` explicitly (field `{}`)",
+                VIA_DELEGABLE_BUILTINS.join(", "),
                 field.name
             ),
         )),

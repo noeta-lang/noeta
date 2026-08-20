@@ -1,0 +1,10 @@
+// A name no derive route registers — not a built-in, not a `trait` this program declares, not a
+// method bundle, not an extension's recipe — is an unknown trait (E0014). Kept distinct from a
+// built-in the compiler merely has no recipe for: there the trait exists and another route may
+// still reach it, here nothing named `Bogus` exists at all.
+// expect: error E0014 at 7:9
+// expect: exit 1
+@derive(Bogus)
+struct Reading { v: int }
+
+echo "unreached"

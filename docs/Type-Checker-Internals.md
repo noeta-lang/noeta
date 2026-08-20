@@ -46,7 +46,7 @@ Because the arm is checked against the whole expression's expected type, a misma
 
 `noeta-types` is the pure-data `Type` lattice: `Int`/`Float`/`Bool`/`String`/`Unit`, `List`/`Map`/`Option`/`Result`, `Named`, `Fn`, unions, and the top `Unknown`. (The Hindley–Milner inference-variable slot was removed once the engine settled on bidirectional-with-subtyping.) `Type::from_ref` structurally desugars surface annotations (including `?T → Option<T>`); predicates like `is_numeric`/`is_gradual` are what the checks key off.
 
-`noeta-types` also owns the **built-in trait registry** — `BuiltinTrait`, `BUILTIN_TRAITS`, and `operator_trait` — the fixed set an `impl` block or `@derive(...)` may name. Each entry records its required method and arity, the operator it overloads, and whether it is derivable. The registry's operator→method map is lock-stepped to the backends' `BinaryOp::overload_method` by a unit test, so the checker's view and the runtime's view of operator dispatch cannot drift.
+`noeta-types` also owns the **built-in trait registry** — `BuiltinTrait`, `BUILTIN_TRAITS`, and `operator_trait` — the fixed set an `impl` block or `@derive(...)` may name. Each entry records its required method and arity, the operator it overloads, and whether the compiler carries a derive recipe for it. The registry's operator→method map is lock-stepped to the backends' `BinaryOp::overload_method` by a unit test, so the checker's view and the runtime's view of operator dispatch cannot drift.
 
 ## Gradual by construction, static at the boundaries
 

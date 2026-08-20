@@ -1,0 +1,14 @@
+// A built-in the compiler has no synthesis recipe for cannot be derived bare (E0014). The refusal
+// is about the recipe and not about `@derive`, so each shape's help names the route that is still
+// open: `Add` has a `via:` template (delegate through a field), `Validate` has none and wants an
+// `impl`. Both are pinned here because that difference is the whole diagnostic.
+// expect: error E0014 at 8:9
+// expect: error E0014 at 11:9
+// expect: exit 1
+@derive(Validate)
+struct Reading { v: int }
+
+@derive(Add)
+struct Tally { v: int }
+
+echo "unreached"

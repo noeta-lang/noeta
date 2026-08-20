@@ -1520,11 +1520,16 @@ impl Checker {
         !matches!(ty, Type::Param(_))
     }
 
-    /// Validate the `@derive(...)` directives on a declaration: every named trait must be a known
-    /// *derivable* built-in, with the right number of generic type arguments, and a generic derive's
-    /// arguments must resolve. The compiler synthesizes the listed impls from the type's fields,
-    /// parameterized by the arguments (e.g. `Serialize<Json>`'s format). The only parameterized
-    /// derivable trait today is `Serialize<Format>`.
+    /// Validate the `@derive(...)` directives on a declaration. A derive resolves through one of
+    /// four routes, and this is the gate for all of them: a **built-in the compiler has a recipe
+    /// for** (synthesized from the type's fields, parameterized by the arguments — only
+    /// `Serialize`/`Deserialize` take one), a **user trait** (defaults adopted, required members
+    /// bridged), a **method bundle**, or an **extension's recipe**. `via: <field>` cuts across the
+    /// first two, delegating a trait through a field instead of synthesizing it.
+    ///
+    /// So a refusal here must say *which* route was unavailable and which of the others still
+    /// applies to the trait in hand. A single sentence listing the recipe built-ins would tell a
+    /// reader one `via:` away from what they wanted that the language cannot do it.
     pub(crate) fn check_derives(
         &mut self,
         type_name: &str,
@@ -1624,7 +1629,15 @@ impl Checker {
                     DiagnosticCode::UnknownTrait,
                     spec.span,
                     format!("unknown trait `{}` in `@derive(...)`", spec.name),
-                );
+                )
+                .help(format!(
+                    "`@derive` names a built-in the compiler synthesizes ({}), a `trait` this \
+                     program declares (adopted whole when every method has a default, otherwise \
+                     bridged with `<method>: <member>` or delegated with `via: <field>`), or a \
+                     derive an extension registers; a `#[...]` data record is declared with the \
+                     `@attribute` directive instead",
+                    recipe_builtins()
+                ));
                 continue;
             };
             // Layer-2 delegation on a built-in (`@derive(Comparable, via: amount)`): validated by
@@ -1706,29 +1719,64 @@ impl Checker {
                 continue;
             }
             if let Some(b) = spec.bindings.first() {
+                let what = if t.has_builtin_recipe() {
+                    "a built-in with a fixed recipe"
+                } else {
+                    "a built-in trait"
+                };
+                let help = if delegable(t) {
+                    format!(
+                        "use `via: <field>` to delegate `{}` through a field",
+                        spec.name
+                    )
+                } else {
+                    format!(
+                        "write `impl {} {{ … }}` — `{}` has no `via:` form either",
+                        spec.name, spec.name
+                    )
+                };
                 self.error(
                     DiagnosticCode::UnderivableTrait,
                     b.span,
                     format!(
-                        "`{}: {}` — member bindings apply to user-trait derives; `{}` is a \
-                         built-in with a fixed recipe",
+                        "`{}: {}` — member bindings apply to user-trait derives; `{}` is {what}",
                         b.member, b.target, spec.name
                     ),
                 )
-                .help("use `via: <field>` to delegate a built-in trait through a field");
+                .help(help);
                 continue;
             }
-            if !t.derivable() {
+            // A built-in the compiler has no recipe for. It is still derivable by the routes the
+            // language actually has, so the help names the ones that apply *to this trait* — a
+            // fixed paragraph listing the recipe set reads as "derive is a built-in privilege",
+            // which is the opposite of true.
+            if !t.has_builtin_recipe() {
+                let help = if delegable(t) {
+                    format!(
+                        "delegate it through a field — `@derive({0}, via: <field>)` — or write \
+                         `impl {0} {{ … }}`; the built-ins `@derive` synthesizes on their own are {1}",
+                        spec.name,
+                        recipe_builtins(),
+                    )
+                } else {
+                    format!(
+                        "write `impl {} {{ … }}`; the built-ins `@derive` synthesizes on their own \
+                         are {}, and `via: <field>` delegates {}",
+                        spec.name,
+                        recipe_builtins(),
+                        via_builtins(),
+                    )
+                };
                 self.error(
                     DiagnosticCode::UnknownTrait,
                     spec.span,
-                    format!("`{}` is not a derivable trait", spec.name),
+                    format!(
+                        "`{}` has no derive recipe: the compiler cannot synthesize it from a \
+                         type's shape",
+                        spec.name
+                    ),
                 )
-                .help(
-                    "derivable traits are `Equatable`, `Comparable`, `Display`, `Error`, \
-                         `Clone`, `Serialize<Format>`, `Deserialize<Format>`; mark attribute \
-                         records with the `@attribute` directive",
-                );
+                .help(help);
                 continue;
             }
             // `@derive(Error)`'s synthesized `message()` returns `"${self}"` — the type's display
@@ -1765,9 +1813,11 @@ impl Checker {
                         spec.args.len()
                     )
                 };
-                self.error(DiagnosticCode::UnknownTrait, spec.span, msg).help(
+                self.error(DiagnosticCode::UnknownTrait, spec.span, msg)
+                    .help(
                         "`Serialize`/`Deserialize` are `@derive(Serialize<Json>)` / \
-                         `@derive(Deserialize<Json>)`; the other derivable traits take no arguments",
+                         `@derive(Deserialize<Json>)`; the other built-in recipes take no type \
+                         arguments",
                     );
                 continue;
             }
@@ -2821,6 +2871,38 @@ impl Checker {
             .help(help);
         }
     }
+}
+
+/// The built-ins a bare `@derive(Name)` synthesizes, spelled as a program writes them
+/// (`Serialize<Format>` carries its argument) — read from the trait table rather than listed, so a
+/// refusal can never advertise a set the gate does not enforce.
+fn recipe_builtins() -> String {
+    noeta_types::BUILTIN_TRAITS
+        .iter()
+        .filter(|t| t.has_builtin_recipe())
+        .map(|t| match t.generic_arity() {
+            0 => format!("`{}`", t.name()),
+            _ => format!("`{}<Format>`", t.name()),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The built-ins `@derive(Trait, via: <field>)` delegates through a field, for the same reason —
+/// the set is `noeta-ast`'s template table, which is where the delegation is actually implemented.
+fn via_builtins() -> String {
+    noeta_ast::derive::VIA_DELEGABLE_BUILTINS
+        .iter()
+        .map(|n| format!("`{n}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Whether `via:` has a template for this built-in — the question a refusal must answer before it
+/// offers delegation as the fix, since offering it for `Validate` sends the reader to a second
+/// error.
+fn delegable(t: BuiltinTrait) -> bool {
+    noeta_ast::derive::VIA_DELEGABLE_BUILTINS.contains(&t.name())
 }
 
 /// The **short** form of a link-qualified name (`b.thing.Thing` → `Thing`) — what the author wrote

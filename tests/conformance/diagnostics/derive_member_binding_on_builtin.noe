@@ -1,0 +1,14 @@
+// `member: target` bridges a *user* trait's required method onto a member; a built-in has no
+// member to bridge, so the binding is E0050 at the binding itself. The two built-in shapes differ
+// in what the help then offers — `Comparable` delegates through a field, `Validate` does not, and
+// suggesting `via:` for `Validate` would only send the reader to a second error.
+// expect: error E0050 at 8:21
+// expect: error E0050 at 11:19
+// expect: exit 1
+@derive(Comparable, compare: v)
+struct Reading { v: int }
+
+@derive(Validate, validate: v)
+struct Tally { v: int }
+
+echo "unreached"

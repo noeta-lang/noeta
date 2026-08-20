@@ -61,7 +61,7 @@ pub fn directive_signature(
         Some(BuiltinDirective::Derive) => {
             let traits = noeta_types::BUILTIN_TRAITS
                 .iter()
-                .filter(|t| t.derivable())
+                .filter(|t| t.has_builtin_recipe())
                 .map(|t| match t.generic_arity() {
                     0 => t.name().to_string(),
                     _ => format!("{}<Format>", t.name()),

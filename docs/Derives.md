@@ -2,9 +2,11 @@
 
 `@derive(...)` generates trait impls from a type's shape. It is a *codegen* directive, distinct from `#[...]` data attributes (see [Attributes & Reflection](Attributes-and-Reflection)). Everything a derive synthesizes obeys the ordinary [coherence rule](Generics-and-Traits#coherence) — at most one implementation of a trait per type, however it got there.
 
-## The derivable built-ins
+## The built-in recipes
 
-| Derivable | Effect |
+A bare `@derive(Name)` on one of these synthesizes the implementation from the type's shape. A built-in that is absent from the table has no recipe — the compiler has no body to write for it — which is not the same as being underivable: [`via:`](#delegating-through-a-field-via) still delegates several of them through a field.
+
+| Built-in | Effect |
 |---|---|
 | `Equatable` | Structural equality. |
 | `Comparable` | Field-wise **structural** ordering, in declaration order (recurses into nested objects and enum payloads, comparing each structurally in turn). On an **enum**: variant declaration order first (`Low < Medium < High`), then payload fields. What `< <= > >=`, `.sorted()` and `.min()`/`.max()` all use — deriving it is how a type opts into being ordered at all, and a type wanting a *different* order writes its own `compare` instead ([Ordering your own type](Generics-and-Traits#ordering-your-own-type)); it cannot do both, since a type implements each trait once. |
@@ -177,7 +179,7 @@ echo Point { x: 1 }.describe()   // a thing!
 
 ## Derive errors
 
-Deriving a non-derivable trait (`@derive(Add)`) or wrong generic arity (`@derive(Comparable<int>)`, `@derive(Serialize)` without a format) is E0014. Spelling a derive as the data-attribute `#[derive(...)]` is E0017 — `@derive` is a codegen directive, not an attribute.
+Deriving a built-in the compiler has no recipe for (`@derive(Add)`, `@derive(Validate)`) or wrong generic arity (`@derive(Comparable<int>)`, `@derive(Serialize)` without a format) is E0014. The refusal names the routes still open to *that* trait — `Add` delegates through a field, `Validate` wants an `impl` — so a diagnostic and this page never disagree about what the language allows. Spelling a derive as the data-attribute `#[derive(...)]` is E0017 — `@derive` is a codegen directive, not an attribute.
 
 ## Bridging a required member
 
@@ -198,7 +200,7 @@ A bridge carries the trait method's **`async`-ness**: an `async` trait method sy
 
 ## Delegating through a field (`via:`)
 
-`@derive(Trait, via: field)` forwards the whole trait through a field — the newtype pattern without boilerplate. For a user trait, every method forwards into the field's own implementation (the field's type must implement the trait), `async` methods included — the forwarder is `async` and awaits the field's future, so a delegated `async fn` is a `Future<T>` at the call site exactly like the one it forwards to. For the built-ins, a template table covers `Equatable`/`Comparable`/`Display` (compare/render the fields) and the operator traits `Add`/`Sub`/`Mul`/`Div`/`Concat` (unwrap-op-rewrap; single-field types only, since the result must construct a new value):
+`@derive(Trait, via: field)` forwards the whole trait through a field — the newtype pattern without boilerplate. For a user trait, every method forwards into the field's own implementation (the field's type must implement the trait), `async` methods included — the forwarder is `async` and awaits the field's future, so a delegated `async fn` is a `Future<T>` at the call site exactly like the one it forwards to. For the built-ins, a template table covers `Equatable`/`Comparable`/`Display` (compare/render the fields), [`Error`](Error-Handling#deriving-error) (forward `message()` into the field's own), and the operator traits `Add`/`Sub`/`Mul`/`Div`/`Concat` (unwrap-op-rewrap; single-field types only, since the result must construct a new value). Every other built-in is an `impl`:
 
 ```noeta check
 @derive(Comparable, via: cents)

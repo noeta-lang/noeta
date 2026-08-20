@@ -549,22 +549,106 @@ fn impl_with_wrong_arity_is_reported() {
 }
 
 #[test]
-fn derivable_traits_are_accepted() {
+fn builtins_with_a_recipe_are_accepted() {
     let src = "@derive(Equatable, Comparable, Display, Clone)\nclass P {\n  x: int\n}\n";
     assert!(codes(src).is_empty());
 }
 
 #[test]
-fn deriving_a_non_derivable_trait_is_reported() {
-    // `Add` is an operator trait, implemented not derived.
+fn a_builtin_without_a_recipe_is_refused_and_the_help_offers_delegation() {
+    // `Add` is an operator trait: the compiler writes no body for it, but `via:` does — so the
+    // refusal has to hand the reader the delegation, not a list of the seven traits it is not.
     let src = "@derive(Add)\nclass P {\n  x: int\n}\n";
     assert_eq!(codes(src), ["E0014"]);
+    let help = helps(src).remove(0);
+    assert!(
+        help.contains("`@derive(Add, via: <field>)`"),
+        "the route one keyword away has to be in the help: {help}"
+    );
+    assert!(
+        help.contains("`impl Add"),
+        "and the route that always works: {help}"
+    );
 }
 
 #[test]
-fn deriving_an_unknown_trait_is_reported() {
+fn a_builtin_with_neither_recipe_nor_via_template_is_told_to_implement_it() {
+    // `Validate` has no recipe (an invariant is not synthesizable) and no `via:` template. Naming
+    // `via:` as *its* fix would send the reader to a second error, so the help states both sets
+    // and points at the `impl`.
+    let src = "@derive(Validate)\nclass P {\n  x: int\n}\n";
+    assert_eq!(codes(src), ["E0014"]);
+    let help = helps(src).remove(0);
+    assert!(
+        help.contains("`impl Validate"),
+        "the only route that reaches `Validate`: {help}"
+    );
+    assert!(
+        !help.contains("@derive(Validate, via:"),
+        "`via:` must not be offered for a trait it cannot delegate: {help}"
+    );
+    assert!(
+        help.contains("`via: <field>` delegates") && help.contains("`Add`"),
+        "the delegable set is still worth naming, as a set: {help}"
+    );
+}
+
+#[test]
+fn deriving_an_unknown_trait_names_every_route() {
+    // Nothing registers `Bogus`. The help is where the four routes are enumerated, because this is
+    // the one refusal that cannot know which of them the author meant.
     let src = "@derive(Bogus)\nclass P {\n  x: int\n}\n";
     assert_eq!(codes(src), ["E0014"]);
+    let help = helps(src).remove(0);
+    for route in [
+        "`Equatable`",
+        "a `trait` this program declares",
+        "`via: <field>`",
+        "an extension registers",
+        "`@attribute`",
+    ] {
+        assert!(help.contains(route), "route `{route}` missing from: {help}");
+    }
+}
+
+#[test]
+fn a_member_binding_on_a_builtin_offers_via_only_where_via_applies() {
+    // Member bindings bridge a *user* trait's required method. On a built-in the binding is E0050
+    // either way, and the help splits on whether `via:` can actually delegate that built-in.
+    let src = "@derive(Comparable, compare: x)\nclass P {\n  x: int\n}\n";
+    assert_eq!(codes(src), ["E0050"]);
+    let help = helps(src).remove(0);
+    assert!(
+        help.contains("use `via: <field>` to delegate `Comparable`"),
+        "{help}"
+    );
+    let src = "@derive(Validate, validate: x)\nclass P {\n  x: int\n}\n";
+    assert_eq!(codes(src), ["E0050"]);
+    let help = helps(src).remove(0);
+    assert!(
+        help.contains("`impl Validate") && !help.contains("use `via:"),
+        "{help}"
+    );
+}
+
+#[test]
+fn a_user_trait_refusal_names_both_bridging_and_delegation() {
+    // A required method with parameters cannot bridge to a field, and a required nullary method
+    // with no candidate field cannot be deduced — both are still one `via:` or one `member:` away,
+    // so both helps say so.
+    let src = "trait Greet {\n  fn greet(who: string): string\n}\n\
+               @derive(Greet)\nstruct T {\n  v: int\n}\n";
+    assert_eq!(codes(src), ["E0050"]);
+    let help = helps(src).remove(0);
+    assert!(help.contains("`@derive(Greet, greet: <method>)`"), "{help}");
+    assert!(help.contains("`@derive(Greet, via: <field>)`"), "{help}");
+
+    let src = "trait Greet {\n  fn greet(): string\n}\n\
+               @derive(Greet)\nstruct T {\n  v: int\n}\n";
+    assert_eq!(codes(src), ["E0050"]);
+    let help = helps(src).remove(0);
+    assert!(help.contains("`@derive(Greet, greet: <member>)`"), "{help}");
+    assert!(help.contains("`@derive(Greet, via: <field>)`"), "{help}");
 }
 
 #[test]

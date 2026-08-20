@@ -13,7 +13,8 @@
 //! checker matches it exhaustively (adding a trait forces every dispatch site to be updated) and an
 //! unknown name is rejected at exactly one parse boundary ([`BuiltinTrait::from_name`]). Each
 //! variant's metadata — the source name, the single method an `impl` must provide, the operator it
-//! overloads, and whether it is derivable — lives in one authoritative [`BuiltinTrait::info`] match.
+//! overloads, and whether the compiler carries a recipe for it — lives in one authoritative
+//! [`BuiltinTrait::info`] match.
 //!
 //! Every operator is now trait-dispatched through both backends: the infix traits `Add`/`Sub`/
 //! `Mul`/`Div`/`Concat` (`+ - * / ~`, M1.8a), `Equatable` (`==`/`!=` → `eq`), and `Comparable`
@@ -48,7 +49,7 @@ pub enum BuiltinTrait {
     /// [`BuiltinTrait::Display`]: an error type *may* also implement `Display` (and std's
     /// `JsonError` does), but `impl Error` alone imposes exactly one method — rendering stays
     /// whatever the type's display story already is, so adopting `Error` never changes program
-    /// output. Derivable (error-ergonomics): `@derive(Error)` synthesizes
+    /// output. The compiler carries a recipe for it: `@derive(Error)` synthesizes
     /// `fn message(): string { return "${self}" }` — the message IS the type's display story
     /// (an `impl Display`'s `to_string`, or a derived `Display`'s structural rendering), so the
     /// derive requires the type to have `Display` at all (E0050 otherwise). `@derive(Error,
@@ -70,8 +71,9 @@ pub enum BuiltinTrait {
     /// construction. `from` is an ordinary associated function, explicitly callable as
     /// `Target.from(x)`; the single *implicit* application in the language is the `?` error
     /// position: a `?` whose `Err` payload type differs from the enclosing function's declared
-    /// error type converts through the target's `From<Source>` impl (E0057 when none exists). Not
-    /// derivable.
+    /// error type converts through the target's `From<Source>` impl (E0057 when none exists). The
+    /// compiler carries **no recipe** for it, and `via:` cannot delegate it either — a conversion
+    /// body is the author's, so `impl From<Source>` is the only route.
     From,
     Clone,
     Serialize,
@@ -96,8 +98,9 @@ pub enum BuiltinTrait {
     /// [`BuiltinTrait::Display`]: adopting `Validate` never changes a type's rendering. A value of
     /// a `Validate`-implementing type can be `.validate()`-called anywhere like any method.
     ///
-    /// **Not derivable** (an invariant cannot be synthesized from fields — the one method is the
-    /// whole point). Beyond presence + arity, the checker pins the return shape to
+    /// The compiler carries **no recipe** for it (an invariant cannot be synthesized from fields —
+    /// the one method is the whole point), and `via:` does not delegate it. Beyond presence +
+    /// arity, the checker pins the return shape to
     /// `Result<void, string | Error>` (E0015 otherwise), so both the `?`-conversion path and the
     /// recipe-seam auto-enforcement (validation arc slice 2) can rely on it. When a
     /// `Validate`-implementing struct is materialized by a recipe door (`json.parse::<T>` /
@@ -153,7 +156,7 @@ impl FixedReturn {
 
 /// The per-variant metadata of a [`BuiltinTrait`]: the name users write, the single method an `impl`
 /// block must provide (with its user-facing arity, i.e. excluding the receiver), the infix operator
-/// it overloads (if any), and whether it may be derived.
+/// it overloads (if any), and whether the compiler carries a synthesis recipe for it.
 struct Info {
     /// The name users write in `impl`/`@derive(...)`.
     name: &'static str,
@@ -165,20 +168,21 @@ struct Info {
     required_method: RequiredMethod,
     /// The infix operator this trait overloads, for the operator traits; `None` otherwise.
     operator: Option<BinaryOp>,
-    /// Whether `@derive(Name)` is accepted for this trait.
-    derivable: bool,
+    /// Whether the compiler carries a synthesis recipe for this trait — see
+    /// [`BuiltinTrait::has_builtin_recipe`].
+    builtin_recipe: bool,
     /// The return type the language fixes for [`Self::required_method`], where it fixes one — see
     /// [`FixedReturn`].
     fixed_return: Option<FixedReturn>,
 }
 
 impl BuiltinTrait {
-    /// The single source of truth: each variant's name, required method, operator, and derivability.
-    /// Every accessor projects one field of this; keep the operator entries consistent with
-    /// [`BinaryOp::overload_method`].
+    /// The single source of truth: each variant's name, required method, operator, and whether the
+    /// compiler carries a recipe for it. Every accessor projects one field of this; keep the
+    /// operator entries consistent with [`BinaryOp::overload_method`].
     fn info(self) -> Info {
         use BuiltinTrait::*;
-        let (name, required_method, operator, derivable, fixed_return): (
+        let (name, required_method, operator, builtin_recipe, fixed_return): (
             &'static str,
             RequiredMethod,
             Option<BinaryOp>,
@@ -235,13 +239,13 @@ impl BuiltinTrait {
                 Some(FixedReturn::Ordering),
             ),
             Display => ("Display", Some(("to_string", Some(0))), None, true, None),
-            // The failure-value protocol: one nullary method, `message(): string`. Derivable
-            // (error-ergonomics): the synthesized `message()` returns `"${self}"` — the type's
+            // The failure-value protocol: one nullary method, `message(): string`. The compiler
+            // has a recipe: the synthesized `message()` returns `"${self}"` — the type's
             // display story (requires Display, impl'd or derived; E0050 otherwise) — or forwards
             // into a field's own `message()` via `via:`.
             Error => ("Error", Some(("message", Some(0))), None, true, None),
             // The declared-conversion protocol: one associated function `from(value: Source):
-            // Target`. Not derivable (a conversion body cannot be synthesized from fields).
+            // Target`. No recipe (a conversion body cannot be synthesized from fields).
             // Spelled in `noeta_ast::conversion`, which is also where a conversion's method-table
             // key is derived — the compiler reads that module and depends on no type-system crate,
             // so the trait's two words live there and are read here.
@@ -259,7 +263,7 @@ impl BuiltinTrait {
             DynamicCall => ("DynamicCall", Some(("call", Some(2))), None, false, None),
             TryAdd => ("TryAdd", Some(("try_add", Some(1))), None, false, None),
             // The data-boundary invariant protocol: one nullary method, `validate(): Result<void,
-            // E>`. Not derivable (an invariant is not synthesizable from fields). The return shape
+            // E>`. No recipe (an invariant is not synthesizable from fields). The return shape
             // is pinned separately by the checker (`Result<void, string | Error>`).
             Validate => ("Validate", Some(("validate", Some(0))), None, false, None),
         };
@@ -267,7 +271,7 @@ impl BuiltinTrait {
             name,
             required_method,
             operator,
-            derivable,
+            builtin_recipe,
             fixed_return,
         }
     }
@@ -317,9 +321,19 @@ impl BuiltinTrait {
         self.info().operator
     }
 
-    /// Whether `@derive(Name)` is accepted for this trait.
-    pub fn derivable(self) -> bool {
-        self.info().derivable
+    /// Whether the compiler carries a **built-in recipe** for this trait: a synthesis it can
+    /// perform from the deriving type's shape alone, which is what a bare `@derive(Name)` runs
+    /// (field-wise ordering for `Comparable`, structural rendering for `Display`, the encode/decode
+    /// walks for `Serialize`/`Deserialize`, `message()` from the display story for `Error`).
+    ///
+    /// **`false` does not mean the trait cannot be derived** — that is why this is not called
+    /// `derivable`. `@derive(Trait, via: <field>)` delegates several of these through a field
+    /// (`noeta_ast::derive::VIA_DELEGABLE_BUILTINS`), and the routes that do not touch this table
+    /// at all — a user `trait`, a bundle binding, an extension's `ExtDerive` recipe — never consult
+    /// it. What `false` says is that *this compiler* has no body to write for the trait, so the
+    /// behavior has to come from somewhere the author names.
+    pub fn has_builtin_recipe(self) -> bool {
+        self.info().builtin_recipe
     }
 
     /// The return type the **language** fixes for this trait's required method, or `None` where the
@@ -353,7 +367,7 @@ pub fn operator_trait(op: BinaryOp) -> Option<BuiltinTrait> {
 }
 
 /// The complete set of built-in traits, in declaration order (operator traits first, then the
-/// protocol/derivable traits). Used to scan by name/operator and by the coherence tests.
+/// protocol traits). Used to scan by name/operator and by the coherence tests.
 pub const BUILTIN_TRAITS: &[BuiltinTrait] = &[
     BuiltinTrait::Add,
     BuiltinTrait::Sub,
@@ -480,14 +494,55 @@ mod tests {
         }
     }
 
+    /// Exactly these built-ins carry a compiler recipe — the set a bare `@derive(Name)`
+    /// synthesizes, and the set the checker's refusal help lists back. Pinned so adding a variant
+    /// with `true` in the table is a deliberate act rather than a diagnostic that quietly grows.
+    #[test]
+    fn exactly_these_builtins_carry_a_recipe() {
+        let with: Vec<&str> = BUILTIN_TRAITS
+            .iter()
+            .filter(|t| t.has_builtin_recipe())
+            .map(|t| t.name())
+            .collect();
+        assert_eq!(
+            with,
+            vec![
+                "Equatable",
+                "Comparable",
+                "Display",
+                "Error",
+                "Clone",
+                "Serialize",
+                "Deserialize"
+            ]
+        );
+        // A recipe and a `via:` template are independent routes, and the two sets genuinely cross:
+        // the operator traits delegate without a recipe, `Clone`/`Serialize`/`Deserialize` have a
+        // recipe and no template, and `Equatable`/`Comparable`/`Display`/`Error` have both. A
+        // refusal that names one route therefore cannot be reworded into the other.
+        let via = noeta_ast::derive::VIA_DELEGABLE_BUILTINS;
+        assert!(via.contains(&BuiltinTrait::Add.name()) && !BuiltinTrait::Add.has_builtin_recipe());
+        assert!(
+            !via.contains(&BuiltinTrait::Clone.name()) && BuiltinTrait::Clone.has_builtin_recipe()
+        );
+        assert!(
+            via.contains(&BuiltinTrait::Display.name())
+                && BuiltinTrait::Display.has_builtin_recipe()
+        );
+        assert!(
+            !via.contains(&BuiltinTrait::Validate.name())
+                && !BuiltinTrait::Validate.has_builtin_recipe()
+        );
+    }
+
     #[test]
     fn from_name_finds_and_rejects() {
         assert_eq!(
             BuiltinTrait::from_name("Add").map(|t| t.name()),
             Some("Add")
         );
-        assert!(BuiltinTrait::from_name("Equatable").is_some_and(|t| t.derivable()));
-        assert!(BuiltinTrait::from_name("Add").is_some_and(|t| !t.derivable()));
+        assert!(BuiltinTrait::from_name("Equatable").is_some_and(|t| t.has_builtin_recipe()));
+        assert!(BuiltinTrait::from_name("Add").is_some_and(|t| !t.has_builtin_recipe()));
         assert!(BuiltinTrait::from_name("Nonexistent").is_none());
     }
 
@@ -516,17 +571,15 @@ mod tests {
             via: Some(("f".to_string(), span)),
             span,
         };
-        const SUPPORTED: &[&str] = &[
-            "Equatable",
-            "Comparable",
-            "Display",
-            "Error",
-            "Add",
-            "Sub",
-            "Mul",
-            "Div",
-            "Concat",
-        ];
+        let supported = noeta_ast::derive::VIA_DELEGABLE_BUILTINS;
+        // Every name in the shared list is a real trait — the list is literals in a crate that
+        // cannot see this enum, so a typo would otherwise only weaken the loop below.
+        for name in supported {
+            assert!(
+                BuiltinTrait::from_name(name).is_some(),
+                "`{name}` is not a built-in trait"
+            );
+        }
         for t in BUILTIN_TRAITS {
             let plan = noeta_ast::derive::plan_builtin_via(
                 t.name(),
@@ -534,7 +587,7 @@ mod tests {
                 std::slice::from_ref(&field),
                 &spec,
             );
-            if SUPPORTED.contains(&t.name()) {
+            if supported.contains(&t.name()) {
                 let methods = plan.unwrap_or_else(|e| panic!("{}: {}", t.name(), e.message));
                 let (required, _) = t
                     .required_method()

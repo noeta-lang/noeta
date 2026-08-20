@@ -424,7 +424,7 @@ fn derive_candidates(ctxt: &DirectiveArgContext, program: &Program) -> Vec<Candi
     }
     let mut candidates: Vec<Candidate> = noeta_types::BUILTIN_TRAITS
         .iter()
-        .filter(|t| t.derivable())
+        .filter(|t| t.has_builtin_recipe())
         .map(|t| {
             let detail = match t.generic_arity() {
                 0 => "derivable trait".to_string(),
