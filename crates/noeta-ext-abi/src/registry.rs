@@ -3977,73 +3977,72 @@ fn trait_name_resolves(units: &[&'static (dyn Extension + Sync)], name: &str) ->
             .any(|t| t.name == name || t.is_qualified(name))
 }
 
-/// Every trait name reachable in `sig`, including nested positions (`List<BoundedVar>`, a closure
-/// parameter, an `Optional` tail) — the ABI twin of the checker's own `BoundedVar` collection walk,
-/// so a bound buried under a wrapper is validated exactly like a top-level one.
-fn collect_sig_bounds(sig: &SigType, out: &mut Vec<&'static str>) {
+/// The first [`SigType::BoundedVar`] bound in `sig` that names no trait, nested positions included
+/// (`List<BoundedVar>`, a closure parameter, an `Optional` tail) — the ABI twin of the checker's own
+/// bound-collection walk, so a bound buried under a wrapper is validated exactly like a top-level one.
+///
+/// Written as a **search** rather than a collection because it runs over every registered signature
+/// at process start: the happy path must not allocate, and the answer is a single name either way.
+fn first_unresolved_bound(
+    units: &[&'static (dyn Extension + Sync)],
+    sig: &SigType,
+) -> Option<&'static str> {
     match sig {
-        SigType::BoundedVar(_, bounds) => out.extend(bounds.iter().copied()),
+        SigType::BoundedVar(_, bounds) => bounds
+            .iter()
+            .copied()
+            .find(|b| !trait_name_resolves(units, b)),
         SigType::List(t) | SigType::Option(t) | SigType::Future(t) | SigType::Optional(t) => {
-            collect_sig_bounds(t, out);
+            first_unresolved_bound(units, t)
         }
         SigType::Map(k, v) | SigType::Result(k, v) => {
-            collect_sig_bounds(k, out);
-            collect_sig_bounds(v, out);
+            first_unresolved_bound(units, k).or_else(|| first_unresolved_bound(units, v))
         }
         SigType::Union(ts) | SigType::Generic(_, ts) => {
-            for t in *ts {
-                collect_sig_bounds(t, out);
-            }
+            ts.iter().find_map(|t| first_unresolved_bound(units, t))
         }
-        SigType::Fn(params, ret) => {
-            for p in *params {
-                collect_sig_bounds(p, out);
-            }
-            collect_sig_bounds(ret, out);
-        }
-        _ => {}
+        SigType::Fn(params, ret) => params
+            .iter()
+            .find_map(|p| first_unresolved_bound(units, p))
+            .or_else(|| first_unresolved_bound(units, ret)),
+        _ => None,
     }
 }
 
-/// Every associated-type name ([`SigType::Assoc`]) reachable in `sig`, nested positions included —
-/// the `Assoc` twin of [`collect_sig_bounds`], so `List<Self::Wide>` is checked like a bare
-/// `Self::Wide`.
-fn collect_sig_assocs(sig: &SigType, out: &mut Vec<&'static str>) {
+/// The first [`SigType::Assoc`] projection in `sig` naming none of `declared`, nested positions
+/// included — the `Assoc` twin of [`first_unresolved_bound`], so `List<Self::Wide>` is checked like a
+/// bare `Self::Wide`, and allocation-free for the same reason.
+fn first_unknown_assoc(declared: &[ExtAssocType], sig: &SigType) -> Option<&'static str> {
     match sig {
-        SigType::Assoc(name) => out.push(name),
+        SigType::Assoc(name) => (!declared.iter().any(|a| a.name == *name)).then_some(*name),
         SigType::List(t) | SigType::Option(t) | SigType::Future(t) | SigType::Optional(t) => {
-            collect_sig_assocs(t, out);
+            first_unknown_assoc(declared, t)
         }
         SigType::Map(k, v) | SigType::Result(k, v) => {
-            collect_sig_assocs(k, out);
-            collect_sig_assocs(v, out);
+            first_unknown_assoc(declared, k).or_else(|| first_unknown_assoc(declared, v))
         }
         SigType::Union(ts) | SigType::Generic(_, ts) => {
-            for t in *ts {
-                collect_sig_assocs(t, out);
-            }
+            ts.iter().find_map(|t| first_unknown_assoc(declared, t))
         }
-        SigType::Fn(params, ret) => {
-            for p in *params {
-                collect_sig_assocs(p, out);
-            }
-            collect_sig_assocs(ret, out);
-        }
-        _ => {}
+        SigType::Fn(params, ret) => params
+            .iter()
+            .find_map(|p| first_unknown_assoc(declared, p))
+            .or_else(|| first_unknown_assoc(declared, ret)),
+        _ => None,
     }
 }
 
-/// The [`SigType`]s an [`ExtFn`] mentions: its parameters and its declared return, so one walk
-/// covers a signature completely. [`RetTy::SameAsArg`] / [`RetTy::NumericPreserving`] name no type of
-/// their own; a [`RetTy::TypeArg`] carries its error type inside the wrapper.
-fn sig_types_of(f: &ExtFn) -> Vec<SigType> {
-    let mut out: Vec<SigType> = f.params.to_vec();
-    match f.ret {
-        RetTy::Concrete(s) => out.push(s),
-        RetTy::TypeArg(TypeArgWrap::Result(e)) => out.push(e),
-        RetTy::TypeArg(_) | RetTy::SameAsArg(_) | RetTy::NumericPreserving => {}
-    }
-    out
+/// The [`SigType`]s an [`ExtFn`] mentions — its parameters, then its declared return — as a borrowing
+/// iterator, so one walk covers a signature completely without materializing a list.
+/// [`RetTy::SameAsArg`] / [`RetTy::NumericPreserving`] name no type of their own; a
+/// [`RetTy::TypeArg`] carries its error type inside the wrapper.
+fn sig_types_of(f: &ExtFn) -> impl Iterator<Item = SigType> + '_ {
+    let ret = match f.ret {
+        RetTy::Concrete(s) => Some(s),
+        RetTy::TypeArg(TypeArgWrap::Result(e)) => Some(e),
+        RetTy::TypeArg(_) | RetTy::SameAsArg(_) | RetTy::NumericPreserving => None,
+    };
+    f.params.iter().copied().chain(ret)
 }
 
 /// Whether `path` names a registered module function — the `"module.func"` spelling an
@@ -4056,7 +4055,9 @@ fn native_fn_path_resolves(units: &[&'static (dyn Extension + Sync)], path: &str
     };
     units.iter().any(|u| {
         u.modules().iter().any(|m| {
-            (m.name == module || format!("{}.{}", u.root(), m.name) == module)
+            // `qualified_matches` rather than a built `"{root}.{name}"`: this runs once per module
+            // per lookup, and a `format!` there is an allocation per module at every process start.
+            (m.name == module || qualified_matches(u.root(), m.name, module))
                 && m.functions
                     .iter()
                     .chain(m.ctx_functions)
@@ -4773,6 +4774,10 @@ fn validate(units: &[&'static (dyn Extension + Sync)]) -> Result<(), String> {
 /// Assembly is the one point every path passes (CLI, composed shim, embed session, lazy default), so
 /// each check names the offending string, the declaration that carries it, and the unit.
 fn validate_cross_references(units: &[&'static (dyn Extension + Sync)]) -> Result<(), String> {
+    // Every loop below runs at PROCESS START, over every registered declaration — so the happy path
+    // allocates nothing. A name is formatted into a message only once one has already failed to
+    // resolve, which is why the owner of each signature is passed as its pieces rather than as a
+    // built `String`.
     for unit in units {
         // --- `traits`: the built-in / native trait a native declaration advertises ---
         //
@@ -4781,98 +4786,66 @@ fn validate_cross_references(units: &[&'static (dyn Extension + Sync)]) -> Resul
         let advertisers = unit
             .types()
             .iter()
-            .map(|t| ("extern type", t.qualified(), t.traits))
+            .map(|t| ("extern type", t.namespace, t.name, t.traits))
             .chain(
                 unit.enums()
                     .iter()
-                    .map(|e| ("enum", e.qualified(), e.traits)),
+                    .map(|e| ("enum", e.namespace, e.name, e.traits)),
             )
             .chain(unit.classes().iter().chain(unit.structs()).map(|f| {
                 let kind = match f.kind {
                     FieldedKind::Class => "class",
                     FieldedKind::Struct => "struct",
                 };
-                (kind, f.qualified(), f.traits)
+                (kind, f.namespace, f.name, f.traits)
             }));
-        for (kind, qualified, traits) in advertisers {
-            for name in traits {
-                if !trait_name_resolves(units, name) {
+        for (kind, namespace, name, traits) in advertisers {
+            for declared in traits {
+                if !trait_name_resolves(units, declared) {
                     return Err(format!(
-                        "native {kind} `{qualified}` of unit `{}` declares trait `{name}`, which is \
-                         neither a built-in trait nor a registered native trait — an unresolved name \
-                         is dropped silently, leaving the type advertising a trait it does not hold",
+                        "native {kind} `{namespace}.{name}` of unit `{}` declares trait \
+                         `{declared}`, which is neither a built-in trait nor a registered native \
+                         trait — an unresolved name is dropped silently, leaving the type \
+                         advertising a trait it does not hold",
                         unit.name()
                     ));
                 }
             }
         }
-        // --- signatures: `BoundedVar` trait bounds, `Assoc` associated types, `param_names` arity ---
-        let module_sigs = unit.modules().iter().flat_map(|m| {
-            m.functions
+        // --- signatures: `BoundedVar` trait bounds and `param_names` arity ---
+        //
+        // Plain nested loops over a shared per-signature check, rather than one chained iterator:
+        // this visits EVERY registered signature at every process start, and the iterator
+        // machinery for a five-way `chain` of `flat_map`s was itself the larger half of what the
+        // sweep cost. `owner` travels as its pieces so the label is built only on the error path.
+        for m in unit.modules() {
+            for f in m
+                .functions
                 .iter()
                 .chain(m.ctx_functions)
                 .chain(m.typed_functions)
-                .map(move |f| (format!("module `{}`", m.name), f))
-        });
-        let type_sigs = unit.types().iter().flat_map(|t| {
-            t.methods
-                .iter()
-                .chain(t.ctx_methods)
-                .chain(t.typed_methods)
-                .map(move |f| (format!("type `{}`", t.qualified()), f))
-        });
-        let enum_sigs = unit.enums().iter().flat_map(|e| {
-            e.methods
-                .iter()
-                .map(move |f| (format!("enum `{}`", e.qualified()), f))
-        });
-        let fielded_sigs = unit.classes().iter().chain(unit.structs()).flat_map(|c| {
-            c.methods
-                .iter()
-                .map(move |f| (format!("type `{}`", c.qualified()), f))
-        });
-        let trait_sigs = unit.traits().iter().flat_map(|t| {
-            t.methods
-                .iter()
-                .map(move |m| (format!("trait `{}`", t.qualified()), &m.sig))
-        });
-        for (owner, f) in module_sigs
-            .chain(type_sigs)
-            .chain(enum_sigs)
-            .chain(fielded_sigs)
-            .chain(trait_sigs)
-        {
-            // A `BoundedVar`'s bounds are the SAME trait-name space as `traits`, resolved the same
-            // way (`collect_var_bounds` → `BuiltinTrait::from_name` in the checker) and dropped just
-            // as silently: an unresolved bound is a parameter that accepts anything, where the
-            // declaration says E0025.
-            let mut bounds = Vec::new();
-            for sig in sig_types_of(f) {
-                collect_sig_bounds(&sig, &mut bounds);
+            {
+                check_signature(units, f, ("module", m.name, ""), unit.name())?;
             }
-            for name in bounds {
-                if !trait_name_resolves(units, name) {
-                    return Err(format!(
-                        "`{}` of {owner} (unit `{}`) declares a type-variable bound `{name}`, which \
-                         is neither a built-in trait nor a registered native trait — an unresolved \
-                         bound is dropped, so the parameter accepts any type",
-                        f.name,
-                        unit.name()
-                    ));
-                }
+        }
+        for t in unit.types() {
+            for f in t.methods.iter().chain(t.ctx_methods).chain(t.typed_methods) {
+                check_signature(units, f, ("type", t.namespace, t.name), unit.name())?;
             }
-            // `param_names` is positionally parallel to `params`: name every parameter or none. A
-            // short list silently unnames the tail (a `name:` label there is refused as unbound).
-            if !f.param_names.is_empty() && f.param_names.len() != f.params.len() {
-                return Err(format!(
-                    "`{}` of {owner} (unit `{}`) declares {} parameter name(s) for {} parameter(s) \
-                     — `param_names` is positionally parallel to `params`: name every parameter or \
-                     none",
-                    f.name,
-                    unit.name(),
-                    f.param_names.len(),
-                    f.params.len()
-                ));
+        }
+        for e in unit.enums() {
+            for f in e.methods {
+                check_signature(units, f, ("enum", e.namespace, e.name), unit.name())?;
+            }
+        }
+        for c in unit.classes().iter().chain(unit.structs()) {
+            for f in c.methods {
+                check_signature(units, f, ("type", c.namespace, c.name), unit.name())?;
+            }
+        }
+        for tr in unit.traits() {
+            for m in tr.methods {
+                check_signature(units, &m.sig, ("trait", tr.namespace, tr.name), unit.name())?;
             }
         }
         // A trait method's `Self::Name` must name one of the trait's own `assoc_types` — the table
@@ -4880,80 +4853,94 @@ fn validate_cross_references(units: &[&'static (dyn Extension + Sync)]) -> Resul
         // hole, so the method's declared result type is silently `dyn`.
         for tr in unit.traits() {
             for m in tr.methods {
-                let mut assocs = Vec::new();
-                for sig in sig_types_of(&m.sig) {
-                    collect_sig_assocs(&sig, &mut assocs);
-                }
-                for name in assocs {
-                    if !tr.assoc_types.iter().any(|a| a.name == name) {
-                        return Err(format!(
-                            "method `{}` of native trait `{}` (unit `{}`) names `Self::{name}`, \
-                             which is not one of the trait's associated types — an unresolved \
-                             projection degrades to `dyn`, so the declared result type is lost",
-                            m.sig.name,
-                            tr.qualified(),
-                            unit.name()
-                        ));
-                    }
+                if let Some(assoc) =
+                    sig_types_of(&m.sig).find_map(|sig| first_unknown_assoc(tr.assoc_types, &sig))
+                {
+                    return Err(format!(
+                        "method `{}` of native trait `{}.{}` (unit `{}`) names `Self::{assoc}`, \
+                         which is not one of the trait's associated types — an unresolved \
+                         projection degrades to `dyn`, so the declared result type is lost",
+                        m.sig.name,
+                        tr.namespace,
+                        tr.name,
+                        unit.name()
+                    ));
                 }
             }
         }
         // --- `docs`: per-member prose keyed by member NAME ---
         //
         // A key matching no member renders nothing at all — the signature shows bare, exactly as an
-        // undocumented one does, so the prose is written, shipped, and never seen.
-        let doc_tables = unit
-            .modules()
-            .iter()
-            .map(|m| {
-                let members: Vec<&str> = m
+        // undocumented one does, so the prose is written, shipped, and never seen. `docs` is opt-in
+        // and empty for nearly every declaration, so each arm checks that first and the membership
+        // test streams the member names rather than collecting them.
+        for m in unit.modules() {
+            for (key, _) in m.docs {
+                if !m
                     .functions
                     .iter()
                     .chain(m.ctx_functions)
                     .chain(m.typed_functions)
-                    .map(|f| f.name)
-                    .collect();
-                (format!("module `{}`", m.name), m.docs, members)
-            })
-            .chain(unit.types().iter().map(|t| {
-                let members: Vec<&str> = t
+                    .any(|f| f.name == *key)
+                {
+                    return Err(undocumentable(
+                        &format!("module `{}`", m.name),
+                        key,
+                        unit.name(),
+                    ));
+                }
+            }
+        }
+        for t in unit.types() {
+            for (key, _) in t.docs {
+                if !t
                     .methods
                     .iter()
                     .chain(t.ctx_methods)
                     .chain(t.typed_methods)
-                    .map(|f| f.name)
-                    .collect();
-                (format!("extern type `{}`", t.qualified()), t.docs, members)
-            }))
-            .chain(unit.enums().iter().map(|e| {
-                let members: Vec<&str> = e
-                    .variants
-                    .iter()
-                    .map(|v| v.name)
-                    .chain(e.methods.iter().map(|f| f.name))
-                    .collect();
-                (format!("enum `{}`", e.qualified()), e.docs, members)
-            }))
-            .chain(unit.classes().iter().chain(unit.structs()).map(|c| {
-                let members: Vec<&str> = c
-                    .fields
-                    .iter()
-                    .map(|f| f.name)
-                    .chain(c.methods.iter().map(|f| f.name))
-                    .collect();
-                (format!("type `{}`", c.qualified()), c.docs, members)
-            }))
-            .chain(unit.traits().iter().map(|t| {
-                let members: Vec<&str> = t.methods.iter().map(|m| m.sig.name).collect();
-                (format!("trait `{}`", t.qualified()), t.docs, members)
-            }));
-        for (owner, docs, members) in doc_tables {
-            for (key, _) in docs {
-                if !members.contains(key) {
-                    return Err(format!(
-                        "{owner} of unit `{}` documents `{key}`, which is not one of its members — \
-                         a docs key matching no member renders nothing at all",
-                        unit.name()
+                    .any(|f| f.name == *key)
+                {
+                    return Err(undocumentable(
+                        &format!("extern type `{}.{}`", t.namespace, t.name),
+                        key,
+                        unit.name(),
+                    ));
+                }
+            }
+        }
+        for e in unit.enums() {
+            for (key, _) in e.docs {
+                if !e.variants.iter().any(|v| v.name == *key)
+                    && !e.methods.iter().any(|f| f.name == *key)
+                {
+                    return Err(undocumentable(
+                        &format!("enum `{}.{}`", e.namespace, e.name),
+                        key,
+                        unit.name(),
+                    ));
+                }
+            }
+        }
+        for c in unit.classes().iter().chain(unit.structs()) {
+            for (key, _) in c.docs {
+                if !c.fields.iter().any(|f| f.name == *key)
+                    && !c.methods.iter().any(|f| f.name == *key)
+                {
+                    return Err(undocumentable(
+                        &format!("type `{}.{}`", c.namespace, c.name),
+                        key,
+                        unit.name(),
+                    ));
+                }
+            }
+        }
+        for tr in unit.traits() {
+            for (key, _) in tr.docs {
+                if !tr.methods.iter().any(|m| m.sig.name == *key) {
+                    return Err(undocumentable(
+                        &format!("trait `{}.{}`", tr.namespace, tr.name),
+                        key,
+                        unit.name(),
                     ));
                 }
             }
@@ -4974,12 +4961,13 @@ fn validate_cross_references(units: &[&'static (dyn Extension + Sync)]) -> Resul
                 };
                 if !ok {
                     return Err(format!(
-                        "variant `{}` of native enum `{}` (unit `{}`) declares a {} value, but the \
-                         enum declares `backing: {:?}` — `.value()` is typed from the backing and \
-                         produced from the variant, so every variant of a backed enum carries a \
+                        "variant `{}` of native enum `{}.{}` (unit `{}`) declares a {} value, but \
+                         the enum declares `backing: {:?}` — `.value()` is typed from the backing \
+                         and produced from the variant, so every variant of a backed enum carries a \
                          fieldless constant of that kind and a non-backed enum's carries none",
                         v.name,
-                        e.qualified(),
+                        e.namespace,
+                        e.name,
                         unit.name(),
                         match v.value {
                             VariantValue::None => "missing",
@@ -5003,11 +4991,12 @@ fn validate_cross_references(units: &[&'static (dyn Extension + Sync)]) -> Resul
                 );
                 if !ok {
                     return Err(format!(
-                        "field `{}` of native attribute `{}` (unit `{}`) declares a default of a \
+                        "field `{}` of native attribute `{}.{}` (unit `{}`) declares a default of a \
                          different type than the field — the default is materialized straight into \
                          the attribute value",
                         f.name,
-                        a.qualified(),
+                        a.namespace,
+                        a.name,
                         unit.name()
                     ));
                 }
@@ -5150,6 +5139,65 @@ fn validate_cross_references(units: &[&'static (dyn Extension + Sync)]) -> Resul
         }
     }
     Ok(())
+}
+
+/// The two per-signature rules — a [`SigType::BoundedVar`]'s trait bounds must resolve, and
+/// `param_names` must be positionally parallel to `params`. Split out so the sweep's five kinds share
+/// one body, and kept allocation-free: it runs over every registered signature at process start, and
+/// the message is built only once something has already failed.
+fn check_signature(
+    units: &[&'static (dyn Extension + Sync)],
+    f: &ExtFn,
+    owner: (&str, &str, &str),
+    unit: &str,
+) -> Result<(), String> {
+    // A `BoundedVar`'s bounds are the SAME trait-name space as `traits`, resolved the same way
+    // (`collect_var_bounds` → `BuiltinTrait::from_name` in the checker) and dropped just as
+    // silently: an unresolved bound is a parameter that accepts anything, where the declaration
+    // says E0025.
+    if let Some(bound) = sig_types_of(f).find_map(|sig| first_unresolved_bound(units, &sig)) {
+        return Err(format!(
+            "`{}` of {} declares a type-variable bound `{bound}`, which is neither a built-in trait \
+             nor a registered native trait — an unresolved bound is dropped, so the parameter \
+             accepts any type",
+            f.name,
+            owner_label(owner, unit)
+        ));
+    }
+    // `param_names` is positionally parallel to `params`: name every parameter or none. A short
+    // list silently unnames the tail (a `name:` label there is refused as unbound).
+    if !f.param_names.is_empty() && f.param_names.len() != f.params.len() {
+        return Err(format!(
+            "`{}` of {} declares {} parameter name(s) for {} parameter(s) — `param_names` is \
+             positionally parallel to `params`: name every parameter or none",
+            f.name,
+            owner_label(owner, unit),
+            f.param_names.len(),
+            f.params.len()
+        ));
+    }
+    Ok(())
+}
+
+/// Render a signature owner for a diagnostic — `module `math``, `type `std.id.Uuid`` — built ONLY on
+/// the error path. The pieces travel as a tuple through the sweep because building this string per
+/// signature, for every registered signature, at every process start, is measurable in the startup
+/// instruction count.
+fn owner_label((kind, namespace, name): (&str, &str, &str), unit: &str) -> String {
+    if name.is_empty() {
+        format!("{kind} `{namespace}` (unit `{unit}`)")
+    } else {
+        format!("{kind} `{namespace}.{name}` (unit `{unit}`)")
+    }
+}
+
+/// The shared "a docs key matches no member" message — one spelling for the five kinds that carry a
+/// `docs` table, built only when a key has already failed to match.
+fn undocumentable(owner: &str, key: &str, unit: &str) -> String {
+    format!(
+        "{owner} of unit `{unit}` documents `{key}`, which is not one of its members — a docs key \
+         matching no member renders nothing at all"
+    )
 }
 
 /// Enforce the documented [`SigType::Optional`] convention — "once a parameter is `Optional`,

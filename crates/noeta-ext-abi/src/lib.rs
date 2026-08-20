@@ -265,7 +265,8 @@
 /// the callee needs is arithmetic on the one this body holds. A `u64` therefore keeps its width
 /// across that frame instead of arriving as its signed reinterpretation.
 /// **25** — every **stringly-typed cross-reference** in a registration must now resolve, or the
-/// registry refuses to assemble ([`registry::validate`]'s sweep, reached by `Registry::new`). A
+/// registry refuses to assemble — the cross-reference half of the sweep
+/// [`registry::Registry::try_new`] runs before it hands back a registry at all. A
 /// `traits` entry, a [`registry::SigType::BoundedVar`] bound, a [`registry::SigType::Assoc`]
 /// projection, a `docs` key, an [`registry::ExtTier`]'s `config` and `handler`, an
 /// [`registry::ExtTierRunner`]'s tier, an [`registry::ExtDeriveMethod`]'s handler, a backed enum's
