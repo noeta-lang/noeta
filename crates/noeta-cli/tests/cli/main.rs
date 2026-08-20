@@ -29,6 +29,8 @@ mod init;
 mod isolates;
 mod mcp;
 mod namespace;
+/// Telemetry configured the way an operator does it — `OTEL_*` variables on a real process.
+mod otel;
 mod pm;
 mod pm_native;
 mod repl;

@@ -80,6 +80,7 @@ Read through the standard environment variables (via the `Env` capability):
 | `OTEL_EXPORTER_OTLP_HEADERS` | `k1=v1,k2=v2` — e.g. an auth token for a hosted collector. Shared across signals. |
 | `OTEL_SERVICE_NAME` | The `service.name` resource attribute (default `noeta`). |
 | `OTEL_METRIC_EXPORT_INTERVAL` | Metrics periodic-export interval in ms (default `60000`). |
+| `OTEL_METRIC_CARDINALITY_LIMIT` | How many attribute sets each metric aggregates separately (default `2000`). See [Cardinality](#cardinality-and-the-overflow-series). |
 | `OTEL_SDK_DISABLED` | `true` forces the null sink for all signals. |
 | `NOETA_TRACE_REACTIVE` | `1`/`true` additionally traces reactive flushes and view diffs (opt-in — too noisy for default-on; see below). |
 
@@ -231,9 +232,25 @@ latency.record(4.2)
 
 > **`Counter`/`Histogram`/`Gauge` are namespaced types** under `std.metrics` — `use`-imported like any extern type, so they coexist with a user's own `Counter`. You only need `use std.metrics.{Counter, …}` when you name one in an annotation; the constructors return them regardless.
 
-**Cardinality matters.** Every distinct attribute set is a separate stored series. Keep attribute values low-cardinality (a route template, a status class) — never a user id, a raw path with ids, or a timestamp — or the host-side aggregation grows unbounded.
-
 Gated on the metrics signal being enabled — a `counter.add(...)` in a hot loop is free when no metrics endpoint is configured.
+
+### Cardinality and the overflow series
+
+Every distinct attribute set is a separate stored series, held host-side for the life of the process. So attribute *values* want to be low-cardinality — a route template, a status class, a tenant tier — and a request id, a user id, a raw path with ids in it or a timestamp is a value that never repeats, which means a new series for every measurement.
+
+Each instrument therefore aggregates at most **2000** attribute sets separately. Measurements whose attribute set arrives after that are not dropped: they fold into one synthetic series marked `otel.metric.overflow=true`, so the instrument's total stays exact and only its breakdown stops. That is what you are looking at when a data point shows up in your collector carrying that attribute and nothing else — the metric it belongs to has more attribute sets than it is allowed to keep apart, and the number under `otel.metric.overflow` is everything that could not be told apart.
+
+The limit is **per instrument**, so one counter carrying a bad attribute does not cost the rest of the program its detail. The sets an instrument saw *before* it filled up keep their own series and keep accumulating; only sets first seen afterwards fold.
+
+Raise or lower it with `OTEL_METRIC_CARDINALITY_LIMIT`:
+
+```sh
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 OTEL_METRIC_CARDINALITY_LIMIT=10000 noeta run app.noe
+```
+
+The value is a count of attribute sets, and it applies to every instrument. Anything that is not a positive whole number — a typo, an empty value, `0` — leaves the default in place rather than being read literally, because a limit of zero would fold every attribute set in the program into one bucket and hide every breakdown you have.
+
+Reaching the overflow series is a signal about the *instrument*, not a budget to raise: the fix is almost always to take the high-cardinality value out of the metric and put it on a [span attribute](#annotating-the-span-you-are-in) or a [log record](#logs-stdlog) instead, where one value per event is the point.
 
 ## Automatic instrumentation
 
