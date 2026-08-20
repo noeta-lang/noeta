@@ -1,15 +1,25 @@
 // **A `Duration` is `Display` but not `Comparable`, and the checker says so.**
 //
 // A calendar span has no total order without a reference date — `PT1M` against `P1D` depends on
-// which day — so `ExternValue::cmp_value` answers `None` and the declaration withholds
-// `Comparable`. The negative half of `datetime_ordering_and_display.noe`: without this case, adding
-// the trait to `Duration` for symmetry would type-check `a < b` and then fail at run time in both
-// backends, which is exactly the failure a declaration is supposed to prevent.
-// expect: error E0007 at 15:6
+// which day — so `ExternValue::cmp_value` answers `None` and the declaration withholds `Comparable`.
+// The negative half of `datetime_ordering_and_display.noe`: without this case, adding the trait to
+// `Duration` for symmetry would type-check `a < b` and then fail at run time in both backends, which
+// is exactly the failure a declaration is supposed to prevent.
+//
+// The **bound** is what makes this case discriminating, and the bare `a < b` below is not enough on
+// its own: a runtime "cannot compare" abort raises the same `E0007` at the same span a static
+// rejection does, so a `Duration` that wrongly declared `Comparable` satisfies an expectation naming
+// only that code and position. An **E0025** at a `T: Comparable` call site has no runtime analogue —
+// a type that declared the trait would satisfy the bound and the error would simply not appear.
+// expect: error E0025 at 24:6
+// expect: error E0007 at 25:6
 // expect: exit 1
 use std.{datetime}
+
+fn smallest<T: Comparable>(xs: List<T>): ?T { return xs.min(); }
 
 t = datetime.from_unix_ms(0);
 a = t.diff(t.add(datetime.hours(1)));
 b = t.diff(t.add(datetime.hours(2)));
+echo smallest([a, b]);
 echo a < b;
