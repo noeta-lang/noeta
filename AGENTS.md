@@ -16,6 +16,13 @@ A language feature lands as a **vertical slice**, in this order: token/AST node 
 > [!IMPORTANT]
 > **The iron rule: every feature or fix lands with a conformance corpus entry** — a `tests/conformance/**.noe` file with an `// expect:` header, negative cases included, and `cargo run -p noeta-conformance -- --differential` at **0 skipped**. Prefer vertical-slice tasks ("implement `~` end to end") over diffuse refactors: a slice's done-condition is "its conformance cases pass". Never blind-accept an `insta` snapshot.
 
+> [!IMPORTANT]
+> **A test you have not seen fail is not a test — ablate it, and commit before you do.** Reintroduce the defect, watch the new case go red *for the reason it names*, then restore. The corpus is full of cases that passed because they never reached the thing they claimed to check: one asserted "histograms and gauges are capped the same way" while recording 100 attribute sets under a limit of 2000, so it never folded a histogram at all; another's own comment cited the differential oracle that had been skipping it. A case whose program cannot reach its claim reads exactly like one that holds.
+>
+> **Commit first.** Ablation means editing the source and putting it back, and `git checkout -- <file>` reverts to HEAD — so uncommitted *tests* in that file vanish with the ablation, and the run that follows passes against a file no longer containing them. That has happened twice in one session, once caught only by noticing a test count of 10 where 13 had run a minute earlier. Commit the test, then ablate, then restore.
+>
+> Two ablation results are not verdicts: a guard you cannot make fail without building a feature that does not exist yet is a **forward-guard** — say so rather than counting it as verified. And a negative case can go red for the wrong reason: a runtime abort and a static rejection can raise the same code at the same span, so pin something only one of them produces.
+
 ## Code conventions
 
 - Files `snake_case.rs`, types `PascalCase`, functions/variables `snake_case`, constants `SCREAMING_SNAKE_CASE`.
