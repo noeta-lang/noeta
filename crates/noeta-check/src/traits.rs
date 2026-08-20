@@ -1801,7 +1801,7 @@ impl Checker {
                 }
             }
             // Generic arity: `Serialize` requires one type argument (`Serialize<Json>`); every other
-            // derivable trait is nullary.
+            // built-in recipe is nullary.
             let arity = t.generic_arity();
             if spec.args.len() != arity {
                 let msg = if arity == 0 {

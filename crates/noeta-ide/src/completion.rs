@@ -13,7 +13,7 @@
 //!   name-space, offered right after an `@` (detected textually via [`is_directive_position`] —
 //!   a dangling `@` never parses).
 //! - [`directive_arg_candidates`] — **directive-argument completion** (C5): the vocabulary inside
-//!   a directive's parens (`@derive(` → the derivable traits, `@role(` → the semantic enums,
+//!   a directive's parens (`@derive(` → what a bare derive accepts, `@role(` → the semantic enums,
 //!   `@packed(` → the `Layout` variants, `@bench(` → its config knobs), from the same sources the
 //!   parser/checker validate against. Context via [`directive_arg_context`].
 //!
@@ -407,7 +407,8 @@ pub fn directive_arg_candidates(ctxt: &DirectiveArgContext, program: &Program) -
     }
 }
 
-/// `@derive(…)`: the derivable built-in traits and the program's derivable **user traits** (UT5:
+/// `@derive(…)`: the built-ins a bare derive synthesizes and the program's derivable **user
+/// traits** (UT5:
 /// non-generic, every method defaulted — deriving adopts the defaults); inside
 /// `Serialize<…>`/`Deserialize<…>`, the serialization formats.
 fn derive_candidates(ctxt: &DirectiveArgContext, program: &Program) -> Vec<Candidate> {

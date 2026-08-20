@@ -101,7 +101,7 @@ pub fn directive_signature(
         // empty `params` and correctly yields no signature.
         //
         // The arms above stay hand-written because their labels interpolate a *vocabulary* that
-        // this table deliberately does not own — the derivable traits come from `noeta-types`, the
+        // this table deliberately does not own — the built-in recipes come from `noeta-types`, the
         // `Layout` variants and semantic-enum variants from `reflect`. The table says `@packed`
         // takes one argument; it does not say which layouts exist.
         Some(directive) => {

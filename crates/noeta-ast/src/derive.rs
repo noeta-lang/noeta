@@ -93,8 +93,8 @@ pub trait DeriveContext {
 }
 
 /// The methods `spec` contributes to the type it decorates, or `None` when no derive planner
-/// applies — a derivable *built-in* trait (whose codegen lives in the backends) or a name nobody
-/// registered (`check_derives` reports that one).
+/// applies — a *built-in* the compiler has a recipe for (whose codegen lives in the backends) or a
+/// name nobody registered (`check_derives` reports that one).
 ///
 /// The one cascade. Its order is load-bearing and was previously restated at each call site: a
 /// user trait first, then `via:` delegation over a built-in, then the plain `@derive(Error)`
