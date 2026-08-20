@@ -1,0 +1,26 @@
+// **`Pattern` and `Match` are `Comparable`.**
+//
+// `Match::cmp_value` orders by `(start, end, text)` — total over matches, which is what makes a
+// `List<Match>` sortable — and `Pattern::cmp_value` orders by source, the same total order
+// `key_capable: true` already promises so a pattern can key a map. A type that can key a map and
+// cannot sort is the asymmetry this pins shut.
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: exit 0
+use std.{regex}
+
+p = regex.compile('\d+')
+all = p.find_all("a1b22c333")
+
+// Matches come out in position order, and that is the order they compare in.
+echo all[0] < all[1]
+echo all.sorted().first() == some(all[0])
+echo all.min() == some(all[0])
+echo all.max() == some(all[2])
+
+// A pattern's ordering is its source's — the same relation that lets it key a map.
+q = regex.compile('a')
+echo (p < q) == (p.source() < q.source())

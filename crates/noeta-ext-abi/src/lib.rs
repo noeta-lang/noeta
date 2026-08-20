@@ -264,7 +264,22 @@
 /// composite's leaf is on a slot, though, and the shape around the leaf is static, so the slot value
 /// the callee needs is arithmetic on the one this body holds. A `u64` therefore keeps its width
 /// across that frame instead of arriving as its signed reinterpretation.
-pub const ABI_VERSION: u32 = 24;
+/// **25** — every **stringly-typed cross-reference** in a registration must now resolve, or the
+/// registry refuses to assemble ([`registry::validate`]'s sweep, reached by `Registry::new`). A
+/// `traits` entry, a [`registry::SigType::BoundedVar`] bound, a [`registry::SigType::Assoc`]
+/// projection, a `docs` key, an [`registry::ExtTier`]'s `config` and `handler`, an
+/// [`registry::ExtTierRunner`]'s tier, an [`registry::ExtDeriveMethod`]'s handler, a backed enum's
+/// variant constants, `param_names` arity. No shape changed and nothing written for ABI 24 stops
+/// compiling — [`registry::BUILTIN_TRAIT_NAMES`] is new and [`registry::BUILTIN_SEMANTIC_VARIANTS`]
+/// merely became public — but a declaration that assembled before may now be **refused**, which is a
+/// change to what the contract accepts and is counted for it.
+///
+/// The rule it implements: a name that resolves to nothing is silently absent. Every consumer of one
+/// is a lookup that yields nothing and moves on, so the trait is simply not held, the doc simply not
+/// shown, the runner simply not found — `traits: &["Comparbale"]` compiles, registers nothing, and
+/// leaves the type unordered with nothing anywhere able to notice. An extension is better told at
+/// assembly than left to a behavior that never arrives.
+pub const ABI_VERSION: u32 = 25;
 
 pub mod args;
 pub mod channel;

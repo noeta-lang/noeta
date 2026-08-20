@@ -328,6 +328,12 @@ fn instant_method_dispatch(
             let Instant(other) = want_extern::<Instant>(method, args, 0, "Instant")?;
             Ok(NativeOut::Scalar(Scalar::Bool(ts > *other)))
         }
+        // `Display`: the SAME rendering `ExternValue::display` writes, so `echo t` and
+        // `t.to_string()` cannot disagree.
+        "to_string" => {
+            want_arity(method, args, 0)?;
+            Ok(NativeOut::Str(ts.to_string()))
+        }
         _ => Err(crate::no_method_error(INSTANT_TYPE_NAME, method)),
     }
 }
@@ -419,6 +425,11 @@ fn zoned_method_dispatch(
             Ok(NativeOut::Scalar(Scalar::Bool(
                 z.timestamp() > other.timestamp(),
             )))
+        }
+        // `Display`: the SAME rendering `ExternValue::display` writes — see the `Instant` twin.
+        "to_string" => {
+            want_arity(method, args, 0)?;
+            Ok(NativeOut::Str(z.to_string()))
         }
         _ => Err(crate::no_method_error(ZONED_TYPE_NAME, method)),
     }
@@ -540,6 +551,16 @@ const INSTANT_METHODS: &[ExtFn] = &[
         params: &[INSTANT_SIG],
         ret: Concrete(SigType::Bool),
     },
+    // `Display`'s required method. The type already renders — `echo t` writes the RFC-3339
+    // timestamp through `ExternValue::display` — so what was missing was the *name* for it: a
+    // `T: Display` body calls `to_string()`, and declaring the trait without the method would be
+    // a promise the receiver cannot keep.
+    ExtFn {
+        param_names: &[],
+        name: "to_string",
+        params: &[],
+        ret: Concrete(Str),
+    },
 ];
 
 /// A zero-arg `Zoned` field accessor returning `int`.
@@ -601,6 +622,13 @@ const ZONED_METHODS: &[ExtFn] = &[
         name: "is_after",
         params: &[ZONED_SIG],
         ret: Concrete(SigType::Bool),
+    },
+    // `Display`'s required method — see the `Instant` twin above.
+    ExtFn {
+        param_names: &[],
+        name: "to_string",
+        params: &[],
+        ret: Concrete(Str),
     },
 ];
 
@@ -694,12 +722,27 @@ const DATETIME_MODULES: &[ExtModule] = &[ExtModule {
     ..ExtModule::DEFAULTS
 }];
 
+/// The datetime extern types, each declaring the traits it actually honors.
+///
+/// `Instant` and `Zoned` are **`Comparable`**: `cmp_value` is a total order over the timestamp at
+/// every door the runtime has, which is why `is_before`/`is_after` exist at all — they were the
+/// hand-written stand-ins for the `<` the type could not reach. Declaring the trait is what lets
+/// `< <= > >=`, `.compare()`, `.sorted()`, `.min()`/`.max()` and a `T: Comparable` bound reach the
+/// ordering the type already has.
+///
+/// `Duration` is deliberately **not** `Comparable`: a calendar span has no total order without a
+/// reference date, `cmp_value` answers `None` accordingly, and declaring it would type-check
+/// `a < b` and then fail at run time.
+///
+/// All three are **`Display`**: each renders itself through `ExternValue::display` and answers
+/// `to_string()` with that same text.
 const DATETIME_TYPES: &[ExtType] = &[
     ExtType {
         name: INSTANT_TYPE_NAME,
         namespace: "std.datetime",
         methods: INSTANT_METHODS,
         dispatch: instant_method_dispatch,
+        traits: &["Comparable", "Display"],
         docs: INSTANT_DOCS,
         ..ExtType::DEFAULTS
     },
@@ -708,6 +751,7 @@ const DATETIME_TYPES: &[ExtType] = &[
         namespace: "std.datetime",
         methods: ZONED_METHODS,
         dispatch: zoned_method_dispatch,
+        traits: &["Comparable", "Display"],
         docs: ZONED_DOCS,
         ..ExtType::DEFAULTS
     },
@@ -716,6 +760,7 @@ const DATETIME_TYPES: &[ExtType] = &[
         namespace: "std.datetime",
         methods: DURATION_METHODS,
         dispatch: duration_method_dispatch,
+        traits: &["Display"],
         docs: DURATION_METHOD_DOCS,
         ..ExtType::DEFAULTS
     },

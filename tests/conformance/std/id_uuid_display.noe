@@ -1,0 +1,20 @@
+// **`Uuid` is `Display`.**
+//
+// It renders as the canonical hyphenated form and answers `to_string()` with exactly that text, so
+// `echo id`, `"${id}"` and `id.to_string()` are one rendering. Declaring the trait is what lets a
+// `T: Display` bound and `is dyn Display` see it — the declaration was the only thing missing, and
+// a rendering nothing can name is a rendering a generic body cannot use.
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "4396d60d-bd85-47af-a98f-f1a0396ff552"
+// expect: exit 0
+use std.{id}
+
+fn show<T: Display>(x: T): string { return x.to_string(); }
+
+u = id.uuid()
+echo "${u}" == u.to_string()
+echo show(u) == u.to_string()
+echo u is dyn Display
+echo show(u)
