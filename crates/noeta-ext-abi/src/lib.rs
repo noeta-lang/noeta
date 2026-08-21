@@ -347,10 +347,10 @@ pub use stream::{
 // them explicitly, so a module-local extractor never shadows silently.
 pub use ring1::*;
 pub use telemetry::{
-    AttrValue, DEFAULT_HISTOGRAM_BOUNDS, HistogramPoint, InstrumentId, InstrumentKind, LogRecord,
-    Logging, MetricData, MetricPoints, MetricStore, MetricValue, Metrics, NumberPoint, Severity,
-    SpanData, SpanEvent, SpanId, SpanKind, SpanStatus, SpanTracker, Temporality, TraceContext,
-    Tracing,
+    AttrValue, DEFAULT_CARDINALITY_LIMIT, DEFAULT_HISTOGRAM_BOUNDS, HistogramPoint, InstrumentId,
+    InstrumentKind, LogRecord, Logging, MetricData, MetricPoints, MetricStore, MetricValue,
+    Metrics, NumberPoint, OVERFLOW_ATTRIBUTE_KEY, Severity, SpanData, SpanEvent, SpanId, SpanKind,
+    SpanStatus, SpanTracker, Temporality, TraceContext, Tracing,
 };
 
 /// Macro-expansion support — types the [`delegate_host!`] arms must name from the caller's crate

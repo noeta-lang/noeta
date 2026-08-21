@@ -226,17 +226,33 @@ struct RealTelemetry {
 
 impl RealTelemetry {
     fn new() -> RealTelemetry {
+        #[cfg(feature = "telemetry")]
+        let exporter = telemetry::OtlpExporter::from_env();
+        // Nothing can accumulate while the metrics signal is off, so the limit is only resolved from
+        // the environment when it is on — an un-configured `noeta run` reads no extra variable and
+        // pays nothing at startup for a knob it cannot use.
+        #[cfg(feature = "telemetry")]
+        let metrics = if exporter
+            .as_ref()
+            .is_some_and(|e| e.metrics_endpoint.is_some())
+        {
+            MetricStore::with_cardinality_limit(metric_cardinality_limit())
+        } else {
+            MetricStore::default()
+        };
+        #[cfg(not(feature = "telemetry"))]
+        let metrics = MetricStore::default();
         RealTelemetry {
             next_span: 1,
             live: HashMap::new(),
             remote: HashMap::new(),
             #[cfg(feature = "telemetry")]
-            exporter: telemetry::OtlpExporter::from_env(),
+            exporter,
             #[cfg(feature = "telemetry")]
             buffer: Vec::new(),
             #[cfg(feature = "telemetry")]
             logs_buffer: Vec::new(),
-            metrics: Arc::new(Mutex::new(MetricStore::default())),
+            metrics: Arc::new(Mutex::new(metrics)),
             #[cfg(feature = "telemetry")]
             metric_exporter: None,
         }
@@ -2711,6 +2727,33 @@ fn metric_export_interval() -> std::time::Duration {
     std::time::Duration::from_millis(ms)
 }
 
+/// The environment variable naming the per-instrument metrics cardinality limit. The OTel
+/// specification stabilizes the limit itself but names no variable for it, and every SDK that offers
+/// one namespaces it to its own language (`OTEL_GO_X_…`, `OTEL_DOTNET_…`) — so this follows the
+/// spelling of the metrics knobs Noeta already reads (`OTEL_METRIC_EXPORT_INTERVAL`) rather than
+/// borrowing another SDK's private name.
+#[cfg(feature = "telemetry")]
+const CARDINALITY_LIMIT_VAR: &str = "OTEL_METRIC_CARDINALITY_LIMIT";
+
+/// The per-instrument cardinality limit from [`CARDINALITY_LIMIT_VAR`], default
+/// [`noeta_stdlib::DEFAULT_CARDINALITY_LIMIT`] (2000, the OTel spec's).
+#[cfg(feature = "telemetry")]
+fn metric_cardinality_limit() -> usize {
+    cardinality_limit_from(std::env::var(CARDINALITY_LIMIT_VAR).ok().as_deref())
+}
+
+/// Resolve the cardinality limit from a raw environment value. Unset, empty, zero, negative or
+/// unparseable all fall back to the spec default — the same policy
+/// [`metric_export_interval`] applies to its own variable, and the safe one: a limit a typo could
+/// silently turn into `0` would fold every attribute set into the overflow bucket, hiding the whole
+/// breakdown of every instrument in the program.
+#[cfg(feature = "telemetry")]
+fn cardinality_limit_from(raw: Option<&str>) -> usize {
+    raw.and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(noeta_stdlib::DEFAULT_CARDINALITY_LIMIT)
+}
+
 /// The metrics periodic-export reader (M2): a background thread snapshotting the shared
 /// [`MetricStore`] on an interval and POSTing the cumulative OTLP/JSON, plus a final export on
 /// shutdown. Real-host-only (the sandbox collects deterministically at teardown instead).
@@ -2871,6 +2914,60 @@ mod tests {
              sees the same sentence whichever host it runs on"
         );
         let _ = host.os_proc_kill(closed);
+    }
+
+    /// The cardinality limit's environment parsing, over every value an operator can write.
+    ///
+    /// Deliberately a test of the *pure* resolver rather than of `std::env`: `set_var` is `unsafe`
+    /// (and this workspace forbids `unsafe`), the process environment is shared by every test thread
+    /// in this binary, and a value set here would leak into unrelated tests. The variable actually
+    /// reaching an exported metric is proved end to end, on a real subprocess with a real collector,
+    /// by `noeta-cli`'s `otel` suite.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn the_cardinality_limit_reads_its_environment_variable() {
+        use noeta_stdlib::DEFAULT_CARDINALITY_LIMIT;
+
+        assert_eq!(
+            cardinality_limit_from(Some("500")),
+            500,
+            "a plain number is honored"
+        );
+        assert_eq!(
+            cardinality_limit_from(Some(" 500 ")),
+            500,
+            "surrounding whitespace is not a malformed value"
+        );
+        assert_eq!(
+            cardinality_limit_from(Some("1")),
+            1,
+            "a limit of one is a real, if extreme, configuration"
+        );
+
+        // Everything an operator can get wrong falls back to the spec default. Zero is grouped with
+        // the malformed values on purpose: read literally it would fold every attribute set into the
+        // overflow bucket, so a typo would blind every instrument in the program.
+        for raw in [
+            "",
+            "   ",
+            "0",
+            "-1",
+            "2_000",
+            "2000.5",
+            "lots",
+            "2000 series",
+        ] {
+            assert_eq!(
+                cardinality_limit_from(Some(raw)),
+                DEFAULT_CARDINALITY_LIMIT,
+                "{raw:?} is not a usable limit, so the default stands"
+            );
+        }
+        assert_eq!(
+            cardinality_limit_from(None),
+            DEFAULT_CARDINALITY_LIMIT,
+            "unset is the default — 2000, the OTel spec's own"
+        );
     }
 
     /// M2 — the metrics periodic-export reader actually POSTs the aggregated OTLP/JSON. Runs the

@@ -353,6 +353,22 @@ pub const DEFAULT_HISTOGRAM_BOUNDS: &[f64] = &[
     10000.0,
 ];
 
+/// The OTel **default cardinality limit** — the most distinct attribute sets one instrument
+/// aggregates into their own series before folding the rest into the [overflow
+/// set](OVERFLOW_ATTRIBUTE_KEY). The spec's own default, so an operator gets the number every other
+/// SDK gives them.
+pub const DEFAULT_CARDINALITY_LIMIT: usize = 2000;
+
+/// The OTel **overflow attribute** key. The single-attribute set `otel.metric.overflow=true` is the
+/// synthetic series every attribute set past the [cardinality limit](DEFAULT_CARDINALITY_LIMIT)
+/// aggregates into, so a counter's total stays exact once its breakdown stops.
+pub const OVERFLOW_ATTRIBUTE_KEY: &str = "otel.metric.overflow";
+
+/// The overflow attribute set — one boolean attribute, per the spec.
+fn overflow_attributes() -> Vec<(CompactString, AttrValue)> {
+    vec![(OVERFLOW_ATTRIBUTE_KEY.into(), AttrValue::Bool(true))]
+}
+
 /// **Metrics** capability (native OTEL) — the third telemetry signal, sibling to [`Tracing`] and
 /// [`Logging`]. Unlike spans and logs (emit-and-forget), instruments are **long-lived and
 /// host-owned**: `metric_get_or_create` is idempotent on name, aggregation (counter sums, histogram
@@ -397,10 +413,23 @@ pub trait Metrics {
 /// byte-identical collected [`MetricData`]. Instruments are stored in creation order (the
 /// [`InstrumentId`] is the index); each holds its series keyed by a canonical attribute-set string
 /// (a `BTreeMap`, so collection is sorted by that key — the determinism rule).
-#[derive(Debug, Clone, Default)]
+///
+/// Every instrument's series map is capped at [`MetricStore::cardinality_limit`] distinct attribute
+/// sets, which is what keeps an instrument carrying a high-cardinality attribute (a request id, a
+/// user id) from growing for the life of the process. The cap is **per instrument**, and a set past
+/// it folds into the [overflow series](OVERFLOW_ATTRIBUTE_KEY) rather than being dropped.
+#[derive(Debug, Clone)]
 pub struct MetricStore {
     instruments: Vec<Instrument>,
     by_name: std::collections::HashMap<CompactString, InstrumentId>,
+    /// The most distinct attribute sets any one instrument aggregates separately.
+    cardinality_limit: usize,
+}
+
+impl Default for MetricStore {
+    fn default() -> MetricStore {
+        MetricStore::with_cardinality_limit(DEFAULT_CARDINALITY_LIMIT)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -408,7 +437,12 @@ struct Instrument {
     name: CompactString,
     unit: CompactString,
     kind: InstrumentKind,
+    /// Series for ordinary attribute sets. `len()` is therefore the exact count the cardinality
+    /// limit is checked against — the overflow series is deliberately *not* in here.
     series: std::collections::BTreeMap<String, Series>,
+    /// The single `otel.metric.overflow=true` series, minted the first time a new attribute set
+    /// arrives past the limit and collected after the ordinary ones.
+    overflow: Option<Series>,
 }
 
 #[derive(Debug, Clone)]
@@ -430,6 +464,22 @@ enum Agg {
 }
 
 impl MetricStore {
+    /// A store whose instruments each aggregate at most `limit` distinct attribute sets separately.
+    /// `0` folds every attributed measurement into the overflow series immediately; callers that
+    /// treat zero as "unconfigured" resolve that before they get here.
+    pub fn with_cardinality_limit(limit: usize) -> MetricStore {
+        MetricStore {
+            instruments: Vec::new(),
+            by_name: std::collections::HashMap::new(),
+            cardinality_limit: limit,
+        }
+    }
+
+    /// The per-instrument cardinality limit this store enforces.
+    pub fn cardinality_limit(&self) -> usize {
+        self.cardinality_limit
+    }
+
     /// Get-or-create an instrument by name (idempotent; first unit/kind wins).
     pub fn get_or_create(&mut self, name: &str, unit: &str, kind: InstrumentKind) -> InstrumentId {
         if let Some(&id) = self.by_name.get(name) {
@@ -441,6 +491,7 @@ impl MetricStore {
             unit: unit.into(),
             kind,
             series: std::collections::BTreeMap::new(),
+            overflow: None,
         });
         self.by_name.insert(name.into(), id);
         id
@@ -448,6 +499,19 @@ impl MetricStore {
 
     /// Record a measurement, dispatched on the instrument's kind. `now` is the host clock (so the
     /// sandbox's logical clock keeps aggregation deterministic).
+    ///
+    /// An attribute set the instrument already tracks always reaches its own series. A **new** set
+    /// arriving once the instrument holds [`Self::cardinality_limit`] of them folds into the single
+    /// `otel.metric.overflow=true` series instead, so the instrument's series map is bounded while
+    /// every measurement still lands in exactly one series — a counter's total stays exact, only its
+    /// breakdown stops.
+    ///
+    /// The overflow series aggregates by the instrument's own kind, so what "folding" costs differs
+    /// by kind: a sum keeps its total and a histogram keeps its count, sum and distribution, but a
+    /// **gauge** is last-value, so folded measurements overwrite each other and only the most recent
+    /// survives. That loss belongs to gauge aggregation rather than to this cap — there is no total
+    /// for a gauge to preserve — and it is deterministic (observation order), so both backends still
+    /// collect the same value.
     pub fn observe(
         &mut self,
         inst: InstrumentId,
@@ -455,6 +519,7 @@ impl MetricStore {
         mut attrs: Vec<(CompactString, AttrValue)>,
         now: u64,
     ) {
+        let limit = self.cardinality_limit;
         let Some(instrument) = self.instruments.get_mut(inst as usize) else {
             return;
         };
@@ -463,16 +528,30 @@ impl MetricStore {
         attrs.sort_by(|(a, _), (b, _)| a.cmp(b));
         let key = attr_set_key(&attrs);
         let kind = instrument.kind;
-        let series = instrument.series.entry(key).or_insert_with(|| Series {
-            attributes: attrs,
-            start_unix_ms: now,
-            agg: Agg::new(kind),
-        });
+        // Under the limit — the case every healthy instrument stays in — this costs one integer
+        // compare and nothing else; the extra `contains_key` is only paid once the instrument is
+        // already at its cap, which is a regime it should not be in.
+        let overflow = is_overflow_set(&attrs)
+            || (instrument.series.len() >= limit && !instrument.series.contains_key(&key));
+        let series = if overflow {
+            instrument.overflow.get_or_insert_with(|| Series {
+                attributes: overflow_attributes(),
+                start_unix_ms: now,
+                agg: Agg::new(kind),
+            })
+        } else {
+            instrument.series.entry(key).or_insert_with(|| Series {
+                attributes: attrs,
+                start_unix_ms: now,
+                agg: Agg::new(kind),
+            })
+        };
         series.agg.observe(value);
     }
 
     /// Snapshot every instrument's series as collected [`MetricData`] (cumulative). Instruments in
-    /// creation order; series in attribute-key order (the `BTreeMap`). `now` stamps each point.
+    /// creation order; ordinary series in attribute-key order (the `BTreeMap`), the overflow series
+    /// last. `now` stamps each point.
     pub fn collect(&self, now: u64) -> Vec<MetricData> {
         self.instruments
             .iter()
@@ -526,21 +605,24 @@ impl Agg {
 }
 
 impl Instrument {
+    /// Every series to collect: the ordinary ones in attribute-key order, then the overflow series
+    /// if this instrument ever exceeded the cardinality limit.
+    fn all_series(&self) -> impl Iterator<Item = &Series> {
+        self.series.values().chain(self.overflow.iter())
+    }
+
     fn collect_points(&self, now: u64) -> MetricPoints {
         match self.kind {
             InstrumentKind::Counter | InstrumentKind::UpDownCounter => MetricPoints::Sum {
                 monotonic: matches!(self.kind, InstrumentKind::Counter),
-                points: self.series.values().map(|s| s.number_point(now)).collect(),
+                points: self.all_series().map(|s| s.number_point(now)).collect(),
             },
             InstrumentKind::Gauge => {
-                MetricPoints::Gauge(self.series.values().map(|s| s.number_point(now)).collect())
+                MetricPoints::Gauge(self.all_series().map(|s| s.number_point(now)).collect())
             }
-            InstrumentKind::Histogram => MetricPoints::Histogram(
-                self.series
-                    .values()
-                    .map(|s| s.histogram_point(now))
-                    .collect(),
-            ),
+            InstrumentKind::Histogram => {
+                MetricPoints::Histogram(self.all_series().map(|s| s.histogram_point(now)).collect())
+            }
         }
     }
 }
@@ -582,6 +664,13 @@ impl Series {
             unix_ms: now,
         }
     }
+}
+
+/// Whether `attrs` *is* the overflow set. A program free to choose its own attribute keys can name
+/// `otel.metric.overflow` itself, and that measurement belongs in the one overflow series rather
+/// than in a second, indistinguishable data point beside it.
+fn is_overflow_set(attrs: &[(CompactString, AttrValue)]) -> bool {
+    matches!(attrs, [(key, AttrValue::Bool(true))] if key == OVERFLOW_ATTRIBUTE_KEY)
 }
 
 /// A canonical, `Ord`-stable string for an attribute set — the `BTreeMap` series key. Attributes are
@@ -840,5 +929,395 @@ mod tests {
             panic!("temp is a gauge");
         };
         assert_eq!(points[0].value, MetricValue::Float(22.0));
+    }
+
+    /// One attribute set per distinct value of `key`, `count` of them, each recording `1`.
+    fn observe_distinct(store: &mut MetricStore, inst: InstrumentId, key: &str, count: usize) {
+        for i in 0..count {
+            store.observe(
+                inst,
+                MetricValue::Int(1),
+                attrs(&[(key, AttrValue::Int(i as i64))]),
+                10,
+            );
+        }
+    }
+
+    fn sum_points(metric: &MetricData) -> &[NumberPoint] {
+        match &metric.points {
+            MetricPoints::Sum { points, .. } => points,
+            _ => panic!("expected a sum"),
+        }
+    }
+
+    fn is_overflow_point(point: &NumberPoint) -> bool {
+        point.attributes.as_slice()
+            == [(OVERFLOW_ATTRIBUTE_KEY.into(), AttrValue::Bool(true))].as_slice()
+    }
+
+    /// **The growth demonstration, bounded.** A counter carrying a distinct attribute value per
+    /// measurement — a request id, the mistake the limit exists for — keeps a bounded number of
+    /// series no matter how many measurements arrive, and the number is the configured limit plus
+    /// the one overflow series. Without the cap this collects 5,000 points and would keep climbing
+    /// for the life of the process.
+    #[test]
+    fn a_distinct_attribute_per_measurement_stays_bounded() {
+        let mut store = MetricStore::with_cardinality_limit(64);
+        let reqs = store.get_or_create("http.requests", "{request}", InstrumentKind::Counter);
+        observe_distinct(&mut store, reqs, "request.id", 5_000);
+
+        let collected = store.collect(100);
+        let points = sum_points(&collected[0]);
+        assert_eq!(
+            points.len(),
+            65,
+            "64 ordinary series plus the one overflow series, whatever the input cardinality"
+        );
+        assert_eq!(
+            points.iter().filter(|p| is_overflow_point(p)).count(),
+            1,
+            "exactly one overflow series"
+        );
+    }
+
+    /// The limit is **per instrument**, not a budget shared across the store: two counters each
+    /// reach their own cap, and neither one's cardinality pushes the other into overflow.
+    #[test]
+    fn the_limit_is_per_instrument() {
+        let mut store = MetricStore::with_cardinality_limit(4);
+        let a = store.get_or_create("a", "", InstrumentKind::Counter);
+        let b = store.get_or_create("b", "", InstrumentKind::Counter);
+        observe_distinct(&mut store, a, "id", 100);
+        observe_distinct(&mut store, b, "id", 4);
+
+        let collected = store.collect(100);
+        assert_eq!(sum_points(&collected[0]).len(), 5, "4 series + overflow");
+        assert_eq!(
+            sum_points(&collected[1]).len(),
+            4,
+            "`b` used exactly its budget, so nothing overflowed on it"
+        );
+        assert!(
+            !sum_points(&collected[1]).iter().any(is_overflow_point),
+            "the spec's guarantee: no overflow while the distinct sets are within the limit"
+        );
+    }
+
+    /// The cap reached **exactly** — the spec's guarantee that overflow does not happen while the
+    /// number of distinct non-overflow attribute sets is less than or equal to the limit. The next
+    /// distinct set is the first one to fold.
+    #[test]
+    fn the_limit_is_reached_exactly_before_anything_overflows() {
+        for (distinct, expected_points, overflowed) in [(3, 3, false), (4, 4, false), (5, 5, true)]
+        {
+            let mut store = MetricStore::with_cardinality_limit(4);
+            let inst = store.get_or_create("c", "", InstrumentKind::Counter);
+            observe_distinct(&mut store, inst, "id", distinct);
+
+            let collected = store.collect(100);
+            let points = sum_points(&collected[0]);
+            assert_eq!(
+                points.len(),
+                expected_points,
+                "{distinct} distinct sets under a limit of 4"
+            );
+            assert_eq!(
+                points.iter().any(is_overflow_point),
+                overflowed,
+                "{distinct} distinct sets under a limit of 4 — overflow expected: {overflowed}"
+            );
+        }
+    }
+
+    /// Folding, not dropping: the counter's **total** is exactly the number of measurements, and
+    /// every measurement is reflected in exactly one series. A dropping policy would lose the
+    /// difference silently, which is the whole reason the spec folds.
+    #[test]
+    fn overflow_folding_preserves_the_counters_total() {
+        let mut store = MetricStore::with_cardinality_limit(10);
+        let inst = store.get_or_create("c", "", InstrumentKind::Counter);
+        observe_distinct(&mut store, inst, "id", 1_000);
+
+        let collected = store.collect(100);
+        let points = sum_points(&collected[0]);
+        let total: i64 = points
+            .iter()
+            .map(|p| match p.value {
+                MetricValue::Int(i) => i,
+                MetricValue::Float(f) => f as i64,
+            })
+            .sum();
+        assert_eq!(total, 1_000, "no measurement is dropped or double-counted");
+        let overflow = points
+            .iter()
+            .find(|p| is_overflow_point(p))
+            .expect("folded");
+        assert_eq!(
+            overflow.value,
+            MetricValue::Int(990),
+            "the 10 sets seen first keep their own series; the other 990 fold into one"
+        );
+    }
+
+    /// The overflow series is exactly the spec's attribute set — one boolean attribute
+    /// `otel.metric.overflow=true` — and it collects **after** the ordinary series, which stay in
+    /// attribute-key order.
+    #[test]
+    fn the_overflow_series_is_the_specs_attribute_set_and_collects_last() {
+        let mut store = MetricStore::with_cardinality_limit(2);
+        let inst = store.get_or_create("c", "", InstrumentKind::Counter);
+        for value in ["a", "b", "c", "d"] {
+            store.observe(
+                inst,
+                MetricValue::Int(1),
+                attrs(&[("route", AttrValue::Str(value.into()))]),
+                10,
+            );
+        }
+
+        let collected = store.collect(100);
+        let points = sum_points(&collected[0]);
+        assert_eq!(points.len(), 3);
+        assert_eq!(
+            points[0].attributes,
+            attrs(&[("route", AttrValue::Str("a".into()))])
+        );
+        assert_eq!(
+            points[1].attributes,
+            attrs(&[("route", AttrValue::Str("b".into()))])
+        );
+        assert_eq!(
+            points[2].attributes,
+            vec![(OVERFLOW_ATTRIBUTE_KEY.into(), AttrValue::Bool(true))],
+            "the synthetic set the spec names, last"
+        );
+    }
+
+    /// Cumulative temporality: an attribute set observed **before** overflow began keeps its own
+    /// series and keeps accumulating afterwards. Only sets first seen after the cap fold.
+    #[test]
+    fn sets_seen_before_overflow_keep_their_own_series() {
+        let mut store = MetricStore::with_cardinality_limit(2);
+        let inst = store.get_or_create("c", "", InstrumentKind::Counter);
+        let get = attrs(&[("method", AttrValue::Str("GET".into()))]);
+        let post = attrs(&[("method", AttrValue::Str("POST".into()))]);
+        store.observe(inst, MetricValue::Int(1), get.clone(), 10);
+        store.observe(inst, MetricValue::Int(1), post.clone(), 10);
+        observe_distinct(&mut store, inst, "id", 50); // all of these overflow
+        store.observe(inst, MetricValue::Int(1), get.clone(), 20); // still its own series
+
+        let collected = store.collect(100);
+        let points = sum_points(&collected[0]);
+        assert_eq!(points.len(), 3);
+        assert_eq!(points[0].attributes, get);
+        assert_eq!(
+            points[0].value,
+            MetricValue::Int(2),
+            "GET kept accumulating"
+        );
+        assert_eq!(points[1].attributes, post);
+        assert_eq!(points[1].value, MetricValue::Int(1));
+        assert!(is_overflow_point(&points[2]));
+        assert_eq!(points[2].value, MetricValue::Int(50));
+    }
+
+    /// **A histogram's `count` and `sum` survive folding, and so does its bucket distribution.** The
+    /// overflow series is an ordinary histogram aggregator over the folded measurements, not a fresh
+    /// start with different bounds: it carries the same [`DEFAULT_HISTOGRAM_BOUNDS`], its buckets
+    /// account for every folded observation, and the instrument's total count and total sum across
+    /// all series are still exactly what was recorded. The counter test above says the same thing
+    /// about a sum; a histogram has three numbers to lose instead of one.
+    #[test]
+    fn overflow_folding_preserves_a_histograms_count_sum_and_buckets() {
+        let mut store = MetricStore::with_cardinality_limit(2);
+        let inst = store.get_or_create("h", "ms", InstrumentKind::Histogram);
+        // Six distinct attribute sets, one measurement each. The first two keep their own series;
+        // the last four fold into one.
+        let values = [3.0f64, 7.0, 600.0, 3.0, 7.0, 600.0];
+        for (i, v) in values.iter().enumerate() {
+            store.observe(
+                inst,
+                MetricValue::Float(*v),
+                attrs(&[("id", AttrValue::Int(i as i64))]),
+                10,
+            );
+        }
+
+        let collected = store.collect(100);
+        let MetricPoints::Histogram(points) = &collected[0].points else {
+            panic!("histogram");
+        };
+        assert_eq!(points.len(), 3, "2 ordinary series + the overflow series");
+
+        let overflow = points.last().expect("a series");
+        assert_eq!(
+            overflow.attributes,
+            vec![(OVERFLOW_ATTRIBUTE_KEY.into(), AttrValue::Bool(true))],
+            "the last point is the overflow series"
+        );
+        assert_eq!(overflow.count, 4, "every folded measurement is counted");
+        assert_eq!(
+            overflow.sum,
+            600.0 + 3.0 + 7.0 + 600.0,
+            "and every folded measurement is summed"
+        );
+        assert_eq!(
+            overflow.bounds, DEFAULT_HISTOGRAM_BOUNDS,
+            "the overflow series buckets on the same bounds as every other series"
+        );
+        // bounds = [0,5,10,25,50,75,100,250,500,750,…]; the folded 3 → <=5, 7 → <=10, 600 ×2 → <=750.
+        assert_eq!(overflow.buckets[1], 1);
+        assert_eq!(overflow.buckets[2], 1);
+        assert_eq!(overflow.buckets[9], 2);
+        assert_eq!(
+            overflow.buckets.iter().sum::<u64>(),
+            overflow.count,
+            "the distribution accounts for exactly the folded measurements"
+        );
+
+        // The instrument as a whole still reports what it was given — nothing dropped, nothing
+        // double-counted, which is the same guarantee the counter's total gets.
+        assert_eq!(
+            points.iter().map(|p| p.count).sum::<u64>(),
+            values.len() as u64
+        );
+        assert_eq!(
+            points.iter().map(|p| p.sum).sum::<f64>(),
+            values.iter().sum::<f64>()
+        );
+    }
+
+    /// **A gauge has no total to preserve, and folding says so plainly.** Its aggregation is
+    /// last-value, so the overflow series holds the most recent folded measurement and the earlier
+    /// folded ones are gone — that loss is inherent to gauge aggregation, not to the overflow
+    /// policy, and the spec asks only that every measurement reach exactly one aggregator. The
+    /// survivor is the *last* one in observation order, so it is deterministic rather than
+    /// arbitrary, which is what lets both backends collect identical gauges.
+    #[test]
+    fn a_folded_gauge_keeps_the_last_measurement() {
+        let mut store = MetricStore::with_cardinality_limit(2);
+        let inst = store.get_or_create("g", "", InstrumentKind::Gauge);
+        for (i, v) in [10i64, 20, 30, 40, 50].iter().enumerate() {
+            store.observe(
+                inst,
+                MetricValue::Int(*v),
+                attrs(&[("id", AttrValue::Int(i as i64))]),
+                10,
+            );
+        }
+
+        let collected = store.collect(100);
+        let MetricPoints::Gauge(points) = &collected[0].points else {
+            panic!("gauge");
+        };
+        assert_eq!(points.len(), 3);
+        assert_eq!(points[0].value, MetricValue::Int(10), "its own series");
+        assert_eq!(points[1].value, MetricValue::Int(20), "its own series");
+        assert!(is_overflow_point(points.last().expect("a series")));
+        assert_eq!(
+            points[2].value,
+            MetricValue::Int(50),
+            "the last folded measurement wins — a gauge overwrites, and 30 and 40 are gone"
+        );
+    }
+
+    /// **The overflow series' cumulative start is the moment folding began, and it never moves.** A
+    /// cumulative data point whose `start_unix_ms` walked forward with each fold would tell a
+    /// collector the series had restarted, which is how a cumulative exporter loses a rate.
+    #[test]
+    fn the_overflow_series_start_time_is_when_folding_began_and_does_not_move() {
+        let mut store = MetricStore::with_cardinality_limit(2);
+        let inst = store.get_or_create("c", "", InstrumentKind::Counter);
+        // Each measurement carries a later clock reading than the one before it.
+        for (i, now) in [100u64, 200, 300, 400, 500].iter().enumerate() {
+            store.observe(
+                inst,
+                MetricValue::Int(1),
+                attrs(&[("id", AttrValue::Int(i as i64))]),
+                *now,
+            );
+        }
+
+        let collected = store.collect(999);
+        let points = sum_points(&collected[0]);
+        assert_eq!(points[0].start_unix_ms, 100, "when that series started");
+        assert_eq!(points[1].start_unix_ms, 200, "when that series started");
+
+        let overflow = points.last().expect("a series");
+        assert!(is_overflow_point(overflow));
+        assert_eq!(
+            overflow.start_unix_ms, 300,
+            "the third distinct set was the first to fold, so folding began at 300 — not 400 or \
+             500, which would mean the series restarted twice"
+        );
+        assert_eq!(overflow.unix_ms, 999, "collection stamps the window's end");
+        assert_eq!(overflow.value, MetricValue::Int(3), "three sets folded");
+    }
+
+    /// Every instrument kind is capped, not just counters — a histogram's buckets and a gauge's
+    /// last value are just as unbounded per attribute set.
+    #[test]
+    fn histograms_and_gauges_are_capped_too() {
+        let mut store = MetricStore::with_cardinality_limit(3);
+        let hist = store.get_or_create("h", "ms", InstrumentKind::Histogram);
+        let gauge = store.get_or_create("g", "", InstrumentKind::Gauge);
+        observe_distinct(&mut store, hist, "id", 100);
+        observe_distinct(&mut store, gauge, "id", 100);
+
+        let collected = store.collect(100);
+        let MetricPoints::Histogram(points) = &collected[0].points else {
+            panic!("histogram");
+        };
+        assert_eq!(points.len(), 4, "3 series + overflow");
+        assert_eq!(
+            points[3].count, 97,
+            "the folded measurements are all counted in the overflow bucket"
+        );
+        let MetricPoints::Gauge(points) = &collected[1].points else {
+            panic!("gauge");
+        };
+        assert_eq!(points.len(), 4);
+    }
+
+    /// A program may name `otel.metric.overflow` itself. That measurement belongs in the one
+    /// overflow series — two data points carrying identical attributes would be indistinguishable
+    /// on the wire — and it does not consume a slot of the instrument's ordinary budget.
+    #[test]
+    fn a_program_supplied_overflow_set_folds_into_the_one_overflow_series() {
+        let mut store = MetricStore::with_cardinality_limit(2);
+        let inst = store.get_or_create("c", "", InstrumentKind::Counter);
+        store.observe(
+            inst,
+            MetricValue::Int(7),
+            attrs(&[(OVERFLOW_ATTRIBUTE_KEY, AttrValue::Bool(true))]),
+            10,
+        );
+        // Two ordinary sets still fit: the program's overflow measurement took none of the budget.
+        observe_distinct(&mut store, inst, "id", 2);
+
+        let collected = store.collect(100);
+        let points = sum_points(&collected[0]);
+        assert_eq!(
+            points.len(),
+            3,
+            "2 ordinary series + the single overflow one"
+        );
+        assert_eq!(
+            points.iter().filter(|p| is_overflow_point(p)).count(),
+            1,
+            "never two points with the same attributes"
+        );
+        assert_eq!(points[2].value, MetricValue::Int(7));
+    }
+
+    /// The default store carries the spec's default limit, so every host that builds one — the
+    /// sandbox, the WASI host, the browser host — is capped without configuring anything.
+    #[test]
+    fn the_default_store_carries_the_spec_default_limit() {
+        assert_eq!(
+            MetricStore::default().cardinality_limit(),
+            DEFAULT_CARDINALITY_LIMIT
+        );
+        assert_eq!(DEFAULT_CARDINALITY_LIMIT, 2000, "the OTel spec's default");
     }
 }

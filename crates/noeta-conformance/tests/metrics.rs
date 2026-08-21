@@ -12,7 +12,10 @@ use std::sync::{Arc, Mutex};
 
 use noeta_db::LangDatabase;
 use noeta_span::{Source, SourceId};
-use noeta_stdlib::{MetricData, MetricPoints, MetricValue, SandboxHost};
+use noeta_stdlib::{
+    AttrValue, DEFAULT_CARDINALITY_LIMIT, MetricData, MetricPoints, MetricValue,
+    OVERFLOW_ATTRIBUTE_KEY, SandboxHost,
+};
 use noeta_vm::VmBackend;
 
 fn compile(text: &str) -> noeta_bytecode::Module {
@@ -198,6 +201,57 @@ fn server_serve_auto_instruments_request_metrics() {
         points.iter().all(|p| p.value == MetricValue::Int(0)),
         "active_requests returns to zero"
     );
+}
+
+/// **The unbounded-growth demonstration, bounded into an assertion.** A counter carrying a distinct
+/// attribute value per measurement — a request id, the mistake this cap exists for — would otherwise
+/// keep one series per measurement for the life of the process. It keeps
+/// [`DEFAULT_CARDINALITY_LIMIT`] of them plus the single `otel.metric.overflow=true` series, and it
+/// keeps them on **both** backends: the store is shared, so neither engine can cap differently from
+/// the other. Without the cap this collects 2,500 series and both backends still agree — agreement
+/// is not what is being tested here, boundedness is.
+#[test]
+fn a_distinct_attribute_per_measurement_stays_bounded_on_both_backends() {
+    let metrics = collected_metrics(
+        "use std.{metrics}\n\
+         c = metrics.counter(\"http.requests\")\n\
+         mut i = 0\n\
+         while i < 2500 {\n\
+         c.add_with(1, {\"request.id\": i})\n\
+         i = i + 1\n\
+         }\n",
+    );
+    let MetricPoints::Sum { points, .. } = &metrics[0].points else {
+        panic!("counter is a sum");
+    };
+    assert_eq!(
+        points.len(),
+        DEFAULT_CARDINALITY_LIMIT + 1,
+        "2,500 distinct attribute sets collapse to the limit plus one overflow series"
+    );
+
+    // The overflow series is the spec's synthetic set, and it collects last.
+    let overflow = points.last().expect("a series");
+    assert_eq!(
+        overflow.attributes,
+        vec![(OVERFLOW_ATTRIBUTE_KEY.into(), AttrValue::Bool(true))],
+        "the folded measurements are marked with the attribute the spec names"
+    );
+    assert_eq!(
+        overflow.value,
+        MetricValue::Int((2_500 - DEFAULT_CARDINALITY_LIMIT) as i64),
+        "every set past the limit folded into that one series"
+    );
+
+    // Folding, not dropping: the counter still totals every measurement it was given.
+    let total: i64 = points
+        .iter()
+        .map(|p| match p.value {
+            MetricValue::Int(i) => i,
+            MetricValue::Float(f) => f as i64,
+        })
+        .sum();
+    assert_eq!(total, 2_500, "the counter's total survives the cap");
 }
 
 /// Get-or-create is idempotent by name: two `counter("x")` calls share one host-side instrument, so

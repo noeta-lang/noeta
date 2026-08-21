@@ -1,0 +1,51 @@
+// std.metrics cardinality: a host-owned instrument aggregates one series per attribute set, so an
+// attribute whose value differs per measurement — a request id, a user id — would otherwise grow a
+// map that lives as long as the process. Each instrument therefore aggregates at most a fixed number
+// of attribute sets separately (2000, configurable with `OTEL_METRIC_CARDINALITY_LIMIT`); every set
+// past that folds into the single `otel.metric.overflow=true` series rather than being dropped, so
+// the counter's total stays exact while its breakdown stops. The cap is per instrument, so a second
+// counter used correctly is unaffected by the first one's cardinality.
+// A metric is a write-only side effect (aggregated host-side, never program output), so this
+// program's OWN output is what the differential pins; that the series stay bounded and the total
+// survives is asserted on both backends in noeta-conformance's `metrics` sink-parity oracle.
+// expect: stdout "start"
+// expect: stdout "2500"
+// expect: stdout "2100"
+// expect: stdout "done"
+// expect: exit 0
+use std.metrics
+
+echo "start"
+
+// A high-cardinality attribute: a distinct value on every single measurement.
+reqs = metrics.counter("http.requests")
+mut i = 0;
+while i < 2500 {
+    reqs.add_with(1, {"request.id": i});
+    i += 1;
+}
+echo i
+
+// A low-cardinality attribute on its own instrument — a route template, which is what an attribute
+// value should look like. Its own budget is untouched by the counter above.
+routes = metrics.counter("http.routes")
+routes.add_with(1, {"route": "/orders"})
+routes.add_with(1, {"route": "/users"})
+routes.add_with(1, {"route": "/orders"})
+
+// The cap is on the instrument, not on counters: this histogram passes the same limit, and its
+// overflow series keeps the folded measurements' count, sum and bucket distribution.
+lat = metrics.histogram("http.latency")
+mut k = 0;
+while k < 2100 {
+    lat.record_with(1.5, {"request.id": k});
+    k += 1;
+}
+echo k
+
+// A gauge is last-value, so it has no total to keep — which is why its attribute values want to be
+// the most conservative of the four. This one is low-cardinality and never folds.
+depth = metrics.gauge("queue.depth")
+depth.record_with(3, {"queue": "orders"})
+
+echo "done"
