@@ -395,16 +395,48 @@ impl HttpClient {
         origin: &str,
         host: &mut dyn crate::Host,
     ) -> Result<crate::NetResponse, crate::NetError> {
-        let jar = self.jar.clone();
-        if jar.is_none() && self.signing.is_none() {
+        if self.jar.is_none() && self.signing.is_none() {
             return host.net_fetch(request);
         }
         // Read the wall clock once per hop. The sandbox's is a pure read that does not advance its
         // logical time, so a client with a jar observes the same clock a client without one does —
         // which is what keeps every existing timing case bit-identical.
         let now_ms = host.clock_unix_ms();
-        let mut request = request;
-        if let Some(jar) = &jar {
+        let sent_to = request.url.clone();
+        let request = self.prepare(request, origin, now_ms).map_err(|error| {
+            crate::NetError::new(crate::NetErrorKind::Other, &sent_to, error.message)
+        })?;
+        let response = host.net_fetch(request)?;
+        // The response's own URL is where the `Set-Cookie` was actually served from, which after a
+        // hop is not the URL this request started at. A host that leaves it empty falls back.
+        let from = match response.url.is_empty() {
+            true => sent_to.as_str(),
+            false => response.url.as_str(),
+        };
+        self.absorb(from, &response.headers, now_ms);
+        Ok(response)
+    }
+
+    /// Apply what this client adds to a request that is about to go out: the jar's matching
+    /// cookies, then the signature.
+    ///
+    /// Public because a **stream** is a request too. `client.stream(…)` reaches the host through
+    /// its own door rather than through [`HttpClient::perform`], and an event stream behind a
+    /// session cookie or a signature is the ordinary case, not an exotic one — a streaming client
+    /// that silently dropped both would be authenticated for every call except the long-lived one.
+    ///
+    /// `origin` bounds the signature: it is signed only when the request is still on the origin
+    /// the caller named. A redirect can point anywhere, and signing whatever it points at would
+    /// hand a third party a valid signature under our key over a request whose shape they chose.
+    /// The redirect layer has already stripped the previous hop's signature crossing that
+    /// boundary; not minting a new one is the other half of the same rule.
+    pub fn prepare(
+        &self,
+        mut request: NetRequest,
+        origin: &str,
+        now_ms: u64,
+    ) -> Result<NetRequest, crate::StdError> {
+        if let Some(jar) = &self.jar {
             let stored = jar.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Some(header) = stored.header_for(&request.url, now_ms) {
                 // A `Cookie` header set on the call or the client wins: the caller named it, and
@@ -422,41 +454,32 @@ impl HttpClient {
         // a specific method and target, so a redirect invalidates it, and it may cover the
         // `Cookie` header the jar just added. Signing before either would sign a request that is
         // not the one going out.
-        //
-        // And it stops at the origin the caller named. A redirect can point anywhere, and signing
-        // whatever it points at would hand a third party a valid signature under our key over a
-        // request they chose the shape of. The redirect layer has already stripped the previous
-        // hop's signature crossing that boundary; not minting a new one is the other half of the
-        // same rule.
         if let Some(key) = self
             .signing
             .as_ref()
             .filter(|_| noeta_ext_abi::uri::origin_of(&request.url) == origin)
         {
             crate::signature::sign_request(&mut request, key, (now_ms / 1_000) as i64).map_err(
-                |error| {
-                    crate::NetError::new(
-                        crate::NetErrorKind::Other,
-                        &request.url,
-                        format!("the request could not be signed: {}", error.message),
-                    )
+                |error| crate::StdError {
+                    kind: error.kind,
+                    message: format!("the request could not be signed: {}", error.message),
                 },
             )?;
         }
-        let sent_to = request.url.clone();
-        let response = host.net_fetch(request)?;
-        // The response's own URL is where the `Set-Cookie` was actually served from, which after a
-        // hop is not the URL this request started at. A host that leaves it empty falls back.
-        let from = match response.url.is_empty() {
-            true => sent_to.as_str(),
-            false => response.url.as_str(),
+        Ok(request)
+    }
+
+    /// Take in what a response served from `url` teaches the client — today, its `Set-Cookie`
+    /// headers. A no-op without a jar. Shared with the streaming door for the same reason
+    /// [`HttpClient::prepare`] is: a stream's head carries `Set-Cookie` exactly as a buffered
+    /// response does, and a session established by one has to be usable by the other.
+    pub fn absorb(&self, url: &str, headers: &[(String, String)], now_ms: u64) {
+        let Some(jar) = &self.jar else {
+            return;
         };
-        if let Some(jar) = &jar {
-            jar.lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .store_response(from, &response.headers, now_ms);
-        }
-        Ok(response)
+        jar.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .store_response(url, headers, now_ms);
     }
 }
 

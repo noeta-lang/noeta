@@ -127,6 +127,11 @@ pub fn sandbox_ws_client_frames() -> Vec<String> {
 ///   [`noeta_ext_abi::stream::Framing::Sse`] it decodes to zero frames — which is precisely the
 ///   failure `FrameStream.status()` exists to make visible, and why the body is scripted here
 ///   rather than described in prose.
+/// - `/stream/headers` → two `Lines` frames: the request's `Cookie` value, then its
+///   `Signature-Input`. A stream is a request, so it carries a client's jar and its signature like
+///   any other call — and it reaches the host through its own door, so nothing else would show
+///   that it does. Its head also sets a cookie, which is how "a session established by a stream is
+///   usable by the requests that follow it" becomes observable.
 /// - anything else → a single-frame body, so a stream against any URL still terminates.
 pub fn sandbox_stream_body(request: &NetRequest) -> String {
     match noeta_ext_abi::uri::path_of(&request.url) {
@@ -149,6 +154,17 @@ pub fn sandbox_stream_body(request: &NetRequest) -> String {
             "{\"error\":{\"message\":\"rate limit exceeded\",\"type\":\"rate_limit_error\"}}"
                 .to_string()
         }
+        "/stream/headers" => {
+            let value = |name: &str| {
+                request
+                    .headers
+                    .iter()
+                    .find(|(header, _)| header.eq_ignore_ascii_case(name))
+                    .map(|(_, value)| value.as_str())
+                    .unwrap_or("-")
+            };
+            format!("{}\n{}\n", value("cookie"), value("signature-input"))
+        }
         path => format!("data: noeta sandbox: {} {path}\n\n", request.method),
     }
 }
@@ -169,6 +185,13 @@ pub fn sandbox_stream_head(request: &NetRequest) -> (u16, Vec<(String, String)>)
             vec![
                 header("content-type", "application/json"),
                 header("retry-after", "30"),
+            ],
+        ),
+        "/stream/headers" => (
+            200,
+            vec![
+                header("content-type", "text/plain"),
+                header("set-cookie", "streamed=1; Path=/"),
             ],
         ),
         _ => (

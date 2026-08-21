@@ -1,0 +1,60 @@
+// A stream is a request. `client.stream(…)` reaches the host through its own door — it does not
+// retry and does not redirect — so the client's cookie jar and its signature have to be applied
+// there explicitly, and nothing else would show that they are. A client authenticated for every
+// call except the long-lived one is the worst possible shape of that bug.
+//
+// The sandbox's `/stream/headers` route answers with two `Lines` frames: the request's `Cookie`
+// value, then its `Signature-Input`. Its head also sets a cookie, so the reverse direction — a
+// session established BY a stream — is observable too.
+// expect: stdout "cookie sent: sid=abc; flagged=s"
+// expect: stdout "signed: true"
+// expect: stdout "covers the authority: true"
+// expect: stdout "the free door is unconfigured: - / -"
+// expect: stdout "after the stream: sid=abc; flagged=s; streamed=1"
+// expect: exit 0
+use std.http.client
+use std.http.Framing
+use std.http.Frame
+use std.http.HttpError
+use std.http.FrameStream
+
+fn blank(): Frame {
+    return Frame { event: "", data: "", id: "", retry: none }
+}
+
+async fn drain(stream: FrameStream): Result<List<string>, HttpError> {
+    mut out: List<string> = []
+    mut going = true
+    while going {
+        next = stream.recv().await
+        if next == none {
+            going = false
+        } else {
+            f: Frame = next ?? blank()
+            out = [...out, f.data]
+        }
+    }
+    return Ok(out)
+}
+
+async fn run(): Result<void, HttpError> {
+    api = client.new("https://svc.test").cookies().sign("k1", "s3cret")
+    api.get("/cookies/set")?
+
+    lines = drain(api.stream(api.prepare("get", "/stream/headers"), Framing.Lines)?).await?
+    echo "cookie sent: ${lines[0]}"
+    echo "signed: ${lines[1].contains("keyid=\"k1\"")}"
+    echo "covers the authority: ${lines[1].contains("@authority")}"
+
+    // The FREE `client.stream(…)` is the unconfigured door and stays that way: it has no client to
+    // take a jar or a key from, so it sends neither.
+    plain = drain(client.stream(api.prepare("get", "/stream/headers"), Framing.Lines)?).await?
+    echo "the free door is unconfigured: ${plain[0]} / ${plain[1]}"
+
+    // And the head's `Set-Cookie` reached the jar, so a session a stream establishes is usable by
+    // the requests that follow it.
+    again = drain(api.stream(api.prepare("get", "/stream/headers"), Framing.Lines)?).await?
+    echo "after the stream: ${again[0]}"
+    return Ok()
+}
+run().await?

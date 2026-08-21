@@ -3197,7 +3197,27 @@ fn client_method_dispatch(
             let framing = want_framing(method, args, 1)?;
             let outgoing =
                 client.build(&request.method, &request.url, request.body, request.headers);
-            return Ok(stream_outcome(host.net_stream_open(outgoing, framing)));
+            // A stream is a request, so it carries the client's cookies and its signature like any
+            // other. This door reaches the host directly rather than through `perform` (a stream
+            // does not retry and does not redirect), which is exactly why the preparation has to
+            // be called here explicitly — an event stream behind a session cookie is the ordinary
+            // case, and a client authenticated for every call except the long-lived one is the
+            // worst possible shape of that bug.
+            let now = host.clock_unix_ms();
+            let origin = noeta_ext_abi::uri::origin_of(&outgoing.url);
+            let outgoing = client.prepare(outgoing, &origin, now)?;
+            let sent_to = outgoing.url.clone();
+            let opened = host.net_stream_open(outgoing, framing);
+            if let Ok(head) = &opened {
+                // A stream's head carries `Set-Cookie` exactly as a buffered response does, so a
+                // session established by a stream is usable by the requests that follow it.
+                let from = match head.url.is_empty() {
+                    true => sent_to.as_str(),
+                    false => head.url.as_str(),
+                };
+                client.absorb(from, &head.headers, now);
+            }
+            return Ok(stream_outcome(opened));
         }
         _ => {}
     }
