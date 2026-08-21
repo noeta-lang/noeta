@@ -3098,11 +3098,12 @@ mod tests {
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
         let addr = listener.local_addr().unwrap();
-        // `/a` redirects to `/b`; `/b` is the destination. Three requests are served: one for the
-        // synchronous assertion, then the async chain's two hops. Every response closes its
-        // connection, so each hop is its own `accept` and the count means what it says.
+        // `/a` redirects to `/b`; `/b` is the destination. Five requests are served: one for the
+        // synchronous assertion, then two hops for each of the async descriptor's two bodies.
+        // Every response closes its connection, so each hop is its own `accept` and the count
+        // means what it says.
         let server = std::thread::spawn(move || {
-            for _ in 0..3 {
+            for _ in 0..5 {
                 let Ok((mut sock, _)) = listener.accept() else {
                     return;
                 };
@@ -3143,29 +3144,50 @@ mod tests {
             "and the caller gets the `Location` it needs in order to follow it"
         );
 
+        // Both of the descriptor's bodies, because it has two and only one of them ships:
+        // `run_real` is what the real executor drives for `get_async`, and `run_sync` is the
+        // fallback for an executor without a real-body path. Asserting only through the fallback
+        // leaves the shipping path uncovered — which this test did until ablating `run_real`
+        // failed to make it red.
+        let landed = |outcome: NativeOut, door: &str| {
+            let NativeOut::Ok(inner) = outcome else {
+                panic!("a reachable server answers `Ok` on {door}");
+            };
+            let NativeOut::Extern(value) = *inner else {
+                panic!("the payload is a `Response` on {door}");
+            };
+            let response = value
+                .as_any()
+                .downcast_ref::<NetResponse>()
+                .expect("a `NetResponse`");
+            assert_eq!(
+                response.status, 200,
+                "the async door ({door}) followed the chain to its end"
+            );
+            assert_eq!(String::from_utf8_lossy(&response.body), "landed");
+            assert_eq!(
+                response.url,
+                format!("http://{addr}/b"),
+                "and reports where the body actually came from ({door})"
+            );
+        };
+
         let mut spawned = host.net_spawn(request("/a"));
-        let outcome = spawned
-            .run_sync(&mut host)
-            .expect("the descriptor resolves");
-        let NativeOut::Ok(inner) = outcome else {
-            panic!("a reachable server answers `Ok`, got {outcome:?}");
+        let Some(RealBody::Async(body)) = spawned.run_real() else {
+            panic!("the real host hands out a real async body");
         };
-        let NativeOut::Extern(value) = *inner else {
-            panic!("the payload is a `Response`");
-        };
-        let response = value
-            .as_any()
-            .downcast_ref::<NetResponse>()
-            .expect("a `NetResponse`");
-        assert_eq!(
-            response.status, 200,
-            "the async door followed the chain to its end"
-        );
-        assert_eq!(String::from_utf8_lossy(&response.body), "landed");
-        assert_eq!(
-            response.url,
-            format!("http://{addr}/b"),
-            "and reports where the body actually came from"
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime to drive the body on");
+        landed(rt.block_on(body).expect("the body resolves"), "run_real");
+
+        let mut spawned = host.net_spawn(request("/a"));
+        landed(
+            spawned
+                .run_sync(&mut host)
+                .expect("the descriptor resolves"),
+            "run_sync",
         );
 
         let _ = server.join();
