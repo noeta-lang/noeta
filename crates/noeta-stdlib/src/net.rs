@@ -215,7 +215,9 @@ fn typed(status: u16, content_type: &str, body: impl Into<Vec<u8>>) -> NetRespon
 /// Control grammar (by request path):
 /// - `/status/{n}` → an empty response with status `n` (a malformed or out-of-range `n` is `400`).
 /// - `/echo` → `200`, JSON body `{method, path, body}` echoing the request.
-/// - `/headers` → `200`, JSON body of the request headers (sorted by name).
+/// - `/headers` → `200`, JSON body of the request headers (sorted by name). `/cookies/headers`
+///   answers identically — a second path under `/cookies`, so a program can watch a path-scoped
+///   cookie appear on one request and not on another.
 /// - `/redirect/{n}` → a `302` to `/redirect/{n-1}`, so `/redirect/3` is a three-hop chain;
 ///   `/redirect/0` is the destination and answers `200 arrived`. A relative `Location`, which is
 ///   what makes it exercise resolution against the hop it came from rather than the original URL.
@@ -226,6 +228,14 @@ fn typed(status: u16, content_type: &str, body: impl Into<Vec<u8>>) -> NetRespon
 ///   because "credentials do not cross an origin" is only half a rule without "and they do survive
 ///   a hop that stays put" — `/headers` answers with whatever reached it, so a program can see
 ///   both halves.
+/// - `/cookies/set` → `200 set`, with three `Set-Cookie` headers chosen so one response covers
+///   every rule a jar has to apply: a root-scoped `sid`, a `scoped` one confined to `/cookies`,
+///   and a `flagged` one marked `Secure`.
+/// - `/cookies/clear` → `200 cleared`, deleting `sid` the way a server does: same name, empty
+///   value, `Max-Age=0`.
+/// - `/cookies/login` → a `302` to `/headers` **and** a `Set-Cookie` in the same response — the
+///   single most common shape on the web, and the one that only works if the jar is applied per
+///   *hop* rather than per request.
 /// - anything else → `200`, the plain-text line `noeta sandbox: {method} {path}`.
 pub fn sandbox_respond(request: &NetRequest) -> NetResponse {
     // Every arm builds its response through `typed`, which cannot know the request; stamp the
@@ -250,6 +260,7 @@ fn redirect_to(status: u16, location: &str) -> NetResponse {
 pub const SANDBOX_CROSS_ORIGIN: &str = "https://other.test";
 
 fn sandbox_body(request: &NetRequest) -> NetResponse {
+    let header = |name: &str, value: &str| (name.to_string(), value.to_string());
     let path = noeta_ext_abi::uri::path_of(&request.url);
     if let Some(rest) = path.strip_prefix("/status/") {
         return match rest.parse::<u16>() {
@@ -271,6 +282,35 @@ fn sandbox_body(request: &NetRequest) -> NetResponse {
         };
     }
     match path {
+        "/cookies/set" => NetResponse {
+            status: 200,
+            headers: vec![
+                header("content-type", "text/plain"),
+                header("set-cookie", "sid=abc; Path=/"),
+                header("set-cookie", "scoped=deep; Path=/cookies"),
+                header("set-cookie", "flagged=s; Path=/; Secure"),
+            ],
+            body: b"set".to_vec(),
+            url: String::new(),
+        },
+        "/cookies/clear" => NetResponse {
+            status: 200,
+            headers: vec![
+                header("content-type", "text/plain"),
+                header("set-cookie", "sid=; Path=/; Max-Age=0"),
+            ],
+            body: b"cleared".to_vec(),
+            url: String::new(),
+        },
+        "/cookies/login" => NetResponse {
+            status: 302,
+            headers: vec![
+                header("location", "/headers"),
+                header("set-cookie", "session=live; Path=/"),
+            ],
+            body: Vec::new(),
+            url: String::new(),
+        },
         "/redirect-same" => redirect_to(302, "/headers"),
         "/redirect-cross" => redirect_to(302, &format!("{SANDBOX_CROSS_ORIGIN}/headers")),
         "/echo" => {
@@ -281,7 +321,7 @@ fn sandbox_body(request: &NetRequest) -> NetResponse {
             });
             typed(200, "application/json", doc.to_string())
         }
-        "/headers" => {
+        "/headers" | "/cookies/headers" => {
             // BTreeMap → JSON object with keys sorted, so the body is stable regardless of header
             // insertion order.
             let sorted: std::collections::BTreeMap<&str, &str> = request

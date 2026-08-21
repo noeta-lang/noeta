@@ -37,6 +37,7 @@ pub mod base64;
 pub mod bulk;
 pub mod cell;
 pub mod cookie;
+pub mod cookie_jar;
 pub mod crypto;
 /// The `std.datetime` calendar/timezone surface (Ring 3), gated behind the default-on
 /// `ring-datetime` feature so a footprint-tailored build can shed jiff and the tzdb.

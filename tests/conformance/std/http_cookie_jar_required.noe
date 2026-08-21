@@ -1,0 +1,9 @@
+// Seeding a cookie needs a jar to seed. A client without one would accept the call, store the
+// cookie nowhere, and send it never — a silence the program could only discover by watching a
+// request it thought was authenticated come back unauthorized.
+// expect: error E0007 at 9:6
+// expect: exit 1
+use std.http.client
+use std.http.server
+
+echo client.new("https://svc.test").store_cookie(server.cookie("sid", "abc")).base_url()

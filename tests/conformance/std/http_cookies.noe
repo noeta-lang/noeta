@@ -1,0 +1,62 @@
+// The client-side cookie jar (RFC 6265). The sandbox's `/cookies/set` answers with three
+// `Set-Cookie` headers chosen to cover the rules a jar has to apply — a root-scoped `sid`, a
+// `scoped` one confined to `/cookies`, and a `flagged` one marked `Secure` — and `/headers` (with
+// its twin `/cookies/headers`) reports back whatever reached it.
+// expect: stdout "{}"
+// expect: stdout "{"cookie":"sid=abc; flagged=s"}"
+// expect: stdout "{"cookie":"scoped=deep; sid=abc; flagged=s"}"
+// expect: stdout "{"cookie":"sid=abc"}"
+// expect: stdout "flagged / true"
+// expect: stdout "sid / false"
+// expect: stdout "scoped /cookies false"
+// expect: stdout "{"cookie":"flagged=s"}"
+// expect: stdout "{"cookie":"session=live"}"
+// expect: stdout "{"cookie":"seeded=from-config"}"
+// expect: stdout "{"cookie":"mine=1"}"
+// expect: exit 0
+use std.http.client
+use std.http.server
+
+// A client without a jar sends nothing and remembers nothing, however many cookies it is handed.
+plain = client.new("https://svc.test")
+plain.get("/cookies/set")?
+echo plain.get("/headers")?.body()
+
+// With a jar, the root-scoped cookies come back on any later request over https…
+jar = client.new("https://svc.test").cookies()
+jar.get("/cookies/set")?
+echo jar.get("/headers")?.body()
+
+// …the path-scoped one only under `/cookies`, and longest path first.
+echo jar.get("/cookies/headers")?.body()
+
+// A `Secure` cookie is withheld from a plain-http request entirely, which is the only thing that
+// makes the flag mean anything.
+insecure = client.new("http://svc.test").cookies()
+insecure.get("/cookies/set")?
+echo insecure.get("/headers")?.body()
+
+// The jar is readable, in a request-independent order: domain, then path, then name.
+for c in jar.stored_cookies() {
+  echo "${c.name()} ${c.path() ?? "-"} ${c.secure()}"
+}
+
+// Deleting is overwriting with an expired cookie, and the jar drops it rather than sending an
+// empty value forever. `scoped` is out of scope on `/headers`, so `flagged` is what is left.
+jar.get("/cookies/clear")?
+echo jar.get("/headers")?.body()
+
+// The shape that only works if the jar is applied per HOP: a `302` and a `Set-Cookie` in the same
+// response. Applying it once per request would send the session to the login page and nowhere
+// after it.
+login = client.new("https://svc.test").cookies()
+echo login.get("/cookies/login")?.body()
+
+// A jar can be seeded, so a program starts already authenticated instead of performing a login it
+// already did.
+seeded = client.new("https://svc.test").cookies().store_cookie(server.cookie("seeded", "from-config"))
+echo seeded.get("/headers")?.body()
+
+// A `Cookie` header the caller sets wins over the jar for that request: silently merging the two
+// would produce a header neither side wrote.
+echo jar.get("/headers", {"cookie": "mine=1"})?.body()

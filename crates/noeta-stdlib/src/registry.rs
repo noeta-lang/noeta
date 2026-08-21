@@ -2684,6 +2684,24 @@ const CLIENT_METHODS: &[ExtFn] = &[
     },
     ExtFn {
         param_names: &[],
+        name: "cookies",
+        params: &[],
+        ret: Concrete(CLIENT_SIG),
+    },
+    ExtFn {
+        param_names: &[],
+        name: "stored_cookies",
+        params: &[],
+        ret: Concrete(SigType::List(&COOKIE_SIG)),
+    },
+    ExtFn {
+        param_names: &["cookie"],
+        name: "store_cookie",
+        params: &[COOKIE_SIG],
+        ret: Concrete(CLIENT_SIG),
+    },
+    ExtFn {
+        param_names: &[],
         name: "base_url",
         params: &[],
         ret: Concrete(Str),
@@ -2803,6 +2821,31 @@ const CLIENT_DOCS: &[(&str, &str)] = &[
     (
         "redirect",
         "A copy of the client that follows at most `limit` redirects (10 by default). `0` opts          out: a `301`/`302`/`303`/`307`/`308` comes back as an ordinary response for you to read          its `header(\"location\")`, which is also what you get once a limit is used up.\n\nA          followed hop rewrites the request the way every HTTP client does: a `303` becomes a          bodyless `GET` (a `HEAD` stays a `HEAD`), a `301`/`302` turns a `POST` into a bodyless          `GET`, and a `307`/`308` preserves both method and body. `Authorization`, `Cookie` and          request signatures are dropped when a hop crosses to a different scheme, host or port —          an open redirect on a trusted host must not hand your token to whoever the parameter          names.",
+    ),
+    (
+        "cookies",
+        "A copy of the client with a cookie jar: it stores every `Set-Cookie` a response carries \
+         and sends the matching ones back on later requests. Every client derived from the result \
+         shares that jar, so `client.new(base).cookies()` can be configured further and still \
+         carry the session a login put in it. Calling it on a client that already has a jar keeps \
+         the jar.\n\nStorage follows RFC 6265. A cookie with no `Domain=` goes back only to the \
+         exact host that set it; one with a `Domain=` reaches that domain's subdomains, and a host \
+         cannot set a cookie for a domain it is not itself in. A cookie's `Path` must match at a \
+         segment boundary, so `/admin` never rides a request to `/adminfoo`. A `Secure` cookie is \
+         withheld from a plain-`http` request entirely.\n\n`SameSite` is stored and read back but \
+         filters nothing: it answers \"is this request coming from another site\", and a program \
+         has no site. A `Cookie` header you set yourself wins over the jar for that request.",
+    ),
+    (
+        "stored_cookies",
+        "Every unexpired cookie in the client's jar, ordered by domain, then path, then name. \
+         Empty for a client without a jar.",
+    ),
+    (
+        "store_cookie",
+        "A copy of the client whose jar already holds `cookie`, stored as if the client's base \
+         URL had set it — the door to starting a session from a saved value instead of \
+         performing a login you already did. The client needs a jar and a base URL.",
     ),
     (
         "base_url",
@@ -2938,6 +2981,52 @@ fn client_method_dispatch(
                 return Err(type_error(method, "a non-negative redirect limit"));
             }
             return configured(client.with_redirect_limit(limit as u32));
+        }
+        "cookies" => {
+            want_arity(method, args, 0)?;
+            return configured(client.with_cookies());
+        }
+        "stored_cookies" => {
+            want_arity(method, args, 0)?;
+            return Ok(NativeOut::List(
+                client
+                    .stored_cookies(host.clock_unix_ms())
+                    .into_iter()
+                    .map(|cookie| NativeOut::Extern(crate::ExternBox::new(cookie)))
+                    .collect(),
+            ));
+        }
+        "store_cookie" => {
+            want_arity(method, args, 1)?;
+            let Some(NativeValue::Extern(value)) = args.first() else {
+                return Err(type_error(method, crate::cookie::COOKIE_TYPE_NAME));
+            };
+            let Some(cookie) = value.as_any().downcast_ref::<crate::cookie::Cookie>() else {
+                return Err(type_error(method, crate::cookie::COOKIE_TYPE_NAME));
+            };
+            // Not `type_error`: the argument is fine, the receiver is not. Both of these would
+            // otherwise fail silently — a cookie stored nowhere is discovered only when a request
+            // the program believed was authenticated comes back unauthorized.
+            if client.jar.is_none() {
+                return Err(StdError {
+                    kind: ErrorKind::ArgType,
+                    message: "`store_cookie` needs a client with a cookie jar — call `cookies()` \
+                              first, or the cookie would be stored nowhere and sent never"
+                        .to_string(),
+                });
+            }
+            if client.base_url.is_empty() {
+                return Err(StdError {
+                    kind: ErrorKind::ArgType,
+                    message: "`store_cookie` stores the cookie under the client's base URL, and \
+                              this client has none — build it with `client.new(base_url)`"
+                        .to_string(),
+                });
+            }
+            let base = client.base_url.clone();
+            let now = host.clock_unix_ms();
+            client.store_cookie(&base, cookie.clone(), now);
+            return configured(client.clone());
         }
         "base_url" => {
             want_arity(method, args, 0)?;
@@ -3500,6 +3589,42 @@ const COOKIE_METHODS: &[ExtFn] = &[
         ret: Concrete(Str),
     },
     ExtFn {
+        param_names: &[],
+        name: "path",
+        params: &[],
+        ret: Concrete(SigType::Option(&Str)),
+    },
+    ExtFn {
+        param_names: &[],
+        name: "domain",
+        params: &[],
+        ret: Concrete(SigType::Option(&Str)),
+    },
+    ExtFn {
+        param_names: &[],
+        name: "max_age",
+        params: &[],
+        ret: Concrete(SigType::Option(&Int)),
+    },
+    ExtFn {
+        param_names: &[],
+        name: "secure",
+        params: &[],
+        ret: Concrete(SigType::Bool),
+    },
+    ExtFn {
+        param_names: &[],
+        name: "http_only",
+        params: &[],
+        ret: Concrete(SigType::Bool),
+    },
+    ExtFn {
+        param_names: &[],
+        name: "same_site",
+        params: &[],
+        ret: Concrete(Str),
+    },
+    ExtFn {
         param_names: &["value"],
         name: "with_value",
         params: &[Str],
@@ -3598,6 +3723,41 @@ fn cookie_method_dispatch(
         "value" => {
             want_arity(method, args, 0)?;
             Ok(NativeOut::Str(cookie.value.clone()))
+        }
+        "path" => {
+            want_arity(method, args, 0)?;
+            Ok(match &cookie.path {
+                Some(path) => NativeOut::Some(Box::new(NativeOut::Str(path.clone()))),
+                None => NativeOut::None,
+            })
+        }
+        "domain" => {
+            want_arity(method, args, 0)?;
+            Ok(match &cookie.domain {
+                Some(domain) => NativeOut::Some(Box::new(NativeOut::Str(domain.clone()))),
+                None => NativeOut::None,
+            })
+        }
+        "max_age" => {
+            want_arity(method, args, 0)?;
+            Ok(match cookie.max_age {
+                Some(seconds) => NativeOut::Some(Box::new(NativeOut::Scalar(Scalar::Int(seconds)))),
+                None => NativeOut::None,
+            })
+        }
+        "secure" => {
+            want_arity(method, args, 0)?;
+            Ok(NativeOut::Scalar(Scalar::Bool(cookie.secure)))
+        }
+        "http_only" => {
+            want_arity(method, args, 0)?;
+            Ok(NativeOut::Scalar(Scalar::Bool(cookie.http_only)))
+        }
+        "same_site" => {
+            want_arity(method, args, 0)?;
+            Ok(NativeOut::Str(
+                cookie.same_site.label().to_ascii_lowercase(),
+            ))
         }
         "with_value" => {
             want_arity(method, args, 1)?;
@@ -5880,6 +6040,33 @@ const COOKIE_DOCS: &[(&str, &str)] = &[
     ("name", "The cookie's name."),
     ("value", "The cookie's value."),
     (
+        "path",
+        "The `Path` the cookie is scoped to, or `none` when it carries no `Path` attribute.",
+    ),
+    (
+        "domain",
+        "The `Domain` the cookie is scoped to, or `none` for a **host-only** cookie — one that \
+         goes back to exactly the host that set it and to no subdomain of it.",
+    ),
+    (
+        "max_age",
+        "The `Max-Age` in seconds, or `none` for a session cookie. `0` is the deletion form.",
+    ),
+    (
+        "secure",
+        "Whether the cookie is withheld from a plain-`http` request.",
+    ),
+    (
+        "http_only",
+        "Whether the cookie is marked `HttpOnly` — invisible to a browser's scripts. Nothing a \
+         Noeta program does is affected by it; it is carried so a cookie read back out of a jar \
+         reports what the server actually sent.",
+    ),
+    (
+        "same_site",
+        "The `SameSite` attribute: `\"strict\"`, `\"lax\"` or `\"none\"`.",
+    ),
+    (
         "with_value",
         "A copy with a new value. Rejects whitespace, `\"`, `,`, `;`, `\\`, and control characters \
          — encode (base64url) anything else first.",
@@ -7443,6 +7630,63 @@ mod tests {
             refused.message,
             "method `redirect` expects a non-negative redirect limit argument"
         );
+    }
+
+    /// Seeding a cookie needs a jar and an origin, and says which is missing.
+    ///
+    /// The corpus can pin an error's code and span but not its text, and "you have no jar" and
+    /// "you have no base URL" are the same code at the same span — so the sentence that tells the
+    /// two apart is asserted where it can be.
+    #[test]
+    fn seeding_a_cookie_names_what_the_client_is_missing() {
+        let mut host = crate::SandboxHost::new();
+        let cookie = NativeValue::Extern(crate::ExternBox::new(
+            crate::cookie::Cookie::new("sid", "abc").expect("valid"),
+        ));
+
+        let mut jarless: Box<dyn crate::ExternValue> =
+            Box::new(crate::http_client::HttpClient::new("https://svc.test"));
+        let refused = client_method_dispatch(
+            jarless.as_mut(),
+            "store_cookie",
+            &mut host,
+            std::slice::from_ref(&cookie),
+        )
+        .expect_err("there is nowhere to put it");
+        assert_eq!(
+            refused.message,
+            "`store_cookie` needs a client with a cookie jar — call `cookies()` first, or the \
+             cookie would be stored nowhere and sent never"
+        );
+
+        let mut rootless: Box<dyn crate::ExternValue> =
+            Box::new(crate::http_client::HttpClient::new("").with_cookies());
+        let refused = client_method_dispatch(
+            rootless.as_mut(),
+            "store_cookie",
+            &mut host,
+            std::slice::from_ref(&cookie),
+        )
+        .expect_err("there is no origin to store it under");
+        assert_eq!(
+            refused.message,
+            "`store_cookie` stores the cookie under the client's base URL, and this client has \
+             none — build it with `client.new(base_url)`"
+        );
+
+        // With both, it lands and is readable back.
+        let mut ready: Box<dyn crate::ExternValue> =
+            Box::new(crate::http_client::HttpClient::new("https://svc.test").with_cookies());
+        let out = client_method_dispatch(ready.as_mut(), "store_cookie", &mut host, &[cookie])
+            .expect("a client with a jar and a base URL");
+        let NativeOut::Extern(seeded) = out else {
+            panic!("`store_cookie` returns a client");
+        };
+        let seeded = seeded
+            .as_any()
+            .downcast_ref::<crate::http_client::HttpClient>()
+            .expect("a client");
+        assert_eq!(seeded.stored_cookies(0).len(), 1);
     }
 
     #[test]

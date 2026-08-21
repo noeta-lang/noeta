@@ -15,9 +15,11 @@
 //! sees the expanded result. The one exception is the deadline, which is genuinely per-request
 //! and therefore rides the seam as `NetRequest::timeout_ms`.
 
+use crate::cookie_jar::CookieJar;
 use crate::{ExternValue, NetRequest};
 use std::any::Any;
 use std::cmp::Ordering;
+use std::sync::{Arc, Mutex};
 
 /// The registered extern-type name of a configured client.
 pub const CLIENT_TYPE_NAME: &str = "Client";
@@ -27,11 +29,18 @@ pub const CLIENT_TYPE_IDENTITY: &str = "std.http.Client";
 
 /// A configured HTTP client: base URL + headers + deadline, spent by the verb methods.
 ///
-/// Pure, content-equal data (no host handle, no connection pool — pooling is the host's, keyed by
-/// origin, and outlives any one client value). Cloning is cheap enough that the immutable-builder
-/// chain is not a performance concern: a chain of N steps allocates N small header vectors once,
-/// at configuration time, not per request.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// Configuration is pure, content-equal data (no host handle, no connection pool — pooling is the
+/// host's, keyed by origin, and outlives any one client value). Cloning is cheap enough that the
+/// immutable-builder chain is not a performance concern: a chain of N steps allocates N small
+/// header vectors once, at configuration time, not per request.
+///
+/// The **cookie jar** is the one exception, and it has to be: a jar is what a client *learns*, and
+/// learning is not immutable. It is therefore shared — `client.cookies().bearer(token)` derives a
+/// second client that keeps the first one's jar rather than starting an empty one, which is the
+/// only behavior that makes a configuration chain usable after a login. Two clients holding the
+/// same jar compare equal on it; two holding separate jars do not, whatever is in them, because a
+/// jar is an identity rather than a value — the next response separates them.
+#[derive(Debug, Clone, Default)]
 pub struct HttpClient {
     /// Prepended to any request path that is not itself absolute. Stored without a trailing `/`
     /// so joining is unambiguous.
@@ -47,7 +56,28 @@ pub struct HttpClient {
     /// [`noeta_ext_abi::redirect::DEFAULT_REDIRECT_LIMIT`]. `Some(0)` hands the 3xx back as an
     /// ordinary response.
     pub redirect_limit: Option<u32>,
+    /// The cookie jar shared with every client derived from the one that created it, or `None`
+    /// for a client that neither stores nor sends cookies.
+    pub jar: Option<Arc<Mutex<CookieJar>>>,
 }
+
+/// Configuration compares by value; the jar compares by **identity** (see [`HttpClient`]).
+impl PartialEq for HttpClient {
+    fn eq(&self, other: &HttpClient) -> bool {
+        self.base_url == other.base_url
+            && self.headers == other.headers
+            && self.timeout_ms == other.timeout_ms
+            && self.retry == other.retry
+            && self.redirect_limit == other.redirect_limit
+            && match (&self.jar, &other.jar) {
+                (None, None) => true,
+                (Some(mine), Some(theirs)) => Arc::ptr_eq(mine, theirs),
+                _ => false,
+            }
+    }
+}
+
+impl Eq for HttpClient {}
 
 /// How a [`HttpClient`] retries (http arc H9).
 ///
@@ -165,6 +195,22 @@ impl HttpClient {
         }
     }
 
+    /// A copy with a **fresh, empty** cookie jar. Every client derived from the result shares it,
+    /// so a login performed through one is carried by the next request through any of them.
+    ///
+    /// A no-op on a client that already has one: calling it twice would otherwise discard the
+    /// session the first call collected, and `client.cookies()` reads as "I want cookies", not
+    /// "start over".
+    pub fn with_cookies(&self) -> HttpClient {
+        if self.jar.is_some() {
+            return self.clone();
+        }
+        HttpClient {
+            jar: Some(Arc::new(Mutex::new(CookieJar::new()))),
+            ..self.clone()
+        }
+    }
+
     /// A copy that follows at most `limit` redirects. `0` opts out entirely — the 3xx comes back
     /// as an ordinary response, `Location` header and all.
     pub fn with_redirect_limit(&self, limit: u32) -> HttpClient {
@@ -232,6 +278,29 @@ impl HttpClient {
         }
     }
 
+    /// Every live cookie the jar holds at `now_ms`, in a request-independent order. Empty for a
+    /// client without a jar.
+    pub fn stored_cookies(&self, now_ms: u64) -> Vec<crate::cookie::Cookie> {
+        let Some(jar) = &self.jar else {
+            return Vec::new();
+        };
+        let jar = jar.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        jar.snapshot(now_ms)
+            .into_iter()
+            .map(|entry| entry.cookie)
+            .collect()
+    }
+
+    /// Seed the jar with `cookie`, as if `url` had set it. `false` when the client has no jar, or
+    /// when the cookie's own domain does not cover `url`'s host.
+    pub fn store_cookie(&self, url: &str, cookie: crate::cookie::Cookie, now_ms: u64) -> bool {
+        let Some(jar) = &self.jar else {
+            return false;
+        };
+        let mut jar = jar.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        jar.store(url, &cookie.to_header(), now_ms)
+    }
+
     /// Perform `request` through the host, applying this client's retry policy (http arc H9).
     ///
     /// Waiting between attempts goes through the **Clock** capability's `delay`, not a thread sleep
@@ -294,7 +363,56 @@ impl HttpClient {
         request: NetRequest,
         host: &mut dyn crate::Host,
     ) -> Result<crate::NetResponse, crate::NetError> {
-        noeta_ext_abi::redirect::follow_redirects(request, |hop| host.net_fetch(hop))
+        noeta_ext_abi::redirect::follow_redirects(request, |hop| self.hop(hop, host))
+    }
+
+    /// One hop: apply what this client adds to a request, perform it, and take in what the
+    /// response teaches the client.
+    ///
+    /// This is per **hop** rather than per request, and that placement is the whole reason
+    /// [`noeta_ext_abi::redirect::follow_redirects`] takes a closure. A cookie set by hop 1 has to
+    /// be sent on hop 2 — a login that answers `302` and a `Set-Cookie` in the same response is
+    /// the single most common shape there is, and applying the jar once per request would send
+    /// the session to the login page and nowhere after it.
+    fn hop(
+        &self,
+        request: NetRequest,
+        host: &mut dyn crate::Host,
+    ) -> Result<crate::NetResponse, crate::NetError> {
+        let Some(jar) = self.jar.clone() else {
+            return host.net_fetch(request);
+        };
+        // Read the wall clock once per hop. The sandbox's is a pure read that does not advance
+        // its logical time, so a client with a jar observes the same clock a client without one
+        // does — which is what keeps every existing timing case bit-identical.
+        let now_ms = host.clock_unix_ms();
+        let mut request = request;
+        {
+            let stored = jar.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(header) = stored.header_for(&request.url, now_ms) {
+                // A `Cookie` header set on the call or the client wins: the caller named it, and
+                // silently merging the jar into it would produce a header neither side wrote.
+                if !request
+                    .headers
+                    .iter()
+                    .any(|(name, _)| name.eq_ignore_ascii_case("cookie"))
+                {
+                    request.headers.push(("cookie".to_string(), header));
+                }
+            }
+        }
+        let sent_to = request.url.clone();
+        let response = host.net_fetch(request)?;
+        // The response's own URL is where the `Set-Cookie` was actually served from, which after a
+        // hop is not the URL this request started at. A host that leaves it empty falls back.
+        let from = match response.url.is_empty() {
+            true => sent_to.as_str(),
+            false => response.url.as_str(),
+        };
+        jar.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .store_response(from, &response.headers, now_ms);
+        Ok(response)
     }
 }
 
@@ -729,6 +847,122 @@ mod tests {
              compute this backoff and then ignore it: {:?}",
             host.slept
         );
+    }
+
+    /// A derived client keeps the jar it came from.
+    ///
+    /// This is the whole reason the jar is shared rather than copied: a configuration chain is
+    /// normally written *after* a login (`session.bearer(token).timeout(500)`), and a jar that
+    /// copied would leave the derived client logged out with nothing to show for it.
+    #[test]
+    fn a_derived_client_carries_the_jar_it_came_from() {
+        let session = HttpClient::new("https://x.test").with_cookies();
+        session.store_cookie("https://x.test/", cookie("sid", "abc"), 0);
+
+        let derived = session
+            .with_header("accept", "application/json")
+            .with_timeout(500);
+        assert_eq!(
+            derived.stored_cookies(0).len(),
+            1,
+            "configuring a client further must not log it out"
+        );
+
+        // And it is genuinely the same jar, not an equal copy: what the derived client learns is
+        // visible to the one it came from.
+        derived.store_cookie("https://x.test/", cookie("theme", "dark"), 0);
+        assert_eq!(session.stored_cookies(0).len(), 2);
+    }
+
+    #[test]
+    fn a_jar_compares_by_identity_and_configuration_by_value() {
+        let a = HttpClient::new("https://x.test").with_cookies();
+        assert_eq!(
+            a,
+            a.clone(),
+            "a clone shares the jar, so it is the same client"
+        );
+        assert_eq!(
+            a.with_header("x", "1"),
+            a.with_header("x", "1"),
+            "two derivations of one client agree on configuration and share one jar"
+        );
+
+        // Two clients with separate jars are not equal even while the jars hold the same thing —
+        // the next response separates them, so treating them as one value would be a lie with a
+        // short shelf life.
+        let b = HttpClient::new("https://x.test").with_cookies();
+        assert_ne!(a, b);
+        assert_eq!(
+            HttpClient::new("https://x.test"),
+            HttpClient::new("https://x.test"),
+            "and two jarless clients are still plain value-equal"
+        );
+    }
+
+    #[test]
+    fn asking_for_cookies_twice_does_not_empty_the_jar() {
+        // `client.cookies()` reads as "I want cookies", not "start over" — and a chain that
+        // mentions it twice must not silently discard the session the first mention collected.
+        let session = HttpClient::new("https://x.test").with_cookies();
+        session.store_cookie("https://x.test/", cookie("sid", "abc"), 0);
+        assert_eq!(session.with_cookies().stored_cookies(0).len(), 1);
+    }
+
+    #[test]
+    fn a_client_without_a_jar_stores_nothing_and_says_so() {
+        let plain = HttpClient::new("https://x.test");
+        assert!(!plain.store_cookie("https://x.test/", cookie("sid", "abc"), 0));
+        assert!(plain.stored_cookies(0).is_empty());
+    }
+
+    /// **A cookie set on a redirecting response reaches the next hop.**
+    ///
+    /// The single most common shape on the web is a login that answers `302` *and* a
+    /// `Set-Cookie` in the same response. A jar applied once per request rather than once per hop
+    /// would store that cookie and then never send it — the session would be collected and
+    /// immediately unused, which looks exactly like a server that ignored the login.
+    #[test]
+    fn a_cookie_set_by_a_redirect_rides_the_hop_it_redirects_to() {
+        let mut host = crate::SandboxHost::new();
+        let client = HttpClient::new("https://svc.test").with_cookies();
+        let request = client.build("GET", "/cookies/login", Vec::new(), Vec::new());
+        let response = client
+            .perform(request, &mut host)
+            .expect("the chain completes");
+
+        assert_eq!(response.status, 200, "the 302 was followed");
+        assert_eq!(
+            String::from_utf8_lossy(&response.body),
+            "{\"cookie\":\"session=live\"}",
+            "the cookie the redirecting response set was sent on the hop it redirected to"
+        );
+    }
+
+    #[test]
+    fn the_jar_does_not_follow_a_cookie_across_an_origin() {
+        // `/redirect-cross` hops to a second host. A jar keyed on the setting host must not send
+        // the first host's cookie to the second, and the redirect layer strips the header the jar
+        // would have added anyway — belt and braces, because either one alone leaking is a
+        // session handed to whoever controls an open redirect.
+        let mut host = crate::SandboxHost::new();
+        let client = HttpClient::new("https://svc.test").with_cookies();
+        client.store_cookie("https://svc.test/", cookie("sid", "abc"), 0);
+        let request = client.build("GET", "/redirect-cross", Vec::new(), Vec::new());
+        let response = client
+            .perform(request, &mut host)
+            .expect("the chain completes");
+
+        assert_eq!(
+            String::from_utf8_lossy(&response.body),
+            "{}",
+            "nothing of ours may reach the other origin"
+        );
+    }
+
+    /// A cookie for the tests above, panicking on an invalid one (they all name valid ones).
+    fn cookie(name: &str, value: &str) -> crate::cookie::Cookie {
+        crate::cookie::Cookie::new(name, value).expect("a valid cookie")
     }
 
     #[test]
