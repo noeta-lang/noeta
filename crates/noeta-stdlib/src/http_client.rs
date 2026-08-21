@@ -43,6 +43,10 @@ pub struct HttpClient {
     pub timeout_ms: Option<u64>,
     /// The retry policy, or `None` to attempt each request exactly once.
     pub retry: Option<RetryPolicy>,
+    /// How many redirects a request follows, or `None` for
+    /// [`noeta_ext_abi::redirect::DEFAULT_REDIRECT_LIMIT`]. `Some(0)` hands the 3xx back as an
+    /// ordinary response.
+    pub redirect_limit: Option<u32>,
 }
 
 /// How a [`HttpClient`] retries (http arc H9).
@@ -125,22 +129,6 @@ impl RetryPolicy {
     }
 }
 
-/// Whether `target` is an **absolute** URL — i.e. begins with a real scheme.
-///
-/// Deliberately not `target.contains("://")`: a *relative* path may legitimately carry a URL in
-/// its query string (`/oauth/callback?redirect=https://app.example.com`), and treating that as
-/// absolute drops the base URL and produces a bare relative string the host rejects. So the text
-/// before `://` must itself be a valid RFC 3986 scheme — alphabetic first character, then
-/// alphanumerics / `+` / `-` / `.` — which a path or query string never is.
-fn has_scheme(target: &str) -> bool {
-    let Some(scheme) = target.split_once("://").map(|(s, _)| s) else {
-        return false;
-    };
-    let mut chars = scheme.chars();
-    chars.next().is_some_and(|c| c.is_ascii_alphabetic())
-        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
-}
-
 /// Parse a `Retry-After` value as delay-seconds (RFC 9110 §10.2.3).
 ///
 /// Only the delay-seconds form is honored; the HTTP-date form needs a wall-clock comparison and a
@@ -177,6 +165,15 @@ impl HttpClient {
         }
     }
 
+    /// A copy that follows at most `limit` redirects. `0` opts out entirely — the 3xx comes back
+    /// as an ordinary response, `Location` header and all.
+    pub fn with_redirect_limit(&self, limit: u32) -> HttpClient {
+        HttpClient {
+            redirect_limit: Some(limit),
+            ..self.clone()
+        }
+    }
+
     /// A copy with the retry policy set.
     pub fn with_retry(&self, retry: RetryPolicy) -> HttpClient {
         HttpClient {
@@ -202,7 +199,7 @@ impl HttpClient {
     /// is joined to the base with exactly one `/` between them. With no base configured, the
     /// target is used as given (so a `Client` with no base behaves like the free verbs).
     pub fn resolve(&self, target: &str) -> String {
-        if has_scheme(target) || self.base_url.is_empty() {
+        if noeta_ext_abi::uri::has_scheme(target) || self.base_url.is_empty() {
             return target.to_string();
         }
         format!("{}/{}", self.base_url, target.trim_start_matches('/'))
@@ -231,6 +228,7 @@ impl HttpClient {
             headers,
             body,
             timeout_ms: self.timeout_ms,
+            redirect_limit: self.redirect_limit,
         }
     }
 
@@ -255,10 +253,10 @@ impl HttpClient {
         host: &mut dyn crate::Host,
     ) -> Result<crate::NetResponse, crate::NetError> {
         let Some(policy) = self.retry.as_ref().filter(|p| p.max_retries > 0) else {
-            return host.net_fetch(request);
+            return self.attempt(request, host);
         };
         if !policy.should_retry_method(&request.method) {
-            return host.net_fetch(request);
+            return self.attempt(request, host);
         }
         let mut retry = 0;
         loop {
@@ -266,9 +264,9 @@ impl HttpClient {
             // rather than clone it — a retrying client must not double-allocate a large body on
             // the common path where no retry actually happens.
             if retry >= policy.max_retries {
-                return host.net_fetch(request);
+                return self.attempt(request, host);
             }
-            let outcome = host.net_fetch(request.clone());
+            let outcome = self.attempt(request.clone(), host);
             let delay = match &outcome {
                 // A transient transport failure: worth another attempt. A deterministic one
                 // (tls, invalid_url) or an ambiguous one (protocol, other) is returned as-is.
@@ -282,6 +280,21 @@ impl HttpClient {
             host.clock_delay(delay as i64);
             retry += 1;
         }
+    }
+
+    /// One **attempt**: the redirect chain, start to finish.
+    ///
+    /// Retries wrap redirects rather than the other way round, which is the only nesting that
+    /// makes sense from the caller's side. A retry means "that request did not work, do the whole
+    /// thing again" — starting from the original target, because the chain that led anywhere else
+    /// is exactly what is being retried. A hop that fails mid-chain therefore replays from hop
+    /// zero, and the retry budget counts whole requests, not hops.
+    fn attempt(
+        &self,
+        request: NetRequest,
+        host: &mut dyn crate::Host,
+    ) -> Result<crate::NetResponse, crate::NetError> {
+        noeta_ext_abi::redirect::follow_redirects(request, |hop| host.net_fetch(hop))
     }
 }
 
@@ -437,23 +450,6 @@ mod tests {
                 "path={path}"
             );
         }
-    }
-
-    #[test]
-    fn a_scheme_is_recognised_by_shape_not_by_substring() {
-        assert!(has_scheme("https://x.example"));
-        assert!(
-            has_scheme("HTTP://x.example"),
-            "schemes are case-insensitive"
-        );
-        assert!(
-            has_scheme("x-custom.v2+json://host"),
-            "RFC 3986 scheme chars"
-        );
-        assert!(!has_scheme("/a?u=https://x"), "a path is not a scheme");
-        assert!(!has_scheme("://nohost"), "empty scheme");
-        assert!(!has_scheme("1http://x"), "a scheme starts with a letter");
-        assert!(!has_scheme("/plain/path"));
     }
 
     #[test]

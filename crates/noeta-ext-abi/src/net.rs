@@ -34,6 +34,15 @@ pub struct NetRequest {
     /// Set by a configured `Client`; the free verbs never carry one. Meaningless on an *inbound*
     /// request (the server side reuses this struct), where it stays `None`.
     pub timeout_ms: Option<u64>,
+    /// How many redirects this request follows, or `None` for
+    /// [`crate::redirect::DEFAULT_REDIRECT_LIMIT`]. `Some(0)` means the 3xx comes back as an
+    /// ordinary response for the caller to read. Meaningless on an *inbound* request, where it
+    /// stays `None`.
+    ///
+    /// It rides the seam rather than staying in the client because the *async* door has no
+    /// synchronous caller above it: a spawned descriptor is handed a request and must decide for
+    /// itself, and this is what it decides with.
+    pub redirect_limit: Option<u32>,
 }
 
 /// The registered extern-type name of a transport failure (http arc H6).
@@ -285,7 +294,13 @@ impl crate::ExternIo for NetFetchIo {
         &mut self,
         host: &mut dyn crate::Host,
     ) -> Result<crate::NativeOut, crate::StdError> {
-        Ok(fetch_outcome(host.net_fetch(self.request.clone())))
+        // A descriptor IS the whole request, so it follows its own redirects: nothing above it is
+        // synchronous enough to do so. It shares [`crate::redirect::redirect_target`] with the
+        // synchronous door, so `get_async` and `get` cannot disagree about what a 302 means.
+        Ok(fetch_outcome(crate::redirect::follow_redirects(
+            self.request.clone(),
+            |hop| host.net_fetch(hop),
+        )))
     }
 }
 

@@ -280,7 +280,20 @@
 /// shown, the runner simply not found — `traits: &["Comparbale"]` compiles, registers nothing, and
 /// leaves the type unordered with nothing anywhere able to notice. An extension is better told at
 /// assembly than left to a behavior that never arrives.
-pub const ABI_VERSION: u32 = 25;
+/// **26** — [`net::NetRequest`] gained `redirect_limit`, and [`host::Network::net_fetch`] now
+/// performs **exactly one hop**. A source break for anything that builds a `NetRequest` as a struct
+/// literal, and a behavior change for any host implementation that followed redirects itself: it
+/// must stop, or the hop budget is spent twice and the caller's limit never applies.
+///
+/// The rule it implements: **a policy the host decides is a policy no test covers.** Four hosts
+/// implement this seam — the deterministic sandbox responder, reqwest, a `wasi:http` embedder hook,
+/// a browser's `fetch` — and each arrived with its own idea of what a redirect is, from "follow ten"
+/// to "do not follow at all". Which one ran depended on where the program was deployed, none of them
+/// could be configured, and the differential could not see any of it. [`redirect::redirect_target`]
+/// is now the single decision: which method survives a `303`, which headers are dropped crossing an
+/// origin, where a relative `Location` resolves to. The sandbox exercises it under the differential
+/// and every platform inherits the answer.
+pub const ABI_VERSION: u32 = 26;
 
 pub mod args;
 pub mod channel;
@@ -295,11 +308,13 @@ pub mod map_key;
 pub mod net;
 pub mod os;
 pub mod p2p;
+pub mod redirect;
 pub mod registry;
 pub mod render_hint;
 pub mod ring1;
 pub mod stream;
 pub mod telemetry;
+pub mod uri;
 
 pub use command::{ArgKind, ArgSpec, CommandCtx, EntryArg, EntryCall, ExtCommand, ParsedArgs};
 pub use ctx::{
@@ -530,6 +545,14 @@ pub fn invalid_json_error(detail: &str) -> StdError {
 
 /// "a string" / "an int" — pick the article so messages read naturally.
 fn an(noun: &str) -> String {
+    // A caller may pass a whole phrase rather than a bare noun (`"a positive timeout in
+    // milliseconds"`), because some arguments are constrained by more than their type. Prefixing
+    // an article onto one that already has its own reads as `expects an a non-negative retry
+    // count` — so the article is only supplied when the phrase does not begin with one.
+    let first = noun.split_whitespace().next().unwrap_or_default();
+    if matches!(first, "a" | "an" | "the") {
+        return noun.to_string();
+    }
     let article = match noun.chars().next() {
         Some('a' | 'e' | 'i' | 'o' | 'u') => "an",
         _ => "a",
@@ -546,6 +569,16 @@ mod tests {
         assert_eq!(
             arity_error("reverse", 0, 2).message,
             "method `reverse` takes 0 argument(s) but 2 were supplied"
+        );
+        assert_eq!(
+            type_error("has", "a non-negative redirect limit").message,
+            "method `has` expects a non-negative redirect limit argument",
+            "a phrase that already carries its own article must not get a second one"
+        );
+        assert_eq!(
+            type_error("has", "int").message,
+            "method `has` expects an int argument",
+            "and a bare noun still gets the right one"
         );
         assert_eq!(
             type_error("has", "string").message,

@@ -674,6 +674,7 @@ mod tests {
                 headers: Vec::new(),
                 body: Vec::new(),
                 timeout_ms: None,
+                redirect_limit: None,
             })
             .expect_err("no network natively");
         assert!(err.message().contains("JS embedding"), "{}", err.message());

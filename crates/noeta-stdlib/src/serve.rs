@@ -1149,6 +1149,7 @@ mod tests {
                 .collect(),
             body: Vec::new(),
             timeout_ms: None,
+            redirect_limit: None,
         }
     }
 

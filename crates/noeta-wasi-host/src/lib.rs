@@ -786,6 +786,7 @@ mod tests {
             headers: vec![("x-a".into(), "1".into())],
             body: Vec::new(),
             timeout_ms: None,
+            redirect_limit: None,
         });
         let listener = host.net_listen("ignored:0").expect("armed listener");
         let (conn, request) = host
@@ -827,6 +828,7 @@ mod tests {
                 headers: Vec::new(),
                 body: Vec::new(),
                 timeout_ms: None,
+                redirect_limit: None,
             })
             .expect_err("no client");
         assert!(err.message().contains("wasi:http"), "{}", err.message());

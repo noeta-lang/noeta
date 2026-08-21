@@ -1,0 +1,8 @@
+// A redirect limit is a count, so a negative one is a mistake in the program rather than a
+// configuration meaning "unlimited" — it is rejected at the call, the way a negative retry count
+// and a non-positive timeout are.
+// expect: error E0007 at 8:6
+// expect: exit 1
+use std.http.client
+
+echo client.new("https://svc.test").redirect(-1).base_url()

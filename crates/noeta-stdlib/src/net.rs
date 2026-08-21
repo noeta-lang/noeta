@@ -56,6 +56,7 @@ pub fn sandbox_request_script() -> Vec<NetRequest> {
             .collect(),
         body: body.as_bytes().to_vec(),
         timeout_ms: None,
+        redirect_limit: None,
     };
     vec![
         req("GET", "/", "", vec![]),
@@ -128,7 +129,7 @@ pub fn sandbox_ws_client_frames() -> Vec<String> {
 ///   rather than described in prose.
 /// - anything else → a single-frame body, so a stream against any URL still terminates.
 pub fn sandbox_stream_body(request: &NetRequest) -> String {
-    match path_of(&request.url) {
+    match noeta_ext_abi::uri::path_of(&request.url) {
         "/stream/sse" => concat!(
             "event: token\ndata: He\n\n",
             "data: multi\ndata: line\n\n",
@@ -162,7 +163,7 @@ pub fn sandbox_stream_body(request: &NetRequest) -> String {
 /// document rather than an event stream, carrying the `retry-after` a backoff actually needs.
 pub fn sandbox_stream_head(request: &NetRequest) -> (u16, Vec<(String, String)>) {
     let header = |name: &str, value: &str| (name.to_string(), value.to_string());
-    match path_of(&request.url) {
+    match noeta_ext_abi::uri::path_of(&request.url) {
         "/stream/error" => (
             429,
             vec![
@@ -207,22 +208,6 @@ fn typed(status: u16, content_type: &str, body: impl Into<Vec<u8>>) -> NetRespon
     }
 }
 
-/// The path of `url` — between the authority and any `?`/`#` — defaulting to `/`. A minimal
-/// hand parse so the sandbox stays dependency-free (the `url` crate lives only in the real host's
-/// reqwest tree).
-fn path_of(url: &str) -> &str {
-    let after_scheme = match url.find("://") {
-        Some(i) => &url[i + 3..],
-        None => url,
-    };
-    let from_path = match after_scheme.find('/') {
-        Some(i) => &after_scheme[i..],
-        None => "/",
-    };
-    let end = from_path.find(['?', '#']).unwrap_or(from_path.len());
-    &from_path[..end]
-}
-
 /// The deterministic sandbox response for `request` — the whole `Network` capability on
 /// [`crate::SandboxHost`]. Pure, so both backends compute the identical response and the
 /// differential holds.
@@ -231,6 +216,16 @@ fn path_of(url: &str) -> &str {
 /// - `/status/{n}` → an empty response with status `n` (a malformed or out-of-range `n` is `400`).
 /// - `/echo` → `200`, JSON body `{method, path, body}` echoing the request.
 /// - `/headers` → `200`, JSON body of the request headers (sorted by name).
+/// - `/redirect/{n}` → a `302` to `/redirect/{n-1}`, so `/redirect/3` is a three-hop chain;
+///   `/redirect/0` is the destination and answers `200 arrived`. A relative `Location`, which is
+///   what makes it exercise resolution against the hop it came from rather than the original URL.
+/// - `/redirect-status/{n}` → status `n` with `Location: /echo`, so a program can watch what each
+///   redirecting status does to its method and body — `/echo` reports both back.
+/// - `/redirect-same` → a `302` to a relative `/headers`, and `/redirect-cross` → a `302` to an
+///   **absolute** `Location` on a different host (`https://other.test/headers`). The pair exists
+///   because "credentials do not cross an origin" is only half a rule without "and they do survive
+///   a hop that stays put" — `/headers` answers with whatever reached it, so a program can see
+///   both halves.
 /// - anything else → `200`, the plain-text line `noeta sandbox: {method} {path}`.
 pub fn sandbox_respond(request: &NetRequest) -> NetResponse {
     // Every arm builds its response through `typed`, which cannot know the request; stamp the
@@ -240,15 +235,44 @@ pub fn sandbox_respond(request: &NetRequest) -> NetResponse {
     response
 }
 
+/// A redirecting response: `status` plus the `Location` that names where to go.
+fn redirect_to(status: u16, location: &str) -> NetResponse {
+    NetResponse {
+        status,
+        headers: vec![("location".to_string(), location.to_string())],
+        body: Vec::new(),
+        url: String::new(),
+    }
+}
+
+/// The host a `/redirect-cross` hop lands on — a second origin, so the sandbox can script the one
+/// redirect case that is a security rule rather than a convenience.
+pub const SANDBOX_CROSS_ORIGIN: &str = "https://other.test";
+
 fn sandbox_body(request: &NetRequest) -> NetResponse {
-    let path = path_of(&request.url);
+    let path = noeta_ext_abi::uri::path_of(&request.url);
     if let Some(rest) = path.strip_prefix("/status/") {
         return match rest.parse::<u16>() {
             Ok(n) if (100..=599).contains(&n) => typed(n, "text/plain", ""),
             _ => typed(400, "text/plain", "invalid status"),
         };
     }
+    if let Some(rest) = path.strip_prefix("/redirect/") {
+        return match rest.parse::<u32>() {
+            Ok(0) => typed(200, "text/plain", "arrived"),
+            Ok(n) => redirect_to(302, &format!("/redirect/{}", n - 1)),
+            Err(_) => typed(400, "text/plain", "invalid hop count"),
+        };
+    }
+    if let Some(rest) = path.strip_prefix("/redirect-status/") {
+        return match rest.parse::<u16>() {
+            Ok(n) if (300..=399).contains(&n) => redirect_to(n, "/echo"),
+            _ => typed(400, "text/plain", "invalid redirect status"),
+        };
+    }
     match path {
+        "/redirect-same" => redirect_to(302, "/headers"),
+        "/redirect-cross" => redirect_to(302, &format!("{SANDBOX_CROSS_ORIGIN}/headers")),
         "/echo" => {
             let doc = json!({
                 "method": request.method,
@@ -286,14 +310,65 @@ mod tests {
             headers: vec![],
             body: vec![],
             timeout_ms: None,
+            redirect_limit: None,
         }
     }
 
     #[test]
-    fn path_parsing_strips_scheme_authority_query_and_fragment() {
-        assert_eq!(path_of("https://x.test/a/b?q=1#f"), "/a/b");
-        assert_eq!(path_of("http://x.test"), "/");
-        assert_eq!(path_of("https://x.test/status/404"), "/status/404");
+    fn the_redirect_route_is_a_chain_that_ends() {
+        // `/redirect/n` counts down to `/redirect/0`, which is the destination.
+        let hop = sandbox_respond(&get("https://x.test/redirect/3"));
+        assert_eq!(hop.status, 302);
+        assert_eq!(
+            hop.header_value("location"),
+            Some("/redirect/2"),
+            "relative on purpose: following it exercises resolution against the current hop"
+        );
+        let end = sandbox_respond(&get("https://x.test/redirect/0"));
+        assert_eq!(end.status, 200);
+        assert_eq!(String::from_utf8(end.body).unwrap(), "arrived");
+        assert_eq!(
+            sandbox_respond(&get("https://x.test/redirect/zzz")).status,
+            400
+        );
+    }
+
+    #[test]
+    fn the_redirect_status_route_answers_with_the_status_it_is_asked_for() {
+        for status in [301, 302, 303, 307, 308] {
+            let response =
+                sandbox_respond(&get(&format!("https://x.test/redirect-status/{status}")));
+            assert_eq!(response.status, status);
+            assert_eq!(
+                response.header_value("location"),
+                Some("/echo"),
+                "it lands on the route that reports the method and body that survived"
+            );
+        }
+        // Only a 3xx makes sense here; anything else is a malformed request for the route.
+        assert_eq!(
+            sandbox_respond(&get("https://x.test/redirect-status/200")).status,
+            400
+        );
+    }
+
+    #[test]
+    fn the_credential_pair_differs_only_in_where_it_points() {
+        // Same origin, relative target…
+        let same = sandbox_respond(&get("https://x.test/redirect-same"));
+        assert_eq!(same.header_value("location"), Some("/headers"));
+        // …and the same destination on a second origin, spelled absolutely. The pair is what makes
+        // "credentials cross a hop that stays put, and never one that does not" observable from a
+        // program: both land on `/headers`, which reports what arrived.
+        let cross = sandbox_respond(&get("https://x.test/redirect-cross"));
+        assert_eq!(
+            cross.header_value("location"),
+            Some("https://other.test/headers")
+        );
+        assert!(!noeta_ext_abi::uri::same_origin(
+            "https://x.test/redirect-cross",
+            cross.header_value("location").unwrap()
+        ));
     }
 
     #[test]

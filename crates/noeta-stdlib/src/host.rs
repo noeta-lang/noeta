@@ -1588,6 +1588,7 @@ mod tests {
             headers: vec![],
             body: vec![],
             timeout_ms: None,
+            redirect_limit: None,
         };
         let stream = host
             .net_stream_open(request.clone(), Framing::Ndjson)
@@ -1685,6 +1686,7 @@ mod tests {
                 headers: vec![],
                 body: vec![],
                 timeout_ms: None,
+                redirect_limit: None,
             };
             let stream = host.net_stream_open(request, framing).unwrap().stream;
             let mut frames = Vec::new();

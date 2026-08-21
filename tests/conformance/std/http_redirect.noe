@@ -1,0 +1,69 @@
+// Redirect following, and configuring it. The sandbox's `/redirect/{n}` route is an n-hop chain
+// with a RELATIVE `Location`, so following it also proves the target resolves against the hop it
+// came from rather than the original URL; `/redirect-status/{n}` redirects to `/echo`, which
+// reports the method and body that survived; and the `/redirect-same` + `/redirect-cross` pair
+// lands on `/headers`, which reports which headers did.
+// expect: stdout "200"
+// expect: stdout "arrived"
+// expect: stdout "https://svc.test/redirect/0"
+// expect: stdout "302"
+// expect: stdout "some(/redirect/2)"
+// expect: stdout "some(/redirect/1)"
+// expect: stdout "some(/redirect/9)"
+// expect: stdout "{"body":"","method":"GET","path":"/echo"}"
+// expect: stdout "{"body":"","method":"GET","path":"/echo"}"
+// expect: stdout "{"body":"hi","method":"POST","path":"/echo"}"
+// expect: stdout "{"body":"hi","method":"POST","path":"/echo"}"
+// expect: stdout "{"authorization":"Bearer tok"}"
+// expect: stdout "{}"
+// expect: stdout "https://other.test/headers"
+// expect: stdout "arrived"
+// expect: exit 0
+use std.http.client
+
+// Following is the default: three hops, and the response reports where its body actually came
+// from — the base a relative `Link` or `Location` would have to resolve against.
+r = client.get("https://svc.test/redirect/3")?
+echo r.status()
+echo r.body()
+echo r.url()
+
+// `redirect(0)` opts out. The 3xx is an ordinary response, not an error, so the caller can read
+// where it was being sent.
+unfollowed = client.new("https://svc.test").redirect(0).get("/redirect/3")?
+echo unfollowed.status()
+echo unfollowed.header("location")
+
+// A used-up budget lands in the same place, by the same rule: one hop of a three-hop chain leaves
+// the second 302 as the answer.
+capped = client.new("https://svc.test").redirect(1).get("/redirect/3")?
+echo capped.header("location")
+
+// The default limit is ten, so a twenty-hop chain stops with ten hops taken.
+deep = client.get("https://svc.test/redirect/20")?
+echo deep.header("location")
+
+// What a redirecting status does to the request. 301 and 302 turn a POST into a bodyless GET —
+// which is what every deployed client does and what a server issuing one after a form post is
+// relying on. 303 says so outright.
+echo client.post("https://svc.test/redirect-status/301", "hi")?.body()
+echo client.post("https://svc.test/redirect-status/303", "hi")?.body()
+
+// 307 and 308 preserve both. That is the entire reason the two codes exist.
+echo client.post("https://svc.test/redirect-status/307", "hi")?.body()
+echo client.post("https://svc.test/redirect-status/308", "hi")?.body()
+
+// Credentials survive a hop that stays on the same origin…
+same = client.new("https://svc.test").bearer("tok").get("/redirect-same")?
+echo same.body()
+
+// …and never one that does not. An open redirect on a trusted host is a routine finding; a client
+// that forwarded its bearer token to whatever the `Location` named would hand the token to
+// whoever controls that parameter.
+cross = client.new("https://svc.test").bearer("tok").get("/redirect-cross")?
+echo cross.body()
+echo cross.url()
+
+// The async door follows the same chain — it is the whole request, so it follows its own.
+a = client.get_async("https://svc.test/redirect/2")
+echo a.await?.body()

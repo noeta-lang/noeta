@@ -134,6 +134,18 @@ pub trait Ids {
 /// connection, TLS) is a classified [`crate::NetError`]; an HTTP error *status* is an ordinary
 /// response, not an error — that split is what makes `?` on a request mean "the network broke".
 pub trait Network {
+    /// Perform `request` and return what the server answered — **exactly one hop**.
+    ///
+    /// A `3xx` is a response like any other here: this must not follow it. Following is
+    /// [`crate::redirect::follow_redirects`]'s, above the seam, and that placement is the whole
+    /// point — four hosts implement this trait, and a redirect rule spelled four times is four
+    /// chances for a cross-origin `Authorization` header to survive a hop on one platform and not
+    /// another. Spelled once, the deterministic sandbox exercises it under the differential and
+    /// every platform inherits the result. An implementation over a library that follows by
+    /// default (reqwest, a browser's `fetch`) has to turn that off.
+    ///
+    /// The exception is [`Self::net_spawn`]'s descriptor, which follows internally because it *is*
+    /// a whole request and has no synchronous caller above it that could.
     fn net_fetch(
         &mut self,
         request: crate::NetRequest,

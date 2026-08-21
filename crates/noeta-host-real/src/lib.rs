@@ -393,9 +393,20 @@ impl RealHost {
 /// synchronous calls on the host's runtime, [`RealHost::http_async`] for `http.*_async` on the
 /// executor's, one per stream pump thread, and one per OTLP exporter thread. Never clone one across
 /// that boundary.
+///
+/// **Redirects are off here on purpose.** `Network::net_fetch` performs exactly one hop; following
+/// is [`noeta_stdlib::redirect`]'s job, above the seam, where the deterministic sandbox exercises
+/// the identical rules under the differential and where a caller's `redirect(n)` can reach it.
+/// Leaving reqwest's own default on would mean the policy that actually ran on a shipped binary
+/// was never the one any test covered.
 #[cfg(feature = "ring-http-client")]
 fn new_http_client() -> reqwest::Client {
-    reqwest::Client::new()
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        // A builder with nothing but a redirect policy set cannot fail; the fallback keeps the
+        // signature infallible rather than panicking on an impossibility.
+        .unwrap_or_else(|_| reqwest::Client::new())
 }
 
 /// The same one-runtime rule as [`new_http_client`], for a client that must not wait forever: the
@@ -611,6 +622,40 @@ async fn reqwest_fetch(
     })
 }
 
+/// Follow the redirect chain for an **async** request — the one door with no synchronous caller
+/// above it that could do so on its behalf ([`noeta_stdlib::redirect::follow_redirects`] is what
+/// every other door uses).
+///
+/// Only the loop is written twice; the decision is not. Both spellings ask
+/// [`noeta_stdlib::redirect::redirect_target`] what the next request is, so `get_async` and `get`
+/// cannot disagree about a 302 — which method survives it, which headers are dropped crossing an
+/// origin, or where a relative `Location` points.
+#[cfg(feature = "ring-http-client")]
+async fn reqwest_fetch_following(
+    client: &reqwest::Client,
+    request: NetRequest,
+) -> Result<NetResponse, NetError> {
+    use noeta_stdlib::redirect::{DEFAULT_REDIRECT_LIMIT, redirect_target};
+    let mut current = request;
+    let mut hops = 0u32;
+    loop {
+        // Checked before the attempt so the last hop consumes the request rather than cloning a
+        // body it will never reuse — the same shape the synchronous loop uses.
+        if hops >= current.redirect_limit.unwrap_or(DEFAULT_REDIRECT_LIMIT) {
+            return reqwest_fetch(client, current).await;
+        }
+        let carrier = current.clone();
+        let response = reqwest_fetch(client, current).await?;
+        match redirect_target(&carrier, &response, hops) {
+            Some(next) => {
+                current = next;
+                hops += 1;
+            }
+            None => return Ok(response),
+        }
+    }
+}
+
 /// Classify a reqwest failure into the seam's [`NetErrorKind`] (http arc H6).
 ///
 /// reqwest exposes the class as a set of predicates rather than an enum, and it does not surface
@@ -712,9 +757,9 @@ impl ExternIo for HttpIo {
             let _enter = rt.enter();
             new_http_client()
         };
-        Ok(noeta_stdlib::net::fetch_outcome(
-            rt.block_on(reqwest_fetch(&client, self.request.clone())),
-        ))
+        Ok(noeta_stdlib::net::fetch_outcome(rt.block_on(
+            reqwest_fetch_following(&client, self.request.clone()),
+        )))
     }
 
     fn run_real(&mut self) -> Option<RealBody> {
@@ -722,7 +767,7 @@ impl ExternIo for HttpIo {
         let request = self.request.clone();
         Some(RealBody::Async(Box::pin(async move {
             Ok(noeta_stdlib::net::fetch_outcome(
-                reqwest_fetch(&client, request).await,
+                reqwest_fetch_following(&client, request).await,
             ))
         })))
     }
@@ -1162,7 +1207,8 @@ async fn read_request(stream: &mut TcpStream) -> Result<NetRequest, StdError> {
         url: target,
         headers,
         body,
-        timeout_ms: None, // inbound: a deadline is the outbound client's concern
+        timeout_ms: None,     // inbound: a deadline is the outbound client's concern
+        redirect_limit: None, // inbound: a request being served follows nothing
     })
 }
 
@@ -3033,6 +3079,98 @@ mod tests {
     ///
     /// Hermetic: a two-line loopback HTTP server, answering both requests. The assertion is simply
     /// that the second one *finishes*; the timeout is the test.
+    /// **The seam performs one hop; the async door follows the chain.**
+    ///
+    /// Both halves are load-bearing and neither is visible from the sandbox. `net_fetch` must stop
+    /// at the 3xx, because [`noeta_stdlib::redirect::follow_redirects`] above it is what applies
+    /// the caller's `redirect(n)`, drops credentials crossing an origin, and is what the
+    /// differential covers — reqwest quietly following on its own would mean the policy that ran
+    /// in production was never the policy any test exercised. And the async descriptor, which has
+    /// no synchronous caller above it, must follow on its own, or `get_async` would answer a 302
+    /// where `get` answers a 200.
+    ///
+    /// It needs a real socket: reqwest's redirect behavior is a property of the client this crate
+    /// builds, and no sandbox can observe it.
+    #[cfg(feature = "ring-http-client")]
+    #[test]
+    fn the_seam_is_one_hop_and_the_async_door_follows_the_chain() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().unwrap();
+        // `/a` redirects to `/b`; `/b` is the destination. Three requests are served: one for the
+        // synchronous assertion, then the async chain's two hops. Every response closes its
+        // connection, so each hop is its own `accept` and the count means what it says.
+        let server = std::thread::spawn(move || {
+            for _ in 0..3 {
+                let Ok((mut sock, _)) = listener.accept() else {
+                    return;
+                };
+                let mut buf = [0u8; 4096];
+                let read = sock.read(&mut buf).unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..read]).to_string();
+                let response = match head.starts_with("GET /a ") {
+                    true => {
+                        "HTTP/1.1 302 Found\r\nlocation: /b\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                    }
+                    false => {
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: 6\r\nconnection: close\r\n\r\nlanded"
+                    }
+                };
+                let _ = sock.write_all(response.as_bytes());
+                let _ = sock.flush();
+            }
+        });
+
+        let request = |path: &str| NetRequest {
+            method: "GET".to_string(),
+            url: format!("http://{addr}{path}"),
+            headers: vec![],
+            body: vec![],
+            timeout_ms: Some(5_000),
+            redirect_limit: None,
+        };
+
+        let mut host = RealHost::new().unwrap();
+        let one_hop = host.net_fetch(request("/a")).expect("the request answers");
+        assert_eq!(
+            one_hop.status, 302,
+            "`net_fetch` is one hop — following is the caller's, above the seam"
+        );
+        assert_eq!(
+            one_hop.header_value("location"),
+            Some("/b"),
+            "and the caller gets the `Location` it needs in order to follow it"
+        );
+
+        let mut spawned = host.net_spawn(request("/a"));
+        let outcome = spawned
+            .run_sync(&mut host)
+            .expect("the descriptor resolves");
+        let NativeOut::Ok(inner) = outcome else {
+            panic!("a reachable server answers `Ok`, got {outcome:?}");
+        };
+        let NativeOut::Extern(value) = *inner else {
+            panic!("the payload is a `Response`");
+        };
+        let response = value
+            .as_any()
+            .downcast_ref::<NetResponse>()
+            .expect("a `NetResponse`");
+        assert_eq!(
+            response.status, 200,
+            "the async door followed the chain to its end"
+        );
+        assert_eq!(String::from_utf8_lossy(&response.body), "landed");
+        assert_eq!(
+            response.url,
+            format!("http://{addr}/b"),
+            "and reports where the body actually came from"
+        );
+
+        let _ = server.join();
+    }
+
     #[cfg(feature = "ring-http-client")]
     #[test]
     fn a_stream_after_a_one_shot_request_to_the_same_origin_still_opens() {
@@ -3063,6 +3201,7 @@ mod tests {
             headers: vec![],
             body: vec![],
             timeout_ms: Some(5_000),
+            redirect_limit: None,
         };
 
         let mut host = RealHost::new().unwrap();
@@ -3308,6 +3447,7 @@ mod tests {
             // No deadline: a timeout would be a second way out, and then a pass would not mean the
             // cancellation reached the request.
             timeout_ms: None,
+            redirect_limit: None,
         });
         let elapsed = start.elapsed();
 
@@ -3360,6 +3500,7 @@ mod tests {
                     headers: vec![],
                     body: vec![],
                     timeout_ms: Some(10_000),
+                    redirect_limit: None,
                 },
                 noeta_stdlib::stream::Framing::Lines,
             )
@@ -3491,6 +3632,7 @@ mod tests {
                 headers: vec![],
                 body: vec![],
                 timeout_ms: None,
+                redirect_limit: None,
             })
             .expect("real fetch should succeed when online");
         assert_eq!(resp.status, 200);

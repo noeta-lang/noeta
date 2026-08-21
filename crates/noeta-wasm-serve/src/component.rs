@@ -54,6 +54,7 @@ fn to_net_request(request: IncomingRequest) -> NetRequest {
         // Meaningless on an inbound request (see the field docs) — the deadline is an outbound,
         // client-side concern.
         timeout_ms: None,
+        redirect_limit: None,
     }
 }
 

@@ -2398,8 +2398,10 @@ fn http_request(
         headers,
         body,
         // The free verbs carry no deadline — a timeout is configuration, and configuration lives
-        // on a `Client` (`client.new(base).timeout(ms)`).
+        // on a `Client` (`client.new(base).timeout(ms)`). Redirects are the same: `None` is the
+        // default limit, and a caller who wants another one asks a `Client` for it.
         timeout_ms: None,
+        redirect_limit: None,
     }
 }
 
@@ -2491,7 +2493,10 @@ fn http_dispatch(
                     url,
                     headers: want_headers(func, args, 3)?,
                     body,
+                    // Configuration is layered on at `send`/`stream` time by whichever client
+                    // spends this request, so a prepared request carries none of its own.
                     timeout_ms: None,
+                    redirect_limit: None,
                 },
             },
         )));
@@ -2564,7 +2569,13 @@ fn http_dispatch(
     } else {
         // A transport failure is `Err(HttpError)`, never a `StdError` abort (http arc H6) — the
         // caller decides whether to `?` it, retry it, or inspect its `kind()`.
-        Ok(crate::net::fetch_outcome(host.net_fetch(request)))
+        //
+        // Redirects are followed here rather than at the seam, exactly as a `Client` follows them:
+        // `net_fetch` is one hop, and a free verb owns a whole request. A free verb carries the
+        // default limit and no way to change it — configuration lives on a `Client`.
+        Ok(crate::net::fetch_outcome(
+            noeta_ext_abi::redirect::follow_redirects(request, |hop| host.net_fetch(hop)),
+        ))
     }
 }
 
@@ -2663,6 +2674,12 @@ const CLIENT_METHODS: &[ExtFn] = &[
         param_names: &[],
         name: "retry_non_idempotent",
         params: &[],
+        ret: Concrete(CLIENT_SIG),
+    },
+    ExtFn {
+        param_names: &["limit"],
+        name: "redirect",
+        params: &[Int],
         ret: Concrete(CLIENT_SIG),
     },
     ExtFn {
@@ -2782,6 +2799,10 @@ const CLIENT_DOCS: &[(&str, &str)] = &[
          already have been applied can duplicate a side effect — a second charge, a second \
          order — and a timeout is exactly the case where the client cannot tell. Opt in when the \
          endpoint is safe to repeat or you send an idempotency key.",
+    ),
+    (
+        "redirect",
+        "A copy of the client that follows at most `limit` redirects (10 by default). `0` opts          out: a `301`/`302`/`303`/`307`/`308` comes back as an ordinary response for you to read          its `header(\"location\")`, which is also what you get once a limit is used up.\n\nA          followed hop rewrites the request the way every HTTP client does: a `303` becomes a          bodyless `GET` (a `HEAD` stays a `HEAD`), a `301`/`302` turns a `POST` into a bodyless          `GET`, and a `307`/`308` preserves both method and body. `Authorization`, `Cookie` and          request signatures are dropped when a hop crosses to a different scheme, host or port —          an open redirect on a trusted host must not hand your token to whoever the parameter          names.",
     ),
     (
         "base_url",
@@ -2909,6 +2930,14 @@ fn client_method_dispatch(
         "retry_non_idempotent" => {
             want_arity(method, args, 0)?;
             return configured(client.with_non_idempotent_retry());
+        }
+        "redirect" => {
+            want_arity(method, args, 1)?;
+            let limit = want_int(method, args, 0)?;
+            if limit < 0 {
+                return Err(type_error(method, "a non-negative redirect limit"));
+            }
+            return configured(client.with_redirect_limit(limit as u32));
         }
         "base_url" => {
             want_arity(method, args, 0)?;
@@ -7369,6 +7398,53 @@ mod tests {
         assert_eq!(SigType::required_count(&[]), 0);
     }
 
+    /// `redirect(n)` reaches the request, and a negative count is refused at the call.
+    ///
+    /// The corpus can pin an error's code and span but not its text, and a runtime abort and a
+    /// static rejection would raise E0007 at the same place here — so the sentence a caller
+    /// actually reads is asserted where it can be: against the dispatch itself.
+    #[test]
+    fn a_redirect_limit_is_configured_and_a_negative_one_is_refused() {
+        let mut host = crate::SandboxHost::new();
+        let mut client: Box<dyn crate::ExternValue> =
+            Box::new(crate::http_client::HttpClient::new("https://svc.test"));
+
+        let out = client_method_dispatch(
+            client.as_mut(),
+            "redirect",
+            &mut host,
+            &[NativeValue::Scalar(Scalar::Int(3))],
+        )
+        .expect("a non-negative limit configures the client");
+        let NativeOut::Extern(configured) = out else {
+            panic!("`redirect` returns a client");
+        };
+        let configured = configured
+            .as_any()
+            .downcast_ref::<crate::http_client::HttpClient>()
+            .expect("a client");
+        assert_eq!(configured.redirect_limit, Some(3));
+        assert_eq!(
+            configured
+                .build("GET", "/a", Vec::new(), Vec::new())
+                .redirect_limit,
+            Some(3),
+            "the limit has to reach the request, which is the only place that reads it"
+        );
+
+        let refused = client_method_dispatch(
+            client.as_mut(),
+            "redirect",
+            &mut host,
+            &[NativeValue::Scalar(Scalar::Int(-1))],
+        )
+        .expect_err("a negative hop count is a mistake, not a way to say `unlimited`");
+        assert_eq!(
+            refused.message,
+            "method `redirect` expects a non-negative redirect limit argument"
+        );
+    }
+
     #[test]
     fn request_accessors_read_the_inbound_request() {
         let mut req = crate::net::Request {
@@ -7379,6 +7455,7 @@ mod tests {
                 headers: vec![("Content-Type".to_string(), "application/json".to_string())],
                 body: b"{}".to_vec(),
                 timeout_ms: None,
+                redirect_limit: None,
             },
         };
         let call = |req: &mut crate::net::Request, method: &str, args: &[NativeValue]| {

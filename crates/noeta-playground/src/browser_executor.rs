@@ -211,6 +211,7 @@ mod tests {
             headers: Vec::new(),
             body: Vec::new(),
             timeout_ms: None,
+            redirect_limit: None,
         }
     }
 
