@@ -1,0 +1,8 @@
+// A signature algorithm this build cannot compute is refused at configuration, not at the request.
+// Accepting the name and then signing with something else would produce a signature the receiver
+// reads as valid under an algorithm nobody chose.
+// expect: error E0007 at 8:6
+// expect: exit 1
+use std.http.client
+
+echo client.new("https://svc.test").sign("k1", "s", ["@method"], "none").base_url()

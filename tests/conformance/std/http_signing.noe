@@ -1,0 +1,75 @@
+// HTTP Message Signatures (RFC 9421), both halves. A signature answers a question a bearer token
+// cannot: not who you are, but whether *this* request is the one you sent. The sandbox's
+// `/signature` route echoes the headers the client put on the wire, so a program can sign a
+// request, read back exactly what went out, and hand it to the verifying side — a full round trip
+// without a socket.
+// expect: stdout "some(k1)"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "false"
+// expect: stdout "false"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "none"
+// expect: stdout "false"
+// expect: stdout "sha-256=:ungWv48Bz+pBQUDeXa4iI7ADYaOWF3qctBD/YfIAFa0=:"
+// expect: stdout "true"
+// expect: exit 0
+use std.http.client
+use std.http.server
+use std.http.Request
+use std.time
+
+// Sign every request this client sends. The default covers `@method`, `@path`, `@query` and
+// `@authority` — the parts a client can name from its URL and a server can name from the request
+// line and its `Host` header, with no guessing at a scheme behind a proxy.
+signed = client.new("https://svc.test").sign("k1", "s3cret")
+wire = signed.get("/signature")?.body().lines()
+
+fn inbound(path: string, input: string, sig: string): Request {
+    return server.incoming("GET", path, "", {
+        "host": "svc.test",
+        "signature-input": input,
+        "signature": sig,
+    })
+}
+
+request = inbound("/signature", wire[0], wire[1])
+
+// A receiver holding several keys reads the claimed key id first, then checks against that secret.
+echo server.signature_key_id(request)
+echo server.verify_signature(request, "s3cret")
+echo server.verify_signature(request, "not-the-secret")
+
+// Every covered part, altered. A component that can change without invalidating the tag is not
+// actually covered — which is the whole thing a signature is for.
+echo server.verify_signature(inbound("/elsewhere", wire[0], wire[1]), "s3cret")
+echo server.verify_signature(inbound("/signature?x=1", wire[0], wire[1]), "s3cret")
+
+// Freshness. `created` is stamped from the clock, so a signature is good now…
+echo server.verify_signature(request, "s3cret", 60)
+// …and refused two minutes later, which is what stops a captured request being replayed.
+time.sleep(120000)
+echo server.verify_signature(request, "s3cret", 60)
+
+// An unsigned request is not a failed signature, and both are refused.
+plain = server.incoming("GET", "/signature", "", {"host": "svc.test"})
+echo server.signature_key_id(plain)
+echo server.verify_signature(plain, "s3cret")
+
+// Naming `content-digest` covers the BODY: the client computes the digest and signs it. Without
+// it a signature says nothing about the payload.
+digest = client.new("https://svc.test").sign("k2", "s", ["@method", "@path", "content-digest"])
+echo digest.post("/signature", "abc")?.body().lines()[2]
+
+// And the receiving side agrees about the request that carried it.
+posted = digest.post("/signature", "abc")?.body().lines()
+echo server.verify_signature(
+    server.incoming("POST", "/signature", "abc", {
+        "host": "svc.test",
+        "content-digest": posted[2],
+        "signature-input": posted[0],
+        "signature": posted[1],
+    }),
+    "s",
+)

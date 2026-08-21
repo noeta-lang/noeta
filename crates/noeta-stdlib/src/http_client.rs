@@ -16,6 +16,7 @@
 //! and therefore rides the seam as `NetRequest::timeout_ms`.
 
 use crate::cookie_jar::CookieJar;
+use crate::signature::SigningKey;
 use crate::{ExternValue, NetRequest};
 use std::any::Any;
 use std::cmp::Ordering;
@@ -59,6 +60,8 @@ pub struct HttpClient {
     /// The cookie jar shared with every client derived from the one that created it, or `None`
     /// for a client that neither stores nor sends cookies.
     pub jar: Option<Arc<Mutex<CookieJar>>>,
+    /// The RFC 9421 key every request is signed with, or `None` to send requests unsigned.
+    pub signing: Option<SigningKey>,
 }
 
 /// Configuration compares by value; the jar compares by **identity** (see [`HttpClient`]).
@@ -69,6 +72,7 @@ impl PartialEq for HttpClient {
             && self.timeout_ms == other.timeout_ms
             && self.retry == other.retry
             && self.redirect_limit == other.redirect_limit
+            && self.signing == other.signing
             && match (&self.jar, &other.jar) {
                 (None, None) => true,
                 (Some(mine), Some(theirs)) => Arc::ptr_eq(mine, theirs),
@@ -207,6 +211,14 @@ impl HttpClient {
         }
         HttpClient {
             jar: Some(Arc::new(Mutex::new(CookieJar::new()))),
+            ..self.clone()
+        }
+    }
+
+    /// A copy that signs every request it sends with `key` (RFC 9421).
+    pub fn with_signing(&self, key: SigningKey) -> HttpClient {
+        HttpClient {
+            signing: Some(key),
             ..self.clone()
         }
     }
@@ -363,7 +375,10 @@ impl HttpClient {
         request: NetRequest,
         host: &mut dyn crate::Host,
     ) -> Result<crate::NetResponse, crate::NetError> {
-        noeta_ext_abi::redirect::follow_redirects(request, |hop| self.hop(hop, host))
+        // The origin the caller actually asked for, captured before the chain can move it. A
+        // signature is not applied past it — see `hop`.
+        let origin = noeta_ext_abi::uri::origin_of(&request.url);
+        noeta_ext_abi::redirect::follow_redirects(request, |hop| self.hop(hop, &origin, host))
     }
 
     /// One hop: apply what this client adds to a request, perform it, and take in what the
@@ -377,17 +392,19 @@ impl HttpClient {
     fn hop(
         &self,
         request: NetRequest,
+        origin: &str,
         host: &mut dyn crate::Host,
     ) -> Result<crate::NetResponse, crate::NetError> {
-        let Some(jar) = self.jar.clone() else {
+        let jar = self.jar.clone();
+        if jar.is_none() && self.signing.is_none() {
             return host.net_fetch(request);
-        };
-        // Read the wall clock once per hop. The sandbox's is a pure read that does not advance
-        // its logical time, so a client with a jar observes the same clock a client without one
-        // does — which is what keeps every existing timing case bit-identical.
+        }
+        // Read the wall clock once per hop. The sandbox's is a pure read that does not advance its
+        // logical time, so a client with a jar observes the same clock a client without one does —
+        // which is what keeps every existing timing case bit-identical.
         let now_ms = host.clock_unix_ms();
         let mut request = request;
-        {
+        if let Some(jar) = &jar {
             let stored = jar.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Some(header) = stored.header_for(&request.url, now_ms) {
                 // A `Cookie` header set on the call or the client wins: the caller named it, and
@@ -401,6 +418,31 @@ impl HttpClient {
                 }
             }
         }
+        // Signing comes last, and per hop, for two reasons that are really one: a signature covers
+        // a specific method and target, so a redirect invalidates it, and it may cover the
+        // `Cookie` header the jar just added. Signing before either would sign a request that is
+        // not the one going out.
+        //
+        // And it stops at the origin the caller named. A redirect can point anywhere, and signing
+        // whatever it points at would hand a third party a valid signature under our key over a
+        // request they chose the shape of. The redirect layer has already stripped the previous
+        // hop's signature crossing that boundary; not minting a new one is the other half of the
+        // same rule.
+        if let Some(key) = self
+            .signing
+            .as_ref()
+            .filter(|_| noeta_ext_abi::uri::origin_of(&request.url) == origin)
+        {
+            crate::signature::sign_request(&mut request, key, (now_ms / 1_000) as i64).map_err(
+                |error| {
+                    crate::NetError::new(
+                        crate::NetErrorKind::Other,
+                        &request.url,
+                        format!("the request could not be signed: {}", error.message),
+                    )
+                },
+            )?;
+        }
         let sent_to = request.url.clone();
         let response = host.net_fetch(request)?;
         // The response's own URL is where the `Set-Cookie` was actually served from, which after a
@@ -409,9 +451,11 @@ impl HttpClient {
             true => sent_to.as_str(),
             false => response.url.as_str(),
         };
-        jar.lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .store_response(from, &response.headers, now_ms);
+        if let Some(jar) = &jar {
+            jar.lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .store_response(from, &response.headers, now_ms);
+        }
         Ok(response)
     }
 }
@@ -957,6 +1001,47 @@ mod tests {
             String::from_utf8_lossy(&response.body),
             "{}",
             "nothing of ours may reach the other origin"
+        );
+    }
+
+    /// **A signature does not follow a redirect off the caller's origin.**
+    ///
+    /// A `Location` can point anywhere. Signing whatever it points at would hand a third party a
+    /// valid signature under our key over a request whose shape they chose — an oracle they had
+    /// no business getting, for no benefit to anyone.
+    #[test]
+    fn a_signature_stops_at_the_origin_the_caller_named() {
+        let mut host = crate::SandboxHost::new();
+        let key = crate::signature::SigningKey::new("k1", b"secret");
+        let client = HttpClient::new("https://svc.test").with_signing(key);
+
+        // A same-origin hop is signed at its destination: `/redirect-same` lands on `/headers`,
+        // which reports what arrived.
+        let request = client.build("GET", "/redirect-same", Vec::new(), Vec::new());
+        let arrived = String::from_utf8(
+            client
+                .perform(request, &mut host)
+                .expect("the chain completes")
+                .body,
+        )
+        .expect("json");
+        assert!(
+            arrived.contains("signature-input"),
+            "a hop that stays put is still signed: {arrived}"
+        );
+
+        // A cross-origin hop is not — and carries nothing of the previous hop's either.
+        let request = client.build("GET", "/redirect-cross", Vec::new(), Vec::new());
+        let arrived = String::from_utf8(
+            client
+                .perform(request, &mut host)
+                .expect("the chain completes")
+                .body,
+        )
+        .expect("json");
+        assert_eq!(
+            arrived, "{}",
+            "nothing signed by us may reach an origin the caller never named"
         );
     }
 

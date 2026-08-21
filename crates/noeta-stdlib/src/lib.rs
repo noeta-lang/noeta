@@ -75,6 +75,7 @@ pub mod registry;
 pub mod scalar;
 pub mod serve;
 pub mod session;
+pub mod signature;
 pub mod task;
 pub mod template;
 pub mod tiers;

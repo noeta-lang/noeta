@@ -2340,6 +2340,20 @@ const HTTP_SERVER_FNS: &[ExtFn] = &[
         params: &[Str, Str],
         ret: Concrete(COOKIE_SIG),
     },
+    // The verifying half of RFC 9421. It lives on the server module because verifying is what a
+    // *receiver* does, and the receiver is the side holding a `Request`.
+    ExtFn {
+        param_names: &["request", "secret", "max_age_s"],
+        name: "verify_signature",
+        params: &[REQUEST_SIG, STR_OR_BYTES, SigType::Optional(&Int)],
+        ret: Concrete(SigType::Bool),
+    },
+    ExtFn {
+        param_names: &["request"],
+        name: "signature_key_id",
+        params: &[REQUEST_SIG],
+        ret: Concrete(SigType::Option(&Str)),
+    },
     // The form/percent codec as free functions, for a caller holding a body string rather than a
     // `Request` — a websocket session delivering a client event, a queue consumer, a test. Same
     // parser as `Request.form_all()`; exposing it here is what keeps every consumer from
@@ -2474,6 +2488,51 @@ fn http_dispatch(
         return Ok(NativeOut::Extern(crate::ExternBox::new(
             crate::cookie::Cookie::new(name, value)?,
         )));
+    }
+    // The verifying half of RFC 9421 (`client.sign` is the producing half). A `bool`, because a
+    // caller acting on a signature has exactly one decision to make and the reason it failed is
+    // not something to branch on — a request that does not verify is a request to refuse.
+    if func == "verify_signature" {
+        want_arity_range(func, args, 2, 3)?;
+        let request = want_request(func, args, 0)?.inner.clone();
+        let secret = want_data(func, args, 1)?.to_vec();
+        let max_age = match args.get(2) {
+            None => None,
+            Some(_) => {
+                let seconds = want_int(func, args, 2)?;
+                if seconds <= 0 {
+                    return Err(type_error(
+                        func,
+                        "a positive freshness window in seconds, or no argument to skip the check",
+                    ));
+                }
+                Some(seconds)
+            }
+        };
+        let now = (host.clock_unix_ms() / 1_000) as i64;
+        return Ok(NativeOut::Scalar(Scalar::Bool(
+            crate::signature::verify_request(&request, &secret, now, max_age).is_ok(),
+        )));
+    }
+    // Which secret a signed request expects to be checked against — read BEFORE verifying, since
+    // a receiver holding several keys has to pick one.
+    if func == "signature_key_id" {
+        want_arity(func, args, 1)?;
+        let request = want_request(func, args, 0)?;
+        let key_id = request
+            .inner
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("signature-input"))
+            .and_then(|(_, value)| {
+                crate::signature::parse_signature_input(value)
+                    .into_iter()
+                    .find_map(|(_, params)| params.key_id)
+            });
+        return Ok(match key_id {
+            Some(id) => NativeOut::Some(Box::new(NativeOut::Str(id))),
+            None => NativeOut::None,
+        });
     }
     // The form/percent codec — pure string transforms over the same parser `Request.form_all()`
     // uses, for callers that hold a body rather than a request.
@@ -2689,6 +2748,17 @@ const CLIENT_METHODS: &[ExtFn] = &[
         ret: Concrete(CLIENT_SIG),
     },
     ExtFn {
+        param_names: &["key_id", "secret", "covering", "alg"],
+        name: "sign",
+        params: &[
+            Str,
+            STR_OR_BYTES,
+            SigType::Optional(&SigType::List(&Str)),
+            SigType::Optional(&Str),
+        ],
+        ret: Concrete(CLIENT_SIG),
+    },
+    ExtFn {
         param_names: &[],
         name: "stored_cookies",
         params: &[],
@@ -2821,6 +2891,21 @@ const CLIENT_DOCS: &[(&str, &str)] = &[
     (
         "redirect",
         "A copy of the client that follows at most `limit` redirects (10 by default). `0` opts          out: a `301`/`302`/`303`/`307`/`308` comes back as an ordinary response for you to read          its `header(\"location\")`, which is also what you get once a limit is used up.\n\nA          followed hop rewrites the request the way every HTTP client does: a `303` becomes a          bodyless `GET` (a `HEAD` stays a `HEAD`), a `301`/`302` turns a `POST` into a bodyless          `GET`, and a `307`/`308` preserves both method and body. `Authorization`, `Cookie` and          request signatures are dropped when a hop crosses to a different scheme, host or port —          an open redirect on a trusted host must not hand your token to whoever the parameter          names.",
+    ),
+    (
+        "sign",
+        "A copy of the client that signs every request it sends with HTTP Message Signatures \
+         (RFC 9421), adding `Signature-Input` and `Signature` headers. `key_id` names which \
+         secret the receiver should check against and is not itself secret; `secret` is the \
+         shared secret; `alg` is `\"hmac-sha256\"` (the default) or `\"hmac-sha512\"`.\n\nA \
+         signature answers a question a bearer token cannot: not who you are, but whether *this* \
+         request is the one you sent. `covering` names the parts it binds, defaulting to \
+         `[\"@method\", \"@path\", \"@query\", \"@authority\"]` — the derived components both \
+         sides can name without guessing at a scheme behind a proxy. Name a header to cover it \
+         too, and name `\"content-digest\"` to cover the **body**: the client then computes \
+         `Content-Digest: sha-256=:…:` over it and signs that. Without it a signature says \
+         nothing about the payload.\n\nSigning happens per redirect hop, over the request that \
+         actually goes out, and the signature is dropped when a hop crosses to another origin.",
     ),
     (
         "cookies",
@@ -2985,6 +3070,42 @@ fn client_method_dispatch(
         "cookies" => {
             want_arity(method, args, 0)?;
             return configured(client.with_cookies());
+        }
+        "sign" => {
+            want_arity_range(method, args, 2, 4)?;
+            let key_id = want_str(method, args, 0)?.to_string();
+            let secret = want_data(method, args, 1)?.to_vec();
+            let mut key = crate::signature::SigningKey::new(&key_id, &secret);
+            if let Some(covering) = args.get(2) {
+                let NativeValue::List(components) = covering else {
+                    return Err(type_error(method, "a list of component names"));
+                };
+                if components.is_empty() {
+                    // Not `type_error`: the argument's type is fine, its content is the problem,
+                    // and the sentence explaining why is the useful part.
+                    return Err(StdError {
+                        kind: ErrorKind::ArgType,
+                        message: "`sign` needs at least one component to cover — a signature over \
+                                  nothing proves only that the signer holds the key"
+                            .to_string(),
+                    });
+                }
+                let named: Result<Vec<String>, StdError> = components
+                    .iter()
+                    .map(|value| match value {
+                        NativeValue::Str(name) => Ok(name.to_string()),
+                        _ => Err(type_error(method, "a list of component names")),
+                    })
+                    .collect();
+                key = key.with_components(named?);
+            }
+            if let Some(alg) = args.get(3) {
+                let NativeValue::Str(alg) = alg else {
+                    return Err(type_error(method, "a signature algorithm name"));
+                };
+                key = key.with_alg(crate::signature::SignatureAlg::parse(alg)?);
+            }
+            return configured(client.with_signing(key));
         }
         "stored_cookies" => {
             want_arity(method, args, 0)?;
@@ -5665,6 +5786,27 @@ const HTTP_URL_DOCS: &[(&str, &str)] = &[
 
 const HTTP_SERVER_DOCS: &[(&str, &str)] = &[
     (
+        "verify_signature",
+        "Whether `request` carries a valid RFC 9421 signature under `secret` — the receiving half \
+         of `client.sign`. `max_age_s` is a freshness window in seconds: a signature whose \
+         `created` is older than that, or that far in our future, is refused before the tag is \
+         even computed, which is what stops a captured request being replayed. Omit it only when \
+         something else stops replays.\n\n`false` has one meaning: do not trust this request. It \
+         covers an absent signature, a malformed one, a covered header that has since been \
+         stripped, a stale one, and a tag that does not match — a receiver has the same thing to \
+         do about all five.\n\nWhat the signature *covers* is the signer's choice, so a covered \
+         `content-digest` is what binds the body: verify the signature, then recompute the digest \
+         over the body you read and compare it, or a valid signature will happily accompany a \
+         payload nobody signed.",
+    ),
+    (
+        "signature_key_id",
+        "The `keyid` of the signature on `request`, or `none` when it carries none. Read it to \
+         choose which secret to check against — a receiver holding several keys has to pick one \
+         before it can call `verify_signature`. It is an unverified claim until that call \
+         succeeds.",
+    ),
+    (
         "serve",
         "Start an HTTP server on `port`, dispatching each `Request` to `handler` and replying with \
          its `Response`. Blocks, serving until the process exits.",
@@ -7687,6 +7829,80 @@ mod tests {
             .downcast_ref::<crate::http_client::HttpClient>()
             .expect("a client");
         assert_eq!(seeded.stored_cookies(0).len(), 1);
+    }
+
+    /// The two ways a `sign` call is refused, and the sentences that tell them apart.
+    ///
+    /// Both are cases where accepting the call would be worse than refusing it: a signature over
+    /// nothing proves only that the signer holds the key, and an algorithm this build cannot
+    /// compute would have to be silently swapped for one it can.
+    #[test]
+    fn signing_refuses_an_empty_cover_and_an_algorithm_it_cannot_compute() {
+        let mut host = crate::SandboxHost::new();
+        let mut client: Box<dyn crate::ExternValue> =
+            Box::new(crate::http_client::HttpClient::new("https://svc.test"));
+        let key = || NativeValue::Str("k1".into());
+        let secret = || NativeValue::Str("s".into());
+
+        let refused = client_method_dispatch(
+            client.as_mut(),
+            "sign",
+            &mut host,
+            &[key(), secret(), NativeValue::List(Vec::new())],
+        )
+        .expect_err("a signature over nothing");
+        assert_eq!(
+            refused.message,
+            "`sign` needs at least one component to cover — a signature over nothing proves only \
+             that the signer holds the key"
+        );
+
+        let refused = client_method_dispatch(
+            client.as_mut(),
+            "sign",
+            &mut host,
+            &[
+                key(),
+                secret(),
+                NativeValue::List(vec![NativeValue::Str("@method".into())]),
+                NativeValue::Str("none".into()),
+            ],
+        )
+        .expect_err("an algorithm this build cannot compute");
+        assert_eq!(
+            refused.message,
+            "unsupported signature algorithm \"none\" — this build signs and verifies \
+             \"hmac-sha256\" and \"hmac-sha512\""
+        );
+
+        // And the freshness window is a duration, so a non-positive one is a mistake rather than
+        // a way to spell "no window" — omitting the argument is how you do that.
+        let signed = crate::net::Request {
+            conn: None,
+            inner: crate::NetRequest {
+                method: "GET".to_string(),
+                url: "/a".to_string(),
+                headers: Vec::new(),
+                body: Vec::new(),
+                timeout_ms: None,
+                redirect_limit: None,
+            },
+        };
+        let refused = http_dispatch(
+            "verify_signature",
+            &mut host,
+            &[
+                NativeValue::Extern(crate::ExternBox::new(signed)),
+                secret(),
+                NativeValue::Scalar(Scalar::Int(0)),
+            ],
+        )
+        .expect_err("a zero-second window");
+        assert!(
+            refused.message.contains("positive freshness window"),
+            "got {:?}",
+            refused.message
+        );
     }
 
     #[test]

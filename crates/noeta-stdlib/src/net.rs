@@ -236,6 +236,11 @@ fn typed(status: u16, content_type: &str, body: impl Into<Vec<u8>>) -> NetRespon
 /// - `/cookies/login` → a `302` to `/headers` **and** a `Set-Cookie` in the same response — the
 ///   single most common shape on the web, and the one that only works if the jar is applied per
 ///   *hop* rather than per request.
+/// - `/signature` → `200`, the request's `Signature-Input`, `Signature` and `Content-Digest`
+///   header values, one per line (empty where the header is absent). It is what lets a program
+///   sign a request, read back exactly what went on the wire, and hand it to
+///   `http.server.verify_signature` — a full round trip through the two halves of RFC 9421
+///   without a socket.
 /// - anything else → `200`, the plain-text line `noeta sandbox: {method} {path}`.
 pub fn sandbox_respond(request: &NetRequest) -> NetResponse {
     // Every arm builds its response through `typed`, which cannot know the request; stamp the
@@ -311,6 +316,26 @@ fn sandbox_body(request: &NetRequest) -> NetResponse {
             body: Vec::new(),
             url: String::new(),
         },
+        "/signature" => {
+            let value = |name: &str| {
+                request
+                    .headers
+                    .iter()
+                    .find(|(header, _)| header.eq_ignore_ascii_case(name))
+                    .map(|(_, value)| value.as_str())
+                    .unwrap_or_default()
+            };
+            typed(
+                200,
+                "text/plain",
+                format!(
+                    "{}\n{}\n{}",
+                    value("signature-input"),
+                    value("signature"),
+                    value("content-digest")
+                ),
+            )
+        }
         "/redirect-same" => redirect_to(302, "/headers"),
         "/redirect-cross" => redirect_to(302, &format!("{SANDBOX_CROSS_ORIGIN}/headers")),
         "/echo" => {
