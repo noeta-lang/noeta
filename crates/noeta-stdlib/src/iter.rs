@@ -38,6 +38,25 @@ pub enum IterMethod {
     Map,
     /// `filter(f)` → an iterator yielding the elements for which `f(element)` is true (Track I.1c).
     Filter,
+    /// `product()` → the product of the remaining numeric elements. Drains the iterator.
+    Product,
+    /// `checked_sum()` → `some(total)`, or `none` when the sum overflows. Drains the iterator.
+    CheckedSum,
+    /// `last()` → the final remaining element as `?T`. Drains the iterator.
+    Last,
+    /// `to_set()` → a `Set<T>` of the remaining elements. Drains the iterator.
+    ToSet,
+    /// `join(sep?)` → the remaining elements' display forms joined by `sep` (empty by default).
+    /// Drains the iterator.
+    Join,
+    /// `any()` → whether any remaining element is `true`. **Short-circuits** at the first `true`,
+    /// which is the whole reason it exists on the lazy side: `.collect().any()` has to build the
+    /// tail first to answer a question the first element can settle.
+    Any,
+    /// `all()` → whether every remaining element is `true`. Short-circuits at the first `false`.
+    All,
+    /// `contains(x)` → whether any remaining element equals `x`. Short-circuits at the first match.
+    Contains,
 }
 
 impl IterMethod {
@@ -56,6 +75,14 @@ impl IterMethod {
             "max" => Some(IterMethod::Max),
             "map" => Some(IterMethod::Map),
             "filter" => Some(IterMethod::Filter),
+            "product" => Some(IterMethod::Product),
+            "checked_sum" => Some(IterMethod::CheckedSum),
+            "last" => Some(IterMethod::Last),
+            "to_set" => Some(IterMethod::ToSet),
+            "join" => Some(IterMethod::Join),
+            "any" => Some(IterMethod::Any),
+            "all" => Some(IterMethod::All),
+            "contains" => Some(IterMethod::Contains),
             _ => None,
         }
     }

@@ -1,0 +1,65 @@
+// **Every iterator terminal answers what its eager twin answers.**
+//
+// Each of these was `.collect()` plus the eager method, which materializes the whole tail to answer
+// a question that streams. The property that makes them safe to add is that the lazy and eager
+// spellings are the same value BY CONSTRUCTION rather than by a re-derivation that could drift: a
+// list-backed iterator hands its remaining range to the one eager reduction, and an adapter chain
+// drains into a temporary first. So every line below prints its two spellings side by side.
+//
+// `any`/`all`/`contains` are the ones worth having lazily rather than merely for symmetry: each is
+// settled by a single element, and each stops there.
+// expect: stdout "product      24 24"
+// expect: stdout "checked_sum  some(10) some(10)"
+// expect: stdout "last         some(4) some(4)"
+// expect: stdout "to_set       {1, 2, 3, 4} {1, 2, 3, 4}"
+// expect: stdout "join         1-2-3-4 1-2-3-4"
+// expect: stdout "join bare    1234 1234"
+// expect: stdout "contains     true true"
+// expect: stdout "missing      false false"
+// expect: stdout "any          true true"
+// expect: stdout "all          false false"
+// expect: stdout "empty any    false false"
+// expect: stdout "empty all    true true"
+// expect: stdout "adapter      6 6"
+// expect: stdout "any stopped  some(false)"
+// expect: stdout "all stopped  some(true)"
+// expect: stdout "contains at  some(9)"
+// expect: exit 0
+xs = [1, 2, 3, 4]
+
+echo "product      ${xs.iter().product()} ${xs.product()}"
+echo "checked_sum  ${xs.iter().checked_sum()} ${xs.checked_sum()}"
+echo "last         ${xs.iter().last()} ${xs.last()}"
+echo "to_set       ${xs.iter().to_set()} ${xs.to_set()}"
+echo "join         ${xs.iter().join("-")} ${xs.join("-")}"
+echo "join bare    ${xs.iter().join()} ${xs.join()}"
+echo "contains     ${xs.iter().contains(3)} ${xs.contains(3)}"
+echo "missing      ${xs.iter().contains(9)} ${xs.contains(9)}"
+
+bs = [true, false, true]
+echo "any          ${bs.iter().any()} ${bs.any()}"
+echo "all          ${bs.iter().all()} ${bs.all()}"
+
+empty: List<bool> = []
+echo "empty any    ${empty.iter().any()} ${empty.any()}"
+echo "empty all    ${empty.iter().all()} ${empty.all()}"
+
+// An ADAPTER chain has no backing range to hand over, so it drains into a temporary — and lands on
+// the same eager reduction, which is what keeps the two shapes from diverging.
+echo "adapter      ${xs.iter().take(3).product()} ${xs.iter().take(3).collect().product()}"
+
+// **Short-circuiting is observable, and only observable this way.** Each of these leaves its
+// iterator exactly where it stopped, so the NEXT element names the index the answer was settled at.
+// A terminal that drained would leave `none` behind on every one of them, which is precisely the
+// cost these three exist to avoid.
+stops_any = [false, true, false].iter()
+stops_any.any()
+echo "any stopped  ${stops_any.next()}"
+
+stops_all = [true, false, true].iter()
+stops_all.all()
+echo "all stopped  ${stops_all.next()}"
+
+stops_contains = [1, 9].iter()
+stops_contains.contains(1)
+echo "contains at  ${stops_contains.next()}"

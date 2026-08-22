@@ -952,7 +952,140 @@ impl<'m> Vm<'m> {
                 drained.release();
                 folded?
             }
+            // The remaining NUMERIC reductions take the ordering terminals' shape exactly, and for
+            // the same reason: a list-backed iterator hands over its remaining range (so a packed
+            // buffer keeps its buffer-direct fold), an adapter chain drains into a temporary, and
+            // the ONE eager reduction answers — `it.product()` and `it.collect().product()` are the
+            // same value by construction rather than by a re-derivation that could drift.
+            M::Product => {
+                self.stdlib_arity(name, args, 0, span)?;
+                if let Some((list, from)) = recv.iter_drain_list() {
+                    return self.call_list_reduction(list, name, from, span);
+                }
+                let drained = self.drain_iter_to_list(recv, span)?;
+                let folded = self.call_list_reduction(drained, name, 0, span);
+                drained.release();
+                folded?
+            }
+            // `checked_sum` reports overflow rather than wrapping, so it has a door of its own —
+            // and that door takes a whole list. A partially-consumed backing list is materialized
+            // to its remainder first; at cursor zero (`xs.iter().checked_sum()`, the canonical
+            // form) the buffer is handed over untouched and folds buffer-direct.
+            M::CheckedSum => {
+                self.stdlib_arity(name, args, 0, span)?;
+                if let Some((list, 0)) = recv.iter_drain_list() {
+                    return self.call_list_checked_sum(list, span);
+                }
+                let drained = self.drain_iter_to_list(recv, span)?;
+                let folded = self.call_list_checked_sum(drained, span);
+                drained.release();
+                folded?
+            }
+            // The full-drain terminals that are not numeric folds take the general eager list
+            // method over the drained remainder — same rule, different door.
+            M::Last | M::ToSet | M::Join => {
+                match method {
+                    M::Join => self.stdlib_arity_range(name, args, 0, 1, span)?,
+                    _ => self.stdlib_arity(name, args, 0, span)?,
+                }
+                let list_method = noeta_stdlib::ListMethod::from_name(name)
+                    .expect("every full-drain terminal names an eager list method");
+                // `iter_drain_list` hands back the BACKING list with a start index, which the
+                // general list door has no way to take — so the remainder is materialized here and
+                // the door sees an ordinary list either way.
+                let drained = self.drain_iter_to_list(recv, span)?;
+                let out = self.call_list_method(drained, list_method, name, args, span);
+                drained.release();
+                out?
+            }
+            // The **short-circuiting** trio, and the reason they are worth having lazily at all:
+            // each is settled by one element, so draining first would materialize a tail nobody
+            // reads. `any` stops at the first `true`, `all` at the first `false`, `contains` at the
+            // first match — and each leaves the iterator where it stopped, which is what a caller
+            // who wants the rest would expect.
+            M::Any | M::All | M::Contains => {
+                let all = match method {
+                    M::Contains => {
+                        self.stdlib_arity(name, args, 1, span)?;
+                        None
+                    }
+                    _ => {
+                        self.stdlib_arity(name, args, 0, span)?;
+                        Some(method == M::All)
+                    }
+                };
+                let mut answer: Option<bool> = None;
+                let mut bad: Option<&'static str> = None;
+                let result = {
+                    let mut apply =
+                        |func: Value, arg: Value| self.call_value(func, vec![arg], span);
+                    loop {
+                        match recv.iter_next_apply(&mut apply) {
+                            Ok(Some(e)) => {
+                                match all {
+                                    // `contains`: the first element equal to the argument settles it.
+                                    None => {
+                                        if noeta_value::value_eq(e, args[0]) {
+                                            answer = Some(true);
+                                        }
+                                    }
+                                    // `any`/`all`: a non-`bool` element is the same refusal the
+                                    // eager reduction gives, raised here rather than after a
+                                    // pointless drain.
+                                    Some(all) => match e.as_bool() {
+                                        Some(b) if b != all => answer = Some(!all),
+                                        Some(_) => {}
+                                        None => bad = Some(e.type_name()),
+                                    },
+                                }
+                                e.release();
+                                if answer.is_some() || bad.is_some() {
+                                    break Ok(());
+                                }
+                            }
+                            Ok(None) => break Ok(()),
+                            Err(err) => break Err(err),
+                        }
+                    }
+                };
+                if let Err(err) = result {
+                    return Err(self.iter_abort(err, span));
+                }
+                if let Some(found) = bad {
+                    return Err(self.error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!("`{name}` expects boolean elements, found {found}"),
+                    ));
+                }
+                // Drained without a decision: `any` of nothing is false, `all` of nothing is true,
+                // `contains` found nothing — the empty-case answers the eager reductions give.
+                Value::bool(answer.unwrap_or_else(|| all.unwrap_or(false)))
+            }
         })
+    }
+
+    /// Drain every remaining element of `recv` into a fresh list the caller owns. The shared front
+    /// half of the full-drain terminals that cannot take a backing list plus a start index.
+    fn drain_iter_to_list(&mut self, recv: Value, span: Span) -> Result<Value, Abort> {
+        let mut out = Vec::new();
+        let result = {
+            let mut apply = |func: Value, arg: Value| self.call_value(func, vec![arg], span);
+            loop {
+                match recv.iter_next_apply(&mut apply) {
+                    Ok(Some(e)) => out.push(e),
+                    Ok(None) => break Ok(()),
+                    Err(err) => break Err(err),
+                }
+            }
+        };
+        if let Err(err) = result {
+            for v in out {
+                release(v); // free the elements drained before the closure aborted
+            }
+            return Err(self.iter_abort(err, span));
+        }
+        Ok(Value::list(out))
     }
 
     /// Advance an iterator one element for a streaming `for` (Track I.2) — drives `iter_next_apply`

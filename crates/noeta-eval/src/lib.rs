@@ -4570,7 +4570,121 @@ impl Interpreter {
                 };
                 self.call_list_reduction_from(&repr, name, 0, span)
             }
+            // The remaining NUMERIC reductions take the ordering terminals' shape exactly: hand a
+            // list-backed iterator its remaining range so a packed buffer keeps its buffer-direct
+            // fold, drain an adapter chain into a temporary otherwise, and let the ONE eager
+            // reduction answer — so `it.product()` and `it.collect().product()` are the same value
+            // by construction rather than by a re-derivation that could drift.
+            M::Product => {
+                self.expect_std_arity(name, args, 0, span)?;
+                let (repr, from) = self.drain_to_list(state, span)?;
+                self.call_list_reduction_from(&repr, name, from, span)
+            }
+            // `checked_sum` reports overflow rather than wrapping, so it has a door of its own —
+            // and that door takes a whole list. A partially-consumed backing list is materialized
+            // to its remainder first; at cursor zero (`xs.iter().checked_sum()`, the canonical
+            // form) the buffer is handed over untouched and folds buffer-direct.
+            M::CheckedSum => {
+                self.expect_std_arity(name, args, 0, span)?;
+                let (repr, from) = self.drain_to_list(state, span)?;
+                if from == 0 {
+                    return self.call_list_checked_sum(&repr, span);
+                }
+                let items: Vec<Value> = (from..repr.len()).filter_map(|i| repr.get(i)).collect();
+                let Value::List(rest) = Value::list(items) else {
+                    unreachable!("`Value::list` builds a list value");
+                };
+                self.call_list_checked_sum(&rest, span)
+            }
+            // The remaining full-drain terminals are not numeric folds, so they take the general
+            // eager list method over the drained remainder — same rule, different door.
+            M::Last | M::ToSet | M::Join => {
+                match method {
+                    M::Join => self.expect_std_arity_range(name, args, 0, 1, span)?,
+                    _ => self.expect_std_arity(name, args, 0, span)?,
+                }
+                let list_method = noeta_stdlib::ListMethod::from_name(name)
+                    .expect("every full-drain terminal names an eager list method");
+                let (repr, from) = self.drain_to_list(state, span)?;
+                let items: Vec<Value> = (from..repr.len()).filter_map(|i| repr.get(i)).collect();
+                self.call_list_method(list_method, &items, None, name, args, span)
+            }
+            // The **short-circuiting** trio, and the reason they are worth having lazily at all:
+            // each is settled by one element, so draining first would materialize a tail nobody
+            // reads. `any` stops at the first `true`, `all` at the first `false`, `contains` at the
+            // first match — and each leaves the iterator where it stopped, which is what a caller
+            // who wants the rest would expect.
+            M::Any | M::All | M::Contains => {
+                let all = match method {
+                    M::Contains => {
+                        self.expect_std_arity(name, args, 1, span)?;
+                        None
+                    }
+                    _ => {
+                        self.expect_std_arity(name, args, 0, span)?;
+                        Some(method == M::All)
+                    }
+                };
+                while let Some(v) = self.iter_advance(state, span)? {
+                    let decided = match all {
+                        // `contains`: the first element equal to the argument settles it.
+                        None => crate::ops::value_eq(&v, &args[0]).then_some(true),
+                        // `any`/`all`: a non-`bool` element is the same refusal the eager
+                        // reduction gives, raised here rather than after a pointless drain.
+                        Some(all) => match v {
+                            Value::Bool(b) => (b != all).then_some(!all),
+                            other => {
+                                return Err(self.runtime_error(
+                                    DiagnosticCode::TypeMismatch,
+                                    span,
+                                    format!(
+                                        "`{name}` expects boolean elements, found {}",
+                                        other.type_name()
+                                    ),
+                                ));
+                            }
+                        },
+                    };
+                    if let Some(answer) = decided {
+                        return Ok(Value::Bool(answer));
+                    }
+                }
+                // Drained without a decision: `any` of nothing is false, `all` of nothing is true,
+                // `contains` found nothing — the empty-case answers the eager reductions give.
+                Ok(Value::Bool(all.unwrap_or(false)))
+            }
         }
+    }
+
+    /// The remaining elements of `state` as a list plus the index to start at: a list-backed
+    /// iterator hands over its own backing (and marks itself drained), anything else drains into a
+    /// fresh one. The shared front half of every full-drain terminal.
+    fn drain_to_list(
+        &mut self,
+        state: &Rc<RefCell<IterState>>,
+        span: Span,
+    ) -> Eval<(ListRepr, usize)> {
+        let direct = match &*state.borrow() {
+            IterState::List {
+                list: Value::List(repr),
+                cursor,
+            } => Some((repr.clone(), *cursor)),
+            _ => None,
+        };
+        if let Some((repr, cursor)) = direct {
+            if let IterState::List { cursor, .. } = &mut *state.borrow_mut() {
+                *cursor = repr.len(); // drain
+            }
+            return Ok((repr, cursor));
+        }
+        let mut out = Vec::new();
+        while let Some(v) = self.iter_advance(state, span)? {
+            out.push(v);
+        }
+        let Value::List(repr) = Value::list(out) else {
+            unreachable!("`Value::list` builds a list value");
+        };
+        Ok((repr, 0))
     }
 
     /// A Ring 1 map method (`keys`/`values`/`has`). Mirrors the VM's `call_map_method`.

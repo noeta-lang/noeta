@@ -600,6 +600,18 @@ fn iterator_method(name: &str, elem: &Type, facts: ElemFacts) -> Option<Type> {
         // `xs.iter().take(k).min()` and `xs.iter().take(k).collect().min()` are the same value.
         // Their element requirement is the [`ElemReq::Ordered`] gate above, which is the list's.
         "min" | "max" => opt(elem.clone()),
+        // The remaining eager reductions, lazily. Each is `.collect()` plus the eager method today,
+        // which materializes the whole tail to answer a question that streams — and three of them
+        // can settle on the first element.
+        "product" => numeric_reduce(elem).unwrap_or(Type::Unknown),
+        "checked_sum" => opt(numeric_reduce(elem).unwrap_or(Type::Int)),
+        "last" => opt(elem.clone()),
+        "to_set" => set(elem.clone()),
+        "join" => Type::String,
+        // The **bool** reductions, matching the list's meaning exactly: `any()`/`all()` ask about
+        // the elements themselves, not about a predicate over them. They short-circuit.
+        "any" | "all" => Type::Bool,
+        "contains" => Type::Bool,
         _ => return None,
     })
 }
@@ -825,6 +837,10 @@ impl ElemReq {
     pub(super) fn of_iterator_method(name: &str) -> Option<ElemReq> {
         match name {
             "min" | "max" => Some(ElemReq::Ordered),
+            // The numeric and boolean reductions read the list's requirements, for the same reason
+            // the ordering ones do: one opinion about what a reduction demands of an element.
+            "product" | "checked_sum" => Some(ElemReq::Numeric),
+            "any" | "all" => Some(ElemReq::Bool),
             _ => None,
         }
     }
@@ -1116,6 +1132,8 @@ fn builtin_method_required(receiver: &Type, name: &str) -> Option<usize> {
         // `list.slice(start, end?)` — end optional; `list.join(sep?)` — separator optional.
         (Type::List(_), "slice") => 1,
         (Type::List(_), "join") => 0,
+        // …and the lazy twin, so `it.join()` and `it.collect().join()` accept the same arities.
+        (Type::Named(n, _), "join") if n == ITERATOR => 0,
         // `bytes.slice(start, end?)` — the same shape as its string/list siblings.
         (Type::Bytes, "slice") => 1,
         _ => return None,
@@ -1125,7 +1143,11 @@ fn builtin_method_required(receiver: &Type, name: &str) -> Option<usize> {
 
 fn iterator_params(name: &str, elem: &Type) -> Option<Vec<Type>> {
     Some(match name {
-        "next" | "collect" | "count" | "enumerate" | "sum" | "min" | "max" => vec![],
+        "next" | "collect" | "count" | "enumerate" | "sum" | "min" | "max" | "product"
+        | "checked_sum" | "last" | "to_set" | "any" | "all" => vec![],
+        "contains" => vec![elem.clone()],
+        // `join(sep?)` — separator optional (default empty), exactly as the list's is.
+        "join" => vec![Type::String],
         "take" | "drop" => vec![Type::Int],
         // `chain` takes another iterator over the same element type.
         "chain" => vec![iterable_iter(elem.clone())],
