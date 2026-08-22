@@ -1,0 +1,9 @@
+// `count` on a list moved to `count_true`, so that `count` means cardinality wherever a program can
+// write it — most of all on an iterator, where it is the only spelling for "how many are left".
+// The old spelling is a clean static error rather than a silently different answer.
+//
+// The corpus pins the code and the span; the help line that names the replacement is asserted in
+// `noeta-check`'s rendered-diagnostic gallery, since a case header cannot pin a message.
+// expect: error E0007 at 9:6
+// expect: exit 1
+echo [true, false, true].count()

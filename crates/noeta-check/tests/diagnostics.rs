@@ -94,6 +94,17 @@ fn unknown_type_gallery() {
     insta::assert_snapshot!(out);
 }
 
+/// **A renamed built-in says where it went.**
+///
+/// `count` on a list is the one no-method error every existing user of the old spelling will hit,
+/// and the generic message reads as their mistake rather than as a move. The corpus can pin a code
+/// and a span but not a message, so the sentence lives here.
+#[test]
+fn a_renamed_builtin_method_names_its_replacement() {
+    noeta_stdlib::registry::default_seeded();
+    insta::assert_snapshot!(render_checks("echo [true, false, true].count();"));
+}
+
 /// **The advice compiles.**
 ///
 /// A help line that names an import is worth more than the general one only if following it

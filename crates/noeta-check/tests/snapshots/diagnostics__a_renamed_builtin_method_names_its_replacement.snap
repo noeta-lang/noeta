@@ -1,0 +1,13 @@
+---
+source: crates/noeta-check/tests/diagnostics.rs
+expression: "render_checks(\"echo [true, false, true].count();\")"
+---
+[E0007] Error: type `List<bool>` has no method `count`
+   ╭─[ snippet.noe:1:6 ]
+   │
+ 1 │ echo [true, false, true].count();
+   │      ────────────┬────────────  
+   │                  ╰────────────── type `List<bool>` has no method `count`
+   │ 
+   │ Help: `count` on a list is spelled `count_true` — it is the number of `true` elements, and `len()` is the number of elements. (An ITERATOR's `count()` is the element count, because a lazy iterator has no `len()` to ask.)
+───╯
