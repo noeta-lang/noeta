@@ -1,0 +1,32 @@
+// **One name, one meaning.** `count()` is how many, `count_true()` is how many are `true`.
+//
+// They used to be the same name one `.iter()` apart: `[true, false, true].count()` was `2` and
+// `[true, false, true].iter().count()` was `3`. Both were defensible alone — a list has `len()` for
+// its size, and a lazy iterator has no `len()` to ask — and together they were one name with two
+// answers on the same values, which is a reading error waiting to happen rather than a subtlety
+// worth keeping.
+//
+// The list side is the one that moved, because it had the alternative: `len()` already answers
+// cardinality there, while on an iterator `count()` is the only spelling for it.
+// expect: stdout "elements     3 3"
+// expect: stdout "true ones    2 2"
+// expect: stdout "len          3"
+// expect: stdout "ints         4 4"
+// expect: stdout "adapter      2 1"
+// expect: exit 0
+bs = [true, false, true]
+
+// The same question, the same answer, on both surfaces.
+echo "elements     ${bs.len()} ${bs.iter().count()}"
+
+// …and so is the other question.
+echo "true ones    ${bs.count_true()} ${bs.iter().count_true()}"
+
+echo "len          ${bs.len()}"
+
+// `count()` on an iterator is about elements, whatever they are — no `bool` involved.
+echo "ints         ${[1, 2, 3, 4].iter().count()} ${[1, 2, 3, 4].len()}"
+
+// And through an adapter, where the two questions genuinely differ: two elements remain, one of
+// which is `true`.
+echo "adapter      ${bs.iter().drop(1).count()} ${bs.iter().drop(1).count_true()}"

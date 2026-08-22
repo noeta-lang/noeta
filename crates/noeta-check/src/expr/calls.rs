@@ -1839,11 +1839,14 @@ impl Checker {
                     && !self.report_unmet_element_requirement(&recv, name, span)
                     && (closed_to_new_methods(&recv) || user_type_is_closed(self, &recv))
                 {
-                    self.error(
+                    let diag = self.error(
                         DiagnosticCode::TypeMismatch,
                         span,
                         format!("type `{recv}` has no method `{name}`"),
                     );
+                    if let Some(help) = renamed_builtin_help(&recv, name) {
+                        diag.help(help);
+                    }
                 }
                 ret
             }
@@ -2653,5 +2656,26 @@ fn callee_label(callee: &Expr) -> String {
         Expr::Call { callee, .. } => format!("{}(…)", callee_label(callee)),
         Expr::Member { receiver, name, .. } => format!("{}.{name}", callee_label(receiver)),
         _ => "this function value".to_string(),
+    }
+}
+
+/// The help line for a built-in method that **moved** rather than never existing.
+///
+/// A rename is the one no-method error where the generic message is actively unhelpful: the reader
+/// wrote something that used to work, and "has no method" reads as their mistake. Naming the new
+/// spelling is what makes the break a five-second fix instead of a search.
+///
+/// One entry today. It is a table rather than an `if` because the next rename should cost a line.
+fn renamed_builtin_help(recv: &Type, name: &str) -> Option<String> {
+    let list_or_iter = matches!(recv, Type::List(_))
+        || matches!(recv, Type::Named(n, _) if n == crate::stdlib::ITERATOR);
+    match (list_or_iter, name) {
+        (true, "count") if matches!(recv, Type::List(_)) => Some(
+            "`count` on a list is spelled `count_true` — it is the number of `true` elements, and \
+             `len()` is the number of elements. (An ITERATOR's `count()` is the element count, \
+             because a lazy iterator has no `len()` to ask.)"
+                .to_string(),
+        ),
+        _ => None,
     }
 }

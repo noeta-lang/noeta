@@ -57,6 +57,9 @@ pub enum IterMethod {
     All,
     /// `contains(x)` → whether any remaining element equals `x`. Short-circuits at the first match.
     Contains,
+    /// `count_true()` → the number of remaining `true` elements. Drains the iterator. The popcount
+    /// twin of [`IterMethod::Count`], which counts ELEMENTS — the two are spelled apart on purpose.
+    CountTrue,
 }
 
 impl IterMethod {
@@ -83,6 +86,7 @@ impl IterMethod {
             "any" => Some(IterMethod::Any),
             "all" => Some(IterMethod::All),
             "contains" => Some(IterMethod::Contains),
+            "count_true" => Some(IterMethod::CountTrue),
             _ => None,
         }
     }

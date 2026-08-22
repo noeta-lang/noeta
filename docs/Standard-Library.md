@@ -87,7 +87,7 @@ A reduction folds the whole list to one value, and each one asks something of th
 | `checked_sum` | `checked_sum() -> ?T` | a numeric `T` | `none` instead of wrapping on integer overflow |
 | `scale` / `abs` / `neg` / `clamp` | `scale(s: T) -> List<T>` | a numeric `T` | `[1,2].scale(3)` → `[3, 6]` |
 | `any` / `all` | `any() -> bool` | `T = bool` | `[false,true].any()` → `true` |
-| `count` | `count() -> int` | `T = bool` | `[true,false,true].count()` → `2` (the `true`s; `len()` is the size) |
+| `count_true` | `count_true() -> int` | `T = bool` | `[true,false,true].count_true()` → `2`; `len()` is the size, and an iterator's `count()` is its element count |
 
 `min`/`max` order by the **same order** `sorted()` sorts by, so `xs.min()` and `xs.sorted().first()` are always the same value. `sum`/`product` fold at the element's numeric width and wrap there, exactly as repeated `+`/`*` would.
 
@@ -203,9 +203,16 @@ The constructors — and `panic` — are ordinary values you can pass around: `r
 | `chain` | `chain(other: Iterator<T>) -> Iterator<T>` | concatenate |
 | `enumerate` | `enumerate() -> Iterator<(int, T)>` | index each element |
 | `zip` | `zip(other: Iterator<B>) -> Iterator<(T, B)>` | pair up (stops at the shorter) |
-| `count` | `count() -> int` | drain and count |
-| `sum` | `sum() -> int \| float` | drain and total |
+| `count` | `count() -> int` | drain and count the elements |
+| `sum` / `product` | `sum() -> int \| float` | drain and fold |
+| `checked_sum` | `checked_sum() -> ?int` | `none` on overflow |
 | `min` / `max` | `min() -> ?T` | drain and take the extremum; `none` if already drained |
+| `last` | `last() -> ?T` | drain and take the final element |
+| `to_set` | `to_set() -> Set<T>` | drain into a set |
+| `join` | `join(sep?: string) -> string` | drain and join the display forms |
+| `any` / `all` | `any() -> bool` | `T = bool`; **stops** at the first `true` / first `false` |
+| `count_true` | `count_true() -> int` | `T = bool`; the `true`s, as on a list |
+| `contains` | `contains(x: T) -> bool` | **stops** at the first match |
 
 ```noeta
 echo [1,2,3,4,5].iter().map(fn(n) => n * 10).take(3).collect()   // [10, 20, 30]
@@ -213,7 +220,11 @@ echo [1,2,3].iter().zip(["a","b","c"].iter()).collect()          // [(1, "a"), (
 echo [3,1,5,2].iter().take(2).min()                              // some(1)
 ```
 
-`count`, `sum`, `min` and `max` are **terminals**: they drain the iterator and hand back a plain value. `sum`, `min` and `max` answer exactly what their eager `List` twins answer over the same elements — `xs.iter().take(k).min()` and `xs.iter().take(k).collect().min()` are the same value — and `min`/`max` ask the element type for the same declared ordering the list's do. An iterator's `count` is the number of elements left, which is the list's `len()` rather than the list's `count()` (that one is a `List<bool>` reduction).
+Everything from `count` down is a **terminal**: it drains the iterator and hands back a plain value. Each answers exactly what its eager `List` twin answers over the same elements — `xs.iter().take(k).min()` and `xs.iter().take(k).collect().min()` are the same value — and `min`/`max` ask the element type for the same declared ordering the list's do.
+
+`any`, `all` and `contains` **short-circuit**: each is settled by a single element and stops there, leaving the iterator on the element after the one that decided it. That is the reason to reach for them over `.collect()` plus the eager method, which builds a tail nobody reads.
+
+`count()` is the number of elements left — the question a list answers with `len()`. The `true`s are `count_true()` on both surfaces.
 
 Generators (`yield`) produce iterators too — see [Concurrency](Concurrency#generators--yield).
 

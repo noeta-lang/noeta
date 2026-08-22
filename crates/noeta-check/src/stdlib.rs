@@ -589,7 +589,12 @@ fn iterator_method(name: &str, elem: &Type, facts: ElemFacts) -> Option<Type> {
         // return — also resolved at the call site (it needs the argument type). (Track I.1c.)
         "filter" => iterable_iter(elem.clone()),
         "map" => iterable_iter(Type::Dyn),
+        // `count()` is the number of remaining elements — cardinality, the one question a lazy
+        // iterator cannot answer any other way (there is no `len()` to ask).
         "count" => Type::Int,
+        // …and `count_true()` is the popcount, spelled the same here as on a list, so the bool
+        // family reads identically on both surfaces.
+        "count_true" => Type::Int,
         // `sum()` → the element type for a concrete numeric `Iterator<T>` (array-ops arc): a narrow
         // element (`iN`/`uN`/`f32`/`f64`) returns THAT type and wraps at its width, so
         // `xs.iter().take(k).sum()` agrees with `xs.sum()`; a non-numeric element stays `Unknown` (as
@@ -824,14 +829,14 @@ impl ElemReq {
             "sum" | "product" | "checked_sum" | "scale" | "abs" | "neg" | "clamp" => {
                 ElemReq::Numeric
             }
-            "any" | "all" | "count" => ElemReq::Bool,
+            "any" | "all" | "count_true" => ElemReq::Bool,
             _ => return None,
         })
     }
 
     /// The requirement each element-gated **iterator** method carries — its own table, because the
-    /// two surfaces overlap by name and not by meaning: an iterator's `count` is the number of
-    /// remaining elements (no `bool` involved), and its `sum` stays open at a non-numeric element
+    /// two surfaces overlap by name and not by meaning: an iterator's `sum` stays open at a
+    /// non-numeric element
     /// so it never newly rejects. The ordering terminals are the shared half, and they read the
     /// same [`ElemReq::Ordered`] the list's do — one opinion about what orders.
     pub(super) fn of_iterator_method(name: &str) -> Option<ElemReq> {
@@ -840,7 +845,7 @@ impl ElemReq {
             // The numeric and boolean reductions read the list's requirements, for the same reason
             // the ordering ones do: one opinion about what a reduction demands of an element.
             "product" | "checked_sum" => Some(ElemReq::Numeric),
-            "any" | "all" => Some(ElemReq::Bool),
+            "any" | "all" | "count_true" => Some(ElemReq::Bool),
             _ => None,
         }
     }
@@ -956,9 +961,13 @@ fn list_method(name: &str, elem: &Type, facts: ElemFacts) -> Option<Type> {
         // type (element-wise, wrapping for ints). Packed lists fold their buffer, boxed lists their
         // scalars — one shared `noeta-stdlib` kernel, so both agree.
         "scale" | "abs" | "neg" | "clamp" => list(num()),
-        // `List<bool>` reductions: `any`/`all` → `bool`, `count` → the number of `true` elements.
+        // `List<bool>` reductions: `any`/`all` → `bool`, `count_true` → the number of `true`
+        // elements. Deliberately NOT `count`: a list already answers "how many elements" with
+        // `len()`, and `count` is the only spelling an iterator has for that question — one name
+        // meaning cardinality on one surface and a popcount on the other, one `.iter()` apart, is
+        // a reading error waiting to happen.
         "any" | "all" => Type::Bool,
-        "count" => Type::Int,
+        "count_true" => Type::Int,
         "map" => list(Type::Dyn),
         // `to_bytes` serializes a `List<@packed>` to its raw flat buffer (P-PACK 4.4).
         "to_bytes" => Type::Bytes,
@@ -1144,7 +1153,7 @@ fn builtin_method_required(receiver: &Type, name: &str) -> Option<usize> {
 fn iterator_params(name: &str, elem: &Type) -> Option<Vec<Type>> {
     Some(match name {
         "next" | "collect" | "count" | "enumerate" | "sum" | "min" | "max" | "product"
-        | "checked_sum" | "last" | "to_set" | "any" | "all" => vec![],
+        | "checked_sum" | "last" | "to_set" | "any" | "all" | "count_true" => vec![],
         "contains" => vec![elem.clone()],
         // `join(sep?)` — separator optional (default empty), exactly as the list's is.
         "join" => vec![Type::String],
@@ -1195,7 +1204,7 @@ fn string_params(name: &str) -> Option<Vec<Type>> {
 fn list_params(name: &str, elem: &Type) -> Option<Vec<Type>> {
     Some(match name {
         "reverse" | "sorted" | "len" | "sum" | "first" | "last" | "to_set" | "enumerate"
-        | "to_bytes" | "iter" | "product" | "min" | "max" | "any" | "all" | "count"
+        | "to_bytes" | "iter" | "product" | "min" | "max" | "any" | "all" | "count_true"
         | "checked_sum" | "abs" | "neg" => {
             vec![]
         }

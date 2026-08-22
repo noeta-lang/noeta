@@ -4570,12 +4570,13 @@ impl Interpreter {
                 };
                 self.call_list_reduction_from(&repr, name, 0, span)
             }
-            // The remaining NUMERIC reductions take the ordering terminals' shape exactly: hand a
+            // The remaining FOLD reductions — numeric `product`, boolean `count_true` — take the
+            // ordering terminals' shape exactly: hand a
             // list-backed iterator its remaining range so a packed buffer keeps its buffer-direct
             // fold, drain an adapter chain into a temporary otherwise, and let the ONE eager
             // reduction answer — so `it.product()` and `it.collect().product()` are the same value
             // by construction rather than by a re-derivation that could drift.
-            M::Product => {
+            M::Product | M::CountTrue => {
                 self.expect_std_arity(name, args, 0, span)?;
                 let (repr, from) = self.drain_to_list(state, span)?;
                 self.call_list_reduction_from(&repr, name, from, span)

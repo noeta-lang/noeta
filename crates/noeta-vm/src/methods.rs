@@ -952,12 +952,13 @@ impl<'m> Vm<'m> {
                 drained.release();
                 folded?
             }
-            // The remaining NUMERIC reductions take the ordering terminals' shape exactly, and for
+            // The remaining FOLD reductions — numeric `product`, boolean `count_true` — take the
+            // ordering terminals' shape exactly, and for
             // the same reason: a list-backed iterator hands over its remaining range (so a packed
             // buffer keeps its buffer-direct fold), an adapter chain drains into a temporary, and
             // the ONE eager reduction answers — `it.product()` and `it.collect().product()` are the
             // same value by construction rather than by a re-derivation that could drift.
-            M::Product => {
+            M::Product | M::CountTrue => {
                 self.stdlib_arity(name, args, 0, span)?;
                 if let Some((list, from)) = recv.iter_drain_list() {
                     return self.call_list_reduction(list, name, from, span);

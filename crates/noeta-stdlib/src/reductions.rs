@@ -42,9 +42,14 @@ pub enum BoolReduce {
     Any,
     /// `all()` → whether every element is `true` (AND; empty → `true`).
     All,
-    /// `count()` → the number of `true` elements (empty → `0`). `len()` already gives the length,
-    /// so `count` on a `List<bool>` is the popcount, not the size.
-    Count,
+    /// `count_true()` → the number of `true` elements (empty → `0`).
+    ///
+    /// **Not** `count()`, and the name is the whole point. `count` means cardinality everywhere
+    /// else a program can write it — most of all on an iterator, where it is the only spelling for
+    /// "how many are left" and no `len()` exists to ask instead. One name answering "how many
+    /// elements" on one surface and "how many are true" on another, one `.iter()` apart, is a
+    /// reading error waiting to happen, and this side is the one that had a clear alternative.
+    CountTrue,
 }
 
 /// The error a list reduction raises for an element it cannot fold — the one constructor, so the
@@ -111,7 +116,7 @@ impl BoolReduce {
         Some(match name {
             "any" => BoolReduce::Any,
             "all" => BoolReduce::All,
-            "count" => BoolReduce::Count,
+            "count_true" => BoolReduce::CountTrue,
             _ => return None,
         })
     }
@@ -120,7 +125,7 @@ impl BoolReduce {
         match self {
             BoolReduce::Any => "any",
             BoolReduce::All => "all",
-            BoolReduce::Count => "count",
+            BoolReduce::CountTrue => "count_true",
         }
     }
 }
@@ -438,7 +443,7 @@ pub fn reduce_bool_packed(op: BoolReduce, bytes: &[u8]) -> RedBool {
     match op {
         BoolReduce::Any => RedBool::Bool(bytes.iter().any(|&b| b != 0)),
         BoolReduce::All => RedBool::Bool(bytes.iter().all(|&b| b != 0)),
-        BoolReduce::Count => RedBool::Int(bytes.iter().filter(|&&b| b != 0).count() as i64),
+        BoolReduce::CountTrue => RedBool::Int(bytes.iter().filter(|&&b| b != 0).count() as i64),
     }
 }
 
@@ -465,7 +470,7 @@ pub fn reduce_bool_scalars(
     Ok(match op {
         BoolReduce::Any => RedBool::Bool(any),
         BoolReduce::All => RedBool::Bool(all),
-        BoolReduce::Count => RedBool::Int(count),
+        BoolReduce::CountTrue => RedBool::Int(count),
     })
 }
 
@@ -659,7 +664,7 @@ mod tests {
             RedBool::Bool(false)
         );
         assert_eq!(
-            reduce_bool_packed(BoolReduce::Count, &[1, 0, 1, 1]),
+            reduce_bool_packed(BoolReduce::CountTrue, &[1, 0, 1, 1]),
             RedBool::Int(3)
         );
         // empty conventions
@@ -671,14 +676,17 @@ mod tests {
             reduce_bool_packed(BoolReduce::All, &[]),
             RedBool::Bool(true)
         );
-        assert_eq!(reduce_bool_packed(BoolReduce::Count, &[]), RedBool::Int(0));
+        assert_eq!(
+            reduce_bool_packed(BoolReduce::CountTrue, &[]),
+            RedBool::Int(0)
+        );
     }
 
     #[test]
     fn bool_packed_and_boxed_agree() {
         let vals = [true, false, true, true];
         let bytes: Vec<u8> = vals.iter().map(|&b| u8::from(b)).collect();
-        for op in [BoolReduce::Any, BoolReduce::All, BoolReduce::Count] {
+        for op in [BoolReduce::Any, BoolReduce::All, BoolReduce::CountTrue] {
             let packed = reduce_bool_packed(op, &bytes);
             let boxed = reduce_bool_scalars(op, vals.iter().map(|&b| Scalar::Bool(b))).unwrap();
             assert_eq!(packed, boxed, "op {op:?}");

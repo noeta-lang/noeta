@@ -44,7 +44,7 @@ echo [1, 2, 3, 4, 5].iter()
     .collect()                 // [20, 30]
 ```
 
-Adapters: `.map(f)`, `.filter(pred)`, `.take(n)`, `.drop(n)`, `.chain(it)`, `.enumerate()`, `.zip(it)`. Terminals: `.next()` (→ `?T`), `.collect()`, `.count()`, `.sum()`. A `for` loop drives an iterator directly (streaming via `next()`). See [Standard Library](Standard-Library#iterators) for the full list.
+Adapters: `.map(f)`, `.filter(pred)`, `.take(n)`, `.drop(n)`, `.chain(it)`, `.enumerate()`, `.zip(it)`. Terminals: `.next()` (→ `?T`), `.collect()`, `.count()`, `.sum()`, `.min()`/`.max()`, `.last()`, `.to_set()`, `.join()`, and the short-circuiting `.any()`/`.all()`/`.contains(x)`. A `for` loop drives an iterator directly (streaming via `next()`). See [Standard Library](Standard-Library#iterators) for the full list.
 
 ## Generators — `yield`
 

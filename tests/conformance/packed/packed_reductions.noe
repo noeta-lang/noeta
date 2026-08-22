@@ -69,7 +69,7 @@ echo [10i64, 20i64].min()               // some(10)
 bs = [true, false, true]
 echo bs.any()                            // true
 echo bs.all()                            // false
-echo bs.count()                          // 2  (the number of `true` elements, not the length)
+echo bs.count_true()                     // 2  (the number of `true` elements; `len()` is the size)
 
 // --- Empty-list conventions: `sum`→0, `product`→1, `min`/`max`→none. ---
 empty = [1i32].filter(fn(x) => false)
@@ -77,8 +77,8 @@ echo empty.sum()                         // 0
 echo empty.product()                     // 1
 echo empty.min()                         // none
 
-// Empty `List<bool>`: any→false, all→true, count→0.
+// Empty `List<bool>`: any→false, all→true, count_true→0.
 empty_bs = [true].filter(fn(x) => false)
 echo empty_bs.any()                      // false
 echo empty_bs.all()                      // true
-echo empty_bs.count()                    // 0
+echo empty_bs.count_true()               // 0
