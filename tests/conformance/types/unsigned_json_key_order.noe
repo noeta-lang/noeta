@@ -1,0 +1,41 @@
+// **One map, one key order, at every door that shows one.**
+//
+// A `Map<u64, _>` is *stored* in the erased word's order — that is what makes a lookup total, and
+// it must stay a pure function of the value's words. What a program OBSERVES is the type's order:
+// the rendered map, `keys()`, `values()`, iteration. Serialized text is observed too, and it was
+// the one door still emitting the storage order, so the same map read out one way through `echo`
+// and another through `json.stringify` with every digit correct on both.
+//
+// Hinting it is what the rule allows: a hint may be consumed by a walk producing output a program
+// reads, never by one placing a value for later retrieval. The find-again half below is the other
+// side of that rule — the canonical buffer is untouched, so every key is still there.
+// expect: stdout "{1: 2, 18446744073709551615: 1}"
+// expect: stdout "[1, 18446744073709551615]"
+// expect: stdout "[2, 1]"
+// expect: stdout "{"1":2,"18446744073709551615":1}"
+// expect: stdout "1"
+// expect: stdout "2"
+// expect: stdout "{"1":2,"9223372036854775808":3,"18446744073709551615":1}"
+// expect: stdout "{"a":1}"
+// expect: exit 0
+use std.json
+
+m: Map<u64, int> = {18446744073709551615u64: 1, 1u64: 2}
+
+echo m
+echo m.keys()
+echo m.values()
+echo json.stringify(m)
+
+// The find-again property: ordering what a reader sees must not touch where a key is stored.
+echo m[18446744073709551615u64]
+echo m[1u64]
+
+// The boundary at bit 63, where a signed reading flips — three keys, so the middle one pins that
+// this is an order rather than a reversal.
+wide: Map<u64, int> = {18446744073709551615u64: 1, 1u64: 2, 9223372036854775808u64: 3}
+echo json.stringify(wide)
+
+// A map with no unsigned key carries no hint and keeps the marshal's order untouched.
+plain: Map<string, int> = {"a": 1}
+echo json.stringify(plain)

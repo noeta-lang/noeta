@@ -644,7 +644,18 @@ pub fn json_stringify(value: &crate::NativeValue, hint: Option<&RenderHint>) -> 
         // read back as the i64 word that text was rendered from — the exact inverse of the one
         // `to_string` that produced it — and re-rendered unsigned.
         (RenderHint::Entries { key, value: val }, NativeValue::Map(entries)) => {
-            json_object(entries.iter().map(|(k, v)| {
+            // …and in the key hint's ORDER, not the marshal's. The entries arrive in the erased
+            // word's order — the placement order a map is stored in — so without this the same map
+            // reads out one way through `echo`/`keys()` and another through `json.stringify`, with
+            // every digit correct on both. Only the order differed, and JSON object order carries
+            // no meaning, which is why this was a consistency gap rather than a defect; it is still
+            // one door disagreeing with two.
+            //
+            // Hinting it is permitted by the rule the rest of this module is built on: a hint may
+            // be consumed by a walk producing output a program READS, never by one placing a value
+            // for later retrieval. Serialized text is read. A map's canonical buffer and
+            // `MapKey::cmp` remain untouched, which is what keeps every key findable.
+            json_object(ordered_entries(entries, key.as_deref()).map(|(k, v)| {
                 (
                     json_map_key(k, key.as_deref()),
                     json_stringify(v, val.as_deref()),
@@ -731,6 +742,30 @@ fn json_object(entries: impl IntoIterator<Item = (String, String)>) -> String {
 /// [`RenderHint::Entries`] arm of [`json_stringify`]: the key arrives as the text
 /// [`crate::MapKey::as_native_str`] produced, so an [`RenderHint::Unsigned`] key is read
 /// back as that i64 word and re-rendered. A key whose text is not one is left alone.
+/// A marshalled map's entries in the order a reader should see them: the key hint's order when it
+/// has one, the marshal's otherwise.
+///
+/// A JSON object key is text by definition, so the marshal has already rendered each key through
+/// the one `to_string` that produced it; a hinted key is read back as the i64 word that text came
+/// from and compared unsigned. A key that does not parse keeps its place relative to the ones that
+/// do rather than being sorted to an end — a mixed map is not a shape the hint describes, and
+/// reordering it on a parse failure would be inventing an order rather than revealing one.
+fn ordered_entries<'e>(
+    entries: &'e [(String, crate::NativeValue)],
+    key_hint: Option<&RenderHint>,
+) -> impl Iterator<Item = &'e (String, crate::NativeValue)> {
+    let mut order: Vec<&'e (String, crate::NativeValue)> = entries.iter().collect();
+    if matches!(key_hint, Some(RenderHint::Unsigned)) {
+        order.sort_by(
+            |(a, _), (b, _)| match (a.parse::<i64>(), b.parse::<i64>()) {
+                (Ok(x), Ok(y)) => unsigned_order(x, y),
+                _ => std::cmp::Ordering::Equal,
+            },
+        );
+    }
+    order.into_iter()
+}
+
 fn json_map_key(key: &str, hint: Option<&RenderHint>) -> String {
     match hint {
         Some(RenderHint::Unsigned) => match key.parse::<i64>() {
