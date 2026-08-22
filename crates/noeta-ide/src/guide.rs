@@ -913,7 +913,16 @@ mod tests {
     }
 
     /// Where retrieval stands today, as a ratchet. Not a target that was aimed at — the measured
-    /// result, pinned so it cannot quietly erode. Raise these when a change earns it.
+    /// result, pinned so it cannot quietly erode.
+    ///
+    /// **`TOP1_FLOOR` is deliberately one below the measured 17, and raising it re-arms a flake.**
+    /// The thinnest top-1 decision is currently won by 0.69% (see [`margin_report`]), and a margin
+    /// that small is not a ranking — BM25 divides by the corpus-wide average document length, so
+    /// any page growing anywhere moves every score. The slack is what absorbs one such coin
+    /// landing the other way, on a docs commit that did nothing wrong. Raise it only when the
+    /// thinnest margin is comfortably wide, and raise that by fixing the PAGE — make the page that
+    /// teaches the topic say so in the reader's words, until it wins on merit rather than on
+    /// arithmetic.
     const TOP1_FLOOR: usize = 16;
     const TOP3_FLOOR: usize = 21;
 
@@ -925,6 +934,67 @@ mod tests {
     /// (this one did, before stemming was added back: exact-token matching lost the accidental
     /// morphology that substring matching had been providing). Without the floor, "no worse than
     /// legacy" could ratchet downward forever.
+    /// How thin a top-1 decision is: the winner's score against the best page on the *other* side
+    /// of the correct/incorrect line, as a percentage of the winner's score. `None` when nothing
+    /// contests it.
+    ///
+    /// This is the number the ratchet could not see. BM25's length normalization divides by the
+    /// corpus-wide average document length, so **every** page's score moves when any page grows —
+    /// and a decision won by a fraction of a percent is not a ranking, it is a coin the next docs
+    /// commit flips. One did: two paragraphs added to an unrelated page reversed a 0.07% call and
+    /// failed this test on a change that had nothing to do with retrieval.
+    fn top1_margin(query: &str, want: &[&str]) -> (bool, Option<(String, f32, String, f32)>) {
+        let mut best: Vec<(String, f32)> = Vec::new();
+        for h in search(query, 200) {
+            if !best.iter().any(|(p, _)| p == &h.page) {
+                best.push((h.page.clone(), h.score));
+            }
+        }
+        let Some((top, top_score)) = best.first().cloned() else {
+            return (false, None);
+        };
+        let hit = want.contains(&top.as_str());
+        let rival = best
+            .iter()
+            .skip(1)
+            .find(|(p, _)| want.contains(&p.as_str()) != hit)
+            .cloned();
+        (hit, rival.map(|(rp, rs)| (top.clone(), top_score, rp, rs)))
+    }
+
+    /// Every top-1 decision, thinnest first, as a table. Printed by the ratchet on failure and
+    /// available on demand (`cargo test -p noeta-ide retrieval -- --nocapture`).
+    ///
+    /// It exists so a red here answers its own first question. "Did my change break retrieval, or
+    /// did it tip a decision that was already a coin flip?" is not answerable from an accuracy
+    /// count, and the difference decides whether the fix is to the ranker or to a page.
+    fn margin_report() -> String {
+        let mut rows: Vec<(f32, String)> = Vec::new();
+        for (query, want) in RELEVANCE {
+            let (hit, contest) = top1_margin(query, want);
+            let mark = if hit { "hit " } else { "MISS" };
+            match contest {
+                Some((top, ts, rival, rs)) => {
+                    let margin = (ts - rs) / ts.max(f32::EPSILON) * 100.0;
+                    rows.push((
+                        margin,
+                        format!("  {margin:>6.2}%  {mark}  {query}: {top} [{ts:.4}] over {rival} [{rs:.4}]"),
+                    ));
+                }
+                None => rows.push((
+                    f32::INFINITY,
+                    format!("       —  {mark}  {query}: uncontested"),
+                )),
+            }
+        }
+        rows.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let lines: Vec<&str> = rows.iter().map(|(_, l)| l.as_str()).collect();
+        format!(
+            "top-1 decision margins (thinnest first):\n{}",
+            lines.join("\n")
+        )
+    }
+
     #[test]
     fn retrieval_answers_the_relevance_set() {
         let pages_of = |q: &str, n: usize| -> Vec<String> {
@@ -949,11 +1019,21 @@ mod tests {
             "retrieval must beat the ranker it replaced: BM25F top1 {new1}/{total} top3 \
              {new3}/{total} vs legacy top1 {old1}/{total} top3 {old3}/{total}"
         );
+        // The margin table rides on the failure, not beside it: a red here is most often a
+        // near-tie tipping rather than a ranking getting worse, and the two want opposite fixes.
         assert!(
             new1 >= TOP1_FLOOR && new3 >= TOP3_FLOOR,
             "retrieval regressed: top1 {new1}/{total} (floor {TOP1_FLOOR}), \
-             top3 {new3}/{total} (floor {TOP3_FLOOR})"
+             top3 {new3}/{total} (floor {TOP3_FLOOR})\n\n{}\n\n\
+             A decision won by a fraction of a percent is a coin flip, not a ranking: BM25 divides \
+             by the corpus-wide average document length, so every score moves when any page grows. \
+             If the query that changed was decided by a thin margin, this is that coin landing the \
+             other way and the fix belongs in the PAGES — make the page that teaches the topic say \
+             so in the reader's words, until it wins on merit. If it was decided by a wide one, \
+             retrieval genuinely regressed.",
+            margin_report()
         );
+        println!("{}", margin_report());
     }
 
     /// The ranker this replaced: raw weighted substring counts, no IDF, no length normalization.
