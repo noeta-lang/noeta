@@ -233,7 +233,7 @@ const MODE: ExtEnum = ExtEnum {
         ret: RetTy::Concrete(SigType::String),
     }],
     dispatch: mode_dispatch,
-    traits: &["Widget"],
+    traits: &["Widget", "Comparable"],
     directives: &[],
     ..ExtEnum::DEFAULTS
 };
@@ -529,6 +529,7 @@ const PROGRAM: &str = r#"
 use fx.kit
 use fx.Widget
 use fx.Button
+use fx.Mode
 
 // A user type implements the native trait (3a).
 struct Card {
@@ -592,6 +593,20 @@ fn ranked<T: Comparable>(x: T): string {
     return "ranked"
 }
 echo ranked(bg)
+
+// …and the bound is only half the promise. A type that declares `Comparable` must ACTUALLY
+// compare, in every door that orders. A declaration the checker accepts and the runtime refuses is
+// worse than a missing one: the program is already written by the time anyone finds out.
+lo = kit.badge("a")
+hi = kit.badge("b")
+echo lo < hi
+echo hi < lo
+
+// The same promise on a native ENUM, whose order is its declaration order.
+dark = Mode.Dark
+light = Mode.Light
+echo dark < light
+echo light < dark
 "#;
 
 #[test]
@@ -600,7 +615,8 @@ fn native_trait_contract_and_dynamic_dispatch_agree_on_both_backends() {
     assert_eq!(
         stdout,
         "card:hi\ncard:hi\nbutton:go\nbutton:go\npanel:cls\npanel:cls\n\
-         mode:dark\nmode:dark\nbadge:v\nbadge:v\nranked\n"
+         mode:dark\nmode:dark\nbadge:v\nbadge:v\nranked\n\
+         true\nfalse\ntrue\nfalse\n"
     );
 }
 

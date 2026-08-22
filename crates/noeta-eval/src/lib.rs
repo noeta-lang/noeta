@@ -1573,6 +1573,8 @@ impl Interpreter {
                             backing: None,
                         })
                         .collect(),
+                    // A prelude enum's ordering is answered by `prelude_enum_orders` at the
+                    // comparison sites, not by a flag: there is nowhere to write a declaration.
                     derives_comparable: false,
                     derives_tojson: false,
                     methods: HashMap::new(),
@@ -2146,6 +2148,8 @@ impl Interpreter {
                         // VM's `ShapeKind::Opaque` default), not as class identity.
                         structural_eq: true,
                         key_capable: std::cell::Cell::new(false),
+                        // An opaque import resolves to no declaration, so there is nothing to read
+                        // an ordering from.
                         derives_comparable: false,
                         derives_tojson: false,
                         opaque: true,
@@ -2855,7 +2859,12 @@ impl Interpreter {
             is_struct: true,
             structural_eq: true,
             key_capable: std::cell::Cell::new(false),
-            derives_comparable: false,
+            // A native `@packed` struct is a native fielded declaration like any other, so it
+            // reads its ordering from the same place.
+            derives_comparable: noeta_stdlib::registry::declares_builtin_trait(
+                cl.traits,
+                COMPARABLE_TRAIT,
+            ),
             derives_tojson: false,
             opaque: false,
             field_defaults: Vec::new(),
@@ -7063,6 +7072,10 @@ fn native_fielded_repr(
     })
 }
 
+/// The built-in trait a native declaration advertises to get an ordering — named once rather than
+/// spelled at each seeding site.
+const COMPARABLE_TRAIT: &str = "Comparable";
+
 fn native_type_value(
     reg: &'static noeta_stdlib::registry::Registry,
     qualified: &str,
@@ -7081,7 +7094,14 @@ fn native_type_value(
                     backing: None,
                 })
                 .collect(),
-            derives_comparable: false,
+            // Seeded from the DECLARATION, not from a `.noe` `@derive` a native type can never
+            // carry. Hardcoding `false` here is what made a native enum advertising `Comparable`
+            // type-check `<` and then abort — the checker read `traits`, the runtime read a flag
+            // nothing ever set.
+            derives_comparable: noeta_stdlib::registry::declares_builtin_trait(
+                en.traits,
+                COMPARABLE_TRAIT,
+            ),
             derives_tojson: false,
             methods: HashMap::new(),
         })));
@@ -7107,7 +7127,11 @@ fn native_type_value(
         is_struct,
         structural_eq: is_struct,
         key_capable: std::cell::Cell::new(false),
-        derives_comparable: false,
+        // The fielded twin of the enum seeding above, and the same rule.
+        derives_comparable: noeta_stdlib::registry::declares_builtin_trait(
+            cl.traits,
+            COMPARABLE_TRAIT,
+        ),
         derives_tojson: false,
         opaque: false,
         field_defaults: Vec::new(),
@@ -7134,6 +7158,7 @@ fn fresh_type_def(name: &str, fields: &[String], is_struct: bool) -> TypeDef {
         structural_eq: is_struct,
         // Reflection-materialized: no packed context (mirrors the VM's fresh `Shape` default).
         key_capable: std::cell::Cell::new(false),
+        // …and no declaration behind it either, so no ordering to inherit.
         derives_comparable: false,
         derives_tojson: false,
         opaque: false,
@@ -7654,6 +7679,21 @@ fn materialize_ext(
 /// no `.noe` def `construct_object` can resolve) build the same struct-kind shape — so a
 /// recipe-decoded native struct is differential-identical to a natively-constructed one, and its
 /// method dispatch (`call_method` → `find_class_method`) reaches the type's native `dispatch`.
+/// Whether the native fielded declaration named `name` advertises `Comparable`.
+///
+/// Resolved against the default-seeded registry rather than a threaded handle: the materialization
+/// entry points below are free functions reached from every native return, and a native type's
+/// declaration is a `&'static` property of the installed units either way. A name that resolves to
+/// no native declaration — a reflection-materialized struct, a recipe shape — answers `false`,
+/// which is the same answer the field carried before.
+fn native_declares_comparable(name: &str) -> bool {
+    noeta_stdlib::registry::default_seeded()
+        .resolve_fielded(name)
+        .is_some_and(|cl| {
+            noeta_stdlib::registry::declares_builtin_trait(cl.traits, COMPARABLE_TRAIT)
+        })
+}
+
 pub(crate) fn fielded_object(name: String, is_struct: bool, fields: Vec<(String, Value)>) -> Value {
     let field_specs = fields
         .iter()
@@ -7664,6 +7704,7 @@ pub(crate) fn fielded_object(name: String, is_struct: bool, fields: Vec<(String,
         })
         .collect();
     let slots: Vec<Value> = fields.into_iter().map(|(_, v)| v).collect();
+    let comparable = native_declares_comparable(&name);
     let def = Rc::new(TypeDef {
         name,
         fields: field_specs,
@@ -7672,7 +7713,10 @@ pub(crate) fn fielded_object(name: String, is_struct: bool, fields: Vec<(String,
         is_struct,
         structural_eq: is_struct,
         key_capable: std::cell::Cell::new(false),
-        derives_comparable: false,
+        // The value the program actually holds, so this is the seeding that decides whether `<`
+        // works. `fielded_object` is handed the SHORT name the shape carries, which is what the
+        // lookup keys on.
+        derives_comparable: comparable,
         derives_tojson: false,
         opaque: false,
         field_defaults: Vec::new(),

@@ -446,11 +446,11 @@ impl Checker {
     /// [`Checker::seed_ext_traits`] instead.
     fn native_declares_builtin_trait(&self, name: &str, t: BuiltinTrait) -> bool {
         use noeta_ext_abi::NominalType;
+        // The shared reading, so what the checker admits and what the runtimes serve is one
+        // question rather than three: both backends seed their ordering flag through the same
+        // predicate.
         let advertises = |traits: &'static [&'static str]| {
-            traits
-                .iter()
-                .filter_map(|n| BuiltinTrait::from_name(n))
-                .any(|declared| declared == t)
+            noeta_ext_abi::registry::declares_builtin_trait(traits, t.name())
         };
         let reg = self.reg();
         reg.extensions()

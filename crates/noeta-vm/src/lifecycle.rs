@@ -680,7 +680,24 @@ impl<'m> Vm<'m> {
             .map(|(t, f, proto)| ((t.clone(), f.clone()), *proto))
             .collect();
         let destruct_reachable = module.destruct_reachable.iter().cloned().collect();
-        let comparable_derives = module.comparable_derives.iter().cloned().collect();
+        // The program's own `@derive(Comparable)` types, PLUS every native declaration advertising
+        // the built-in. Only the first half is in the artifact — a native type's traits belong to
+        // the installed units, not to the module — and taking only the first half is what made a
+        // native enum or struct type-check `<` and then abort: the checker read the declaration and
+        // this set never did.
+        let comparable_derives: HashSet<String> = module
+            .comparable_derives
+            .iter()
+            .cloned()
+            .chain(
+                persist
+                    .registry
+                    .unwrap_or_else(noeta_stdlib::registry::default_seeded)
+                    .builtin_trait_declarers(COMPARABLE_TRAIT)
+                    .into_iter()
+                    .map(str::to_string),
+            )
+            .collect();
         let tojson_derives = module.tojson_derives.iter().cloned().collect();
         // Lift the `@derive(Deserialize<Json>)` decode recipes into a name→recipe map (L2.2 DI) so
         // `Op::DecodeTyped` can look up a runtime type name in O(1).
@@ -830,6 +847,10 @@ impl<'m> Vm<'m> {
             .unwrap_or_else(noeta_stdlib::registry::default_seeded)
     }
 }
+
+/// The built-in trait whose native declarers complete a VM's `comparable_derives` at load — named
+/// once rather than spelled at the seeding site, and the same string `noeta-eval` seeds from.
+const COMPARABLE_TRAIT: &str = "Comparable";
 
 thread_local! {
     /// The count of **live session heap-owners** on this thread. A [`VmSession`]'s persistent

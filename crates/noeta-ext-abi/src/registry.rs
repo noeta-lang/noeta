@@ -3964,6 +3964,45 @@ pub const BUILTIN_TRAIT_NAMES: &[&str] = &[
     "Validate",
 ];
 
+/// Whether a declaration's `traits` list advertises the built-in trait `name`.
+///
+/// The **one** reading of a `traits` entry as a built-in, shared by the checker (which decides
+/// whether a `<` type-checks and whether a `T: Comparable` bound admits the type) and by both
+/// backends (which decide whether the value actually orders at run time). Those were three
+/// readings, and two of them said no: a native enum or fielded declaration advertising
+/// `Comparable` type-checked `<` and then aborted, because the runtimes seeded their ordering flag
+/// from a `.noe` `@derive` and never looked at the declaration at all.
+///
+/// A name outside [`BUILTIN_TRAIT_NAMES`] answers `false` even when the list contains it verbatim:
+/// it is either a native `ExtTrait` — a different channel entirely — or dead data, and neither is
+/// a built-in this can vouch for.
+pub fn declares_builtin_trait(traits: &[&str], name: &str) -> bool {
+    BUILTIN_TRAIT_NAMES.contains(&name) && traits.contains(&name)
+}
+
+impl Registry {
+    /// Every native **enum** and **fielded** declaration advertising the built-in trait `name`, by
+    /// the SHORT name a runtime shape carries.
+    ///
+    /// The bytecode VM's ordering gate is a set membership on that short name, and a native
+    /// declaration never appears in the program's own `@derive` list — the artifact records what
+    /// the *program* declared, and a native type's traits are a property of the installed units.
+    /// So the set is completed here at load, from the registry that entry is actually running
+    /// against: an embed session with its own extension set gets its own answer rather than the
+    /// process-global one baked in at compile time.
+    pub fn builtin_trait_declarers(&self, name: &str) -> Vec<&'static str> {
+        self.enums()
+            .filter(|en| declares_builtin_trait(en.traits, name))
+            .map(|en| en.name)
+            .chain(
+                self.fielded()
+                    .filter(|f| declares_builtin_trait(f.traits, name))
+                    .map(|f| f.name),
+            )
+            .collect()
+    }
+}
+
 /// Whether `name` resolves to a trait the assembled `units` can answer for: a built-in
 /// ([`BUILTIN_TRAIT_NAMES`]) or a native [`ExtTrait`] declared by some unit, named by its **short**
 /// name or its **qualified** identity — exactly the two spellings `Checker::seed_ext_traits`'s
