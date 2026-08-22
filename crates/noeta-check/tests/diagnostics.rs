@@ -27,8 +27,8 @@ fn render_checks(src: &str) -> String {
 fn checker_diagnostic_gallery() {
     // This test is its own assembling driver (audit-6 F2): seed the std units first.
     noeta_stdlib::registry::default_seeded();
-    // One representative program per checker diagnostic. E0013 (unknown type) is deferred to
-    // M1.9 and intentionally absent.
+    // One representative program per checker diagnostic. E0013 has a gallery of its own below,
+    // because what it says about a *nearly* correct name is the whole point of it.
     let cases = [
         ("E0007 arithmetic type mismatch", "echo 1 + true;"),
         (
@@ -55,6 +55,64 @@ fn checker_diagnostic_gallery() {
         out.push('\n');
     }
     insta::assert_snapshot!(out);
+}
+
+/// **An unknown type names a real one badly, far more often than it names nothing.**
+///
+/// Two shapes, both ordinary. A bare name the file forgot to import (`x: Uuid`), and a dotted one
+/// reaching through the wrong module — `Request` lives at `std.http.Request`, not under
+/// `std.http.server`, so `server.Request` names nothing however sensible it looks.
+///
+/// The second half of each case is the diagnostic that used to follow and read as a riddle. An
+/// unresolved annotation survives as a `Type::Named("server.Request")`, which displays by its last
+/// segment exactly as the real `std.http.Request` does — so the mismatch rendered as
+/// `expected `Request`, found `Request``. Both sides now qualify when, and only when, their short
+/// forms collide.
+#[test]
+fn unknown_type_gallery() {
+    noeta_stdlib::registry::default_seeded();
+    let cases = [
+        (
+            "E0013 a bare name that was never imported",
+            "fn label(id: Uuid): string { return \"x\"; }\necho label(\"u\");",
+        ),
+        (
+            "E0013 a dotted name reaching through the wrong module",
+            "use std.http.server\nfn handle(r: server.Request): string { return r.method(); }\necho handle(server.incoming(\"GET\", \"/a\"));",
+        ),
+        (
+            "E0013 a name nothing resolves, which keeps the general help",
+            "fn f(x: Nonesuch): int { return 1; }",
+        ),
+    ];
+    let mut out = String::new();
+    for (label, src) in cases {
+        out.push_str(&format!("================ {label} ================\n"));
+        out.push_str(&render_checks(src));
+        out.push('\n');
+    }
+    insta::assert_snapshot!(out);
+}
+
+/// **The advice compiles.**
+///
+/// A help line that names an import is worth more than the general one only if following it
+/// actually works — and "write `Request` with `use std.http.Request`" is a claim about two things
+/// at once, the import path and the spelling to use afterwards. Getting either wrong sends the
+/// reader somewhere worse than the generic help would have.
+#[test]
+fn the_import_a_diagnostic_suggests_resolves_the_error() {
+    noeta_stdlib::registry::default_seeded();
+    for taken in [
+        "use std.id\nuse std.id.Uuid\nfn label(u: Uuid): string { return \"x\"; }\necho label(id.uuid());",
+        "use std.http.server\nuse std.http.Request\nfn handle(r: Request): string { return r.method(); }\necho handle(server.incoming(\"GET\", \"/a\"));",
+    ] {
+        assert_eq!(
+            render_checks(taken),
+            "",
+            "the suggested spelling must check clean:\n{taken}"
+        );
+    }
 }
 
 /// The `match`-arm gallery. E0066 is the first diagnostic in the catalog to carry **two** labels —

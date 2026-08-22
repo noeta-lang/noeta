@@ -717,8 +717,49 @@ impl Type {
 /// display share, so a qualified identity strips to its short display name in exactly one place.
 pub use noeta_ast::short_type_name;
 
+/// A type identity as a message should spell it: short by default, whole under `{:#}`. A free
+/// function rather than a closure because it hands back a borrow of its argument, which is the one
+/// shape a closure cannot express without naming the lifetime.
+fn identity(name: &str, qualified: bool) -> &str {
+    match qualified {
+        true => name,
+        false => short_type_name(name),
+    }
+}
+
+/// Render a pair of types for a **mismatch** message, falling back to qualified identities when
+/// their short forms are indistinguishable.
+///
+/// `short_type_name` strips a qualified identity for readability, which is right almost always and
+/// catastrophic in exactly one place: a message whose two sides are different types that display
+/// the same. `expected `Request`, found `Request`` is not a diagnostic, it is a riddle — and it
+/// arises whenever a name fails to resolve (`server.Request` stays `Type::Named("server.Request")`
+/// and renders as `Request`) or two namespaces genuinely both declare the name.
+///
+/// The fallback is not applied when the strings already differ, so the common case keeps its short,
+/// readable form.
+pub fn mismatch_pair(expected: &Type, found: &Type) -> (String, String) {
+    let (left, right) = (expected.to_string(), found.to_string());
+    match left == right && expected != found {
+        true => (format!("{expected:#}"), format!("{found:#}")),
+        false => (left, right),
+    }
+}
+
+/// `{}` renders short names (`std.id.Uuid` → `Uuid`); `{:#}` keeps every identity qualified. The
+/// alternate form exists for [`mismatch_pair`] and is threaded through the whole walk rather than
+/// applied at the top level only, so a `List<std.http.Request>` disambiguates as readily as a bare
+/// one.
 impl std::fmt::Display for Type {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Captured before any write borrows the formatter, and rendered through `nested` so the
+        // walk stays single — a second renderer for qualified output would be the same rule
+        // spelled twice, and the two would drift the first time a variant was added.
+        let qualified = f.alternate();
+        let nested = move |t: &Type| match qualified {
+            true => format!("{t:#}"),
+            false => format!("{t}"),
+        };
         match self {
             Type::Unknown => f.write_str("?"),
             Type::Dyn => f.write_str("dyn"),
@@ -734,24 +775,24 @@ impl std::fmt::Display for Type {
             Type::Bool => f.write_str("bool"),
             Type::String => f.write_str("string"),
             Type::Bytes => f.write_str("bytes"),
-            Type::List(t) => write!(f, "List<{t}>"),
-            Type::Set(t) => write!(f, "Set<{t}>"),
-            Type::Map(k, v) => write!(f, "Map<{k}, {v}>"),
-            Type::Option(t) => write!(f, "Option<{t}>"),
-            Type::Result(t, e) => write!(f, "Result<{t}, {e}>"),
+            Type::List(t) => write!(f, "List<{}>", nested(t)),
+            Type::Set(t) => write!(f, "Set<{}>", nested(t)),
+            Type::Map(k, v) => write!(f, "Map<{}, {}>", nested(k), nested(v)),
+            Type::Option(t) => write!(f, "Option<{}>", nested(t)),
+            Type::Result(t, e) => write!(f, "Result<{}, {}>", nested(t), nested(e)),
             Type::Kind(k) => f.write_str(k.name()),
-            Type::DynTrait(tr) => write!(f, "dyn {}", short_type_name(tr)),
+            Type::DynTrait(tr) => write!(f, "dyn {}", identity(tr, qualified)),
             // A parameter renders as the user wrote it — identically to the `Named("T")` it used
             // to be, so no diagnostic or hover text changes.
             Type::Param(p) => f.write_str(&p.name),
-            Type::Named(n, args) if args.is_empty() => f.write_str(short_type_name(n)),
+            Type::Named(n, args) if args.is_empty() => f.write_str(identity(n, qualified)),
             Type::Named(n, args) => {
-                write!(f, "{}<", short_type_name(n))?;
+                write!(f, "{}<", identity(n, qualified))?;
                 for (i, a) in args.iter().enumerate() {
                     if i > 0 {
                         f.write_str(", ")?;
                     }
-                    write!(f, "{a}")?;
+                    f.write_str(&nested(a))?;
                 }
                 f.write_str(">")
             }
@@ -761,9 +802,9 @@ impl std::fmt::Display for Type {
                     if i > 0 {
                         f.write_str(", ")?;
                     }
-                    write!(f, "{p}")?;
+                    f.write_str(&nested(p))?;
                 }
-                write!(f, ") -> {ret}")
+                write!(f, ") -> {}", nested(ret))
             }
             // "Every numeric scalar" has a name, and printing it beats spelling twelve members in
             // the middle of a sentence — `not assignable to `number`` says the same thing as
@@ -776,7 +817,7 @@ impl std::fmt::Display for Type {
                     if i > 0 {
                         f.write_str(" | ")?;
                     }
-                    write!(f, "{m}")?;
+                    f.write_str(&nested(m))?;
                 }
                 Ok(())
             }
@@ -786,7 +827,7 @@ impl std::fmt::Display for Type {
                     if i > 0 {
                         f.write_str(", ")?;
                     }
-                    write!(f, "{e}")?;
+                    f.write_str(&nested(e))?;
                 }
                 f.write_str(")")
             }
@@ -805,6 +846,78 @@ mod tests {
             args,
             span: Span::new(0, 0),
         }
+    }
+
+    /// **A mismatch whose two sides display the same is a riddle, not a diagnostic.**
+    ///
+    /// `short_type_name` strips a qualified identity for readability, which is right almost
+    /// everywhere and catastrophic here: an unresolved annotation (`server.Request`) and the real
+    /// type (`std.http.Request`) both render as `Request`, so the message read
+    /// `expected `Request`, found `Request``.
+    #[test]
+    fn a_mismatch_qualifies_only_when_the_short_forms_collide() {
+        let real = Type::Named("std.http.Request".to_string(), Vec::new());
+        let unresolved = Type::Named("server.Request".to_string(), Vec::new());
+        assert_eq!(real.to_string(), unresolved.to_string(), "the collision");
+        assert_eq!(
+            mismatch_pair(&unresolved, &real),
+            ("server.Request".to_string(), "std.http.Request".to_string())
+        );
+
+        // The common case keeps its short, readable form — qualifying every message would be a
+        // worse diagnostic everywhere to fix one.
+        assert_eq!(
+            mismatch_pair(&Type::Int, &Type::String),
+            ("int".to_string(), "string".to_string())
+        );
+        assert_eq!(
+            mismatch_pair(&real, &Type::Named("std.id.Uuid".to_string(), Vec::new())),
+            ("Request".to_string(), "Uuid".to_string())
+        );
+        // Two spellings of the SAME type are not a mismatch to disambiguate.
+        assert_eq!(
+            mismatch_pair(&real, &real.clone()),
+            ("Request".to_string(), "Request".to_string())
+        );
+    }
+
+    #[test]
+    fn the_alternate_form_qualifies_at_every_depth() {
+        // Threading the flag through the walk rather than applying it at the top level is what
+        // makes a collision inside a container disambiguate too.
+        let request = Type::Named("std.http.Request".to_string(), Vec::new());
+        let listed = Type::List(Box::new(request.clone()));
+        assert_eq!(listed.to_string(), "List<Request>");
+        assert_eq!(format!("{listed:#}"), "List<std.http.Request>");
+
+        let nested = Type::Map(
+            Box::new(Type::String),
+            Box::new(Type::Result(
+                Box::new(Type::Option(Box::new(request.clone()))),
+                Box::new(Type::Named("std.http.HttpError".to_string(), Vec::new())),
+            )),
+        );
+        assert_eq!(
+            format!("{nested:#}"),
+            "Map<string, Result<Option<std.http.Request>, std.http.HttpError>>"
+        );
+        assert_eq!(
+            nested.to_string(),
+            "Map<string, Result<Option<Request>, HttpError>>",
+            "and the default form is unchanged"
+        );
+
+        let f = Type::Fn {
+            params: vec![request.clone()],
+            ret: Box::new(Type::Tuple(vec![request.clone(), Type::Int])),
+        };
+        assert_eq!(
+            format!("{f:#}"),
+            "fn(std.http.Request) -> (std.http.Request, int)"
+        );
+
+        let union = Type::union([request, Type::Int]);
+        assert!(format!("{union:#}").contains("std.http.Request"));
     }
 
     #[test]

@@ -2545,10 +2545,11 @@ impl Checker {
                 continue;
             }
             if !self.arg_assignable(arg, param) {
+                let (shown_param, shown_arg) = noeta_types::mismatch_pair(param, arg);
                 let d = self.error(
                     DiagnosticCode::TypeMismatch,
                     span,
-                    format!("argument of type `{arg}` is not assignable to `{param}`"),
+                    format!("argument of type `{shown_arg}` is not assignable to `{shown_param}`"),
                 );
                 // `number` is the one parameter type whose name does not list its members, so say
                 // what it admits — once, here, rather than in the message every call site prints.

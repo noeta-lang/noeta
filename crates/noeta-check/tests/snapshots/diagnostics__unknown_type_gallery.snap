@@ -1,0 +1,50 @@
+---
+source: crates/noeta-check/tests/diagnostics.rs
+expression: out
+---
+================ E0013 a bare name that was never imported ================
+[E0013] Error: unknown type `Uuid`
+   ╭─[ snippet.noe:1:14 ]
+   │
+ 1 │ fn label(id: Uuid): string { return "x"; }
+   │              ──┬─  
+   │                ╰─── unknown type `Uuid`
+   │ 
+   │ Help: `Uuid` is `std.id.Uuid` — add `use std.id.Uuid`
+───╯
+[E0007] Error: argument of type `string` is not assignable to `Uuid`
+   ╭─[ snippet.noe:2:6 ]
+   │
+ 2 │ echo label("u");
+   │      ──┬──  
+   │        ╰──── argument of type `string` is not assignable to `Uuid`
+───╯
+
+================ E0013 a dotted name reaching through the wrong module ================
+[E0013] Error: unknown type `server.Request`
+   ╭─[ snippet.noe:2:14 ]
+   │
+ 2 │ fn handle(r: server.Request): string { return r.method(); }
+   │              ───────┬──────  
+   │                     ╰──────── unknown type `server.Request`
+   │ 
+   │ Help: `Request` is `std.http.Request`, not a member of `server` — write `Request` with `use std.http.Request`
+───╯
+[E0007] Error: argument of type `std.http.Request` is not assignable to `server.Request`
+   ╭─[ snippet.noe:3:6 ]
+   │
+ 3 │ echo handle(server.incoming("GET", "/a"));
+   │      ───┬──  
+   │         ╰──── argument of type `std.http.Request` is not assignable to `server.Request`
+───╯
+
+================ E0013 a name nothing resolves, which keeps the general help ================
+[E0013] Error: unknown type `Nonesuch`
+   ╭─[ snippet.noe:1:9 ]
+   │
+ 1 │ fn f(x: Nonesuch): int { return 1; }
+   │         ────┬───  
+   │             ╰───── unknown type `Nonesuch`
+   │ 
+   │ Help: name a declared type, one imported with `use` (native types too, e.g. `use std.id.Uuid`), a generic parameter, or a built-in
+───╯

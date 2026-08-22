@@ -2357,6 +2357,7 @@ impl Checker {
                 continue;
             }
             if !self.arg_assignable(arg, &expected) {
+                let (expected, arg) = noeta_types::mismatch_pair(&expected, arg);
                 self.error(
                     DiagnosticCode::TypeMismatch,
                     span,

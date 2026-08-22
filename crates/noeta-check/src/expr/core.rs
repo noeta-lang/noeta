@@ -645,6 +645,7 @@ impl Checker {
 
     pub(crate) fn subsume(&mut self, actual: &Type, expected: &Type, span: Span) {
         if !self.assignable(actual, expected) {
+            let (expected, actual) = noeta_types::mismatch_pair(expected, actual);
             self.error(
                 DiagnosticCode::TypeMismatch,
                 span,

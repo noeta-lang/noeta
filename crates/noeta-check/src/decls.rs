@@ -514,6 +514,9 @@ impl Checker {
                         .split_once('.')
                         .is_some_and(|(root, _)| self.symbols.types.contains(root))
                 {
+                    // Computed before the diagnostic is opened: `error` borrows the checker
+                    // mutably for the builder's lifetime, and the lookup needs it immutably.
+                    let suggestion = self.suggest_type_import(name.as_str());
                     let diag = self.error(
                         DiagnosticCode::UnknownType,
                         *span,
@@ -533,10 +536,13 @@ impl Checker {
                             "`Ok`/`Err` are a `Result`'s values, not types — take it apart with \
                              `match x { Ok(v) => …, Err(e) => … }`, or propagate it with `?`",
                         ),
-                        _ => diag.help(
-                            "name a declared type, one imported with `use` (native types too, \
-                             e.g. `use std.id.Uuid`), a generic parameter, or a built-in",
-                        ),
+                        _ => match suggestion {
+                            Some(help) => diag.help(help),
+                            None => diag.help(
+                                "name a declared type, one imported with `use` (native types too, \
+                                 e.g. `use std.id.Uuid`), a generic parameter, or a built-in",
+                            ),
+                        },
                     };
                 }
                 // Key-capability gate (extern-types X4): a `Map<K, _>` key / `Set<T>` element
@@ -565,6 +571,33 @@ impl Checker {
                 self.check_type_args(name.as_str(), args, *span);
             }
         }
+    }
+
+    /// The help line for an unknown type that a real one is *nearly* named by — the overwhelmingly
+    /// common way to get E0013.
+    ///
+    /// Two shapes reach here and both are ordinary. `x: Uuid` without the import: the type exists
+    /// and the file simply has not asked for it. And `r: server.Request`: the type exists under a
+    /// different namespace than the module the caller reached through — `Request` lives at
+    /// `std.http.Request`, not under `std.http.server`, so the dotted spelling names nothing.
+    ///
+    /// Naming the import is worth the lookup because the generic help cannot: "name a declared
+    /// type, one imported with `use`" is true and leaves the reader to guess *which* `use`, and the
+    /// second shape leaves them guessing that the type is not where they thought at all.
+    fn suggest_type_import(&self, name: &str) -> Option<String> {
+        let short = noeta_ast::short_type_name(name);
+        let qualified = self.reg().find_type(short)?.qualified();
+        // A bare name that resolves is a missing import and nothing more.
+        if short == name {
+            return Some(format!(
+                "`{short}` is `{qualified}` — add `use {qualified}`"
+            ));
+        }
+        Some(format!(
+            "`{short}` is `{qualified}`, not a member of `{}` — write `{short}` with \
+             `use {qualified}`",
+            name.rsplit_once('.').map(|(head, _)| head).unwrap_or(name),
+        ))
     }
 
     /// Validate a named type's **generic arguments**: each argument is itself a type reference that

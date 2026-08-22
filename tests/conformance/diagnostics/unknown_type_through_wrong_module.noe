@@ -1,0 +1,20 @@
+// A type reached through the wrong module names nothing, and both diagnostics that follow have to
+// be readable. `Request` lives at `std.http.Request`, not under `std.http.server` — so
+// `server.Request` is E0013, and the mismatch it causes must not render as `Request` on both
+// sides. An unresolved annotation survives as a name that displays by its last segment exactly as
+// the real type does, and `expected `Request`, found `Request`` is a riddle rather than a
+// diagnostic; the two sides qualify when, and only when, their short forms would collide.
+//
+// The corpus can pin a code and a span but not a message, so the wording is asserted in
+// `noeta-check`'s rendered-diagnostic gallery. What is pinned here is that BOTH errors are
+// reported, at the annotation and at the call.
+// expect: error E0013 at 16:14
+// expect: error E0007 at 20:6
+// expect: exit 1
+use std.http.server
+
+fn handle(r: server.Request): string {
+    return r.method()
+}
+
+echo handle(server.incoming("GET", "/a"))
