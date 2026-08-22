@@ -35,7 +35,7 @@ pub enum NumReduce {
     Max,
 }
 
-/// A `List<bool>` reduction: `any`, `all`, `count`.
+/// A `List<bool>` reduction: `any`, `all`, `count_true`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BoolReduce {
     /// `any()` → whether at least one element is `true` (OR; empty → `false`).
@@ -140,7 +140,7 @@ pub enum RedNum {
     F32(f32),
 }
 
-/// The result of a `List<bool>` reduction: `any`/`all` → a `bool`, `count` → an `int`.
+/// The result of a `List<bool>` reduction: `any`/`all` → a `bool`, `count_true` → an `int`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum RedBool {
     Bool(bool),
@@ -155,6 +155,17 @@ fn non_numeric(op: NumReduce, found: &str) -> StdError {
             op.label()
         ),
     }
+}
+
+/// The refusal a boolean reduction gives for an element that is not a `bool`.
+///
+/// Public because the **lazy** surface reaches the same refusal from a different door: the
+/// iterator's `any`/`all` short-circuit rather than fold, so they never enter the loop below and
+/// would otherwise have to phrase the failure themselves. A second phrasing is a second rejection
+/// class — the runtime-rejection census counts it as one and asks whether a checked program can
+/// reach it — for what is the same refusal on the same grounds.
+pub fn non_bool_element_error(op: BoolReduce) -> StdError {
+    non_bool(op)
 }
 
 fn non_bool(op: BoolReduce) -> StdError {

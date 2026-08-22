@@ -95,8 +95,8 @@ pub use host::{CounterIds, DeterministicClock, DeterministicEntropy, SandboxHost
 pub use iter::IterMethod;
 pub use reductions::{
     BoolReduce, NumReduce, RedBool, RedNum, checked_sum_packed, checked_sum_scalars,
-    packed_field_folds_numerically, reduce_bool_packed, reduce_bool_scalars, reduce_num_packed,
-    reduce_num_scalars, reduction_element_error,
+    non_bool_element_error, packed_field_folds_numerically, reduce_bool_packed,
+    reduce_bool_scalars, reduce_num_packed, reduce_num_scalars, reduction_element_error,
 };
 #[cfg(feature = "ring-regex")]
 pub use regex::RegexExtension;

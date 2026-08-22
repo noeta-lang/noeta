@@ -1016,7 +1016,7 @@ impl<'m> Vm<'m> {
                     }
                 };
                 let mut answer: Option<bool> = None;
-                let mut bad: Option<&'static str> = None;
+                let mut bad = false;
                 let result = {
                     let mut apply =
                         |func: Value, arg: Value| self.call_value(func, vec![arg], span);
@@ -1036,11 +1036,11 @@ impl<'m> Vm<'m> {
                                     Some(all) => match e.as_bool() {
                                         Some(b) if b != all => answer = Some(!all),
                                         Some(_) => {}
-                                        None => bad = Some(e.type_name()),
+                                        None => bad = true,
                                     },
                                 }
                                 e.release();
-                                if answer.is_some() || bad.is_some() {
+                                if answer.is_some() || bad {
                                     break Ok(());
                                 }
                             }
@@ -1052,12 +1052,16 @@ impl<'m> Vm<'m> {
                 if let Err(err) = result {
                     return Err(self.iter_abort(err, span));
                 }
-                if let Some(found) = bad {
-                    return Err(self.error(
-                        DiagnosticCode::TypeMismatch,
-                        span,
-                        format!("`{name}` expects boolean elements, found {found}"),
-                    ));
+                if bad {
+                    // The SHARED refusal, not a second phrasing of it. A short-circuit never
+                    // enters the eager fold's loop, so it would otherwise invent its own message —
+                    // and a second phrasing is a second entry in the runtime-rejection census for
+                    // the same refusal on the same grounds.
+                    let op = noeta_stdlib::BoolReduce::from_name(name)
+                        .expect("`any`/`all` are boolean reductions");
+                    return Err(
+                        self.std_dispatch_error(noeta_stdlib::non_bool_element_error(op), span)
+                    );
                 }
                 // Drained without a decision: `any` of nothing is false, `all` of nothing is true,
                 // `contains` found nothing — the empty-case answers the eager reductions give.

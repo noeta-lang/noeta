@@ -1,0 +1,13 @@
+// A boolean reduction over an element that is not a `bool` is refused, and the LAZY door gives the
+// eager door's refusal rather than a second phrasing of it.
+//
+// The element requirement is static wherever the element type is known, so reaching this at all
+// takes a `dyn` the checker cannot see through — an adapter whose closure returns `dyn`. That is
+// the same reachability the eager `[1, 2].any()` has, and it is why both doors must answer with one
+// message: a second wording is a second runtime-rejection class in the census, for the same refusal
+// on the same grounds.
+// expect: error E0007 at 13:6
+// expect: exit 1
+fn opaque(x: dyn): dyn { return x }
+
+echo [1, 2, 3].iter().map(fn(n) => opaque(n)).any()

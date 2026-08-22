@@ -4634,14 +4634,17 @@ impl Interpreter {
                         // reduction gives, raised here rather than after a pointless drain.
                         Some(all) => match v {
                             Value::Bool(b) => (b != all).then_some(!all),
-                            other => {
-                                return Err(self.runtime_error(
-                                    DiagnosticCode::TypeMismatch,
+                            _ => {
+                                // The SHARED refusal, not a second phrasing of it. A short-circuit
+                                // never enters the eager fold's loop, so it would otherwise invent
+                                // its own message — and a second phrasing is a second entry in the
+                                // runtime-rejection census for the same refusal on the same
+                                // grounds.
+                                let op = noeta_stdlib::BoolReduce::from_name(name)
+                                    .expect("`any`/`all` are boolean reductions");
+                                return Err(self.std_dispatch_error(
+                                    noeta_stdlib::non_bool_element_error(op),
                                     span,
-                                    format!(
-                                        "`{name}` expects boolean elements, found {}",
-                                        other.type_name()
-                                    ),
                                 ));
                             }
                         },
