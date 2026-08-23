@@ -69,11 +69,14 @@ pub fn of_bool_reduce(m: BoolReduce) -> WidthDisclosure {
 /// This is the hole a census over enums cannot see. `ListMethod`/`NumReduce`/`BoolReduce` between
 /// them cover twenty of the checker's twenty-seven `List<T>` methods; the rest are matched on their
 /// name at the dispatch site (`is_bulk_method`, and `checked_sum`'s own special case), so no
-/// exhaustive match ever forces them to be classified. Two of them were wrong when this table was
-/// written, and neither was reachable from anything that would have said so.
+/// exhaustive match ever forces them to be classified — and a door nothing forces is a door that
+/// reads the erased word until someone goes looking. Two of the rows below (`abs`, `clamp`) were
+/// found that way, by classifying the surface rather than by anything failing.
 ///
 /// The completeness check lives in `noeta-conformance`'s census, which reads the checker's own
-/// `list_method` surface and asserts every name is either a member of an enum or a row here.
+/// `list_method` surface and asserts every name is either a member of an enum or a row here — and
+/// walks a `u64` past bit 63 through every row that discloses, so a classification here is a claim
+/// the census has to make good on rather than a label.
 pub const NAME_DISPATCHED_LIST_METHODS: &[(&str, WidthDisclosure)] = &[
     // The overflow-reporting fold: whether it reports at all depends on the element width.
     ("checked_sum", WidthDisclosure::Order),

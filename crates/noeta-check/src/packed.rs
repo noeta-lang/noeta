@@ -355,9 +355,10 @@ impl Checker {
     /// (the erased-word walk, not `Display` dispatch), so a hinted element and an unhinted one
     /// differ in digits alone.
     ///
-    /// One arithmetic door reads the same hint at the same kind of span: `checked_sum` folds at the
-    /// element width, and a `u64` past bit 63 is a negative word, so a signed fold finds no overflow
-    /// where the type says there is one. Same question, same answer, same channel — see
+    /// A few arithmetic doors read the same hint at the same kind of span, because a `u64` past bit
+    /// 63 is a negative word: `checked_sum` folds at the element width, so a signed fold finds no
+    /// overflow where the type says there is one, and the bulk `abs`/`clamp` compare that word
+    /// against zero and against their bounds. Same question, same answer, same channel — see
     /// [`crate::stdlib::discloses_width`].
     ///
     /// [`HintPurpose::Display`] is the numbering, deliberately: an ordering walk compares two values

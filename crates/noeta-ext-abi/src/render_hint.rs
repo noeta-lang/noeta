@@ -27,8 +27,8 @@
 //!   and a `for` over a set or map — applied by each backend's comparator against its own value
 //!   model, through [`unsigned_order`] and [`map_key_order`].
 //!
-//! One **arithmetic** door takes the ordering hint too, and it is the exception that shows what the
-//! hint really answers. `checked_sum` reports integer overflow instead of wrapping, so the element
+//! A few **arithmetic** doors take the ordering hint too, and they are the exception that shows what
+//! the hint really answers. `checked_sum` reports integer overflow instead of wrapping, so the element
 //! width decides not how a number reads but *which sums overflow at all* — and at 64 bits the two
 //! readings disagree about that (`u64::MAX + 2` wraps past zero; the same words read signed are
 //! `-1 + 2` and overflow nothing). That is the same one bit an ordering door needs about the same
@@ -36,6 +36,12 @@
 //! What the hint cannot answer there is a **narrow** width: it says "this word is a `u64`", not
 //! "this word is 8 bits wide", and a narrow fold's overflow point is its own width. A narrow list
 //! carries that in its packed schema instead — see `checked_sum_packed` and its boxed twin.
+//!
+//! The bulk array ops split on the same line, and the split is worth stating because it is the whole
+//! rule in miniature. `abs` and `clamp` **compare** — against zero, and against the bounds — so a
+//! boxed `List<u64>` needs the bit or `u64::MAX` folds to `1` and clamps to the *low* bound it sits
+//! far above. `scale` and `neg` only **compute**: a wrapping product and a two's-complement negation
+//! are the same bits whichever sign the type reads them with, so neither takes the hint at all.
 //!
 //! The hint mirrors only the structure those walks take: a scalar, a list/set's elements, a map's
 //! keys and values, positional slots (a tuple's positions, an object's fields), and an enum's

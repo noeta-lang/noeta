@@ -461,9 +461,10 @@ pub enum Rvalue {
         supplied: Option<u64>,
         /// The **ordering hint** for a method that reveals an order a program can observe —
         /// `.sorted()`, `.min()`, `.max()` on a list, `.keys()`/`.values()` on a map — whose
-        /// receiver's static type carries an unsigned 64-bit integer, and for the one arithmetic
-        /// method that needs the identical bit (`checked_sum`, which reports overflow at the element
-        /// width). `None` for every other call, which is nearly all of them.
+        /// receiver's static type carries an unsigned 64-bit integer, and for the arithmetic methods
+        /// that need the identical bit (`checked_sum`, which reports overflow at the element width,
+        /// and the bulk `abs`/`clamp`, which compare against zero and against their bounds). `None`
+        /// for every other call, which is nearly all of them.
         ///
         /// The ordering twin of [`Rvalue::Render`], emitted for the same reason: a fixed-width
         /// integer is erased to its i64 word, so a `u64` past bit 63 is a negative word and would

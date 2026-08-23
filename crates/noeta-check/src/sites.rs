@@ -185,9 +185,10 @@ pub struct Sites {
     /// `u64` past bit 63 is a negative i64 word, so it would order below every small value unless
     /// the *type* says otherwise. Recorded at the doors that reveal an order a program can see —
     /// `.sorted()`, `.min()`, `.max()`, `.keys()`, `.values()`, and a `for` over a set or map —
-    /// **and** at the one arithmetic door needing the identical bit: `checked_sum`, which reports
+    /// **and** at the arithmetic doors needing the identical bit: `checked_sum`, which reports
     /// overflow at the element width rather than wrapping, so the two readings of a 64-bit word
-    /// disagree about which sums overflow at all. Never at a set's canonical buffer or a map's key
+    /// disagree about which sums overflow at all, and the two bulk array ops that compare — `abs`
+    /// against zero and `clamp` against its bounds. Never at a set's canonical buffer or a map's key
     /// placement, which are identity orders
     /// built at one site and probed at another (see [`noeta_ast::render_hint`]). Empty for every
     /// program with no `u64` in an ordered position. A pure function of the program.

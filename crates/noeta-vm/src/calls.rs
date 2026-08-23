@@ -1174,17 +1174,28 @@ impl<'m> Vm<'m> {
             let out = result.map_err(|e| self.std_dispatch_error(e, span))?;
             return Ok(Value::packed_list(schema, out));
         }
-        // Boxed fallback.
+        // Boxed fallback. A packed buffer names its element width in its schema; these words do not,
+        // so the ops that COMPARE — `abs` against zero, `clamp` against its bounds — take the
+        // receiver's element hint the checker recorded at this call span, exactly as `min`/`max` do.
+        // `scale` and `neg` only compute, and a wrapping product or negation is the same bits under
+        // either reading, so neither is given the bit.
+        let unsigned = matches!(
+            self.order_hint(&span).and_then(|h| h.elements()),
+            Some(noeta_ast::RenderHint::Unsigned)
+        );
         let a = self.list_reduction_scalars(v, method, 0, span)?;
         let result = match method {
             "scale" => noeta_stdlib::scale_num_scalars(&a, arg_scalar(self, 0)?),
-            "clamp" => {
-                noeta_stdlib::clamp_num_scalars(&a, arg_scalar(self, 0)?, arg_scalar(self, 1)?)
-            }
+            "clamp" => noeta_stdlib::clamp_num_scalars(
+                &a,
+                arg_scalar(self, 0)?,
+                arg_scalar(self, 1)?,
+                unsigned,
+            ),
             _ => {
                 let op = noeta_stdlib::ElemMap::from_name(method)
                     .expect("the caller gates this to a bulk method name");
-                noeta_stdlib::map_num_scalars(op, &a)
+                noeta_stdlib::map_num_scalars(op, &a, unsigned)
             }
         };
         let out = result.map_err(|e| self.std_dispatch_error(e, span))?;

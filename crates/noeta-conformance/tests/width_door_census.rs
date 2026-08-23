@@ -23,7 +23,8 @@ use noeta_stdlib::iter::IterMethod;
 use noeta_stdlib::reductions::{BoolReduce, NumReduce};
 use noeta_stdlib::ring1::{ListMethod, MapMethod, SetMethod};
 use noeta_stdlib::width_doors::{
-    of_bool_reduce, of_iter_method, of_list_method_name, of_num_reduce,
+    NAME_DISPATCHED_LIST_METHODS, of_bool_reduce, of_iter_method, of_list_method_name,
+    of_num_reduce,
 };
 use noeta_stdlib::width_doors_ring1::{
     WidthDisclosure, of_list_method, of_map_method, of_set_method,
@@ -164,13 +165,49 @@ fn iter_probe(m: IterMethod) -> Option<Probe> {
     }
 }
 
-/// The probe for each numeric list reduction.
+/// The probe for each **name-dispatched** `List<T>` method — the rows of
+/// [`NAME_DISPATCHED_LIST_METHODS`], which no enum reaches and which therefore had a classification
+/// and nothing walking through it.
 ///
-/// The **eager** `xs.checked_sum()` is not among them and cannot be: it is neither a [`NumReduce`]
-/// nor a [`ListMethod`], being name-dispatched on the list surface, so no enum here reaches it and
-/// nothing forces a probe. Its lazy twin below is the one this census can hold, and the two share a
-/// fold — `tests/conformance/types/unsigned_checked_sum.noe` drives both spellings on both engines,
-/// which is where the eager door is pinned.
+/// Matched on the name rather than on a variant, so this cannot be exhaustive the way its five
+/// siblings are; the completeness that replaces the compiler's is the `_ =>` arm, which refuses an
+/// unknown name outright. Adding a row to the table without a probe here fails at that arm, and
+/// adding one classified [`WidthDisclosure::Order`] or `Display` with `None` fails in [`walk`].
+fn name_dispatched_probe(name: &str) -> Option<Probe> {
+    let xs = format!("xs: List<u64> = [{BIG}, {MID}, 1u64]");
+    match name {
+        // The overflow-reporting fold, in its EAGER spelling — the one the enums cannot reach.
+        // `u64::MAX + 2` wraps past zero; the same words read signed are `-1 + 2` and overflow
+        // nothing, so an unhinted fold answers `some(1)`.
+        "checked_sum" => p(
+            format!("ys: List<u64> = [{BIG}, 2u64]\necho ys.checked_sum()"),
+            "none",
+        ),
+        // An unsigned value is ALREADY non-negative, so `abs` is the identity. Read signed, the
+        // same words are `-1` and `i64::MIN`, and `wrapping_abs` folds the first to `1`.
+        "abs" => p(
+            format!("{xs}\necho xs.abs()"),
+            format!("[{BIG_D}, {MID_D}, 1]"),
+        ),
+        // Both boundaries sit far ABOVE the high bound, so both clamp down to it. Read signed they
+        // are negative and clamp UP to the low bound instead — the same wrong answer for two
+        // different values, which is why the control element is in the list.
+        "clamp" => p(
+            format!("{xs}\necho xs.clamp(0u64, 100u64)"),
+            "[100, 100, 1]",
+        ),
+        // Classified as disclosing nothing: `scale` and `neg` compute rather than compare (a
+        // wrapping product and a two's-complement negation are the same bits under either reading),
+        // and the rest hand elements onward carrying their own static type.
+        "scale" | "neg" | "len" | "iter" | "enumerate" | "map" | "filter" | "to_bytes" => None,
+        other => panic!(
+            "`{other}` is a name-dispatched `List<T>` method with no probe. Give it a program that \
+             drives a `u64` past bit 63 through it, or say here that it discloses nothing."
+        ),
+    }
+}
+
+/// The probe for each numeric list reduction.
 fn num_reduce_probe(m: NumReduce) -> Option<Probe> {
     let xs = format!("xs: List<u64> = [{BIG}, 1u64, {MID}]");
     match m {
@@ -405,12 +442,30 @@ fn every_reduction_door_reads_a_u64_whole() {
     }
 }
 
+/// The name-dispatched half of the `List<T>` surface, walked with the same `u64` past bit 63.
+///
+/// The five tests above iterate an enum, so the compiler is what makes them complete. These methods
+/// reach their implementation by name — there is no enum to iterate — so the table itself is the
+/// iteration, and [`name_dispatched_probe`]'s refusal arm is what keeps a new row from arriving
+/// without a program behind it. `abs` and `clamp` are the reason this exists: both were classified
+/// as disclosing an order, and being reachable from no enum, both stayed classified and unwalked.
+#[test]
+fn every_name_dispatched_list_door_reads_a_u64_whole() {
+    for &(name, disclosure) in NAME_DISPATCHED_LIST_METHODS {
+        walk(
+            &format!("List::{name} (name-dispatched)"),
+            disclosure,
+            name_dispatched_probe(name),
+        );
+    }
+}
+
 /// **The hole a census over enums cannot see.**
 ///
 /// `ListMethod`/`NumReduce`/`BoolReduce` cover twenty of the checker's twenty-seven `List<T>`
 /// methods. The other seven reach their implementation by NAME — `is_bulk_method`, and
 /// `checked_sum`'s own special case — so no exhaustive match forces them to be classified, and two
-/// of them (`abs`, `clamp`) were wrong when this was written with nothing anywhere to say so.
+/// of them (`abs`, `clamp`) read the erased word with nothing anywhere to say so.
 ///
 /// So the surface is read from the checker itself, which is the authority on what a `List<T>` has:
 /// every name it types must resolve to a disclosure, through an enum or through
@@ -464,9 +519,9 @@ fn every_list_method_the_checker_types_has_a_disclosure() {
         "these `List<T>` methods have no width disclosure: {unclassified:?}\n\n\
          Every method the checker types must say what it lets a program learn about a fixed-width \
          integer. If it is dispatched through a surface enum, classify it there; if it reaches its \
-         implementation by name, add a row to `NAME_DISPATCHED_LIST_METHODS`. A method that \
-         COMPARES (against zero, against a bound, against another element) is where this family's \
-         bugs live — `abs` and `clamp` both read the erased word, and neither was reachable from \
-         anything that would have said so."
+         implementation by name, add a row to `NAME_DISPATCHED_LIST_METHODS` and a probe to \
+         `name_dispatched_probe`. A method that COMPARES (against zero, against a bound, against \
+         another element) is where this family's bugs live — `abs` and `clamp` both compare, and \
+         neither was reachable from anything that would have said so."
     );
 }

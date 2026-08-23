@@ -15,6 +15,14 @@
 //! reductions): a native-width `wrapping_add`/`wrapping_sub`/`wrapping_mul` is exactly the width-
 //! wrapped result the language's `+`/`-`/`*` gives. `abs`/`neg` wrap likewise (`i32::MIN.neg()` stays
 //! `i32::MIN`). `clamp` needs no wrap — its result is already one of its in-range inputs.
+//!
+//! **The ops that COMPARE need the element's signedness told to them.** A packed buffer carries its
+//! element width in its schema, so every kernel above is already exact; a *boxed* list carries only
+//! the erased 64-bit words, and past bit 63 a `u64` is a negative `i64`. `scale` and `neg` are
+//! immune — they compute, and a wrapping product or two's-complement negation is the same bits
+//! whichever sign the type reads them with — while `abs` (against zero) and `clamp` (against the
+//! bounds) compare, and take the one bit their callers read off the ordering hint. See
+//! [`crate::width_doors::NAME_DISPATCHED_LIST_METHODS`], which classifies the four the same way.
 
 // `Scalar` (the enum) is the boxed runtime element of the *fallback* folds; `scalar::Scalar` (aliased
 // `Elem`) is the per-width element trait the packed kernels are now generic over. Two distinct concepts
@@ -421,7 +429,14 @@ pub fn scale_num_scalars(a: &[Scalar], factor: Scalar) -> Result<Vec<Scalar>, St
 
 /// `abs`/`neg` over a boxed scalar list (integers wrap at 64 bits — the only boxed integer widths are
 /// `int`/`i64`/`u64`, for which a 64-bit wrap is exact; narrow widths are always packed).
-pub fn map_num_scalars(op: ElemMap, a: &[Scalar]) -> Result<Vec<Scalar>, StdError> {
+///
+/// `unsigned` says the elements' erased words are a `u64`, which the words themselves cannot: past
+/// bit 63 one carries a negative i64. The two ops split on it exactly as they split in
+/// [`crate::width_doors::NAME_DISPATCHED_LIST_METHODS`] — `abs` **compares against zero**, so it
+/// needs the bit; `neg` only computes, and a two's-complement negation is the same bits whichever
+/// sign the type reads them with. The packed twin needs no flag because a packed buffer carries its
+/// element width in its schema and dispatches to [`Elem::abs`] for that exact width.
+pub fn map_num_scalars(op: ElemMap, a: &[Scalar], unsigned: bool) -> Result<Vec<Scalar>, StdError> {
     let who = match op {
         ElemMap::Abs => "abs",
         ElemMap::Neg => "neg",
@@ -429,6 +444,10 @@ pub fn map_num_scalars(op: ElemMap, a: &[Scalar]) -> Result<Vec<Scalar>, StdErro
     a.iter()
         .map(|&x| match x {
             Scalar::Int(i) => Ok(Scalar::Int(match op {
+                // An unsigned value is ALREADY non-negative, so `abs` is the identity — the same
+                // answer `u64::abs` gives the packed path. Reading the word signed instead folds
+                // `u64::MAX` to `1` and the bit-63 boundary to itself.
+                ElemMap::Abs if unsigned => i,
                 ElemMap::Abs => i.wrapping_abs(),
                 ElemMap::Neg => i.wrapping_neg(),
             })),
@@ -446,9 +465,26 @@ pub fn map_num_scalars(op: ElemMap, a: &[Scalar]) -> Result<Vec<Scalar>, StdErro
 }
 
 /// `clamp(lo, hi)` over a boxed scalar list.
-pub fn clamp_num_scalars(a: &[Scalar], lo: Scalar, hi: Scalar) -> Result<Vec<Scalar>, StdError> {
+///
+/// `unsigned` says the elements — and the bounds, which the checker types as the element type — are
+/// a `u64`. Clamping **compares** against both bounds, and past bit 63 the erased word compares as a
+/// negative i64: `u64::MAX` reads as below every bound and comes back as `lo`, where the type says
+/// it is above every one of them and must come back as `hi`. Same bit, same reason, as
+/// [`map_num_scalars`]'s `abs`; the packed twin reads the width off its schema instead.
+pub fn clamp_num_scalars(
+    a: &[Scalar],
+    lo: Scalar,
+    hi: Scalar,
+    unsigned: bool,
+) -> Result<Vec<Scalar>, StdError> {
     a.iter()
         .map(|&x| match x {
+            // The unsigned reading of the same three words, which is what `clamp_buf::<u64>` does
+            // for a packed `List<u64>` — so the two representations agree element for element.
+            Scalar::Int(i) if unsigned => Ok(Scalar::Int(Ord::min(
+                Ord::max(i as u64, factor_i64(lo) as u64),
+                factor_i64(hi) as u64,
+            ) as i64)),
             // `Ord::min`/`max` named explicitly: `i64` now implements `Elem` (in scope for the packed
             // kernels), so a bare `i.max(..)` is ambiguous between `Ord` and `Elem::max`. For a
             // total-order integer the two agree, so this is the same `Ord` clamp as before.
@@ -551,6 +587,95 @@ mod tests {
         assert_eq!(
             map_num_packed(ElemMap::Neg, &field, &a).unwrap(),
             vec![56, 156]
+        );
+    }
+
+    /// The boxed path has no schema to read a width off, so the signedness is told to it — and told
+    /// wrong, `u64::MAX` reads as the word `-1`: `abs` folds it to `1`, and `clamp` puts it *below*
+    /// a bound it is far above. Both readings are asserted here so the flag cannot be dropped
+    /// without a red.
+    #[test]
+    fn boxed_abs_and_clamp_follow_the_element_signedness() {
+        let words = [u64::MAX as i64, (1u64 << 63) as i64, 1];
+        let xs: Vec<Scalar> = words.iter().map(|&w| Scalar::Int(w)).collect();
+        let ints = |v: Vec<Scalar>| -> Vec<i64> {
+            v.into_iter()
+                .map(|s| match s {
+                    Scalar::Int(i) => i,
+                    _ => unreachable!(),
+                })
+                .collect()
+        };
+
+        // Unsigned: `abs` is the identity, and both boundaries clamp DOWN to the high bound.
+        assert_eq!(
+            ints(map_num_scalars(ElemMap::Abs, &xs, true).unwrap()),
+            words
+        );
+        assert_eq!(
+            ints(clamp_num_scalars(&xs, Scalar::Int(0), Scalar::Int(100), true).unwrap()),
+            [100, 100, 1]
+        );
+        // Signed, unchanged: the same words are `-1` and `i64::MIN`, so `abs` wraps at the width and
+        // the clamp pulls both UP to the low bound.
+        assert_eq!(
+            ints(map_num_scalars(ElemMap::Abs, &xs, false).unwrap()),
+            [1, i64::MIN, 1]
+        );
+        assert_eq!(
+            ints(clamp_num_scalars(&xs, Scalar::Int(0), Scalar::Int(100), false).unwrap()),
+            [0, 0, 1]
+        );
+        // `neg` computes rather than compares, so the flag cannot change its answer.
+        assert_eq!(
+            map_num_scalars(ElemMap::Neg, &xs, true).unwrap(),
+            map_num_scalars(ElemMap::Neg, &xs, false).unwrap()
+        );
+    }
+
+    /// The two kernels are the one definition of what these ops mean at a 64-bit unsigned element,
+    /// written twice — once reading a schema, once told the same fact — so they are pinned equal
+    /// element for element. `Elem::abs`/`max`/`min` for `u64` is the reference the boxed arms above
+    /// were written against; if either side is edited alone, this says so.
+    #[test]
+    fn boxed_u64_agrees_with_the_packed_u64_buffer() {
+        let words = [u64::MAX, 1u64 << 63, 1];
+        let field = PackedField::IntN {
+            bits: 64,
+            signed: false,
+        };
+        let buf: Vec<u8> = words.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let from_u64 = |bytes: &[u8]| -> Vec<i64> {
+            bytes
+                .chunks_exact(8)
+                .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
+                .collect()
+        };
+        let xs: Vec<Scalar> = words.iter().map(|&w| Scalar::Int(w as i64)).collect();
+        let ints = |v: Vec<Scalar>| -> Vec<i64> {
+            v.into_iter()
+                .map(|s| match s {
+                    Scalar::Int(i) => i,
+                    _ => unreachable!(),
+                })
+                .collect()
+        };
+
+        for op in [ElemMap::Abs, ElemMap::Neg] {
+            assert_eq!(
+                from_u64(&map_num_packed(op, &field, &buf).unwrap()),
+                ints(map_num_scalars(op, &xs, true).unwrap()),
+                "{op:?}"
+            );
+        }
+        let (lo, hi) = (Scalar::Int(0), Scalar::Int(100));
+        assert_eq!(
+            from_u64(&clamp_num_packed(&field, &buf, lo, hi).unwrap()),
+            ints(clamp_num_scalars(&xs, lo, hi, true).unwrap())
+        );
+        assert_eq!(
+            from_u64(&scale_num_packed(&field, &buf, Scalar::Int(1)).unwrap()),
+            ints(scale_num_scalars(&xs, Scalar::Int(1)).unwrap())
         );
     }
 

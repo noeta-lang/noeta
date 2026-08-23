@@ -1,0 +1,102 @@
+// The bulk array ops that COMPARE read the element's signedness off the static type, because the
+// value cannot carry it: a fixed-width integer is erased to its i64 word, so `u64::MAX` IS the word
+// `-1` and the bit-63 boundary IS `i64::MIN`. `abs` compares against zero and `clamp` against its
+// bounds, so both answer from the type's reading of those words — the checker marks the call span
+// with the receiver's element hint, the same hint `.min()`/`.max()` read at the same span, and both
+// backends map under it.
+//
+// Their two siblings are the deliberate contrast, and the reason the split is worth pinning: `scale`
+// and `neg` only compute. A wrapping product and a two's-complement negation are the same bits
+// whichever sign the type reads them with, so neither takes the hint and neither can be wrong.
+//
+// The negative half runs the IDENTICAL erased words through `List<i64>`, where they really are `-1`
+// and `i64::MIN`, and demands the opposite answers. That pair is what says the fix follows the type
+// rather than the bits: an implementation that guessed from the word could not pass both halves.
+// expect: stdout "[18446744073709551615, 9223372036854775808, 1]"
+// expect: stdout "[100, 100, 1]"
+// expect: stdout "[18446744073709551615, 9223372036854775808, 2]"
+// expect: stdout "[18446744073709551615, 9223372036854775808, 1]"
+// expect: stdout "[1, 9223372036854775808, 18446744073709551615]"
+// expect: stdout "[18446744073709551615, 9223372036854775808, 1]"
+// expect: stdout "[100, 100, 1]"
+// expect: stdout "[]"
+// expect: stdout "[5, 3]"
+// expect: stdout "[0, 2]"
+// expect: stdout "[5, -3]"
+// expect: stdout "[-10, 6]"
+// expect: stdout "[1, -9223372036854775808, 1]"
+// expect: stdout "[0, 0, 1]"
+// expect: stdout "[5, 3]"
+// expect: stdout "[0, 2]"
+// expect: stdout "[200, 1]"
+// expect: stdout "[100, 1]"
+// expect: stdout "[1.5, 2.5]"
+// expect: exit 0
+
+// The two boundaries the erased word misreads, and a control that sits inside every bound below.
+big: u64 = 18446744073709551615u64
+mid: u64 = 9223372036854775808u64
+one: u64 = 1u64
+
+// A 64-bit element never earns the compact flat buffer — only widths BELOW 64 do — so a `List<u64>`
+// is always the boxed representation, carrying erased words and no schema to read a width off. That
+// is what makes the static type the only place the signedness can come from.
+xs: List<u64> = [big, mid, one]
+
+// An unsigned value is already non-negative, so `abs` is the identity. Read signed, `big` folds to
+// `1` and `mid` to itself.
+echo xs.abs()
+
+// Both boundaries are far ABOVE the high bound and clamp down to it; the control is inside the range
+// and passes through. Read signed, both are negative and clamp UP to the low bound instead — the
+// same wrong answer for two different values, which is why the control is here to tell them apart.
+echo xs.clamp(0u64, 100u64)
+
+// The low bound in the same reading: `one` is below it and comes up to `2`, while neither boundary
+// moves. A signed clamp would drag both boundaries up to `2` as well.
+echo xs.clamp(2u64, big)
+
+// The two that only compute, unchanged by any reading: scaling by one is the identity, and negating
+// twice returns the list.
+echo xs.scale(1u64)
+echo xs.neg()
+
+// The same values written as a literal receiver, so the hint has to reach a call whose receiver is
+// the expression itself rather than a name the checker already typed.
+echo [18446744073709551615u64, 9223372036854775808u64, 1u64].abs()
+echo [18446744073709551615u64, 9223372036854775808u64, 1u64].clamp(0u64, 100u64)
+
+// Nothing to compare.
+empty: List<u64> = []
+echo empty.abs()
+
+// --- The negative half: signed lists, where the erased word IS the value. ---
+
+ss: List<i64> = [-5i64, 3i64]
+echo ss.abs()
+echo ss.clamp(0i64, 2i64)
+echo ss.neg()
+echo ss.scale(2i64)
+
+// The same three words as `xs`, typed signed: `abs` must fold `-1` to `1` and leave `i64::MIN` alone
+// (it wraps at the width), and the clamp must pull both negatives UP to the low bound. Every line
+// here is the answer the unsigned half must NOT give.
+ws: List<i64> = [-1i64, -9223372036854775808i64, 1i64]
+echo ws.abs()
+echo ws.clamp(0i64, 100i64)
+
+// A plain `int` is the same 64-bit signed reading under another name.
+ns: List<int> = [-5, 3]
+echo ns.abs()
+echo ns.clamp(0, 2)
+
+// A narrow width fits an i64 word with room to spare, so it needs no hint at all: `200u8` is `200`
+// under either reading, and this list is packed besides, folding through the schema that names its
+// width. Here to pin that the hint changed nothing below 64 bits.
+bs: List<u8> = [200u8, 1u8]
+echo bs.abs()
+echo bs.clamp(0u8, 100u8)
+
+// Floats compare as themselves; no width is erased.
+fs: List<float> = [-1.5, 2.5]
+echo fs.abs()

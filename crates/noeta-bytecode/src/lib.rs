@@ -1987,7 +1987,8 @@ pub struct Module {
     /// up by span — a stdlib method call's (`.sorted()`, `.min()`, `.max()`, `.keys()`,
     /// `.values()`) or a `for` loop's — and orders the sequence the program sees accordingly.
     /// `checked_sum` reads the same table for the same bit: it reports overflow at the element
-    /// width, and the two readings of a 64-bit word disagree about which sums overflow.
+    /// width, and the two readings of a 64-bit word disagree about which sums overflow. So do the
+    /// bulk `abs`/`clamp`, which compare a boxed element against zero and against their bounds.
     ///
     /// A side table rather than an operand, deliberately: these ops are the hot dispatch path, and
     /// nearly every program has no entry here at all. The tree-walker reads the same hint off its

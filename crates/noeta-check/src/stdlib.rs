@@ -744,6 +744,14 @@ fn string_method(name: &str) -> Option<Type> {
 /// predicates answering one question is how the doors in this family drift apart. It reports
 /// overflow instead of wrapping, and at 64 bits the signed and unsigned readings disagree about
 /// which sums overflow at all, in both directions.
+///
+/// The two bulk array ops that **compare** are here for the same one bit: `abs` compares against
+/// zero (an unsigned value is already non-negative, so `abs` is the identity, while the erased word
+/// folds `u64::MAX` to `1`) and `clamp` compares against its bounds (past bit 63 a `u64` reads as
+/// below every bound where the type says it is above them). Their two siblings are deliberately
+/// absent — `scale` and `neg` only compute, and a wrapping product or a two's-complement negation is
+/// the same bits whichever sign the type reads them with. That split is stated once more, for both
+/// backends, in `noeta_stdlib::width_doors::NAME_DISPATCHED_LIST_METHODS`.
 pub(super) fn discloses_width(recv: &Type, name: &str) -> bool {
     use noeta_ext_abi::{ListMethod, MapMethod};
     match recv {
@@ -751,7 +759,7 @@ pub(super) fn discloses_width(recv: &Type, name: &str) -> bool {
             matches!(
                 ListMethod::from_name(name),
                 Some(ListMethod::Sorted | ListMethod::Join)
-            ) || matches!(name, "min" | "max" | "checked_sum")
+            ) || matches!(name, "min" | "max" | "checked_sum" | "abs" | "clamp")
         }
         // An iterator's terminals observe the same order, and render the same text, over the same
         // elements — each drains into the eager list door — so a `u64` element reads unsigned
