@@ -3764,6 +3764,61 @@ fn the_checker_visits_every_body_it_is_given() {
     );
 }
 
+// ----- E0078: a `u64`'s width discarded into a `dyn` position -----
+
+/// **What E0078 must NOT say is the half the corpus cannot check.**
+///
+/// A conformance header asserts that the diagnostics it names are *produced*; it cannot assert that
+/// nothing else was. So the `u32` control in `types/unsigned_dyn_launder_warns` reads like a guard
+/// and is not one — widening the width filter to every unsigned type leaves that case green. The
+/// absence half is asserted here, where the code list is compared exactly.
+///
+/// The narrowness is the whole argument for the warning existing: `u8`/`u16`/`u32` and every `iN`
+/// fit the signed 64-bit word and render identically through it, so `u64` past bit 63 is the one
+/// width whose digits change. A rule that fired on the rest would be noise on correct programs.
+#[test]
+fn erased_width_display_warns_for_u64_alone() {
+    let launder = |ty: &str, lit: &str| format!("v: {ty} = {lit}\nd: dyn = v\necho d\n");
+
+    assert_eq!(
+        warn_codes(&launder("u64", "18446744073709551615u64")),
+        ["E0078"],
+        "the one width whose digits change"
+    );
+    // Nested, because laundering a `List<u64>` loses its elements' digits the same way.
+    assert_eq!(
+        warn_codes("v: List<u64> = [1u64]\nd: dyn = v\necho d\n"),
+        ["E0078"]
+    );
+
+    for (ty, lit) in [
+        ("u32", "4294967295u32"),
+        ("u16", "65535u16"),
+        ("u8", "255u8"),
+        ("i64", "-1i64"),
+        ("i32", "-1i32"),
+        ("int", "-1"),
+    ] {
+        assert!(
+            warn_codes(&launder(ty, lit)).is_empty(),
+            "`{ty}` survives erasure intact and must not warn"
+        );
+    }
+
+    // And a `u64` that keeps its annotation is not a launder at all.
+    assert!(
+        warn_codes("v: u64 = 18446744073709551615u64\necho v\n").is_empty(),
+        "the width still names itself here"
+    );
+    // Nor is a `u64` reaching a native door that carries a hint through its `dyn` parameter — the
+    // shape an earlier attempt at this rule fired on, which is to say the code that works.
+    assert!(
+        warn_codes("use std.json\nv: u64 = 18446744073709551615u64\necho json.stringify(v)\n")
+            .is_empty(),
+        "`json.stringify` preserves the width; warning there would be noise on correct code"
+    );
+}
+
 // ----- E0063: unanswerable width `is` test (packed-widths slice 2) -----
 //
 // A bare-scalar `x is iN` / `x is f64` is the one test the *runtime* cannot answer: an erased width
