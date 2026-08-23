@@ -769,7 +769,6 @@ pub(super) fn discloses_width(recv: &Type, name: &str) -> bool {
     }
 }
 
-
 /// The **deferred-serialization** argument a native method declares, if any: the position of the
 /// parameter whose value the receiver's extern type keeps and serializes to JSON on some later tick
 /// (`ExtType::push_hint_args`). The checker records that argument's hint at the call span, because a

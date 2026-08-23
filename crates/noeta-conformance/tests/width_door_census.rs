@@ -22,7 +22,9 @@ use noeta_span::{Source, SourceId};
 use noeta_stdlib::iter::IterMethod;
 use noeta_stdlib::reductions::{BoolReduce, NumReduce};
 use noeta_stdlib::ring1::{ListMethod, MapMethod, SetMethod};
-use noeta_stdlib::width_doors::{of_bool_reduce, of_iter_method, of_num_reduce};
+use noeta_stdlib::width_doors::{
+    of_bool_reduce, of_iter_method, of_list_method_name, of_num_reduce,
+};
 use noeta_stdlib::width_doors_ring1::{
     WidthDisclosure, of_list_method, of_map_method, of_set_method,
 };
@@ -401,4 +403,70 @@ fn every_reduction_door_reads_a_u64_whole() {
             bool_reduce_probe(m),
         );
     }
+}
+
+/// **The hole a census over enums cannot see.**
+///
+/// `ListMethod`/`NumReduce`/`BoolReduce` cover twenty of the checker's twenty-seven `List<T>`
+/// methods. The other seven reach their implementation by NAME — `is_bulk_method`, and
+/// `checked_sum`'s own special case — so no exhaustive match forces them to be classified, and two
+/// of them (`abs`, `clamp`) were wrong when this was written with nothing anywhere to say so.
+///
+/// So the surface is read from the checker itself, which is the authority on what a `List<T>` has:
+/// every name it types must resolve to a disclosure, through an enum or through
+/// `NAME_DISPATCHED_LIST_METHODS`. Adding a method to the language without classifying it fails
+/// here. Reading source at test time is the technique `check_options_census` and
+/// `constraint_fields` already use for the same reason — the alternative is a hand-copied list,
+/// which is the thing being guarded against.
+#[test]
+fn every_list_method_the_checker_types_has_a_disclosure() {
+    let stdlib = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates/")
+        .join("noeta-check/src/stdlib.rs");
+    let text = std::fs::read_to_string(&stdlib).expect("the checker's surface is readable");
+
+    // The `list_method` return-type table: from its signature to the next item at column zero.
+    let start = text
+        .find("fn list_method(")
+        .expect("the checker declares its `List<T>` surface here");
+    let body = &text[start..];
+    let end = body[10..].find("\nfn ").expect("the table ends") + 10;
+    let body = &body[..end];
+
+    let mut unclassified: Vec<String> = Vec::new();
+    let mut names: Vec<String> = Vec::new();
+    for raw in body.split('"').skip(1).step_by(2) {
+        // Match-arm literals only: a method name is lowercase ASCII with underscores.
+        if raw.is_empty()
+            || !raw
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c == '_' || c.is_ascii_digit())
+        {
+            continue;
+        }
+        if names.iter().any(|n| n == raw) {
+            continue;
+        }
+        names.push(raw.to_string());
+        if of_list_method_name(raw).is_none() {
+            unclassified.push(raw.to_string());
+        }
+    }
+
+    assert!(
+        names.len() >= 25,
+        "the `List<T>` surface should have been read from the checker, found only {names:?} — the \
+         table's shape changed and this scan needs updating rather than the classification"
+    );
+    assert!(
+        unclassified.is_empty(),
+        "these `List<T>` methods have no width disclosure: {unclassified:?}\n\n\
+         Every method the checker types must say what it lets a program learn about a fixed-width \
+         integer. If it is dispatched through a surface enum, classify it there; if it reaches its \
+         implementation by name, add a row to `NAME_DISPATCHED_LIST_METHODS`. A method that \
+         COMPARES (against zero, against a bound, against another element) is where this family's \
+         bugs live — `abs` and `clamp` both read the erased word, and neither was reachable from \
+         anything that would have said so."
+    );
 }
