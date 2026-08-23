@@ -1,0 +1,13 @@
+big: u64 = 18446744073709551615u64
+mid: u64 = 9223372036854775808u64
+xs: List<u64> = [big, mid, 1u64]
+
+// `abs` of an unsigned value is the value — it is already non-negative.
+echo "abs:    ${xs.abs()}"
+// `u64::MAX` clamped into [0, 100] must be 100: it is far ABOVE the high bound.
+echo "clamp:  ${xs.clamp(0u64, 100u64)}"
+// The control: `scale` already wraps at the element width.
+echo "scale:  ${xs.scale(1u64)}"
+// And a signed list, where the same operations are correct today.
+ys: List<i64> = [-5i64, 3i64]
+echo "signed: ${ys.abs()} ${ys.clamp(0i64, 2i64)}"
