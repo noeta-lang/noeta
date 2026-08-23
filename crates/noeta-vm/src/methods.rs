@@ -250,9 +250,18 @@ impl<'m> Vm<'m> {
                     Some(&arg) => self.stdlib_string(name, arg, span)?,
                     None => String::new(),
                 };
+                // A `List<u64>` renders its elements under the checker's hint for this call, so the
+                // erased words reach the joined string as the values they stand for — the same walk
+                // `echo` of the same list runs, reached through the same span-keyed table
+                // `sorted`/`min`/`max` read. Unhinted (every other list) each element renders
+                // exactly as before.
+                let elem = self.order_hint(&span).and_then(|h| h.elements());
                 let joined = items
                     .iter()
-                    .map(|v| v.display())
+                    .map(|v| match elem {
+                        Some(hint) => v.display_hinted(hint),
+                        None => v.display(),
+                    })
                     .collect::<Vec<_>>()
                     .join(&separator);
                 Ok(Value::string(&joined))

@@ -338,10 +338,22 @@ impl Checker {
         }
     }
 
-    /// Record the [`RenderHint`](noeta_ast::RenderHint) for a value **about to be ordered** at
-    /// `span` (`.sorted()`, `.min()`, `.max()`, `.keys()`, `.values()`, a `for` over a set or map),
-    /// if `ty` contains an unsigned 64-bit integer. Nothing is recorded otherwise, so a program that
-    /// never orders a `u64` carries no hint and lowers unchanged.
+    /// Record the [`RenderHint`](noeta_ast::RenderHint) for a value a **collection door about to
+    /// disclose its elements' width** reads at `span` — `.sorted()`, `.min()`, `.max()`, `.keys()`,
+    /// `.values()`, a `for` over a set or map, and `.join()` — if `ty` contains an unsigned 64-bit
+    /// integer. Nothing is recorded otherwise, so a program that never orders or joins a `u64`
+    /// carries no hint and lowers unchanged.
+    ///
+    /// `.join()` renders rather than orders, and takes this hint rather than a display one of its
+    /// own because the two are the same hint delivered the same way: the shape is the receiver's
+    /// (`Elements(…)` for both), the numbering is the same [`HintPurpose::Display`] one both walks
+    /// use, and the carrier is the span-keyed table every method door reads. What a display site
+    /// records for itself ([`Self::note_render_hint`]) is a hint on the *rendered expression*, which
+    /// lowering turns into a string — the wrong door entirely for a value a method renders
+    /// internally. The [`Display`-trait exemption](Self::note_render_hint) does not apply on either
+    /// count: an ordering never consults `to_string`, and `join` renders each element structurally
+    /// (the erased-word walk, not `Display` dispatch), so a hinted element and an unhinted one
+    /// differ in digits alone.
     ///
     /// [`HintPurpose::Display`] is the numbering, deliberately: an ordering walk compares two values
     /// slot by slot against the object's **own** slot array (`Payload::Object`'s slots in the VM, the

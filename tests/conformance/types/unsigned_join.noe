@@ -1,0 +1,65 @@
+// **Joining a `u64` past bit 63.**
+//
+// `join` renders every element into one string, so it is a display door that lives inside a method:
+// its elements never reach an `echo`, and a fixed width lives only in the static type. The checker
+// therefore records the receiver's hint at the `join` call, exactly as it does at `.sorted()`, and
+// both backends render each element through the same hinted walk `echo` runs. The lazy spelling
+// drains into the eager one, so `it.join(sep)` reads the same values by construction.
+//
+// The hint is structural, so a `u64` nested in a list, an object field or an enum payload reads
+// unsigned too. The narrower widths are the controls: every `u32` value fits in an i64 already, so
+// it joins identically hinted or not — and `i64` keeps the sign, because the erased word IS its
+// value.
+// expect: stdout "18446744073709551615,1,9223372036854775808"
+// expect: stdout "18446744073709551615,1,9223372036854775808"
+// expect: stdout "18446744073709551615,1"
+// expect: stdout "1844674407370955161519223372036854775808"
+// expect: stdout "[18446744073709551615, 1, 9223372036854775808]"
+// expect: stdout "4294967295,1"
+// expect: stdout "-1,1"
+// expect: stdout "[18446744073709551615] | [1, 9223372036854775808]"
+// expect: stdout "Meter {reading: 18446744073709551615, label: "m"}"
+// expect: stdout "some(18446744073709551615),none"
+// expect: stdout "18446744073709551615,1,9223372036854775808"
+// expect: stdout "1,2"
+// expect: exit 0
+
+struct Meter {
+    reading: u64
+    label: string
+}
+
+big: u64 = 18446744073709551615u64;
+half: u64 = 9223372036854775808u64;
+xs: List<u64> = [big, 1u64, half];
+
+// The eager door, the lazy one, and the lazy one through an adapter.
+echo xs.join(",");
+echo xs.iter().join(",");
+echo xs.iter().take(2).join(",");
+
+// The default separator is empty, and the display door agrees with all of them digit for digit.
+echo xs.join();
+echo xs;
+
+// Controls: `u32` fits an i64 with room to spare, so hint or no hint it joins the same digits, and
+// an `i64` word is its own value.
+ns: List<u32> = [4294967295u32, 1u32];
+echo ns.join(",");
+ss: List<i64> = [-1i64, 1i64];
+echo ss.join(",");
+
+// Nesting: a list element, an object field, an enum payload — the same positions `echo` renders.
+rows: List<List<u64>> = [[big], [1u64, half]];
+echo rows.join(" | ");
+ms: List<Meter> = [Meter { reading: big, label: "m" }];
+echo ms.join(",");
+opts: List<?u64> = [some(big), none];
+echo opts.join(",");
+
+// A generic body is one compiled body for every instantiation, so the width cannot be baked into
+// it: the hint names the type parameter and the CALL supplies the answer. `int` supplies none, and
+// the same body joins the erased words that are already the values.
+fn joined<T>(items: List<T>): string { return items.join(","); }
+echo joined(xs);
+echo joined([1, 2]);

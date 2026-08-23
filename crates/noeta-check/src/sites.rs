@@ -188,6 +188,14 @@ pub struct Sites {
     /// **never** at a set's canonical buffer or a map's key placement, which are identity orders
     /// built at one site and probed at another (see [`noeta_ast::render_hint`]). Empty for every
     /// program with no `u64` in an ordered position. A pure function of the program.
+    ///
+    /// It carries one door that **renders** rather than orders: `.join()`, whose elements are
+    /// written into a string by the method itself and so never reach a display site of their own.
+    /// The hint is the same hint — built from the same receiver type, shaped `Elements(…)`, and
+    /// numbered by the same `HintPurpose::Display` walk both backends run on their own value model —
+    /// so it travels on this map rather than on a second one that would have to stay in step with
+    /// it. The recorder (`Checker::note_order_hint`) and the checker's door list
+    /// (`stdlib::discloses_width`) name every entry.
     pub order_hint_sites: HashMap<Span, noeta_ast::RenderHint>,
     /// **Deferred-serialization sites whose bound value contains an unsigned 64-bit integer**, keyed
     /// by the binding call's span → the [`RenderHint`](noeta_ast::RenderHint) built from the bound
@@ -540,7 +548,7 @@ pub(crate) const SITE_POLICIES: &[(&str, SiteClass, &str)] = &[
     ("width_sites", SiteClass::Ordinal, "(signed, bits): a fixed-width arithmetic BIT WIDTH, not an index"),
     ("render_hint_sites", SiteClass::SpanKeyed, "span → RenderHint: structural; its Slots/Variants numbers are SLOT positions within the rendered value"),
     ("json_hint_sites", SiteClass::SpanKeyed, "span → RenderHint: structural; its Slots/Variants numbers are SLOT positions within the serialized value"),
-    ("order_hint_sites", SiteClass::SpanKeyed, "span → RenderHint: structural; its Slots/Variants numbers are SLOT positions within the ordered value"),
+    ("order_hint_sites", SiteClass::SpanKeyed, "span → RenderHint: structural; its Slots/Variants numbers are SLOT positions within the ordered (or joined) value"),
     ("binding_hint_sites", SiteClass::SpanKeyed, "span → RenderHint: structural; its Slots/Variants numbers are SLOT positions within the value serialized later"),
     ("echo_hint_sites", SiteClass::SpanKeyed, "span → RenderHint: structural; its Slots/Variants numbers are SLOT positions within the value a session echoes"),
     ("folded_type_tests", SiteClass::SpanKeyed, "span → the constant answer of a statically decided `is`"),

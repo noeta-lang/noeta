@@ -717,30 +717,43 @@ fn string_method(name: &str) -> Option<Type> {
 /// The result type of a numeric list reduction (`sum`/`product`/`min`/`max`) — the element type
 /// itself — or `None` if the element is not numeric. `sum`/`product` return this directly (width-
 /// wrapping); `min`/`max` wrap it in `?T` for the empty case.
-/// Whether the built-in method `name` on receiver `recv` produces or reveals an order a program can
-/// **observe** — the doors [`crate::Sites::order_hint_sites`] is recorded at.
+/// Whether the built-in method `name` on receiver `recv` **discloses** a fixed-width integer to the
+/// program — the doors [`crate::Sites::order_hint_sites`] is recorded at, and the checker's half of
+/// the classification [`noeta_ext_abi::width_doors`] states method by method.
 ///
-/// `sorted`/`min`/`max` compute an order over a list's elements, and `min`/`max` do the same over an
-/// iterator's remaining ones; `keys`/`values` hand back a map's entries in key order. `to_set`,
-/// `add`, `union`, `contains` and `has` are absent on purpose: those build or probe an identity
-/// order, which must stay a pure function of the erased word. The list reductions are spelled here
-/// beside [`numeric_reduce`], which types them, so the two cannot drift.
+/// Two kinds of disclosure take the one hint, because a width lives only in the static type and
+/// every one of these doors is a walk over the *erased* words:
+///
+/// * an **order** a program observes — `sorted`/`min`/`max` over a list's elements, `min`/`max` over
+///   an iterator's remaining ones, `keys`/`values` handing back a map's entries in key order;
+/// * the **text** one renders — `join`, which is the display door that lives inside a method. Its
+///   elements never reach an `echo`, so unless the hint reaches `join` itself a `List<u64>` joins
+///   the erased words while `echo` of the same list prints the values.
+///
+/// `to_set`, `add`, `union`, `contains` and `has` are absent on purpose: those build or probe an
+/// identity order, which must stay a pure function of the erased word. The list reductions are
+/// spelled here beside [`numeric_reduce`], which types them, so the two cannot drift.
 ///
 /// The same line divides the two comparators the runtime uses. An element type that declares its own
-/// `compare` decides the order at exactly the doors listed here — the ones a program observes —
-/// while a set's canonical buffer and a map's key placement keep the structural order for the
-/// reason a `u64` hint is withheld from them: they place a value at one site and probe it at
+/// `compare` decides the order at exactly the ordering doors listed here — the ones a program
+/// observes — while a set's canonical buffer and a map's key placement keep the structural order for
+/// the reason a `u64` hint is withheld from them: they place a value at one site and probe it at
 /// another, so a reading that could change between the two loses a member that is present.
-pub(super) fn reveals_order(recv: &Type, name: &str) -> bool {
+pub(super) fn discloses_width(recv: &Type, name: &str) -> bool {
     use noeta_ext_abi::{ListMethod, MapMethod};
     match recv {
         Type::List(_) => {
-            matches!(ListMethod::from_name(name), Some(ListMethod::Sorted))
-                || matches!(name, "min" | "max")
+            matches!(
+                ListMethod::from_name(name),
+                Some(ListMethod::Sorted | ListMethod::Join)
+            ) || matches!(name, "min" | "max")
         }
-        // An iterator's ordering terminals observe the same order over the same elements, so a
-        // `u64` element reads unsigned through `xs.iter().min()` exactly as through `xs.min()`.
-        Type::Named(n, _) if n == ITERATOR => matches!(name, "min" | "max"),
+        // An iterator's terminals observe the same order, and render the same text, over the same
+        // elements — each drains into the eager list door — so a `u64` element reads unsigned
+        // through `xs.iter().min()` and `xs.iter().join(",")` exactly as through the list's own.
+        // (Spelled by name rather than through `IterMethod`: this crate deliberately does not link
+        // `noeta-stdlib`, where that enum lives.)
+        Type::Named(n, _) if n == ITERATOR => matches!(name, "min" | "max" | "join"),
         Type::Map(..) => matches!(
             MapMethod::from_name(name),
             Some(MapMethod::Keys | MapMethod::Values)

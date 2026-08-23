@@ -235,21 +235,12 @@ fn run_both(program: &str, door: &str) -> String {
 /// too, saying so. The list only ever shrinks. That is the whole difference between a census and a
 /// disabled test — the runtime-rejection snapshot in `noeta-fuzz` works the same way.
 ///
-/// Both entries were found by this census on its first run, which is the argument for it existing.
-const KNOWN_UNHINTED: &[(&str, &str)] = &[
-    (
-        "List::Join",
-        "`join` renders every element through the unhinted `display`, so a `List<u64>` joins its          erased words while `echo` of the same list prints the values. Closing it needs a render          hint recorded at the `join` call and carried to the method — the machinery `echo` uses —          so it is its own slice rather than a line here.",
-    ),
-    (
-        "Iterator::Join",
-        "The same defect reached through the lazy door: `it.join(sep)` drains into the eager          `join`, which is the property that makes the two spellings agree by construction — so it          agrees on this too. One fix closes both.",
-    ),
-    (
-        "Iterator::CheckedSum",
-        "`checked_sum` folds through `checked_sum_scalars`, which adds at i64: `u64::MAX` is the          word `-1`, so `u64::MAX + 2` overflows nothing and reports `some(1)` where the element          width says `none`. The PACKED path is already right (`checked_sum_buf::<u64>`); the boxed          fallback needs the element width threaded to it. The eager `xs.checked_sum()` has the          same defect — it is not reached by any of the six enums, being name-dispatched, which is          its own finding.",
-    ),
-];
+/// Every entry here was found by this census on its first run, which is the argument for it
+/// existing.
+const KNOWN_UNHINTED: &[(&str, &str)] = &[(
+    "Iterator::CheckedSum",
+    "`checked_sum` folds through `checked_sum_scalars`, which adds at i64: `u64::MAX` is the          word `-1`, so `u64::MAX + 2` overflows nothing and reports `some(1)` where the element          width says `none`. The PACKED path is already right (`checked_sum_buf::<u64>`); the boxed          fallback needs the element width threaded to it. The eager `xs.checked_sum()` has the          same defect — it is not reached by any of the six enums, being name-dispatched, which is          its own finding.",
+)];
 
 /// Every door the classification says must consult the hint, walked with a `u64` past bit 63.
 ///
