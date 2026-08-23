@@ -643,7 +643,60 @@ impl Checker {
         }
     }
 
+    /// Whether `t` carries a `u64` anywhere — the one fixed width whose *digits* change when the
+    /// static type stops naming it.
+    ///
+    /// Every other width survives erasure intact: `u8`/`u16`/`u32` and every `iN` fit the signed
+    /// 64-bit word and render identically through it. Only `u64` past bit 63 reads back as a
+    /// different number, which is what keeps the warning below narrow enough to be worth having.
+    /// Nested, because laundering a `List<u64>` loses its elements' digits exactly as laundering a
+    /// bare one loses its own.
+    fn carries_u64(t: &Type) -> bool {
+        match t {
+            Type::IntN { signed, bits } => !*signed && *bits == 64,
+            Type::List(e) | Type::Set(e) | Type::Option(e) => Self::carries_u64(e),
+            Type::Map(k, v) | Type::Result(k, v) => Self::carries_u64(k) || Self::carries_u64(v),
+            Type::Tuple(es) | Type::Union(es) => es.iter().any(Self::carries_u64),
+            Type::Named(_, args) => args.iter().any(Self::carries_u64),
+            _ => false,
+        }
+    }
+
+    /// Warn (E0078) when a `u64` is put into a `dyn` position, which is where its display width is
+    /// lost for good.
+    ///
+    /// **The complaint belongs at the launder, and nowhere downstream can make it.** A `dyn`
+    /// position has no static type to complain from, and by the time the wrong digits are printed
+    /// the value is indistinguishable from an ordinary `int`. That is the placement `x is u64`'s
+    /// E0063 already uses: warn where the width stops being recoverable, not where the consequence
+    /// shows up.
+    ///
+    /// Called from every funnel a value can cross that boundary through — an annotation, a return
+    /// or a field (`subsume`) and an argument (`check_args`) — because they are separate paths and
+    /// a rule that covered one would be a rule the other silently lacked. The **argument** funnel
+    /// is what catches the position with no spelling in the source: a generic function taken as a
+    /// value erases its parameters to `dyn`, so calling one with a `u64` is a launder the program
+    /// never wrote.
+    pub(crate) fn warn_erased_width(&mut self, actual: &Type, expected: &Type, span: Span) {
+        if matches!(expected, Type::Dyn) && Self::carries_u64(actual) {
+            self.warn(
+                DiagnosticCode::ErasedWidthDisplay,
+                span,
+                "`u64` discarded into a `dyn` position: displaying the value later prints \
+                 the erased signed word (`u64::MAX` reads as `-1`), because the width \
+                 lives only in the static type"
+                    .to_string(),
+            )
+            .help(
+                "keep the annotation through the position, or render it to a string while the \
+                 type still names the width. Arithmetic, comparison and `json.stringify` are \
+                 unaffected — the representation is intact, only the display reading changes",
+            );
+        }
+    }
+
     pub(crate) fn subsume(&mut self, actual: &Type, expected: &Type, span: Span) {
+        self.warn_erased_width(actual, expected, span);
         if !self.assignable(actual, expected) {
             let (expected, actual) = noeta_types::mismatch_pair(expected, actual);
             self.error(
@@ -1203,6 +1256,17 @@ impl Checker {
                 else {
                     return Type::Unknown;
                 };
+                // **Deliberately NOT warned here**, though this is where the width is lost.
+                // The value's fixed-width positions are being erased, but nothing at this site
+                // knows whether a `u64` will ever pass through them — so the warning would assert
+                // a specific wrong number for a value that may never exist. Measured: it fired on
+                // a trait-bound diagnostics case with no `u64` anywhere in it, which is the kind
+                // of noise that teaches a reader to ignore the code. Warning it precisely needs
+                // the CALL to know its callee came from an erased generic value, and a fn value's
+                // type (`Fn(dyn) -> …`) does not carry that provenance.
+                //
+                // The explicit `dyn` launder is warned instead (E0078 in `warn_erased_width`),
+                // because there the checker sees the `u64` going in.
                 self.sites
                     .hidden_arg_sites
                     .insert(*span, vec![noeta_ext_abi::HiddenArg::Erased; slots]);

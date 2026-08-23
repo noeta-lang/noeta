@@ -370,6 +370,25 @@ pub enum DiagnosticCode {
     /// head) and so are container targets like `List<i32>` (a packed element's width lives in the
     /// buffer's schema). Advisory, not an error: the program still compiles.
     ErasedWidthNarrow,
+    /// A `u64` was discarded into a position that does not fix the width, so a later *display* of
+    /// it will print the erased 64-bit word as a signed `int` — different digits, not a coarser
+    /// answer.
+    ///
+    /// The width lives only in the static type. Every other fixed width survives erasure intact
+    /// (`u8`/`u16`/`u32` and every `iN` fit the signed word and render identically), so `u64` above
+    /// `i64::MAX` is the **one** case whose digits change — which is what makes this warning
+    /// narrow enough to be worth having.
+    ///
+    /// Reported where the width is *lost*, not where the wrong digits appear: a `dyn` position has
+    /// no static type to complain from, and by then nothing can tell the value apart from an
+    /// ordinary `int`. Two sites lose it — an explicit launder into `dyn`, and a call through a
+    /// generic function taken as a **value**, which carries no type-argument channel. The second
+    /// has no spelling in the source at all, which is exactly why it warns.
+    ///
+    /// The sibling [`Self::ErasedWidthNarrow`] makes the same judgement at the type-test door.
+    /// Advisory, not an error: the representation is intact and every arithmetic, comparison and
+    /// serialization that *does* fix the width still reads it correctly.
+    ErasedWidthDisplay,
     /// A string escape is malformed. Covers the numeric escapes added for control characters: a
     /// `\xHH` that lacks two hex digits, is non-hex, or exceeds `0x7F` (the ASCII range — a lone
     /// non-ASCII byte can't live in a UTF-8 string, so `\u{…}` is the fix); and a `\u{H…H}` that
@@ -603,6 +622,7 @@ impl DiagnosticCode {
         DiagnosticCode::ShadowedTypeParameter,
         DiagnosticCode::PrivateMethod,
         DiagnosticCode::RedundantVisibility,
+        DiagnosticCode::ErasedWidthDisplay,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -686,6 +706,7 @@ impl DiagnosticCode {
             DiagnosticCode::ShadowedTypeParameter => "E0075",
             DiagnosticCode::PrivateMethod => "E0076",
             DiagnosticCode::RedundantVisibility => "E0077",
+            DiagnosticCode::ErasedWidthDisplay => "E0078",
         }
     }
 

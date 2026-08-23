@@ -190,6 +190,15 @@ impl DiagnosticCode {
                 detail: "A width is a property of *storage*, not of a value: every integer width is the same runtime word, and an `f64` is a `float` bit for bit. So once a value is held as `dyn` (or as a union, or as an erased type parameter) its width is gone and no runtime test can recover it. This warns only in that case. Where the scrutinee's static type *does* name a width — `a: i32` then `a is i32` — the checker answers the test itself and folds the constant, with no warning. Test the base type (`x is int`, `x is float`) to ask the question the runtime can answer. `f32` never warns: it is reified, with its own runtime tag. Nor does a container target like `List<i32>`, whose element width lives in the buffer's schema.",
                 docs: "Fixed-Width-Integers",
             },
+            DiagnosticCode::ErasedWidthDisplay => Explanation {
+                code: "E0078",
+                title: "u64 width discarded before display",
+                group: "Types, inference, and narrowing",
+                severity: Severity::Warning,
+                summary: "**Warning.** A `u64` was put into a position that does not fix the width, so displaying it later prints the erased signed word — different digits, not a coarser answer.",
+                detail: "A width is a property of the *static type*, not of the value: every integer width is the same runtime word. Displaying reads that static type, so a `u64` above `i64::MAX` prints its unsigned value wherever the type still says `u64` — and prints the signed reinterpretation (`-1` for `u64::MAX`) wherever it does not. Every other fixed width survives erasure intact, because `u8`/`u16`/`u32` and every `iN` fit the signed word and render identically; `u64` past bit 63 is the one case whose digits change, which is why this warns there and nowhere else.\n\nIt is reported where the width is *lost*, not where the wrong digits appear — by then the value is indistinguishable from an ordinary `int` and there is no static type left to complain from. Two positions lose it: an explicit launder into `dyn`, and a call through a generic function taken as a **value**, which carries no type-argument channel to pin its instantiation. The second has no spelling in the source, which is the reason it warns rather than being left to the reader to discover.\n\nThe representation is never wrong: arithmetic, comparison, `json.stringify` and every door that still names the width read the full value. Keep the annotation (`v: u64`) through the position, or convert deliberately, to keep the digits.",
+                docs: "Fixed-Width-Integers",
+            },
             DiagnosticCode::ImpossibleTypeTest => Explanation {
                 code: "E0065",
                 title: "impossible type test",

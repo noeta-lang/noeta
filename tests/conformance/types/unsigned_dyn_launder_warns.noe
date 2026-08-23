@@ -1,0 +1,31 @@
+// **The width is lost at the launder, and that is where the complaint belongs.**
+//
+// A `u64` above `i64::MAX` displays its unsigned value wherever the static type still names the
+// width, and the erased signed word wherever it does not — different digits, not a coarser answer.
+// A `dyn` position has no static type to complain from, and by the time the wrong digits are
+// printed the value is indistinguishable from an ordinary `int`. So the warning goes where the
+// checker can still see the `u64` going in, which is the placement `x is u64`'s E0063 already uses.
+//
+// It is narrow on purpose: `u8`/`u16`/`u32` and every `iN` fit the signed word and render
+// identically through it, so `u64` past bit 63 is the ONE width whose digits change. The `u32`
+// below is the control, and it must stay silent.
+// expect: error E0078 at 18:18
+// expect: error E0078 at 22:15
+// expect: exit 0
+big: u64 = 18446744073709551615u64
+
+// Warned: the digits change on the way out.
+laundered: dyn = big
+echo laundered
+
+// Warned at any depth — a laundered `List<u64>` loses its elements' digits exactly as a bare one.
+nested: dyn = [big]
+echo nested
+
+// NOT warned: every narrower width survives erasure intact.
+small: u32 = 4294967295u32
+fine: dyn = small
+echo fine
+
+// NOT warned: the width still names itself here, so the digits are right.
+echo big
