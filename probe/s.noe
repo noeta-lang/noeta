@@ -1,8 +1,0 @@
-big: u64 = 18446744073709551615u64
-xs: List<u64> = [big, 1u64]
-
-echo "scale:  ${xs.scale(2u64)}"
-echo "clamp:  ${xs.clamp(0u64, 100u64)}"
-echo "abs:    ${xs.abs()}"
-echo "len:    ${xs.len()}"
-echo "bytes:  ${xs.to_bytes().len()}"
