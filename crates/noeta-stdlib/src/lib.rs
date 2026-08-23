@@ -81,6 +81,9 @@ pub mod template;
 pub mod tiers;
 pub mod tracing;
 pub mod url;
+pub mod width_doors;
+/// The ring-1 collection surfaces' width-door census, re-exported so a consumer needs one path.
+pub use noeta_ext_abi::width_doors as width_doors_ring1;
 pub mod vec3;
 pub mod vec_kernels;
 

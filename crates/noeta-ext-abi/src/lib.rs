@@ -315,6 +315,7 @@ pub mod ring1;
 pub mod stream;
 pub mod telemetry;
 pub mod uri;
+pub mod width_doors;
 
 pub use command::{ArgKind, ArgSpec, CommandCtx, EntryArg, EntryCall, ExtCommand, ParsedArgs};
 pub use ctx::{
