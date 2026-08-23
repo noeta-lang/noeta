@@ -163,6 +163,12 @@ fn iter_probe(m: IterMethod) -> Option<Probe> {
 }
 
 /// The probe for each numeric list reduction.
+///
+/// The **eager** `xs.checked_sum()` is not among them and cannot be: it is neither a [`NumReduce`]
+/// nor a [`ListMethod`], being name-dispatched on the list surface, so no enum here reaches it and
+/// nothing forces a probe. Its lazy twin below is the one this census can hold, and the two share a
+/// fold — `tests/conformance/types/unsigned_checked_sum.noe` drives both spellings on both engines,
+/// which is where the eager door is pinned.
 fn num_reduce_probe(m: NumReduce) -> Option<Probe> {
     let xs = format!("xs: List<u64> = [{BIG}, 1u64, {MID}]");
     match m {
@@ -235,12 +241,16 @@ fn run_both(program: &str, door: &str) -> String {
 /// too, saying so. The list only ever shrinks. That is the whole difference between a census and a
 /// disabled test — the runtime-rejection snapshot in `noeta-fuzz` works the same way.
 ///
-/// Every entry here was found by this census on its first run, which is the argument for it
-/// existing.
-const KNOWN_UNHINTED: &[(&str, &str)] = &[(
-    "Iterator::CheckedSum",
-    "`checked_sum` folds through `checked_sum_scalars`, which adds at i64: `u64::MAX` is the          word `-1`, so `u64::MAX + 2` overflows nothing and reports `some(1)` where the element          width says `none`. The PACKED path is already right (`checked_sum_buf::<u64>`); the boxed          fallback needs the element width threaded to it. The eager `xs.checked_sum()` has the          same defect — it is not reached by any of the six enums, being name-dispatched, which is          its own finding.",
-)];
+/// **Currently empty, and that is the point.** Every entry this census opened with —
+/// `List::Join`, `Iterator::Join`, `Iterator::CheckedSum` — has been closed, so the ledger holds
+/// nothing and the census asserts every disclosing door reads a `u64` whole with no exceptions.
+///
+/// The mechanism stays because the next gap will want it: a door that must consult the hint and
+/// does not can be recorded here with a reason, visible and bounded, instead of the census being
+/// weakened or switched off. It is asserted exactly in both directions — a door failing without an
+/// entry is red, and an entry whose door starts passing is red and says to remove it — so the list
+/// can only ever shrink.
+const KNOWN_UNHINTED: &[(&str, &str)] = &[];
 
 /// Every door the classification says must consult the hint, walked with a `u64` past bit 63.
 ///

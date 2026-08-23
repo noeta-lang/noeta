@@ -6548,12 +6548,18 @@ impl Interpreter {
                 let view = p.seam_view();
                 noeta_stdlib::checked_sum_packed(&view.fields[0], p.raw())
             }
-            _ => noeta_stdlib::checked_sum_scalars(self.list_scalars(
-                list,
-                "checked_sum",
-                0,
-                span,
-            )?),
+            _ => {
+                // A `u64` element is the one 64-bit width the erased word cannot state: past bit 63
+                // it carries a negative one, so a signed fold finds no overflow where the type says
+                // there is one. The checker recorded the receiver's element hint at this call span,
+                // exactly as it does for `min`/`max`.
+                let unsigned = matches!(
+                    self.order_hint(span).and_then(|h| h.elements()),
+                    Some(RenderHint::Unsigned)
+                );
+                let scalars = self.list_scalars(list, "checked_sum", 0, span)?;
+                noeta_stdlib::checked_sum_scalars(scalars, unsigned)
+            }
         }
         .map_err(|e| self.runtime_error(std_error_code(e.kind), span, e.message))?;
         Ok(match folded {

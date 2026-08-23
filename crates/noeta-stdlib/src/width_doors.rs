@@ -16,7 +16,11 @@ pub fn of_iter_method(m: IterMethod) -> WidthDisclosure {
         // Folds the remaining elements arithmetically; the total's own static type carries the
         // width to whatever renders it, and the FOLD itself wraps at the element width rather than
         // the erased one.
-        IterMethod::Sum | IterMethod::Product | IterMethod::CheckedSum => WidthDisclosure::Order,
+        IterMethod::Sum | IterMethod::Product => WidthDisclosure::Order,
+        // The same fold, reporting instead of wrapping — so the element width decides not the
+        // digits but WHICH SUMS OVERFLOW, and at 64 bits the signed and unsigned readings disagree
+        // about that (`u64::MAX + 2` wraps past zero; the same words read signed are `-1 + 2`).
+        IterMethod::CheckedSum => WidthDisclosure::Order,
         // Builds a set's canonical buffer.
         IterMethod::ToSet => WidthDisclosure::Identity,
         // Equality, which the erased word answers exactly.

@@ -11,7 +11,9 @@
 //!
 //! The signedness is therefore taken from the **static type at the door** and travels to both
 //! backends as one of these hints, built by the checker and applied by a shared walk. Widths
-//! narrower than 64 bits need no hint: every value of one fits in an i64 and is already correct.
+//! narrower than 64 bits need no hint at any of these doors: every value of one fits in an i64 and
+//! already renders, sorts and compares correctly. (That is a property of *reading* a value, not of
+//! computing with one — the arithmetic door noted below is where the difference shows.)
 //!
 //! There are three kinds of door, and they take the same hint:
 //!
@@ -24,6 +26,16 @@
 //! * **Ordering** — `.sorted()`, `.min()`, `.max()`, `.keys()`, `.values()`, a rendered set or map,
 //!   and a `for` over a set or map — applied by each backend's comparator against its own value
 //!   model, through [`unsigned_order`] and [`map_key_order`].
+//!
+//! One **arithmetic** door takes the ordering hint too, and it is the exception that shows what the
+//! hint really answers. `checked_sum` reports integer overflow instead of wrapping, so the element
+//! width decides not how a number reads but *which sums overflow at all* — and at 64 bits the two
+//! readings disagree about that (`u64::MAX + 2` wraps past zero; the same words read signed are
+//! `-1 + 2` and overflow nothing). That is the same one bit an ordering door needs about the same
+//! receiver, read at the same call span, so it travels the same map rather than a second one.
+//! What the hint cannot answer there is a **narrow** width: it says "this word is a `u64`", not
+//! "this word is 8 bits wide", and a narrow fold's overflow point is its own width. A narrow list
+//! carries that in its packed schema instead — see `checked_sum_packed` and its boxed twin.
 //!
 //! The hint mirrors only the structure those walks take: a scalar, a list/set's elements, a map's
 //! keys and values, positional slots (a tuple's positions, an object's fields), and an enum's

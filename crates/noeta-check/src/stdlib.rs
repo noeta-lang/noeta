@@ -739,6 +739,11 @@ fn string_method(name: &str) -> Option<Type> {
 /// observes — while a set's canonical buffer and a map's key placement keep the structural order for
 /// the reason a `u64` hint is withheld from them: they place a value at one site and probe it at
 /// another, so a reading that could change between the two loses a member that is present.
+/// `checked_sum` is here rather than in a predicate of its own: it asks the SAME question about
+/// the same receiver at the same span — are these elements' erased words `u64`? — and two
+/// predicates answering one question is how the doors in this family drift apart. It reports
+/// overflow instead of wrapping, and at 64 bits the signed and unsigned readings disagree about
+/// which sums overflow at all, in both directions.
 pub(super) fn discloses_width(recv: &Type, name: &str) -> bool {
     use noeta_ext_abi::{ListMethod, MapMethod};
     match recv {
@@ -746,14 +751,16 @@ pub(super) fn discloses_width(recv: &Type, name: &str) -> bool {
             matches!(
                 ListMethod::from_name(name),
                 Some(ListMethod::Sorted | ListMethod::Join)
-            ) || matches!(name, "min" | "max")
+            ) || matches!(name, "min" | "max" | "checked_sum")
         }
         // An iterator's terminals observe the same order, and render the same text, over the same
         // elements — each drains into the eager list door — so a `u64` element reads unsigned
         // through `xs.iter().min()` and `xs.iter().join(",")` exactly as through the list's own.
         // (Spelled by name rather than through `IterMethod`: this crate deliberately does not link
         // `noeta-stdlib`, where that enum lives.)
-        Type::Named(n, _) if n == ITERATOR => matches!(name, "min" | "max" | "join"),
+        Type::Named(n, _) if n == ITERATOR => {
+            matches!(name, "min" | "max" | "join" | "checked_sum")
+        }
         Type::Map(..) => matches!(
             MapMethod::from_name(name),
             Some(MapMethod::Keys | MapMethod::Values)
@@ -761,6 +768,7 @@ pub(super) fn discloses_width(recv: &Type, name: &str) -> bool {
         _ => false,
     }
 }
+
 
 /// The **deferred-serialization** argument a native method declares, if any: the position of the
 /// parameter whose value the receiver's extern type keeps and serializes to JSON on some later tick

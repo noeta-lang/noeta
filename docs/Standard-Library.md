@@ -89,7 +89,7 @@ A reduction folds the whole list to one value, and each one asks something of th
 | `any` / `all` | `any() -> bool` | `T = bool` | `[false,true].any()` → `true` |
 | `count_true` | `count_true() -> int` | `T = bool` | `[true,false,true].count_true()` → `2`; `len()` is the size, and an iterator's `count()` is its element count |
 
-`min`/`max` order by the **same order** `sorted()` sorts by, so `xs.min()` and `xs.sorted().first()` are always the same value. `sum`/`product` fold at the element's numeric width and wrap there, exactly as repeated `+`/`*` would.
+`min`/`max` order by the **same order** `sorted()` sorts by, so `xs.min()` and `xs.sorted().first()` are always the same value. `sum`/`product` fold at the element's numeric width and wrap there, exactly as repeated `+`/`*` would. `checked_sum` reports at that same width instead of wrapping, so it answers by the element type rather than by the widest integer: a `List<u64>` summing past the top of `u64` is `none`, while one whose total merely passes the top of `i64` is `some` of the whole value.
 
 ### What "an ordered `T`" means
 
