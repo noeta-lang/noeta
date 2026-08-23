@@ -1063,6 +1063,16 @@ fn canonical_module() -> Module {
                 value: None,
             },
         )],
+        // A computing site: the span a numeric fold, a `checked_sum` or a bulk array op reads its
+        // element's `(signed, bits)` at. Non-empty so the digest covers the field's encoding, and
+        // narrow-and-unsigned so neither half encodes as a default.
+        elem_width_sites: vec![(
+            span(107),
+            noeta_ast::ElemWidth {
+                signed: false,
+                bits: 8,
+            },
+        )],
         // A deferred-serialization site: the span a `view.expose` reads the bound value's hint at.
         // Structurally nested for the same reason as the row above.
         binding_hint_sites: vec![(

@@ -89,9 +89,11 @@ A reduction folds the whole list to one value, and each one asks something of th
 | `any` / `all` | `any() -> bool` | `T = bool` | `[false,true].any()` → `true` |
 | `count_true` | `count_true() -> int` | `T = bool` | `[true,false,true].count_true()` → `2`; `len()` is the size, and an iterator's `count()` is its element count |
 
-`min`/`max` order by the **same order** `sorted()` sorts by, so `xs.min()` and `xs.sorted().first()` are always the same value. `sum`/`product` fold at the element's numeric width and wrap there, exactly as repeated `+`/`*` would. `checked_sum` reports at that same width instead of wrapping, so it answers by the element type rather than by the widest integer: a `List<u64>` summing past the top of `u64` is `none`, while one whose total merely passes the top of `i64` is `some` of the whole value.
+`min`/`max` order by the **same order** `sorted()` sorts by, so `xs.min()` and `xs.sorted().first()` are always the same value. `sum`/`product` fold at the element's numeric width and wrap there, exactly as repeated `+`/`*` would — `[200u8, 100u8].sum()` is `44`. `checked_sum` reports at that same width instead of wrapping, so it answers by the element type rather than by the widest integer: the same `List<u8>` is `none`, a `List<u64>` summing past the top of `u64` is `none`, and one whose total merely passes the top of `i64` is `some` of the whole value.
 
-The element-wise four answer by the element type too. `scale` and `neg` wrap at its width the way `*` and unary `-` do; `abs` and `clamp` **compare** at it, so an unsigned element is already non-negative and `abs` hands it straight back — `[18446744073709551615u64].abs()` is itself, not `1` — and a value near the top of `u64` clamps down to the high bound rather than up to the low one.
+The element-wise four answer by the element type too. `scale` and `neg` wrap at its width the way `*` and unary `-` do — `[200u8, 100u8].scale(3)` is `[88, 44]` — while `abs` and `clamp` **compare** at it, so an unsigned element is already non-negative and `abs` hands it straight back — `[18446744073709551615u64].abs()` is itself, not `1` — and a value near the top of `u64` clamps down to the high bound rather than up to the low one.
+
+The element type is the whole of it: none of these answers depend on how the list was built. A `List<u8>` folds at 8 bits whether you wrote it as a literal, mapped it out of another list, or collected it from an iterator, and the same holds for the iterator terminals (`xs.iter().map(f).sum()`) and for `+`/`-`/`*` between two lists.
 
 ### What "an ordered `T`" means
 

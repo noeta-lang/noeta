@@ -127,6 +127,43 @@ impl<'m> Vm<'m> {
         resolve_hint_operand(operand, &self.hints.type_args, regs, fbase, door)
     }
 
+    /// The **element width** the computing door at `span` answers at.
+    ///
+    /// Two sources, in this order, because they cover two different positions and neither covers
+    /// both:
+    ///
+    /// 1. the width the checker recorded from the receiver's element type — exact, and the only one
+    ///    that can name a width below 64;
+    /// 2. failing that, the **ordering hint** at the same span, which says only "these words are a
+    ///    `u64`". It is here for the one position a static width cannot reach: inside a generic body
+    ///    the element type is a type parameter, which names no width, and the answer lives at the
+    ///    call — so the hint carries a `RenderHint::Param` the frame resolves. Only `min`/`max`
+    ///    reach a generic body at all (they are the reductions with a bound that promises an order);
+    ///    the arithmetic ones require a concrete numeric element type, so their width is always
+    ///    recorded above.
+    ///
+    /// [`noeta_ast::ElemWidth::WORD`] where neither speaks — an `int`/`float` element, a `dyn`
+    /// receiver, an instantiation the call could not name. The erased signed word is what such a
+    /// door always computed at, so absence is the untouched path rather than a wrong number.
+    ///
+    /// The tree-walker runs the identical two-source lookup over the identical tables, so both
+    /// engines wrap, overflow and compare at the same width.
+    pub(crate) fn elem_width(&self, span: &Span) -> noeta_ast::ElemWidth {
+        if let Some(width) = (!self.elem_widths.is_empty())
+            .then(|| self.elem_widths.get(span).copied())
+            .flatten()
+        {
+            return width;
+        }
+        if matches!(
+            self.order_hint(span).and_then(|h| h.elements()),
+            Some(noeta_ast::RenderHint::Unsigned)
+        ) {
+            return noeta_ast::ElemWidth::U64;
+        }
+        noeta_ast::ElemWidth::WORD
+    }
+
     /// The push hint recorded at `span` — the deferred twin of [`Vm::order_hint`], read once when a
     /// native call that BINDS a value for later serialization builds its ctx. Same `is_empty`
     /// short-circuit, for the same reason: nearly every program has no entry at all.
@@ -871,16 +908,20 @@ impl<'m> Vm<'m> {
                 // A directly list-backed iterator (`xs.iter().sum()`, the canonical form) delegates to
                 // the eager list reduction over its remaining elements — so a packed narrow-width list
                 // folds its buffer and width-wraps *identically* to `xs.sum()` (no divergence). An
-                // adapter chain (`take`/`map`/…) falls through to the generic fold, where the element
-                // type is already a 64-bit `int`/`float`, so no width-wrapping is at stake.
+                // adapter chain (`take`/`map`/…) falls through to the generic fold below.
                 if let Some((list, from)) = recv.iter_drain_list() {
                     return self.call_list_reduction(list, "sum", from, span);
                 }
-                // A narrow-width source (`xs.iter().take(k)` over a `List<i32>`, …): the generic fold
-                // accumulates at 64 bits, so mask the integer total back to the element width at the
-                // end — the same wrap `xs.sum()` applies — so a narrow-typed iterator reduction agrees
-                // (array-ops arc). Traced through the width-preserving adapters only.
-                let narrow = recv.iter_narrow_width();
+                // A narrow-width source (`xs.iter().map(f)` over a `List<u8>`, `xs.iter().take(k)`
+                // over a `List<i32>`, …): the generic fold accumulates at 64 bits, so mask the
+                // integer total back to the element width at the end — the same wrap `xs.sum()`
+                // applies. The width comes from this terminal's `Iterator<T>` receiver, which names
+                // what a `map` produced; the runtime trace behind it reads a PACKED backing buffer's
+                // schema, and stands in only where the checker could not type the chain at all.
+                let narrow = match self.elem_width(&span) {
+                    w if w != noeta_ast::ElemWidth::WORD => Some((w.signed, w.bits)),
+                    _ => recv.iter_narrow_width(),
+                };
                 let mut int_total: i64 = 0;
                 let mut float_total: f64 = 0.0;
                 let mut any_float = false;

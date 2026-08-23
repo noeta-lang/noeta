@@ -1986,14 +1986,28 @@ pub struct Module {
     /// with the [`noeta_ast::RenderHint`] naming the positions to read unsigned. The VM looks a site
     /// up by span — a stdlib method call's (`.sorted()`, `.min()`, `.max()`, `.keys()`,
     /// `.values()`) or a `for` loop's — and orders the sequence the program sees accordingly.
-    /// `checked_sum` reads the same table for the same bit: it reports overflow at the element
-    /// width, and the two readings of a 64-bit word disagree about which sums overflow. So do the
-    /// bulk `abs`/`clamp`, which compare a boxed element against zero and against their bounds.
-    ///
     /// A side table rather than an operand, deliberately: these ops are the hot dispatch path, and
     /// nearly every program has no entry here at all. The tree-walker reads the same hint off its
     /// IR node (`Rvalue::Method::order` / `Stmt::For::order`), so both engines order alike.
+    ///
+    /// A door that **computes** rather than reads takes [`Module::elem_width_sites`] instead: a hint
+    /// is structural and says nothing about a width below 64, which is right for rendering and
+    /// ordering a value and wrong for folding one.
     pub order_hint_sites: Vec<(Span, noeta_ast::RenderHint)>,
+    /// **Computing sites** over a fixed-width numeric element: the door's `Span` paired with that
+    /// element's [`noeta_ast::ElemWidth`]. The VM looks a site up by span — a numeric reduction, a
+    /// `checked_sum`, a bulk array op, an element-wise `+`/`-`/`*` — and wraps, overflows and
+    /// compares at that width instead of at the erased 64-bit word.
+    ///
+    /// A *packed* list needs no entry: its flat buffer's schema is the element width, so every
+    /// kernel folding one is exact already. A **boxed** narrow-width list — a `map` result, an
+    /// `iter().collect()` — carries nothing but the erased words, and without this table
+    /// `[200u8, 100u8].map(fn(x) => x).sum()` answers `300` where the packed literal answers `44`.
+    ///
+    /// A side table for the same reason [`Module::order_hint_sites`] is one. The tree-walker reads
+    /// the identical table off its own lowered program (`noeta_ir::Program::elem_width_sites`), so
+    /// both engines compute at the same width.
+    pub elem_width_sites: Vec<(Span, noeta_ast::ElemWidth)>,
     /// **Deferred-serialization sites**: the span of a native call that BINDS a value it serializes
     /// to JSON on some later tick (`view.expose(name, signal)`) → the
     /// [`noeta_ast::RenderHint`] built from the bound value's static type. The VM looks the site up

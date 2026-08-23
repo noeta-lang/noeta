@@ -37,6 +37,9 @@ pub use noeta_ext_abi::render_hint::{
     PushHint, RenderHint, json_stringify, json_stringify_pushed, map_key_display, map_key_order,
     unsigned_digits, unsigned_order,
 };
+// The hint's sibling channel, re-exported for the same reason: a computing door's `(signed, bits)`
+// is read off a static type this crate spells, and both backends take it from the lowered program.
+pub use noeta_ext_abi::width_doors::ElemWidth;
 pub use syntax_kind::SyntaxKind;
 
 /// The human-facing **short name** of a (possibly namespace-qualified) type identity: the segment

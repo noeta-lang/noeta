@@ -751,14 +751,13 @@ impl<'m> Vm<'m> {
                     noeta_stdlib::reduce_num_packed(op, &field, &bytes[from * schema.byte_size..])
                 }
                 _ => {
-                    // `min`/`max` on a `List<u64>` read the erased words unsigned; the checker
-                    // recorded the receiver's element hint at this call span.
-                    let unsigned = matches!(
-                        self.order_hint(&span).and_then(|h| h.elements()),
-                        Some(noeta_ast::RenderHint::Unsigned)
-                    );
+                    // A boxed list carries only its erased words, so the element type is what says
+                    // how wide they are and how to read them: `min`/`max` on a `List<u64>` compare
+                    // unsigned, and `sum`/`product` on a `List<u8>` wrap at 8 bits. The checker
+                    // recorded both facts at this call span.
+                    let width = self.elem_width(&span);
                     let scalars = self.list_reduction_scalars(v, method, from, span)?;
-                    noeta_stdlib::reduce_num_scalars(op, scalars.into_iter(), unsigned)
+                    noeta_stdlib::reduce_num_scalars(op, scalars.into_iter(), width)
                 }
             };
             let folded = folded.map_err(|e| self.std_dispatch_error(e, span))?;
@@ -1113,10 +1112,14 @@ impl<'m> Vm<'m> {
                 return Ok(Value::packed_list(schema, bytes));
             }
         }
-        // Boxed fallback: fold the materialized scalars.
+        // Boxed fallback: fold the materialized scalars, wrapping at the width the checker recorded
+        // for this operator's span — the packed path above reads the same width off the schema, so
+        // `[200u8, 100u8] + [200u8, 100u8]` is `[144, 200]` whichever representation the two lists
+        // happen to have.
+        let width = self.elem_width(&span);
         let a = self.list_reduction_scalars(left, op.symbol(), 0, span)?;
         let b = self.list_reduction_scalars(right, op.symbol(), 0, span)?;
-        let out = noeta_stdlib::zip_num_scalars(op, &a, &b)
+        let out = noeta_stdlib::zip_num_scalars(op, &a, &b, width)
             .map_err(|e| self.std_dispatch_error(e, span))?;
         Ok(Value::list(
             out.into_iter()
@@ -1174,28 +1177,25 @@ impl<'m> Vm<'m> {
             let out = result.map_err(|e| self.std_dispatch_error(e, span))?;
             return Ok(Value::packed_list(schema, out));
         }
-        // Boxed fallback. A packed buffer names its element width in its schema; these words do not,
-        // so the ops that COMPARE — `abs` against zero, `clamp` against its bounds — take the
-        // receiver's element hint the checker recorded at this call span, exactly as `min`/`max` do.
-        // `scale` and `neg` only compute, and a wrapping product or negation is the same bits under
-        // either reading, so neither is given the bit.
-        let unsigned = matches!(
-            self.order_hint(&span).and_then(|h| h.elements()),
-            Some(noeta_ast::RenderHint::Unsigned)
-        );
+        // Boxed fallback. A packed buffer names its element width in its schema; these words do
+        // not, so all four take the width the checker recorded at this call span. Every one of them
+        // needs it: `scale` and `neg` wrap there (`[200u8].neg()` is `[56]`), `abs` folds around it
+        // (an unsigned element is already non-negative, and `(-128i8).abs()` stays `-128`), and
+        // `clamp` compares against bounds this element type also types.
+        let width = self.elem_width(&span);
         let a = self.list_reduction_scalars(v, method, 0, span)?;
         let result = match method {
-            "scale" => noeta_stdlib::scale_num_scalars(&a, arg_scalar(self, 0)?),
+            "scale" => noeta_stdlib::scale_num_scalars(&a, arg_scalar(self, 0)?, width),
             "clamp" => noeta_stdlib::clamp_num_scalars(
                 &a,
                 arg_scalar(self, 0)?,
                 arg_scalar(self, 1)?,
-                unsigned,
+                width,
             ),
             _ => {
                 let op = noeta_stdlib::ElemMap::from_name(method)
                     .expect("the caller gates this to a bulk method name");
-                noeta_stdlib::map_num_scalars(op, &a, unsigned)
+                noeta_stdlib::map_num_scalars(op, &a, width)
             }
         };
         let out = result.map_err(|e| self.std_dispatch_error(e, span))?;
@@ -1215,16 +1215,13 @@ impl<'m> Vm<'m> {
                 noeta_stdlib::checked_sum_packed(&field, &bytes)
             }
             _ => {
-                // A `u64` element is the one 64-bit width the erased word cannot state: past bit 63
-                // it carries a negative one, so a signed fold finds no overflow where the type says
-                // there is one. The checker recorded the receiver's element hint at this call span,
-                // exactly as it does for `min`/`max`.
-                let unsigned = matches!(
-                    self.order_hint(&span).and_then(|h| h.elements()),
-                    Some(noeta_ast::RenderHint::Unsigned)
-                );
+                // The element width IS the overflow point, and the erased word cannot state it: at
+                // 8 bits `200 + 100` overflows where at 64 it does not, and at 64 a `u64` past bit
+                // 63 carries a negative word, so a signed fold finds no overflow where the type says
+                // there is one. The checker recorded the width at this call span.
+                let width = self.elem_width(&span);
                 let scalars = self.list_reduction_scalars(v, "checked_sum", 0, span)?;
-                noeta_stdlib::checked_sum_scalars(scalars.into_iter(), unsigned)
+                noeta_stdlib::checked_sum_scalars(scalars.into_iter(), width)
             }
         };
         let folded = folded.map_err(|e| self.std_dispatch_error(e, span))?;

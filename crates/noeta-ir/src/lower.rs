@@ -180,6 +180,13 @@ pub struct LoweringSites<'a> {
     /// [`Rvalue::Method::order`] / [`Stmt::For::order`] so both backends read those erased words
     /// unsigned when producing the order a program sees — the ordering twin of `render_hint_sites`.
     pub order_hint_sites: &'a HashMap<Span, noeta_ast::RenderHint>,
+    /// Computing sites over a fixed-width numeric element → that element's
+    /// [`noeta_ast::ElemWidth`]. Copied wholesale onto [`crate::Program::elem_width_sites`], where
+    /// both backends read it by span: a boxed narrow-width list carries only its erased words, so a
+    /// fold there wraps at 64 bits unless the door is told the elements are 8. The arithmetic
+    /// sibling of `order_hint_sites`, and a separate map because a structural hint cannot state a
+    /// width below 64 — see `noeta_check::Sites::elem_width_sites`.
+    pub elem_width_sites: &'a HashMap<Span, noeta_ast::ElemWidth>,
     /// Deferred-serialization sites: the span of a native call that BINDS a value it serializes on a
     /// later tick → the [`noeta_ast::RenderHint`] built from the bound value's static type.
     pub binding_hint_sites: &'a HashMap<Span, noeta_ast::RenderHint>,
@@ -300,6 +307,7 @@ impl LoweringSites<'static> {
         static RECIPES: OnceLock<HashMap<Span, noeta_ext_abi::TypeRecipe>> = OnceLock::new();
         static WIDTHS: OnceLock<HashMap<Span, (bool, u8)>> = OnceLock::new();
         static HINTS: OnceLock<HashMap<Span, noeta_ast::RenderHint>> = OnceLock::new();
+        static ELEM_WIDTHS: OnceLock<HashMap<Span, noeta_ast::ElemWidth>> = OnceLock::new();
         static FOLDED: OnceLock<HashMap<Span, bool>> = OnceLock::new();
         static REPRS: OnceLock<HashMap<Span, noeta_ast::reflect::TypeRepr>> = OnceLock::new();
         static HANDLES: OnceLock<HashMap<Span, (String, String, bool)>> = OnceLock::new();
@@ -331,6 +339,7 @@ impl LoweringSites<'static> {
             render_hint_sites: HINTS.get_or_init(HashMap::new),
             json_hint_sites: HINTS.get_or_init(HashMap::new),
             order_hint_sites: HINTS.get_or_init(HashMap::new),
+            elem_width_sites: ELEM_WIDTHS.get_or_init(HashMap::new),
             binding_hint_sites: HINTS.get_or_init(HashMap::new),
             folded_type_tests: FOLDED.get_or_init(HashMap::new),
             construction_sites: REPRS.get_or_init(HashMap::new),
@@ -386,6 +395,7 @@ macro_rules! lowering_sites {
             render_hint_sites: &$s.render_hint_sites,
             json_hint_sites: &$s.json_hint_sites,
             order_hint_sites: &$s.order_hint_sites,
+            elem_width_sites: &$s.elem_width_sites,
             binding_hint_sites: &$s.binding_hint_sites,
             folded_type_tests: &$s.folded_type_tests,
             construction_sites: &$s.construction_sites,
@@ -789,8 +799,25 @@ pub fn lower_with_sites_opts(
         type_args: sites.type_arg_table.clone(),
         type_arg_reprs: sites.type_arg_reprs.clone(),
         type_arg_hints: sites.type_arg_hints.clone(),
+        // Sorted by span, and that is load-bearing rather than tidy: the checker keeps these in a
+        // `HashMap`, whose iteration order varies between processes, and this vector is serialized
+        // into the `.noeb` verbatim. An unsorted copy makes the compiled module's bytes differ from
+        // one run of the same compiler to the next — which `determinism.rs` catches, and which would
+        // otherwise defeat the startup cache's content addressing.
+        elem_width_sites: sorted_elem_widths(sites.elem_width_sites),
         span: program.span,
     })
+}
+
+/// The checker's element-width map as a **deterministically ordered** vector, keyed by span —
+/// `(source, start, end)`, the only total order a `Span` has (it derives no `Ord` of its own,
+/// because a span is a location rather than a rank).
+fn sorted_elem_widths(
+    map: &HashMap<Span, noeta_ast::ElemWidth>,
+) -> Vec<(Span, noeta_ast::ElemWidth)> {
+    let mut out: Vec<(Span, noeta_ast::ElemWidth)> = map.iter().map(|(s, w)| (*s, *w)).collect();
+    out.sort_by_key(|(s, _)| (s.source, s.start, s.end));
+    out
 }
 
 /// Carries the temporary counter for the function frame currently being lowered. One

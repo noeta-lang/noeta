@@ -11,6 +11,16 @@
 //! discloses nothing. A classification with no probe behind it is the shape this census exists to
 //! prevent — a door declared connected that nothing ever walked through.
 //!
+//! **The computing doors are walked differently, because they answer a different question.** A
+//! [`WidthDisclosure::Compute`] door — a numeric fold, `checked_sum`, a bulk array op — derives its
+//! answer from the elements *as numbers*, at the element's own width, and no hint can state a width
+//! below 64. Those probes run the same door twice over the same numbers, once on a **packed** list
+//! and once on the **boxed** twin `.map(fn(x) => x)` produces, and pin the FULL output exactly. The
+//! packed side reads its width off its buffer's schema and is the reference; the boxed side is the
+//! representation that carries nothing but the erased words. A `-1` tripwire would be useless here —
+//! a boxed `[200u8, 100u8].sum()` answering `300` instead of `44` looks entirely plausible — which
+//! is why these assert the whole answer rather than the absence of a tell.
+//!
 //! And the identity doors are asserted in the opposite direction. A set's buffer and a map's key
 //! slots are built at one site and probed at another, so a hint there would lose a member that is
 //! present — strictly worse than an order a reader finds surprising. Those probes check the value
@@ -37,7 +47,10 @@ const BIG: &str = "18446744073709551615u64";
 /// One below the signed boundary's mirror, to catch an order that only looks right at the extreme.
 const MID: &str = "9223372036854775808u64";
 
-/// A door's probe: a program, and the substring its output must contain.
+/// A door's probe: a program, and what its output must be. A disclosing door checks `want` as a
+/// substring (the value has to read back whole, wherever in the output it lands); a **computing**
+/// door checks it as the entire output, because a wrong width produces a plausible-looking number
+/// rather than a tell.
 struct Probe {
     program: String,
     want: String,
@@ -49,6 +62,19 @@ fn p(program: impl Into<String>, want: impl Into<String>) -> Option<Probe> {
         want: want.into(),
     })
 }
+
+/// The **boxed** twin of the list `expr` names: `map` with the identity changes nothing about the
+/// values and everything about the representation, which is exactly the contrast a computing door
+/// has to survive.
+fn boxed(expr: &str) -> String {
+    format!("{expr}.map(fn(x) => x)")
+}
+
+/// The two `u8` values every computing probe runs, and the packed list holding them. `200 + 100`
+/// leaves the range of a `u8` and `200 * 100` leaves it several times over, so every fold below
+/// answers differently at 8 bits than at 64 — a probe whose numbers were small would agree either
+/// way and prove nothing.
+const NARROW: &str = "xs: List<u8> = [200u8, 100u8]";
 
 /// The probe for each `List<T>` method, or `None` where the classification says it discloses
 /// nothing. Exhaustive: a new method needs an answer here.
@@ -130,18 +156,33 @@ fn iter_probe(m: IterMethod) -> Option<Probe> {
             format!("{it}\necho xs.iter().max()"),
             format!("some({BIG_D})"),
         ),
+        // The fold wraps at the ELEMENT width, and a `map` adapter is where the runtime has nothing
+        // left to trace: the backing buffer is gone and only the terminal's `Iterator<u8>` receiver
+        // still names the width. The 64-bit line beside it is the other end of the same channel.
         IterMethod::Sum => p(
-            // The fold wraps at the element width, not the erased one.
-            format!("ys: List<u64> = [{BIG}, 2u64]\necho ys.iter().sum()"),
-            "1",
+            format!(
+                "{NARROW}\necho xs.iter().sum()\necho xs.iter().map(fn(x) => x).sum()\n\
+                 ys: List<u64> = [{BIG}, 2u64]\necho ys.iter().sum()"
+            ),
+            "44\n44\n1",
         ),
         IterMethod::Product => p(
-            format!("ys: List<u64> = [{BIG}, 1u64]\necho ys.iter().product()"),
-            BIG_D,
+            format!(
+                "{NARROW}\necho xs.iter().product()\necho xs.iter().map(fn(x) => x).product()\n\
+                 ys: List<u64> = [{BIG}, 1u64]\necho ys.iter().product()"
+            ),
+            format!("32\n32\n{BIG_D}"),
         ),
+        // Reporting instead of wrapping: `200 + 100` leaves a `u8`, and `u64::MAX + 2` leaves a
+        // `u64`, while the same words read signed (`-1 + 2`) overflow nothing.
         IterMethod::CheckedSum => p(
-            format!("ys: List<u64> = [{BIG}, 2u64]\necho ys.iter().checked_sum()"),
-            "none",
+            format!(
+                "{NARROW}\necho xs.iter().checked_sum()\n\
+                 echo xs.iter().map(fn(x) => x).checked_sum()\n\
+                 zs: List<u8> = [200u8, 55u8]\necho zs.iter().map(fn(x) => x).checked_sum()\n\
+                 ys: List<u64> = [{BIG}, 2u64]\necho ys.iter().checked_sum()"
+            ),
+            "none\nnone\nsome(255)\nnone",
         ),
         IterMethod::ToSet => p(
             format!("{it}\necho xs.iter().to_set().contains({BIG})"),
@@ -174,35 +215,65 @@ fn iter_probe(m: IterMethod) -> Option<Probe> {
 /// unknown name outright. Adding a row to the table without a probe here fails at that arm, and
 /// adding one classified [`WidthDisclosure::Order`] or `Display` with `None` fails in [`walk`].
 fn name_dispatched_probe(name: &str) -> Option<Probe> {
-    let xs = format!("xs: List<u64> = [{BIG}, {MID}, 1u64]");
+    let us = format!("us: List<u64> = [{BIG}, {MID}, 1u64]");
     match name {
         // The overflow-reporting fold, in its EAGER spelling — the one the enums cannot reach.
-        // `u64::MAX + 2` wraps past zero; the same words read signed are `-1 + 2` and overflow
-        // nothing, so an unhinted fold answers `some(1)`.
+        // `200u8 + 100u8` leaves the range of a `u8` where the same words at 64 bits carry it
+        // whole, and `u64::MAX + 2` wraps past zero where the same words read signed are `-1 + 2`
+        // and overflow nothing. Both boundaries, because getting one right is not getting the
+        // other right.
         "checked_sum" => p(
-            format!("ys: List<u64> = [{BIG}, 2u64]\necho ys.checked_sum()"),
-            "none",
+            format!(
+                "{NARROW}\necho xs.checked_sum()\necho {}.checked_sum()\n\
+                 zs: List<u8> = [200u8, 55u8]\necho {}.checked_sum()\n\
+                 ys: List<u64> = [{BIG}, 2u64]\necho ys.checked_sum()",
+                boxed("xs"),
+                boxed("zs")
+            ),
+            "none\nnone\nsome(255)\nnone",
         ),
-        // An unsigned value is ALREADY non-negative, so `abs` is the identity. Read signed, the
-        // same words are `-1` and `i64::MIN`, and `wrapping_abs` folds the first to `1`.
+        // `scale` multiplies and `neg` negates, and both wrap at the element width: `200u8 * 3` is
+        // `88` and `(200u8).neg()` is `56`. At 64 bits neither reading changes the bits, which is
+        // why the u64 line is absent here and present for the two that compare.
+        "scale" => p(
+            format!("{NARROW}\necho xs.scale(3)\necho {}.scale(3)", boxed("xs")),
+            "[88, 44]\n[88, 44]",
+        ),
+        "neg" => p(
+            format!("{NARROW}\necho xs.neg()\necho {}.neg()", boxed("xs")),
+            "[56, 156]\n[56, 156]",
+        ),
+        // `abs` compares against zero AND wraps: an unsigned element is already non-negative (read
+        // signed, `u64::MAX` and the bit-63 boundary are `-1` and `i64::MIN`, and `wrapping_abs`
+        // folds the first to `1`), while `(-128i8).abs()` stays `-128` because 128 is not an `i8`.
         "abs" => p(
-            format!("{xs}\necho xs.abs()"),
-            format!("[{BIG_D}, {MID_D}, 1]"),
+            format!(
+                "ss: List<i8> = [-128i8, 100i8]\necho ss.abs()\necho {}.abs()\n\
+                 {us}\necho us.abs()",
+                boxed("ss")
+            ),
+            format!("[-128, 100]\n[-128, 100]\n[{BIG_D}, {MID_D}, 1]"),
         ),
         // Both boundaries sit far ABOVE the high bound, so both clamp down to it. Read signed they
         // are negative and clamp UP to the low bound instead — the same wrong answer for two
-        // different values, which is why the control element is in the list.
+        // different values, which is why the control element is in the list. The narrow pair needs
+        // no wrap (the result is one of three in-range inputs) and is here so the door that does
+        // not move is walked beside the ones that do.
         "clamp" => p(
-            format!("{xs}\necho xs.clamp(0u64, 100u64)"),
-            "[100, 100, 1]",
+            format!(
+                "{NARROW}\necho xs.clamp(0u8, 150u8)\necho {}.clamp(0u8, 150u8)\n\
+                 {us}\necho us.clamp(0u64, 100u64)",
+                boxed("xs")
+            ),
+            "[150, 100]\n[150, 100]\n[100, 100, 1]",
         ),
-        // Classified as disclosing nothing: `scale` and `neg` compute rather than compare (a
-        // wrapping product and a two's-complement negation are the same bits under either reading),
-        // and the rest hand elements onward carrying their own static type.
-        "scale" | "neg" | "len" | "iter" | "enumerate" | "map" | "filter" | "to_bytes" => None,
+        // Classified as letting nothing through: each hands elements onward carrying their own
+        // static type, and a length is not a width.
+        "len" | "iter" | "enumerate" | "map" | "filter" | "to_bytes" => None,
         other => panic!(
             "`{other}` is a name-dispatched `List<T>` method with no probe. Give it a program that \
-             drives a `u64` past bit 63 through it, or say here that it discloses nothing."
+             drives a `u64` past bit 63, or a boxed narrow-width list, through it — or say here \
+             that it lets nothing through."
         ),
     }
 }
@@ -213,10 +284,23 @@ fn num_reduce_probe(m: NumReduce) -> Option<Probe> {
     match m {
         NumReduce::Min => p(format!("{xs}\necho xs.min()"), "some(1)"),
         NumReduce::Max => p(format!("{xs}\necho xs.max()"), format!("some({BIG_D})")),
-        NumReduce::Sum => p(format!("ys: List<u64> = [{BIG}, 2u64]\necho ys.sum()"), "1"),
+        // The arithmetic folds wrap at the ELEMENT width. `[200u8, 100u8]` is `44` and its product
+        // `32`, in both representations; at 64 bits the same fold wraps past zero.
+        NumReduce::Sum => p(
+            format!(
+                "{NARROW}\necho xs.sum()\necho {}.sum()\n\
+                 ys: List<u64> = [{BIG}, 2u64]\necho ys.sum()",
+                boxed("xs")
+            ),
+            "44\n44\n1",
+        ),
         NumReduce::Product => p(
-            format!("ys: List<u64> = [{BIG}, 1u64]\necho ys.product()"),
-            BIG_D,
+            format!(
+                "{NARROW}\necho xs.product()\necho {}.product()\n\
+                 ys: List<u64> = [{BIG}, 1u64]\necho ys.product()",
+                boxed("xs")
+            ),
+            format!("32\n32\n{BIG_D}"),
         ),
     }
 }
@@ -291,24 +375,39 @@ fn run_both(program: &str, door: &str) -> String {
 /// can only ever shrink.
 const KNOWN_UNHINTED: &[(&str, &str)] = &[];
 
-/// Every door the classification says must consult the hint, walked with a `u64` past bit 63.
+/// Every door the classification says needs an answer from the static type, walked: a
+/// [`WidthDisclosure::Display`]/`Order`/`Identity` door with a `u64` past bit 63, a
+/// [`WidthDisclosure::Compute`] door with a **boxed** narrow-width list beside its packed twin.
 ///
-/// A door classified [`WidthDisclosure::Display`] or [`WidthDisclosure::Order`] and not actually
-/// hinted fails here — that is the whole point. The `-1` assertion is separate from the
-/// `want` match because the erased reading is the specific failure this family produces, and
-/// naming it makes a red say what went wrong rather than only that something did.
+/// A door classified as needing one and not actually getting it fails here — that is the whole
+/// point. The two kinds fail differently, which is why they are asserted differently. A dropped
+/// *hint* leaks the erased word, so `-1` in the output is a tell worth naming on its own; a dropped
+/// *width* produces `300` where the answer is `44`, which looks like an answer. So a computing door
+/// is pinned to its whole output and nothing less.
 #[track_caller]
 fn walk(door: &str, disclosure: WidthDisclosure, probe: Option<Probe>) {
     match (disclosure, probe) {
         (WidthDisclosure::None, None) => {}
         (WidthDisclosure::None, Some(_)) => {
-            panic!("{door} discloses nothing but carries a probe — say which it is")
+            panic!("{door} lets no width through but carries a probe — say which it is")
         }
         (d, None) => panic!(
             "{door} is classified {d:?} and has no probe. A door declared connected that nothing \
              walks through is exactly the shape this census exists to prevent — give it a program \
-             that drives a `u64` past bit 63 through it."
+             that drives a `u64` past bit 63, or a boxed narrow-width list, through it."
         ),
+        (WidthDisclosure::Compute, Some(probe)) => {
+            let out = run_both(&probe.program, door);
+            assert_eq!(
+                out.trim_end(),
+                probe.want.trim_end(),
+                "{door}: the answer is computed at the ELEMENT width, and this door did not get \
+                 it. The packed line reads the width off its buffer's schema; the boxed line — the \
+                 `.map(fn(x) => x)` twin — carries only the erased words and needs the checker's \
+                 `elem_width_sites` entry to reach the same answer.\n{}",
+                probe.program
+            );
+        }
         (_, Some(probe)) => {
             let out = run_both(&probe.program, door);
             let whole = !out.contains("-1") && out.contains(&probe.want);

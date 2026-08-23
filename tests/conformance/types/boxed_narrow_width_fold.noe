@@ -1,0 +1,158 @@
+// A fixed-width integer is erased to its i64 word, so the width lives only in the static type. A
+// PACKED list carries it anyway — its flat buffer's schema is the element width, and every kernel
+// that folds one is exact by construction. A **boxed** list carries nothing but the words: a `map`
+// result, an `iter().collect()`, anything that arrived as ordinary boxed elements. So each pair
+// below runs one door twice over the same numbers, once packed and once boxed, and demands the same
+// answer. The packed line is the reference; the boxed line is the one that had no width to fold at.
+//
+// `.map(fn(x) => x)` is the identity, deliberately: it changes nothing about the values and
+// everything about the representation, so a pair that disagrees can only be disagreeing about where
+// the fold wraps.
+//
+// The negative half runs the IDENTICAL numbers through `List<int>`, where 300 really is 300 and the
+// sum of 200 and 100 overflows nothing. That contrast is what says the answer follows the TYPE
+// rather than the values: an implementation that guessed from the magnitudes could not pass both
+// halves, and one that simply wrapped everything at 8 bits would fail the second.
+
+// --- `u8`: the fold wraps at 8 bits, in both representations -------------------------------------
+bs: List<u8> = [200u8, 100u8]
+mb = bs.map(fn(x) => x)
+// expect: stdout "44"
+echo(bs.sum())
+// expect: stdout "44"
+echo(mb.sum())
+// expect: stdout "32"
+echo(bs.product())
+// expect: stdout "32"
+echo(mb.product())
+
+// `checked_sum` REPORTS instead of wrapping, so the element width decides not the digits but
+// whether there is an answer at all: `200 + 100` leaves the range of a `u8`.
+// expect: stdout "none"
+echo(bs.checked_sum())
+// expect: stdout "none"
+echo(mb.checked_sum())
+// One below the boundary, so the `none` above is a boundary and not a blanket refusal.
+// expect: stdout "some(255)"
+echo([200u8, 55u8].map(fn(x) => x).checked_sum())
+
+// --- the bulk array ops, which map rather than fold ----------------------------------------------
+// expect: stdout "[88, 44]"
+echo(bs.scale(3))
+// expect: stdout "[88, 44]"
+echo(mb.scale(3))
+// expect: stdout "[56, 156]"
+echo(bs.neg())
+// expect: stdout "[56, 156]"
+echo(mb.neg())
+// `clamp` needs no wrap — its result is one of three values that were already in the width — and is
+// here so the pair that does not move is pinned beside the pairs that do.
+// expect: stdout "[150, 100]"
+echo(bs.clamp(0u8, 150u8))
+// expect: stdout "[150, 100]"
+echo(mb.clamp(0u8, 150u8))
+
+// The element-wise operators take the same width at the operator's own span.
+// expect: stdout "[144, 200]"
+echo(bs + bs)
+// expect: stdout "[144, 200]"
+echo(mb + mb)
+// expect: stdout "[64, 16]"
+echo(bs * bs)
+// expect: stdout "[64, 16]"
+echo(mb * mb)
+
+// --- `i8`: the boundary `abs` cannot leave -------------------------------------------------------
+// 128 is not an `i8`, so `(-128i8).abs()` stays `-128` — reading the word instead answers `128`,
+// which is not a value the type has.
+ss: List<i8> = [-128i8, 100i8]
+ms = ss.map(fn(x) => x)
+// expect: stdout "[-128, 100]"
+echo(ss.abs())
+// expect: stdout "[-128, 100]"
+echo(ms.abs())
+// expect: stdout "[-128, -100]"
+echo(ss.neg())
+// expect: stdout "[-128, -100]"
+echo(ms.neg())
+// A signed narrow sum sign-extends rather than truncating.
+// expect: stdout "-128"
+echo([-100i8, -28i8].map(fn(x) => x).sum())
+// expect: stdout "none"
+echo([-100i8, -29i8].map(fn(x) => x).checked_sum())
+
+// --- the other widths, so 8 bits is not the only one that reaches the kernel ----------------------
+ws: List<u16> = [60000u16, 10000u16]
+// expect: stdout "4464"
+echo(ws.sum())
+// expect: stdout "4464"
+echo(ws.map(fn(x) => x).sum())
+ns: List<u32> = [4000000000u32, 400000000u32]
+// expect: stdout "105032704"
+echo(ns.sum())
+// expect: stdout "105032704"
+echo(ns.map(fn(x) => x).sum())
+hs: List<i16> = [-32768i16, -1i16]
+// expect: stdout "32767"
+echo(hs.sum())
+// expect: stdout "32767"
+echo(hs.map(fn(x) => x).sum())
+
+// --- the iterator terminals, which drain into the same kernels ------------------------------------
+// expect: stdout "44"
+echo(bs.iter().sum())
+// A `map` adapter is where the runtime has nothing left to trace: the backing buffer is gone and
+// only the terminal's `Iterator<u8>` receiver still names the width.
+// expect: stdout "44"
+echo(bs.iter().map(fn(x) => x).sum())
+// expect: stdout "44"
+echo(bs.iter().map(fn(x) => x).collect().sum())
+// expect: stdout "none"
+echo(bs.iter().map(fn(x) => x).checked_sum())
+// expect: stdout "32"
+echo(bs.iter().map(fn(x) => x).product())
+
+// --- the negative half: the same numbers, no width to wrap at -------------------------------------
+ints: List<int> = [200, 100]
+mi = ints.map(fn(x) => x)
+// expect: stdout "300"
+echo(ints.sum())
+// expect: stdout "300"
+echo(mi.sum())
+// expect: stdout "20000"
+echo(mi.product())
+// expect: stdout "some(300)"
+echo(mi.checked_sum())
+// expect: stdout "[600, 300]"
+echo(mi.scale(3))
+// expect: stdout "[-200, -100]"
+echo(mi.neg())
+// expect: stdout "[400, 200]"
+echo(mi + mi)
+
+// --- and the 64-bit widths, which the same channel now carries -------------------------------------
+// A `List<u64>` is NEVER packed — only widths below 64 earn the compact buffer — so it is the boxed
+// path always, and its answers depend on the same recorded element type reading its words unsigned.
+us: List<u64> = [18446744073709551615u64, 2u64]
+// expect: stdout "1"
+echo(us.sum())
+// expect: stdout "none"
+echo(us.checked_sum())
+// expect: stdout "some(2)"
+echo(us.min())
+// expect: stdout "some(18446744073709551615)"
+echo(us.max())
+// expect: stdout "[18446744073709551615, 2]"
+echo(us.abs())
+// expect: stdout "[100, 2]"
+echo(us.clamp(0u64, 100u64))
+// The identical erased words typed `int`, where they really are `-1` and `2`.
+js: List<int> = [-1, 2]
+// expect: stdout "1"
+echo(js.sum())
+// expect: stdout "some(1)"
+echo(js.checked_sum())
+// expect: stdout "some(-1)"
+echo(js.min())
+// expect: stdout "[1, 2]"
+echo(js.abs())

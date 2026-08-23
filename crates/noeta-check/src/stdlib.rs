@@ -714,9 +714,6 @@ fn string_method(name: &str) -> Option<Type> {
     })
 }
 
-/// The result type of a numeric list reduction (`sum`/`product`/`min`/`max`) — the element type
-/// itself — or `None` if the element is not numeric. `sum`/`product` return this directly (width-
-/// wrapping); `min`/`max` wrap it in `?T` for the empty case.
 /// Whether the built-in method `name` on receiver `recv` **discloses** a fixed-width integer to the
 /// program — the doors [`crate::Sites::order_hint_sites`] is recorded at, and the checker's half of
 /// the classification [`noeta_ext_abi::width_doors`] states method by method.
@@ -739,19 +736,22 @@ fn string_method(name: &str) -> Option<Type> {
 /// observes — while a set's canonical buffer and a map's key placement keep the structural order for
 /// the reason a `u64` hint is withheld from them: they place a value at one site and probe it at
 /// another, so a reading that could change between the two loses a member that is present.
-/// `checked_sum` is here rather than in a predicate of its own: it asks the SAME question about
-/// the same receiver at the same span — are these elements' erased words `u64`? — and two
-/// predicates answering one question is how the doors in this family drift apart. It reports
-/// overflow instead of wrapping, and at 64 bits the signed and unsigned readings disagree about
-/// which sums overflow at all, in both directions.
 ///
-/// The two bulk array ops that **compare** are here for the same one bit: `abs` compares against
-/// zero (an unsigned value is already non-negative, so `abs` is the identity, while the erased word
-/// folds `u64::MAX` to `1`) and `clamp` compares against its bounds (past bit 63 a `u64` reads as
-/// below every bound where the type says it is above them). Their two siblings are deliberately
-/// absent — `scale` and `neg` only compute, and a wrapping product or a two's-complement negation is
-/// the same bits whichever sign the type reads them with. That split is stated once more, for both
-/// backends, in `noeta_stdlib::width_doors::NAME_DISPATCHED_LIST_METHODS`.
+/// The doors that **compute** an answer out of the elements as numbers are deliberately absent, and
+/// take [`elem_width_door`] instead. A hint answers "where under this type is an unsigned 64-bit
+/// word", which is a structural fact about *reading* a value; a fold needs "how many bits does this
+/// element have", which a hint cannot state at all — its invariant is that a width under 64 needs
+/// none, because every such value already renders, sorts and compares correctly as its erased word.
+///
+/// `min`/`max` are on **both** lists, for two reasons that both hold. First, a `min` over a numeric
+/// element and a `min` over a struct are different runtime paths: a `List<u64>` folds through the
+/// scalar kernel and needs the element's signedness, while a `List<(u64, int)>` folds through the
+/// *structural* comparator, which walks slots and needs the shape only this map carries. Second,
+/// they are the only computing doors a **generic body** can reach — `Comparable` is a bound, and
+/// nothing bounds an element to a number — so at `fn mx<T: Comparable>(xs: List<T>)` the element
+/// type is a type parameter naming no width, and the hint's `Param` resolution against the call is
+/// the only channel that can answer. Both are built from the same static type, so they cannot
+/// disagree.
 pub(super) fn discloses_width(recv: &Type, name: &str) -> bool {
     use noeta_ext_abi::{ListMethod, MapMethod};
     match recv {
@@ -759,21 +759,68 @@ pub(super) fn discloses_width(recv: &Type, name: &str) -> bool {
             matches!(
                 ListMethod::from_name(name),
                 Some(ListMethod::Sorted | ListMethod::Join)
-            ) || matches!(name, "min" | "max" | "checked_sum" | "abs" | "clamp")
+            ) || matches!(name, "min" | "max")
         }
         // An iterator's terminals observe the same order, and render the same text, over the same
         // elements — each drains into the eager list door — so a `u64` element reads unsigned
         // through `xs.iter().min()` and `xs.iter().join(",")` exactly as through the list's own.
         // (Spelled by name rather than through `IterMethod`: this crate deliberately does not link
         // `noeta-stdlib`, where that enum lives.)
-        Type::Named(n, _) if n == ITERATOR => {
-            matches!(name, "min" | "max" | "join" | "checked_sum")
-        }
+        Type::Named(n, _) if n == ITERATOR => matches!(name, "min" | "max" | "join"),
         Type::Map(..) => matches!(
             MapMethod::from_name(name),
             Some(MapMethod::Keys | MapMethod::Values)
         ),
         _ => false,
+    }
+}
+
+/// The **numeric element** a built-in method computes its answer at, or `None` where the method
+/// does not compute one — the doors [`crate::Sites::elem_width_sites`] is recorded at, and the
+/// checker's half of `noeta_ext_abi::width_doors::WidthDisclosure::Compute`.
+///
+/// A fixed-width integer is erased to its i64 word, so a *boxed* list of them carries no width at
+/// all: `[200u8, 100u8].map(fn(x) => x).sum()` folds two ordinary words, and the answer is `44`
+/// only if the door is told the elements are 8 bits wide. A *packed* list is exact without this —
+/// its buffer's schema is the width — which is why the bug this closes is invisible on a literal
+/// and appears the moment the same list arrives boxed.
+///
+/// Nothing is recorded where the element type names a **type parameter**: an erased generic has one
+/// compiled body per instantiation, and a width baked at the door would be the wrong one. Only
+/// `min`/`max` reach such a body — the arithmetic doors require a concrete numeric element, since no
+/// bound promises a number — and those read the ordering hint, which resolves its `Param` against
+/// the call. So the two channels between them cover every position a computing door can occupy.
+///
+/// Four kinds of door are here, and every one of them turns elements into a number:
+///
+/// * the **folds** — `sum` and `product` wrap at the element width, `checked_sum` reports overflow
+///   there rather than wrapping, so at 8 bits `200 + 100` overflows where at 64 it does not;
+/// * the **comparisons** — `min`/`max` pick under the reading the element's signedness names, which
+///   at 64 bits is the one thing the erased word cannot state (`u64::MAX` *is* the word `-1`);
+/// * the **bulk array ops** — `scale` and `neg` wrap at the width like `+` does, `abs` folds around
+///   it (an unsigned element is already non-negative; `i8::MIN.abs()` stays `i8::MIN`), and `clamp`
+///   compares against bounds this checker types as the element type;
+/// * the element-wise `+`/`-`/`*` over two lists, recorded at the operator's own span.
+///
+/// The receiver's element type is returned rather than a bare `bool` so the caller cannot pair the
+/// right door with the wrong type: one function answers both halves of the question.
+pub(super) fn elem_width_door<'t>(recv: &'t Type, name: &str) -> Option<&'t Type> {
+    let computes = matches!(
+        name,
+        "sum" | "product" | "min" | "max" | "checked_sum" | "scale" | "neg" | "abs" | "clamp"
+    );
+    match recv {
+        Type::List(elem) if computes => Some(elem),
+        // An iterator's numeric terminals drain into the eager list reduction, so the element width
+        // reaches the same kernel through the same span. `join` is absent: it renders, and rendering
+        // is the hint's question.
+        Type::Named(n, args)
+            if n == ITERATOR
+                && matches!(name, "sum" | "product" | "min" | "max" | "checked_sum") =>
+        {
+            args.first()
+        }
+        _ => None,
     }
 }
 
@@ -801,6 +848,9 @@ pub(super) fn push_hint_arg(
         .map(|&(_, i)| i as usize)
 }
 
+/// The result type of a numeric list reduction (`sum`/`product`/`min`/`max`) — the element type
+/// itself — or `None` if the element is not numeric. `sum`/`product` return this directly (width-
+/// wrapping); `min`/`max` wrap it in `?T` for the empty case.
 fn numeric_reduce(elem: &Type) -> Option<Type> {
     matches!(
         elem,

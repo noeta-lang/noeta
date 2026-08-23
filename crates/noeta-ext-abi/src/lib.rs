@@ -357,6 +357,10 @@ pub use stream::{
     Frame, FrameDecoder, FrameStream, Framing, SseCloseIo, SseSendIo, SseSink, StreamRecvIo,
     Utf8Chunker,
 };
+// The element width a computing door folds, wraps and compares at — the render hint's sibling
+// channel, exported beside it for the same reason: the checker builds one out of a static type and
+// both backends hand it to one shared kernel.
+pub use width_doors::ElemWidth;
 // The Ring 1 bodies moved to `ring1` (audit-2 F8); the glob keeps every existing path
 // (`noeta_ext_abi::Arg`, `noeta_stdlib::string_method`, ...) compiling unchanged. The shared
 // argument guards stay namespaced (`noeta_ext_abi::args::want_str`) — dispatch modules import

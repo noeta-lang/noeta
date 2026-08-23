@@ -323,6 +323,9 @@ impl Interpreter {
         self.type_args = ir.type_args.clone();
         self.type_arg_reprs = ir.type_arg_reprs.clone();
         self.type_arg_hints = ir.type_arg_hints.clone();
+        // The element-width table rides the IR itself, for the same reason: both backends read the
+        // same entries by construction rather than each deriving a width from a value that has none.
+        self.absorb_elem_widths(ir);
         let mut frame = Frame::new(ir.temp_count);
         // The top-level statements run directly in the global scope (no child).
         match self.exec_ir_stmts(&ir.top.stmts, &mut frame) {
@@ -372,6 +375,10 @@ impl Interpreter {
     /// fresh `Frame` each call is correct. Returns the batch's terminating [`Flow`] (a top-level
     /// `return`/error stops it, mirroring the AST-walker session loop).
     pub(crate) fn run_ir_batch(&mut self, ir: &noeta_ir::Program) -> Eval<Flow> {
+        // Accumulated across batches, never replaced: an earlier entry's still-live function looks
+        // its own call span up when it runs again, exactly as the VM's session keeps every install's
+        // entries.
+        self.absorb_elem_widths(ir);
         // Arm per batch, relative to the session's current residency (persistent bindings are
         // never charged against the watermark).
         crate::leak::safepoint_arm(crate::leak::safepoint_step());

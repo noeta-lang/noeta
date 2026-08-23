@@ -1755,6 +1755,17 @@ impl Checker {
                 if stdlib::discloses_width(&recv, name) {
                     self.note_order_hint(&recv, call_span);
                 }
+                // A method that COMPUTES its answer out of the elements as numbers — a fold, a
+                // comparison, a bulk map — on a receiver whose element type is a fixed-width
+                // integer: record that width at the call span, so both backends wrap, overflow and
+                // compare where the type says rather than at the erased 64-bit word. The sibling
+                // channel to the hint above and not the same one: a hint is structural and says
+                // nothing below 64 bits, which is right for reading a value and wrong for computing
+                // with one (`[200u8, 100u8].sum()` is `44`).
+                if let Some(elem) = stdlib::elem_width_door(&recv, name) {
+                    let elem = elem.clone();
+                    self.note_elem_width(&elem, call_span);
+                }
                 // A native method that BINDS one of its arguments now and serializes it to JSON on a
                 // later tick (`view.expose(name, signal)`, pushed on every flush): record that
                 // argument's hint at the call span, since the push itself has no call site to read a

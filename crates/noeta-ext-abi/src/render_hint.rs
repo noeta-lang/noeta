@@ -13,7 +13,8 @@
 //! backends as one of these hints, built by the checker and applied by a shared walk. Widths
 //! narrower than 64 bits need no hint at any of these doors: every value of one fits in an i64 and
 //! already renders, sorts and compares correctly. (That is a property of *reading* a value, not of
-//! computing with one — the arithmetic door noted below is where the difference shows.)
+//! computing with one, where a `u8` fold wraps at 8 bits — which is why the computing doors take a
+//! channel of their own, noted below.)
 //!
 //! There are three kinds of door, and they take the same hint:
 //!
@@ -27,21 +28,13 @@
 //!   and a `for` over a set or map — applied by each backend's comparator against its own value
 //!   model, through [`unsigned_order`] and [`map_key_order`].
 //!
-//! A few **arithmetic** doors take the ordering hint too, and they are the exception that shows what
-//! the hint really answers. `checked_sum` reports integer overflow instead of wrapping, so the element
-//! width decides not how a number reads but *which sums overflow at all* — and at 64 bits the two
-//! readings disagree about that (`u64::MAX + 2` wraps past zero; the same words read signed are
-//! `-1 + 2` and overflow nothing). That is the same one bit an ordering door needs about the same
-//! receiver, read at the same call span, so it travels the same map rather than a second one.
-//! What the hint cannot answer there is a **narrow** width: it says "this word is a `u64`", not
-//! "this word is 8 bits wide", and a narrow fold's overflow point is its own width. A narrow list
-//! carries that in its packed schema instead — see `checked_sum_packed` and its boxed twin.
-//!
-//! The bulk array ops split on the same line, and the split is worth stating because it is the whole
-//! rule in miniature. `abs` and `clamp` **compare** — against zero, and against the bounds — so a
-//! boxed `List<u64>` needs the bit or `u64::MAX` folds to `1` and clamps to the *low* bound it sits
-//! far above. `scale` and `neg` only **compute**: a wrapping product and a two's-complement negation
-//! are the same bits whichever sign the type reads them with, so neither takes the hint at all.
+//! **No arithmetic door takes this hint**, and the reason is the sharp edge of the invariant above.
+//! A door that computes — a `sum` that wraps, a `checked_sum` that reports, a bulk `scale`/`neg`/
+//! `abs`/`clamp` — answers at the element's own width, and a hint cannot state a width below 64: it
+//! says "this word is a `u64`", never "this word is 8 bits wide", so it would answer `300` where
+//! `[200u8, 100u8].sum()` is `44`. Those doors read [`crate::width_doors::ElemWidth`] instead, the
+//! sibling channel carrying `(signed, bits)` from the same static type, which subsumes the one bit a
+//! 64-bit element needs. See [`crate::width_doors`] for the classification both channels share.
 //!
 //! The hint mirrors only the structure those walks take: a scalar, a list/set's elements, a map's
 //! keys and values, positional slots (a tuple's positions, an object's fields), and an enum's

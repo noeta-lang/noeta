@@ -184,14 +184,22 @@ pub struct Sites {
     /// The ordering twin of [`Sites::render_hint_sites`], and it exists for the same reason: a
     /// `u64` past bit 63 is a negative i64 word, so it would order below every small value unless
     /// the *type* says otherwise. Recorded at the doors that reveal an order a program can see —
-    /// `.sorted()`, `.min()`, `.max()`, `.keys()`, `.values()`, and a `for` over a set or map —
-    /// **and** at the arithmetic doors needing the identical bit: `checked_sum`, which reports
-    /// overflow at the element width rather than wrapping, so the two readings of a 64-bit word
-    /// disagree about which sums overflow at all, and the two bulk array ops that compare — `abs`
-    /// against zero and `clamp` against its bounds. Never at a set's canonical buffer or a map's key
+    /// `.sorted()`, `.min()`, `.max()`, `.keys()`, `.values()`, and a `for` over a set or map. Never
+    /// at a set's canonical buffer or a map's key
     /// placement, which are identity orders
     /// built at one site and probed at another (see [`noeta_ast::render_hint`]). Empty for every
     /// program with no `u64` in an ordered position. A pure function of the program.
+    ///
+    /// The doors that **compute** an answer out of the elements as numbers — `sum`, `product`,
+    /// `checked_sum` and the bulk array ops — take [`Sites::elem_width_sites`] instead. This map
+    /// answers "where under this type is an unsigned 64-bit word", which is a structural question
+    /// about *reading* a value; a fold needs "how many bits does this element have", and the two are
+    /// neither the same question nor answerable by the same shape.
+    ///
+    /// `min`/`max` are recorded on **both**, because the runtime has two of them: a numeric element
+    /// folds through the scalar comparison, which wants the element width, and a struct or tuple
+    /// element folds through the structural comparator, which walks slots against the shape only
+    /// this map describes. Both are built from the same static type, so they cannot disagree.
     ///
     /// It carries one door that **renders** rather than orders: `.join()`, whose elements are
     /// written into a string by the method itself and so never reach a display site of their own.
@@ -201,6 +209,30 @@ pub struct Sites {
     /// it. The recorder (`Checker::note_order_hint`) and the checker's door list
     /// (`stdlib::discloses_width`) name every entry.
     pub order_hint_sites: HashMap<Span, noeta_ast::RenderHint>,
+    /// **Computing sites over a fixed-width numeric element**, keyed by the call's span → that
+    /// element's [`ElemWidth`](noeta_ast::ElemWidth).
+    ///
+    /// The arithmetic sibling of [`Sites::order_hint_sites`], and the reason the two are separate
+    /// maps rather than one: an integer's width lives only in the static type, and a door either
+    /// **reads** a value — where the structural hint's invariant holds, that a width under 64 needs
+    /// no hint because every such value fits in an i64 word — or **computes** with one, where it
+    /// does not. `[200u8, 100u8].sum()` is `44`, and no hint can say so.
+    ///
+    /// A *packed* list needs neither channel: its flat buffer's schema is the element width, and
+    /// every kernel that folds one is exact by construction. A **boxed** narrow-width list is the
+    /// open case — a `map` result, an `iter().collect()`, anything that arrived as ordinary boxed
+    /// elements — and it carries nothing but the erased words. This map is how the width reaches it.
+    ///
+    /// Recorded at every door whose answer is computed from the elements as numbers: the numeric
+    /// reductions (`sum`, `product`, `min`, `max`), `checked_sum`, the bulk array ops (`scale`,
+    /// `neg`, `abs`, `clamp`), the same reductions on an `Iterator<T>`, and the element-wise
+    /// `+`/`-`/`*` over two lists. Nothing is recorded for an `int`/`float` element, a `dyn`
+    /// receiver or a generic body naming a type parameter — absence means
+    /// [`ElemWidth::WORD`](noeta_ast::ElemWidth::WORD), the erased word itself, so those doors take
+    /// the untouched path. The recorder is `Checker::note_elem_width` and the door list is
+    /// `stdlib::computes_at_elem_width`, mirrored for both backends by
+    /// `noeta_ext_abi::width_doors::WidthDisclosure::Compute`.
+    pub elem_width_sites: HashMap<Span, noeta_ast::ElemWidth>,
     /// **Deferred-serialization sites whose bound value contains an unsigned 64-bit integer**, keyed
     /// by the binding call's span → the [`RenderHint`](noeta_ast::RenderHint) built from the bound
     /// argument's static type.
@@ -553,6 +585,7 @@ pub(crate) const SITE_POLICIES: &[(&str, SiteClass, &str)] = &[
     ("render_hint_sites", SiteClass::SpanKeyed, "span → RenderHint: structural; its Slots/Variants numbers are SLOT positions within the rendered value"),
     ("json_hint_sites", SiteClass::SpanKeyed, "span → RenderHint: structural; its Slots/Variants numbers are SLOT positions within the serialized value"),
     ("order_hint_sites", SiteClass::SpanKeyed, "span → RenderHint: structural; its Slots/Variants numbers are SLOT positions within the ordered (or joined) value"),
+    ("elem_width_sites", SiteClass::Ordinal, "span → ElemWidth: a numeric element's (signed, bits) BIT WIDTH, not an index — the same kind of datum as width_sites"),
     ("binding_hint_sites", SiteClass::SpanKeyed, "span → RenderHint: structural; its Slots/Variants numbers are SLOT positions within the value serialized later"),
     ("echo_hint_sites", SiteClass::SpanKeyed, "span → RenderHint: structural; its Slots/Variants numbers are SLOT positions within the value a session echoes"),
     ("folded_type_tests", SiteClass::SpanKeyed, "span → the constant answer of a statically decided `is`"),
@@ -631,6 +664,7 @@ impl Sites {
             render_hint_sites: _,
             json_hint_sites: _,
             order_hint_sites: _,
+            elem_width_sites: _,
             binding_hint_sites: _,
             echo_hint_sites: _,
             folded_type_tests: _,
@@ -852,6 +886,8 @@ pub(crate) struct SiteMaps {
     pub(crate) json_hint_sites: HashMap<Span, noeta_ast::RenderHint>,
     /// Ordering sites carrying an unsigned 64-bit integer — see [`Sites::order_hint_sites`].
     pub(crate) order_hint_sites: HashMap<Span, noeta_ast::RenderHint>,
+    /// Computing sites over a fixed-width numeric element — see [`Sites::elem_width_sites`].
+    pub(crate) elem_width_sites: HashMap<Span, noeta_ast::ElemWidth>,
     /// Deferred-serialization sites carrying an unsigned 64-bit integer — see
     /// [`Sites::binding_hint_sites`].
     pub(crate) binding_hint_sites: HashMap<Span, noeta_ast::RenderHint>,
@@ -939,6 +975,7 @@ impl SiteMaps {
             render_hint_sites: self.render_hint_sites,
             json_hint_sites: self.json_hint_sites,
             order_hint_sites: self.order_hint_sites,
+            elem_width_sites: self.elem_width_sites,
             binding_hint_sites: self.binding_hint_sites,
             echo_hint_sites: self.echo_hint_sites,
             folded_type_tests: self.folded_type_tests,

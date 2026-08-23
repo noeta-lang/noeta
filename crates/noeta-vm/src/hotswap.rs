@@ -510,6 +510,7 @@ impl<'m> Vm<'m> {
         if sites.is_none() {
             extended.map_packed_sites = self.module.map_packed_sites.clone();
             extended.order_hint_sites = self.module.order_hint_sites.clone();
+            extended.elem_width_sites = self.module.elem_width_sites.clone();
             extended.binding_hint_sites = self.module.binding_hint_sites.clone();
         }
 
@@ -564,6 +565,11 @@ impl<'m> Vm<'m> {
         // orders unsigned. Idempotent for the spans already there.
         for (span, hint) in &extended.order_hint_sites {
             self.hints.order.insert(*span, hint.clone());
+        }
+        // Same reason again for the element widths: a swapped-in `[200u8, 100u8].map(f).sum()`
+        // would otherwise fold at 64 bits where a cold start folds at 8.
+        for (span, width) in &extended.elem_width_sites {
+            self.elem_widths.insert(*span, *width);
         }
         // …and the table those hints' slots index, which a swapped-in generic door resolves through.
         self.hints.type_args = extended.type_arg_hints.clone();

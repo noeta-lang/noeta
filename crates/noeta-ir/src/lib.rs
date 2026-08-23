@@ -82,6 +82,18 @@ pub struct Program {
     /// says how that instantiation's erased words are written and ordered. Empty for a program with
     /// no generic door over a `u64`, which is nearly all of them.
     pub type_arg_hints: Vec<noeta_ext_abi::TypeArgHints>,
+    /// The program-wide **element-width table**: the span of every door that computes its answer out
+    /// of a fixed-width numeric element → that element's [`noeta_ext_abi::ElemWidth`].
+    ///
+    /// A span-keyed side table rather than a field on each node, because the doors are of three
+    /// different shapes — a method call, an iterator terminal, an element-wise `+` — and all three
+    /// already carry the span the checker recorded at. Both backends look the width up the same way
+    /// (the tree-walker here, the VM through `Module::elem_width_sites`), so they wrap, overflow and
+    /// compare at the same width by construction.
+    ///
+    /// Empty for a program with no fixed-width numeric collection, which is nearly all of them; a
+    /// door with no entry computes at [`noeta_ext_abi::ElemWidth::WORD`], the erased word itself.
+    pub elem_width_sites: Vec<(Span, noeta_ext_abi::ElemWidth)>,
     pub span: Span,
 }
 
@@ -461,10 +473,12 @@ pub enum Rvalue {
         supplied: Option<u64>,
         /// The **ordering hint** for a method that reveals an order a program can observe —
         /// `.sorted()`, `.min()`, `.max()` on a list, `.keys()`/`.values()` on a map — whose
-        /// receiver's static type carries an unsigned 64-bit integer, and for the arithmetic methods
-        /// that need the identical bit (`checked_sum`, which reports overflow at the element width,
-        /// and the bulk `abs`/`clamp`, which compare against zero and against their bounds). `None`
-        /// for every other call, which is nearly all of them.
+        /// receiver's static type carries an unsigned 64-bit integer. `None` for every other call,
+        /// which is nearly all of them.
+        ///
+        /// A method that COMPUTES its answer out of the elements takes
+        /// [`Program::elem_width_sites`] instead: a hint is structural and cannot state a width
+        /// below 64, which is right for the doors above and wrong for a fold.
         ///
         /// The ordering twin of [`Rvalue::Render`], emitted for the same reason: a fixed-width
         /// integer is erased to its i64 word, so a `u64` past bit 63 is a negative word and would

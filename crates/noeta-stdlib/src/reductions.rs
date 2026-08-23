@@ -24,7 +24,7 @@
 // that unfortunately share the name — the alias keeps both readable in one file.
 use crate::registry::Scalar;
 use crate::scalar::Scalar as Elem;
-use crate::{ErrorKind, PackedField, StdError};
+use crate::{ElemWidth, ErrorKind, PackedField, StdError};
 
 /// A numeric list reduction: `sum`, `product`, `min`, `max`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -319,27 +319,26 @@ pub fn checked_sum_packed(field: &PackedField, bytes: &[u8]) -> Result<Option<Re
 }
 
 /// `checked_sum()` over a **boxed** scalar list — the fallback sharing the overflow convention with
-/// [`checked_sum_packed`]. Integers fold at 64 bits, `unsigned` deciding **which** 64: an `int`,
-/// `i64` or narrow signed element is exactly the erased word, while a `u64` element past bit 63
-/// carries a negative one, so folding it signed would report `u64::MAX + 2` as no overflow at all.
-/// The caller reads the flag from the call site's element hint, exactly as [`reduce_num_scalars`]
-/// reads it for `min`/`max`.
+/// [`checked_sum_packed`], which reads the same `(signed, bits)` off its buffer's schema. Integers
+/// fold **in the element width**, and that width is the whole answer: at 8 bits `200 + 100`
+/// overflows where at 64 it does not, and at 64 the two readings disagree in both directions (a
+/// `u64` past bit 63 carries a negative word, so folding it signed reports `u64::MAX + 2` as no
+/// overflow at all).
 ///
-/// A **narrow** element (`u8`, `i16`, …) still folds at 64 here, which is the width its packed
-/// buffer would not have used. Every narrow list built as a literal is packed, and takes
-/// [`checked_sum_packed`] instead; a narrow list that arrived boxed — a `map` result, an iterator
-/// drained through `collect` — folds wider than its type says, because the erased word carries no
-/// width and this call site hands over only the one bit above.
+/// The caller reads `width` from the call site's element-width table, which the checker fills from
+/// the receiver's static type — the only place a width exists, since the erased words carry none. A
+/// caller with none passes [`ElemWidth::WORD`](noeta_ext_abi::ElemWidth::WORD) and folds at the
+/// signed 64-bit word, which is what an `int` element is.
 pub fn checked_sum_scalars(
     scalars: impl Iterator<Item = Scalar>,
-    unsigned: bool,
+    width: ElemWidth,
 ) -> Result<Option<RedNum>, StdError> {
     let mut int_acc: i64 = 0;
     let mut float_acc: f64 = 0.0;
     let mut any_float = false;
     for s in scalars {
         match s {
-            Scalar::Int(i) => match checked_add_word(int_acc, i, unsigned) {
+            Scalar::Int(i) => match width.checked_add(int_acc, i) {
                 Some(v) => int_acc = v,
                 None => return Ok(None),
             },
@@ -361,18 +360,6 @@ pub fn checked_sum_scalars(
     }))
 }
 
-/// Add two erased integer words, reporting overflow at 64 bits under the reading the element type
-/// says — the boxed twin of [`Elem::checked_add`], and the only place this file spells the unsigned
-/// reinterpretation for arithmetic. A `u64` past bit 63 is a negative word, so the two readings
-/// disagree about which sums overflow; every other 64-bit element *is* the signed word.
-fn checked_add_word(acc: i64, x: i64, unsigned: bool) -> Option<i64> {
-    if unsigned {
-        (acc as u64).checked_add(x as u64).map(|v| v as i64)
-    } else {
-        acc.checked_add(x)
-    }
-}
-
 /// The numeric domain of one boxed element: an integer (`int`/`IntN`, erased to `i64`) or a float.
 #[derive(Clone, Copy)]
 enum Num {
@@ -392,18 +379,22 @@ impl Num {
 /// Combine two boxed numeric elements under `op`, promoting to float if either is a float (matching
 /// the eager `sum`'s int/float promotion). Left-to-right, so the fold order — and thus float rounding
 /// — is identical to the packed kernel's sequential fold.
-fn combine(op: NumReduce, a: Num, b: Num, unsigned: bool) -> Num {
+fn combine(op: NumReduce, a: Num, b: Num, width: ElemWidth) -> Num {
     match (a, b) {
         // `Ord::min`/`Ord::max` and `f64::min`/`f64::max` are named explicitly: the `Elem` trait is in
         // scope for the packed folds, and its own `min`/`max` would otherwise make `x.min(y)` ambiguous.
         (Num::Int(x), Num::Int(y)) => Num::Int(match op {
+            // The arithmetic folds wrap at the ELEMENT width, and folding at 64 then wrapping once
+            // at the end is the same answer (the low `bits` bits are a ring homomorphism under `+`
+            // and `*`), so the wrap happens once in `reduce_num_scalars` rather than per step.
             NumReduce::Sum => x.wrapping_add(y),
             NumReduce::Product => x.wrapping_mul(y),
             // `min`/`max` are the sign-DEPENDENT reductions: a `u64` past bit 63 is a negative
             // erased word, so the signed reading would report it as the minimum of every list it
-            // is in. `sum`/`product` need no such distinction — they wrap at the width either way.
-            NumReduce::Min if unsigned => unsigned_pick(x, y, std::cmp::Ordering::Less),
-            NumReduce::Max if unsigned => unsigned_pick(x, y, std::cmp::Ordering::Greater),
+            // is in. Below 64 bits every value is its own erased word under either reading, so the
+            // two agree and the flag costs nothing.
+            NumReduce::Min if !width.signed => unsigned_pick(x, y, std::cmp::Ordering::Less),
+            NumReduce::Max if !width.signed => unsigned_pick(x, y, std::cmp::Ordering::Greater),
             NumReduce::Min => Ord::min(x, y),
             NumReduce::Max => Ord::max(x, y),
         }),
@@ -425,13 +416,17 @@ fn combine(op: NumReduce, a: Num, b: Num, unsigned: bool) -> Num {
 /// return `None`; `sum`/`product` of empty return their identity as an `int` (matching the historical
 /// eager `sum`, which folds an empty list to `int` `0`).
 ///
-/// `unsigned` says the element type is `u64` — the width the erased i64 word cannot represent, so
-/// `min`/`max` must read it unsigned. The caller reads it from the call site's ordering hint (a
-/// `List<u64>` receiver); every other element type passes `false`.
+/// `width` is the ELEMENT's `(signed, bits)`, which the erased words cannot carry — the packed twin
+/// reads the identical datum off its buffer's schema, which is why the two representations agree
+/// only once this arrives. Both halves of it matter, at opposite ends of the range: `min`/`max`
+/// need the sign at 64 bits, where a `u64` past bit 63 is a negative word, and `sum`/`product` need
+/// the bit count below 64, where the fold wraps at the element width and not at the word
+/// (`[200u8, 100u8].sum()` is `44`). A caller with no recorded width passes
+/// [`ElemWidth::WORD`](noeta_ext_abi::ElemWidth::WORD), which is the erased word itself.
 pub fn reduce_num_scalars(
     op: NumReduce,
     scalars: impl Iterator<Item = Scalar>,
-    unsigned: bool,
+    width: ElemWidth,
 ) -> Result<Option<RedNum>, StdError> {
     let mut acc: Option<Num> = None;
     for s in scalars {
@@ -443,12 +438,18 @@ pub fn reduce_num_scalars(
         };
         acc = Some(match acc {
             None => v,
-            Some(a) => combine(op, a, v, unsigned),
+            Some(a) => combine(op, a, v, width),
         });
     }
+    // The arithmetic folds land back in the element width; the ordering ones hand back an element
+    // that was already in it.
+    let wrapped = |n: Num| match (op, n) {
+        (NumReduce::Sum | NumReduce::Product, Num::Int(i)) => RedNum::Int(width.wrap(i)),
+        (_, other) => to_rednum(other),
+    };
     Ok(match op {
-        NumReduce::Sum => Some(acc.map(to_rednum).unwrap_or(RedNum::Int(0))),
-        NumReduce::Product => Some(acc.map(to_rednum).unwrap_or(RedNum::Int(1))),
+        NumReduce::Sum => Some(acc.map(wrapped).unwrap_or(RedNum::Int(0))),
+        NumReduce::Product => Some(acc.map(wrapped).unwrap_or(RedNum::Int(1))),
         NumReduce::Min | NumReduce::Max => acc.map(to_rednum),
     })
 }
@@ -656,8 +657,15 @@ mod tests {
             NumReduce::Max,
         ] {
             let packed = reduce_num_packed(op, &field, &bytes).unwrap();
-            let boxed =
-                reduce_num_scalars(op, vals.iter().map(|&v| Scalar::Int(v as i64)), false).unwrap();
+            let boxed = reduce_num_scalars(
+                op,
+                vals.iter().map(|&v| Scalar::Int(v as i64)),
+                ElemWidth {
+                    signed: true,
+                    bits: 32,
+                },
+            )
+            .unwrap();
             assert_eq!(packed, boxed, "op {op:?}");
         }
     }
@@ -672,17 +680,57 @@ mod tests {
             -1,       /* u64::MAX */
             i64::MIN, /* i64::MAX + 1 */
         ];
-        let fold = |op, unsigned| {
-            reduce_num_scalars(op, words.iter().map(|&v| Scalar::Int(v)), unsigned).unwrap()
+        let fold = |op, width| {
+            reduce_num_scalars(op, words.iter().map(|&v| Scalar::Int(v)), width).unwrap()
         };
-        assert_eq!(fold(NumReduce::Min, true), Some(RedNum::Int(1)));
-        assert_eq!(fold(NumReduce::Max, true), Some(RedNum::Int(-1)));
-        assert_eq!(fold(NumReduce::Min, false), Some(RedNum::Int(i64::MIN)));
-        assert_eq!(fold(NumReduce::Max, false), Some(RedNum::Int(1)));
-        assert_eq!(fold(NumReduce::Sum, true), fold(NumReduce::Sum, false));
+        let (u, i) = (ElemWidth::U64, ElemWidth::WORD);
+        assert_eq!(fold(NumReduce::Min, u), Some(RedNum::Int(1)));
+        assert_eq!(fold(NumReduce::Max, u), Some(RedNum::Int(-1)));
+        assert_eq!(fold(NumReduce::Min, i), Some(RedNum::Int(i64::MIN)));
+        assert_eq!(fold(NumReduce::Max, i), Some(RedNum::Int(1)));
+        assert_eq!(fold(NumReduce::Sum, u), fold(NumReduce::Sum, i));
+        assert_eq!(fold(NumReduce::Product, u), fold(NumReduce::Product, i));
+    }
+
+    /// The BIT COUNT half of the same datum, which the sign half cannot stand in for: a narrow fold
+    /// wraps at its own width, so `[200u8, 100u8].sum()` is `44` and its product is `32`. Pinned
+    /// against the packed kernel over the identical values, since a packed buffer reads the width
+    /// off its schema and is the reference both engines' boxed path has to match.
+    #[test]
+    fn a_narrow_fold_wraps_at_the_element_width() {
+        let field = PackedField::IntN {
+            bits: 8,
+            signed: false,
+        };
+        let width = ElemWidth {
+            signed: false,
+            bits: 8,
+        };
+        let bytes: Vec<u8> = vec![200, 100];
+        for (op, want) in [(NumReduce::Sum, 44i64), (NumReduce::Product, 32)] {
+            let boxed = reduce_num_scalars(op, bytes.iter().map(|&b| Scalar::Int(b as i64)), width)
+                .unwrap();
+            assert_eq!(boxed, Some(RedNum::Int(want)), "{op:?}");
+            assert_eq!(
+                reduce_num_packed(op, &field, &bytes).unwrap(),
+                boxed,
+                "{op:?}: the boxed fold must land where the packed buffer does"
+            );
+        }
+        // A signed narrow width sign-extends rather than truncating: -32768 + -1 is 32767 at 16
+        // bits, where the erased word answers -32769.
+        let i16_width = ElemWidth {
+            signed: true,
+            bits: 16,
+        };
         assert_eq!(
-            fold(NumReduce::Product, true),
-            fold(NumReduce::Product, false)
+            reduce_num_scalars(
+                NumReduce::Sum,
+                [-32768i64, -1].into_iter().map(Scalar::Int),
+                i16_width
+            )
+            .unwrap(),
+            Some(RedNum::Int(32767))
         );
     }
 
@@ -694,18 +742,36 @@ mod tests {
     /// reading while the unsigned one has half its range left.
     #[test]
     fn an_unsigned_checked_sum_overflows_at_the_unsigned_boundary() {
-        let fold = |words: &[i64], unsigned| {
-            checked_sum_scalars(words.iter().map(|&v| Scalar::Int(v)), unsigned).unwrap()
+        let fold = |words: &[i64], width| {
+            checked_sum_scalars(words.iter().map(|&v| Scalar::Int(v)), width).unwrap()
         };
-        assert_eq!(fold(&[-1, 2], true), None);
-        assert_eq!(fold(&[-1, 2], false), Some(RedNum::Int(1)));
-        assert_eq!(fold(&[i64::MAX, 1], true), Some(RedNum::Int(i64::MIN)));
-        assert_eq!(fold(&[i64::MAX, 1], false), None);
+        let (u, i) = (ElemWidth::U64, ElemWidth::WORD);
+        assert_eq!(fold(&[-1, 2], u), None);
+        assert_eq!(fold(&[-1, 2], i), Some(RedNum::Int(1)));
+        assert_eq!(fold(&[i64::MAX, 1], u), Some(RedNum::Int(i64::MIN)));
+        assert_eq!(fold(&[i64::MAX, 1], i), None);
         // The exact top of `u64`, reached from below: whole, and not an overflow.
-        assert_eq!(fold(&[i64::MIN, i64::MAX], true), Some(RedNum::Int(-1)));
+        assert_eq!(fold(&[i64::MIN, i64::MAX], u), Some(RedNum::Int(-1)));
         // Small values and the empty fold read the same either way.
-        assert_eq!(fold(&[1, 2, 3], true), fold(&[1, 2, 3], false));
-        assert_eq!(fold(&[], true), Some(RedNum::Int(0)));
+        assert_eq!(fold(&[1, 2, 3], u), fold(&[1, 2, 3], i));
+        assert_eq!(fold(&[], u), Some(RedNum::Int(0)));
+        // And the NARROW boundary, which neither 64-bit reading can reach: `200u8 + 100u8`
+        // overflows an 8-bit element where both readings of the word carry it whole.
+        let u8_width = ElemWidth {
+            signed: false,
+            bits: 8,
+        };
+        assert_eq!(fold(&[200, 100], u8_width), None);
+        assert_eq!(fold(&[200, 55], u8_width), Some(RedNum::Int(255)));
+        assert_eq!(fold(&[200, 100], u), Some(RedNum::Int(300)));
+        // A signed narrow element overflows at its own boundary in the other direction.
+        let i8_width = ElemWidth {
+            signed: true,
+            bits: 8,
+        };
+        assert_eq!(fold(&[100, 100], i8_width), None);
+        assert_eq!(fold(&[-100, -28], i8_width), Some(RedNum::Int(-128)));
+        assert_eq!(fold(&[-100, -29], i8_width), None);
     }
 
     /// The packed `u64` kernel and the boxed fallback are one `checked_sum`, whichever
@@ -725,11 +791,9 @@ mod tests {
         ] {
             let bytes: Vec<u8> = words.iter().flat_map(|v| v.to_le_bytes()).collect();
             let packed = checked_sum_packed(&field, &bytes).unwrap();
-            let boxed = checked_sum_scalars(
-                words.iter().map(|&v| Scalar::Int(v as i64)),
-                /* unsigned */ true,
-            )
-            .unwrap();
+            let boxed =
+                checked_sum_scalars(words.iter().map(|&v| Scalar::Int(v as i64)), ElemWidth::U64)
+                    .unwrap();
             assert_eq!(packed, boxed, "words {words:?}");
         }
     }

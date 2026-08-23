@@ -92,8 +92,10 @@ impl Checker {
                 // differing element type is E0007 (`List<i32> + List<int>`), exactly what the runtime
                 // would refuse. `/`/`%` are not defined on lists (they fall through to the generic
                 // path, which reports E0007). The runtime folds the packed buffer / boxed scalars via
-                // one shared `noeta-stdlib` kernel; a plain `Op::Binary` dispatches it (no width site —
-                // the element width lives in the packed field, read at runtime).
+                // one shared `noeta-stdlib` kernel; a plain `Op::Binary` dispatches it, and the
+                // element width is recorded at this span for the boxed half — a packed buffer reads
+                // it off its own schema, while a boxed list carries only the erased words and would
+                // otherwise wrap two `u8`s at 64 bits (`[200u8] + [200u8]` is `[144]`).
                 if let (Type::List(a), Type::List(b)) = (&lt, &rt)
                     && matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul)
                 {
@@ -109,6 +111,8 @@ impl Checker {
                         return Type::List(elem.clone());
                     }
                     if numeric(a) && numeric(b) && a == b {
+                        let elem = (**a).clone();
+                        self.note_elem_width(&elem, span);
                         return Type::List(a.clone());
                     }
                     self.report_operator_error(op, &lt, &rt, None, span);

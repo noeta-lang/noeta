@@ -1451,6 +1451,13 @@ struct Interpreter {
     /// twin of the VM's load-time `order_hints` table, keyed the same way so a `.sorted()` on a
     /// `List<u64>` orders identically in both engines. Empty for nearly every program.
     order_hints: HashMap<Span, Rc<RenderHint>>,
+    /// Computing-site span → the [`ElemWidth`](noeta_ast::ElemWidth) the door folds, wraps and
+    /// compares at, copied from `noeta_ir::Program::elem_width_sites` when a program is run. The
+    /// tree-walker twin of the VM's load-time `elem_widths` table, keyed the same way so
+    /// `[200u8, 100u8].map(fn(x) => x).sum()` answers `44` in both engines. Empty for nearly every
+    /// program, and a door with no entry computes at
+    /// [`ElemWidth::WORD`](noeta_ast::ElemWidth::WORD).
+    elem_widths: HashMap<Span, noeta_ast::ElemWidth>,
     /// Deferred-serialization site span → the [`RenderHint`] the native dispatch reads as
     /// `NativeCtx::push_hint`, registered as lowering's `Rvalue::Method::push` reaches each site. The
     /// tree-walker twin of the VM's load-time `binding_hints` table, keyed the same way so a
@@ -1625,6 +1632,7 @@ impl Interpreter {
             type_args: Vec::new(),
             type_arg_reprs: Vec::new(),
             type_arg_hints: Vec::new(),
+            elem_widths: HashMap::new(),
             call_sites: Vec::new(),
             abort_trace: Vec::new(),
             registry: None,
@@ -1943,6 +1951,46 @@ impl Interpreter {
             // so the same span answers differently at two instantiations of the same generic body.
             self.order_hints.insert(span, hint);
         }
+    }
+
+    /// Take the lowered program's element-width table into this interpreter, keyed by span.
+    /// Additive, so a session's later batch adds its own doors without retiring an earlier one's.
+    pub(crate) fn absorb_elem_widths(&mut self, ir: &noeta_ir::Program) {
+        self.elem_widths.extend(ir.elem_width_sites.iter().copied());
+    }
+
+    /// The **element width** the computing door at `span` answers at.
+    ///
+    /// Two sources, in this order, because they cover two different positions and neither covers
+    /// both:
+    ///
+    /// 1. the width the checker recorded from the receiver's element type — exact, and the only one
+    ///    that can name a width below 64;
+    /// 2. failing that, the **ordering hint** at the same span, which says only "these words are a
+    ///    `u64`". It is here for the one position a static width cannot reach: inside a generic body
+    ///    the element type is a type parameter, which names no width, and the answer lives at the
+    ///    call — so the hint carries a `RenderHint::Param` the frame resolves. Only `min`/`max`
+    ///    reach a generic body at all (they are the reductions with a bound that promises an order);
+    ///    the arithmetic ones require a concrete numeric element type, so their width is always
+    ///    recorded above.
+    ///
+    /// [`ElemWidth::WORD`](noeta_ast::ElemWidth::WORD) where neither speaks — an `int`/`float` element, a `dyn`
+    /// receiver, an instantiation the call could not name. The erased signed word is what such a
+    /// door always computed at, so absence is the untouched path rather than a wrong number.
+    pub(crate) fn elem_width(&self, span: Span) -> noeta_ast::ElemWidth {
+        if let Some(width) = (!self.elem_widths.is_empty())
+            .then(|| self.elem_widths.get(&span).copied())
+            .flatten()
+        {
+            return width;
+        }
+        if matches!(
+            self.order_hint(span).and_then(|h| h.elements()),
+            Some(RenderHint::Unsigned)
+        ) {
+            return noeta_ast::ElemWidth::U64;
+        }
+        noeta_ast::ElemWidth::WORD
     }
 
     /// The push hint registered at `span`, or `None` — the deferred twin of [`Self::order_hint`],
@@ -4515,11 +4563,16 @@ impl Interpreter {
                     }
                     return self.call_list_reduction_from(&repr, "sum", cursor, span);
                 }
-                // A narrow-width source (`xs.iter().take(k)` over a `List<i32>`, …): the generic fold
-                // accumulates at 64 bits, so mask the integer total back to the element width at the
-                // end — the same wrap `xs.sum()` applies — so a narrow-typed iterator reduction agrees
-                // (array-ops arc). Traced through the width-preserving adapters only.
-                let narrow = iter_narrow_bits(&Value::Iter(Rc::clone(state)));
+                // A narrow-width source (`xs.iter().map(f)` over a `List<u8>`, `xs.iter().take(k)`
+                // over a `List<i32>`, …): the generic fold accumulates at 64 bits, so mask the
+                // integer total back to the element width at the end — the same wrap `xs.sum()`
+                // applies. The width comes from this terminal's `Iterator<T>` receiver, which names
+                // what a `map` produced; the runtime trace behind it reads a PACKED backing buffer's
+                // schema, and stands in only where the checker could not type the chain at all.
+                let narrow = match self.elem_width(span) {
+                    w if w != noeta_ast::ElemWidth::WORD => Some((w.signed, w.bits)),
+                    _ => iter_narrow_bits(&Value::Iter(Rc::clone(state))),
+                };
                 let mut int_total: i64 = 0;
                 let mut float_total: f64 = 0.0;
                 let mut any_float = false;
@@ -5998,14 +6051,13 @@ impl Interpreter {
                     )
                 }
                 _ => {
-                    // `min`/`max` on a `List<u64>` read the erased words unsigned; the checker
-                    // recorded the receiver's element hint at this call span.
-                    let unsigned = matches!(
-                        self.order_hint(span).and_then(|h| h.elements()),
-                        Some(RenderHint::Unsigned)
-                    );
+                    // A boxed list carries only its erased words, so the element type is what says
+                    // how wide they are and how to read them: `min`/`max` on a `List<u64>` compare
+                    // unsigned, and `sum`/`product` on a `List<u8>` wrap at 8 bits. The checker
+                    // recorded both facts at this call span.
+                    let width = self.elem_width(span);
                     let scalars = self.list_scalars(list, method, from, span)?;
-                    noeta_stdlib::reduce_num_scalars(op, scalars, unsigned)
+                    noeta_stdlib::reduce_num_scalars(op, scalars, width)
                 }
             };
             let folded =
@@ -6471,10 +6523,14 @@ impl Interpreter {
                 return Ok(Value::List(ListRepr::Packed(pa.like(bytes))));
             }
         }
-        // Boxed fallback: fold the materialized scalars.
+        // Boxed fallback: fold the materialized scalars, wrapping at the width the checker recorded
+        // for this operator's span — the packed path above reads the same width off the schema, so
+        // `[200u8, 100u8] + [200u8, 100u8]` is `[144, 200]` whichever representation the two lists
+        // happen to have.
+        let width = self.elem_width(span);
         let a: Vec<_> = self.list_scalars(left, op.symbol(), 0, span)?.collect();
         let b: Vec<_> = self.list_scalars(right, op.symbol(), 0, span)?.collect();
-        let out = noeta_stdlib::zip_num_scalars(op, &a, &b)
+        let out = noeta_stdlib::zip_num_scalars(op, &a, &b, width)
             .map_err(|e| self.runtime_error(std_error_code(e.kind), span, e.message))?;
         Ok(Value::list(out.into_iter().map(scalar_to_value).collect()))
     }
@@ -6523,28 +6579,25 @@ impl Interpreter {
                 return Ok(Value::List(ListRepr::Packed(p.like(bytes))));
             }
         }
-        // Boxed fallback. A packed buffer names its element width in its schema; these words do not,
-        // so the ops that COMPARE — `abs` against zero, `clamp` against its bounds — take the
-        // receiver's element hint the checker recorded at this call span, exactly as `min`/`max` do.
-        // `scale` and `neg` only compute, and a wrapping product or negation is the same bits under
-        // either reading, so neither is given the bit.
-        let unsigned = matches!(
-            self.order_hint(span).and_then(|h| h.elements()),
-            Some(RenderHint::Unsigned)
-        );
+        // Boxed fallback. A packed buffer names its element width in its schema; these words do
+        // not, so all four take the width the checker recorded at this call span. Every one of them
+        // needs it: `scale` and `neg` wrap there (`[200u8].neg()` is `[56]`), `abs` folds around it
+        // (an unsigned element is already non-negative, and `(-128i8).abs()` stays `-128`), and
+        // `clamp` compares against bounds this element type also types.
+        let width = self.elem_width(span);
         let a: Vec<_> = self.list_scalars(list, method, 0, span)?.collect();
         let out = match method {
-            "scale" => noeta_stdlib::scale_num_scalars(&a, arg_scalar(self, 0)?),
+            "scale" => noeta_stdlib::scale_num_scalars(&a, arg_scalar(self, 0)?, width),
             "clamp" => noeta_stdlib::clamp_num_scalars(
                 &a,
                 arg_scalar(self, 0)?,
                 arg_scalar(self, 1)?,
-                unsigned,
+                width,
             ),
             _ => {
                 let op = noeta_stdlib::ElemMap::from_name(method)
                     .expect("the caller gates this to a bulk method name");
-                noeta_stdlib::map_num_scalars(op, &a, unsigned)
+                noeta_stdlib::map_num_scalars(op, &a, width)
             }
         }
         .map_err(|e| self.runtime_error(std_error_code(e.kind), span, e.message))?;
@@ -6560,16 +6613,13 @@ impl Interpreter {
                 noeta_stdlib::checked_sum_packed(&view.fields[0], p.raw())
             }
             _ => {
-                // A `u64` element is the one 64-bit width the erased word cannot state: past bit 63
-                // it carries a negative one, so a signed fold finds no overflow where the type says
-                // there is one. The checker recorded the receiver's element hint at this call span,
-                // exactly as it does for `min`/`max`.
-                let unsigned = matches!(
-                    self.order_hint(span).and_then(|h| h.elements()),
-                    Some(RenderHint::Unsigned)
-                );
+                // The element width IS the overflow point, and the erased word cannot state it: at
+                // 8 bits `200 + 100` overflows where at 64 it does not, and at 64 a `u64` past bit
+                // 63 carries a negative word, so a signed fold finds no overflow where the type says
+                // there is one. The checker recorded the width at this call span.
+                let width = self.elem_width(span);
                 let scalars = self.list_scalars(list, "checked_sum", 0, span)?;
-                noeta_stdlib::checked_sum_scalars(scalars, unsigned)
+                noeta_stdlib::checked_sum_scalars(scalars, width)
             }
         }
         .map_err(|e| self.runtime_error(std_error_code(e.kind), span, e.message))?;

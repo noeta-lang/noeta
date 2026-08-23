@@ -311,7 +311,17 @@ pub const MAGIC: &[u8; 4] = b"NOEB";
 /// checker's precomputed answer per combination of leaf values) are carried on the op, so no module
 /// table moves. It cannot be re-derived on the reading side, for the reason every row above cannot:
 /// signedness lives only in the static type — and here in a static type no signature spells.
-pub const FORMAT_VERSION: u8 = 28;
+/// Bumped to 29 by the hint's **sibling channel** — the question a hint was never shaped to answer.
+/// [`noeta_bytecode::Module`] gained `elem_width_sites`, the span-keyed `(signed, bits)` a door that
+/// COMPUTES reads: a numeric reduction, `checked_sum`, a bulk array op, an element-wise `+`/`-`/`*`.
+/// A hint's invariant is that a width under 64 needs none, which is true for *reading* a value —
+/// every `u8` fits an i64 word and already renders, sorts and compares whole — and false for
+/// *computing* with one, where `[200u8, 100u8].sum()` is `44`. postcard writes a struct's fields back
+/// to back with no tags, so a version-28 reader takes the new field's bytes as whatever follows it,
+/// silently and still well-formed — the same slide `order_hint_sites` caused at 24. It cannot be
+/// re-derived on the reading side, for the reason every row above cannot: a width lives only in the
+/// static type, and a boxed narrow-width list carries nothing but the erased words.
+pub const FORMAT_VERSION: u8 = 29;
 
 /// The SHA-256 of one canonical [`Module`]'s postcard encoding — the *other* half of
 /// [`FORMAT_VERSION`], and the thing that makes the changelog above enforceable.
@@ -335,7 +345,7 @@ pub const FORMAT_VERSION: u8 = 28;
 /// pair exists to prevent. The test's message says so; this doc says so; the changelog paragraph
 /// you are about to write is the third place.
 pub const MODULE_LAYOUT_DIGEST: &str =
-    "aa55f592d9f73adb83579b8ed8664228b48fd8a983ec817daa9a5775973163ba";
+    "d7647174e123661ba3d504892fce20793cb291342ca48aa680a0f5147a164ea1";
 
 /// The runtime version stamped into and checked against artifacts — the building crate's
 /// package version. Any release that changes the serialized [`Module`] layout bumps this, so a

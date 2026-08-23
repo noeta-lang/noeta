@@ -355,11 +355,10 @@ impl Checker {
     /// (the erased-word walk, not `Display` dispatch), so a hinted element and an unhinted one
     /// differ in digits alone.
     ///
-    /// A few arithmetic doors read the same hint at the same kind of span, because a `u64` past bit
-    /// 63 is a negative word: `checked_sum` folds at the element width, so a signed fold finds no
-    /// overflow where the type says there is one, and the bulk `abs`/`clamp` compare that word
-    /// against zero and against their bounds. Same question, same answer, same channel — see
-    /// [`crate::stdlib::discloses_width`].
+    /// No arithmetic door reads this hint: a door that computes answers at the element's own width,
+    /// and a hint cannot state a width below 64. Those take [`Self::note_elem_width`] instead — see
+    /// [`crate::stdlib::discloses_width`] and [`crate::stdlib::elem_width_door`], which are the two
+    /// halves of one door list.
     ///
     /// [`HintPurpose::Display`] is the numbering, deliberately: an ordering walk compares two values
     /// slot by slot against the object's **own** slot array (`Payload::Object`'s slots in the VM, the
@@ -373,6 +372,33 @@ impl Checker {
     pub(crate) fn note_order_hint(&mut self, ty: &Type, span: Span) {
         if let Some(hint) = self.render_hint(ty, HintPurpose::Display, &mut Vec::new()) {
             self.sites.order_hint_sites.insert(span, hint);
+        }
+    }
+
+    /// Record the [`ElemWidth`](noeta_ast::ElemWidth) a door at `span` **computes at**, read off the
+    /// receiver's element type `elem` — the arithmetic sibling of [`Self::note_order_hint`], and the
+    /// only channel that can carry a width below 64.
+    ///
+    /// A fixed-width integer erases to its i64 word, and a *boxed* list of them carries nothing
+    /// else, so a fold there wraps at 64 unless the door is told the elements are narrower:
+    /// `[200u8, 100u8].map(fn(x) => x).sum()` is `44`, not `300`. A *packed* list needs none of this
+    /// — its buffer's schema is the width — which is why the same literal answers correctly and only
+    /// the boxed twin is wrong.
+    ///
+    /// Nothing is recorded for an `int`/`float`/`String` element, a `dyn` receiver, or a generic
+    /// body whose element type names a type parameter (a parameter names no width, and an erased
+    /// generic has one compiled body for every instantiation). Absence means
+    /// [`ElemWidth::WORD`](noeta_ast::ElemWidth::WORD) — the erased word itself — so an unrecorded
+    /// door behaves exactly as it did before there was a channel at all.
+    pub(crate) fn note_elem_width(&mut self, elem: &Type, span: Span) {
+        if let Type::IntN { signed, bits } = elem {
+            self.sites.elem_width_sites.insert(
+                span,
+                noeta_ast::ElemWidth {
+                    signed: *signed,
+                    bits: *bits,
+                },
+            );
         }
     }
 

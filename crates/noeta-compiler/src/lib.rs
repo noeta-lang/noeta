@@ -515,6 +515,7 @@ const TABLE_POLICIES: &[(&str, Policy, &str)] = &[
     ("type_arg_hints", Policy::MergeByContent, "absorb_type_args, in lockstep with type_args"),
     ("structural_eq_types", Policy::Append, "register_types"),
     ("order_hint_sites", Policy::MergeByKey, "lowering — one entry per ordering site, keyed by span"),
+    ("elem_width_sites", Policy::MergeByKey, "lowering — one entry per computing site, keyed by span"),
     ("binding_hint_sites", Policy::MergeByKey, "lowering — one entry per deferred-serialization site, keyed by span"),
     ("transient_slots", Policy::MergeByKey, "register_types"),
     ("unsigned_slots", Policy::MergeByKey, "register_types"),
@@ -638,6 +639,7 @@ impl SessionCompiler {
             transient_slots: HashMap::new(),
             unsigned_slots: HashMap::new(),
             order_hint_sites: Vec::new(),
+            elem_width_sites: Vec::new(),
             binding_hint_sites: Vec::new(),
             transient_names: HashSet::new(),
             native_type_names: HashMap::new(),
@@ -949,6 +951,15 @@ impl SessionCompiler {
         // program's `SourceId`, so re-merging an accumulated bundle is an idempotent overwrite.
         // Must precede any `FnCompiler` run below, which reads it.
         take_type_of_sites(sites.as_mut(), &mut self.mc.type_of_sites);
+        // `elem_width_sites` — MergeByKey. The width each computing door folds, wraps and compares
+        // at, carried on the lowered program because three unrelated node shapes (a method call, an
+        // iterator terminal, an element-wise `+`) reach the same kernels and all three already carry
+        // the span the checker recorded at. A live session keeps every earlier install's entries: a
+        // still-running function looks its own call span up at run time, exactly as `map_packed`
+        // does.
+        for (span, width) in &ir.elem_width_sites {
+            self.mc.record_elem_width(*span, *width);
+        }
         if let Some(bundle) = sites.as_mut() {
             // `deserialize_recipes` — Replace. `@derive(Deserialize<Json>)` decode recipes (L2.2
             // DI): the runtime registry `json.decode_typed` resolves against is baked from
@@ -1144,6 +1155,7 @@ impl SessionCompiler {
             // function looks its `map(...)` call span up at run time (session-checker C5).
             map_packed_sites: self.map_packed,
             order_hint_sites: self.mc.order_hint_sites,
+            elem_width_sites: self.mc.elem_width_sites,
             type_arg_hints: self.mc.type_arg_hints.clone(),
             binding_hint_sites: self.mc.binding_hint_sites,
             methods: self.mc.methods,
@@ -1324,6 +1336,11 @@ struct ModuleCompiler {
     /// span → the [`noeta_ast::RenderHint`] the VM reads there. Baked into
     /// [`Module::order_hint_sites`]; empty for a program with no `u64` in an ordered position.
     order_hint_sites: Vec<(Span, noeta_ast::RenderHint)>,
+    /// Computing sites over a fixed-width numeric element, in emission order: the door's span →
+    /// that element's [`noeta_ast::ElemWidth`]. Copied out of the lowered program (which copies it
+    /// from the checker) and baked into [`Module::elem_width_sites`]; empty for a program with no
+    /// fixed-width numeric collection.
+    elem_width_sites: Vec<(Span, noeta_ast::ElemWidth)>,
     /// Deferred-serialization sites, in emission order: the span of a native call that BINDS a value
     /// it serializes on a later tick → the [`noeta_ast::RenderHint`] the VM hands the dispatch there.
     /// Baked into [`Module::binding_hint_sites`]; empty for a program with no `u64` in a bound
@@ -1603,6 +1620,14 @@ impl ModuleCompiler {
     fn record_order_hint(&mut self, span: Span, hint: &noeta_ast::RenderHint) {
         if !self.order_hint_sites.iter().any(|(s, _)| *s == span) {
             self.order_hint_sites.push((span, hint.clone()));
+        }
+    }
+
+    /// Record the element width a computing site folds, wraps and compares at, so the VM can look
+    /// it up by span. Idempotent per span for the same reason [`Self::record_order_hint`] is.
+    fn record_elem_width(&mut self, span: Span, width: noeta_ast::ElemWidth) {
+        if !self.elem_width_sites.iter().any(|(s, _)| *s == span) {
+            self.elem_width_sites.push((span, width));
         }
     }
 

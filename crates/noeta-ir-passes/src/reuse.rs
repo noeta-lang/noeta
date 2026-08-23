@@ -89,6 +89,7 @@ pub fn thread_reuse(program: &Program, ambient_own_destructors: &HashSet<String>
         type_args: program.type_args.clone(),
         type_arg_reprs: program.type_arg_reprs.clone(),
         type_arg_hints: program.type_arg_hints.clone(),
+        elem_width_sites: program.elem_width_sites.clone(),
         span: program.span,
     }
 }

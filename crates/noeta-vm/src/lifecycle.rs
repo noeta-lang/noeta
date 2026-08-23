@@ -730,6 +730,12 @@ impl<'m> Vm<'m> {
             binding: module.binding_hint_sites.iter().cloned().collect(),
             resolved_binding: HashMap::new(),
         };
+        // The element width each computing door folds, wraps and compares at — the arithmetic
+        // sibling of the hints above, and a separate table because it answers a different question:
+        // not "where under this value is an unsigned word" but "how many bits does this numeric
+        // element have". A boxed narrow-width list carries neither.
+        let elem_widths: HashMap<Span, noeta_ast::ElemWidth> =
+            module.elem_width_sites.iter().copied().collect();
         Vm {
             module,
             debug_session: None,
@@ -741,6 +747,7 @@ impl<'m> Vm<'m> {
             persist,
             map_packed,
             hints,
+            elem_widths,
             methods,
             global_slots,
             destructors,

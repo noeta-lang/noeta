@@ -542,6 +542,11 @@ struct Vm<'m> {
     /// splice, and the table a render slot indexes. See [`methods::HintState`]; empty for nearly
     /// every program.
     hints: methods::HintState,
+    /// Computing-site span → the width that door folds, wraps and compares at, from
+    /// `Module::elem_width_sites`. Beside the hints because it answers the other half of the width
+    /// question, which a hint structurally cannot — see [`Vm::elem_width`]. Empty for nearly every
+    /// program.
+    elem_widths: HashMap<Span, noeta_ast::ElemWidth>,
     /// Instance-method dispatch: type name → (method name → prototype index). Two-level
     /// (audit-1 finding 7) so every lookup probes with **borrowed** `&str` keys via
     /// [`Vm::method_proto`] — the previous flat `(String, String)` key forced two heap
