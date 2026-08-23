@@ -163,6 +163,12 @@ fn iter_probe(m: IterMethod) -> Option<Probe> {
 }
 
 /// The probe for each numeric list reduction.
+///
+/// The **eager** `xs.checked_sum()` is not among them and cannot be: it is neither a [`NumReduce`]
+/// nor a [`ListMethod`], being name-dispatched on the list surface, so no enum here reaches it and
+/// nothing forces a probe. Its lazy twin below is the one this census can hold, and the two share a
+/// fold — `tests/conformance/types/unsigned_checked_sum.noe` drives both spellings on both engines,
+/// which is where the eager door is pinned.
 fn num_reduce_probe(m: NumReduce) -> Option<Probe> {
     let xs = format!("xs: List<u64> = [{BIG}, 1u64, {MID}]");
     match m {
@@ -244,10 +250,6 @@ const KNOWN_UNHINTED: &[(&str, &str)] = &[
     (
         "Iterator::Join",
         "The same defect reached through the lazy door: `it.join(sep)` drains into the eager          `join`, which is the property that makes the two spellings agree by construction — so it          agrees on this too. One fix closes both.",
-    ),
-    (
-        "Iterator::CheckedSum",
-        "`checked_sum` folds through `checked_sum_scalars`, which adds at i64: `u64::MAX` is the          word `-1`, so `u64::MAX + 2` overflows nothing and reports `some(1)` where the element          width says `none`. The PACKED path is already right (`checked_sum_buf::<u64>`); the boxed          fallback needs the element width threaded to it. The eager `xs.checked_sum()` has the          same defect — it is not reached by any of the six enums, being name-dispatched, which is          its own finding.",
     ),
 ];
 

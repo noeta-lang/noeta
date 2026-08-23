@@ -1,0 +1,72 @@
+// `checked_sum()` reports overflow AT THE ELEMENT WIDTH, and at 64 bits the element width is the one
+// thing the value does not carry: a fixed-width integer is erased to its i64 word, so `u64::MAX` is
+// the word `-1` and the signed fold `-1 + 2` overflows nothing at all. The signedness lives only in
+// the static type, so the checker marks the fold's call span with the receiver's element hint — the
+// same hint `.min()`/`.max()` read at the same span — and both backends fold under it.
+//
+// The reinterpretation cuts both ways, which is why both directions are pinned below: a `u64` sum
+// that really does wrap past zero must answer `none`, and one whose total merely passes `i64::MAX`
+// must answer `some` with the whole value, where a signed fold would have invented an overflow.
+//
+// `sum()` is the deliberate contrast beside it: a reduction is a repeated binary op, so `sum` wraps
+// at the element width exactly as folding with `+` would. `checked_sum` is the opt-in that reports
+// instead of wrapping — the two answer differently on purpose.
+// expect: stdout "none"
+// expect: stdout "none"
+// expect: stdout "1"
+// expect: stdout "some(18446744073709551615)"
+// expect: stdout "some(18446744073709551615)"
+// expect: stdout "some(9223372036854775808)"
+// expect: stdout "some(0)"
+// expect: stdout "none"
+// expect: stdout "some(9223372036854775805)"
+// expect: stdout "none"
+// expect: stdout "some(6)"
+// expect: stdout "none"
+// expect: stdout "some(200)"
+// expect: stdout "44"
+// expect: stdout "some(4.0)"
+// expect: exit 0
+
+// The three boundaries: the top of `u64`, the first value an i64 does not hold, and the last it does.
+big: u64 = 18446744073709551615u64
+mid: u64 = 9223372036854775808u64
+top: u64 = 9223372036854775807u64
+
+// A `u64` sum that wraps past zero, through the eager door and the lazy one — `it.checked_sum()`
+// drains into the same fold, so the two spellings must agree about the same elements. `sum()` beside
+// them is the wrap the language's `+` gives.
+echo [big, 2u64].checked_sum()
+echo [big, 2u64].iter().checked_sum()
+echo [big, 2u64].sum()
+
+// A `u64` sum that does NOT wrap, and whose total is past `i64::MAX`: the digits have to come back
+// whole rather than as the negative word they are stored in.
+echo [mid, top].checked_sum()
+echo [mid, top].iter().checked_sum()
+
+// The reinterpretation's other direction, and the line that only the unsigned fold can pass: read
+// signed these words are `i64::MAX + 1`, which overflows — so a signed fold answers `none` to a sum
+// the element type has half its range left for.
+echo [top, 1u64].checked_sum()
+
+// The empty list sums to the identity, always `some`.
+e: List<u64> = []
+echo e.checked_sum()
+
+// Signed controls, where the erased word IS the value: `i64::MAX + 2` overflows, `i64::MAX - 2`
+// does not, and a plain `int` is the same 64-bit signed fold under another name.
+echo [9223372036854775807i64, 2i64].checked_sum()
+echo [9223372036854775807i64, -2i64].checked_sum()
+echo [9223372036854775807, 2].checked_sum()
+echo [1, 2, 3].checked_sum()
+
+// A narrow width overflows at ITS width, not at 64: `200u8 + 100u8` passes 255 and reports it, while
+// `100u8 + 100u8` fits. The packed buffer carries the width in its schema, so the fold reads it
+// there; `sum()` on the same list wraps to 44 rather than reporting.
+echo [200u8, 100u8].checked_sum()
+echo [100u8, 100u8].checked_sum()
+echo [200u8, 100u8].sum()
+
+// Floats never report an overflow — their addition is total, so the answer is always `some`.
+echo [1.5, 2.5].checked_sum()

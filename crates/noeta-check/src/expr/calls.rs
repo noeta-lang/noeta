@@ -1751,7 +1751,12 @@ impl Checker {
                 // here — a set's canonical buffer and a map's key placement are identity orders,
                 // built at one site and probed at another, and are deliberately never hinted (see
                 // `Sites::order_hint_sites`).
-                if stdlib::reveals_order(&recv, name) {
+                // A method that FOLDS at the element width needs the same one bit about the same
+                // receiver — whether the elements' erased words are `u64` — because `checked_sum`
+                // reports overflow rather than wrapping, and at 64 bits the two readings disagree
+                // about which sums overflow at all. Same datum, same span, same site map.
+                if stdlib::reveals_order(&recv, name) || stdlib::folds_at_element_width(&recv, name)
+                {
                     self.note_order_hint(&recv, call_span);
                 }
                 // A native method that BINDS one of its arguments now and serializes it to JSON on a

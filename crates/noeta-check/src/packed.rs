@@ -343,6 +343,11 @@ impl Checker {
     /// if `ty` contains an unsigned 64-bit integer. Nothing is recorded otherwise, so a program that
     /// never orders a `u64` carries no hint and lowers unchanged.
     ///
+    /// One arithmetic door reads the same hint at the same kind of span: `checked_sum` folds at the
+    /// element width, and a `u64` past bit 63 is a negative word, so a signed fold finds no overflow
+    /// where the type says there is one. Same question, same answer, same channel — see
+    /// [`crate::stdlib::folds_at_element_width`].
+    ///
     /// [`HintPurpose::Display`] is the numbering, deliberately: an ordering walk compares two values
     /// slot by slot against the object's **own** slot array (`Payload::Object`'s slots in the VM, the
     /// `TypeDef`'s field specs in the tree-walker) — the deep marshal never runs, so a `#[Transient]`

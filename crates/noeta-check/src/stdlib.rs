@@ -749,6 +749,32 @@ pub(super) fn reveals_order(recv: &Type, name: &str) -> bool {
     }
 }
 
+/// Whether the built-in method `name` on receiver `recv` folds **at the element width** and so must
+/// know whether that element's erased word is a `u64` — the one arithmetic door
+/// [`crate::Sites::order_hint_sites`] is recorded at.
+///
+/// `checked_sum` reports overflow instead of wrapping, and at 64 bits the signed and unsigned
+/// readings disagree about which sums overflow at all: `u64::MAX + 2` wraps past zero, while the
+/// same words read signed are `-1 + 2` and overflow nothing. Every other reduction wraps either way
+/// (`sum`/`product`) or is an ordering door already listed in [`reveals_order`].
+///
+/// The same datum, about the same receiver, read at the same call span as an ordering hint — so it
+/// travels the same site map rather than a second one. What it cannot carry is a *narrow* width: the
+/// hint answers "is this a `u64`", and a boxed `List<u8>` therefore still folds at 64 (a packed one
+/// folds through its schema, which does carry the width). See `checked_sum_scalars`.
+pub(super) fn folds_at_element_width(recv: &Type, name: &str) -> bool {
+    if name != "checked_sum" {
+        return false;
+    }
+    // The eager and the lazy spelling of one fold: `it.checked_sum()` drains into the same kernel,
+    // so hinting one without the other would make them disagree about the same elements.
+    match recv {
+        Type::List(_) => true,
+        Type::Named(n, _) => n == ITERATOR,
+        _ => false,
+    }
+}
+
 /// The **deferred-serialization** argument a native method declares, if any: the position of the
 /// parameter whose value the receiver's extern type keeps and serializes to JSON on some later tick
 /// (`ExtType::push_hint_args`). The checker records that argument's hint at the call span, because a

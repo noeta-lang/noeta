@@ -1986,6 +1986,8 @@ pub struct Module {
     /// with the [`noeta_ast::RenderHint`] naming the positions to read unsigned. The VM looks a site
     /// up by span — a stdlib method call's (`.sorted()`, `.min()`, `.max()`, `.keys()`,
     /// `.values()`) or a `for` loop's — and orders the sequence the program sees accordingly.
+    /// `checked_sum` reads the same table for the same bit: it reports overflow at the element
+    /// width, and the two readings of a 64-bit word disagree about which sums overflow.
     ///
     /// A side table rather than an operand, deliberately: these ops are the hot dispatch path, and
     /// nearly every program has no entry here at all. The tree-walker reads the same hint off its

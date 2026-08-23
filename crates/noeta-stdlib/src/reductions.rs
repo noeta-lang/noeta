@@ -319,17 +319,27 @@ pub fn checked_sum_packed(field: &PackedField, bytes: &[u8]) -> Result<Option<Re
 }
 
 /// `checked_sum()` over a **boxed** scalar list — the fallback sharing the overflow convention with
-/// [`checked_sum_packed`]. Integers fold at 64 bits (the only boxed integer widths are
-/// `int`/`i64`/`u64`, exact at 64; narrow widths are always packed).
+/// [`checked_sum_packed`]. Integers fold at 64 bits, `unsigned` deciding **which** 64: an `int`,
+/// `i64` or narrow signed element is exactly the erased word, while a `u64` element past bit 63
+/// carries a negative one, so folding it signed would report `u64::MAX + 2` as no overflow at all.
+/// The caller reads the flag from the call site's element hint, exactly as [`reduce_num_scalars`]
+/// reads it for `min`/`max`.
+///
+/// A **narrow** element (`u8`, `i16`, …) still folds at 64 here, which is the width its packed
+/// buffer would not have used. Every narrow list built as a literal is packed, and takes
+/// [`checked_sum_packed`] instead; a narrow list that arrived boxed — a `map` result, an iterator
+/// drained through `collect` — folds wider than its type says, because the erased word carries no
+/// width and this call site hands over only the one bit above.
 pub fn checked_sum_scalars(
     scalars: impl Iterator<Item = Scalar>,
+    unsigned: bool,
 ) -> Result<Option<RedNum>, StdError> {
     let mut int_acc: i64 = 0;
     let mut float_acc: f64 = 0.0;
     let mut any_float = false;
     for s in scalars {
         match s {
-            Scalar::Int(i) => match int_acc.checked_add(i) {
+            Scalar::Int(i) => match checked_add_word(int_acc, i, unsigned) {
                 Some(v) => int_acc = v,
                 None => return Ok(None),
             },
@@ -349,6 +359,18 @@ pub fn checked_sum_scalars(
     } else {
         RedNum::Int(int_acc)
     }))
+}
+
+/// Add two erased integer words, reporting overflow at 64 bits under the reading the element type
+/// says — the boxed twin of [`Elem::checked_add`], and the only place this file spells the unsigned
+/// reinterpretation for arithmetic. A `u64` past bit 63 is a negative word, so the two readings
+/// disagree about which sums overflow; every other 64-bit element *is* the signed word.
+fn checked_add_word(acc: i64, x: i64, unsigned: bool) -> Option<i64> {
+    if unsigned {
+        (acc as u64).checked_add(x as u64).map(|v| v as i64)
+    } else {
+        acc.checked_add(x)
+    }
 }
 
 /// The numeric domain of one boxed element: an integer (`int`/`IntN`, erased to `i64`) or a float.
@@ -662,6 +684,54 @@ mod tests {
             fold(NumReduce::Product, true),
             fold(NumReduce::Product, false)
         );
+    }
+
+    /// `checked_sum` is the other sign-DEPENDENT fold, and it depends on the sign in a way `sum`
+    /// does not: `sum` wraps at the width either way, while `checked_sum` REPORTS, and the two
+    /// readings of a 64-bit word disagree about which sums overflow at all. Both directions are
+    /// asserted, because getting one right is not getting the other right: `u64::MAX + 2` wraps
+    /// past zero where the erased words `-1 + 2` do not, and `i64::MAX + 1` overflows the signed
+    /// reading while the unsigned one has half its range left.
+    #[test]
+    fn an_unsigned_checked_sum_overflows_at_the_unsigned_boundary() {
+        let fold = |words: &[i64], unsigned| {
+            checked_sum_scalars(words.iter().map(|&v| Scalar::Int(v)), unsigned).unwrap()
+        };
+        assert_eq!(fold(&[-1, 2], true), None);
+        assert_eq!(fold(&[-1, 2], false), Some(RedNum::Int(1)));
+        assert_eq!(fold(&[i64::MAX, 1], true), Some(RedNum::Int(i64::MIN)));
+        assert_eq!(fold(&[i64::MAX, 1], false), None);
+        // The exact top of `u64`, reached from below: whole, and not an overflow.
+        assert_eq!(fold(&[i64::MIN, i64::MAX], true), Some(RedNum::Int(-1)));
+        // Small values and the empty fold read the same either way.
+        assert_eq!(fold(&[1, 2, 3], true), fold(&[1, 2, 3], false));
+        assert_eq!(fold(&[], true), Some(RedNum::Int(0)));
+    }
+
+    /// The packed `u64` kernel and the boxed fallback are one `checked_sum`, whichever
+    /// representation a `List<u64>` happens to have — the `packed_and_boxed_agree` property for the
+    /// reduction that reports instead of wrapping.
+    #[test]
+    fn packed_and_boxed_checked_sums_agree_on_u64() {
+        let field = PackedField::IntN {
+            bits: 64,
+            signed: false,
+        };
+        for words in [
+            vec![u64::MAX, 2],
+            vec![1u64, 2, 3],
+            vec![1u64 << 63, i64::MAX as u64],
+            vec![],
+        ] {
+            let bytes: Vec<u8> = words.iter().flat_map(|v| v.to_le_bytes()).collect();
+            let packed = checked_sum_packed(&field, &bytes).unwrap();
+            let boxed = checked_sum_scalars(
+                words.iter().map(|&v| Scalar::Int(v as i64)),
+                /* unsigned */ true,
+            )
+            .unwrap();
+            assert_eq!(packed, boxed, "words {words:?}");
+        }
     }
 
     #[test]
