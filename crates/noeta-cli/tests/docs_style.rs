@@ -221,3 +221,161 @@ fn the_gate_catches_what_actually_shipped() {
         );
     }
 }
+
+/// The release this checkout *is*. Every crate inherits it (`version.workspace = true`), so
+/// `noeta-cli`'s own package version is the workspace version.
+const RELEASE: &str = env!("CARGO_PKG_VERSION");
+
+/// The toolchain's own crates, read from the tree rather than listed here — a crate added later is
+/// covered without anyone remembering to extend a table.
+fn toolchain_crates() -> Vec<String> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(repo_root().join("crates")).expect("crates/ is readable") {
+        let name = entry.expect("readable entry").file_name();
+        let name = name.to_string_lossy().to_string();
+        if name.starts_with("noeta-") {
+            out.push(name);
+        }
+    }
+    out
+}
+
+/// The canonical toolchain repository. A `tag =` beside this URL pins a real release; the same
+/// key beside `github.com/acme/…` pins a *fictional* package and is none of our business.
+const TOOLCHAIN_REPO: &str = "github.com/noeta-lang/noeta";
+
+/// Pull the value out of `key = "value"`, if the line has one.
+fn value_of<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    let after = line.split_once(key)?.1;
+    let after = after.trim_start().strip_prefix('=')?.trim_start();
+    let rest = after.strip_prefix('"')?;
+    rest.split_once('"').map(|(v, _)| v)
+}
+
+/// The version a line requires of `krate`, written either bare (`krate = "0.6"`) or as a table
+/// (`krate = { version = "0.6" }`). A table pinning `git`/`tag` instead has no requirement to read —
+/// the toolchain-repository rule above covers that form.
+fn requirement_for<'a>(line: &'a str, krate: &str) -> Option<&'a str> {
+    let after = line.split_once(krate)?.1;
+    let after = after.trim_start().strip_prefix('=')?.trim_start();
+    if let Some(table) = after.strip_prefix('{') {
+        let end = table.find('}')?;
+        return value_of(&table[..end], "version");
+    }
+    let rest = after.strip_prefix('"')?;
+    rest.split_once('"').map(|(v, _)| v)
+}
+
+/// `0.6.0` → `0.6`. A crates.io requirement names the compatible range, not the patch.
+fn major_minor(version: &str) -> &str {
+    match version.match_indices('.').nth(1) {
+        Some((i, _)) => &version[..i],
+        None => version,
+    }
+}
+
+/// Scan one page for dependency declarations that name the toolchain, and report the stale ones.
+fn stale_declarations(stem: &str, text: &str, crates: &[String], out: &mut Vec<String>) {
+    for (n, line) in text.lines().enumerate() {
+        let n = n + 1;
+        // A git pin on the toolchain repository must name this release exactly.
+        if line.contains(TOOLCHAIN_REPO) {
+            if let Some(tag) = value_of(line, "tag") {
+                let want = format!("v{RELEASE}");
+                if tag != want {
+                    out.push(format!(
+                        "{stem}.md:{n}: pins the toolchain at `{tag}`, but this is `{want}` — a \
+                         reader copying it gets a different toolchain than the page describes"
+                    ));
+                }
+            }
+        }
+        // A published-crate requirement must name this release's compatible range.
+        for krate in crates {
+            let Some(req) = requirement_for(line, krate) else {
+                continue;
+            };
+            let bare = req.trim_start_matches(['^', '~', '=']);
+            if bare != major_minor(RELEASE) && bare != RELEASE {
+                out.push(format!(
+                    "{stem}.md:{n}: requires `{krate} = \"{req}\"`, but this is `{RELEASE}` — the \
+                     range a reader copies must resolve the release they are reading about"
+                ));
+            }
+        }
+    }
+}
+
+/// A version in the wiki is either a **declaration a reader copies** — which must name this
+/// release — or an illustration, which must not name a real one at all.
+///
+/// This gate covers the first kind, and only the first kind: a `tag =` beside the toolchain's own
+/// repository URL, and a requirement on one of the toolchain's own crates. Everything else that
+/// looks like a version in `docs/` is a float literal, a cache size, a percentage, or a *fictional*
+/// package (`acme/http = "^1.0"`), and a rule wide enough to catch those would fire on all of them.
+///
+/// The checklist this replaces did not work. `Extension-Compatibility.md` told package authors to
+/// depend on `noeta-conformance` at `v0.2.0` for **five releases**, on the very page the release
+/// procedure names — the two lines it *listed* were updated each time and the two beside them were
+/// not. An invariant that lives in a procedure decays exactly this way; one that fails a test does
+/// not.
+#[test]
+fn dependency_snippets_name_the_current_release() {
+    let crates = toolchain_crates();
+    let docs = repo_root().join("docs");
+    let mut violations = Vec::new();
+    for entry in std::fs::read_dir(&docs).expect("docs/ is readable") {
+        let path = entry.expect("readable entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let stem = path
+            .file_stem()
+            .expect("a .md file has a stem")
+            .to_string_lossy()
+            .to_string();
+        let text = std::fs::read_to_string(&path).expect("a doc page is readable");
+        stale_declarations(&stem, &text, &crates, &mut violations);
+    }
+    assert!(
+        violations.is_empty(),
+        "documentation pins a release this checkout is not:\n  {}",
+        violations.join("\n  ")
+    );
+}
+
+/// The gate above catches the drift it exists for, and stays quiet on the versions that are
+/// deliberately not this release.
+#[test]
+fn the_release_gate_reads_declarations_and_not_illustrations() {
+    let crates: Vec<String> = vec!["noeta-ext-abi".into(), "noeta-conformance".into()];
+    let stale =
+        format!("noeta-conformance = {{ git = \"https://{TOOLCHAIN_REPO}\", tag = \"v0.2.0\" }}");
+    for caught in [
+        stale.as_str(),
+        "noeta-ext-abi = \"0.2\"",
+        "noeta-ext-abi = { version = \"0.4.0\" }",
+    ] {
+        let mut violations = Vec::new();
+        stale_declarations("Some-Page", caught, &crates, &mut violations);
+        assert!(
+            !violations.is_empty(),
+            "the gate would not have caught: {caught}"
+        );
+    }
+    // A fictional package's tag, a user's declared floor, and the hypothetical older pin in the
+    // composition prose are all versions that must NOT be dragged along by a release.
+    for ok in [
+        "http = { git = \"https://github.com/acme/http\", tag = \"v1.2.0\" }",
+        "toolchain = \">=0.2\"",
+        "A package pinned at an older tag (say `v0.2.0`) still composes under a newer binary.",
+        "codec = { version = \"^1.0\", package = \"acme/imgcodec\" }",
+    ] {
+        let mut violations = Vec::new();
+        stale_declarations("Some-Page", ok, &crates, &mut violations);
+        assert!(
+            violations.is_empty(),
+            "false positive on: {ok}\n{violations:?}"
+        );
+    }
+}
