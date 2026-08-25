@@ -150,7 +150,32 @@ fn temp_noeta_copy(name: &str) -> PathBuf {
     let source = assert_cmd::cargo::cargo_bin("noeta");
     let copy = dir.join("noeta");
     std::fs::copy(&source, &copy).expect("copy the noeta binary");
+    wait_until_executable(&copy);
     copy
+}
+
+/// A just-written executable can be transiently **`ETXTBSY`**, and the cause is not this thread.
+/// `fs::copy` holds the destination open for writing; a sibling test spawning a process in that
+/// window forks, the child inherits the descriptor, and the file counts as open-for-write until
+/// that child reaches its `exec`. The descriptor is `CLOEXEC`, so the window is short and closes
+/// on its own — but `exec` during it fails, and under a loaded runner with tests in parallel it
+/// does. Wait the window out rather than failing a run over it.
+fn wait_until_executable(path: &std::path::Path) {
+    /// `ETXTBSY` on both Linux and macOS. `io::ErrorKind::ExecutableFileBusy` is still unstable.
+    const ETXTBSY: i32 = 26;
+    for _ in 0..100 {
+        match std::process::Command::new(path).arg("--version").output() {
+            Ok(_) => return,
+            Err(e) if e.raw_os_error() == Some(ETXTBSY) => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(e) => panic!("probing the copied binary at {}: {e}", path.display()),
+        }
+    }
+    panic!(
+        "{} stayed ETXTBSY for two seconds — that is not the fork window",
+        path.display()
+    );
 }
 
 #[test]
