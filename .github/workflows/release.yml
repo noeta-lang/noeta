@@ -11,7 +11,7 @@ name: Release
 # Prerelease is detected from the tag: any `-` suffix (v1.2.0-rc.1, v1.2.0-alpha) is a prerelease.
 #
 # Only `noeta-ext-abi` and `noeta-reactive-abi` go to crates.io. That is the whole documented stable
-# surface, and publishing it is what lets a native package depend on a **range** (`"0.6"`) instead of
+# surface, and publishing it is what lets a native package depend on a **range** (`"0.7"`) instead of
 # an exact git tag — so a patch release stops costing a manifest edit in every package repo. Every
 # other crate is `publish = false`: they are internal organs with no stability promise, and shipping
 # them would advertise a semver contract this project does not keep. `noeta-embed` stays unpublished

@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/noeta-lang/noeta"
@@ -56,7 +56,7 @@ noeta-loader = { path = "crates/noeta-loader" }
 noeta-stdlib = { path = "crates/noeta-stdlib" }
 # Native-extension ABI (P-NATIVE): the contract + dep-free primitives, split out of noeta-stdlib so
 # the batteries (crypto/uuid/json) don't ride the ABI. noeta-stdlib re-exports it (core/std-style).
-noeta-ext-abi = { path = "crates/noeta-ext-abi", version = "0.6.0" }
+noeta-ext-abi = { path = "crates/noeta-ext-abi", version = "0.7.0" }
 # M2 runtime (host-coupled IO: real disk async + real env/args)
 noeta-host-real = { path = "crates/noeta-host-real" }
 # Lean production runtime (dev-deps D3): the app-execution core (VM+Host+compile front-end, no dev
@@ -82,7 +82,7 @@ noeta-reactive = { path = "crates/noeta-reactive" }
 # implements — reached per-run via `noeta_ext_abi::capability::<dyn ReactiveSource>`. Tiny: deps only
 # noeta-ext-abi (NativeCtx/Retained) + noeta-reactive (NodeId). Neither engine internals nor consumer
 # node types cross it.
-noeta-reactive-abi = { path = "crates/noeta-reactive-abi", version = "0.6.0" }
+noeta-reactive-abi = { path = "crates/noeta-reactive-abi", version = "0.7.0" }
 # The project model: `project_check` — the one answer `noeta check`, the LSP's `workspace/diagnostic`
 # and the MCP `check` tool all give — over the shared disk-backed salsa workspace construction.
 # Editor-free by construction: a batch checker must not depend on an editor crate to answer whether

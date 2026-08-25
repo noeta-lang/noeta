@@ -50,7 +50,7 @@ A standalone package repo can't path-depend the noeta monorepo, so its entry cra
 ```toml ignore
 # a standalone package's native/Cargo.toml
 [dependencies]
-noeta-ext-abi = "0.6"
+noeta-ext-abi = "0.7"
 ```
 
 `noeta-ext-abi` and `noeta-reactive-abi` are the only toolchain crates published there — they are the whole stable surface (see [Extension Compatibility](Extension-Compatibility)). A range rather than an exact version, because a *patch* toolchain release does not change the contract and should not cost you a manifest edit.

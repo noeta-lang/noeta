@@ -61,7 +61,7 @@ A package depends on the contract crate from **crates.io**, by range:
 ```toml ignore
 # the package's native/Cargo.toml
 [dependencies]
-noeta-ext-abi = "0.6"
+noeta-ext-abi = "0.7"
 ```
 
 A range rather than an exact version because a *patch* release of the toolchain does not change the contract, so it should not cost every package a manifest edit. A **minor** bump still does, deliberately: pre-1.0 a minor may break you (below), and that is a change worth looking at.
@@ -69,7 +69,7 @@ A range rather than an exact version because a *patch* release of the toolchain 
 A git pin on the toolchain repository also still works, and is what a package reaching past the contract must use, since the internal crates are not published:
 
 ```toml ignore
-noeta-ext-abi = { git = "https://github.com/noeta-lang/noeta", tag = "v0.6.0" }
+noeta-ext-abi = { git = "https://github.com/noeta-lang/noeta", tag = "v0.7.0" }
 ```
 
 That pin governs **only the package's own repository**: `cargo test` in your CI, your local builds. When a *consumer* depends on your package, toolchain composition builds your crate again—from source, inside the consumer's composed shim—and resolves every toolchain crate to **the consumer's own toolchain version**, not your tag:
@@ -96,8 +96,8 @@ The consumed crates (`noeta-ext-abi`, `noeta-reactive-abi`, `noeta-cli` as the c
 ```toml ignore
 # the package's native crate — test-only, does not ship
 [dev-dependencies]
-noeta-conformance = { git = "https://github.com/noeta-lang/noeta", tag = "v0.6.0" }
-noeta-stdlib      = { git = "https://github.com/noeta-lang/noeta", tag = "v0.6.0" }
+noeta-conformance = { git = "https://github.com/noeta-lang/noeta", tag = "v0.7.0" }
+noeta-stdlib      = { git = "https://github.com/noeta-lang/noeta", tag = "v0.7.0" }
 ```
 
 ## See also
