@@ -279,15 +279,13 @@ fn stale_declarations(stem: &str, text: &str, crates: &[String], out: &mut Vec<S
     for (n, line) in text.lines().enumerate() {
         let n = n + 1;
         // A git pin on the toolchain repository must name this release exactly.
-        if line.contains(TOOLCHAIN_REPO) {
-            if let Some(tag) = value_of(line, "tag") {
-                let want = format!("v{RELEASE}");
-                if tag != want {
-                    out.push(format!(
-                        "{stem}.md:{n}: pins the toolchain at `{tag}`, but this is `{want}` — a \
-                         reader copying it gets a different toolchain than the page describes"
-                    ));
-                }
+        if let Some(tag) = value_of(line, "tag").filter(|_| line.contains(TOOLCHAIN_REPO)) {
+            let want = format!("v{RELEASE}");
+            if tag != want {
+                out.push(format!(
+                    "{stem}.md:{n}: pins the toolchain at `{tag}`, but this is `{want}` — a \
+                     reader copying it gets a different toolchain than the page describes"
+                ));
             }
         }
         // A published-crate requirement must name this release's compatible range.
