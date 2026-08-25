@@ -139,6 +139,12 @@ jobs:
       # byte-identical accelerator, so doc behaviour is unchanged and the gate stays fast.
       - name: cargo test -p noeta-cli --test doc_samples
         run: cargo test -p noeta-cli --test doc_samples --no-default-features --locked
+      # The step above proves the samples still compile; nothing there reads the prose around them,
+      # or the version a reader copies out of a dependency snippet. Both are release-time drift: a
+      # page becomes a changelog one sentence at a time, and a pin goes stale the moment the tag
+      # moves. Same job, because it needs no build the samples have not already paid for.
+      - name: cargo test -p noeta-cli --test docs_style
+        run: cargo test -p noeta-cli --test docs_style --no-default-features --locked
 
   docs-site:
     name: Documentation site (builds, links and anchors resolve)
