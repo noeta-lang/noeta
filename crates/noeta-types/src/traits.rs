@@ -290,10 +290,11 @@ impl BuiltinTrait {
                 operator: Some(BinaryOp::Concat),
                 ..Info::DEFAULTS
             },
+            // No `operator` entry, deliberately: `==` reads its answer through the trait rather
+            // than dispatching to it as an overload, which is also why its return is pinned.
             Equatable => Info {
                 name: "Equatable",
                 required_method: Some(("eq", Some(1))),
-                operator: Some(BinaryOp::Eq),
                 builtin_recipe: true,
                 fixed_return: Some(FixedReturn::Bool),
                 ..Info::DEFAULTS
