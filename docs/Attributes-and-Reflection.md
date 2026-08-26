@@ -990,11 +990,11 @@ Unlike `construct`, the named form does **not** type-check an argument against i
 
 A parameter with a default may be omitted from either shape, exactly as at a direct call site — the pair to `ParamInfo.optional`. A panic *inside* the invoked body is a normal abort; only the by-name resolution is caught.
 
-### A declared conversion is named after its source
+### A declared conversion is named after its counterpart
 
-One method name is built rather than written: an [`impl From<Source>`](Error-Handling#converting-errors-at---impl-fromsource) conversion answers to **`from<Source>`**, not to `from`.
+One method name is built rather than written: an [`impl From<Source>`](Error-Handling#converting-errors-at---impl-fromsource) conversion answers to **`from<Source>`**, not to `from`, and an [`impl To<Target>`](Error-Handling#converting-into-a-type-you-do-not-own--impl-totarget) answers to **`to<Target>`**.
 
-A conversion's identity is the pair of types it goes between, and a type may declare one per source, so `from` alone names a *set* — which is exactly the question a by-name lookup cannot answer. Asking for it is a miss, and the message names the alternatives:
+A conversion's identity is the pair of types it goes between, and a type may declare one per counterpart, so the bare name alone names a *set* — which is exactly the question a by-name lookup cannot answer. Asking for it is a miss, and the message names the alternatives:
 
 ```noeta
 struct HttpError { status: int }

@@ -289,6 +289,7 @@ Traits are a **fixed built-in set** — naming an unknown one is E0014. Operator
 | `Error` | `message(): string` | the idiomatic `Err` payload — see [Error Handling](Error-Handling) |
 | `Validate` | `validate(): Result<void, E>` | a data-boundary invariant; auto-runs at typed decode — see [Validation](Validation) |
 | `From<Source>` | `from(value: Source): Target` — static | error conversion at `?` — see [Error Handling](Error-Handling#converting-errors-at---impl-fromsource) |
+| `To<Target>` | `to(): Target` | the same conversion declared on the **source**, for a target you do not own — see [Error Handling](Error-Handling#converting-into-a-type-you-do-not-own--impl-totarget) |
 | `Add` | `add(other): T` | `+` |
 | `Sub` | `sub(other): T` | `-` |
 | `Mul` | `mul(other): T` | `*` |
@@ -368,7 +369,7 @@ fn matches<K, T: Keyed<K>>(item: T, k: K): bool {
 echo matches(Door { code: 7 }, 7)     // true
 ```
 
-An instantiated bound must match the trait's arity (`T: Keyed<int, string>` on a one-parameter trait is E0014), and built-in traits take no bound arguments. (`From<Source>` is the one built-in whose *impl* carries a type argument — `impl From<JsonError> { … }` — but it is not usable as an instantiated bound.)
+An instantiated bound must match the trait's arity (`T: Keyed<int, string>` on a one-parameter trait is E0014), and built-in traits take no bound arguments. (The conversion traits are the ones whose *impl* carries a type argument — `impl From<JsonError> { … }`, `impl To<ServiceError> for DiskError { … }` — but neither is usable as an instantiated bound.)
 
 The bound also types the **body**: on a `T`-typed value, a method the bound's trait declares resolves at the bound's instantiation — under `<T: Keyed<int>>`, `item.key()` is an `int` and `item.same(x)` demands an `int`, so a wrong argument, return, or arity is E0007 at the definition, before any call site exists. A method no bound declares stays leniently deferred.
 
@@ -595,7 +596,7 @@ Coherence has two halves: **uniqueness** — at most one implementation per (typ
 
 Each type has **at most one** implementation of a given trait, across `@derive(T)`, an in-body `impl T { }`, and a standalone `impl T for Type { }`. A duplicate or competing impl is E0027 — including two *different modules* that each implement one trait for one type, which is a conflict like any other and is reported rather than silently resolved in someone's favor. The diagnostic labels **both** sites, each rendered against its own file, since the two are routinely in different modules.
 
-`From` counts per **source type** rather than per trait: `impl From<HttpError>` beside `impl From<JsonError>` declares two different conversions into one target, and only a repeated source is the conflict (see [Converting errors at `?`](Error-Handling#converting-errors-at---impl-fromsource)). It can afford that because every site that reaches a conversion carries the source type — a `?`'s propagated `Err`, an argument's type — and so says which one it means; a second `impl Cache<int>` beside `impl Cache<string>` would hand the type two `get`s with nothing at the call site to choose between them, and stays E0027.
+A conversion counts per **counterpart type** rather than per trait: `impl From<HttpError>` beside `impl From<JsonError>` declares two different conversions into one target, and only a repeated counterpart is the conflict (see [Converting errors at `?`](Error-Handling#converting-errors-at---impl-fromsource)). It can afford that because every site that reaches a conversion carries the source type — a `?`'s propagated `Err`, an argument's type — and so says which one it means; a second `impl Cache<int>` beside `impl Cache<string>` would hand the type two `get`s with nothing at the call site to choose between them, and stays E0027. The two conversion spellings state one relation between them, so `impl From<A>` on `B` beside `impl To<B>` for `A` is that same conflict — see [Converting into a type you do not own](Error-Handling#converting-into-a-type-you-do-not-own--impl-totarget).
 
 Uniqueness is always decidable here, and that is a property of the language: Noeta links **one whole program** at a time, so every module and every dependency is resolved into a single program before it is checked, and there is no separately-compiled unit that could hold an implementation this one cannot see.
 
