@@ -622,7 +622,10 @@ pub(crate) fn builtin_satisfies(ty: &Type, t: BuiltinTrait) -> bool {
         | Bt::Members
         | Bt::DynamicCall
         | Bt::TryAdd
-        | Bt::Validate => false,
+        | Bt::Validate
+        // A conversion is declared, never satisfied structurally: no primitive converts into
+        // another type without somebody writing the body.
+        | Bt::To => false,
     }
 }
 

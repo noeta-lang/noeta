@@ -26,7 +26,7 @@
 //! method: `a.try_add(b)?`, no operator wiring.)
 
 use noeta_ast::BinaryOp;
-use noeta_ast::conversion::{FROM_METHOD, FROM_TRAIT};
+use noeta_ast::conversion::{FROM_METHOD, FROM_TRAIT, TO_METHOD, TO_TRAIT};
 
 /// One built-in trait — the fixed vocabulary an `impl`/`@derive(...)` may name. A fieldless enum so
 /// trait identity is a value the checker matches exhaustively; the per-variant metadata is reached
@@ -107,6 +107,20 @@ pub enum BuiltinTrait {
     /// `try_parse` / `decode_typed`), its `validate` runs automatically bottom-up on the built
     /// value; a rejection aborts or is threaded into the door's error channel.
     Validate,
+    /// **To** — the conversion protocol's mirror, declared on the **source**:
+    /// `impl To<Target> for Source` states that a `Source` converts into a `Target`, providing
+    /// `fn to(): Target`. The relation it declares is the same ordered pair `(source, target)` an
+    /// `impl From<Source>` on the target declares, so the two share one registry and a program
+    /// containing both spellings of one pair is a coherence conflict.
+    ///
+    /// It exists because the orphan rule closes a direction to `From`. A conversion's impl must live
+    /// with its own type, so `impl From<Source>` requires the **target** to be local — which makes
+    /// converting *into* a foreign type unwritable, and that is exactly what a `?` needs when a
+    /// function's declared error type comes from somebody else's package. `To` sits with the source
+    /// instead. The reverse worry does not arise: two different packages can never both declare one
+    /// conversion, because each spelling requires its own type to be local and the other to be
+    /// visible, which is a dependency cycle.
+    To,
 }
 
 /// The required-method cell of [`Info`]: the method's name paired with its user-facing arity,
@@ -174,105 +188,219 @@ struct Info {
     /// The return type the language fixes for [`Self::required_method`], where it fixes one — see
     /// [`FixedReturn`].
     fixed_return: Option<FixedReturn>,
+    /// Whether the trait declares its required method `static` — see [`BuiltinTrait::declares_static`].
+    declares_static: bool,
+    /// How many generic type arguments `impl`/`@derive` requires — see [`BuiltinTrait::generic_arity`].
+    generic_arity: usize,
+    /// The conversion relation this trait declares, if any — see [`ConversionRole`].
+    conversion: Option<ConversionRole>,
+}
+
+impl Info {
+    /// What a trait row leaves unsaid. A row spells only what is unusual about its trait, the way a
+    /// registration literal spells only the [`ExtModule`](noeta_ext_abi) fields it uses — so a new
+    /// fact about *one* trait costs one field on this struct and one word in that trait's row,
+    /// rather than a silent `false` typed into twenty other rows.
+    const DEFAULTS: Info = Info {
+        name: "",
+        required_method: None,
+        operator: None,
+        builtin_recipe: false,
+        fixed_return: None,
+        declares_static: false,
+        generic_arity: 0,
+        conversion: None,
+    };
+}
+
+/// **A trait that declares a conversion between two types, and where its type argument sits in that
+/// relation.** The relation is the ordered pair `(source, target)`; the two spellings state the same
+/// pair from opposite ends, which is why they share one registry and collide as one conflict.
+///
+/// Every rule that used to name `From` reads this instead: whether an impl declares a conversion at
+/// all, which type its argument names, and which half of the method's signature that argument has to
+/// agree with. Adding [`BuiltinTrait::To`] needed no new site because each of them asks this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConversionRole {
+    /// `impl From<Source>` on the target: the argument names the **source**, the method takes it as
+    /// its only parameter and returns `Self`. Declared on the target, so it reaches a foreign
+    /// *source*.
+    FromSource,
+    /// `impl To<Target> for Source`: the argument names the **target**, the method takes no
+    /// parameter and returns it. Declared on the source, so it reaches a foreign *target* — the
+    /// direction the orphan rule closes to `From`.
+    ToTarget,
+}
+
+impl ConversionRole {
+    /// Whether the trait argument names the method's **return** type rather than its first
+    /// parameter. The one signature rule both spellings share, asked once.
+    pub fn arg_is_return(self) -> bool {
+        matches!(self, ConversionRole::ToTarget)
+    }
+
+    /// The relation `(source, target)` this impl declares, given the impl's own type (the type the
+    /// `impl` is written on) and its type argument.
+    pub fn relation(self, own: &str, arg: &str) -> (String, String) {
+        match self {
+            ConversionRole::FromSource => (arg.to_string(), own.to_string()),
+            ConversionRole::ToTarget => (own.to_string(), arg.to_string()),
+        }
+    }
 }
 
 impl BuiltinTrait {
     /// The single source of truth: each variant's name, required method, operator, and whether the
     /// compiler carries a recipe for it. Every accessor projects one field of this; keep the
     /// operator entries consistent with [`BinaryOp::overload_method`].
+    /// **The single source of truth**: one row per trait, spelling only what is unusual about it.
+    /// Every accessor projects one field of this, so a rule that needs a new fact about traits adds
+    /// a field here and reads it — rather than a fresh `if t == BuiltinTrait::X` at its own site.
+    /// Keep the operator entries consistent with [`BinaryOp::overload_method`].
     fn info(self) -> Info {
         use BuiltinTrait::*;
-        let (name, required_method, operator, builtin_recipe, fixed_return): (
-            &'static str,
-            RequiredMethod,
-            Option<BinaryOp>,
-            bool,
-            Option<FixedReturn>,
-        ) = match self {
-            Add => (
-                "Add",
-                Some(("add", Some(1))),
-                Some(BinaryOp::Add),
-                false,
-                None,
-            ),
-            Sub => (
-                "Sub",
-                Some(("sub", Some(1))),
-                Some(BinaryOp::Sub),
-                false,
-                None,
-            ),
-            Mul => (
-                "Mul",
-                Some(("mul", Some(1))),
-                Some(BinaryOp::Mul),
-                false,
-                None,
-            ),
-            Div => (
-                "Div",
-                Some(("div", Some(1))),
-                Some(BinaryOp::Div),
-                false,
-                None,
-            ),
-            Concat => (
-                "Concat",
-                Some(("concat", Some(1))),
-                Some(BinaryOp::Concat),
-                false,
-                None,
-            ),
-            Equatable => (
-                "Equatable",
-                Some(("eq", Some(1))),
-                None,
-                true,
-                Some(FixedReturn::Bool),
-            ),
-            Comparable => (
-                "Comparable",
-                Some(("compare", Some(1))),
-                None,
-                true,
-                Some(FixedReturn::Ordering),
-            ),
-            Display => ("Display", Some(("to_string", Some(0))), None, true, None),
-            // The failure-value protocol: one nullary method, `message(): string`. The compiler
-            // has a recipe: the synthesized `message()` returns `"${self}"` — the type's
-            // display story (requires Display, impl'd or derived; E0050 otherwise) — or forwards
-            // into a field's own `message()` via `via:`.
-            Error => ("Error", Some(("message", Some(0))), None, true, None),
-            // The declared-conversion protocol: one associated function `from(value: Source):
-            // Target`. No recipe (a conversion body cannot be synthesized from fields).
-            // Spelled in `noeta_ast::conversion`, which is also where a conversion's method-table
-            // key is derived — the compiler reads that module and depends on no type-system crate,
-            // so the trait's two words live there and are read here.
-            From => (FROM_TRAIT, Some((FROM_METHOD, Some(1))), None, false, None),
-            Clone => ("Clone", None, None, true, None),
-            Serialize => ("Serialize", None, None, true, None),
-            Deserialize => ("Deserialize", None, None, true, None),
-            Index => ("Index", Some(("get", Some(1))), None, false, None),
-            Length => ("Length", Some(("len", Some(0))), None, false, None),
-            Iterable => ("Iterable", Some(("iter", Some(0))), None, false, None),
-            // `Callable` makes an object invocable as `obj(args)` (dispatched to its `call`
-            // method); the arity is the method's own business, so it is not pinned here.
-            Callable => ("Callable", Some(("call", None)), None, false, None),
-            Members => ("Members", Some(("get", Some(1))), None, false, None),
-            DynamicCall => ("DynamicCall", Some(("call", Some(2))), None, false, None),
-            TryAdd => ("TryAdd", Some(("try_add", Some(1))), None, false, None),
-            // The data-boundary invariant protocol: one nullary method, `validate(): Result<void,
-            // E>`. No recipe (an invariant is not synthesizable from fields). The return shape
-            // is pinned separately by the checker (`Result<void, string | Error>`).
-            Validate => ("Validate", Some(("validate", Some(0))), None, false, None),
-        };
-        Info {
-            name,
-            required_method,
-            operator,
-            builtin_recipe,
-            fixed_return,
+        match self {
+            Add => Info {
+                name: "Add",
+                required_method: Some(("add", Some(1))),
+                operator: Some(BinaryOp::Add),
+                ..Info::DEFAULTS
+            },
+            Sub => Info {
+                name: "Sub",
+                required_method: Some(("sub", Some(1))),
+                operator: Some(BinaryOp::Sub),
+                ..Info::DEFAULTS
+            },
+            Mul => Info {
+                name: "Mul",
+                required_method: Some(("mul", Some(1))),
+                operator: Some(BinaryOp::Mul),
+                ..Info::DEFAULTS
+            },
+            Div => Info {
+                name: "Div",
+                required_method: Some(("div", Some(1))),
+                operator: Some(BinaryOp::Div),
+                ..Info::DEFAULTS
+            },
+            Concat => Info {
+                name: "Concat",
+                required_method: Some(("concat", Some(1))),
+                operator: Some(BinaryOp::Concat),
+                ..Info::DEFAULTS
+            },
+            Equatable => Info {
+                name: "Equatable",
+                required_method: Some(("eq", Some(1))),
+                operator: Some(BinaryOp::Eq),
+                builtin_recipe: true,
+                fixed_return: Some(FixedReturn::Bool),
+                ..Info::DEFAULTS
+            },
+            Comparable => Info {
+                name: "Comparable",
+                required_method: Some(("compare", Some(1))),
+                builtin_recipe: true,
+                fixed_return: Some(FixedReturn::Ordering),
+                ..Info::DEFAULTS
+            },
+            Display => Info {
+                name: "Display",
+                required_method: Some(("to_string", Some(0))),
+                builtin_recipe: true,
+                ..Info::DEFAULTS
+            },
+            Error => Info {
+                name: "Error",
+                required_method: Some(("message", Some(0))),
+                builtin_recipe: true,
+                ..Info::DEFAULTS
+            },
+            // The conversion declared on the TARGET: `impl From<Source>` names the source, and its
+            // `from` is `static` because it builds a value rather than acting on one.
+            From => Info {
+                name: FROM_TRAIT,
+                required_method: Some((FROM_METHOD, Some(1))),
+                declares_static: true,
+                generic_arity: 1,
+                conversion: Some(ConversionRole::FromSource),
+                ..Info::DEFAULTS
+            },
+            // The mirror, declared on the SOURCE: `impl To<Target> for Source` names the target and
+            // returns it. NOT `static` — it converts the value in hand, so it takes `self`, which is
+            // the whole reason it reaches a target its own package does not own.
+            To => Info {
+                name: TO_TRAIT,
+                required_method: Some((TO_METHOD, Some(0))),
+                generic_arity: 1,
+                conversion: Some(ConversionRole::ToTarget),
+                ..Info::DEFAULTS
+            },
+            Clone => Info {
+                name: "Clone",
+                required_method: None,
+                builtin_recipe: true,
+                ..Info::DEFAULTS
+            },
+            Serialize => Info {
+                name: "Serialize",
+                required_method: None,
+                builtin_recipe: true,
+                generic_arity: 1,
+                ..Info::DEFAULTS
+            },
+            Deserialize => Info {
+                name: "Deserialize",
+                required_method: None,
+                builtin_recipe: true,
+                generic_arity: 1,
+                ..Info::DEFAULTS
+            },
+            Index => Info {
+                name: "Index",
+                required_method: Some(("get", Some(1))),
+                ..Info::DEFAULTS
+            },
+            Length => Info {
+                name: "Length",
+                required_method: Some(("len", Some(0))),
+                ..Info::DEFAULTS
+            },
+            Iterable => Info {
+                name: "Iterable",
+                required_method: Some(("iter", Some(0))),
+                ..Info::DEFAULTS
+            },
+            // `Callable` makes an object invocable as `obj(args)`; the arity is the method's own
+            // business, so it is not pinned here.
+            Callable => Info {
+                name: "Callable",
+                required_method: Some(("call", None)),
+                ..Info::DEFAULTS
+            },
+            Members => Info {
+                name: "Members",
+                required_method: Some(("get", Some(1))),
+                ..Info::DEFAULTS
+            },
+            DynamicCall => Info {
+                name: "DynamicCall",
+                required_method: Some(("call", Some(2))),
+                ..Info::DEFAULTS
+            },
+            TryAdd => Info {
+                name: "TryAdd",
+                required_method: Some(("try_add", Some(1))),
+                ..Info::DEFAULTS
+            },
+            // The data-boundary invariant protocol. No recipe (an invariant is not synthesizable
+            // from fields); the return shape is pinned separately by the checker.
+            Validate => Info {
+                name: "Validate",
+                required_method: Some(("validate", Some(0))),
+                ..Info::DEFAULTS
+            },
         }
     }
 
@@ -313,7 +441,13 @@ impl BuiltinTrait {
     /// declines to put this trait's methods in the instance interface (E0047). Stating it once,
     /// beside `required_method`, is what keeps them agreeing about the next static protocol.
     pub fn declares_static(self) -> bool {
-        matches!(self, BuiltinTrait::From)
+        self.info().declares_static
+    }
+
+    /// The conversion relation this trait declares, or `None` — see [`ConversionRole`]. Read by
+    /// every rule that used to name `From` by hand.
+    pub fn conversion(self) -> Option<ConversionRole> {
+        self.info().conversion
     }
 
     /// The infix operator this trait overloads, or `None`.
@@ -345,10 +479,7 @@ impl BuiltinTrait {
     /// How many **generic type arguments** `@derive(Name<…>)` requires for this trait. Only
     /// `Serialize<Format>` is parameterized today (arity 1); every other trait is nullary.
     pub fn generic_arity(self) -> usize {
-        match self {
-            BuiltinTrait::Serialize | BuiltinTrait::Deserialize | BuiltinTrait::From => 1,
-            _ => 0,
-        }
+        self.info().generic_arity
     }
 }
 
@@ -390,6 +521,7 @@ pub const BUILTIN_TRAITS: &[BuiltinTrait] = &[
     BuiltinTrait::DynamicCall,
     BuiltinTrait::TryAdd,
     BuiltinTrait::Validate,
+    BuiltinTrait::To,
 ];
 
 #[cfg(test)]

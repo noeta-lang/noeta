@@ -25,9 +25,64 @@ pub const FROM_TRAIT: &str = "From";
 /// The method a `From` implementation provides (`fn from(value: Source): Target`).
 pub const FROM_METHOD: &str = "from";
 
+/// The name a `To` implementation is written with (`impl To<Target> for Source { … }`).
+pub const TO_TRAIT: &str = "To";
+
+/// The method a `To` implementation provides (`fn to(): Target`).
+pub const TO_METHOD: &str = "to";
+
 /// The method-table key the conversion **from `source`** occupies on its target.
 pub fn from_method_key(source: &str) -> String {
     format!("{FROM_METHOD}<{source}>")
+}
+
+/// The method-table key the conversion **to `target`** occupies on its source.
+///
+/// The mirror of [`from_method_key`], and named the same way for the same reason: a type may
+/// convert into several targets, so the target is part of the name rather than something a bare
+/// `to` would have to disambiguate.
+pub fn to_method_key(target: &str) -> String {
+    format!("{TO_METHOD}<{target}>")
+}
+
+/// **Which spelling declared a conversion.** The relation is the pair `(source, target)` and both
+/// spellings state it, so this is not a difference in meaning — it is which type's body holds the
+/// method, and therefore which method table the call goes through.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Spelling {
+    /// `impl From<Source>` on the target: the body lives on the **target**, called as
+    /// `Target.from<Source>(value)`.
+    From,
+    /// `impl To<Target> for Source`: the body lives on the **source**, called as
+    /// `value.to<Target>()`.
+    To,
+}
+
+impl Spelling {
+    /// The trait name this spelling is written with.
+    pub fn trait_name(self) -> &'static str {
+        match self {
+            Self::From => FROM_TRAIT,
+            Self::To => TO_TRAIT,
+        }
+    }
+
+    /// The method name this spelling provides.
+    pub fn method(self) -> &'static str {
+        match self {
+            Self::From => FROM_METHOD,
+            Self::To => TO_METHOD,
+        }
+    }
+
+    /// The method-table key a conversion of this spelling occupies, given the type argument the
+    /// impl names — the source for `From`, the target for `To`.
+    pub fn method_key(self, named: &str) -> String {
+        match self {
+            Self::From => from_method_key(named),
+            Self::To => to_method_key(named),
+        }
+    }
 }
 
 /// **The method-table key each of a type's `impl From<Source>` conversions occupies**, keyed by the
