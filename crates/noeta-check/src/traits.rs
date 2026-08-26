@@ -237,10 +237,47 @@ impl Checker {
                  `{req_name}`'s parameters alone"
             ));
         }
-        // A conversion trait carries a type argument, so it is also the one kind whose argument
-        // must agree with the method's signature. WHICH half it must agree with is the role's
-        // answer, not this site's: `From<Source>` names the method's parameter, `To<Target>` names
-        // its return. Stated once, so the next conversion spelling inherits the check.
+        // **A conversion's signature is pinned at BOTH ends**, because `?` applies one implicitly
+        // and cannot check the result: the trait argument names one end, and the impl's own type is
+        // the other. WHICH end the argument names is the role's answer, not this site's —
+        // `From<Source>` names the method's parameter and must return the target, `To<Target>` names
+        // its return and takes the value as `self`.
+        //
+        // The second half is what makes a conversion **infallible** in fact rather than by
+        // convention. Nothing pinned it before, so a `from` could return `Result<Target, E>`, the
+        // `?` desugar would wrap that whole `Result` as the propagated `Err`, and a function
+        // declaring `Result<_, Target>` would hand back an `Err` holding a `Result` — a value whose
+        // type disagrees with the signature that produced it, discovered only when something called
+        // a method on it. A conversion that can fail is an ordinary function returning a `Result`;
+        // it is not this.
+        if let Some(role) = t.conversion()
+            && let Some(req) = t.required_method_name()
+            && let Some(m) = methods.iter().find(|m| m.name == req)
+        {
+            // The end the impl's own type governs — the return under `From`, and nothing under `To`,
+            // whose return is already the counterpart the argument names.
+            if !role.arg_is_return()
+                && let Some(ret) = m.ret.as_ref()
+            {
+                let got = self.annot(ret);
+                let want = Type::Named(target.to_string(), Vec::new());
+                if !Self::sig_types_compatible(&want, &got) {
+                    self.error(
+                        DiagnosticCode::InvalidImpl,
+                        m.name_span,
+                        format!(
+                            "`{req}` builds a `{want}`, but returns `{got}` — a conversion produces \
+                             its target"
+                        ),
+                    )
+                    .help(
+                        "`?` applies a conversion implicitly and propagates whatever it returns, so \
+                         a conversion cannot report its own failure. A conversion that can fail is \
+                         an ordinary function returning a `Result`",
+                    );
+                }
+            }
+        }
         if let Some(role) = t.conversion()
             && let Some(req) = t.required_method_name()
             && let Some(m) = methods.iter().find(|m| m.name == req)

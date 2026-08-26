@@ -1,0 +1,23 @@
+// A conversion is pinned at BOTH ends of its signature, and the second end is what makes it
+// **infallible in fact** rather than by convention.
+//
+// `?` applies a conversion implicitly and propagates whatever it returns. A `from` returning
+// `Result<Target, E>` therefore has its whole `Result` wrapped as the propagated `Err`, so a
+// function declaring `Result<_, Target>` hands back an `Err` holding a `Result` — a value whose type
+// disagrees with the signature that produced it, and nothing notices until something calls a method
+// on it and finds an enum.
+//
+// A conversion that can fail is an ordinary function returning a `Result`, not a `From`/`To` impl.
+// expect: error E0015 at 17:12
+// expect: exit 1
+struct Raw { v: int }
+struct Small { v: int }
+
+impl From<Raw> for Small {
+    pub fn from(value: Raw): Result<Small, string> {
+        if value.v > 100 { return Err("too big") }
+        return Ok(Small { v: value.v })
+    }
+}
+
+echo "never runs"
