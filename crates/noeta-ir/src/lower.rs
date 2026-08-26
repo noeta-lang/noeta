@@ -243,7 +243,7 @@ pub struct LoweringSites<'a> {
     /// key of the conversion its `Err` type selected. The `?` operand is rewritten to
     /// `match v { Ok($t) => Ok($t), Err($t) => Err(Target.from($t)) }` — ordinary IR, so both
     /// backends (and the JIT) convert identically by construction.
-    pub try_conversion_sites: &'a HashMap<Span, (String, String)>,
+    pub try_conversion_sites: &'a HashMap<Span, (String, String, noeta_ast::conversion::Spelling)>,
     /// Explicit `Target.from(x)` spans on a target declaring several conversions → the method-table
     /// key the argument's type selected. Lowering substitutes it for the `from` the source wrote, so
     /// the call reaches the one body the checker resolved.
@@ -312,6 +312,9 @@ impl LoweringSites<'static> {
         static REPRS: OnceLock<HashMap<Span, noeta_ast::reflect::TypeRepr>> = OnceLock::new();
         static HANDLES: OnceLock<HashMap<Span, (String, String, bool)>> = OnceLock::new();
         static PAIRS: OnceLock<HashMap<Span, (String, String)>> = OnceLock::new();
+        static CONVERSIONS: OnceLock<
+            HashMap<Span, (String, String, noeta_ast::conversion::Spelling)>,
+        > = OnceLock::new();
         static NAMES: OnceLock<HashMap<Span, String>> = OnceLock::new();
         static VARIANT_PATTERNS: OnceLock<VariantPatternSites> = OnceLock::new();
         static TYPE_ARGS: OnceLock<Vec<noeta_ext_abi::TypeArgInfo>> = OnceLock::new();
@@ -353,7 +356,7 @@ impl LoweringSites<'static> {
             f32_literal_sites: SPANS.get_or_init(HashSet::new),
             trait_call_sites: PAIRS.get_or_init(HashMap::new),
             namespace_module_sites: NAMES.get_or_init(HashMap::new),
-            try_conversion_sites: PAIRS.get_or_init(HashMap::new),
+            try_conversion_sites: CONVERSIONS.get_or_init(HashMap::new),
             from_call_sites: NAMES.get_or_init(HashMap::new),
             type_arg_table: TYPE_ARGS.get_or_init(Vec::new),
             type_arg_reprs: TYPE_ARG_REPRS.get_or_init(Vec::new),
@@ -632,7 +635,7 @@ pub fn hoist_impl_methods_with_registry(
     // than the name: a type may legitimately carry several `from` bodies (one per source), and
     // deduplicating them by name drops every conversion after the first, leaving a call the checker
     // resolved to `from<Dimes>` with no body to reach.
-    let from_keys = noeta_ast::conversion::from_conversion_keys_program(&program.stmts);
+    let from_keys = noeta_ast::conversion::conversion_keys_program(&program.stmts);
     let table_key = |m: &FnDecl| -> String {
         from_keys
             .get(&m.name_span)
@@ -1010,7 +1013,7 @@ pub struct ProgramFacts {
     /// fragment whenever it changed, and its own `ClassDef` is then in the IR in hand.
     pub own_destructors: HashSet<String>,
     /// The **method-table key** each declared `From` conversion's `from` occupies, by the span of
-    /// that `from` — [`noeta_ast::conversion::from_conversion_keys_program`].
+    /// that `from` — [`noeta_ast::conversion::conversion_keys_program`].
     ///
     /// A conversion is named after the source it converts (`from<Cents>`), and the two spellings
     /// that declare one — in the target's body, or beside it as `impl From<Cents> for Money { … }`
@@ -1023,7 +1026,7 @@ pub struct ProgramFacts {
     /// the target class carries the class and not the standalone `impl` beside it, so a fragment
     /// deriving this table alone would rename the surviving conversion out from under every call
     /// site that already resolved it.
-    pub from_conversion_keys: HashMap<Span, String>,
+    pub conversion_keys: HashMap<Span, String>,
 }
 
 impl ProgramFacts {
@@ -1041,9 +1044,7 @@ impl ProgramFacts {
                 .collect(),
             module_globals: module_global_names(program),
             own_destructors: own_destructor_class_names(program),
-            from_conversion_keys: noeta_ast::conversion::from_conversion_keys_program(
-                &program.stmts,
-            ),
+            conversion_keys: noeta_ast::conversion::conversion_keys_program(&program.stmts),
         }
     }
 
@@ -1069,7 +1070,7 @@ impl ProgramFacts {
         self.expr_tiers.extend(own.expr_tiers);
         self.module_globals.extend(own.module_globals);
         self.own_destructors.extend(own.own_destructors);
-        self.from_conversion_keys.extend(own.from_conversion_keys);
+        self.conversion_keys.extend(own.conversion_keys);
         self
     }
 
@@ -1081,7 +1082,7 @@ impl ProgramFacts {
         self.expr_tiers.extend(other.expr_tiers);
         self.module_globals.extend(other.module_globals);
         self.own_destructors.extend(other.own_destructors);
-        self.from_conversion_keys.extend(other.from_conversion_keys);
+        self.conversion_keys.extend(other.conversion_keys);
     }
 }
 
@@ -1109,7 +1110,13 @@ fn own_destructor_class_names(program: &AstProgram) -> HashSet<String> {
 /// scrutinee); the `$try` binding name cannot collide with user bindings (`$` is not writable in
 /// source), and every synthetic node reuses the `?`'s span so diagnostics and tracebacks keep
 /// pointing at the `?`.
-fn try_conversion_match(operand: &Expr, target: &str, method: &str, span: Span) -> Expr {
+fn try_conversion_match(
+    operand: &Expr,
+    owner: &str,
+    method: &str,
+    spelling: noeta_ast::conversion::Spelling,
+    span: Span,
+) -> Expr {
     let ident = |name: &str| Expr::Ident {
         name: noeta_ast::Name::canonical(name),
         span,
@@ -1137,18 +1144,25 @@ fn try_conversion_match(operand: &Expr, target: &str, method: &str, span: Span) 
         body: noeta_ast::ClosureBody::Expr(Box::new(body)),
         span,
     };
+    // The two spellings put the body on different types and therefore make different calls: a
+    // `From` conversion is `static` on the target and takes the value as its argument, a `To`
+    // conversion is a method on the value itself. Which one this is came from the checker with the
+    // site — "which conversion does this `Err` type select" is a typing question, and this is
+    // lowering.
+    let (receiver, args) = match spelling {
+        noeta_ast::conversion::Spelling::From => (ident(owner), vec![ident("$try")]),
+        noeta_ast::conversion::Spelling::To => (ident("$try"), Vec::new()),
+    };
     let from_call = call(
         Expr::Member {
-            receiver: Box::new(ident(target)),
-            // The conversion the checker selected — `from`, or the source-named key one of several
-            // conversions on this target occupies. Written here rather than looked up again,
-            // because "which conversion does this `Err` type select" is a typing question and this
-            // is lowering.
+            receiver: Box::new(receiver),
+            // The conversion the checker selected — the counterpart-named key the conversion
+            // occupies on whichever type holds it.
             name: method.to_string(),
             name_span: span,
             span,
         },
-        vec![ident("$try")],
+        args,
     );
     Expr::Match {
         scrutinee: Box::new(operand.clone()),
@@ -2022,13 +2036,13 @@ impl Lowerer<'_> {
         // and takes the key named after the source it converts, so the table both backends build
         // from this list has one entry per conversion. It is the same key the checker registered
         // the signature under, because both ask [`noeta_ast::conversion`]. The map is a program
-        // fact ([`ProgramFacts::from_conversion_keys`]) rather than a per-type one: a standalone
+        // fact ([`ProgramFacts::conversion_keys`]) rather than a per-type one: a standalone
         // conversion's block is not in the target's own `impls`.
         let mut out = Vec::with_capacity(methods.len());
         for m in methods {
             let key = self
                 .facts
-                .from_conversion_keys
+                .conversion_keys
                 .get(&m.name_span)
                 .cloned()
                 .unwrap_or_else(|| m.name.to_string());
@@ -3678,8 +3692,8 @@ impl Lowerer<'_> {
                 // conversion is identical by construction. The ordinary propagation then applies
                 // unchanged to the converted `Result`.
                 let operand = match self.sites.try_conversion_sites.get(span) {
-                    Some((target, method)) => {
-                        let converted = try_conversion_match(expr, target, method, *span);
+                    Some((owner, method, spelling)) => {
+                        let converted = try_conversion_match(expr, owner, method, *spelling, *span);
                         self.lower_expr(&converted, out)?
                     }
                     None => self.lower_expr(expr, out)?,

@@ -66,7 +66,7 @@ pub enum BuiltinTrait {
     /// `impl From<JsonError>` declares two conversions while a repeated source is a conflict
     /// (E0027). Which conversion a site means is decided statically, from the source in hand — the
     /// propagated `Err` type at a `?`, the argument's type at an explicit call — and the body each
-    /// occupies is named by [`noeta_ast::conversion::from_conversion_keys`], so a method table with
+    /// occupies is named by [`noeta_ast::conversion::conversion_keys`], so a method table with
     /// one slot per name still holds them all. That is what keeps the `?` conversion path unique by
     /// construction. `from` is an ordinary associated function, explicitly callable as
     /// `Target.from(x)`; the single *implicit* application in the language is the `?` error

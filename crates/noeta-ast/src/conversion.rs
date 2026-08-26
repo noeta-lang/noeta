@@ -112,7 +112,7 @@ impl Spelling {
 /// linker-qualified identity by the time any caller runs — so two impls naming one source spell it
 /// identically (and collide as the coherence conflict they are), and two impls naming different
 /// sources cannot collide.
-pub fn from_conversion_keys(impls: &[ImplBlock]) -> HashMap<Span, String> {
+pub fn conversion_keys(impls: &[ImplBlock]) -> HashMap<Span, String> {
     let mut out = HashMap::new();
     collect_conversion_keys(
         impls
@@ -124,7 +124,7 @@ pub fn from_conversion_keys(impls: &[ImplBlock]) -> HashMap<Span, String> {
 }
 
 /// **The method-table key every conversion in the whole program occupies**, keyed by the span of
-/// each `from` — [`from_conversion_keys`] asked of both spellings at once.
+/// each `from` — [`conversion_keys`] asked of both spellings at once.
 ///
 /// A conversion is written either **in the target's body** (`impl From<Cents> { … }`) or **beside
 /// it** (`impl From<Cents> for Money { … }`), and the two are the same declaration: the backends'
@@ -138,7 +138,7 @@ pub fn from_conversion_keys(impls: &[ImplBlock]) -> HashMap<Span, String> {
 /// Asked by everything that builds or resolves a method table — the checker's signature
 /// registration, IR lowering, the bytecode compiler's prototype reservation, and the reflection
 /// manifest — so the key is one answer to one question rather than four walks written to agree.
-pub fn from_conversion_keys_program(stmts: &[crate::Stmt]) -> HashMap<Span, String> {
+pub fn conversion_keys_program(stmts: &[crate::Stmt]) -> HashMap<Span, String> {
     use crate::Stmt;
     let mut out = HashMap::new();
     for stmt in stmts {
@@ -172,11 +172,21 @@ fn collect_conversion_keys<'a>(
     out: &mut HashMap<Span, String>,
 ) {
     for (trait_name, args, methods) in impls {
-        if trait_name != FROM_TRAIT || args.len() != 1 {
+        // Either spelling, by the same rule: the block names one counterpart, and its method is
+        // keyed after it. Which trait wrote it decides only which side the counterpart is on.
+        let spelling = match trait_name {
+            FROM_TRAIT => Spelling::From,
+            TO_TRAIT => Spelling::To,
+            _ => continue,
+        };
+        if args.len() != 1 {
             continue;
         }
-        let key = from_method_key(&shape::type_source(&args[0]));
-        for m in methods.iter().filter(|m| m.name.as_str() == FROM_METHOD) {
+        let key = spelling.method_key(&shape::type_source(&args[0]));
+        for m in methods
+            .iter()
+            .filter(|m| m.name.as_str() == spelling.method())
+        {
             out.insert(m.name_span, key.clone());
         }
     }

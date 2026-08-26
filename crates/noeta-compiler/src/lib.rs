@@ -1571,7 +1571,7 @@ impl ModuleCompiler {
     ///
     /// The key is the method's declared name, except for a `From` conversion: those arrive
     /// flattened under the one name they were written with, and each takes the key named after the
-    /// source it converts ([`noeta_ast::conversion::from_conversion_keys_program`]) — the same rule
+    /// source it converts ([`noeta_ast::conversion::conversion_keys_program`]) — the same rule
     /// the checker registered the signature under and lowering named the body with, so all three
     /// address one prototype. Whole-program, because a conversion may be written beside its target
     /// (`impl From<Cents> for Money { … }`) rather than inside it.
@@ -1660,7 +1660,7 @@ impl ModuleCompiler {
         // a conversion written beside its target (`impl From<Cents> for Money { … }`) is not in
         // that target's own `impls`, and reading only those would leave its `from` under the bare
         // name — where a second conversion would overwrite it.
-        let from_keys = noeta_ast::conversion::from_conversion_keys_program(&program.stmts);
+        let from_keys = noeta_ast::conversion::conversion_keys_program(&program.stmts);
         // Every **prelude enum** is namable like any other, so `Ordering.Less`, `Type.Unit`,
         // `Semantic.TrustBoundary`, `Layout.Row`, and `Cancelled.Cancelled` lower to `MakeEnum`
         // rather than failing name resolution at run time. The declarations come from the one

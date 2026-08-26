@@ -89,11 +89,15 @@ impl Checker {
             }
             return;
         }
-        // `From` is the one built-in whose `impl` carries a real type argument
-        // (`impl From<Source>`); every other built-in impl is bare. The argument's resolution is
-        // validated below (E0013 for a ghost name), and the resolved source was recorded at
-        // collection ([`Self::record_conversion_impls`]).
-        if trait_name == BuiltinTrait::From.name() {
+        // A conversion trait is the one kind whose `impl` carries a real type argument
+        // (`impl From<Source>`, `impl To<Target>`); every other built-in impl is bare. Asked of the
+        // trait rather than tested against one name, so both spellings reach this and a third would
+        // too. The argument's resolution is validated below (E0013 for a ghost name), and the
+        // resolved relation was recorded at collection ([`Self::record_conversion_impls`]).
+        if BuiltinTrait::from_name(trait_name)
+            .and_then(|t| t.conversion())
+            .is_some()
+        {
             if trait_args.len() != 1 {
                 self.error(
                     DiagnosticCode::InvalidImpl,
@@ -233,24 +237,37 @@ impl Checker {
                  `{req_name}`'s parameters alone"
             ));
         }
-        // `From` is the one built-in whose `impl` carries a type argument, so it is also the one
-        // whose declared source must agree with the method's annotated parameter. That is a rule
-        // about the trait's TYPE ARGUMENT, not about its receiver — the receiver half above is now
-        // general.
-        if t == BuiltinTrait::From
-            && let Some(m) = methods.iter().find(|m| m.name == "from")
-            && let (Some(arg), Some(param)) = (trait_args.first(), m.params.first())
+        // A conversion trait carries a type argument, so it is also the one kind whose argument
+        // must agree with the method's signature. WHICH half it must agree with is the role's
+        // answer, not this site's: `From<Source>` names the method's parameter, `To<Target>` names
+        // its return. Stated once, so the next conversion spelling inherits the check.
+        if let Some(role) = t.conversion()
+            && let Some(req) = t.required_method_name()
+            && let Some(m) = methods.iter().find(|m| m.name == req)
+            && let Some(arg) = trait_args.first()
+            && let Some(annotated) = if role.arg_is_return() {
+                Some(&m.ret)
+            } else {
+                m.params.first().map(|p| &p.ty)
+            }
         {
+            let param_span = if role.arg_is_return() {
+                m.name_span
+            } else {
+                m.params.first().map(|p| p.name_span).unwrap_or(m.name_span)
+            };
             let want = self.annot(arg);
-            let got = self.annot_field(&param.ty);
+            let got = self.annot_field(annotated);
             if !Self::sig_types_compatible(&want, &got) {
+                let half = if role.arg_is_return() {
+                    "returns"
+                } else {
+                    "its parameter is"
+                };
                 self.error(
                     DiagnosticCode::InvalidImpl,
-                    param.name_span,
-                    format!(
-                        "`from` converts the declared source `{want}`, but its parameter is \
-                         `{got}`"
-                    ),
+                    param_span,
+                    format!("`{req}` converts the declared `{want}`, but {half} `{got}`"),
                 );
             }
         }
@@ -1276,15 +1293,20 @@ impl Checker {
                     // non-rendered consumer of the diagnostic — reports.
                     .label(span, format!("implemented again here, {form}"))
                     .label(first_span, format!("first implemented here, {first_form}"))
-                    // A conversion's key carries its source in angle brackets, which no trait NAME
-                    // can contain — so this recognizes the one contest whose fix is not "implement
-                    // it once" but "one per source".
+                    // A conversion's key carries its other end in angle brackets, which no trait
+                    // NAME can contain — so this recognizes the one contest whose fix is not
+                    // "implement it once" but "one per counterpart".
                     .help(
-                        if name.starts_with(&format!("{}<", BuiltinTrait::From.name())) {
+                        if noeta_types::BUILTIN_TRAITS
+                            .iter()
+                            .filter(|t| t.conversion().is_some())
+                            .any(|t| name.starts_with(&format!("{}<", t.name())))
+                        {
                             format!(
-                                "a type declares one conversion per source — remove one of the two \
-                             `{name}` blocks, or merge them into a single one. A conversion from a \
-                             DIFFERENT source is a different conversion and may sit beside this one"
+                                "a type declares one conversion per counterpart — remove one of the \
+                             two `{name}` blocks, or merge them into a single one. A conversion \
+                             naming a DIFFERENT type is a different conversion and may sit beside \
+                             this one"
                             )
                         } else {
                             format!(
@@ -1426,9 +1448,14 @@ impl Checker {
                 .get(target)
                 .and_then(|convs| convs.iter().find(|c| c.source == *err))
         {
-            self.sites
-                .try_conversion_sites
-                .insert(span, (target.clone(), conv.method.clone()));
+            // The body lives on the target under `From` and on the source under `To`, so the site
+            // records the conversion's OWNER rather than the declared error type — that is the type
+            // whose method table lowering must reach — and the spelling, which is what tells it
+            // whether the value is the call's argument or its receiver.
+            self.sites.try_conversion_sites.insert(
+                span,
+                (conv.owner.clone(), conv.method.clone(), conv.spelling),
+            );
             return;
         }
         let d = self.error(
@@ -2950,10 +2977,13 @@ fn bound_display(name: &str, args: &[Type]) -> String {
 /// A **generic user trait** is deliberately still keyed by name: `impl Cache<string>` beside
 /// `impl Cache<int>` would hand the type two `get`s with no way to choose between them at a call
 /// site, which is the ambiguity coherence exists to refuse. `From` escapes that because its call
-/// sites carry the source type — a `?`'s propagated `Err`, an argument's type — and so can say
-/// which conversion they mean.
+/// sites carry the type that selects it — a `?`'s propagated `Err`, an argument's type, the target
+/// a `to<Target>()` names — and so can say which conversion they mean. Both conversion spellings
+/// escape on the same terms, which is why this asks the trait rather than naming one.
 pub(crate) fn coherence_key(trait_name: &str, trait_args: &[noeta_ast::TypeRef]) -> String {
-    if trait_name == BuiltinTrait::From.name()
+    if BuiltinTrait::from_name(trait_name)
+        .and_then(|t| t.conversion())
+        .is_some()
         && let [source] = trait_args
     {
         return format!("{trait_name}<{}>", noeta_ast::shape::type_source(source));

@@ -300,7 +300,7 @@ const FACTS: &[Fact] = &[
     // the fold is the identity rather than a rescue. It is a fact all the same: it is read off
     // `program.stmts`, which is what puts it here rather than beside `facts` on the `Lowerer`.
     Fact(
-        "from_conversion_keys",
+        "conversion_keys",
         Anchor(
             HOTSWAP,
             "fn a_swapped_type_keeps_each_conversion_under_its_own_source(",

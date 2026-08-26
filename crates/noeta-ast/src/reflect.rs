@@ -855,7 +855,7 @@ pub fn build(
     // The method-table key each declared `From` conversion occupies, over the whole program — so a
     // conversion written beside its target (`impl From<Cents> for Money { … }`) is discoverable
     // under the same `from<Cents>` name `invoke` dispatches it by, exactly as an in-body one is.
-    let from_keys = crate::conversion::from_conversion_keys_program(&program.stmts);
+    let from_keys = crate::conversion::conversion_keys_program(&program.stmts);
     // Every callable's declared parameter list, keyed by target (bare fn name or `Type.method`) — the
     // index `params_of(target)` surfaces, built in source order alongside the attribute manifest.
     let mut params: Vec<ParamRecord> = Vec::new();
@@ -1230,7 +1230,7 @@ fn collect_trait_impls(program: &Program, native: &NativeTraitImpls) -> Vec<Trai
 /// takes and what an attribute row on that method is keyed by.
 ///
 /// Its declared name, except for a `From` conversion, which takes the source-named key it dispatches
-/// under ([`crate::conversion::from_conversion_keys_program`]). Keying two of them by the shared
+/// under ([`crate::conversion::conversion_keys_program`]). Keying two of them by the shared
 /// `from` would put two different signatures under one name and answer for whichever the walk
 /// reached last — and would name something `invoke` cannot reach either, since the runtime method
 /// table has no plain `from` for such a type. The discovery surface and the dispatch surface

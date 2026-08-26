@@ -339,9 +339,9 @@ pub struct Sites {
     ///
     /// The key travels with the target because the target alone does not determine the conversion:
     /// a type declaring several names each of them after its source
-    /// ([`noeta_ast::conversion::from_conversion_keys`]), and matching the source against them is a typing
+    /// ([`noeta_ast::conversion::conversion_keys`]), and matching the source against them is a typing
     /// question lowering cannot re-ask.
-    pub try_conversion_sites: HashMap<Span, (String, String)>,
+    pub try_conversion_sites: HashMap<Span, (String, String, Spelling)>,
     /// Explicit `Target.from(x)` call spans on a type declaring **several** conversions → the
     /// method-table key the argument's type selected. The static twin of
     /// [`Sites::try_conversion_sites`]: same resolution rule, same reason lowering cannot redo it,
@@ -597,7 +597,7 @@ pub(crate) const SITE_POLICIES: &[(&str, SiteClass, &str)] = &[
     ("trait_call_sites", SiteClass::SpanKeyed, "span → (trait qualified identity, method)"),
     ("namespace_module_sites", SiteClass::SpanKeyed, "span → the root-qualified module identity"),
     ("f32_literal_sites", SiteClass::SpanKeyed, "a bare span set"),
-    ("try_conversion_sites", SiteClass::SpanKeyed, "span → (target error type name, the conversion's method-table key)"),
+    ("try_conversion_sites", SiteClass::SpanKeyed, "span → (the conversion owner's type name, its method-table key, which spelling declared it)"),
     ("from_call_sites", SiteClass::SpanKeyed, "span → the conversion's method-table key an explicit `Target.from(x)` selected"),
     ("type_arg_table", SiteClass::TheTable, "the table itself; absorb_type_args REPLACES it with the session's merged superset"),
     ("type_arg_reprs", SiteClass::TheTable, "the table's reflection projection, indexed in lockstep; replaced with it"),
@@ -918,7 +918,7 @@ pub(crate) struct SiteMaps {
     /// Namespace-group member-access sites — see [`Sites::namespace_module_sites`].
     pub(crate) namespace_module_sites: HashMap<Span, String>,
     /// `?`-conversion sites (error-ergonomics) — see [`Sites::try_conversion_sites`].
-    pub(crate) try_conversion_sites: HashMap<Span, (String, String)>,
+    pub(crate) try_conversion_sites: HashMap<Span, (String, String, Spelling)>,
     /// Explicit `Target.from(x)` conversion-selection sites — see [`Sites::from_call_sites`].
     pub(crate) from_call_sites: HashMap<Span, String>,
     /// The type-argument table (poly-values F2b) — see [`Sites::type_arg_table`].

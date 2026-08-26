@@ -818,6 +818,46 @@ impl Checker {
     /// a type (or is shadowed by a local), a target declaring no conversion at all, or an argument
     /// the enum's built-in conversion accepts, which the arm below types.
     #[allow(clippy::too_many_arguments)]
+    /// The method-table key a `value.to::<Target>()` selects, or `name` unchanged.
+    ///
+    /// A conversion declared on the source occupies `to<Target>`, never the bare `to` — the same
+    /// rule that names a `From` conversion after its source, for the same reason: a type may
+    /// convert into several targets, so the bare name would name a set. The turbofish is what says
+    /// which, so this is where the two meet.
+    ///
+    /// Asked of whichever conversion traits exist rather than of `To` by name, so the rule stays
+    /// one rule.
+    fn conversion_turbofish_key(
+        &mut self,
+        type_name: &str,
+        name: &str,
+        resolved: &[Type],
+        name_span: Span,
+    ) -> Option<String> {
+        let Some(t) = noeta_types::BUILTIN_TRAITS
+            .iter()
+            .copied()
+            .find(|t| t.conversion().is_some() && t.required_method_name() == Some(name))
+        else {
+            return None;
+        };
+        let role = t.conversion()?;
+        let [arg] = resolved else {
+            return None;
+        };
+        let spelled = arg.to_string();
+        let candidate = if role.arg_is_return() {
+            noeta_ast::conversion::to_method_key(&spelled)
+        } else {
+            noeta_ast::conversion::from_method_key(&spelled)
+        };
+        let _ = name_span;
+        self.symbols
+            .methods
+            .contains_key(&(type_name.to_string(), candidate.clone()))
+            .then_some(candidate)
+    }
+
     fn check_from_conversion_call(
         &mut self,
         receiver: &Expr,
@@ -2264,6 +2304,23 @@ impl Checker {
                 span,
             );
         }
+        // **A conversion written on the source reaches its body through the turbofish.**
+        // `value.to::<Target>()` is not a generic method being instantiated — `to` is not generic —
+        // it is the one call shape that can name which conversion it means, the way
+        // `Target.from(x)` names one by its argument's type. The type argument selects the
+        // conversion and the key it occupies (`to<Target>`), so the lookup is rewritten before it
+        // can miss on the bare `to` no declaration ever occupies.
+        let selected_conversion =
+            self.conversion_turbofish_key(&type_name, name, &resolved, name_span);
+        // Recorded like any other conversion selection: the AST still spells the bare method, and
+        // lowering substitutes the key the checker resolved rather than redoing the resolution —
+        // "which conversion does this turbofish name" is a typing question.
+        if let Some(key) = &selected_conversion {
+            self.sites.from_call_sites.insert(span, key.clone());
+        }
+        let name = &selected_conversion
+            .clone()
+            .unwrap_or_else(|| name.to_string());
         let Some(sig) = self
             .symbols
             .methods
@@ -2309,6 +2366,12 @@ impl Checker {
             .help(format!(
                 "call it on the type: `{type_name}.{name}::<...>(...)`"
             ));
+            return sig.ret.clone();
+        }
+        // A conversion consumed the turbofish to SELECT itself, so there is nothing left to
+        // instantiate: `to::<Target>` names one body, it does not parameterize one.
+        if selected_conversion.is_some() {
+            self.finalize_closure_args(&sig.params, args, arg_exprs, env);
             return sig.ret.clone();
         }
         let Some(generic) = sig.generic.clone() else {
