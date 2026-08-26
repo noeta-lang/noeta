@@ -556,267 +556,195 @@ mod tests {
     /// is the failure that actually happened — a mechanical edit to one shape (a retype, a sed, a
     /// refactor) silently changing what a trait means. Adding a trait forces a row here, so the next
     /// one is described twice on purpose rather than once by accident.
-    const CENSUS: &[(
-        BuiltinTrait,
-        &str,
-        RequiredMethod,
-        Option<BinaryOp>,
-        bool,
-        Option<FixedReturn>,
-        bool,
-        usize,
-        Option<ConversionRole>,
-    )] = &[
-        // trait, name, required method, operator, recipe, fixed return, static, arity, conversion
-        (
-            BuiltinTrait::Add,
-            "Add",
-            Some(("add", Some(1))),
-            Some(BinaryOp::Add),
-            false,
-            None,
-            false,
-            0,
-            None,
-        ),
-        (
-            BuiltinTrait::Sub,
-            "Sub",
-            Some(("sub", Some(1))),
-            Some(BinaryOp::Sub),
-            false,
-            None,
-            false,
-            0,
-            None,
-        ),
-        (
-            BuiltinTrait::Mul,
-            "Mul",
-            Some(("mul", Some(1))),
-            Some(BinaryOp::Mul),
-            false,
-            None,
-            false,
-            0,
-            None,
-        ),
-        (
-            BuiltinTrait::Div,
-            "Div",
-            Some(("div", Some(1))),
-            Some(BinaryOp::Div),
-            false,
-            None,
-            false,
-            0,
-            None,
-        ),
-        (
-            BuiltinTrait::Concat,
-            "Concat",
-            Some(("concat", Some(1))),
-            Some(BinaryOp::Concat),
-            false,
-            None,
-            false,
-            0,
-            None,
-        ),
-        (
-            BuiltinTrait::Equatable,
-            "Equatable",
-            Some(("eq", Some(1))),
-            None,
-            true,
-            Some(FixedReturn::Bool),
-            false,
-            0,
-            None,
-        ),
-        (
-            BuiltinTrait::Comparable,
-            "Comparable",
-            Some(("compare", Some(1))),
-            None,
-            true,
-            Some(FixedReturn::Ordering),
-            false,
-            0,
-            None,
-        ),
-        (
-            BuiltinTrait::Display,
-            "Display",
-            Some(("to_string", Some(0))),
-            None,
-            true,
-            None,
-            false,
-            0,
-            None,
-        ),
-        (
-            BuiltinTrait::Error,
-            "Error",
-            Some(("message", Some(0))),
-            None,
-            true,
-            None,
-            false,
-            0,
-            None,
-        ),
-        (
-            BuiltinTrait::From,
-            "From",
-            Some(("from", Some(1))),
-            None,
-            false,
-            None,
-            true,
-            1,
-            Some(ConversionRole::FromSource),
-        ),
-        (
-            BuiltinTrait::Clone,
-            "Clone",
-            None,
-            None,
-            true,
-            None,
-            false,
-            0,
-            None,
-        ),
-        (
-            BuiltinTrait::Serialize,
-            "Serialize",
-            None,
-            None,
-            true,
-            None,
-            false,
-            1,
-            None,
-        ),
-        (
-            BuiltinTrait::Deserialize,
-            "Deserialize",
-            None,
-            None,
-            true,
-            None,
-            false,
-            1,
-            None,
-        ),
-        (
-            BuiltinTrait::Index,
-            "Index",
-            Some(("get", Some(1))),
-            None,
-            false,
-            None,
-            false,
-            0,
-            None,
-        ),
-        (
-            BuiltinTrait::Length,
-            "Length",
-            Some(("len", Some(0))),
-            None,
-            false,
-            None,
-            false,
-            0,
-            None,
-        ),
-        (
-            BuiltinTrait::Iterable,
-            "Iterable",
-            Some(("iter", Some(0))),
-            None,
-            false,
-            None,
-            false,
-            0,
-            None,
-        ),
-        (
-            BuiltinTrait::Callable,
-            "Callable",
-            Some(("call", None)),
-            None,
-            false,
-            None,
-            false,
-            0,
-            None,
-        ),
-        (
-            BuiltinTrait::Members,
-            "Members",
-            Some(("get", Some(1))),
-            None,
-            false,
-            None,
-            false,
-            0,
-            None,
-        ),
-        (
-            BuiltinTrait::DynamicCall,
-            "DynamicCall",
-            Some(("call", Some(2))),
-            None,
-            false,
-            None,
-            false,
-            0,
-            None,
-        ),
-        (
-            BuiltinTrait::TryAdd,
-            "TryAdd",
-            Some(("try_add", Some(1))),
-            None,
-            false,
-            None,
-            false,
-            0,
-            None,
-        ),
-        (
-            BuiltinTrait::Validate,
-            "Validate",
-            Some(("validate", Some(0))),
-            None,
-            false,
-            None,
-            false,
-            0,
-            None,
-        ),
-        (
-            BuiltinTrait::To,
-            "To",
-            Some(("to", Some(0))),
-            None,
-            false,
-            None,
-            false,
-            1,
-            Some(ConversionRole::ToTarget),
-        ),
+    /// One censused trait. Named fields rather than a tuple, because the point of restating the
+    /// table is that a transposition shows — and nine positional columns are exactly where one
+    /// would not.
+    struct Row {
+        t: BuiltinTrait,
+        name: &'static str,
+        required: RequiredMethod,
+        operator: Option<BinaryOp>,
+        recipe: bool,
+        fixed: Option<FixedReturn>,
+        is_static: bool,
+        arity: usize,
+        conversion: Option<ConversionRole>,
+    }
+
+    /// Spell only what a row asserts beyond the common case, the way the table it restates does.
+    const NOTHING: Row = Row {
+        t: BuiltinTrait::Clone,
+        name: "",
+        required: None,
+        operator: None,
+        recipe: false,
+        fixed: None,
+        is_static: false,
+        arity: 0,
+        conversion: None,
+    };
+
+    const CENSUS: &[Row] = &[
+        Row {
+            t: BuiltinTrait::Add,
+            name: "Add",
+            required: Some(("add", Some(1))),
+            operator: Some(BinaryOp::Add),
+            ..NOTHING
+        },
+        Row {
+            t: BuiltinTrait::Sub,
+            name: "Sub",
+            required: Some(("sub", Some(1))),
+            operator: Some(BinaryOp::Sub),
+            ..NOTHING
+        },
+        Row {
+            t: BuiltinTrait::Mul,
+            name: "Mul",
+            required: Some(("mul", Some(1))),
+            operator: Some(BinaryOp::Mul),
+            ..NOTHING
+        },
+        Row {
+            t: BuiltinTrait::Div,
+            name: "Div",
+            required: Some(("div", Some(1))),
+            operator: Some(BinaryOp::Div),
+            ..NOTHING
+        },
+        Row {
+            t: BuiltinTrait::Concat,
+            name: "Concat",
+            required: Some(("concat", Some(1))),
+            operator: Some(BinaryOp::Concat),
+            ..NOTHING
+        },
+        Row {
+            t: BuiltinTrait::Equatable,
+            name: "Equatable",
+            required: Some(("eq", Some(1))),
+            recipe: true,
+            fixed: Some(FixedReturn::Bool),
+            ..NOTHING
+        },
+        Row {
+            t: BuiltinTrait::Comparable,
+            name: "Comparable",
+            required: Some(("compare", Some(1))),
+            recipe: true,
+            fixed: Some(FixedReturn::Ordering),
+            ..NOTHING
+        },
+        Row {
+            t: BuiltinTrait::Display,
+            name: "Display",
+            required: Some(("to_string", Some(0))),
+            recipe: true,
+            ..NOTHING
+        },
+        Row {
+            t: BuiltinTrait::Error,
+            name: "Error",
+            required: Some(("message", Some(0))),
+            recipe: true,
+            ..NOTHING
+        },
+        Row {
+            t: BuiltinTrait::From,
+            name: "From",
+            required: Some(("from", Some(1))),
+            is_static: true,
+            arity: 1,
+            conversion: Some(ConversionRole::FromSource),
+            ..NOTHING
+        },
+        Row {
+            t: BuiltinTrait::Clone,
+            name: "Clone",
+            required: None,
+            recipe: true,
+            ..NOTHING
+        },
+        Row {
+            t: BuiltinTrait::Serialize,
+            name: "Serialize",
+            required: None,
+            recipe: true,
+            arity: 1,
+            ..NOTHING
+        },
+        Row {
+            t: BuiltinTrait::Deserialize,
+            name: "Deserialize",
+            required: None,
+            recipe: true,
+            arity: 1,
+            ..NOTHING
+        },
+        Row {
+            t: BuiltinTrait::Index,
+            name: "Index",
+            required: Some(("get", Some(1))),
+            ..NOTHING
+        },
+        Row {
+            t: BuiltinTrait::Length,
+            name: "Length",
+            required: Some(("len", Some(0))),
+            ..NOTHING
+        },
+        Row {
+            t: BuiltinTrait::Iterable,
+            name: "Iterable",
+            required: Some(("iter", Some(0))),
+            ..NOTHING
+        },
+        Row {
+            t: BuiltinTrait::Callable,
+            name: "Callable",
+            required: Some(("call", None)),
+            ..NOTHING
+        },
+        Row {
+            t: BuiltinTrait::Members,
+            name: "Members",
+            required: Some(("get", Some(1))),
+            ..NOTHING
+        },
+        Row {
+            t: BuiltinTrait::DynamicCall,
+            name: "DynamicCall",
+            required: Some(("call", Some(2))),
+            ..NOTHING
+        },
+        Row {
+            t: BuiltinTrait::TryAdd,
+            name: "TryAdd",
+            required: Some(("try_add", Some(1))),
+            ..NOTHING
+        },
+        Row {
+            t: BuiltinTrait::Validate,
+            name: "Validate",
+            required: Some(("validate", Some(0))),
+            ..NOTHING
+        },
+        Row {
+            t: BuiltinTrait::To,
+            name: "To",
+            required: Some(("to", Some(0))),
+            arity: 1,
+            conversion: Some(ConversionRole::ToTarget),
+            ..NOTHING
+        },
     ];
 
     /// The census describes **exactly** the registry — so a trait added to one and not the other
     /// fails here rather than shipping half-described.
     #[test]
     fn the_census_covers_every_built_in_trait() {
-        let censused: Vec<BuiltinTrait> = CENSUS.iter().map(|r| r.0).collect();
+        let censused: Vec<BuiltinTrait> = CENSUS.iter().map(|r| r.t).collect();
         assert_eq!(
             censused,
             BUILTIN_TRAITS.to_vec(),
@@ -828,15 +756,20 @@ mod tests {
     /// Every column, against the table it restates.
     #[test]
     fn every_column_of_the_trait_table_is_pinned() {
-        for &(t, name, required, operator, recipe, fixed, is_static, arity, conversion) in CENSUS {
-            assert_eq!(t.name(), name, "name for {t:?}");
-            assert_eq!(t.required_method(), required, "required_method for {t:?}");
-            assert_eq!(t.operator(), operator, "operator for {t:?}");
-            assert_eq!(t.has_builtin_recipe(), recipe, "builtin_recipe for {t:?}");
-            assert_eq!(t.fixed_return(), fixed, "fixed_return for {t:?}");
-            assert_eq!(t.declares_static(), is_static, "declares_static for {t:?}");
-            assert_eq!(t.generic_arity(), arity, "generic_arity for {t:?}");
-            assert_eq!(t.conversion(), conversion, "conversion for {t:?}");
+        for r in CENSUS {
+            let t = r.t;
+            assert_eq!(t.name(), r.name, "name for {t:?}");
+            assert_eq!(t.required_method(), r.required, "required_method for {t:?}");
+            assert_eq!(t.operator(), r.operator, "operator for {t:?}");
+            assert_eq!(t.has_builtin_recipe(), r.recipe, "builtin_recipe for {t:?}");
+            assert_eq!(t.fixed_return(), r.fixed, "fixed_return for {t:?}");
+            assert_eq!(
+                t.declares_static(),
+                r.is_static,
+                "declares_static for {t:?}"
+            );
+            assert_eq!(t.generic_arity(), r.arity, "generic_arity for {t:?}");
+            assert_eq!(t.conversion(), r.conversion, "conversion for {t:?}");
         }
     }
 
