@@ -293,10 +293,11 @@
 /// is now the single decision: which method survives a `303`, which headers are dropped crossing an
 /// origin, where a relative `Location` resolves to. The sandbox exercises it under the differential
 /// and every platform inherits the answer.
-/// **26 → 27.** [`registry::BUILTIN_TRAIT_NAMES`] gains `To`, the conversion declared on the source
-/// (`impl To<Target> for Source`). A native declaration's `traits` entry is resolved against that
-/// list at assembly, so a name added to it is a change to what an extension may advertise — additive,
-/// and still a change to the contract.
+/// **27** — [`registry::BUILTIN_TRAIT_NAMES`] gained `To`, the conversion declared on the **source**
+/// (`impl To<Target> for Source`), which reaches a target its own package does not own. A native
+/// declaration's `traits` entry is resolved against that list at assembly and the checker resolves
+/// the same string through `BuiltinTrait::from_name`, so the list is part of the contract: a name
+/// added to it widens what an extension may advertise. Additive, and still a change.
 pub const ABI_VERSION: u32 = 27;
 
 pub mod args;
