@@ -254,12 +254,58 @@ echo load("7")
 The rules keep the language explicit:
 
 - **`?` is the only implicit conversion position.** A `return Err(jsonErr)` or an assignment with a mismatched error type stays the plain type mismatch (E0007) it always was; write `Err(AppError.from(e))` there — `from` is an ordinary static function, callable anywhere as `Target.from(x)`.
-- **One conversion per source.** The conversion is declared on the target (`impl From<Source>` names the source; the source may be an extern type like `JsonError`, which could not carry your impl anyway — an `impl` targets a struct, class, or enum the program [declares](Generics-and-Traits#implementing-a-trait), never a built-in or an extern). A type may declare a conversion from each of several sources — that is how one application error type absorbs a transport failure and a decode failure — but only one from each: a repeated source is a coherence conflict (E0027). Declaring it on the target is also what satisfies the [orphan rule](Generics-and-Traits#the-orphan-rule): `From` is built into the language and so belongs to no package, which means the `impl` must live in the target type's own package. A conversion *into* a dependency's error type therefore goes on your own wrapper, never on theirs.
+- **One conversion per source.** The conversion is declared on the target (`impl From<Source>` names the source; the source may be an extern type like `JsonError`, which could not carry your impl anyway — an `impl` targets a struct, class, or enum the program [declares](Generics-and-Traits#implementing-a-trait), never a built-in or an extern). A type may declare a conversion from each of several sources — that is how one application error type absorbs a transport failure and a decode failure — but only one from each: a repeated source is a coherence conflict (E0027). Declaring it on the target is also what satisfies the [orphan rule](Generics-and-Traits#the-orphan-rule): `From` is built into the language and so belongs to no package, which means the `impl` must live in the target type's own package. A conversion *into* a dependency's error type is therefore written the other way round, with [`impl To<Target>`](#converting-into-a-type-you-do-not-own) on your own type.
 - **Exactly one conversion path.** Which conversion runs is decided where the call is written, never at run time: a `?` converts through the one its propagated `Err` type names, and `Target.from(x)` through the one `x`'s type names. Sources are matched by type identity, so a site sees exactly one candidate — and **conversions never chain**. `A → B` and `B → C` do not make `A → C`; write the conversion you want.
 - **No conversion, no propagation.** A `?` whose `Err` type neither matches the declared error type nor has a `From` conversion is E0057. (A `dyn`/unannotated context defers to runtime, as everywhere in the gradual checker.)
 - `from` is an **associated** conversion: it builds a new target value from its argument, so a body referencing `self` is rejected (E0015), as is a parameter that disagrees with the declared source.
 - **A conversion is never guessed.** Where a target declares several, `Target.from(x)` needs `x`'s type to name one of them. An argument typed `dyn` leaves every conversion a candidate and is E0023 — narrow it (`if x is HttpError { … }`) or annotate it; an argument whose type names no declared source is E0007, and the diagnostic lists what the target does convert.
 - **The conversion's own name carries its source.** A declared conversion answers to `from<HttpError>` rather than to `from`, which is what lets an enum keep its [wire-value conversion](Structs-Classes-and-Enums#converting-a-wire-value-to-a-case) — `Plan.from("free")` — while also declaring `impl From<Raw>`. Writing the call never needs the built name — `Target.from(x)` and `?` both pick by type — but reaching one by name does; see [A declared conversion is named after its source](Attributes-and-Reflection#a-declared-conversion-is-named-after-its-source).
+
+## Converting *into* a type you do not own — `impl To<Target>`
+
+A conversion's `impl` lives with its own type, so `impl From<Source>` needs the **target** to be yours. When the target belongs to somebody else — a framework's error type your handler has to return — there is nowhere to put it, and `?` has nothing to convert through.
+
+`impl To<Target> for Source` states the same conversion from the other end, and lives with the source:
+
+```noeta
+// `ServiceError` stands in for a type from the framework you are writing against — the reason the
+// conversion cannot go on it is that it is not yours to edit.
+struct ServiceError { detail: string }
+struct DiskError { path: string }
+
+impl Error for ServiceError { pub fn message(): string { return self.detail } }
+impl Error for DiskError {
+    pub fn message(): string { return "cannot read ${self.path}" }
+}
+
+// `impl From<DiskError>` would have to sit inside `ServiceError`. This sits with `DiskError`.
+impl To<ServiceError> for DiskError {
+    pub fn to(): ServiceError { return ServiceError { detail: self.message() } }
+}
+
+fn read_config(): Result<string, DiskError> {
+    return Err(DiskError { path: "/etc/app.toml" })
+}
+
+fn handler(): Result<string, ServiceError> {
+    raw = read_config()?       // DiskError → ServiceError, through the `To` impl
+    return Ok(raw)
+}
+
+echo match handler() {
+    Ok(v)  => v,
+    Err(e) => e.message(),
+}
+```
+
+Everything the `From` rules say holds here, read from the other side:
+
+- **A conversion is one relation, whichever spelling states it.** `impl From<A>` on `B` and `impl To<B>` for `A` both declare `A → B`, so a program containing both is a coherence conflict (E0027) naming both sites. That keeps "exactly one conversion path" true by construction rather than by a precedence rule.
+- **The two can never collide across packages.** Each spelling needs its own type local and the other merely visible, so two packages declaring one conversion would have to depend on each other. A conflict is therefore always something one author can fix by deleting one of the two.
+- **It follows that `To` cannot override a `From` you do not own.** Reaching a foreign target is what it is for; changing what an existing conversion means is not, and would let one package silently retarget a `?` in code that never mentions it.
+- **One conversion per target.** A source may convert into several targets — one `impl To<Target>` block each, named apart by the target the way a target's conversions are named apart by their sources.
+- **The call names the target.** `value.to::<Target>()` selects the conversion, because the bare `to` names a set rather than one of them. The type argument selects; it does not instantiate anything.
+- `to` converts the value in hand, so it takes `self` and returns the declared target — a return type disagreeing with the trait argument is E0015, the mirror of the parameter check on `from`.
 
 ## `??` — coalesce
 
