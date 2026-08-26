@@ -3962,6 +3962,7 @@ pub const BUILTIN_TRAIT_NAMES: &[&str] = &[
     "DynamicCall",
     "TryAdd",
     "Validate",
+    "To",
 ];
 
 /// Whether a declaration's `traits` list advertises the built-in trait `name`.

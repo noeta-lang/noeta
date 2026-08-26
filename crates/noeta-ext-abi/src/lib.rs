@@ -293,7 +293,11 @@
 /// is now the single decision: which method survives a `303`, which headers are dropped crossing an
 /// origin, where a relative `Location` resolves to. The sandbox exercises it under the differential
 /// and every platform inherits the answer.
-pub const ABI_VERSION: u32 = 26;
+/// **26 → 27.** [`registry::BUILTIN_TRAIT_NAMES`] gains `To`, the conversion declared on the source
+/// (`impl To<Target> for Source`). A native declaration's `traits` entry is resolved against that
+/// list at assembly, so a name added to it is a change to what an extension may advertise — additive,
+/// and still a change to the contract.
+pub const ABI_VERSION: u32 = 27;
 
 pub mod args;
 pub mod channel;
