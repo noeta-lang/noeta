@@ -199,14 +199,14 @@ impl Checker {
     }
 
     /// The **method-table key** a declaration occupies on its type: its declared name, except for
-    /// one of several `From` conversions on a single type ([`Symbols::from_method_keys`]).
+    /// one of several `From` conversions on a single type ([`Symbols::conversion_method_keys`]).
     ///
     /// Both walks that reach a conversion resolve it here — the type's flattened `methods` and the
     /// `impl` block itself hold the *same* `FnDecl`, so the span they share is what makes the two
     /// register one entry rather than two.
     fn method_key(&self, m: &FnDecl) -> String {
         self.symbols
-            .from_method_keys
+            .conversion_method_keys
             .get(&m.name_span)
             .cloned()
             .unwrap_or_else(|| m.name.to_string())
@@ -277,7 +277,7 @@ impl Checker {
         };
         // The key this method occupies in the type's table. It is the declared name for everything
         // except a `From` conversion, which is written under a shared `from` and which
-        // [`Symbols::from_method_keys`] tells apart by span — for either spelling, in the target's
+        // [`Symbols::conversion_method_keys`] tells apart by span — for either spelling, in the target's
         // body or beside it. Read once, here, so every index below — visibility, receiver
         // discipline, the signature itself — is written under the same key the call site resolves.
         let key = self.method_key(m);
@@ -526,7 +526,7 @@ impl Checker {
                             .chain(r.impls.iter().map(|b| b.trait_name.as_str())),
                     );
                     self.record_derived(r.name.as_str(), &r.decorators.derives);
-                    self.record_from_impls(r.name.as_str(), &r.impls);
+                    self.record_conversion_impls(r.name.as_str(), &r.impls);
                     self.record_attribute(r.name.as_str(), r.decorators.attribute.as_deref());
                     self.symbols.generic_types.insert(
                         r.name.to_string(),
@@ -630,7 +630,7 @@ impl Checker {
                             .chain(c.impls.iter().map(|b| b.trait_name.as_str())),
                     );
                     self.record_derived(c.name.as_str(), &c.decorators.derives);
-                    self.record_from_impls(c.name.as_str(), &c.impls);
+                    self.record_conversion_impls(c.name.as_str(), &c.impls);
                     // Record each method's signature (class methods and impl-block methods alike),
                     // so `obj.method(...)` resolves to a concrete type and its arguments are
                     // checked. The class's generic parameters are erased to `dyn` (erased at
@@ -715,7 +715,7 @@ impl Checker {
                             .chain(e.impls.iter().map(|b| b.trait_name.as_str())),
                     );
                     self.record_derived(e.name.as_str(), &e.decorators.derives);
-                    self.record_from_impls(e.name.as_str(), &e.impls);
+                    self.record_conversion_impls(e.name.as_str(), &e.impls);
                     self.symbols.generic_types.insert(
                         e.name.to_string(),
                         e.type_params.iter().map(param_ref).collect(),
@@ -1034,7 +1034,7 @@ impl Checker {
         // when the signature registers, and so a `?` site resolves `(source → target)` through it.
         for stmt in &program.stmts {
             if let Stmt::Impl(d) = stmt {
-                self.record_standalone_from_impl(d);
+                self.record_standalone_conversion_impl(d);
             }
         }
         for stmt in &program.stmts {
@@ -1734,10 +1734,15 @@ impl Checker {
     /// `from` occupies — under the target, so a `?` site can look up `(source → target)` regardless
     /// of statement order and then dispatch through the right one. Arity/validity of the block is
     /// checked in pass 2 (`check_trait_impl`); a malformed block records nothing.
-    pub(crate) fn record_from_impls(&mut self, target: &str, impls: &[noeta_ast::ImplBlock]) {
+    /// Record every conversion an in-body impl list declares, for whichever spellings it holds.
+    ///
+    /// `own` is the type the block is written on — the target under `impl From<Source>`, the source
+    /// under `impl To<Target>`. Which of the two it is comes from the trait's own
+    /// [`ConversionRole`], never from this call site.
+    pub(crate) fn record_conversion_impls(&mut self, own: &str, impls: &[noeta_ast::ImplBlock]) {
         for block in impls {
-            self.record_from_impl(
-                target,
+            self.record_conversion_impl(
+                own,
                 block.trait_name.as_str(),
                 &block.trait_args,
                 &block.methods,
@@ -1745,59 +1750,107 @@ impl Checker {
         }
     }
 
-    /// [`Self::record_from_impls`] for the **standalone** spelling — `impl From<Source> for Target
-    /// { … }`, which declares the same conversion from beside the type rather than inside it. Both
-    /// forms must record, because the backends' hoist flattens the standalone one onto the target
-    /// before a method table is built: a conversion the checker did not key would type-check under
-    /// the bare `from` while the table it dispatches through holds `from<Source>`.
-    pub(crate) fn record_standalone_from_impl(&mut self, decl: &noeta_ast::ImplDecl) {
-        let target = decl.target.to_string();
-        self.record_from_impl(
-            &target,
+    /// [`Self::record_conversion_impls`] for the **standalone** spelling — `impl From<Source> for
+    /// Target { … }` and `impl To<Target> for Source { … }`, which declare the same conversions from
+    /// beside the type rather than inside it. Both forms must record, because the backends' hoist
+    /// flattens the standalone one onto its type before a method table is built: a conversion the
+    /// checker did not key would type-check under the bare method name while the table it dispatches
+    /// through holds the qualified key.
+    pub(crate) fn record_standalone_conversion_impl(&mut self, decl: &noeta_ast::ImplDecl) {
+        let own = decl.target.to_string();
+        self.record_conversion_impl(
+            &own,
             decl.trait_name.as_str(),
             &decl.trait_args,
             &decl.methods,
         );
     }
 
-    /// The one recording rule, over whichever impl form the caller holds: a `From` block naming one
-    /// source resolves it in the target's scope and files the conversion under the method-table key
-    /// [`noeta_ast::conversion`] names it with.
-    fn record_from_impl(
+    /// **The one recording rule**, over whichever impl form and whichever spelling the caller holds.
+    ///
+    /// It asks the trait what it is — [`BuiltinTrait::conversion`] — rather than testing for `From`
+    /// by name, so the second spelling needed no second copy of this and a third would need none
+    /// either. The role answers the only two questions that differ between them: which end of the
+    /// relation the type argument names, and therefore which method-table key the body occupies.
+    ///
+    /// The relation is filed under its **target** whichever spelling declared it, which is what puts
+    /// the coherence check here: a pair already present is a second declaration of one conversion,
+    /// and both sites are named.
+    fn record_conversion_impl(
         &mut self,
-        target: &str,
+        own: &str,
         trait_name: &str,
         trait_args: &[noeta_ast::TypeRef],
         methods: &[noeta_ast::FnDecl],
     ) {
-        if trait_name != BuiltinTrait::From.name() || trait_args.len() != 1 {
+        let Some(t) = BuiltinTrait::from_name(trait_name) else {
+            return;
+        };
+        let Some(role) = t.conversion() else {
+            return;
+        };
+        if trait_args.len() != 1 {
             return;
         }
         let Some(m) = methods
             .iter()
-            .find(|c| Some(c.name.as_str()) == BuiltinTrait::From.required_method_name())
+            .find(|c| Some(c.name.as_str()) == t.required_method_name())
         else {
             return;
         };
-        let key =
-            noeta_ast::conversion::from_method_key(&noeta_ast::shape::type_source(&trait_args[0]));
+        let spelling = match role {
+            ConversionRole::FromSource => Spelling::From,
+            ConversionRole::ToTarget => Spelling::To,
+        };
+        let arg_spelling = noeta_ast::shape::type_source(&trait_args[0]);
+        let key = spelling.method_key(&arg_spelling);
         self.symbols
-            .from_method_keys
+            .conversion_method_keys
             .insert(m.name_span, key.clone());
-        // In the target's scope, like every other impl argument.
-        let source = from_ref_q(
+        // In the impl's own scope, like every other impl argument.
+        let arg_ty = from_ref_q(
             &trait_args[0],
             &self.imports.extern_types,
-            &self.target_scope(target),
+            &self.target_scope(own),
         );
-        self.symbols
-            .from_impls
-            .entry(target.to_string())
-            .or_default()
-            .push(FromConversion {
-                source,
-                method: key,
-            });
+        // The relation, as the ordered pair it is: the argument names one end and the impl's own
+        // type is the other, and which is which is the role's answer.
+        let (source, target) = match role {
+            ConversionRole::FromSource => (arg_ty, own.to_string()),
+            ConversionRole::ToTarget => (
+                noeta_types::Type::Named(own.to_string(), Vec::new()),
+                arg_spelling.clone(),
+            ),
+        };
+        let entry = self.symbols.conversions.entry(target.clone()).or_default();
+        if let Some(prior) = entry.iter().find(|c| c.source == source) {
+            let prior_span = prior.span;
+            let prior_trait = prior.spelling.trait_name();
+            self.error(
+                DiagnosticCode::ConflictingTraitImpl,
+                m.name_span,
+                format!(
+                    "the conversion `{source}` → `{target}` is declared twice: once as \
+                     `{prior_trait}` and once as `{trait_name}`"
+                ),
+            )
+            .label(
+                prior_span,
+                format!("first declared here, as `{prior_trait}`"),
+            )
+            .help(
+                "a conversion is the ordered pair of its two types, and both spellings state that \
+                 pair — keep whichever one belongs with the type you own and remove the other",
+            );
+            return;
+        }
+        entry.push(Conversion {
+            source,
+            method: key,
+            owner: own.to_string(),
+            spelling,
+            span: m.name_span,
+        });
     }
 
     pub(crate) fn record_trait_impls<'a>(

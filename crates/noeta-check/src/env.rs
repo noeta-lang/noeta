@@ -172,16 +172,29 @@ pub(crate) struct FnSig {
 
 /// One declared `From` conversion into a target type — the resolved source it converts, and the
 /// **method-table key** that conversion's body occupies on the target
-/// ([`noeta_ast::conversion::from_method_key`] — `from<Source>`, always, whichever spelling declared
-/// it and however many the target has).
+/// **A declared conversion, from either spelling.**
 ///
-/// The two travel together because every consumer needs both halves and neither can be derived from
-/// the other at the point of use: the source is what a `?` site or an argument type is matched
-/// against, and the key is what the call must then dispatch through.
+/// The relation is the ordered pair `(source, target)`, and this is one end of it filed under the
+/// other: the registry keys these by **target**, so `source` is what a `?` site or an argument type
+/// is matched against. What the pair does not say is where the *body* lives, and the two spellings
+/// disagree about that — `impl From<Source>` puts it on the target, `impl To<Target> for Source`
+/// puts it on the source — so `owner` and `spelling` travel with it. A consumer needs all of them
+/// and none can be derived from the others at the point of use: `source` selects the conversion,
+/// `method` is the table key to dispatch through, `owner` is whose table holds it, and `spelling`
+/// says whether the call is written on the type or on the value.
 #[derive(Clone)]
-pub(crate) struct FromConversion {
+pub(crate) struct Conversion {
+    /// The type converted **from** — matched against a `?`'s propagated `Err` or a call's argument.
     pub(crate) source: Type,
+    /// The method-table key the body occupies: `from<Source>` or `to<Target>`.
     pub(crate) method: String,
+    /// The type whose method table holds the body — the target for `From`, the source for `To`.
+    pub(crate) owner: String,
+    /// Which spelling declared it, which is what tells a call site whether the body takes the value
+    /// as an argument or as a receiver.
+    pub(crate) spelling: noeta_ast::conversion::Spelling,
+    /// Where it was declared, so a second declaration of the same relation can label both sites.
+    pub(crate) span: noeta_span::Span,
 }
 
 /// What a generic free function needs at its call sites: the type parameters with their bounds, and

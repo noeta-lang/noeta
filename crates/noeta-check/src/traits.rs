@@ -92,7 +92,7 @@ impl Checker {
         // `From` is the one built-in whose `impl` carries a real type argument
         // (`impl From<Source>`); every other built-in impl is bare. The argument's resolution is
         // validated below (E0013 for a ghost name), and the resolved source was recorded at
-        // collection ([`Self::record_from_impls`]).
+        // collection ([`Self::record_conversion_impls`]).
         if trait_name == BuiltinTrait::From.name() {
             if trait_args.len() != 1 {
                 self.error(
@@ -1422,7 +1422,7 @@ impl Checker {
         if let Type::Named(target, _) = &declared
             && let Some(conv) = self
                 .symbols
-                .from_impls
+                .conversions
                 .get(target)
                 .and_then(|convs| convs.iter().find(|c| c.source == *err))
         {

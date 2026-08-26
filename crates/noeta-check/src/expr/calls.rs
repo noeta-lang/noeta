@@ -837,7 +837,7 @@ impl Checker {
         if lookup(env, tn.as_str()).is_some() {
             return None;
         }
-        let convs = self.symbols.from_impls.get(tn.as_str())?.clone();
+        let convs = self.symbols.conversions.get(tn.as_str())?.clone();
         if convs.is_empty() {
             return None;
         }

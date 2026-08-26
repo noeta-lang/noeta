@@ -67,6 +67,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
+use noeta_ast::conversion::Spelling;
 use noeta_ast::{
     AttrValue, Attribute, BinaryOp, BuiltinTy, ClassDecl, DeriveSpec, EnumDecl, Expr, FieldDecl,
     FnDecl, ForPattern, ImplBlock, ImplDecl, MatchArm, MethodDirective, Param, Pattern, Program,
@@ -77,7 +78,7 @@ pub use noeta_edition::Provenance;
 use noeta_edition::{Edition, EditionMap};
 use noeta_ext_abi::NominalType;
 use noeta_span::{PackageOrigin, Span};
-use noeta_types::{BuiltinTrait, ParamId, ParamRef, Type};
+use noeta_types::{BuiltinTrait, ConversionRole, ParamId, ParamRef, Type};
 
 mod args;
 mod attributes;
@@ -1166,19 +1167,24 @@ struct Symbols {
     /// derivation over `T`'s `@packed` element into `trait_assoc[(T, trait)]` so `Self::Name` resolves.
     /// Empty for a `.noe` trait or a native trait with no associated types (ExtBundle→ExtTrait fold-in).
     native_derived_assoc: HashMap<String, Vec<(String, noeta_ext_abi::AssocDerivation)>>,
-    /// Declared `From` conversions (error-ergonomics): target type name → one entry per in-body
-    /// `impl From<Source>` block, resolved at collection so a `?` site can consult them regardless
-    /// of statement order.
+    /// **Every declared conversion in the program, filed under its target** — both spellings, in one
+    /// table, resolved at collection so a `?` site can consult them regardless of statement order.
     ///
-    /// A type may declare **one conversion per distinct source**; coherence keys `From` on the
-    /// source it names rather than on the trait name, so a repeated source is E0027 and the sources
-    /// recorded here are distinct in a well-formed program. A `(source → target)` lookup is
-    /// therefore unambiguous by construction, and it yields the method-table key
-    /// ([`noeta_ast::conversion::from_method_key`]) the call site must dispatch through.
-    from_impls: HashMap<String, Vec<FromConversion>>,
+    /// One table rather than two because `impl From<Source>` on a target and
+    /// `impl To<Target> for Source` state the *same* relation, the ordered pair `(source, target)`,
+    /// from opposite ends. Filing them together is what makes the coherence rule structural: a
+    /// second declaration of a pair already present is a conflict at the moment it is inserted,
+    /// whichever spelling wrote it, and no site downstream has to know that two spellings exist to
+    /// stay unambiguous.
+    ///
+    /// So a `(source → target)` lookup remains unambiguous **by construction**, which is the
+    /// property the `?` rule rests on: coherence admits at most one conversion per pair, so no `?`
+    /// site ever sees two candidates. The entry then carries what dispatch needs — the method-table
+    /// key, and whose table holds it.
+    conversions: HashMap<String, Vec<Conversion>>,
     /// The **method-table key** each `impl From<Source>`'s `from` occupies, keyed by that method's
-    /// name span. Written by [`Checker::record_from_impls`] (an in-body block) and
-    /// [`Checker::record_standalone_from_impl`] (one written beside its target) before the owning
+    /// name span. Written by [`Checker::record_conversion_impls`] (an in-body block) and
+    /// [`Checker::record_standalone_conversion_impl`] (one written beside its target) before the owning
     /// type's methods are walked, and read by the one funnel every method registration passes
     /// through ([`Checker::collect_method_sig_classified`]) — so a conversion is registered under
     /// the key its call sites dispatch through, whether the walk reaches it through the type's
@@ -1187,7 +1193,7 @@ struct Symbols {
     /// Span-keyed rather than `(type, method)`-keyed because that pair is exactly what is ambiguous
     /// here: every conversion on a type is written `from`, and the declaration span is what tells
     /// two of them apart.
-    from_method_keys: HashMap<Span, String>,
+    conversion_method_keys: HashMap<Span, String>,
     /// The subset of [`Checker::trait_impls`] that came from `@derive(...)` (not a hand-written
     /// `impl`). A **generic** type's derive is conditional on its instantiated fields
     /// (derive-soundness S4); a hand-written impl is unconditional. Keyed like `trait_impls`.

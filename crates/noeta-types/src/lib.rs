@@ -42,7 +42,7 @@ use noeta_ast::TypeRef;
 use noeta_span::{SourceId, Span};
 
 mod traits;
-pub use traits::{BUILTIN_TRAITS, BuiltinTrait, SERIALIZE_FORMATS, operator_trait};
+pub use traits::{BUILTIN_TRAITS, BuiltinTrait, ConversionRole, SERIALIZE_FORMATS, operator_trait};
 
 /// The **identity** of one generic type parameter: *where it was declared*.
 ///
