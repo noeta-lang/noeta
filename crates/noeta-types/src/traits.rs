@@ -529,6 +529,344 @@ pub const BUILTIN_TRAITS: &[BuiltinTrait] = &[
 mod tests {
     use super::*;
 
+    /// **The built-in trait table, stated a second time.**
+    ///
+    /// [`BuiltinTrait::info`] is one row per trait and every accessor projects it, which makes the
+    /// table small, central, and load-bearing: `builtin_recipe` decides what a bare `@derive(Name)`
+    /// synthesizes, `fixed_return` decides which impls are rejected, `declares_static` decides
+    /// whether a method takes a receiver. A wrong value in any of them changes behavior with nothing
+    /// to say so.
+    ///
+    /// Several columns were already covered, each by its own test: `operator` against
+    /// [`BinaryOp::overload_method`], `builtin_recipe` and `fixed_return` by membership tests naming
+    /// the traits that carry them, `name` through [`BuiltinTrait::from_name`]. What had nothing were
+    /// `declares_static`, `generic_arity` and `conversion` — and `required_method`, pinned for two
+    /// traits and free for the rest.
+    ///
+    /// The deeper gap was that **nothing forced a new trait to be described at all**: every one of
+    /// those tests names the traits it cares about, so a trait added to the registry joins none of
+    /// them and arrives with its facts unchecked.
+    ///
+    /// The risk is not theoretical. Reshaping this table into `..Info::DEFAULTS` rows meant retyping
+    /// twenty-one of them, which gave `Equatable` an `operator` entry it never had — caught because
+    /// that column happened to have a gate. Three columns had none.
+    ///
+    /// So this is a deliberate **second statement** of the same facts, in a different shape. It
+    /// cannot catch a wrong value typed identically into both, and does not try to; what it catches
+    /// is the failure that actually happened — a mechanical edit to one shape (a retype, a sed, a
+    /// refactor) silently changing what a trait means. Adding a trait forces a row here, so the next
+    /// one is described twice on purpose rather than once by accident.
+    const CENSUS: &[(
+        BuiltinTrait,
+        &str,
+        RequiredMethod,
+        Option<BinaryOp>,
+        bool,
+        Option<FixedReturn>,
+        bool,
+        usize,
+        Option<ConversionRole>,
+    )] = &[
+        // trait, name, required method, operator, recipe, fixed return, static, arity, conversion
+        (
+            BuiltinTrait::Add,
+            "Add",
+            Some(("add", Some(1))),
+            Some(BinaryOp::Add),
+            false,
+            None,
+            false,
+            0,
+            None,
+        ),
+        (
+            BuiltinTrait::Sub,
+            "Sub",
+            Some(("sub", Some(1))),
+            Some(BinaryOp::Sub),
+            false,
+            None,
+            false,
+            0,
+            None,
+        ),
+        (
+            BuiltinTrait::Mul,
+            "Mul",
+            Some(("mul", Some(1))),
+            Some(BinaryOp::Mul),
+            false,
+            None,
+            false,
+            0,
+            None,
+        ),
+        (
+            BuiltinTrait::Div,
+            "Div",
+            Some(("div", Some(1))),
+            Some(BinaryOp::Div),
+            false,
+            None,
+            false,
+            0,
+            None,
+        ),
+        (
+            BuiltinTrait::Concat,
+            "Concat",
+            Some(("concat", Some(1))),
+            Some(BinaryOp::Concat),
+            false,
+            None,
+            false,
+            0,
+            None,
+        ),
+        (
+            BuiltinTrait::Equatable,
+            "Equatable",
+            Some(("eq", Some(1))),
+            None,
+            true,
+            Some(FixedReturn::Bool),
+            false,
+            0,
+            None,
+        ),
+        (
+            BuiltinTrait::Comparable,
+            "Comparable",
+            Some(("compare", Some(1))),
+            None,
+            true,
+            Some(FixedReturn::Ordering),
+            false,
+            0,
+            None,
+        ),
+        (
+            BuiltinTrait::Display,
+            "Display",
+            Some(("to_string", Some(0))),
+            None,
+            true,
+            None,
+            false,
+            0,
+            None,
+        ),
+        (
+            BuiltinTrait::Error,
+            "Error",
+            Some(("message", Some(0))),
+            None,
+            true,
+            None,
+            false,
+            0,
+            None,
+        ),
+        (
+            BuiltinTrait::From,
+            "From",
+            Some(("from", Some(1))),
+            None,
+            false,
+            None,
+            true,
+            1,
+            Some(ConversionRole::FromSource),
+        ),
+        (
+            BuiltinTrait::Clone,
+            "Clone",
+            None,
+            None,
+            true,
+            None,
+            false,
+            0,
+            None,
+        ),
+        (
+            BuiltinTrait::Serialize,
+            "Serialize",
+            None,
+            None,
+            true,
+            None,
+            false,
+            1,
+            None,
+        ),
+        (
+            BuiltinTrait::Deserialize,
+            "Deserialize",
+            None,
+            None,
+            true,
+            None,
+            false,
+            1,
+            None,
+        ),
+        (
+            BuiltinTrait::Index,
+            "Index",
+            Some(("get", Some(1))),
+            None,
+            false,
+            None,
+            false,
+            0,
+            None,
+        ),
+        (
+            BuiltinTrait::Length,
+            "Length",
+            Some(("len", Some(0))),
+            None,
+            false,
+            None,
+            false,
+            0,
+            None,
+        ),
+        (
+            BuiltinTrait::Iterable,
+            "Iterable",
+            Some(("iter", Some(0))),
+            None,
+            false,
+            None,
+            false,
+            0,
+            None,
+        ),
+        (
+            BuiltinTrait::Callable,
+            "Callable",
+            Some(("call", None)),
+            None,
+            false,
+            None,
+            false,
+            0,
+            None,
+        ),
+        (
+            BuiltinTrait::Members,
+            "Members",
+            Some(("get", Some(1))),
+            None,
+            false,
+            None,
+            false,
+            0,
+            None,
+        ),
+        (
+            BuiltinTrait::DynamicCall,
+            "DynamicCall",
+            Some(("call", Some(2))),
+            None,
+            false,
+            None,
+            false,
+            0,
+            None,
+        ),
+        (
+            BuiltinTrait::TryAdd,
+            "TryAdd",
+            Some(("try_add", Some(1))),
+            None,
+            false,
+            None,
+            false,
+            0,
+            None,
+        ),
+        (
+            BuiltinTrait::Validate,
+            "Validate",
+            Some(("validate", Some(0))),
+            None,
+            false,
+            None,
+            false,
+            0,
+            None,
+        ),
+        (
+            BuiltinTrait::To,
+            "To",
+            Some(("to", Some(0))),
+            None,
+            false,
+            None,
+            false,
+            1,
+            Some(ConversionRole::ToTarget),
+        ),
+    ];
+
+    /// The census describes **exactly** the registry — so a trait added to one and not the other
+    /// fails here rather than shipping half-described.
+    #[test]
+    fn the_census_covers_every_built_in_trait() {
+        let censused: Vec<BuiltinTrait> = CENSUS.iter().map(|r| r.0).collect();
+        assert_eq!(
+            censused,
+            BUILTIN_TRAITS.to_vec(),
+            "`CENSUS` must list exactly `BUILTIN_TRAITS`, in order — a trait described in one and \
+             not the other is a trait whose facts nothing checks"
+        );
+    }
+
+    /// Every column, against the table it restates.
+    #[test]
+    fn every_column_of_the_trait_table_is_pinned() {
+        for &(t, name, required, operator, recipe, fixed, is_static, arity, conversion) in CENSUS {
+            assert_eq!(t.name(), name, "name for {t:?}");
+            assert_eq!(t.required_method(), required, "required_method for {t:?}");
+            assert_eq!(t.operator(), operator, "operator for {t:?}");
+            assert_eq!(t.has_builtin_recipe(), recipe, "builtin_recipe for {t:?}");
+            assert_eq!(t.fixed_return(), fixed, "fixed_return for {t:?}");
+            assert_eq!(t.declares_static(), is_static, "declares_static for {t:?}");
+            assert_eq!(t.generic_arity(), arity, "generic_arity for {t:?}");
+            assert_eq!(t.conversion(), conversion, "conversion for {t:?}");
+        }
+    }
+
+    /// The conversion columns, cross-checked against the crate that **names** a conversion's body —
+    /// an independent source rather than a restatement, so this one catches a value typed wrong in
+    /// both shapes.
+    ///
+    /// A trait declaring a [`ConversionRole`] must be spelled and provide its method exactly as
+    /// `noeta_ast::conversion` writes them, because that module builds the method-table key every
+    /// call site resolves through; a mismatch would key a conversion under a name nothing dispatches
+    /// to. Both are also arity 1: a conversion names one counterpart.
+    #[test]
+    fn conversion_traits_agree_with_the_naming_rule() {
+        use noeta_ast::conversion::{FROM_METHOD, FROM_TRAIT, TO_METHOD, TO_TRAIT};
+        for t in BUILTIN_TRAITS.iter().copied() {
+            let Some(role) = t.conversion() else { continue };
+            let (want_trait, want_method) = match role {
+                ConversionRole::FromSource => (FROM_TRAIT, FROM_METHOD),
+                ConversionRole::ToTarget => (TO_TRAIT, TO_METHOD),
+            };
+            assert_eq!(t.name(), want_trait, "spelling for {t:?}");
+            assert_eq!(
+                t.required_method_name(),
+                Some(want_method),
+                "method for {t:?}"
+            );
+            assert_eq!(t.generic_arity(), 1, "a conversion names one counterpart");
+        }
+    }
+
     /// Every infix operator that `noeta-ast` says is overloadable must have exactly one operator
     /// trait here whose required method matches — and vice versa. This pins the two definitions
     /// (the backends' `overload_method`, the checker's registry) together so they cannot drift.
