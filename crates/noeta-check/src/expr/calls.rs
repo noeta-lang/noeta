@@ -795,6 +795,42 @@ impl Checker {
         }
         ret
     }
+    /// The method-table key a `value.to::<Target>()` selects, or `name` unchanged.
+    ///
+    /// A conversion declared on the source occupies `to<Target>`, never the bare `to` — the same
+    /// rule that names a `From` conversion after its source, for the same reason: a type may
+    /// convert into several targets, so the bare name would name a set. The turbofish is what says
+    /// which, so this is where the two meet.
+    ///
+    /// Asked of whichever conversion traits exist rather than of `To` by name, so the rule stays
+    /// one rule.
+    fn conversion_turbofish_key(
+        &mut self,
+        type_name: &str,
+        name: &str,
+        resolved: &[Type],
+        name_span: Span,
+    ) -> Option<String> {
+        let role = noeta_types::BUILTIN_TRAITS
+            .iter()
+            .copied()
+            .find(|t| t.conversion().is_some() && t.required_method_name() == Some(name))
+            .and_then(|t| t.conversion())?;
+        let [arg] = resolved else {
+            return None;
+        };
+        let spelled = arg.to_string();
+        let candidate = if role.arg_is_return() {
+            noeta_ast::conversion::to_method_key(&spelled)
+        } else {
+            noeta_ast::conversion::from_method_key(&spelled)
+        };
+        let _ = name_span;
+        self.symbols
+            .methods
+            .contains_key(&(type_name.to_string(), candidate.clone()))
+            .then_some(candidate)
+    }
 
     /// **`Target.from(x)` where `Target` declares conversions** — the explicit twin of the `?`
     /// conversion rule ([`Checker::check_try_error`]), and the call site that says *which* one.
@@ -818,46 +854,6 @@ impl Checker {
     /// a type (or is shadowed by a local), a target declaring no conversion at all, or an argument
     /// the enum's built-in conversion accepts, which the arm below types.
     #[allow(clippy::too_many_arguments)]
-    /// The method-table key a `value.to::<Target>()` selects, or `name` unchanged.
-    ///
-    /// A conversion declared on the source occupies `to<Target>`, never the bare `to` — the same
-    /// rule that names a `From` conversion after its source, for the same reason: a type may
-    /// convert into several targets, so the bare name would name a set. The turbofish is what says
-    /// which, so this is where the two meet.
-    ///
-    /// Asked of whichever conversion traits exist rather than of `To` by name, so the rule stays
-    /// one rule.
-    fn conversion_turbofish_key(
-        &mut self,
-        type_name: &str,
-        name: &str,
-        resolved: &[Type],
-        name_span: Span,
-    ) -> Option<String> {
-        let Some(t) = noeta_types::BUILTIN_TRAITS
-            .iter()
-            .copied()
-            .find(|t| t.conversion().is_some() && t.required_method_name() == Some(name))
-        else {
-            return None;
-        };
-        let role = t.conversion()?;
-        let [arg] = resolved else {
-            return None;
-        };
-        let spelled = arg.to_string();
-        let candidate = if role.arg_is_return() {
-            noeta_ast::conversion::to_method_key(&spelled)
-        } else {
-            noeta_ast::conversion::from_method_key(&spelled)
-        };
-        let _ = name_span;
-        self.symbols
-            .methods
-            .contains_key(&(type_name.to_string(), candidate.clone()))
-            .then_some(candidate)
-    }
-
     fn check_from_conversion_call(
         &mut self,
         receiver: &Expr,
