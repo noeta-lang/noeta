@@ -1,0 +1,71 @@
+// `impl To<Target> for Source` — the conversion declared on the SOURCE, and the mirror of
+// `impl From<Source>`. It is not a second way to write the same thing: a conversion's impl must
+// live with its own type, so `From` requires the TARGET to be local and therefore cannot reach a
+// target another package owns. `To` sits with the source, which is what makes converting *into* a
+// foreign type writable at all — and a `?` whose function declares a foreign error type is exactly
+// that case.
+//
+// Three things are pinned here. The explicit call selects the conversion by naming its counterpart
+// (`to::<Target>()`), the way `Target.from(x)` selects one by its argument's type — the bare `to`
+// names a set and is nobody's key. The `?` position converts through it, which is the one implicit
+// conversion in the language. And a type may declare several, one per target, exactly as a target
+// may declare one `From` per source.
+// expect: stdout "250"
+// expect: stdout "reported: disk"
+// expect: stdout "2 cents"
+// expect: stdout "ok=7"
+// expect: exit 0
+struct Cents { amount: int }
+struct Money { total: int }
+struct Label { text: string }
+
+// Two conversions from one source: one per target, named apart by the target each reaches.
+impl To<Money> for Cents {
+    pub fn to(): Money { return Money { total: self.amount } }
+}
+impl To<Label> for Cents {
+    pub fn to(): Label { return Label { text: self.amount ~ " cents" } }
+}
+
+struct LowLevel { note: string }
+struct Reported { note: string }
+
+impl Error for LowLevel { pub fn message(): string { return self.note } }
+impl Error for Reported { pub fn message(): string { return self.note } }
+
+impl To<Reported> for LowLevel {
+    pub fn to(): Reported { return Reported { note: "reported: " ~ self.note } }
+}
+
+fn fails(): Result<int, LowLevel> {
+    return Err(LowLevel { note: "disk" })
+}
+
+// The `?` converts the propagated `LowLevel` into the declared `Reported` through the `To` impl —
+// the conversion `Reported` itself never declares, and could not if it belonged to someone else.
+fn reported(): Result<int, Reported> {
+    v = fails()?
+    return Ok(v)
+}
+
+fn succeeds(): Result<int, LowLevel> {
+    return Ok(7)
+}
+
+// A `?` whose propagated error needs no conversion is untouched by any of this.
+fn passes_through(): Result<int, Reported> {
+    v = succeeds()?
+    return Ok(v)
+}
+
+c = Cents { amount: 250 }
+echo c.to::<Money>().total
+echo match reported() {
+    Ok(v)  => "ok=" ~ v,
+    Err(e) => e.message(),
+}
+echo Cents { amount: 2 }.to::<Label>().text
+echo match passes_through() {
+    Ok(v)  => "ok=" ~ v,
+    Err(e) => e.message(),
+}

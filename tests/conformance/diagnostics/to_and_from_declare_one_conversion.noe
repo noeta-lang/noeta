@@ -1,0 +1,17 @@
+// A conversion is the ordered pair of its two types, and both spellings state that pair: an
+// `impl From<A>` on `B` and an `impl To<B>` for `A` are two bodies for one relation, not two
+// relations. Declaring both is a conflict, and both sites are named.
+//
+// It stays fixable by construction, which is why this is an error rather than a precedence rule:
+// the two spellings can only ever be written by ONE package. Each requires its own type to be
+// local and the other merely visible, so two packages declaring one conversion would have to
+// depend on each other. The author of a conflict therefore owns both impls and can delete one.
+// expect: error E0027 at 15:27
+// expect: exit 1
+struct A { v: int }
+struct B { v: int }
+
+impl From<A> for B { pub fn from(value: A): B { return B { v: value.v } } }
+impl To<B> for A { pub fn to(): B { return B { v: self.v + 1 } } }
+
+echo "never runs"

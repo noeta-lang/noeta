@@ -1,0 +1,15 @@
+// A conversion trait's type argument has to agree with its method's signature, and WHICH half it
+// agrees with is the trait's own business: `From<Source>` names the method's parameter, `To<Target>`
+// names its return. One rule, asked of the trait — so this is the `To` half of the check that
+// already rejects an `impl From<X>` whose `from` takes a `Y`.
+// expect: error E0015 at 12:12
+// expect: exit 1
+struct Cents { amount: int }
+struct Money { total: int }
+struct Label { text: string }
+
+impl To<Money> for Cents {
+    pub fn to(): Label { return Label { text: "wrong target" } }
+}
+
+echo "never runs"
