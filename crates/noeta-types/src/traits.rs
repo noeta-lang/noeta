@@ -1,10 +1,13 @@
-//! The built-in trait registry — the fixed set of traits an `impl` block or `@derive(...)`
-//! directive may name.
+//! The built-in trait registry — the traits the **language** defines, as opposed to the ones a
+//! program declares for itself with `trait Name { … }`.
 //!
-//! The language has no user-defined traits: a class implements one of these built-ins to "light
-//! up" its operator or protocol (`impl Add` enables `+`, `impl Display` enables `echo`), and the
-//! `@derive(...)` directive asks the compiler to synthesize the implementation for the
-//! value-object cases. Data attributes (`#[...]`) are a separate mechanism and do not name traits
+//! A type implements one of these to "light up" its operator or protocol (`impl Add` enables `+`,
+//! `impl Display` enables `echo`), and `@derive(...)` asks the compiler to synthesize the
+//! implementation for the value-object cases. The set is fixed because dispatch depends on it: `==`
+//! has to know which method answers it, so an operator cannot be attached to a trait named at will.
+//! A user-declared trait sits alongside them — it can be implemented, bounded on, derived through a
+//! default, and made into a trait object — and it is checked elsewhere; this registry answers only
+//! "is this name one of the language's own, and what does it require". Data attributes (`#[...]`) are a separate mechanism and do not name traits
 //! here. This table is the single source of truth the checker validates `impl`/`@derive` names against
 //! (`noeta-check`), and the operator → method correspondence it encodes is kept in lockstep with
 //! [`BinaryOp::overload_method`](noeta_ast::BinaryOp::overload_method) by a unit test below.

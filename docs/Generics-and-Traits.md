@@ -279,7 +279,7 @@ Declared bounds ride along (`g: (Box, Box) -> Box = biggest` is E0025 when `Box`
 
 ## The built-in traits
 
-Traits are a **fixed built-in set** — naming an unknown one is E0014. Operators dispatch to a trait's method:
+The traits below are **built into the language** — a fixed set an `impl` or `@derive(...)` may name, and naming a trait that is neither one of these nor [declared in the program](#implementing-a-trait) is E0014. They are what operators and protocols dispatch through, which is why they are fixed: `==` has to know which method answers it. A program declares its own traits alongside them.
 
 | Trait | Method | Lights up |
 |---|---|---|
