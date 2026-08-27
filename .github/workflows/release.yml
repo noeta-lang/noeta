@@ -225,7 +225,12 @@ jobs:
   # can't trigger workflows in another repo, so this uses a PAT with `contents: write` on the sites.
   notify-web:
     name: Dispatch to the web repos
-    needs: build
+    # `needs: release` is load-bearing, the same way `advance-ecosystem-version` is for the para
+    # dispatch below. A receiving repo builds the docs site by DOWNLOADING this release's linux
+    # tarball and running the binary to generate the reference sections; dispatch before the assets
+    # are attached and that download 404s, the generated pages are silently absent, and every link
+    # into them is dead — a deploy failure that reads as broken content and is really a race.
+    needs: [build, release]
     if: needs.build.outputs.is_prerelease != 'true'
     runs-on: ubuntu-latest
     strategy:
