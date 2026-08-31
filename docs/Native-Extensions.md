@@ -266,6 +266,8 @@ This does not widen what a hook can see. The declaration's own fields are part o
 
 **A hook only ever sees a legal invocation.** Placement and the declared argument contract are checked before it runs, so it need not defend against a directive that sat somewhere it does not belong or was called with arguments it never declared. Reading the filesystem is authorized by the package's `[trust]` grant; beyond that, a hook must be a pure function of its `DirectiveCtx` and the files it reports.
 
+**A generated member may not take a name the declaration already uses.** The members go in *after* the hand-written ones, and a collision between the two is **E0079**, naming the directive and both spans. There is no precedence rule to fall back on, and that is the point: the generated half is written from a document outside the program, so "the author wins" drops a generated member the day that document grows an operation whose name is already taken, and "the generator wins" drops the author's method the day it does. Either way real code stops running with nothing to say so. A generator that can collide with *itself* should suffix the loser rather than overwrite it — losing an operation is the failure nobody notices.
+
 Failures are reported as **E0062**, always blamed on the directive rather than on a generated line — the author wrote one line and cannot edit the hundred it produced — with the position inside the generated source carried in the message.
 
 ## Derive recipes (`ExtDerive`)

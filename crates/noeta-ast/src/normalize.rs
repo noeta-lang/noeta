@@ -32,11 +32,11 @@
 
 use crate::{
     Arg, AssocTypeDecl, AttrValue, Attribute, ClassDecl, ClosureBody, Decorators, DeriveSpec,
-    EnumDecl, Expr, FieldDecl, FieldInit, FnDecl, ForPattern, ForeignDirective, ImplBlock,
-    ImplDecl, MatchArm, MemberBinding, MethodDirective, Name, ObjectLit, PackedDirective,
-    PackedLayout, Param, Pattern, Program, ReflectKind, ReflectOperand, RoleTag, Stmt, StrPart,
-    StructDecl, TierDecl, TraitBound, TraitDecl, TraitMethod, TypeOperand, TypeParam, TypeRef,
-    UnaryOp, UseName, VariantDecl,
+    EnumDecl, ExpansionMark, Expr, FieldDecl, FieldInit, FnDecl, ForPattern, ForeignDirective,
+    ImplBlock, ImplDecl, MatchArm, MemberBinding, MethodDirective, Name, ObjectLit,
+    PackedDirective, PackedLayout, Param, Pattern, Program, ReflectKind, ReflectOperand, RoleTag,
+    Stmt, StrPart, StructDecl, TierDecl, TraitBound, TraitDecl, TraitMethod, TypeOperand,
+    TypeParam, TypeRef, UnaryOp, UseName, VariantDecl,
 };
 use noeta_span::{SourceId, Span};
 
@@ -601,6 +601,7 @@ impl Normalize for Decorators {
             packed,
             validated,
             foreign,
+            expansions,
         } = self;
         derives.normalize(how);
         attrs.normalize(how);
@@ -610,6 +611,23 @@ impl Normalize for Decorators {
         packed.normalize(how);
         validated.normalize(how);
         foreign.normalize(how);
+        expansions.normalize(how);
+    }
+}
+
+impl Normalize for ExpansionMark {
+    fn normalize(&mut self, how: &Normalization) {
+        let ExpansionMark {
+            directive,
+            origin,
+            source,
+        } = self;
+        directive.normalize(how);
+        origin.normalize(how);
+        // The generated source's id is the key a member's span is matched against, so zeroing it
+        // would make every expansion on a declaration look like the same one. It is also not a
+        // span: nothing a format shifts.
+        let _ = source;
     }
 }
 

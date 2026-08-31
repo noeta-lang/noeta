@@ -5520,6 +5520,9 @@ where
                             packed,
                             validated,
                             foreign,
+                            // Filled by the loader when a directive's expansion hook contributes
+                            // members; the parser has nothing to put here.
+                            expansions: Vec::new(),
                         },
                     ),
                     pub_kw.is_some(),

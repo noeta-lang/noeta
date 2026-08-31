@@ -114,7 +114,14 @@ pub fn expand_program(
             out.reads.extend(reads);
             match result {
                 Ok(done) => {
-                    splice(&mut program.stmts[index], done.members);
+                    // The stamp travels with the members, so a later pass can tell a generated
+                    // member from a hand-written one by its span's source alone.
+                    let mark = noeta_ast::ExpansionMark {
+                        directive: plan.directive.name.to_string(),
+                        origin: plan.span,
+                        source: done.source.id(),
+                    };
+                    splice(&mut program.stmts[index], done.members, mark);
                     out.sources.push(ExpandedSource {
                         source: done.source,
                         origin: plan.span,
@@ -424,29 +431,42 @@ fn members_of(program: Program) -> Option<Members> {
     }
 }
 
-/// Add the generated members to the declaration, **after** the hand-written ones.
+/// Add the generated members to the declaration, **after** the hand-written ones, and record which
+/// directive put them there.
 ///
 /// Order is the visible rule: what the author wrote comes first, so reading a type top-to-bottom
 /// reads their code before the generator's, and a generated member never shifts the position of a
 /// hand-written one.
-fn splice(stmt: &mut Stmt, m: Members) {
+///
+/// The [`noeta_ast::ExpansionMark`] goes on the declaration rather than on each member because the
+/// generated source is one source: a member's `span.source` already identifies its expansion, so
+/// one stamp per expansion says the same thing as a stamp per member and cannot fall out of step
+/// with the members it describes. The checker reads it to name `@<directive>` when a generated
+/// member collides with a hand-written one (`E0079`).
+fn splice(stmt: &mut Stmt, m: Members, mark: noeta_ast::ExpansionMark) {
     match stmt {
         Stmt::Struct(d) => {
             d.fields.extend(m.fields);
             d.methods.extend(m.methods);
             d.impls.extend(m.impls);
+            d.decorators.expansions.push(mark);
         }
         Stmt::Class(d) => {
             d.fields.extend(m.fields);
             d.methods.extend(m.methods);
             d.impls.extend(m.impls);
+            d.decorators.expansions.push(mark);
         }
         Stmt::Enum(d) => {
             d.variants.extend(m.variants);
             d.methods.extend(m.methods);
             d.impls.extend(m.impls);
+            d.decorators.expansions.push(mark);
         }
-        Stmt::Trait(d) => d.methods.extend(m.trait_methods),
+        Stmt::Trait(d) => {
+            d.methods.extend(m.trait_methods);
+            d.decorators.expansions.push(mark);
+        }
         // `plan_for` plans only for the kinds `keyword_of` names, which are exactly these.
         _ => {}
     }

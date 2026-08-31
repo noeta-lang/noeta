@@ -543,6 +543,19 @@ pub enum DiagnosticCode {
     /// Advisory, not an error: the representation is intact and every arithmetic, comparison and
     /// serialization that *does* fix the width still reads it correctly.
     ErasedWidthDisplay,
+    /// A declaration names the same member twice: two fields, two enum variants, or two methods of
+    /// one name in one `struct`/`class`/`enum`/`trait` body.
+    ///
+    /// An error rather than a precedence rule, because one of the two is always lost and nothing
+    /// says which. That matters most where the second member was *generated*: an `@`-directive's
+    /// expansion is written from a file outside the program — an interface description, a schema —
+    /// so under "the author wins" a later edit to that file silently drops a generated member, and
+    /// under "the generator wins" it silently drops the author's. Refusing the collision is the one
+    /// outcome that loses neither.
+    ///
+    /// Appended at the tail because this enum is on the `.noeb` wire and postcard encodes a variant
+    /// by declaration index — see [`Self::ErasedWidthDisplay`].
+    DuplicateMember,
 }
 
 impl DiagnosticCode {
@@ -626,6 +639,7 @@ impl DiagnosticCode {
         DiagnosticCode::PrivateMethod,
         DiagnosticCode::RedundantVisibility,
         DiagnosticCode::ErasedWidthDisplay,
+        DiagnosticCode::DuplicateMember,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -710,6 +724,7 @@ impl DiagnosticCode {
             DiagnosticCode::PrivateMethod => "E0076",
             DiagnosticCode::RedundantVisibility => "E0077",
             DiagnosticCode::ErasedWidthDisplay => "E0078",
+            DiagnosticCode::DuplicateMember => "E0079",
         }
     }
 

@@ -25,6 +25,10 @@ noeta-ext-abi = { workspace = true }
 # units before linking (a dev-dep never re-enters the library build graph, so stdlib body edits
 # still skip this crate's lib).
 noeta-stdlib = { workspace = true }
+# The expansion tests check what they link: whether a generated member collides with a hand-written
+# one is the checker's judgement (E0079), and asserting it here is what proves the loader's
+# expansion stamp survives the trip. A dev-dep only, so the library layering is unchanged.
+noeta-check = { workspace = true }
 # Scratch projects for the linking tests, private to each process: this crate links an entry's
 # sibling files as modules, so a fixture in the shared system temp dir would sweep in whatever
 # `.noe` files another process left there.

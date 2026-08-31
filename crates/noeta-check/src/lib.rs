@@ -69,9 +69,9 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use noeta_ast::conversion::Spelling;
 use noeta_ast::{
-    AttrValue, Attribute, BinaryOp, BuiltinTy, ClassDecl, DeriveSpec, EnumDecl, Expr, FieldDecl,
-    FnDecl, ForPattern, ImplBlock, ImplDecl, MatchArm, MethodDirective, Param, Pattern, Program,
-    Stmt, StrPart, StructDecl, TypeParam, TypeRef, UnaryOp,
+    AttrValue, Attribute, BinaryOp, BuiltinTy, ClassDecl, Decorators, DeriveSpec, EnumDecl, Expr,
+    FieldDecl, FnDecl, ForPattern, ImplBlock, ImplDecl, MatchArm, MethodDirective, Param, Pattern,
+    Program, Stmt, StrPart, StructDecl, TypeParam, TypeRef, UnaryOp,
 };
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 pub use noeta_edition::Provenance;

@@ -1,0 +1,17 @@
+// A `struct` may not name the same member twice — E0079, once for the fields and once for the
+// methods. Nothing picks a winner, because there is no answer that keeps both: whichever member is
+// dropped, the code written for it stops running and nothing says so. Fields and methods stay
+// separate name spaces (`closures/field_vs_method_precedence.noe` pins that pair), so this fires
+// only within one kind.
+// expect: error E0079 at 12:5
+// expect: error E0079 at 15:12
+// expect: exit 1
+struct S {
+    x: int
+    y: int
+    x: int
+
+    pub fn f(): int { return self.y; }
+    pub fn f(): int { return self.x; }
+}
+echo "unreached"
