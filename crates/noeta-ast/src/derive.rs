@@ -544,7 +544,12 @@ fn deduce_field_bridge(
 /// entry synthesizes the trait's one required method through the field:
 ///
 /// - `Equatable`/`Comparable` compare the fields (`self.f == other.f` / `self.f.compare(other.f)`);
-/// - `Display` forwards `to_string`;
+/// - `Display` **renders** the field (`return "${self.f}"`), for the reason [`plan_error_derive`]
+///   renders `self`: rendering is a protocol every value answers, while `to_string` is a *method*
+///   only a type carrying `Display` has, so a field typed `string`/`int`/`List<…>` has nothing to
+///   forward a call to. A field whose type does write a `to_string` still reaches it —
+///   interpolation is the door `display_value` consults it through — so one template serves every
+///   field type and a hand-written `to_string` stays authoritative;
 /// - the operator traits (`Add`/`Sub`/`Mul`/`Div`/`Concat`) unwrap-op-**rewrap** — the result is a
 ///   new value of the deriving type, so they require the type to have exactly one field (the
 ///   newtype shape; anything else has no well-defined value for the other fields).
@@ -634,9 +639,8 @@ pub fn plan_builtin_via(
             };
             Ok(one(
                 decl,
-                Expr::Call {
-                    callee: Box::new(member(self_f(), "to_string", span)),
-                    args: Vec::new(),
+                Expr::Interp {
+                    parts: vec![StrPart::Hole(self_f())],
                     span,
                 },
             ))

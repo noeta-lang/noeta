@@ -1,0 +1,94 @@
+// **A `@derive(Trait, via: f)` answers wherever its membership does — for every delegable
+// built-in, through every field type the derive accepts.**
+//
+// A `via:` derive plants a forwarder whose body is a *use* of the field, and registers membership
+// either way. So the failure it can produce is the trait-surface one: `traits_of` reports the
+// trait, `x is dyn Trait` answers `true`, a `dyn Trait` parameter accepts the value — and the
+// trait's own method aborts at run time. Every trait below is therefore asserted at all of those
+// doors at once, on a field whose type is a **primitive**, which is the shape that has nothing to
+// forward a *method* call to: a `string` has no `to_string()`, an `int` no `add()`.
+//
+// `Display` is the one that decides this by construction rather than by a check: the template
+// **renders** the field (`"${self.f}"`) instead of calling `to_string()` on it, so it delegates
+// through any field type at all, and a field whose type does write a `to_string` still reaches it
+// — the third column of the `render` lines is the nested case, where the forwarder must produce
+// the inner type's own text and not a structural dump.
+//
+// `Equatable`'s forward is `==`, which is universal, so it needs no field constraint either. The
+// remaining delegable built-ins do, and `derive_via_builtin_field_unmet` is the negative half.
+
+// expect: stdout "display traits [\"Display\"] is true"
+// expect: stdout "display render hello | hello | hello | Ok(hello)"
+// expect: stdout "display int 7 | 7 | 7"
+// expect: stdout "display list [1, 2] | [1, 2] | [1, 2]"
+// expect: stdout "display nested inner:x | inner:x | inner:x | Ok(inner:x)"
+// expect: stdout "eq traits [\"Equatable\"] is true"
+// expect: stdout "eq same true true true | diff false false false"
+// expect: stdout "cmp traits [\"Comparable\"] is true"
+// expect: stdout "cmp Ordering.Less true Ordering.Less"
+// expect: stdout "concat ab | ab"
+// expect: stdout "add 8 | 8"
+// expect: exit 0
+
+@derive(Display, via: name)
+struct Tagged { name: string }
+
+@derive(Display, via: n)
+struct Counted { n: int }
+
+@derive(Display, via: xs)
+struct Listed { xs: List<int> }
+
+struct Inner {
+    tag: string
+    impl Display {
+        pub fn to_string(): string { return "inner:" ~ self.tag }
+    }
+}
+@derive(Display, via: inner)
+struct Nested { inner: Inner }
+
+@derive(Equatable, via: s)
+struct Word { s: string }
+
+@derive(Comparable, via: s)
+struct Ranked { s: string }
+
+@derive(Concat, via: s)
+struct Buf { s: string }
+
+@derive(Add, via: n)
+struct Cents { n: int }
+
+fn show(x: dyn Display): string { return x.to_string() }
+fn same(a: dyn Equatable, b: dyn Equatable): bool { return a.eq(b) }
+fn order(a: dyn Comparable, b: dyn Comparable): Ordering { return a.compare(b) }
+
+t = Tagged { name: "hello" }
+echo "display traits ${traits_of(t)} is ${t is dyn Display}"
+// The direct call, interpolation (the protocol the trait lights up), dispatch through the trait
+// object, and the reflective by-name door — one text, or the derive is not answering everywhere.
+echo "display render ${t.to_string()} | ${t} | ${show(t)} | ${invoke(t, "to_string", [])}"
+c = Counted { n: 7 }
+echo "display int ${c.to_string()} | ${c} | ${show(c)}"
+l = Listed { xs: [1, 2] }
+echo "display list ${l.to_string()} | ${l} | ${show(l)}"
+n = Nested { inner: Inner { tag: "x" } }
+echo "display nested ${n.to_string()} | ${n} | ${show(n)} | ${invoke(n, "to_string", [])}"
+
+a = Word { s: "a" }
+b = Word { s: "b" }
+echo "eq traits ${traits_of(a)} is ${a is dyn Equatable}"
+// The method, the operator that reads it, and dispatch through the object — one answer per pair.
+echo "eq same ${a.eq(Word { s: "a" })} ${a == Word { s: "a" }} ${same(a, Word { s: "a" })} | diff ${a.eq(b)} ${a == b} ${same(a, b)}"
+
+r = Ranked { s: "a" }
+q = Ranked { s: "b" }
+echo "cmp traits ${traits_of(r)} is ${r is dyn Comparable}"
+echo "cmp ${r.compare(q)} ${r < q} ${order(r, q)}"
+
+// The operator templates unwrap-op-rewrap: the result is a new value of the deriving type, so its
+// own field is readable — which is also what says the operator's static type is the impl's answer
+// and not the display form's `string`.
+echo "concat ${(Buf { s: "a" } ~ Buf { s: "b" }).s} | ${Buf { s: "a" }.concat(Buf { s: "b" }).s}"
+echo "add ${(Cents { n: 5 } + Cents { n: 3 }).n} | ${Cents { n: 5 }.add(Cents { n: 3 }).n}"

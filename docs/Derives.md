@@ -212,6 +212,8 @@ A bridge carries the trait method's **`async`-ness**: an `async` trait method sy
 struct Price { cents: int }
 ```
 
+**What each template demands of the field is checked at the derive** (E0050), because a `via:` derive registers the trait's membership whichever field it names — so a field that cannot answer the forwarded construct would give you a type that reports the trait, satisfies `is dyn Trait`, and then fails on the trait's one method. The demand is the same question the forwarded construct itself asks: `Comparable` needs a field that **orders**, `Error` a field whose type implements `Error`, and each operator trait a field its operator accepts (`@derive(Mul, via: label)` on a `string` field is refused, and `@derive(Concat, via: label)` on the same field is fine). `Equatable` and `Display` demand nothing at all: `==` is universal, and the `Display` template **renders** the field rather than calling `to_string()` on it, so it delegates through any field type — a `string`, an `int`, a `List`, or a type with a `to_string` of its own, which the rendering reaches exactly as `${…}` does.
+
 ## Native derive recipes
 
 An extension can register a derive (`ExtDerive` — see [Native Extensions](Native-Extensions)): `@derive(<Name>)` then synthesizes methods forwarding into the extension's native handler. std ships `Inspect` — `@derive(Inspect)` gives `inspect()`, a structural dump through the native JSON renderer. And with `fields_of(value)` (see [Attributes & Reflection](Attributes-and-Reflection)), a fully-defaulted user trait can do the same kind of structural work in pure Noeta — walk `self`'s fields reflectively — and be derived onto any type.

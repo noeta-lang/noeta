@@ -1,0 +1,47 @@
+// **What a `@derive(<BuiltinTrait>, via: f)` demands of its field is refused at the derive**, not
+// at the first call.
+//
+// A `via:` derive registers membership whatever the field is, so a field that cannot answer the
+// forwarded construct produces a type reporting the trait, satisfying `is dyn Trait`, and aborting
+// on the trait's one method. The demand is therefore the same question the forwarded construct
+// itself asks — `Comparable` an ordering, `Error` an `impl Error`, and the operator traits their
+// own operator on the field — and every delegable built-in that has one states it here, so a trait
+// gaining a template cannot arrive with the check missing.
+//
+// `Equatable` and `Display` are absent on purpose and are covered positively in
+// `derive_via_builtin_doors`: `==` is universal and the `Display` template renders the field
+// instead of calling a method on it, so neither can be handed a field it cannot use.
+//
+// Pinned at the **via field's span**, which only a static rejection reports: the run-time failure
+// each of these produces without the check lands inside the synthesized method, at the `@derive`
+// attribute's own span on the line above.
+// expect: error E0050 at 26:26
+// expect: error E0050 at 29:21
+// expect: error E0050 at 32:19
+// expect: error E0050 at 35:19
+// expect: error E0050 at 38:19
+// expect: error E0050 at 41:19
+// expect: error E0050 at 44:22
+// expect: exit 1
+@derive(Comparable, via: xs)
+struct Ordered { xs: List<int> }
+
+@derive(Error, via: s)
+struct Wrapped { s: string }
+
+@derive(Add, via: s)
+struct Summed { s: string }
+
+@derive(Sub, via: s)
+struct Taken { s: string }
+
+@derive(Mul, via: s)
+struct Scaled { s: string }
+
+@derive(Div, via: s)
+struct Split { s: string }
+
+@derive(Concat, via: n)
+struct Joined { n: int }
+
+echo 0

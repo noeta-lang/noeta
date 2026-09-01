@@ -1715,70 +1715,8 @@ impl Checker {
                     if let Some(h) = e.help {
                         d.help(h);
                     }
-                } else if t == BuiltinTrait::Comparable {
-                    // The forward is `self.f.compare(other.f)` — a via field whose type can
-                    // NEVER order (the same judgement the field-wise recipe applies) would only
-                    // fail at the first runtime comparison; reject it at the declaration. A via
-                    // field mentioning one of the type's own generic parameters is deferred to
-                    // the instantiation site instead (`satisfies` judges the substituted via
-                    // field — S4's `via:` twin), exactly like the field-wise recipe's deferral.
-                    let params: ParamSet = self
-                        .symbols
-                        .generic_types
-                        .get(type_name)
-                        .map(|ps| ps.iter().map(|p| p.id).collect())
-                        .unwrap_or_default();
-                    let field_ty = self
-                        .symbols
-                        .records
-                        .get(type_name)
-                        .and_then(|fs| fs.iter().find(|(n, _)| n == via_name))
-                        .map(|(_, ty)| ty.clone());
-                    if let Some(ty) = field_ty
-                        && !mentions_param(&ty, &params)
-                        && !self.type_orderable(&ty, &mut Vec::new())
-                    {
-                        self.error(
-                            DiagnosticCode::UnderivableTrait,
-                            *via_span,
-                            format!("`via: {via_name}` has no ordering (`{ty}`)"),
-                        )
-                        .help("delegate `Comparable` through a field whose type orders");
-                    }
-                } else if t == BuiltinTrait::Error {
-                    // The forward is `self.f.message()` — the via field's type must itself
-                    // implement `Error`, or the delegation dispatches into nothing (the same
-                    // judgement as a user-trait `via:`). A field typed as one of the deriving
-                    // type's own generic parameters defers to the instantiation site.
-                    let params: ParamSet = self
-                        .symbols
-                        .generic_types
-                        .get(type_name)
-                        .map(|ps| ps.iter().map(|p| p.id).collect())
-                        .unwrap_or_default();
-                    let field_ty = self
-                        .symbols
-                        .records
-                        .get(type_name)
-                        .and_then(|fs| fs.iter().find(|(n, _)| n == via_name))
-                        .map(|(_, ty)| ty.clone());
-                    if let Some(ty) = field_ty
-                        && !mentions_param(&ty, &params)
-                        && !self.satisfies(&ty, BuiltinTrait::Error)
-                    {
-                        self.error(
-                            DiagnosticCode::UnderivableTrait,
-                            *via_span,
-                            format!(
-                                "`via: {via_name}` forwards `message()` to the field, but its \
-                                 type (`{ty}`) does not implement `Error`"
-                            ),
-                        )
-                        .help(
-                            "the field's type needs an `impl Error` (or its own \
-                             `@derive(Error)`)",
-                        );
-                    }
+                } else {
+                    self.check_builtin_via_field(t, type_name, via_name, *via_span);
                 }
                 continue;
             }
@@ -1930,6 +1868,104 @@ impl Checker {
             }
             self.check_derive_field_constraint(type_name, t, spec.span);
         }
+    }
+
+    /// **What a `@derive(<BuiltinTrait>, via: f)` demands of the field it delegates through** —
+    /// asked once, for every delegable built-in.
+    ///
+    /// A `via:` derive plants a forwarder whose body is a *use* of the field: `self.f.compare(…)`,
+    /// `self.f.message()`, `self.f + other.f`. Membership is registered either way, so a field that
+    /// cannot answer that use produces a type which reports the trait, satisfies `is dyn Trait`,
+    /// and then aborts at the first call — the disagreement a declaration exists to prevent. The
+    /// demand is therefore the same question the forwarded construct itself asks, and each trait
+    /// names it below rather than each trait's own `else if` re-deriving the field type:
+    ///
+    /// * `Comparable` — the field must **order**, the judgement the field-wise recipe applies;
+    /// * `Error` — the field's type must itself implement `Error`, or `message()` dispatches into
+    ///   nothing;
+    /// * `Add`/`Sub`/`Mul`/`Div`/`Concat` — the field must satisfy the **operator's own trait**,
+    ///   the same predicate `a + b` consults on its operands;
+    /// * `Equatable` and `Display` demand nothing: `==` is universal and the `Display` template
+    ///   renders the field rather than calling a method on it, so every field type answers.
+    ///
+    /// A via field mentioning one of the deriving type's own generic parameters is deferred to the
+    /// instantiation site (`satisfies` judges the substituted via field — S4's `via:` twin),
+    /// exactly like the field-wise recipe's deferral.
+    fn check_builtin_via_field(
+        &mut self,
+        t: BuiltinTrait,
+        type_name: &str,
+        via_name: &str,
+        via_span: Span,
+    ) {
+        // What the forwarded construct asks of the field, and how to say it went unanswered.
+        let (met, message, help): (bool, String, String) = {
+            let params: ParamSet = self
+                .symbols
+                .generic_types
+                .get(type_name)
+                .map(|ps| ps.iter().map(|p| p.id).collect())
+                .unwrap_or_default();
+            let Some(ty) = self
+                .symbols
+                .records
+                .get(type_name)
+                .and_then(|fs| fs.iter().find(|(n, _)| n == via_name))
+                .map(|(_, ty)| ty.clone())
+            else {
+                return;
+            };
+            if mentions_param(&ty, &params) {
+                return;
+            }
+            match t {
+                BuiltinTrait::Comparable => (
+                    self.type_orderable(&ty, &mut Vec::new()),
+                    format!("`via: {via_name}` has no ordering (`{ty}`)"),
+                    "delegate `Comparable` through a field whose type orders".to_string(),
+                ),
+                BuiltinTrait::Error => (
+                    self.satisfies(&ty, BuiltinTrait::Error),
+                    format!(
+                        "`via: {via_name}` forwards `message()` to the field, but its type \
+                         (`{ty}`) does not implement `Error`"
+                    ),
+                    "the field's type needs an `impl Error` (or its own `@derive(Error)`)"
+                        .to_string(),
+                ),
+                // The operator templates unwrap-op-rewrap: the body applies the operator to the
+                // two fields, so the field has to be an operand the operator accepts.
+                BuiltinTrait::Add
+                | BuiltinTrait::Sub
+                | BuiltinTrait::Mul
+                | BuiltinTrait::Div
+                | BuiltinTrait::Concat => {
+                    let op = t
+                        .operator()
+                        .expect("an operator trait names the operator it overloads")
+                        .symbol();
+                    (
+                        self.operand_satisfies_operator(&ty, t),
+                        format!(
+                            "`via: {via_name}` applies `{op}` to the field, but its type (`{ty}`) \
+                             does not implement `{}`",
+                            t.name()
+                        ),
+                        format!(
+                            "delegate `{}` through a field whose type is an operand of `{op}`",
+                            t.name()
+                        ),
+                    )
+                }
+                // Nothing to demand — see the doc comment.
+                _ => return,
+            }
+        };
+        if met {
+            return;
+        }
+        self.error(DiagnosticCode::UnderivableTrait, via_span, message)
+            .help(help);
     }
 
     /// Validate a `@derive(<UserTrait>)` through the shared planner (UT5 + derive layers 1+2):
