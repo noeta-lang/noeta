@@ -13,6 +13,9 @@
 // a reference date — so both `a < b` and `a.compare(b)` must say so statically. Its `<` half is
 // `std/datetime_duration_unordered.noe`; this is its method twin.
 //
+// `Iterator<T>` and `Future<T>` are the third kind: nominal, but the checker's own — no program can
+// implement them, so what the checker knows about them is all there is to know.
+//
 // **Every call below sits in a function nothing calls**, which is what makes the case
 // discriminating: an abort raises the same `E0007` at the same span a static rejection does, so a
 // position alone would be satisfied by either. Unreachable code has no run-time behavior to
@@ -21,12 +24,14 @@
 // The undecided receivers are asserted by their absence from the list: a `dyn` value and an
 // unbounded type parameter both reach `.compare()`, because "not known" is not "does not order" —
 // a `dyn` may hold an `int`, and a `T` is licensed by its bound elsewhere.
-// expect: error E0007 at 35:31
-// expect: error E0007 at 36:32
-// expect: error E0007 at 37:30
-// expect: error E0007 at 38:30
-// expect: error E0007 at 39:34
-// expect: error E0007 at 44:12
+// expect: error E0007 at 40:31
+// expect: error E0007 at 41:32
+// expect: error E0007 at 42:30
+// expect: error E0007 at 43:30
+// expect: error E0007 at 44:34
+// expect: error E0007 at 49:12
+// expect: error E0007 at 52:35
+// expect: error E0007 at 54:33
 // expect: exit 1
 use std.{datetime}
 
@@ -43,6 +48,10 @@ fn spans(): Ordering {
     a = t.diff(t.add(datetime.hours(1)))
     return a.compare(t.diff(t.add(datetime.hours(2))))
 }
+
+fn iterators(): Ordering { return [1].iter().compare([2].iter()) }
+async fn one(): int { return 1 }
+fn futures(): Ordering { return one().compare(one()) }
 
 // Undecided receivers keep the call: neither of these is refused.
 fn through_dyn(x: dyn, y: dyn): Ordering { return x.compare(y) }

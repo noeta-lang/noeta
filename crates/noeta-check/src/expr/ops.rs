@@ -293,28 +293,35 @@ impl Checker {
         }
     }
 
-    /// Whether `operand` may be used with an operator requiring `trait_name`: a `dyn`/hole defers;
-    /// an in-scope **type parameter** is licensed only by its declared bounds; any other type by the
-    /// satisfaction model ([`Self::satisfies`] — built-in table + `@derive`/`impl` index).
     /// Whether this receiver's `Comparable` membership is **decided at check time** — whether a
     /// `false` from [`Self::operand_satisfies_operator`] means "does not order" rather than "not
     /// known here".
     ///
-    /// Three kinds of receiver decide it: a built-in whose method table is complete
+    /// Four kinds of receiver decide it: a built-in whose method table is complete
     /// ([`crate::expr::calls::closed_to_new_methods`]), a nominal type this program declares
-    /// ([`crate::expr::calls::user_type_is_closed`]), and a **native** type — whose traits come
-    /// from its ABI declaration, which is authoritative for exactly this question and is what
-    /// `a < b` already reads. Everything else — a type parameter, a `dyn`/hole, a name the linker
-    /// left unresolved — is undecided, and stays licensed.
+    /// ([`crate::expr::calls::user_type_is_closed`]), a **native** type — whose traits come from
+    /// its ABI declaration, which is authoritative for exactly this question and is what `a < b`
+    /// already reads — and a **prelude** type ([`PRELUDE_TYPES`]), which the checker defines
+    /// itself: an `Iterator<T>`, a `Future<T>`, a channel endpoint. Those are nominal but no
+    /// program's to implement, so what the checker knows about them is all there is to know.
+    ///
+    /// Everything else — a type parameter, a `dyn`/hole, a **union** (whose members may order
+    /// individually while the pairing does not), a name the linker left unresolved — is undecided,
+    /// and stays licensed.
     pub(crate) fn orderability_is_decided(&self, recv: &Type) -> bool {
         match recv {
             Type::Named(n, _) => {
                 crate::expr::calls::user_type_is_closed(self, recv)
                     || self.native_type_exists(n.as_str())
+                    || PRELUDE_TYPES.contains(&n.as_str())
             }
             other => crate::expr::calls::closed_to_new_methods(other),
         }
     }
+
+    /// Whether `operand` may be used with an operator requiring `trait_name`: a `dyn`/hole defers;
+    /// an in-scope **type parameter** is licensed only by its declared bounds; any other type by the
+    /// satisfaction model ([`Self::satisfies`] — built-in table + `@derive`/`impl` index).
 
     /// Whether `a ~ b` reaches a `concat` **implementation** rather than the display form — a
     /// question the LEFT operand alone answers, because that is how both backends dispatch it: an
