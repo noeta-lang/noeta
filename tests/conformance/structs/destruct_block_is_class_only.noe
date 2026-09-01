@@ -1,0 +1,15 @@
+// A `destruct` block is a **class** capability, and a `struct` is refused one (E0079) with the rule
+// stated: a destructor runs when the last reference to an instance drops, and only a class has the
+// identity that gives "the last reference" a meaning — a struct value is copied, not referenced.
+//
+// The block is parsed here rather than left out of the struct grammar, which is what lets the
+// message name the rule: with no production for it the keyword fell to the field rule beside it and
+// was reported as a reserved *name*, which says nothing about destructors at all.
+// expect: error E0079 at 12:5
+// expect: exit 1
+struct Point {
+    x: int
+    destruct { echo "gone" }
+}
+
+echo Point { x: 1 }.x

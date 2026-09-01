@@ -320,7 +320,10 @@ enum ClassMember {
     Field(FieldDecl),
     Method(FnDecl),
     Impl(ImplBlock),
-    Destructor(Vec<Stmt>),
+    /// The block's statements plus the span of the whole `destruct { … }` — carried because the
+    /// two kinds that may *not* have one blame the block itself (E0079), and a member the grammar
+    /// accepts everywhere but only one kind keeps needs somewhere to point.
+    Destructor(Vec<Stmt>, Span),
 }
 
 /// One member of an `enum` body: a variant, an inherent method, or an `impl Trait { ... }` block
@@ -330,6 +333,9 @@ enum EnumMember {
     Variant(VariantDecl),
     Method(FnDecl),
     Impl(ImplBlock),
+    /// Parsed so the rule can be *stated* (E0079: `destruct` is class-only) rather than leaving the
+    /// keyword to be mis-read as a variant name.
+    Destructor(Span),
 }
 
 /// One member of an `impl` body (class-body `impl Trait { … }` or standalone `impl Trait for T { … }`):
@@ -352,6 +358,34 @@ fn split_impl_members(members: Vec<ImplMember>) -> (Vec<FnDecl>, Vec<(String, Ty
         }
     }
     (methods, assoc_bindings)
+}
+
+/// The refusal a `destruct` block gets on a kind that has no destructor (`E0079`).
+///
+/// A destructor runs when the **last reference** to an instance drops, and only a `class` has the
+/// identity that makes "the last reference" mean anything: a `struct` is a value — copied, compared
+/// field-wise, with no instance to tear down — and an enum's variants are values in the same sense.
+/// So the block is parsed in every type body and refused here by kind, which is what lets the
+/// message name the rule; leaving the grammar without a production for it handed the keyword to the
+/// field/variant rule beside it, and that reported the *token* (`destruct` is a reserved name)
+/// without ever saying that destructors are a class capability.
+fn destructor_is_class_only(kind: &str, name: &str, span: Span) -> Diagnostic {
+    let article = if kind.starts_with(['a', 'e', 'i', 'o', 'u']) {
+        "an"
+    } else {
+        "a"
+    };
+    Diagnostic::error(
+        DiagnosticCode::InvalidMemberSite,
+        span,
+        format!("a `destruct` block is class-only, and `{name}` is {article} {kind}"),
+    )
+    .with_help(
+        "a destructor runs when the last reference to an instance drops, and only a class has the \
+         identity that gives \"the last reference\" a meaning — a struct or enum value is copied \
+         rather than referenced. Make it a `class`, or do the cleanup where the value goes out of \
+         use",
+    )
 }
 
 /// One member of a `trait` body: an associated-type declaration (`type Name;` / `type Name = T;`) or
@@ -4682,6 +4716,17 @@ where
                     })
                 },
             );
+        // `destruct { ... }` — the runtime-invoked destructor block. Not a method (no name,
+        // no params, no receiver syntax); the GC calls it when the last reference drops.
+        //
+        // Parsed in **every** type body, not only a class's. The capability is class-only, but a
+        // grammar that simply has no production for it leaves the keyword to the field/variant rule
+        // beside it, which reports the *token* ("`destruct` is reserved, rename it to `destruct_`")
+        // and never states the rule. Accepting the block and refusing it by kind is what lets the
+        // struct and enum arms say which kind has a destructor, and why.
+        let class_destructor = just(T::DestructKw)
+            .ignore_then(block.clone())
+            .map_with(move |body, e| ClassMember::Destructor(body, ctx.to_span(e.span())));
         // An `enum` body (object-model slice 3): variants plus the unified body's methods and
         // `impl Trait { ... }` blocks. `impl`/`fn` open a method or impl; anything else is a variant
         // (which begins with `#[...]?` then an uppercase name). The `choice` tries the keyword-led
@@ -4692,6 +4737,10 @@ where
                 _ => unreachable!("class_impl yields only ClassMember::Impl"),
             }),
             method.clone().map(EnumMember::Method),
+            class_destructor.clone().map(|m| match m {
+                ClassMember::Destructor(_, span) => EnumMember::Destructor(span),
+                _ => unreachable!("class_destructor yields only ClassMember::Destructor"),
+            }),
             variant.map(EnumMember::Variant),
         ));
         let enum_decl = just(T::EnumKw)
@@ -4721,6 +4770,13 @@ where
                             methods.extend(block.methods.iter().cloned());
                             impls.push(block);
                         }
+                        EnumMember::Destructor(span) => {
+                            ctx.diags.borrow_mut().push(destructor_is_class_only(
+                                "enum",
+                                name_pair.0.as_str(),
+                                span,
+                            ));
+                        }
                     }
                 }
                 Stmt::Enum(EnumDecl {
@@ -4737,11 +4793,6 @@ where
                 })
             });
 
-        // `destruct { ... }` — the runtime-invoked destructor block. Not a method (no name,
-        // no params, no receiver syntax); the GC calls it when the last reference drops.
-        let class_destructor = just(T::DestructKw)
-            .ignore_then(block.clone())
-            .map(ClassMember::Destructor);
         // `impl Trait for Type { ... }` — a *standalone* (top-level) trait implementation, the
         // mechanism by which a bodiless struct declares a capability (`impl Serialize for Route
         // {}`). The `for Type` is what distinguishes it from the class-body `impl Trait { ... }`
@@ -4899,6 +4950,7 @@ where
                 choice((
                     class_method.clone(),
                     class_impl.clone(),
+                    class_destructor.clone(),
                     class_field.clone(),
                 ))
                 // Absorb the woven `;` between members on separate lines (slice 7).
@@ -4919,9 +4971,16 @@ where
                             methods.extend(block.methods.iter().cloned());
                             impls.push(block);
                         }
-                        // A `struct` body's grammar offers no `destruct`, so this is unreachable;
-                        // ignore defensively rather than panic.
-                        ClassMember::Destructor(_) => {}
+                        // A `destruct` block parses here so the rule can be stated: it is a
+                        // **class** capability, and a struct is a value with no identity to tear
+                        // down.
+                        ClassMember::Destructor(_, block_span) => {
+                            ctx.diags.borrow_mut().push(destructor_is_class_only(
+                                "struct",
+                                name.as_str(),
+                                block_span,
+                            ));
+                        }
                     }
                 }
                 Stmt::Struct(StructDecl {
@@ -4966,7 +5025,7 @@ where
                         }
                         // A second `destruct` block silently keeps the last; the checker (M1.7)
                         // will reject duplicates. M0/M1 accept the surface for now.
-                        ClassMember::Destructor(body) => destructor = Some(body),
+                        ClassMember::Destructor(body, _) => destructor = Some(body),
                     }
                 }
                 Stmt::Class(ClassDecl {

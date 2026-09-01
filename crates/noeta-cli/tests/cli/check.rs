@@ -348,3 +348,50 @@ fn check_does_not_duplicate_a_diagnostic_across_shapes() {
     assert_eq!(report["errors"], 1);
     assert_eq!(report["diagnostics"].as_array().unwrap().len(), 1);
 }
+
+// --- diagnostic *wording* (the corpus header pins a code and a span, never a message) -------------
+
+/// A `destruct` block on a `struct` must state the **rule** — that destructors are class-only — and
+/// not merely that `destruct` is a reserved word.
+///
+/// The reader's mistake is not a syntax error and not a typo: they wrote a member the grammar knows,
+/// spelled correctly, on the wrong kind of declaration. "`destruct` cannot be used as a name … rename
+/// it to `destruct_`" answered a question nobody asked. The conformance case beside this one pins
+/// `E0079` at the block; only a text assertion can pin what the code is *for*.
+#[test]
+fn a_destruct_block_on_a_struct_names_the_class_only_rule() {
+    let file = temp_program(
+        "check_struct_destruct",
+        "struct Point {\n    x: int\n    destruct { echo \"gone\" }\n}\necho Point { x: 1 }.x\n",
+    );
+    lang()
+        .arg("check")
+        .arg(&file)
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("E0079"))
+        .stderr(predicate::str::contains(
+            "a `destruct` block is class-only, and `Point` is a struct",
+        ))
+        .stderr(predicate::str::contains("reserved").not());
+}
+
+/// `dyn` on a built-in trait with no trait object is refused **at the annotation**, naming the trait.
+#[test]
+fn dyn_on_a_trait_without_an_object_names_the_trait() {
+    let file = temp_program(
+        "check_dyn_marker_trait",
+        "fn f(x: dyn Clone): int { return 1 }\necho 0\n",
+    );
+    lang()
+        .arg("check")
+        .arg(&file)
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("E0014"))
+        .stderr(predicate::str::contains(
+            "`Clone` has no trait object, so `dyn Clone` names no type",
+        ));
+}

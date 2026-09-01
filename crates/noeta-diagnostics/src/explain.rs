@@ -199,6 +199,15 @@ impl DiagnosticCode {
                 detail: "A width is a property of the *static type*, not of the value: every integer width is the same runtime word. Displaying reads that static type, so a `u64` above `i64::MAX` prints its unsigned value wherever the type still says `u64` — and prints the signed reinterpretation (`-1` for `u64::MAX`) wherever it does not. Every other fixed width survives erasure intact, because `u8`/`u16`/`u32` and every `iN` fit the signed word and render identically; `u64` past bit 63 is the one case whose digits change, which is why this warns there and nowhere else.\n\nIt is reported where the width is *lost*, not where the wrong digits appear — by then the value is indistinguishable from an ordinary `int` and there is no static type left to complain from. Two positions lose it: an explicit launder into `dyn`, and a call through a generic function taken as a **value**, which carries no type-argument channel to pin its instantiation. The second has no spelling in the source, which is the reason it warns rather than being left to the reader to discover.\n\nThe representation is never wrong: arithmetic, comparison, `json.stringify` and every door that still names the width read the full value. Keep the annotation (`v: u64`) through the position, or convert deliberately, to keep the digits.",
                 docs: "Fixed-Width-Integers",
             },
+            DiagnosticCode::InvalidMemberSite => Explanation {
+                code: "E0079",
+                title: "invalid member site",
+                group: "Data: structs, classes, enums, fields",
+                severity: Severity::Error,
+                summary: "A declaration member written on a kind that does not have it — a `destruct` block on a `struct` or an `enum`.",
+                detail: "`struct`, `class` and `enum` share one body grammar, so the members they accept differ by kind rather than by syntax. A `destruct` block is a **class** capability: it runs when the last reference to an instance drops, and only a class has the identity that makes \"the last reference\" mean something. A struct is a value — it is copied, compared field-wise, and has no instance to tear down — and an enum's variants are values in the same sense.\n\nMove the block to a class, or do the cleanup explicitly where the value goes out of use.",
+                docs: "Structs-Classes-and-Enums",
+            },
             DiagnosticCode::ImpossibleTypeTest => Explanation {
                 code: "E0065",
                 title: "impossible type test",
