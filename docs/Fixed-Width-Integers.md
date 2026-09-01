@@ -59,9 +59,11 @@ echo 0b1100 ^ 0b1010  // 6
 echo 1 << 4           // 16
 echo 256 >> 2         // 64
 echo !0               // -1     (bitwise complement:  !x == -(x + 1))
+echo !1u8             // 254    (a fixed width complements within its width)
 ```
 
 - On a plain `int`, `!` is **bitwise complement**; on a `bool` it stays logical NOT.
+- On a fixed width, `!` complements **within the width**, so `!1u8` is `254` and `!255u8` is `0` — the same wrap `+ - *` take. Every door reads that one value: `!1u8 == 254u8`, `echo !1u8` prints `254`, and `[!1u8, 5u8].sorted()` is `[5, 254]`.
 - Right shift `>>` is arithmetic on signed types and logical on unsigned types.
 - **Precedence is Rust-style**: bitwise operators bind *tighter than* comparison, and shifts bind just below `+`/`-`. So `5 & 3 == 1` parses as `(5 & 3) == 1` → `true`.
 

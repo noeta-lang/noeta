@@ -1414,6 +1414,16 @@ impl Checker {
                     }
                     return t;
                 }
+                // Unary `!` on a fixed-width integer (Tier W): complementing the erased i64 sets
+                // every bit above the declared width, so the result must be masked back into it —
+                // `!1u8` is `254`, not `-2`. Recording the site is what makes every door agree: the
+                // masked word is the one `==`, `echo`, a fold and an ordering all read. Unlike `-`,
+                // both signednesses are meaningful (for a signed width the mask is the identity,
+                // since `!x == -x - 1` never leaves the range), so no operand is rejected here.
+                if let (UnaryOp::Not, Type::IntN { signed, bits }) = (op, &t) {
+                    self.sites.width_sites.insert(*span, (*signed, *bits));
+                    return t;
+                }
                 // Other unary type errors have no corpus case and the operand is often gradual;
                 // infer for nested checks but do not promote (kept conservative).
                 t

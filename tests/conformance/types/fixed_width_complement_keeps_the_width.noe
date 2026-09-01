@@ -1,0 +1,8 @@
+// The negative half of the masking rule: `!` on a fixed-width integer yields *that* width, not
+// `int`. Without this the value could be masked correctly and still leak into an `int` position,
+// where the next operation would wrap at 64 bits instead. E0007 names the width the complement kept.
+// expect: error E0007 at 7:10
+// expect: exit 1
+x: u8 = 1;
+y: int = !x;
+echo y;

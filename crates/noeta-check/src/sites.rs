@@ -148,7 +148,7 @@ pub struct Sites {
     /// sets `Stmt::For.stream` so both backends drive the iterator's `next()` instead of snapshotting.
     pub for_stream_sites: HashSet<Span>,
     /// Fixed-width arithmetic sites (Tier W), keyed by the `Expr::Binary`/`Expr::Unary` span → the
-    /// result's `(signed, bits)`. A same-width `+ - *` or unary `-` on an `IntN` records its site here;
+    /// result's `(signed, bits)`. A same-width `+ - *` or a unary `-`/`!` on an `IntN` records its site here;
     /// lowering wraps the op's result in `Rvalue::MaskWidth` to wrap the erased i64 into the width. A
     /// pure function of the program, like the other site maps — the masking is invisible to `RunResult`.
     pub width_sites: HashMap<Span, (bool, u8)>,
@@ -876,7 +876,7 @@ pub(crate) struct SiteMaps {
     /// [`Checked::for_stream_sites`]) to set `Stmt::For.stream`. A pure function of the program; a
     /// collection or `dyn` iterable is absent here and keeps the snapshot/cursor fast path.
     pub(crate) for_stream_sites: HashSet<Span>,
-    /// Fixed-width arithmetic sites (Tier W): the span of a same-width `+ - *` / unary `-` on an
+    /// Fixed-width arithmetic sites (Tier W): the span of a same-width `+ - *` / unary `-` or `!` on an
     /// `IntN` → the result's `(signed, bits)`. Lowering reads this (via [`Checked::width_sites`]) to
     /// wrap the op's result in `Rvalue::MaskWidth`. Empty for programs with no fixed-width arithmetic.
     pub(crate) width_sites: HashMap<Span, (bool, u8)>,

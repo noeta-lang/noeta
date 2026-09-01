@@ -183,7 +183,9 @@ pub fn apply_unary(op: UnaryOp, value: Value) -> Result<Value, OpError> {
         UnaryOp::Neg if value.is_f32() => Ok(Value::f32(-value.as_f32().unwrap())),
         UnaryOp::Not if value.as_bool().is_some() => Ok(Value::bool(!value.as_bool().unwrap())),
         // `!` on an `int` is bitwise complement (P-BITS Tier B2), exactly as Rust: `!x == -(x+1)`,
-        // so `!0 == -1`. `int` and `bool` are disjoint, so the arm order is irrelevant.
+        // so `!0 == -1`. `int` and `bool` are disjoint, so the arm order is irrelevant. A fixed-width
+        // operand is erased to its i64 word here and reduced back into its declared width by the
+        // `MaskWidth` lowering emits after the op, exactly as unary `-` and `+ - *` are.
         UnaryOp::Not if value.as_int().is_some() => Ok(Value::int(!value.as_int().unwrap())),
         // `...xs` (list spread) is the runtime identity — the value flows straight into the
         // surrounding `~` concatenation; the list requirement is enforced statically.

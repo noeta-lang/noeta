@@ -4931,3 +4931,56 @@ fn a_top_level_generic_fn_does_not_shadow_a_generic_class() {
     let src = "class Repo<T> {\n  pub v: int\n}\nfn label<T>(x: T): string { return \"x\"; }\necho label(1);\n";
     assert!(codes(src).is_empty(), "{:?}", messages(src));
 }
+
+// ----- Tier W: unary `!` records its fixed-width mask site -----
+
+/// Parse `text`, check it, and return the `(signed, bits)` widths recorded in `width_sites`, sorted.
+/// The site map is what lowering reads to wrap an op's erased i64 result back into its declared
+/// width, so "is there a site here" is the checker-side statement of "this op wraps".
+fn width_site_widths(text: &str) -> Vec<(bool, u8)> {
+    seed_std();
+    let source = Source::new(SourceId::FIRST, "test.noe", text);
+    let lexed = lex(&source);
+    let parsed = parse(&source, &lexed.tokens);
+    assert!(
+        parsed.diagnostics.is_empty(),
+        "test program must parse cleanly: {:?}",
+        parsed.diagnostics
+    );
+    let mut widths: Vec<(bool, u8)> = super::check_all(&parsed.program)
+        .sites
+        .width_sites
+        .into_values()
+        .collect();
+    widths.sort_unstable();
+    widths
+}
+
+/// Complementing a fixed-width integer records a mask site at every width. A fixed-width value is
+/// erased to a 64-bit word, so `!` on the word alone sets every bit above the declared width and
+/// `!1u8` reads back as `-2` instead of `254` — masked, `+ - *` and unary `-` and `!` all agree on
+/// one value, which is what the doors (`==`, display, a fold, an ordering) then read.
+#[test]
+fn complementing_a_fixed_width_integer_records_a_mask_site() {
+    for bits in [8u8, 16, 32, 64] {
+        for signed in [false, true] {
+            let ty = format!("{}{bits}", if signed { "i" } else { "u" });
+            let src = format!("x: {ty} = 1\necho !x\n");
+            assert_eq!(
+                width_site_widths(&src),
+                [(signed, bits)],
+                "`!` on `{ty}` must record its width so lowering masks the result"
+            );
+        }
+    }
+}
+
+/// And nothing else does. Plain `int` is already the full 64-bit word and `bool` is logical NOT, so
+/// neither records a site — a mask there would be dead work, and on `int` it would be a lie about
+/// where the value wraps.
+#[test]
+fn complementing_an_int_or_a_bool_records_no_mask_site() {
+    assert_eq!(width_site_widths("echo !0\n"), []);
+    assert_eq!(width_site_widths("echo !1\n"), []);
+    assert_eq!(width_site_widths("echo !true\n"), []);
+}

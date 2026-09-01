@@ -276,7 +276,7 @@ pub enum Rvalue {
         span: Span,
     },
     /// Reduce a value to its fixed-width integer range (Tier W). Emitted by lowering immediately
-    /// after a width-bearing op — same-width `+ - *` and unary `-` on an `IntN` — because fixed-width
+    /// after a width-bearing op — same-width `+ - *` and unary `-`/`!` on an `IntN` — because fixed-width
     /// values are erased to i64 and the arithmetic runs full-width; this wraps the result back into
     /// the declared width via `noeta_ext_abi::mask_to_width(value, signed, bits)`. Both backends apply
     /// the identical helper, so wraparound agrees by construction. Pure, single-operand (like

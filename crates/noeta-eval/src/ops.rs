@@ -153,7 +153,9 @@ pub fn apply_unary(op: UnaryOp, value: &Value) -> Result<Value, OpError> {
         (UnaryOp::Neg, Value::Float(f)) => Ok(Value::Float(-f)),
         (UnaryOp::Neg, Value::F32(f)) => Ok(Value::F32(-f)),
         (UnaryOp::Not, Value::Bool(b)) => Ok(Value::Bool(!b)),
-        // `!` on an `int` is bitwise complement (P-BITS Tier B2), like Rust: `!x == -(x+1)`.
+        // `!` on an `int` is bitwise complement (P-BITS Tier B2), like Rust: `!x == -(x+1)`. A
+        // fixed-width operand is erased to its i64 word here and reduced back into its declared
+        // width by the `MaskWidth` lowering emits after the op, exactly as unary `-` and `+ - *` are.
         (UnaryOp::Not, Value::Int(i)) => Ok(Value::Int(!i)),
         // `...xs` (list spread) is the runtime identity — the value flows straight into the
         // surrounding `~` concatenation; the list requirement is enforced statically.

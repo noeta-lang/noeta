@@ -1,0 +1,68 @@
+// Tier W5: unary `!` on a fixed-width integer complements *within the width*. A fixed-width value is
+// erased to a 64-bit word, so complementing the word alone sets every bit above the declared width —
+// `!1u8` would be `-2` rather than `254`. The result is masked back into the width exactly as `+ - *`
+// and unary `-` are, which is what makes the doors agree: the value `==` compares, `echo` renders, a
+// fold computes with and an ordering places are all the one masked word. On a signed width the mask
+// is the identity (`!x == -x - 1` never leaves the range) and plain `int` is not masked at all, so
+// neither changes. Both backends apply the same mask, so the differential pins them equal.
+// expect: stdout "254"
+// expect: stdout "0"
+// expect: stdout "255"
+// expect: stdout "65534"
+// expect: stdout "65535"
+// expect: stdout "4294967294"
+// expect: stdout "18446744073709551615"
+// expect: stdout "18446744073709551614"
+// expect: stdout "-2"
+// expect: stdout "127"
+// expect: stdout "-128"
+// expect: stdout "-2"
+// expect: stdout "-2"
+// expect: stdout "-2"
+// expect: stdout "-1"
+// expect: stdout "-2"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "254"
+// expect: stdout "254"
+// expect: stdout "255"
+// expect: stdout "[5, 254]"
+// expect: stdout "[1, 18446744073709551615]"
+// expect: exit 0
+
+// Unsigned widths: the complement stays inside the width.
+echo !1u8                   // 254
+echo !255u8                 // 0
+echo !0u8                   // 255
+echo !1u16                  // 65534
+echo !0u16                  // 65535
+echo !1u32                  // 4294967294
+echo !0u64                  // 18446744073709551615 (past bit 63 — reads unsigned from the type)
+echo !1u64                  // 18446744073709551614
+
+// Signed widths are unchanged: `!x == -x - 1` is in range at every width, so the mask is identity.
+echo !1i8                   // -2
+echo !(-128i8)              // 127
+echo !127i8                 // -128
+echo !1i16                  // -2
+echo !1i32                  // -2
+echo !1i64                  // -2
+
+// Plain `int` is not a fixed width and is not masked.
+echo !0                     // -1
+echo !1                     // -2
+
+// The doors agree on the one value. Equality compares the masked word...
+echo !1u8 == 254u8          // true
+echo !255u8 == 0u8          // true
+echo !0u32 == 4294967295u32 // true
+
+// ...a fold computes at the element width...
+echo [!1u8, 0u8].sum()      // 254
+echo "${!1u8}"              // 254 (an interpolation hole renders the same value `echo` does)
+echo !1u8 + 1u8             // 255
+
+// ...and an ordering places it by its value, at a narrow width and past bit 63 alike.
+echo [!1u8, 5u8].sorted()   // [5, 254]
+echo [!0u64, 1u64].sorted() // [1, 18446744073709551615]
