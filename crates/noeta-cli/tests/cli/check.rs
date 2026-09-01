@@ -395,3 +395,51 @@ fn dyn_on_a_trait_without_an_object_names_the_trait() {
             "`Clone` has no trait object, so `dyn Clone` names no type",
         ));
 }
+
+/// **A derived trait's method resolves at `check` time**, so the editor never underlines a call that
+/// runs. `traits_of` reports `Display` for this type and `x is dyn Display` is `true`; a checker that
+/// refused `x.to_string()` would be contradicting both.
+///
+/// The absent string is the assertion that matters: "has no method" is what the reader used to be
+/// shown for a member their own `@derive` put there.
+#[test]
+fn a_derived_builtin_trait_method_is_not_reported_missing() {
+    let file = temp_program(
+        "check_derived_builtin_method",
+        "@derive(Display, Equatable, Comparable)\nstruct Tag {\n    n: int\n}\n\
+         t = Tag { n: 1 }\necho t.to_string()\necho t.eq(t)\necho t.compare(Tag { n: 2 })\n\
+         fn render(x: dyn Display): string { return x.to_string() }\necho render(t)\n",
+    );
+    lang()
+        .arg("check")
+        .arg(&file)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("has no method").not());
+}
+
+/// **`compare` on a type that does not implement `Comparable` is refused where it is written.**
+///
+/// `compare` is the one method every ordered built-in answers, so a receiver-agnostic reading of it
+/// typed the call as an `Ordering` on *any* receiver — which told the checker the member existed and
+/// left the program to abort at run time (`E0005`) on a type with no ordering, while the sibling
+/// door `t.eq(u)` was refused statically. The absent `E0005` is what pins the fix: the same mistake
+/// must not be reachable through two codes at two different times.
+#[test]
+fn compare_on_an_unordered_user_type_is_refused_statically() {
+    let file = temp_program(
+        "check_compare_unordered",
+        "struct Plain {\n    n: int\n}\necho Plain { n: 1 }.compare(Plain { n: 2 })\n",
+    );
+    lang()
+        .arg("check")
+        .arg(&file)
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("E0007"))
+        .stderr(predicate::str::contains(
+            "type `Plain` has no method `compare`",
+        ))
+        .stderr(predicate::str::contains("E0005").not());
+}

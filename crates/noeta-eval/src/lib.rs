@@ -3341,6 +3341,12 @@ impl Interpreter {
             {
                 return self.call_native_class_method(&receiver, name, args, span);
             }
+            // A method a `@derive`d built-in trait makes callable (`to_string`/`eq`/`compare`).
+            // Ahead of the field fallback below, because it is a METHOD — the same precedence the
+            // checker pins statically, where its signature is registered.
+            if let Some(result) = self.derived_builtin_call(&receiver, name, &args, span) {
+                return result;
+            }
             // The runtime member-call fallback (the field-access-then-call desugar's `dyn`
             // path): no method `name`, but the object HAS a field `name` — `obj.f(args)`
             // means `(obj.f)(args)`, so call the field's value. The same order the checker
@@ -3431,6 +3437,13 @@ impl Interpreter {
                 ));
             }
             return Ok(Value::Str(head));
+        }
+        // A method a `@derive`d built-in trait makes callable (`to_string`/`eq`/`compare`). An enum
+        // value reaches its methods here — its arm above falls through on a miss — so this is the
+        // enum twin of the object arm's call, and it precedes the primitive `compare` below: a
+        // derived enum orders by variant then payload, which `compare_primitive` does not do.
+        if let Some(result) = self.derived_builtin_call(&receiver, name, &args, span) {
+            return result;
         }
         // `x.compare(y)` — the `Ordering` of two primitives. This is the value a `Comparable`
         // impl returns (typically by delegating to a field's `compare`); it lights up nothing on
@@ -3941,6 +3954,28 @@ impl Interpreter {
             // A value → an instance method (the instance's fields are in scope).
             Value::Object(object) => {
                 let Some(method_closure) = object.def.methods.get(method) else {
+                    // A method a `@derive`d built-in trait makes callable (`to_string`/`eq`/
+                    // `compare`): the reflective door reaches the same member set a direct call
+                    // does, so `invoke` cannot report "no method" for one `x.to_string()` answers.
+                    // Arity is an `Err` value here rather than an abort — that is what `invoke`
+                    // promises about every other miss.
+                    if let Some(row) = self.derived_builtin_row(&receiver, method) {
+                        if named.is_some_and(|n| !n.is_empty()) {
+                            return Ok(invoke_err(format!(
+                                "method `{method}` takes no named arguments"
+                            )));
+                        }
+                        if args.len() != row.arity {
+                            return Ok(invoke_err(arity_message(
+                                "method",
+                                row.arity,
+                                row.arity,
+                                args.len(),
+                            )));
+                        }
+                        let result = self.run_derived_builtin(row, &receiver, &args, span)?;
+                        return Ok(builtin_enum("Result", "Ok", vec![result]));
+                    }
                     // A bare `from` names no single conversion; say which ones exist.
                     return Ok(invoke_err(
                         noeta_ast::conversion::missing_from_message(
@@ -4949,6 +4984,125 @@ impl Interpreter {
             _ => {
                 let error = noeta_stdlib::type_error(name, "int");
                 Err(self.runtime_error(std_error_code(error.kind), span, error.message))
+            }
+        }
+    }
+
+    /// **The method a `@derive`d built-in trait makes callable**, asked when method dispatch found
+    /// none — `to_string()` under `Display`, `eq(other)` under `Equatable`, `compare(other)` under
+    /// `Comparable` (`noeta_ast::derive::DERIVED_BUILTIN_METHODS`).
+    ///
+    /// A derive registers trait membership, which `traits_of(value)` reports and `x is dyn Trait`
+    /// reads off the same table this asks. Answering the trait's method for exactly that set of
+    /// types is what keeps the two from disagreeing: a value cannot say `true` to `is dyn Display`
+    /// and then abort on the one method that object promises, and a call through `dyn Display`
+    /// resolves for the same reason the direct one does.
+    ///
+    /// The answer is not a second implementation. Each arm runs the routine [`Self::display_value`]
+    /// and [`Self::apply_binary_op`] already run for the operator or protocol the trait lights up,
+    /// so a derived `compare` and `<` — and a derived `to_string` and interpolation — give one
+    /// answer by construction.
+    ///
+    /// `None` when the name is no derived method, the receiver is not a user object/enum, its type
+    /// writes the method itself, or the type has no registered impl of the trait; the caller then
+    /// reports the miss as it would have. Mirrors the VM's `derived_builtin_call`.
+    fn derived_builtin_call(
+        &mut self,
+        receiver: &Value,
+        name: &str,
+        args: &[Value],
+        span: Span,
+    ) -> Option<Eval<Value>> {
+        let row = self.derived_builtin_row(receiver, name)?;
+        if args.len() != row.arity {
+            return Some(Err(self.runtime_error(
+                DiagnosticCode::TypeMismatch,
+                span,
+                arity_message("method", row.arity, row.arity, args.len()),
+            )));
+        }
+        Some(self.run_derived_builtin(row, receiver, args, span))
+    }
+
+    /// Which derived built-in method `name` is **on this receiver** — the name's row, and only when
+    /// the receiver's nominal type has a registered impl of that row's trait. The membership half of
+    /// [`Self::derived_builtin_call`], split out for the `invoke` door, whose arity mismatch is a
+    /// returned `Err` value rather than an abort.
+    fn derived_builtin_row(
+        &self,
+        receiver: &Value,
+        name: &str,
+    ) -> Option<&'static noeta_ast::derive::DerivedBuiltinMethod> {
+        let row = noeta_ast::derive::derived_builtin_method(name)?;
+        // A **user** object or enum only. An extern type advertises its trait impls through the ABI
+        // and lands in the same membership table, but its behavior is its own contract's — a
+        // `Uuid`'s `compare` is the byte order the extension implements, not a walk of slots this
+        // side of the seam can perform — so it keeps the built-in path below.
+        //
+        // A written implementation also always wins: a hand-written `impl Display`, or the
+        // forwarder a `@derive(Display, via: f)` plants. Both are in the method table, and both
+        // leave the same membership record this reads, so the table is asked first rather than
+        // trusting every caller to have missed already.
+        let own = match receiver {
+            Value::Object(o) => o.def.methods.contains_key(name),
+            Value::Enum(e) => matches!(
+                self.scope.lookup(&e.enum_name),
+                Some(Value::EnumType(def)) if def.method(name).is_some()
+            ),
+            _ => return None,
+        };
+        if own {
+            return None;
+        }
+        let type_name = value_nominal_name(receiver)?;
+        self.reflection
+            .type_implements(&type_name, row.trait_name)
+            .then_some(row)
+    }
+
+    /// Run a derived built-in method's structural routine over `receiver` and an argument list the
+    /// caller has already arity-checked against `row`.
+    fn run_derived_builtin(
+        &mut self,
+        row: &noeta_ast::derive::DerivedBuiltinMethod,
+        receiver: &Value,
+        args: &[Value],
+        span: Span,
+    ) -> Eval<Value> {
+        match row.body {
+            // The structural rendering — `Value::display`, which is exactly what `display_value`
+            // falls back to for a type with no `to_string`, so the method and interpolation write
+            // the same text.
+            noeta_ast::derive::DerivedBody::Render => Ok(Value::Str(receiver.display())),
+            // The structural equality `==` reads (`ops::values_equal`), for the same operands.
+            noeta_ast::derive::DerivedBody::Equals => {
+                Ok(Value::Bool(ops::values_equal(receiver, &args[0])))
+            }
+            // The field-wise structural ordering `< <= > >=` read, as the `Ordering` a `compare`
+            // hands back — the same two comparators `apply_binary_op` reaches for, so the operator
+            // and the method cannot order one pair of values differently.
+            noeta_ast::derive::DerivedBody::Order => {
+                let ordering = match receiver {
+                    Value::Object(o) => object_structural_compare(o, &args[0]),
+                    Value::Enum(e) => enum_structural_compare(e, &args[0]),
+                    _ => None,
+                };
+                match ordering {
+                    Some(ordering) => Ok(builtin_enum(
+                        "Ordering",
+                        noeta_ast::ordering_variant(ordering),
+                        Vec::new(),
+                    )),
+                    None => Err(self.runtime_error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!(
+                            "cannot compare {} and {}",
+                            receiver.type_name(),
+                            args[0].type_name()
+                        ),
+                    )),
+                }
             }
         }
     }

@@ -289,30 +289,32 @@ Declared bounds ride along (`g: (Box, Box) -> Box = biggest` is E0025 when `Box`
 
 The traits below are **built into the language** — a fixed set an `impl` or `@derive(...)` may name, and naming a trait that is neither one of these nor [declared in the program](#implementing-a-trait) is E0014. They are what operators and protocols dispatch through, which is why they are fixed: `==` has to know which method answers it. A program declares its own traits alongside them.
 
-| Trait | Method | Lights up |
-|---|---|---|
-| `Equatable` | `eq(other): bool` | `==` `!=` |
-| `Comparable` | `compare(other): Ordering` | `< <= > >=` |
-| `Display` | `to_string(): string` | `echo`, `${…}` |
-| `Error` | `message(): string` | the idiomatic `Err` payload — see [Error Handling](Error-Handling) |
-| `Validate` | `validate(): Result<void, E>` | a data-boundary invariant; auto-runs at typed decode — see [Validation](Validation) |
-| `From<Source>` | `from(value: Source): Target` — static | error conversion at `?` — see [Error Handling](Error-Handling#converting-errors-at---impl-fromsource) |
-| `To<Target>` | `to(): Target` | the same conversion declared on the **source**, for a target you do not own — see [Error Handling](Error-Handling#converting-into-a-type-you-do-not-own--impl-totarget) |
-| `Add` | `add(other): T` | `+` |
-| `Sub` | `sub(other): T` | `-` |
-| `Mul` | `mul(other): T` | `*` |
-| `Div` | `div(other): T` | `/` |
-| `Concat` | `concat(other): T` | `~` |
-| `TryAdd` | `try_add(other): Result<T, E>` | the explicit `a.try_add(b)?` |
-| `Index` | `get(i): T` | `a[i]` |
-| `Length` | `len(): int` | `x.len()` on a `<T: Length>` parameter |
-| `Iterable` | `iter(): List<T>` | `for x in o` |
-| `Callable` | `call(...)` — any arity | `obj(args)` |
-| `Members` | `get(name): T` | a `<T: Members>` bound — look a member up by name |
-| `DynamicCall` | `call(name, args): T` | a `<T: DynamicCall>` bound — invoke by name |
-| `Serialize` | — | `@derive(Serialize<Json>)` synthesizes the encoder — see [Derives](Derives) |
-| `Deserialize` | — | `@derive(Deserialize<Json>)` registers the decoder — see [Derives](Derives) |
-| `Clone` | — | structural clone |
+| Trait | Method | `dyn` | Lights up |
+|---|---|---|---|
+| `Equatable` | `eq(other): bool` | yes | `==` `!=` |
+| `Comparable` | `compare(other): Ordering` | yes | `< <= > >=` |
+| `Display` | `to_string(): string` | yes | `echo`, `${…}` |
+| `Error` | `message(): string` | yes | the idiomatic `Err` payload — see [Error Handling](Error-Handling) |
+| `Validate` | `validate(): Result<void, E>` | yes | a data-boundary invariant; auto-runs at typed decode — see [Validation](Validation) |
+| `From<Source>` | `from(value: Source): Target` — static | no | error conversion at `?` — see [Error Handling](Error-Handling#converting-errors-at---impl-fromsource) |
+| `To<Target>` | `to(): Target` | no | the same conversion declared on the **source**, for a target you do not own — see [Error Handling](Error-Handling#converting-into-a-type-you-do-not-own--impl-totarget) |
+| `Add` | `add(other): T` | yes | `+` |
+| `Sub` | `sub(other): T` | yes | `-` |
+| `Mul` | `mul(other): T` | yes | `*` |
+| `Div` | `div(other): T` | yes | `/` |
+| `Concat` | `concat(other): T` | yes | `~` |
+| `TryAdd` | `try_add(other): Result<T, E>` | yes | the explicit `a.try_add(b)?` |
+| `Index` | `get(i): T` | yes | `a[i]` |
+| `Length` | `len(): int` | yes | `x.len()` on a `<T: Length>` parameter |
+| `Iterable` | `iter(): List<T>` | yes | `for x in o` |
+| `Callable` | `call(...)` — any arity | yes | `obj(args)` |
+| `Members` | `get(name): T` | yes | a `<T: Members>` bound — look a member up by name |
+| `DynamicCall` | `call(name, args): T` | yes | a `<T: DynamicCall>` bound — invoke by name |
+| `Serialize` | — | no | `@derive(Serialize<Json>)` synthesizes the encoder — see [Derives](Derives) |
+| `Deserialize` | — | no | `@derive(Deserialize<Json>)` registers the decoder — see [Derives](Derives) |
+| `Clone` | — | no | membership only: the type satisfies a `<T: Clone>` bound, and structs already copy on assignment |
+
+The **`dyn` column** says whether `dyn Trait` names a type ([Trait objects](#trait-objects)). A trait object is a value plus a method to call on it, so the five that lack one lack a piece of that: `Clone`, `Serialize` and `Deserialize` impose no method to dispatch, `From`'s `from` is `static` (called on the type, so there is no receiver to erase), and `From`, `To`, `Serialize` and `Deserialize` all take a type argument `dyn Name` has no syntax to carry — a `dyn To` would not say *to what*. Writing one of the five is E0014 where it is written; use a `<T: Trait>` bound, or the concrete type.
 
 `Ordering` is a namable built-in enum (`Ordering.Less` / `Equal` / `Greater`); calling `.compare()` on a primitive returns it.
 
@@ -587,6 +589,8 @@ echo via_dyn(Http {}).await         // body:one
 The bound and the trait object agree by construction: both read the trait's declaration, so a call is typed identically whether the receiver is a bound parameter, a declared `dyn Trait`, a `dyn` narrowed with `x is dyn Trait`, or the concrete type. A wrong argument type or arity through `dyn` is E0007, just as it is through a bound.
 
 `dyn` on a **generic** trait erases its parameters — there is no `dyn Trait<...>` surface form, so, as with a bare `<T: Store>` bound, the parameters instantiate permissively to `dyn` and those positions defer to run time. Name the instantiation with a bound (`<S: Store<int>>`) when you need them typed.
+
+Every `trait` a program declares has a trait object. Among the [built-ins](#the-built-in-traits), the ones with a `yes` in the `dyn` column do — seventeen of the twenty-two; `dyn Clone`, `dyn Serialize`, `dyn Deserialize`, `dyn From` and `dyn To` are E0014.
 
 ## `@derive` — synthesized implementations
 

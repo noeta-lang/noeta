@@ -8,13 +8,15 @@ A bare `@derive(Name)` on one of these synthesizes the implementation from the t
 
 | Built-in | Effect |
 |---|---|
-| `Equatable` | Structural equality. |
-| `Comparable` | Field-wise **structural** ordering, in declaration order (recurses into nested objects and enum payloads, comparing each structurally in turn). On an **enum**: variant declaration order first (`Low < Medium < High`), then payload fields. What `< <= > >=`, `.sorted()` and `.min()`/`.max()` all use — deriving it is how a type opts into being ordered at all, and a type wanting a *different* order writes its own `compare` instead ([Ordering your own type](Generics-and-Traits#ordering-your-own-type)); it cannot do both, since a type implements each trait once. |
-| `Display` | A structural `to_string` — a **marker**: the structural default you already get, kept so a competing hand-written `impl Display` is a coherence error. |
+| `Equatable` | Structural equality, as the `==` answer and as a callable `eq(other): bool`. |
+| `Comparable` | Field-wise **structural** ordering, in declaration order (recurses into nested objects and enum payloads, comparing each structurally in turn). On an **enum**: variant declaration order first (`Low < Medium < High`), then payload fields. What `< <= > >=`, `.sorted()`, `.min()`/`.max()` and the callable `compare(other): Ordering` all read — deriving it is how a type opts into being ordered at all, and a type wanting a *different* order writes its own `compare` instead ([Ordering your own type](Generics-and-Traits#ordering-your-own-type)); it cannot do both, since a type implements each trait once. |
+| `Display` | `to_string(): string` returning the structural rendering — character for character the text `echo` and `${…}` write for the value. A competing hand-written `impl Display` is a coherence error. |
 | `Error` | `message()` returns `"${self}"` — the type's display story (a hand-written `impl Display`'s `to_string()`, or the structural rendering under `@derive(Display)`). Requires the type to have `Display` at all (E0050 otherwise); `@derive(Error, via: field)` instead forwards `message()` into the field's own `Error` implementation. See [Error Handling](Error-Handling#deriving-error). |
-| `Clone` | A structural clone — a marker like `Display` (value semantics already copy). |
+| `Clone` | Membership alone: the type satisfies a `<T: Clone>` bound and reports `Clone` from `traits_of`. There is no method behind it and no `dyn Clone` — a `struct` is a value type and copies on assignment, so a copy needs no call. |
 | `Serialize<Json>` | Synthesizes `to_json()` (on an enum: the variant rendering `json.stringify` produces). Encoding writes **every** field except one marked [`#[Transient]`](#keeping-a-field-out-of-the-wire) — a default is a decode-side notion, so it never omits one. A `bytes` field encodes as a JSON **array of its byte values** (`[104, 105]`) — the lossless spelling that needs no agreed side-channel like base64; it is write-only, since `bytes` is not a decodable field type. An **enum value** encodes as its case name when the variant is payload-free (`"Green"`) and as `{"Case":[payload…]}` when it carries one (`Shape.Circle(3)` → `{"Circle":[3]}`) — the payload travels, positionally, rather than being dropped in favor of the tag; `Result` is a plain enum, so `Ok(5)` is `{"Ok":[5]}`. Like `bytes`, the payload-carrying form is write-only ([a payload-carrying enum has no JSON decoding at all](#enum-typed-fields)). An `Option` is the one exception, by the JSON-null convention: `some(x)` encodes as `x` and `none` as `null`, at the top level and inside a variant's payload alike. |
 | `Deserialize<Json>` | Registers the type's decode recipe, so JSON decodes into it: `json.parse::<T>` / `json.try_parse::<T>`, `Response.json::<T>()`, and the router-facing `json.decode_typed("T", text)` (which resolves the type by *name* at runtime, and needs this derive). Derivable for a non-generic `struct` or `class` whose fields are all JSON-decodable — numbers (including the [fixed widths](Fixed-Width-Integers), which accept a JSON number that fits the declared width and report one that does not), `bool`, `string`, `?T`, `List`, string-keyed `Map`, a declared **enum**, or another such type; anything else is E0050. A decoded `class` is a class: it has identity, compares by reference, and runs its `Validate` at the door like any other decode. See [which fields may be omitted](#which-json-fields-may-be-omitted) and [enum-typed fields](#enum-typed-fields) below. |
+
+A derived trait's method is **callable by name**, not only through the operator it lights up: `@derive(Display)` answers `x.to_string()`, `@derive(Equatable)` answers `x.eq(other)`, `@derive(Comparable)` answers `x.compare(other)`. It is the operator's own answer said a second way — a derived `compare` and `<` read one ordering, and a derived `to_string()` is exactly what interpolation writes — and it answers through the [trait object](Generics-and-Traits#trait-objects) too, so a value that reports `Display` from `traits_of` can always be handed to a `dyn Display` and asked.
 
 ```noeta check
 @derive(Equatable, Comparable, Display, Clone)
@@ -23,7 +25,9 @@ class Point {
     y: int
     pub fn new(x: int, y: int): Point { return Point { x: x, y: y } }
 }
-echo Point.new(1, 2) < Point.new(1, 3)   // true
+echo Point.new(1, 2) < Point.new(1, 3)          // true
+echo Point.new(1, 2).compare(Point.new(1, 3))   // Ordering.Less
+echo Point.new(1, 2).to_string()                // Point {x: 1, y: 2}
 
 @derive(Serialize<Json>)
 class User {

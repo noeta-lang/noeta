@@ -1064,4 +1064,66 @@ mod tests {
             }
         }
     }
+
+    /// **The derived-method table is exactly the recipe traits that impose a method.**
+    ///
+    /// `noeta_ast::derive::DERIVED_BUILTIN_METHODS` is what both backends resolve a
+    /// method-dispatch miss through and what the checker registers signatures from, and it is
+    /// literals in a crate that cannot see [`BuiltinTrait`]. Left ungated, a trait that grows a
+    /// built-in recipe joins `traits_of` and `dyn Trait` — the membership half — while its method
+    /// stays uncallable, which is the exact shape of the hole this table closes.
+    ///
+    /// So the set is derived here from the row rather than restated: a trait needs a derived
+    /// method iff the compiler carries a recipe for it (`@derive(Name)` alone synthesizes the
+    /// implementation) **and** the trait imposes a method to call. `Error` is the one exclusion,
+    /// and for a stated reason — its `message()` is a real synthesized body from
+    /// `plan_error_derive`, so it is in the method table before any miss.
+    #[test]
+    fn derived_builtin_methods_cover_every_recipe_trait_that_imposes_a_method() {
+        use noeta_ast::derive::{DERIVED_BUILTIN_METHODS, derived_builtin_method};
+
+        for row in DERIVED_BUILTIN_METHODS {
+            let t = BuiltinTrait::from_name(row.trait_name)
+                .unwrap_or_else(|| panic!("`{}` is not a built-in trait", row.trait_name));
+            assert!(
+                t.has_builtin_recipe(),
+                "{} has a derived method but no built-in recipe",
+                row.trait_name
+            );
+            assert_eq!(
+                t.required_method(),
+                Some((row.method, Some(row.arity))),
+                "the derived method of {} must be its required method",
+                row.trait_name
+            );
+            // A derived method is called ON A VALUE and dispatched by name through a trait object,
+            // which is the same pair of facts `has_trait_object` is derived from.
+            assert!(
+                t.has_trait_object(),
+                "{} has a derived method but no trait object",
+                row.trait_name
+            );
+            assert_eq!(
+                derived_builtin_method(row.method),
+                Some(row),
+                "method names must be unique across the table"
+            );
+        }
+
+        for t in BUILTIN_TRAITS {
+            let wants = t.has_builtin_recipe()
+                && t.required_method().is_some()
+                && *t != BuiltinTrait::Error;
+            let has = DERIVED_BUILTIN_METHODS
+                .iter()
+                .any(|m| m.trait_name == t.name());
+            assert_eq!(
+                has,
+                wants,
+                "{} {} a derived structural method",
+                t.name(),
+                if wants { "needs" } else { "must not have" }
+            );
+        }
+    }
 }

@@ -18,6 +18,11 @@ enum InvokeTarget {
     /// A top-level function value read from its global slot (the two-argument form). Reserves no
     /// `self` register, and may carry upvalues, so it does not fit the prototype path.
     Free(Value),
+    /// A method a `@derive`d built-in trait makes callable (`noeta_ast::derive::
+    /// DERIVED_BUILTIN_METHODS`): `to_string`/`eq`/`compare` on a type that derives the trait but
+    /// writes no body for it. There is no prototype to push — the routine runs synchronously — so
+    /// the reflective door reaches the same member set a direct `x.to_string()` does.
+    Derived(&'static noeta_ast::derive::DerivedBuiltinMethod),
 }
 
 /// How a [`Vm::cold_op`] arm left the dispatch loop — the three exits the arms already had,
@@ -1976,6 +1981,22 @@ impl<'m> Vm<'m> {
                             set_reg(regs, fbase, *dst, result);
                             return Ok(Some(ColdStep::Next(pc + 1)));
                         }
+                        // A method a `@derive`d built-in trait makes callable
+                        // (`to_string`/`eq`/`compare`). Ahead of the field
+                        // fallback below because it is a METHOD — the same
+                        // precedence the checker pins statically, where its
+                        // signature is registered. Left uncached like the field
+                        // path: the method cache memoizes prototypes, and this
+                        // one has none.
+                        {
+                            let arg_values = ArgBuf::collect(args, regs, fbase);
+                            if let Some(result) =
+                                self.derived_builtin_call(v, method, arg_values.as_slice(), *span)
+                            {
+                                set_reg(regs, fbase, *dst, result?);
+                                return Ok(Some(ColdStep::Next(pc + 1)));
+                            }
+                        }
                         // The runtime member-call fallback (the field-access-then-
                         // call desugar's `dyn` path): no method `method`, but the
                         // shape HAS a field of that name — `obj.f(args)` means
@@ -3889,6 +3910,31 @@ impl<'m> Vm<'m> {
                             "method"
                         };
                         let Some(proto) = self.method_proto(&type_name, &method) else {
+                            // A method a `@derive`d built-in trait makes callable. Arity is bound
+                            // here like every other target's, so a wrong count is the `Result.Err`
+                            // `invoke` promises rather than an abort.
+                            if !is_assoc
+                                && let Some(row) =
+                                    noeta_ast::derive::derived_builtin_method(&method)
+                                && module
+                                    .reflection
+                                    .type_implements(&type_name, row.trait_name)
+                            {
+                                break 'resolve match bind_invoke_args(
+                                    &module.reflection,
+                                    &format!("{type_name}.{method}"),
+                                    kind,
+                                    row.arity,
+                                    0,
+                                    arg_items,
+                                    named.as_deref(),
+                                ) {
+                                    Ok((args, supplied)) => {
+                                        Ok((InvokeTarget::Derived(row), args, supplied))
+                                    }
+                                    Err(message) => Err(message),
+                                };
+                            }
                             // A bare `from` names no single conversion; say which ones exist.
                             break 'resolve Err(
                                 self.missing_method_message(&type_name, &method, is_assoc)
@@ -3948,6 +3994,22 @@ impl<'m> Vm<'m> {
                             let result = self.call_value_masked(callee, owned, *span, supplied)?;
                             let ok = self.persist.shapes[*ok_shape as usize];
                             set_reg(regs, fbase, *dst, Value::enum_value(ok, vec![result]));
+                            pc += 1;
+                        }
+                        Ok((InvokeTarget::Derived(row), arg_items, _)) => {
+                            // No frame to push: the structural routine runs here and its result is
+                            // wrapped in `Result.Ok` exactly as a returning body's would be. The
+                            // receiver and arguments stay borrowed — the routine reads them and
+                            // hands back a fresh value.
+                            let recv = recv_val.expect("an instance dispatch resolved a receiver");
+                            let result =
+                                self.derived_builtin_call(recv, row.method, &arg_items, *span);
+                            if let Some(list) = args_to_release.take() {
+                                list.release();
+                            }
+                            let value = result.expect("the row resolved on this receiver")?;
+                            let ok = self.persist.shapes[*ok_shape as usize];
+                            set_reg(regs, fbase, *dst, Value::enum_value(ok, vec![value]));
                             pc += 1;
                         }
                         Ok((InvokeTarget::Proto { proto, is_assoc }, arg_items, supplied)) => {

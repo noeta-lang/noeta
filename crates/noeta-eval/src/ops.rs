@@ -247,7 +247,7 @@ pub fn value_eq(left: &Value, right: &Value) -> bool {
     values_equal(left, right)
 }
 
-fn values_equal(left: &Value, right: &Value) -> bool {
+pub(crate) fn values_equal(left: &Value, right: &Value) -> bool {
     match (left, right) {
         (Value::Int(a), Value::Int(b)) => a == b,
         (Value::Float(a), Value::Float(b)) => a == b,

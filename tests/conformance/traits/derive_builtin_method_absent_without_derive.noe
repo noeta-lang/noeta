@@ -1,0 +1,26 @@
+// **The method comes from the derive, not from the shape.** A type that does not derive the trait
+// has no `to_string`, no `eq` and no `compare`, and each is refused where it is written.
+//
+// The membership half agrees: `traits_of` on this type is empty and `x is dyn Display` is `false`,
+// so refusing the call is the same answer said twice — which is exactly what a derived implementor
+// gets the other way round (see `derive_builtin_method_doors`). Without this, "the method is
+// installed" could pass by installing it on every nominal type.
+//
+// Two things separate this from a runtime abort raising the same code at the same spans. The two
+// `echo`s come FIRST and expect nothing on stdout — a run reaching the calls would have printed
+// them — and three diagnostics come out of one run, where a run aborts at the first bad call.
+
+// expect: error E0007 at 24:6
+// expect: error E0007 at 25:6
+// expect: error E0007 at 26:6
+// expect: exit 1
+
+struct Plain {
+    n: int
+}
+
+echo traits_of(Plain { n: 1 })
+echo Plain { n: 1 } is dyn Display
+echo Plain { n: 1 }.to_string()
+echo Plain { n: 1 }.eq(Plain { n: 1 })
+echo Plain { n: 1 }.compare(Plain { n: 2 })

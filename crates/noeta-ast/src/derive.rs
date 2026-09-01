@@ -77,6 +77,130 @@ pub const VIA_DELEGABLE_BUILTINS: &[&str] = &[
     "Concat",
 ];
 
+/// **The structural routine a derived built-in trait's method runs.**
+///
+/// A `@derive(Display)` registers membership *and* has to make `to_string()` answerable, or
+/// `x is dyn Display` and `x.to_string()` disagree about the same value. What the method answers
+/// with is not a second implementation: each variant names the routine the runtime **already** runs
+/// for the operator or protocol the trait lights up, so the derived method and the operator it
+/// stands beside cannot give different answers.
+///
+/// The variants are named for the routine rather than for the trait, because that is what a
+/// backend implements: `Order` is the field-wise ordering `< <= > >=`, `.sorted()` and `.min()`
+/// all read, and there is exactly one of it per backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DerivedBody {
+    /// `Display::to_string()` → the value's structural rendering — the same text `echo` and string
+    /// interpolation write for a type with no hand-written `to_string`.
+    Render,
+    /// `Equatable::eq(other)` → structural equality — the same answer `==` gives.
+    Equals,
+    /// `Comparable::compare(other)` → the field-wise structural ordering, as an `Ordering`.
+    Order,
+}
+
+/// One row of [`DERIVED_BUILTIN_METHODS`]: which built-in trait, the method a program calls, its
+/// user-facing arity (excluding the receiver), and the routine that answers it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DerivedBuiltinMethod {
+    /// The built-in trait's name, exactly as `@derive(...)` spells it.
+    pub trait_name: &'static str,
+    /// The method name a program calls, and the key the runtime method table is probed under.
+    pub method: &'static str,
+    /// Parameter count **excluding** the receiver.
+    pub arity: usize,
+    /// The structural routine the method runs.
+    pub body: DerivedBody,
+}
+
+/// **The built-in traits whose `@derive` makes the trait's method callable**, and what each method
+/// answers.
+///
+/// Deriving one of these registers trait membership, which `traits_of(value)` reports and
+/// `x is dyn Trait` reads; the method has to come with it, because a value that answers `true` to
+/// `is dyn Display` and then aborts on `x.to_string()` breaks the one promise a trait object makes.
+/// Both backends resolve a method-dispatch miss through this table and run the named routine, and
+/// the checker registers the same signatures — so the direct call, dispatch through `dyn Trait`,
+/// the operator, `traits_of` and `is` all answer for the same set of types.
+///
+/// Literals rather than `BuiltinTrait` values for the reason [`ERROR_TRAIT`] is one: this crate
+/// deliberately does not depend on `noeta-types`, and `noeta-vm` does not either. A lockstep test
+/// in `noeta-types` pins every row to a real trait whose `required_method` has this name and arity,
+/// and asserts the set is exactly the built-in-recipe traits that impose a method — so a trait that
+/// grows a recipe cannot quietly arrive without one.
+///
+/// `Error` is absent because its method is not structural: [`plan_error_derive`] synthesizes a real
+/// `message()` body, which lands in the method table like any written one and never reaches a miss.
+pub const DERIVED_BUILTIN_METHODS: &[DerivedBuiltinMethod] = &[
+    DerivedBuiltinMethod {
+        trait_name: "Display",
+        method: "to_string",
+        arity: 0,
+        body: DerivedBody::Render,
+    },
+    DerivedBuiltinMethod {
+        trait_name: "Equatable",
+        method: "eq",
+        arity: 1,
+        body: DerivedBody::Equals,
+    },
+    DerivedBuiltinMethod {
+        trait_name: "Comparable",
+        method: crate::COMPARE_METHOD,
+        arity: 1,
+        body: DerivedBody::Order,
+    },
+];
+
+/// The [`DERIVED_BUILTIN_METHODS`] row a method name selects, if any — the lookup a runtime makes
+/// when method dispatch misses, before deciding the member does not exist.
+///
+/// Method names are unique across the table (a lockstep test in `noeta-types` asserts it), so the
+/// name alone names the row; the caller still has to ask whether the receiver's type implements the
+/// row's trait, which is the whole of the membership question.
+pub fn derived_builtin_method(method: &str) -> Option<&'static DerivedBuiltinMethod> {
+    DERIVED_BUILTIN_METHODS.iter().find(|m| m.method == method)
+}
+
+/// The **signature** a derived built-in method presents, for the deriving type written as
+/// `self_ty` (its own name, carrying its type parameters where it has them).
+///
+/// Body-less on purpose, and the one place in this module where that is so: the other planners
+/// synthesize code the backends materialize, while this method's behavior is the runtime's own
+/// structural routine and has no source form. What the checker needs is the signature — so
+/// `x.to_string()` types as the `string` it produces, `x.eq(a, b)` is refused for its arity, and a
+/// receiver typed `Tag` resolves the member instead of reporting that `Tag` has no such method.
+///
+/// A parameterized method takes the deriving type itself, which is what a hand-written `impl`
+/// would write and what the operator beside it accepts.
+pub fn derived_builtin_signature(
+    row: &DerivedBuiltinMethod,
+    self_ty: TypeRef,
+    span: Span,
+) -> FnDecl {
+    let ret = match row.body {
+        DerivedBody::Render => named("string", span),
+        DerivedBody::Equals => named("bool", span),
+        DerivedBody::Order => named(crate::reflect::ORDERING_ENUM, span),
+    };
+    let params = (0..row.arity)
+        .map(|_| Param {
+            attrs: Vec::new(),
+            name: "other".to_string(),
+            name_span: span,
+            ty: Some(self_ty.clone()),
+            default: None,
+            span,
+            positional: false,
+        })
+        .collect();
+    FnDecl {
+        params,
+        ret: Some(ret),
+        ..empty_fn(row.method, span)
+    }
+}
+
 /// How a caller resolves the names a `@derive` can refer to.
 ///
 /// The checker answers from its symbol table, lowering from a scan of the linked program. *Which*
