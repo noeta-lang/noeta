@@ -110,6 +110,7 @@ Rationale is welcome where it helps a reader *use* the thing — explaining that
 - Implement features in full — no stubs or TODOs unless deferring an entire subsystem, and never defer scope without asking first.
 - Commit each green, gated slice as it completes; do not wait for per-commit authorization. **Never `git push` without explicit authorization.**
 - **This project does not use pull requests.** Work merges to `main` and CI runs on the push.
+- **Cutting a release is `RELEASE.md`**, not something to reconstruct from the workflows. It carries the one ordering that matters — push the branch, wait for CI to go green on that exact commit, *then* push the tag, because the release's own gate runs after the tag exists — plus what the tag automates for you (the org `NOETA_VERSION` variable, the site dispatches, the extension publish), what you must never do by hand, and the post-release checklist for the `para` fleet.
 
 ## Before you're done
 
