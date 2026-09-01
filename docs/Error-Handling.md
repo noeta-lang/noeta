@@ -123,15 +123,38 @@ fn place(items: List<Item>): Result<Order, OrderError> {
 }
 ```
 
-This lets you write the happy path linearly while failures short-circuit outward:
+This lets you write the happy path linearly while failures short-circuit outward. Declaring the error side as `dyn Error` is what lets several unrelated error types propagate through one function without a conversion between them — each `Err` widens into the trait object on its way out, and the caller asks it for a `message()`:
 
-```noeta ignore
+```noeta
+struct Report { lines: int }
+
+struct DiskError {
+    path: string
+    impl Error { pub fn message(): string { return "cannot read ${self.path}" } }
+}
+
+struct ParseError {
+    at: int
+    impl Error { pub fn message(): string { return "bad input at line ${self.at}" } }
+}
+
+fn fs_read(path: string): Result<string, DiskError> { return Err(DiskError { path: path }) }
+fn parse(raw: string): Result<int, ParseError> { return Ok(raw.len()) }
+fn analyze(n: int): Report { return Report { lines: n } }
+
 fn pipeline(path: string): Result<Report, dyn Error> {
-    raw    = fs_read(path)?      // returns Err on read failure
-    parsed = parse(raw)?         // returns Err on parse failure
+    raw    = fs_read(path)?      // a `DiskError` widens into `dyn Error`
+    parsed = parse(raw)?         // and so does a `ParseError` — neither declares a conversion
     return Ok(analyze(parsed))
 }
+
+echo match pipeline("/etc/app.toml") {
+    Ok(r)  => "read ${r.lines} lines",
+    Err(e) => e.message(),
+}
 ```
+
+That is the trade the two error shapes make. `dyn Error` costs nothing to declare and answers only `message()`; a concrete error type lets the caller `match` on which failure it was, and is what the [`From` conversions](#converting-errors-at---impl-fromsource) below are for.
 
 `?` works the same on an **Option**: it unwraps a `some`, or early-returns the `none` from the enclosing (Option-returning) function:
 
