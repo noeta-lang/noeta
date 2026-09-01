@@ -1,0 +1,11 @@
+// An `enum` gets the same refusal a `struct` does (E0079): a `destruct` block is class-only, and an
+// enum's variants are values in exactly the sense a struct is — copied rather than referenced, with
+// no instance identity for "the last reference" to be about.
+// expect: error E0079 at 8:5
+// expect: exit 1
+enum Status {
+    Open; Closed
+    destruct { echo "gone" }
+}
+
+echo Status.Open

@@ -82,6 +82,36 @@ pub enum NativeValue {
     },
 }
 
+impl NativeValue {
+    /// The receiver's own **nominal name**, where it carries one — an enum value's enum, a class or
+    /// struct instance's type, an opaque or flat object's shape name.
+    ///
+    /// It exists for the one caller that has a receiver and no declaration in hand: a dispatch that
+    /// resolved nothing and must say *which type* has no such method. `None` for the shapes with no
+    /// nominal identity at all (a scalar, a string, a container), where there is nothing honest to
+    /// name.
+    ///
+    /// Matched exhaustively rather than with a wildcard: a new arg-view shape that *does* carry a
+    /// name would otherwise join the `None` side silently, and the diagnostic would name the
+    /// fallback instead of the type.
+    pub fn nominal_name(&self) -> Option<&str> {
+        match self {
+            NativeValue::Variant { enum_name, .. } => Some(enum_name.as_str()),
+            NativeValue::Instance { class, .. } => Some(class.as_str()),
+            NativeValue::Object { type_name, .. } | NativeValue::Opaque(type_name) => {
+                Some(type_name)
+            }
+            NativeValue::Extern(b) => Some(b.type_identity()),
+            NativeValue::Scalar(_)
+            | NativeValue::Str(_)
+            | NativeValue::Bytes(_)
+            | NativeValue::Unit
+            | NativeValue::List(_)
+            | NativeValue::Map(_) => None,
+        }
+    }
+}
+
 /// A backend-agnostic **result** the backend materializes into its own `Value`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum NativeOut {
@@ -1191,12 +1221,12 @@ impl ExtType {
         name: "",
         namespace: "std",
         methods: &[],
-        dispatch: |_, method, _, _| {
-            Err(StdError {
-                kind: crate::ErrorKind::UnknownName,
-                message: format!("internal: no method dispatch registered (method `{method}`)"),
-            })
-        },
+        // A type that declares no plain `methods` registers no dispatch, so **every** call that
+        // reaches here is a method the type does not have — a `computed.set(…)`, an `effect.get()`,
+        // a typo. That is an ordinary user mistake and reads as one: the receiver names itself, so
+        // the answer is the same "type `X` has no method `m`" the checker gives for a closed type,
+        // not a note about a registration the reader has never heard of and cannot act on.
+        dispatch: |recv, method, _, _| Err(crate::no_method_error(recv.type_identity(), method)),
         key_capable: false,
         ctx_methods: &[],
         ctx_dispatch: None,
@@ -1383,13 +1413,13 @@ impl ExtEnum {
         variants: &[],
         backing: EnumBacking::None,
         methods: &[],
-        dispatch: |_, method, _, _| {
-            Err(StdError {
-                kind: crate::ErrorKind::UnknownName,
-                message: format!(
-                    "internal: no enum-method dispatch registered (method `{method}`)"
-                ),
-            })
+        // Reached only for a method the enum does not have — see [`ExtType::DEFAULTS`] for why
+        // that is reported in the checker's words rather than the registry's.
+        dispatch: |recv, method, _, _| {
+            Err(crate::no_method_error(
+                recv.nominal_name().unwrap_or("enum"),
+                method,
+            ))
         },
         traits: &[],
         directives: &[],
@@ -1681,13 +1711,13 @@ impl ExtFielded {
         namespace: "std",
         fields: &[],
         methods: &[],
-        dispatch: |_, method, _, _| {
-            Err(StdError {
-                kind: crate::ErrorKind::UnknownName,
-                message: format!(
-                    "internal: no fielded-method dispatch registered (method `{method}`)"
-                ),
-            })
+        // Reached only for a method the type does not have — see [`ExtType::DEFAULTS`] for why
+        // that is reported in the checker's words rather than the registry's.
+        dispatch: |recv, method, _, _| {
+            Err(crate::no_method_error(
+                recv.nominal_name().unwrap_or("value"),
+                method,
+            ))
         },
         traits: &[],
         kind: FieldedKind::Class,

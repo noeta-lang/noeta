@@ -1,0 +1,23 @@
+// **Five built-in traits have no trait object**, and `dyn Name` on them is refused where it is
+// written (E0014) rather than naming a type nothing can inhabit.
+//
+// A trait object is a value plus a method to call on it, so the refusal follows from the trait's
+// own contract: `Clone`, `Serialize` and `Deserialize` are markers whose behavior is synthesized
+// and impose no method to dispatch; `From::from` is `static`, called on the type rather than on a
+// value, so there is no receiver to erase; and `From`, `To`, `Serialize` and `Deserialize` all take
+// a type argument that `dyn Name` has no syntax to carry — a `dyn To` would not say *to what*.
+//
+// Pinned so "refused" and "silently broken" cannot be confused later: every other built-in trait
+// coerces in every position (see `dyn_builtin_trait_positions`), and the ones that do not say so.
+// expect: error E0014 at 18:9
+// expect: error E0014 at 19:9
+// expect: error E0014 at 20:9
+// expect: error E0014 at 21:9
+// expect: error E0014 at 22:9
+// expect: exit 1
+fn a(x: dyn Clone): int { return 1 }
+fn b(x: dyn From): int { return 2 }
+fn c(x: dyn To): int { return 3 }
+fn d(x: dyn Serialize): int { return 4 }
+fn e(x: dyn Deserialize): int { return 5 }
+echo 0

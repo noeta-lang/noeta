@@ -476,17 +476,38 @@ impl Checker {
             // resolve here; the checker projects it per-impl at each typing site (an unbound name
             // degrades to a gradual hole rather than an E0013), so there is nothing to reject.
             TypeRef::AssocProjection { .. } => {}
-            // `dyn Trait` — the trait must resolve to a built-in or user-defined trait (L1, UT4).
+            // `dyn Trait` — the trait must resolve to a built-in or user-defined trait, and a
+            // built-in one must actually **have** a trait object
+            // ([`BuiltinTrait::has_trait_object`]). This is the one door `dyn Trait` enters the type
+            // system by — every spelling of it (an annotation, a parameter, a declared return, an
+            // element type, an `is`/`.as<…>` target) resolves through here — so a trait with no
+            // object is refused where it is written rather than quietly naming a type nothing can
+            // inhabit.
             TypeRef::DynTrait { trait_name, span } => {
-                if BuiltinTrait::from_name(trait_name.as_str()).is_none()
-                    && !self.symbols.user_traits.contains_key(trait_name.as_str())
-                {
-                    self.error(
-                        DiagnosticCode::UnknownTrait,
-                        *span,
-                        format!("unknown trait `{trait_name}` in `dyn {trait_name}`"),
-                    )
-                    .help("`dyn` must be followed by a built-in trait or a `trait` you declare");
+                match BuiltinTrait::from_name(trait_name.as_str()) {
+                    Some(t) if !t.has_trait_object() => {
+                        let message = format!(
+                            "`{trait_name}` has no trait object, so `dyn {trait_name}` names no type"
+                        );
+                        self.error(DiagnosticCode::UnknownTrait, *span, message).help(
+                            "a trait object is a value with a method to call on it: a marker trait \
+                             imposes no method, a `static` one is called on the type rather than on \
+                             a value, and a trait taking a type argument has no `dyn` spelling that \
+                             names it. Use a `<T: Trait>` bound, or the concrete type, instead",
+                        );
+                    }
+                    Some(_) => {}
+                    None if !self.symbols.user_traits.contains_key(trait_name.as_str()) => {
+                        self.error(
+                            DiagnosticCode::UnknownTrait,
+                            *span,
+                            format!("unknown trait `{trait_name}` in `dyn {trait_name}`"),
+                        )
+                        .help(
+                            "`dyn` must be followed by a built-in trait or a `trait` you declare",
+                        );
+                    }
+                    None => {}
                 }
             }
             TypeRef::Named { name, args, span } => {

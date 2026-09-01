@@ -418,7 +418,11 @@ impl Checker {
     ///   receiver *is* some implementor and `Self` names that implementor, so the trait object is
     ///   the most precise answer this side of the erasure.
     pub(crate) fn dyn_trait_method(&self, tr: &str, name: &str) -> Option<TraitCall> {
-        let decl = self.symbols.user_traits.get(tr)?;
+        // A user (or native) `trait` is asked first, so a declaration shadowing a built-in name
+        // keeps its own contract — the same precedence `seed_ext_traits` gives the symbol table.
+        let Some(decl) = self.symbols.user_traits.get(tr) else {
+            return Self::builtin_dyn_method(tr, name);
+        };
         let m = decl.methods.iter().find(|m| m.sig.name == name)?;
         // Resolved in the TRAIT's scope, like the bound path above — see the note there.
         let trait_scope = param_scope(&decl.type_params, &self.imports.extern_types);
@@ -451,6 +455,36 @@ impl Checker {
             params,
             required: required_params(&m.sig.params),
             ret: inst(ret),
+        })
+    }
+
+    /// The [`Self::dyn_trait_method`] arm for a **built-in** trait object: the contract a value can
+    /// still answer once the implementor is erased.
+    ///
+    /// A `.noe` `trait` writes its methods out, so the arm above reads a real signature. A built-in
+    /// trait has no declaration — [`BuiltinTrait`] pins the required method's **name** and
+    /// **arity** and nothing else, and everything it does not pin is the implementor's. So exactly
+    /// what the registry states is returned, and only for the shape where that is the whole
+    /// signature: a **nullary** required method (`to_string`, `message`, `len`, `iter`,
+    /// `validate`). The parameterized protocols (`get(key)`, `eq(other)`, `add(other)`) name no
+    /// parameters here, and inventing names or types for them would be the trait object stating a
+    /// contract no implementor wrote — they stay as lenient through an object as any unresolved
+    /// `dyn` member, which is what dynamic dispatch by name gives them anyway.
+    ///
+    /// The **return is a hole even for the ones that resolve**. The language fixes a return for
+    /// `Equatable`/`Comparable` alone ([`BuiltinTrait::fixed_return`], both parameterized and so
+    /// not reached here); `Display::to_string` and `Error::message` are typed by whatever the
+    /// implementor declared, so typing the call `string` would promise something no impl was held
+    /// to. What this arm buys over leaving the method unresolved is the **arity** check —
+    /// `e.message(1)` is refused here rather than aborting at run time.
+    fn builtin_dyn_method(tr: &str, name: &str) -> Option<TraitCall> {
+        let t = BuiltinTrait::from_name(tr)?;
+        let (method, arity) = t.required_method()?;
+        (t.has_trait_object() && method == name && arity == Some(0)).then(|| TraitCall {
+            param_names: Vec::new(),
+            params: Vec::new(),
+            required: 0,
+            ret: Type::Unknown,
         })
     }
 

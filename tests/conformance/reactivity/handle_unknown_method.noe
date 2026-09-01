@@ -1,0 +1,12 @@
+// A method a reactive **handle** does not have fails like a method any other type does not have:
+// `E0005`, naming the type and the method, at the call.
+//
+// `Signal`/`Computed`/`Effect` declare their surface as context methods and register no plain
+// method dispatch at all, so every plain method call on one lands on the shared "nothing
+// registered" fallback — which means the fallback is not an internal condition to describe, it is
+// the ordinary "no such method" answer for these types, and it reads as one.
+// expect: error E0005 at 12:1
+// expect: exit 1
+use std.reactive.{signal}
+s = signal(1)
+s.nudge(2)

@@ -543,6 +543,18 @@ pub enum DiagnosticCode {
     /// Advisory, not an error: the representation is intact and every arithmetic, comparison and
     /// serialization that *does* fix the width still reads it correctly.
     ErasedWidthDisplay,
+    /// A **declaration member written on a kind that does not have it** — today a `destruct` block
+    /// on a `struct` or an `enum`, which is a `class` capability.
+    ///
+    /// It is its own code because the reader's mistake is not a syntax error and not a type error:
+    /// they wrote a member the grammar knows, spelled correctly, on the wrong kind of declaration.
+    /// The only thing that helps is being told which kind has it and why, and neither "unexpected
+    /// token" nor "reserved name" can say that — a `struct`'s `destruct` reported as a reserved
+    /// *name* named the token and left the rule unstated.
+    ///
+    /// Appended at the tail on purpose: this enum is on the `.noeb` wire and postcard encodes a
+    /// variant by declaration index, so a middle insertion silently renumbers everything after it.
+    InvalidMemberSite,
 }
 
 impl DiagnosticCode {
@@ -626,6 +638,7 @@ impl DiagnosticCode {
         DiagnosticCode::PrivateMethod,
         DiagnosticCode::RedundantVisibility,
         DiagnosticCode::ErasedWidthDisplay,
+        DiagnosticCode::InvalidMemberSite,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -710,6 +723,7 @@ impl DiagnosticCode {
             DiagnosticCode::PrivateMethod => "E0076",
             DiagnosticCode::RedundantVisibility => "E0077",
             DiagnosticCode::ErasedWidthDisplay => "E0078",
+            DiagnosticCode::InvalidMemberSite => "E0079",
         }
     }
 

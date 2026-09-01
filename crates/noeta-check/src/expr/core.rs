@@ -552,15 +552,19 @@ impl Checker {
     /// the rule composes (`List<WebRole> <: List<Enum>`); every non-kind case delegates to the pure
     /// lattice. This is the single funnel for assignment, argument, return, and field checks.
     pub(crate) fn assignable(&self, actual: &Type, expected: &Type) -> bool {
-        // A **trait object** `dyn Trait` (L1 user traits, UT4) — a registry-dependent membership rule
-        // like `Kind`, decided here rather than in the pure lattice. An implementor widens into it; a
-        // `dyn`/hole defers; a `dyn Trait` widens into bare `dyn` (or the same trait object). This is
-        // the direct/element-wise coercion the common cases (a `dyn Trait` parameter, an annotated
+        // A **trait object** `dyn Trait` — a registry-dependent membership rule like `Kind`, decided
+        // here rather than in the pure lattice. An implementor widens into it; a `dyn`/hole defers; a
+        // `dyn Trait` widens into bare `dyn` (or the same trait object). This is the direct/
+        // element-wise coercion the common cases (a `dyn Trait` parameter, an annotated
         // `List<dyn Trait>` literal checked element-by-element) go through.
+        //
+        // Membership goes through the single funnel [`Checker::implements_trait`] — the same
+        // registration data the runtime `x is dyn Trait` test and `traits_of(x)` read — so a
+        // built-in trait's object is formed by exactly the values that answer `true` to the test.
         if let Type::DynTrait(tr) = expected {
             return match actual {
                 Type::DynTrait(a) => a == tr,
-                Type::Named(n, _) => self.type_impls_trait(n, tr),
+                Type::Named(n, _) => self.implements_trait(n, tr),
                 other => other.defers_to_runtime(),
             };
         }
@@ -573,15 +577,6 @@ impl Checker {
         // `Named(n)` is a member of an abstract `Kind(k)`. Threading it through [`Type::subtype_with`]
         // reaches every nested covariant position without re-implementing the variance walk here.
         Type::subtype_with(actual, expected, &|n, k| self.is_of_kind(n, k))
-    }
-
-    /// Whether the named type `n` implements the user trait `tr` (L1, UT4) — a recorded in-body or
-    /// standalone `impl`. The membership rule behind `dyn Trait` coercion.
-    fn type_impls_trait(&self, n: &str, tr: &str) -> bool {
-        self.symbols
-            .user_trait_impls
-            .get(n)
-            .is_some_and(|s| s.contains_key(tr))
     }
 
     /// Whether an argument of type `arg` may be passed where `param` is expected — the kind-aware
