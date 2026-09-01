@@ -3459,7 +3459,19 @@ impl Interpreter {
                     ),
                 ));
             }
-            return match compare_primitive(&receiver, &args[0]) {
+            // The prelude enums that order without a declaration (`?T`, `Result<T, E>`) order
+            // structurally — variant declaration index first, then the payload. `compare_primitive`
+            // does not walk an enum, so without this arm `some(1) < none` answered and
+            // `some(1).compare(none)` aborted on the very same pair: the method and the operator
+            // are one trait and read one ordering. Same condition and same routine as
+            // `apply_binary_op`'s prelude arm, and the VM's twin.
+            let ordering = match &receiver {
+                Value::Enum(e) if noeta_ast::prelude_enum_orders(&e.enum_name) => {
+                    enum_structural_compare(e, &args[0])
+                }
+                other => compare_primitive(other, &args[0]),
+            };
+            return match ordering {
                 Some(ordering) => Ok(builtin_enum(
                     "Ordering",
                     noeta_ast::ordering_variant(ordering),

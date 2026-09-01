@@ -1,0 +1,53 @@
+// **`~` on a type that implements `Concat` produces what its `concat` produces**, and the checker
+// says so.
+//
+// `~` has two jobs: it display-concatenates any two operands into a `string`, and it is the
+// operator `impl Concat` overloads. Both backends pick between them from the LEFT operand alone —
+// an object or enum carrying a `concat` is asked for it, and nothing else is — so the static type
+// has to pick the same way. Typing the overloaded form `string` is the one answer that can be
+// *wrong* rather than merely imprecise: it admitted `f(a ~ b)` against an `f(x: string)`, which
+// checked clean and then aborted inside `f` with a receiver that was never a string.
+//
+// The `.s` reads below are the assertion. A value of the deriving type has that field; a `string`
+// does not, so a run that prints them is a run where the operator's result really is the impl's
+// answer at both doors — and the `left` lines pin the other half, that a non-implementing left
+// operand still renders rather than dispatching.
+
+// expect: stdout "impl S {s: \"ab\"} | ab | ab"
+// expect: stdout "derived D {s: \"ab\"} | ab | ab"
+// expect: stdout "other 7 | 7"
+// expect: stdout "left aS {s: \"a\"} | [1]S {s: \"a\"}"
+// expect: stdout "strings ab | lists [1, 2]"
+// expect: exit 0
+
+struct S {
+    s: string
+    impl Concat {
+        pub fn concat(other: S): S { return S { s: self.s ~ other.s } }
+    }
+}
+
+@derive(Concat, via: s)
+struct D { s: string }
+
+// A `concat` need not return the deriving type — the implementor decides, and the operator hands
+// back whatever the method does.
+struct Counted {
+    n: int
+    impl Concat {
+        pub fn concat(other: Counted): int { return self.n + other.n }
+    }
+}
+
+a = S { s: "a" } ~ S { s: "b" }
+echo "impl ${a} | ${a.s} | ${S { s: "a" }.concat(S { s: "b" }).s}"
+d = D { s: "a" } ~ D { s: "b" }
+echo "derived ${d} | ${d.s} | ${D { s: "a" }.concat(D { s: "b" }).s}"
+c = Counted { n: 3 } ~ Counted { n: 4 }
+echo "other ${c} | ${Counted { n: 3 }.concat(Counted { n: 4 })}"
+
+// The left operand decides: a `string` or a list on the left never reaches the impl, so both of
+// these render the right operand into text.
+echo "left ${"a" ~ S { s: "a" }} | ${[1] ~ S { s: "a" }}"
+// And the two structural forms are untouched.
+echo "strings ${"a" ~ "b"} | lists ${[1] ~ [2]}"

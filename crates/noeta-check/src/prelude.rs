@@ -445,24 +445,51 @@ impl Checker {
     /// [`ExtTrait`]) is dead data for this question and is recorded by
     /// [`Checker::seed_ext_traits`] instead.
     fn native_declares_builtin_trait(&self, name: &str, t: BuiltinTrait) -> bool {
-        use noeta_ext_abi::NominalType;
         // The shared reading, so what the checker admits and what the runtimes serve is one
         // question rather than three: both backends seed their ordering flag through the same
         // predicate.
-        let advertises = |traits: &'static [&'static str]| {
-            noeta_ext_abi::registry::declares_builtin_trait(traits, t.name())
-        };
+        self.native_declared_traits(name)
+            .any(|traits| noeta_ext_abi::registry::declares_builtin_trait(traits, t.name()))
+    }
+
+    /// The trait list every native declaration of the nominal type `name` advertises — empty when
+    /// the registry knows no such type.
+    ///
+    /// One walk over the three places a native type can be declared (an extern type, a fielded
+    /// class/struct, a native enum), so "does it declare this trait" and "does the registry know
+    /// this type at all" read the same three sources. Asking them separately is how a rule ends up
+    /// consulting two of the three: a `Duration` is a *fielded* declaration, which
+    /// `Registry::resolve_type` — extern types only — does not see.
+    fn native_declared_traits(
+        &self,
+        name: &str,
+    ) -> impl Iterator<Item = &'static [&'static str]> + '_ {
+        use noeta_ext_abi::NominalType;
+        let name = name.to_string();
         let reg = self.reg();
-        reg.extensions()
+        let types = reg
+            .extensions()
             .iter()
             .flat_map(|ext| ext.types())
-            .any(|ty| ty.is_qualified(name) && advertises(ty.traits))
-            || reg
-                .fielded()
-                .any(|f| f.is_qualified(name) && advertises(f.traits))
-            || reg
-                .enums()
-                .any(|en| en.is_qualified(name) && advertises(en.traits))
+            .filter_map({
+                let name = name.clone();
+                move |ty| ty.is_qualified(&name).then_some(ty.traits)
+            });
+        let fielded = reg.fielded().filter_map({
+            let name = name.clone();
+            move |f| f.is_qualified(&name).then_some(f.traits)
+        });
+        let enums = reg
+            .enums()
+            .filter_map(move |en| en.is_qualified(&name).then_some(en.traits));
+        types.chain(fielded).chain(enums)
+    }
+
+    /// Whether the registry declares a **native nominal type** under `name` — the existence half of
+    /// [`Self::native_declared_traits`], for rules that need "the answer about this type is known
+    /// here" rather than "this type has that trait".
+    pub(crate) fn native_type_exists(&self, name: &str) -> bool {
+        self.native_declared_traits(name).next().is_some()
     }
 
     /// Whether the nominal type `name` implements the built-in trait `t` — the **one** membership

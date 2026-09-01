@@ -409,7 +409,19 @@ impl<'m> Vm<'m> {
                 ));
             }
             let other = args[0];
-            return match compare_primitive(v, other) {
+            // The prelude enums that order without a declaration (`?T`, `Result<T, E>`) order
+            // structurally — variant declaration index first, then the payload. `compare_primitive`
+            // does not walk an enum, so without this arm `some(1) < none` answered and
+            // `some(1).compare(none)` aborted on the very same pair: the method and the operator
+            // are one trait and read one ordering. Same condition and same comparator the operator
+            // arm in `dispatch` uses, and the tree-walker's twin.
+            let ordering = match v.shape() {
+                Some(shape) if v.is_enum() && noeta_ast::prelude_enum_orders(&shape.name) => {
+                    structural_compare(v, other)
+                }
+                _ => compare_primitive(v, other),
+            };
+            return match ordering {
                 Some(ordering) => Ok(make_ordering(noeta_ast::ordering_variant(ordering))),
                 None => Err(self.error(
                     DiagnosticCode::TypeMismatch,

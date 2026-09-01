@@ -511,16 +511,26 @@ impl Checker {
             return t;
         }
         // `compare` is the one answer `stdlib::method_return` gives for EVERY receiver kind —
-        // `Comparable`'s method, whose `Ordering` return the registry pins — and it is right for
-        // every built-in kind that orders. It is wrong for a **closed user type that does not
-        // implement the trait**: the resolved return is exactly what the closedness guard reads as
-        // proof the member exists, so `t.compare(u)` on an unordered type checked clean and then
-        // aborted at run time (E0005), while its twin `t.eq(u)` was refused where it was written.
-        // A declared type answers `compare` from its own method table like any other name — which
-        // a `@derive(Comparable)` fills — so the trait decides, at both doors, in the same words.
-        let universal_compare = noeta_types::BuiltinTrait::Comparable.required_method_name()
-            == Some(name)
-            && crate::expr::calls::user_type_is_closed(self, recv);
+        // `Comparable`'s method, whose `Ordering` return the registry pins. That is right only
+        // where the receiver **orders**, which is the same question `a < b` asks of its operands;
+        // `x.compare(y)` and `x < y` are one rule and are decided here by one predicate.
+        //
+        // Where the answer is no, the universal return is withheld and the receiver's own method
+        // table decides — reporting "has no method `compare`" at the same span `<` reports "cannot
+        // apply". The resolved return is exactly what the closedness guard reads as proof the
+        // member exists, so without this a `List<int>`, a tuple, a map or an extern `Duration`
+        // checked clean at `.compare()` and aborted at run time, while `<` on the very same pair
+        // was refused where it was written.
+        //
+        // Only asked where the membership is **decided** here: a closed built-in kind, a nominal
+        // type this program declares, or a native type whose ABI declaration is the same authority
+        // `<` reads. A type parameter, a `dyn`/hole and an unresolved name all license the call, as
+        // they do at every other member — "nothing known" is not "does not order".
+        let comparable = noeta_types::BuiltinTrait::Comparable;
+        let universal_compare = comparable.required_method_name() == Some(name)
+            && (crate::expr::calls::user_type_is_closed(self, recv)
+                || (self.orderability_is_decided(recv)
+                    && !self.operand_satisfies_operator(recv, comparable)));
         if !universal_compare
             && let Some(t) = stdlib::method_return(self.reg(), recv, name, self.elem_facts(recv))
         {

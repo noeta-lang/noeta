@@ -418,13 +418,20 @@ fn a_derived_builtin_trait_method_is_not_reported_missing() {
         .stderr(predicate::str::contains("has no method").not());
 }
 
-/// **`compare` on a type that does not implement `Comparable` is refused where it is written.**
+/// **`compare` on a type that does not implement `Comparable` is refused where it is written**, and
+/// the message says which requirement went unmet.
 ///
 /// `compare` is the one method every ordered built-in answers, so a receiver-agnostic reading of it
 /// typed the call as an `Ordering` on *any* receiver — which told the checker the member existed and
 /// left the program to abort at run time (`E0005`) on a type with no ordering, while the sibling
 /// door `t.eq(u)` was refused statically. The absent `E0005` is what pins the fix: the same mistake
 /// must not be reachable through two codes at two different times.
+///
+/// The wording is the second half, and it is why this is a CLI test rather than a corpus case (the
+/// `// expect:` grammar pins a code and a position, not a text). "Has no method" is the wrong story
+/// for `compare`: the method is `Comparable`'s and the reader's mistake is not a typo but a missing
+/// ordering, which is also exactly what `a < b` would tell them — so the diagnostic names the
+/// requirement and the operator, and must NOT read as a spelling mistake.
 #[test]
 fn compare_on_an_unordered_user_type_is_refused_statically() {
     let file = temp_program(
@@ -439,7 +446,42 @@ fn compare_on_an_unordered_user_type_is_refused_statically() {
         .code(1)
         .stderr(predicate::str::contains("E0007"))
         .stderr(predicate::str::contains(
-            "type `Plain` has no method `compare`",
+            "`compare()` needs an ordered receiver, but `Plain` has no ordering",
         ))
+        .stderr(predicate::str::contains("@derive(Comparable)"))
+        .stderr(predicate::str::contains("type `Plain` has no method `compare`").not())
+        .stderr(predicate::str::contains("E0005").not());
+}
+
+/// **An unordered NATIVE type is refused at `.compare()` too**, from its own ABI declaration.
+///
+/// The sibling above is a type the program declares, whose member set the checker closes. A native
+/// type's member set stays open — a registry miss is not proof of absence — so it takes the trait
+/// declaration instead, which is the same authority `a < b` reads and is authoritative for exactly
+/// this question. `Duration` is the case: it renders, and deliberately declares no ordering,
+/// because a calendar span has none without a reference date.
+///
+/// Asserted here rather than in the corpus for the same reason as the sibling — and with the
+/// **absent** string carrying the point: a `Duration` must not be reported as lacking a member,
+/// because the member set is not what decides it.
+#[test]
+fn compare_on_an_unordered_native_type_is_refused_statically() {
+    let file = temp_program(
+        "check_compare_unordered_native",
+        "use std.{datetime}\nt = datetime.from_unix_ms(0)\n\
+         a = t.diff(t.add(datetime.hours(1)))\n\
+         echo a.compare(t.diff(t.add(datetime.hours(2))))\n",
+    );
+    lang()
+        .arg("check")
+        .arg(&file)
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("E0007"))
+        .stderr(predicate::str::contains(
+            "`compare()` needs an ordered receiver, but `Duration` has no ordering",
+        ))
+        .stderr(predicate::str::contains("has no method").not())
         .stderr(predicate::str::contains("E0005").not());
 }

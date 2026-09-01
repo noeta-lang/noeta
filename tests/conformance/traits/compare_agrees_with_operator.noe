@@ -1,0 +1,58 @@
+// **`x.compare(y)` is answerable exactly where `x < y` is, and gives the operator's own ordering.**
+//
+// `compare` is `Comparable`'s method and `< <= > >=` are the operators that read its answer, so the
+// two are one rule. What makes them easy to split is that they are reached by different machinery:
+// the operator asks whether the operand type orders, while the method's return is answered from a
+// built-in table that has one row for every receiver kind. A receiver that orders at one door and
+// not at the other is the failure this case exists to catch, in both directions — a method that
+// aborts where the operator answers, and a method that checks clean where the operator refuses.
+//
+// The **reified containers** are the discriminating half. `?T` and `Result<T, E>` order structurally
+// (variant declaration index first, then payload) with no declaration anywhere to read, so they
+// order at `<` and at `.sorted()` while `traits_of` reports nothing for them — exactly as `int`
+// does. Each line below therefore reads the pair *through both doors at once*: the third column is
+// the operator and the method agreeing about the same pair, which a drift between them cannot
+// satisfy.
+//
+// `derive_builtin_method_doors` covers the same agreement for the types that DO declare the trait.
+// The negative half — a receiver that orders at neither door — is `compare_unordered_receiver`.
+
+// expect: stdout "int Ordering.Less true | string Ordering.Less true | bool Ordering.Greater true"
+// expect: stdout "option Ordering.Greater true | Ordering.Less true | Ordering.Equal true"
+// expect: stdout "result Ordering.Less true | Ordering.Less true"
+// expect: stdout "option membership [] false"
+// expect: stdout "sorted [none, some(1), some(3)] | [Ok(1), Ok(2), Err(a)]"
+// expect: stdout "own Ordering.Less true | derived Ordering.Less true"
+// expect: exit 0
+
+// The pattern every line uses: the method's `Ordering`, then whether the operator agrees with it.
+fn agree(ordering: Ordering, less: bool): string { return "${ordering} ${(ordering == Ordering.Less) == less}" }
+
+echo "int ${agree(1.compare(2), 1 < 2)} | string ${agree("a".compare("b"), "a" < "b")} | bool ${agree(true.compare(false), true < false)}"
+
+s: Option<int> = some(1)
+n: Option<int> = none
+echo "option ${agree(s.compare(n), s < n)} | ${agree(n.compare(s), n < s)} | ${agree(s.compare(some(1)), s < some(1))}"
+
+ok: Result<int, string> = Ok(1)
+better: Result<int, string> = Ok(2)
+bad: Result<int, string> = Err("a")
+echo "result ${agree(ok.compare(better), ok < better)} | ${agree(ok.compare(bad), ok < bad)}"
+
+// A container carries no *declared* impl — the same answer `traits_of(42)` gives — so ordering
+// without membership is the design here, and the lines above are what says the method honors it.
+echo "option membership ${traits_of(s)} ${s is dyn Comparable}"
+
+// `.sorted()` is the third reader of that one ordering.
+echo "sorted ${[some(3), none, some(1)].sorted()} | ${[better, bad, ok].sorted()}"
+
+// A declared ordering answers through the same two doors, hand-written or derived.
+struct Own {
+    n: int
+    impl Comparable {
+        pub fn compare(other: Own): Ordering { return self.n.compare(other.n) }
+    }
+}
+@derive(Comparable)
+struct Derived { n: int }
+echo "own ${agree(Own { n: 1 }.compare(Own { n: 2 }), Own { n: 1 } < Own { n: 2 })} | derived ${agree(Derived { n: 1 }.compare(Derived { n: 2 }), Derived { n: 1 } < Derived { n: 2 })}"

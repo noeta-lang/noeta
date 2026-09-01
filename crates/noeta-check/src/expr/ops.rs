@@ -71,11 +71,20 @@ impl Checker {
         let lt = self.synth(lhs, env);
         let rt = self.synth(rhs, env);
         match op {
-            // `~` concatenates two lists (their element types unified, `dyn` on a concrete clash)
-            // or display-concatenates any other operands to a string.
+            // `~` concatenates two lists (their element types unified, `dyn` on a concrete clash),
+            // dispatches to an `impl Concat`'s `concat` when the LEFT operand has one, and
+            // display-concatenates any other operands to a string.
             BinaryOp::Concat => {
                 if let (Type::List(a), Type::List(b)) = (&lt, &rt) {
                     Type::List(Box::new(unify_element(a, b).unwrap_or(Type::Dyn)))
+                } else if self.concat_dispatches_to_impl(&lt) {
+                    // `Concat` is an overloadable operator like `+`, and both backends look for the
+                    // left operand's `concat` before reaching the display form — so a type carrying
+                    // the trait decides what `a ~ b` produces, and the answer is its `concat`'s,
+                    // not `string`. Deferred to the runtime exactly as `+` on a user `Add` type is:
+                    // asserting `string` over a value that is not one is the one answer that can be
+                    // *wrong*, and it type-checked `f(a ~ b)` against an `f(x: string)`.
+                    Type::Unknown
                 } else {
                     // The display-concatenation form renders both operands, so each is a display
                     // site and takes the same hint `echo` does. (The list form above concatenates
@@ -287,6 +296,46 @@ impl Checker {
     /// Whether `operand` may be used with an operator requiring `trait_name`: a `dyn`/hole defers;
     /// an in-scope **type parameter** is licensed only by its declared bounds; any other type by the
     /// satisfaction model ([`Self::satisfies`] — built-in table + `@derive`/`impl` index).
+    /// Whether this receiver's `Comparable` membership is **decided at check time** — whether a
+    /// `false` from [`Self::operand_satisfies_operator`] means "does not order" rather than "not
+    /// known here".
+    ///
+    /// Three kinds of receiver decide it: a built-in whose method table is complete
+    /// ([`crate::expr::calls::closed_to_new_methods`]), a nominal type this program declares
+    /// ([`crate::expr::calls::user_type_is_closed`]), and a **native** type — whose traits come
+    /// from its ABI declaration, which is authoritative for exactly this question and is what
+    /// `a < b` already reads. Everything else — a type parameter, a `dyn`/hole, a name the linker
+    /// left unresolved — is undecided, and stays licensed.
+    pub(crate) fn orderability_is_decided(&self, recv: &Type) -> bool {
+        match recv {
+            Type::Named(n, _) => {
+                crate::expr::calls::user_type_is_closed(self, recv)
+                    || self.native_type_exists(n.as_str())
+            }
+            other => crate::expr::calls::closed_to_new_methods(other),
+        }
+    }
+
+    /// Whether `a ~ b` reaches a `concat` **implementation** rather than the display form — a
+    /// question the LEFT operand alone answers, because that is how both backends dispatch it: an
+    /// object or enum carrying `Concat` is asked for its `concat` before `~` renders anything, and
+    /// a `"x" ~ obj` never is.
+    ///
+    /// Structural concatenation is deliberately not an impl. `string` and `List<T>` satisfy
+    /// [`BuiltinTrait::Concat`] because the operator itself concatenates them, and their results
+    /// are exactly the `string`/`List` the other two branches state; what this asks about is a type
+    /// whose own `concat` decides the answer instead.
+    fn concat_dispatches_to_impl(&self, lhs: &Type) -> bool {
+        match lhs {
+            Type::Named(n, _) => self.has_builtin_trait(n.as_str(), BuiltinTrait::Concat),
+            Type::DynTrait(t) => t == BuiltinTrait::Concat.name(),
+            Type::Param(p) => self
+                .param_bounds(p)
+                .is_some_and(|bs| bs.iter().any(|b| b.name == BuiltinTrait::Concat.name())),
+            _ => false,
+        }
+    }
+
     pub(crate) fn operand_satisfies_operator(&self, operand: &Type, t: BuiltinTrait) -> bool {
         if operand.defers_to_runtime() {
             return true;
@@ -318,6 +367,39 @@ impl Checker {
         crate::stdlib::ElemFacts {
             orderable: self.operand_satisfies_operator(elem, BuiltinTrait::Comparable),
         }
+    }
+
+    /// Report `x.compare(y)` on a receiver that **does not order**. `true` when this reported.
+    ///
+    /// `compare` is `Comparable`'s method, and `a < b` is the operator that reads its answer, so
+    /// the two are refused together or not at all. Asked without the closedness guard for the
+    /// reason [`Self::report_unmet_element_requirement`] is: this is a property of the *method*,
+    /// not of whether the receiver admits new members. A native type is the case that needs it —
+    /// its member set stays open (a registry miss is not proof of absence), but its **traits** are
+    /// its ABI declaration, which is exactly what `<` already reads, so a `Duration` that declares
+    /// no ordering is as decided at `.compare()` as it is at `<`.
+    ///
+    /// Undecided receivers say nothing: a type parameter, a `dyn`/hole and a name the linker left
+    /// unresolved all keep the call — see [`Self::orderability_is_decided`].
+    pub(crate) fn report_unordered_compare(&mut self, recv: &Type, name: &str, span: Span) -> bool {
+        let comparable = BuiltinTrait::Comparable;
+        if comparable.required_method_name() != Some(name)
+            || !self.orderability_is_decided(recv)
+            || self.operand_satisfies_operator(recv, comparable)
+        {
+            return false;
+        }
+        self.error(
+            DiagnosticCode::TypeMismatch,
+            span,
+            format!("`compare()` needs an ordered receiver, but `{recv}` has no ordering"),
+        )
+        .help(
+            "a value orders when it is a number, string or bool, when its type carries \
+             `@derive(Comparable)` / `impl Comparable`, or when a native type declares one; \
+             `<` on this type is refused for the same reason",
+        );
+        true
     }
 
     /// Report a built-in collection method refused because the **element type** does not meet what

@@ -1,0 +1,51 @@
+// **A receiver that does not order is refused at `.compare()` where it is written**, the same
+// place and for the same reason `<` refuses it.
+//
+// `compare` is `Comparable`'s method, so its availability is the trait's membership — a fact the
+// checker has for every receiver whose ordering is *decided* here: a built-in kind, a type this
+// program declares, and a **native** type, whose traits are its own ABI declaration. Without this
+// the method's return came from a built-in table with a row for every receiver kind, so
+// `xs.compare(ys)` on a list, a tuple or an unordered native type checked clean and aborted at the
+// first call while `xs < ys` on the very same pair was refused where it was written.
+//
+// `Duration` is the case that needs the native half and the one that shows the two doors are one
+// rule: it renders (`Display`) but declares no ordering, because a calendar span has none without
+// a reference date — so both `a < b` and `a.compare(b)` must say so statically. Its `<` half is
+// `std/datetime_duration_unordered.noe`; this is its method twin.
+//
+// **Every call below sits in a function nothing calls**, which is what makes the case
+// discriminating: an abort raises the same `E0007` at the same span a static rejection does, so a
+// position alone would be satisfied by either. Unreachable code has no run-time behavior to
+// misread — without the check this file compiles, runs `main`, prints `ok` and exits 0.
+//
+// The undecided receivers are asserted by their absence from the list: a `dyn` value and an
+// unbounded type parameter both reach `.compare()`, because "not known" is not "does not order" —
+// a `dyn` may hold an `int`, and a `T` is licensed by its bound elsewhere.
+// expect: error E0007 at 35:31
+// expect: error E0007 at 36:32
+// expect: error E0007 at 37:30
+// expect: error E0007 at 38:30
+// expect: error E0007 at 39:34
+// expect: error E0007 at 44:12
+// expect: exit 1
+use std.{datetime}
+
+struct Unordered { n: int }
+
+fn lists(): Ordering { return [1].compare([2]) }
+fn tuples(): Ordering { return (1, 2).compare((1, 3)) }
+fn maps(): Ordering { return {"a": 1}.compare({"b": 1}) }
+fn sets(): Ordering { return [1].to_set().compare([2].to_set()) }
+fn declared(): Ordering { return Unordered { n: 1 }.compare(Unordered { n: 2 }) }
+
+fn spans(): Ordering {
+    t = datetime.from_unix_ms(0)
+    a = t.diff(t.add(datetime.hours(1)))
+    return a.compare(t.diff(t.add(datetime.hours(2))))
+}
+
+// Undecided receivers keep the call: neither of these is refused.
+fn through_dyn(x: dyn, y: dyn): Ordering { return x.compare(y) }
+fn through_param<T>(x: T, y: T): Ordering { return x.compare(y) }
+
+echo "ok ${through_dyn(1, 2)} ${through_param(1, 2)}"

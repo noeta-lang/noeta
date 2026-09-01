@@ -1883,8 +1883,13 @@ impl Checker {
                 // admits new members: an `Iterator<T>` is not closed to new methods (a native type
                 // may grow some), yet `it.min()` on an unordered `T` is still the method existing
                 // and this element being unable to supply what it orders by.
+                // `compare` is asked in that same position and for that same reason: `Comparable`
+                // membership is a property of the method's trait, so a receiver that does not
+                // order is refused here whether or not its member set is closed — which is what
+                // lets a native type's ABI declaration decide it, exactly as `a < b` does.
                 if matches!(ret, Type::Unknown)
                     && !self.report_unmet_element_requirement(&recv, name, span)
+                    && !self.report_unordered_compare(&recv, name, span)
                     && (closed_to_new_methods(&recv) || user_type_is_closed(self, &recv))
                 {
                     let diag = self.error(
