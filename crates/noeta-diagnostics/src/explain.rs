@@ -600,8 +600,8 @@ impl DiagnosticCode {
                 title: "async misuse",
                 group: "Concurrency and reactivity",
                 severity: Severity::Error,
-                summary: "An async misuse — `.await` outside an async context, on a non-future, in a closure, or in a condition or loop head.",
-                detail: "`.await` needs an async context and a future. It is rejected inside a **closure** (a closure is a fresh callable, not the enclosing async body) and in an `if`/`while` condition or a `for` iterable, which cannot be hoisted without changing when the head evaluates. Bind the awaited value to a local first.",
+                summary: "An async misuse — `.await` outside an async context, on a non-future, in a closure, or in a condition or loop head inside an `async fn`.",
+                detail: "`.await` needs an async context and a future. It is always rejected inside a **closure** — a closure is a fresh callable, not the enclosing async body. In a condition or loop head — an `if`/`while` condition or a `for` iterable — it is rejected inside an `async fn` body, where the state-machine desugar has nowhere to hoist it to and hoisting it out would change when the head evaluates; bind the awaited value to a local first. At the top level and inside a `concurrent { … }` scope there is no state machine to desugar into, and a head await is accepted.",
                 docs: "Concurrency",
             },
             DiagnosticCode::OrphanSpawn => Explanation {
