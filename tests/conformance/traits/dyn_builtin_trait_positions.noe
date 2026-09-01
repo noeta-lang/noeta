@@ -1,0 +1,183 @@
+// **Every built-in trait that has a trait object agrees with itself in every position.**
+//
+// The `dyn Trait` coercion, the runtime `x is dyn Trait` membership test and trait-method dispatch
+// all read the same registration data — an `impl Trait { … }` block here — so for each trait below
+// a value widens into `dyn Trait` at a parameter, an annotated binding, a `List<dyn Trait>` element
+// and a declared return, AND answers the runtime test `true` behind every one of them. A trait
+// where those disagree is the failure this case exists to catch: a `dyn` target that tests `true`
+// but can never be formed is not a trait object, it is a type nothing inhabits.
+//
+// Asserted per trait rather than for a sample, because the split was per trait: the coercion asked
+// the user-trait table alone, so every built-in answered `false` while the runtime answered `true`.
+
+// expect: stdout "Add true"
+// expect: stdout "Sub true"
+// expect: stdout "Mul true"
+// expect: stdout "Div true"
+// expect: stdout "Concat true"
+// expect: stdout "Equatable true"
+// expect: stdout "Comparable true"
+// expect: stdout "Display true"
+// expect: stdout "Error true"
+// expect: stdout "Index true"
+// expect: stdout "Length true"
+// expect: stdout "Iterable true"
+// expect: stdout "Callable true"
+// expect: stdout "Members true"
+// expect: stdout "DynamicCall true"
+// expect: stdout "TryAdd true"
+// expect: stdout "Validate true"
+// expect: exit 0
+
+struct AddBox { n: int
+    impl Add { pub fn add(other: AddBox): AddBox { return AddBox { n: self.n + other.n } } }
+}
+fn take_add(x: dyn Add): bool { return x is dyn Add }
+fn make_add(): dyn Add { return AddBox { n: 1 } }
+bound_add: dyn Add = AddBox { n: 1 }
+list_add: List<dyn Add> = [AddBox { n: 1 }]
+echo "Add ${(AddBox { n: 1 } is dyn Add) && take_add(AddBox { n: 1 }) && take_add(bound_add) && take_add(list_add[0]) && take_add(make_add())}"
+
+struct SubBox { n: int
+    impl Sub { pub fn sub(other: SubBox): SubBox { return SubBox { n: self.n - other.n } } }
+}
+fn take_sub(x: dyn Sub): bool { return x is dyn Sub }
+fn make_sub(): dyn Sub { return SubBox { n: 1 } }
+bound_sub: dyn Sub = SubBox { n: 1 }
+list_sub: List<dyn Sub> = [SubBox { n: 1 }]
+echo "Sub ${(SubBox { n: 1 } is dyn Sub) && take_sub(SubBox { n: 1 }) && take_sub(bound_sub) && take_sub(list_sub[0]) && take_sub(make_sub())}"
+
+struct MulBox { n: int
+    impl Mul { pub fn mul(other: MulBox): MulBox { return MulBox { n: self.n * other.n } } }
+}
+fn take_mul(x: dyn Mul): bool { return x is dyn Mul }
+fn make_mul(): dyn Mul { return MulBox { n: 1 } }
+bound_mul: dyn Mul = MulBox { n: 1 }
+list_mul: List<dyn Mul> = [MulBox { n: 1 }]
+echo "Mul ${(MulBox { n: 1 } is dyn Mul) && take_mul(MulBox { n: 1 }) && take_mul(bound_mul) && take_mul(list_mul[0]) && take_mul(make_mul())}"
+
+struct DivBox { n: int
+    impl Div { pub fn div(other: DivBox): DivBox { return DivBox { n: self.n / other.n } } }
+}
+fn take_div(x: dyn Div): bool { return x is dyn Div }
+fn make_div(): dyn Div { return DivBox { n: 1 } }
+bound_div: dyn Div = DivBox { n: 1 }
+list_div: List<dyn Div> = [DivBox { n: 1 }]
+echo "Div ${(DivBox { n: 1 } is dyn Div) && take_div(DivBox { n: 1 }) && take_div(bound_div) && take_div(list_div[0]) && take_div(make_div())}"
+
+struct ConcatBox { n: int
+    impl Concat { pub fn concat(other: ConcatBox): ConcatBox { return ConcatBox { n: self.n + other.n } } }
+}
+fn take_concat(x: dyn Concat): bool { return x is dyn Concat }
+fn make_concat(): dyn Concat { return ConcatBox { n: 1 } }
+bound_concat: dyn Concat = ConcatBox { n: 1 }
+list_concat: List<dyn Concat> = [ConcatBox { n: 1 }]
+echo "Concat ${(ConcatBox { n: 1 } is dyn Concat) && take_concat(ConcatBox { n: 1 }) && take_concat(bound_concat) && take_concat(list_concat[0]) && take_concat(make_concat())}"
+
+struct EqBox { n: int
+    impl Equatable { pub fn eq(other: EqBox): bool { return self.n == other.n } }
+}
+fn take_equatable(x: dyn Equatable): bool { return x is dyn Equatable }
+fn make_equatable(): dyn Equatable { return EqBox { n: 1 } }
+bound_equatable: dyn Equatable = EqBox { n: 1 }
+list_equatable: List<dyn Equatable> = [EqBox { n: 1 }]
+echo "Equatable ${(EqBox { n: 1 } is dyn Equatable) && take_equatable(EqBox { n: 1 }) && take_equatable(bound_equatable) && take_equatable(list_equatable[0]) && take_equatable(make_equatable())}"
+
+struct CmpBox { n: int
+    impl Comparable { pub fn compare(other: CmpBox): Ordering { return Ordering.Equal } }
+}
+fn take_comparable(x: dyn Comparable): bool { return x is dyn Comparable }
+fn make_comparable(): dyn Comparable { return CmpBox { n: 1 } }
+bound_comparable: dyn Comparable = CmpBox { n: 1 }
+list_comparable: List<dyn Comparable> = [CmpBox { n: 1 }]
+echo "Comparable ${(CmpBox { n: 1 } is dyn Comparable) && take_comparable(CmpBox { n: 1 }) && take_comparable(bound_comparable) && take_comparable(list_comparable[0]) && take_comparable(make_comparable())}"
+
+struct DisplayBox { n: int
+    impl Display { pub fn to_string(): string { return "display" } }
+}
+fn take_display(x: dyn Display): bool { return x is dyn Display }
+fn make_display(): dyn Display { return DisplayBox { n: 1 } }
+bound_display: dyn Display = DisplayBox { n: 1 }
+list_display: List<dyn Display> = [DisplayBox { n: 1 }]
+echo "Display ${(DisplayBox { n: 1 } is dyn Display) && take_display(DisplayBox { n: 1 }) && take_display(bound_display) && take_display(list_display[0]) && take_display(make_display())}"
+
+struct ErrorBox { n: int
+    impl Error { pub fn message(): string { return "boom" } }
+}
+fn take_error(x: dyn Error): bool { return x is dyn Error }
+fn make_error(): dyn Error { return ErrorBox { n: 1 } }
+bound_error: dyn Error = ErrorBox { n: 1 }
+list_error: List<dyn Error> = [ErrorBox { n: 1 }]
+echo "Error ${(ErrorBox { n: 1 } is dyn Error) && take_error(ErrorBox { n: 1 }) && take_error(bound_error) && take_error(list_error[0]) && take_error(make_error())}"
+
+struct IndexBox { n: int
+    impl Index { pub fn get(i: int): int { return self.n + i } }
+}
+fn take_index(x: dyn Index): bool { return x is dyn Index }
+fn make_index(): dyn Index { return IndexBox { n: 1 } }
+bound_index: dyn Index = IndexBox { n: 1 }
+list_index: List<dyn Index> = [IndexBox { n: 1 }]
+echo "Index ${(IndexBox { n: 1 } is dyn Index) && take_index(IndexBox { n: 1 }) && take_index(bound_index) && take_index(list_index[0]) && take_index(make_index())}"
+
+struct LengthBox { n: int
+    impl Length { pub fn len(): int { return self.n } }
+}
+fn take_length(x: dyn Length): bool { return x is dyn Length }
+fn make_length(): dyn Length { return LengthBox { n: 1 } }
+bound_length: dyn Length = LengthBox { n: 1 }
+list_length: List<dyn Length> = [LengthBox { n: 1 }]
+echo "Length ${(LengthBox { n: 1 } is dyn Length) && take_length(LengthBox { n: 1 }) && take_length(bound_length) && take_length(list_length[0]) && take_length(make_length())}"
+
+struct IterableBox { n: int
+    impl Iterable { pub fn iter(): List<int> { return [self.n] } }
+}
+fn take_iterable(x: dyn Iterable): bool { return x is dyn Iterable }
+fn make_iterable(): dyn Iterable { return IterableBox { n: 1 } }
+bound_iterable: dyn Iterable = IterableBox { n: 1 }
+list_iterable: List<dyn Iterable> = [IterableBox { n: 1 }]
+echo "Iterable ${(IterableBox { n: 1 } is dyn Iterable) && take_iterable(IterableBox { n: 1 }) && take_iterable(bound_iterable) && take_iterable(list_iterable[0]) && take_iterable(make_iterable())}"
+
+struct CallableBox { n: int
+    impl Callable { pub fn call(x: int): int { return self.n + x } }
+}
+fn take_callable(x: dyn Callable): bool { return x is dyn Callable }
+fn make_callable(): dyn Callable { return CallableBox { n: 1 } }
+bound_callable: dyn Callable = CallableBox { n: 1 }
+list_callable: List<dyn Callable> = [CallableBox { n: 1 }]
+echo "Callable ${(CallableBox { n: 1 } is dyn Callable) && take_callable(CallableBox { n: 1 }) && take_callable(bound_callable) && take_callable(list_callable[0]) && take_callable(make_callable())}"
+
+struct MembersBox { n: int
+    impl Members { pub fn get(k: string): int { return self.n } }
+}
+fn take_members(x: dyn Members): bool { return x is dyn Members }
+fn make_members(): dyn Members { return MembersBox { n: 1 } }
+bound_members: dyn Members = MembersBox { n: 1 }
+list_members: List<dyn Members> = [MembersBox { n: 1 }]
+echo "Members ${(MembersBox { n: 1 } is dyn Members) && take_members(MembersBox { n: 1 }) && take_members(bound_members) && take_members(list_members[0]) && take_members(make_members())}"
+
+struct DynCallBox { n: int
+    impl DynamicCall { pub fn call(name: string, args: List<dyn>): dyn { return self.n } }
+}
+fn take_dynamiccall(x: dyn DynamicCall): bool { return x is dyn DynamicCall }
+fn make_dynamiccall(): dyn DynamicCall { return DynCallBox { n: 1 } }
+bound_dynamiccall: dyn DynamicCall = DynCallBox { n: 1 }
+list_dynamiccall: List<dyn DynamicCall> = [DynCallBox { n: 1 }]
+echo "DynamicCall ${(DynCallBox { n: 1 } is dyn DynamicCall) && take_dynamiccall(DynCallBox { n: 1 }) && take_dynamiccall(bound_dynamiccall) && take_dynamiccall(list_dynamiccall[0]) && take_dynamiccall(make_dynamiccall())}"
+
+struct TryAddBox { n: int
+    impl TryAdd { pub fn try_add(other: TryAddBox): Result<TryAddBox, string> { return Ok(other) } }
+}
+fn take_tryadd(x: dyn TryAdd): bool { return x is dyn TryAdd }
+fn make_tryadd(): dyn TryAdd { return TryAddBox { n: 1 } }
+bound_tryadd: dyn TryAdd = TryAddBox { n: 1 }
+list_tryadd: List<dyn TryAdd> = [TryAddBox { n: 1 }]
+echo "TryAdd ${(TryAddBox { n: 1 } is dyn TryAdd) && take_tryadd(TryAddBox { n: 1 }) && take_tryadd(bound_tryadd) && take_tryadd(list_tryadd[0]) && take_tryadd(make_tryadd())}"
+
+struct ValidateBox { n: int
+    impl Validate { pub fn validate(): Result<void, string> { return Ok() } }
+}
+fn take_validate(x: dyn Validate): bool { return x is dyn Validate }
+fn make_validate(): dyn Validate { return ValidateBox { n: 1 } }
+bound_validate: dyn Validate = ValidateBox { n: 1 }
+list_validate: List<dyn Validate> = [ValidateBox { n: 1 }]
+echo "Validate ${(ValidateBox { n: 1 } is dyn Validate) && take_validate(ValidateBox { n: 1 }) && take_validate(bound_validate) && take_validate(list_validate[0]) && take_validate(make_validate())}"

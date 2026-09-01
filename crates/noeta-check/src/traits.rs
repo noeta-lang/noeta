@@ -2847,6 +2847,44 @@ impl Checker {
         self.satisfies_user_trait_inner(ty, bound, want, &mut Vec::new())
     }
 
+    /// **The one membership question**: does the nominal type `type_name` have a registered
+    /// implementation of the trait `trait_name` — built-in, user-declared or native, asked through a
+    /// single door?
+    ///
+    /// This is the checker's counterpart of
+    /// [`noeta_ast::reflect::ReflectionInfo::type_implements`], the table the runtime `x is dyn
+    /// Trait` / `x.as<dyn Trait>()` test and the `traits_of(x)` query both read. The two are fed by
+    /// the same declarations — an in-body `impl Trait { … }`, a standalone `impl Trait for T`, a
+    /// `@derive(Trait)`, and a native type's ABI advertisement — so routing the *static* `dyn Trait`
+    /// coercion through one funnel is what keeps "this widens into `dyn Trait`", "`x is dyn Trait`"
+    /// and "a `Trait` method call on `x` resolves" from disagreeing.
+    ///
+    /// Disagree they did: asked of the user-trait table alone, the coercion answered `false` for
+    /// every built-in trait, so a value could be *tested* against `dyn Error` and narrowed into the
+    /// branch while no `dyn Error` could be formed in any position.
+    ///
+    /// A native type's impls are recorded under its **qualified identity** while source names it by
+    /// the short spelling its `use` bound, so the import map is consulted on a miss — once, for both
+    /// halves, exactly as [`Self::satisfies_user_trait_inner`] does for a bound.
+    pub(crate) fn implements_trait(&self, type_name: &str, trait_name: &str) -> bool {
+        let qualified = self.imports.extern_types.get(type_name);
+        match BuiltinTrait::from_name(trait_name) {
+            Some(t) => {
+                self.has_builtin_trait(type_name, t)
+                    || qualified.is_some_and(|q| self.has_builtin_trait(q, t))
+            }
+            None => {
+                let declared = |n: &str| {
+                    self.symbols
+                        .user_trait_impls
+                        .get(n)
+                        .is_some_and(|impls| impls.contains_key(trait_name))
+                };
+                declared(type_name) || qualified.is_some_and(|q| declared(q))
+            }
+        }
+    }
+
     /// The recursive worker: `visited` guards a recursive nominal reached through a `via:` chain
     /// (covered by the outer frame — the same convention as [`Self::type_orderable`]).
     fn satisfies_user_trait_inner(

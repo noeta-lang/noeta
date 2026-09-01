@@ -485,6 +485,33 @@ impl BuiltinTrait {
     pub fn generic_arity(self) -> usize {
         self.info().generic_arity
     }
+
+    /// Whether `dyn Name` names a type for this trait — whether the trait has a **trait object**.
+    ///
+    /// A trait object is a value plus the promise that some method can be called on it, so the
+    /// question is answered from the row rather than from a list of trait names: the trait must
+    /// have a **required method** (a marker synthesizes behavior and imposes nothing to dispatch —
+    /// `Clone`, `Serialize`, `Deserialize`), that method must be an **instance** method (a `static`
+    /// one is called on the type and has no receiver to erase — `From::from`), and `dyn Name` must
+    /// **name the trait completely** (the surface has no `dyn Name<…>` form, so a parameterized
+    /// trait's object would not say `To` *what* — `From`, `To`, `Serialize`, `Deserialize`).
+    ///
+    /// Deriving it this way is what makes the next built-in trait get the right answer by
+    /// construction; a hand-written allowlist is a list that goes stale silently, and the fixed set
+    /// is restated once — in the unit census below — precisely so a widening of this rule has to be
+    /// written down twice before it ships.
+    ///
+    /// Nothing here is about the method's *parameters*: dispatch through the object is by name at
+    /// run time, so a parameterized protocol (`get(key)`, `eq(other)`) is reached exactly as a
+    /// nullary one is. What the checker declines to *type* through an object is a separate and
+    /// narrower question, answered where a call is typed.
+    ///
+    /// Read at the one door `dyn Name` enters the type system by, so a trait with no object is
+    /// **refused where it is written** rather than quietly naming a type nothing can inhabit.
+    pub fn has_trait_object(self) -> bool {
+        let info = self.info();
+        info.generic_arity == 0 && !info.declares_static && info.required_method.is_some()
+    }
 }
 
 /// The serialization formats `@derive(Serialize<Format>)` accepts — the blessed vocabulary, starting
@@ -572,6 +599,10 @@ mod tests {
         is_static: bool,
         arity: usize,
         conversion: Option<ConversionRole>,
+        /// Whether `dyn Name` names a type — restated here as the *answer*, not as the rule that
+        /// derives it ([`BuiltinTrait::has_trait_object`]), so a change to that rule that quietly
+        /// widens or narrows the set has to be written down twice before it ships.
+        dyn_object: bool,
     }
 
     /// Spell only what a row asserts beyond the common case, the way the table it restates does.
@@ -585,6 +616,7 @@ mod tests {
         is_static: false,
         arity: 0,
         conversion: None,
+        dyn_object: false,
     };
 
     const CENSUS: &[Row] = &[
@@ -593,6 +625,7 @@ mod tests {
             name: "Add",
             required: Some(("add", Some(1))),
             operator: Some(BinaryOp::Add),
+            dyn_object: true,
             ..NOTHING
         },
         Row {
@@ -600,6 +633,7 @@ mod tests {
             name: "Sub",
             required: Some(("sub", Some(1))),
             operator: Some(BinaryOp::Sub),
+            dyn_object: true,
             ..NOTHING
         },
         Row {
@@ -607,6 +641,7 @@ mod tests {
             name: "Mul",
             required: Some(("mul", Some(1))),
             operator: Some(BinaryOp::Mul),
+            dyn_object: true,
             ..NOTHING
         },
         Row {
@@ -614,6 +649,7 @@ mod tests {
             name: "Div",
             required: Some(("div", Some(1))),
             operator: Some(BinaryOp::Div),
+            dyn_object: true,
             ..NOTHING
         },
         Row {
@@ -621,6 +657,7 @@ mod tests {
             name: "Concat",
             required: Some(("concat", Some(1))),
             operator: Some(BinaryOp::Concat),
+            dyn_object: true,
             ..NOTHING
         },
         Row {
@@ -629,6 +666,7 @@ mod tests {
             required: Some(("eq", Some(1))),
             recipe: true,
             fixed: Some(FixedReturn::Bool),
+            dyn_object: true,
             ..NOTHING
         },
         Row {
@@ -637,6 +675,7 @@ mod tests {
             required: Some(("compare", Some(1))),
             recipe: true,
             fixed: Some(FixedReturn::Ordering),
+            dyn_object: true,
             ..NOTHING
         },
         Row {
@@ -644,6 +683,7 @@ mod tests {
             name: "Display",
             required: Some(("to_string", Some(0))),
             recipe: true,
+            dyn_object: true,
             ..NOTHING
         },
         Row {
@@ -651,6 +691,7 @@ mod tests {
             name: "Error",
             required: Some(("message", Some(0))),
             recipe: true,
+            dyn_object: true,
             ..NOTHING
         },
         Row {
@@ -689,48 +730,56 @@ mod tests {
             t: BuiltinTrait::Index,
             name: "Index",
             required: Some(("get", Some(1))),
+            dyn_object: true,
             ..NOTHING
         },
         Row {
             t: BuiltinTrait::Length,
             name: "Length",
             required: Some(("len", Some(0))),
+            dyn_object: true,
             ..NOTHING
         },
         Row {
             t: BuiltinTrait::Iterable,
             name: "Iterable",
             required: Some(("iter", Some(0))),
+            dyn_object: true,
             ..NOTHING
         },
         Row {
             t: BuiltinTrait::Callable,
             name: "Callable",
             required: Some(("call", None)),
+            dyn_object: true,
             ..NOTHING
         },
         Row {
             t: BuiltinTrait::Members,
             name: "Members",
             required: Some(("get", Some(1))),
+            dyn_object: true,
             ..NOTHING
         },
         Row {
             t: BuiltinTrait::DynamicCall,
             name: "DynamicCall",
             required: Some(("call", Some(2))),
+            dyn_object: true,
             ..NOTHING
         },
         Row {
             t: BuiltinTrait::TryAdd,
             name: "TryAdd",
             required: Some(("try_add", Some(1))),
+            dyn_object: true,
             ..NOTHING
         },
         Row {
             t: BuiltinTrait::Validate,
             name: "Validate",
             required: Some(("validate", Some(0))),
+            dyn_object: true,
             ..NOTHING
         },
         Row {
@@ -773,6 +822,11 @@ mod tests {
             );
             assert_eq!(t.generic_arity(), r.arity, "generic_arity for {t:?}");
             assert_eq!(t.conversion(), r.conversion, "conversion for {t:?}");
+            assert_eq!(
+                t.has_trait_object(),
+                r.dyn_object,
+                "has_trait_object for {t:?}"
+            );
         }
     }
 

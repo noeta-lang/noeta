@@ -1,0 +1,16 @@
+// The `dyn Trait` coercion is gated on a **real registered implementation** for a built-in trait
+// exactly as it is for a user-declared one: `Plain` has a `message` method of the right name and
+// shape but no `impl Error` block, so it is not an `Error` and does not widen into `dyn Error`.
+//
+// This is the negative half of the agreement the positive case asserts. `Plain is dyn Error` is
+// `false` at run time — the membership table has no row for it — so a coercion that accepted it
+// would put a value behind a trait object the runtime test denies.
+// expect: error E0007 at 16:6
+// expect: exit 1
+struct Plain {
+    pub fn message(): string { return "not an error" }
+}
+
+fn describe(e: dyn Error): string { return e.message() }
+
+echo describe(Plain {})

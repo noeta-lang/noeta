@@ -136,7 +136,7 @@ impl Checker {
     /// It also seeds the **3b dynamic-dispatch coercion channel**: for each native type advertising
     /// this trait (a name in its [`ExtType::traits`] list matching the trait), it records
     /// `user_trait_impls[native_type_qualified][short_trait] = []`, so a native value typed
-    /// `Type::Named("fx.Button")` coerces to `dyn Widget` (`assignable`/`type_impls_trait`) and its
+    /// `Type::Named("fx.Button")` coerces to `dyn Widget` (`assignable`/`implements_trait`) and its
     /// method call dispatches through the existing extern-method seam — no runtime change. The
     /// advertiser loop is written over a generic `(qualified_type, trait_names)` source, so a future
     /// `ExtClass` gaining a `traits` field joins it without a redesign (Option A ships ExtType only).
