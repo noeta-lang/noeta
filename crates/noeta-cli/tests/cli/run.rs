@@ -1072,3 +1072,31 @@ fn a_warning_does_not_fail_build_or_dump() {
         .stderr(predicate::str::contains("[E0063]"));
     assert!(bundle.exists(), "the artifact is still written");
 }
+
+/// A method a native handle does not have must fail in the **user's** vocabulary, naming the type
+/// and the method — never as an internal note about a dispatch registration.
+///
+/// `Signal`/`Computed`/`Effect` declare their whole surface as context methods and register no plain
+/// method dispatch, so every plain method call on one lands on the shared "nothing registered"
+/// fallback. That fallback is not an internal condition for these types: it *is* the no-such-method
+/// answer, and reporting it as "internal: no method dispatch registered" told a reader who called
+/// `.set()` on a computed that they had found a compiler bug. The conformance cases beside this one
+/// pin `E0005` at the call; only a text assertion can pin what the message says.
+#[test]
+fn an_unknown_method_on_a_native_handle_names_the_type_not_the_registry() {
+    let file = temp_program(
+        "run_handle_no_method",
+        "use std.reactive.{computed}\nc = computed(fn() => 5)\nc.set(3)\n",
+    );
+    lang()
+        .arg("run")
+        .arg(&file)
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("E0005"))
+        .stderr(predicate::str::contains(
+            "type `std.reactive.Computed` has no method `set`",
+        ))
+        .stderr(predicate::str::contains("internal:").not());
+}
