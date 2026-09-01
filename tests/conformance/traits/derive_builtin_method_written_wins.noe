@@ -1,0 +1,46 @@
+// **A written implementation wins over the derived one, at every door at once.**
+//
+// A derive registers membership whether the body is synthesized or supplied, so the membership
+// record alone cannot decide what runs — the method table has to, and it is asked first. Two ways a
+// body arrives: an `impl Display { … }` block beside a `@derive(Equatable)`, and
+// `@derive(Display, via: field)`, whose forwarder is a real method planted on the type.
+//
+// The doors are asserted together, because the failure mode is one of them slipping to the
+// structural answer: an `x.to_string()` reading "Written#1" while `"${x}"` or a `dyn Display`
+// dispatch reads `Written {n: 1}` is the same disagreement this whole area is written to prevent,
+// pointing the other way.
+
+// expect: stdout "written Written#1 | Written#1 | Written#1"
+// expect: stdout "written-eq true false"
+// expect: stdout "via 7 | 7 | 7"
+// expect: exit 0
+
+@derive(Equatable)
+struct Written {
+    n: int
+
+    impl Display {
+        pub fn to_string(): string { return "Written#${self.n}" }
+    }
+}
+
+struct Inner {
+    k: int
+    impl Display { pub fn to_string(): string { return "${self.k}" } }
+}
+
+@derive(Display, via: inner)
+struct Wrapper {
+    inner: Inner
+}
+
+fn render(x: dyn Display): string { return x.to_string() }
+
+w = Written { n: 1 }
+echo "written ${w.to_string()} | ${w} | ${render(w)}"
+// `Equatable` is still derived here, so its own doors keep the structural answer beside the
+// hand-written `Display`: one trait's written body does not change another's.
+echo "written-eq ${w.eq(Written { n: 1 })} ${w.eq(Written { n: 2 })}"
+
+v = Wrapper { inner: Inner { k: 7 } }
+echo "via ${v.to_string()} | ${v} | ${render(v)}"

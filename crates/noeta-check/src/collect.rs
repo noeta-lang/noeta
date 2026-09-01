@@ -1015,6 +1015,66 @@ impl Checker {
                 }
             }
         }
+        // The **derived built-in methods** (`noeta_ast::derive::DERIVED_BUILTIN_METHODS`):
+        // `@derive(Display)` makes `to_string()` answerable on the type, `@derive(Equatable)` makes
+        // `eq(other)`, `@derive(Comparable)` makes `compare(other)`. A derive registers trait
+        // membership, which `traits_of(value)` reports and `x is dyn Trait` reads — so the method
+        // has to come with it, or a value answers `true` to `is dyn Display` and then aborts on the
+        // one method that object promises.
+        //
+        // Only the SIGNATURE is registered here: the behavior is the runtime's own structural
+        // routine (the same one `==`, `<` and interpolation run), which has no source form for a
+        // planner to synthesize — so unlike every other entry above, there is no body and no hoist.
+        // Runs AFTER the plans, and `register_synth_method` keeps the first entry per name, so a
+        // hand-written method and a `via:` forward both win.
+        for stmt in &program.stmts {
+            let (type_name, type_params, derives): (&str, &[TypeParam], &[DeriveSpec]) = match stmt
+            {
+                Stmt::Struct(d) => (d.name.as_str(), &d.type_params, &d.decorators.derives),
+                Stmt::Class(d) => (d.name.as_str(), &d.type_params, &d.decorators.derives),
+                Stmt::Enum(d) => (d.name.as_str(), &d.type_params, &d.decorators.derives),
+                _ => continue,
+            };
+            let rows: Vec<(&noeta_ast::derive::DerivedBuiltinMethod, Span)> = derives
+                .iter()
+                .filter_map(|spec| {
+                    noeta_ast::derive::DERIVED_BUILTIN_METHODS
+                        .iter()
+                        .find(|row| row.trait_name == spec.name.as_str())
+                        .map(|row| (row, spec.span))
+                })
+                .collect();
+            if rows.is_empty() {
+                continue;
+            }
+            // The deriving type as a signature writes it — carrying its own parameters, so a
+            // `Box<T>`'s `compare` takes a `Box<T>` rather than a bare `Box`.
+            let self_ty = |span| TypeRef::Named {
+                name: noeta_ast::Name::canonical(type_name),
+                args: type_params
+                    .iter()
+                    .map(|p| TypeRef::Named {
+                        name: noeta_ast::Name::canonical(p.name.as_str()),
+                        args: Vec::new(),
+                        span,
+                    })
+                    .collect(),
+                span,
+            };
+            let type_name = type_name.to_string();
+            for (row, span) in rows {
+                let sig = noeta_ast::derive::derived_builtin_signature(row, self_ty(span), span);
+                // `Instance`: a derived method acts on a value, so `T.to_string()` is E0047 rather
+                // than a call that binds no receiver and aborts. The body-less signature cannot say
+                // so on its own — `register_synth_method` reads receiver-ness off a body.
+                self.register_synth_method_with(
+                    &type_name,
+                    row.trait_name,
+                    &sig,
+                    Receiver::Instance,
+                );
+            }
+        }
         // A STANDALONE `impl Trait for T { … }`'s method signatures. The in-body `impl` half was
         // already folded into each type's own method walk above (`.impls` chained into `methods`);
         // this closes the other half, which the surface has carried unfinished since standalone
@@ -1479,6 +1539,27 @@ impl Checker {
     /// `impl` block's method does, so a hoisted default of a `static fn` narrows exactly like a
     /// written-out one.
     fn register_synth_method(&mut self, type_name: &str, trait_name: &str, m: &noeta_ast::FnDecl) {
+        // Every method reaching here comes from a trait: a hoisted UT5 default, or a `@derive`
+        // plan's bridge/forward. So a self-less one is `Either` like any other trait method — an
+        // omitted default is reachable as `T.m()` (the documented UT5 spelling) *and* on a value,
+        // exactly as the same body written out in the `impl` block would be, and narrowed back to
+        // `Static` by the same pass if the trait declared it so.
+        let receiver = Receiver::trait_method(m.body.iter().any(|s| s.mentions("self")));
+        self.register_synth_method_with(type_name, trait_name, m, receiver);
+    }
+
+    /// [`Self::register_synth_method`] with the receiver discipline supplied rather than read off
+    /// the body — for a signature that HAS no body. A derived built-in method
+    /// (`noeta_ast::derive::DERIVED_BUILTIN_METHODS`) is the one such registration: its behavior is
+    /// a runtime routine, so "does the body mention `self`" has no answer, and the classification
+    /// has to be stated.
+    fn register_synth_method_with(
+        &mut self,
+        type_name: &str,
+        trait_name: &str,
+        m: &noeta_ast::FnDecl,
+        receiver: Receiver,
+    ) {
         let key = (type_name.to_string(), m.name.to_string());
         if self.symbols.methods.contains_key(&key) {
             return;
@@ -1504,16 +1585,7 @@ impl Checker {
                 .unwrap_or(Type::Unknown),
             m.is_async,
         );
-        // Every method reaching here comes from a trait: a hoisted UT5 default, or a `@derive`
-        // plan's bridge/forward. So a self-less one is `Either` like any other trait method — an
-        // omitted default is reachable as `T.m()` (the documented UT5 spelling) *and* on a value,
-        // exactly as the same body written out in the `impl` block would be, and narrowed back to
-        // `Static` by the same pass if the trait declared it so.
-        self.record_receiver(
-            key.clone(),
-            m,
-            Receiver::trait_method(m.body.iter().any(|s| s.mentions("self"))),
-        );
+        self.record_receiver(key.clone(), m, receiver);
         self.note_trait_supplied(type_name, &key.1, m, trait_name);
         self.symbols.methods.insert(
             key,

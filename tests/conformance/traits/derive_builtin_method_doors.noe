@@ -1,0 +1,88 @@
+// **A derived built-in trait's method answers wherever its membership does.**
+//
+// `@derive(Display)` registers `Display` — which `traits_of(value)` reports and `x is dyn Display`
+// reads — so the trait's method has to answer too, at every door: the direct call `x.to_string()`,
+// the protocol the trait lights up (interpolation, `==`, `<`), dispatch through `dyn Display`, the
+// two reflective queries, and the by-name `invoke`. A value that answers `true` to `is dyn Display`
+// and then aborts on `x.to_string()` breaks the one promise a trait object makes, so the doors are
+// asserted *together* per trait: what this case pins is their mutual agreement, not that a method
+// exists.
+//
+// The derived method is the operator's own answer rather than a second implementation, which the
+// `same`-prefixed lines assert directly: a derived `compare` and `<` order the same pair the same
+// way, `eq` and `==` agree on it, and `to_string()` is character-for-character what interpolation
+// writes. `.sorted()` is included because it is the third reader of that one ordering.
+//
+// Covers a struct, a class and an enum, because the three reach method dispatch by different routes
+// (an object arm, an object arm with reference identity, and an enum arm that falls through to the
+// built-in methods).
+
+// expect: stdout "traits Comparable,Display,Equatable"
+// expect: stdout "is true true true"
+// expect: stdout "render Tag {n: 1, s: \"x\"} | Tag {n: 1, s: \"x\"} | Tag {n: 1, s: \"x\"}"
+// expect: stdout "same-eq true true true"
+// expect: stdout "same-ne false false false"
+// expect: stdout "same-order Ordering.Less Ordering.Less true"
+// expect: stdout "sorted [Tag {n: 1, s: \"x\"}, Tag {n: 2, s: \"y\"}]"
+// expect: stdout "invoke Ok(Tag {n: 1, s: \"x\"}) Ok(true) Ok(Ordering.Less)"
+// expect: stdout "class traits Comparable,Display,Equatable"
+// expect: stdout "class render Cell {v: 3} | Cell {v: 3} | Cell {v: 3}"
+// expect: stdout "class same-eq true true true"
+// expect: stdout "class same-order Ordering.Greater Ordering.Greater true"
+// expect: stdout "enum traits Comparable,Display,Equatable"
+// expect: stdout "enum is true true true"
+// expect: stdout "enum render Level.Low | Level.Low | Level.Low"
+// expect: stdout "enum same-eq true true true"
+// expect: stdout "enum same-order Ordering.Less Ordering.Less true"
+// expect: exit 0
+
+@derive(Display, Equatable, Comparable)
+struct Tag {
+    n: int
+    s: string
+}
+
+@derive(Display, Equatable, Comparable)
+class Cell {
+    v: int
+    pub fn new(v: int): Cell { return Cell { v: v } }
+}
+
+@derive(Display, Equatable, Comparable)
+enum Level { Low; High }
+
+fn render(x: dyn Display): string { return x.to_string() }
+fn same(a: dyn Equatable, b: dyn Equatable): bool { return a.eq(b) }
+fn order(a: dyn Comparable, b: dyn Comparable): Ordering { return a.compare(b) }
+
+a = Tag { n: 1, s: "x" }
+b = Tag { n: 2, s: "y" }
+
+echo "traits ${traits_of(a).join(",")}"
+echo "is ${a is dyn Display} ${a is dyn Equatable} ${a is dyn Comparable}"
+// The direct call, interpolation (the protocol), and dispatch through `dyn Display` — one text.
+echo "render ${a.to_string()} | ${a} | ${render(a)}"
+// The direct call, the operator it stands beside, and dispatch through `dyn Equatable`.
+echo "same-eq ${a.eq(a)} ${a == a} ${same(a, a)}"
+echo "same-ne ${a.eq(b)} ${a == b} ${same(a, b)}"
+// A derived `compare` and `<` read one ordering: the third field is the operator agreeing with the
+// method's own `Ordering`, so a drift between them cannot pass as `true`.
+echo "same-order ${a.compare(b)} ${order(a, b)} ${(a < b) == (a.compare(b) == Ordering.Less)}"
+echo "sorted ${[b, a].sorted()}"
+// The reflective by-name door reaches the same member set the direct call does.
+echo "invoke ${invoke(a, "to_string", [])} ${invoke(a, "eq", [a])} ${invoke(a, "compare", [b])}"
+
+c = Cell.new(3)
+d = Cell.new(1)
+echo "class traits ${traits_of(c).join(",")}"
+echo "class render ${c.to_string()} | ${c} | ${render(c)}"
+echo "class same-eq ${c.eq(Cell.new(3))} ${c == Cell.new(3)} ${same(c, Cell.new(3))}"
+echo "class same-order ${c.compare(d)} ${order(c, d)} ${(c > d) == (c.compare(d) == Ordering.Greater)}"
+
+low = Level.Low
+high = Level.High
+echo "enum traits ${traits_of(low).join(",")}"
+echo "enum is ${low is dyn Display} ${low is dyn Equatable} ${low is dyn Comparable}"
+echo "enum render ${low.to_string()} | ${low} | ${render(low)}"
+echo "enum same-eq ${low.eq(Level.Low)} ${low == Level.Low} ${same(low, Level.Low)}"
+echo "enum same-order ${low.compare(high)} ${order(low, high)} ${(low < high) == (low.compare(high) == Ordering.Less)}"

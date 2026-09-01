@@ -510,7 +510,20 @@ impl Checker {
         if let Some(t) = self.native_method_assoc_return(recv, name) {
             return t;
         }
-        if let Some(t) = stdlib::method_return(self.reg(), recv, name, self.elem_facts(recv)) {
+        // `compare` is the one answer `stdlib::method_return` gives for EVERY receiver kind —
+        // `Comparable`'s method, whose `Ordering` return the registry pins — and it is right for
+        // every built-in kind that orders. It is wrong for a **closed user type that does not
+        // implement the trait**: the resolved return is exactly what the closedness guard reads as
+        // proof the member exists, so `t.compare(u)` on an unordered type checked clean and then
+        // aborted at run time (E0005), while its twin `t.eq(u)` was refused where it was written.
+        // A declared type answers `compare` from its own method table like any other name — which
+        // a `@derive(Comparable)` fills — so the trait decides, at both doors, in the same words.
+        let universal_compare = noeta_types::BuiltinTrait::Comparable.required_method_name()
+            == Some(name)
+            && crate::expr::calls::user_type_is_closed(self, recv);
+        if !universal_compare
+            && let Some(t) = stdlib::method_return(self.reg(), recv, name, self.elem_facts(recv))
+        {
             return t;
         }
         if let Type::Named(n, _) = recv

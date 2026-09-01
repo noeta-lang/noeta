@@ -36,6 +36,80 @@ impl<'m> Vm<'m> {
             .copied()
     }
 
+    /// **The method a `@derive`d built-in trait makes callable**, asked when method dispatch found
+    /// none — `to_string()` under `Display`, `eq(other)` under `Equatable`, `compare(other)` under
+    /// `Comparable` (`noeta_ast::derive::DERIVED_BUILTIN_METHODS`).
+    ///
+    /// A derive registers trait membership, which `traits_of(value)` reports and `x is dyn Trait`
+    /// reads off the same `Module::reflection` table this asks. Answering the trait's method for
+    /// exactly that set of types is what keeps the two from disagreeing: a value cannot say `true`
+    /// to `is dyn Display` and then abort on the one method that object promises.
+    ///
+    /// The answer is not a second implementation — each arm runs the routine the operator or
+    /// protocol path already runs (`Value::display` behind `Op::Stringify`, `value_eq` behind `==`,
+    /// `structural_compare` behind `< <= > >=`), so a derived method and its operator give one
+    /// answer by construction. Mirrors the tree-walker's `derived_builtin_call`.
+    ///
+    /// `None` when the name is no derived method, the receiver is not a user object/enum, its type
+    /// writes the method itself (a hand-written `impl`, or a `@derive(…, via: f)` forwarder — both
+    /// leave the same membership record, so the proto table is asked first), or the type has no
+    /// registered impl of the trait.
+    pub(crate) fn derived_builtin_call(
+        &mut self,
+        v: Value,
+        method: &str,
+        args: &[Value],
+        span: Span,
+    ) -> Option<Result<Value, Abort>> {
+        let row = noeta_ast::derive::derived_builtin_method(method)?;
+        if !(v.is_object() || v.is_enum()) {
+            return None;
+        }
+        let type_name = &v.shape()?.name;
+        if self.method_proto(type_name, method).is_some()
+            || !self
+                .module
+                .reflection
+                .type_implements(type_name, row.trait_name)
+        {
+            return None;
+        }
+        if args.len() != row.arity {
+            // The shared arity wording every other method miscall uses — a derived method is not a
+            // new kind of callable, so it must not be a new kind of rejection either (the fuzz
+            // census pins the runtime's inventory of them).
+            return Some(Err(self.error(
+                DiagnosticCode::TypeMismatch,
+                span,
+                arity_message("method", row.arity, row.arity, args.len()),
+            )));
+        }
+        Some(match row.body {
+            // The structural rendering — `Value::display`, which is what `Op::Stringify` falls back
+            // to for a type with no `to_string`, so the method and interpolation write one text.
+            noeta_ast::derive::DerivedBody::Render => Ok(Value::string(&v.display())),
+            // The structural equality `==` reads, for the same operands.
+            noeta_ast::derive::DerivedBody::Equals => {
+                Ok(Value::bool(noeta_value::value_eq(v, args[0])))
+            }
+            // The field-wise structural ordering `< <= > >=` read, as the `Ordering` a `compare`
+            // hands back — the same comparator the operator reaches for, so the operator and the
+            // method cannot order one pair of values differently.
+            noeta_ast::derive::DerivedBody::Order => match structural_compare(v, args[0]) {
+                Some(ordering) => Ok(make_ordering(noeta_ast::ordering_variant(ordering))),
+                None => Err(self.error(
+                    DiagnosticCode::TypeMismatch,
+                    span,
+                    format!(
+                        "cannot compare {} and {}",
+                        v.type_name(),
+                        args[0].type_name()
+                    ),
+                )),
+            },
+        })
+    }
+
     /// The message a **by-name miss** on `type_name.method` reports. A bare `from` names no single
     /// conversion, so it names the ones the type declares
     /// ([`noeta_ast::conversion::missing_from_message`]) — the same function the IR interpreter
@@ -318,6 +392,12 @@ impl<'m> Vm<'m> {
         // `x.compare(y)` — the `Ordering` of two primitives (the value a `Comparable`
         // impl returns). One argument, on any non-object receiver.
         if method == "compare" {
+            // A `@derive(Comparable)` object or enum orders field-wise (an enum by variant
+            // declaration index, then payload), which `compare_primitive` below does not do — so
+            // the derived method is answered here rather than reported as "cannot compare".
+            if let Some(result) = self.derived_builtin_call(v, method, args, span) {
+                return result;
+            }
             if args.len() != 1 {
                 return Err(self.error(
                     DiagnosticCode::TypeMismatch,
@@ -708,11 +788,17 @@ impl<'m> Vm<'m> {
                     span,
                     format!("method `{method}` takes no arguments"),
                 )),
-            None => Err(self.error(
-                DiagnosticCode::UnknownName,
-                span,
-                format!("no method `{method}` on {}", v.type_name()),
-            )),
+            // A method a `@derive`d built-in trait makes callable (`to_string`/`eq`). An enum
+            // value's `Op::CallMethod` arm falls through to here on a proto miss, and so does a
+            // method handle's — so both reach the derived member the direct object call does.
+            None => match self.derived_builtin_call(v, method, args, span) {
+                Some(result) => result,
+                None => Err(self.error(
+                    DiagnosticCode::UnknownName,
+                    span,
+                    format!("no method `{method}` on {}", v.type_name()),
+                )),
+            },
         }
     }
 
