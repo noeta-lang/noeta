@@ -126,7 +126,7 @@ fn place(items: List<Item>): Result<Order, OrderError> {
 This lets you write the happy path linearly while failures short-circuit outward:
 
 ```noeta ignore
-fn pipeline(path: string): Result<Report, Error> {
+fn pipeline(path: string): Result<Report, dyn Error> {
     raw    = fs_read(path)?      // returns Err on read failure
     parsed = parse(raw)?         // returns Err on parse failure
     return Ok(analyze(parsed))
@@ -378,6 +378,7 @@ For genuinely unrecoverable states:
 - `panic(msg)` aborts the program (recorded as E0010) with a nonzero exit; output produced before it is kept.
 - `assert(cond)` / `assert(cond, msg)` checks a condition and panics if it is false. It is the basis of the [test runner](Testing); the message is materialized only on failure.
 - An unhandled `Err` reaching the top level is the *third* way a program aborts (E0069, above) — the difference is that nobody wrote it: it is where an ordinary recoverable failure ends up when no frame handled it.
+- **Integer division or remainder by zero** aborts too, as E0008. Nobody wrote that one either, and there is no recoverable twin: guard the divisor, or take the branch that never divides.
 
 ```noeta
 balance = 5

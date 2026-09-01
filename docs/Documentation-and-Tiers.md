@@ -11,16 +11,19 @@ A `@doc { … }` block holds verbatim prose (Markdown). Its body is captured **u
 ```noeta
 @doc {
     # Adder
-
-    `add(a, b)` returns **a + b**. Pure; no side effects.
 }
 
+@doc {
+    `add(a, b)` returns **a + b**. Pure; no side effects.
+}
 fn add(a: int, b: int): int { return a + b }
 ```
 
+The first block stands alone and is the file's **module doc**; the second leads `fn add` and documents it.
+
 ### Attachment — docs belong to declarations
 
-A `@doc` block **attaches by adjacency**: immediately above a declaration (`fn`/`struct`/`class`/`enum`/`trait`), it documents that declaration. A non-attached block (above the `use` header, between sections, or standing alone) is the **module doc** if it is the file's first such block, else free-floating section prose. No new syntax — position decides.
+A `@doc` block **attaches by adjacency**: immediately above a declaration (`fn`/`struct`/`class`/`enum`/`trait`), it documents that declaration. Blank lines between the two do not break the attachment; any statement in between does. A non-attached block (above the `use` header, between sections, or standing alone) is the **module doc** if it is the file's first such block, else free-floating section prose. No new syntax — position decides.
 
 A **method** is documented the same way — the block leads the method inside the body it is declared in:
 
@@ -56,7 +59,7 @@ for d in attributes_of::<Doc>() { echo "${d.target}: ${d.value.text.trim()}" }
 // --tier doc → "add: Adds two ints." then "Users.list: List every user."
 ```
 
-Extract every `@doc` block to stdout:
+Extract every `@doc` block to stdout — from the file named **and its sibling modules**, so a one-file argument in a multi-file directory returns more than one file's blocks:
 
 ```console
 $ noeta doc adder.noe
@@ -75,7 +78,7 @@ $ noeta doc adder.noe
 noeta doc [OPTIONS] [PATH]
 ```
 
-`PATH` (default `.`) is a file or a **directory**. A directory extracts every `.noe` beneath it; a file extracts that file **and its sibling modules**, because a `@doc` block belongs to the file it sits in and linking merges declarations without the blocks beside them — extracting from the linked program alone would silently drop the documentation of every imported symbol. This is the same workspace `--out` has always documented, so the two halves of `noeta doc` agree on what "the docs" means. A file that does not parse contributes nothing rather than failing the run.
+`PATH` (default `.`) is a file or a **directory**. A directory extracts every `.noe` beneath it; a file extracts that file **and its sibling modules**, because a `@doc` block belongs to the file it sits in and linking merges declarations without the blocks beside them — extracting from the linked program alone would silently drop the documentation of every imported symbol. This is the same workspace `--out` documents, so the two halves of `noeta doc` agree on what "the docs" means. A file that does not parse contributes nothing rather than failing the run.
 
 ### Generating a documentation artifact
 

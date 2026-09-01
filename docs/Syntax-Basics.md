@@ -223,7 +223,10 @@ echo "Hello ${name}"         // Hello Niro
 echo "sum is ${1 + 2 * 3}"   // sum is 7
 echo "{not a hole}"          // {not a hole}
 echo "say \"hi\""            // say "hi"
+echo "esc \x1b[0m \u{1F600}" // an ASCII/control byte, and a Unicode scalar
 ```
+
+The escapes are `\n`, `\t`, `\r`, `\"`, `\\`, `\$` (a literal `$`, so a literal `${` is `\${`), `\xHH` — exactly two hex digits naming an ASCII scalar `0x00`–`0x7F` — and `\u{H…H}` — 1 to 6 hex digits naming any non-surrogate Unicode scalar up to `0x10FFFF`. Any other escaped character is that character verbatim, so a stray `\q` is just `q`. A malformed **numeric** escape is E0064, an invalid string escape, reported at the escape itself: `\x` without two hex digits or naming a byte above `0x7F`, `\u` without braces, an empty `\u{}`, or a `\u{…}` that is a surrogate or above `0x10FFFF`.
 
 **`'...'` — raw.** No interpolation; the only escapes are `\'` and `\\`.
 

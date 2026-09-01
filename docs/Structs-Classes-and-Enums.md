@@ -316,7 +316,7 @@ To decode an enum sitting inside a larger document, derive [`Deserialize<Json>`]
 
 ## Tuples
 
-Tuples are anonymous, positional, value-semantic aggregates. A literal needs **2 or more** elements — `(x)` is just a parenthesized expression, and `()` is unit.
+Tuples are anonymous, positional, value-semantic aggregates. A literal needs **2 or more** elements — `(x)` is just a parenthesized expression, and there is no one- or zero-element form: `()` is a parse error (E0003) in every position, binding, argument, return value and annotation alike. The unit *type* is spelled `void`, and a `void` function returns with a bare `return;` or by falling off the end of its body.
 
 ```noeta
 fn divmod(a: int, b: int): (int, int) { return (a / b, a % b) }

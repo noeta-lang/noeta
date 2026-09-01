@@ -119,6 +119,8 @@ All three instantiation paths a free function has apply, consistent with them: *
 
 **A method's own parameter shadows.** Reusing one of the class's names declares a *new* parameter that hides the outer one for the body's extent, exactly as a local binding hides a global — `Repo::<Todo>.label::<User>()` on a `fn label<T>()` inside `class Repo<T>` answers `User`, because the receiver's turbofish binds the class's `T` and the method's binds its own. The outer parameter is simply unreachable by that name inside the method; where you want both, give them different names (`fn paired<U>` above), which is also what reads better.
 
+That is what **E0075 (a warning, not an error)** says at the inner declaration: the program compiles and means what it says, but a reader cannot tell the two `T`s apart by sight, so the diagnostic asks you to rename one. Identity is the declaration site, never the spelling.
+
 A method's own parameter **forwards** into a call-site-typed position exactly as a free function's does — `json.try_parse::<U>` inside a method body is fine (see [Forwarding `T`](#forwarding-t) for the one thing to know about it). One boundary still holds statically: a **trait's** required-method set stays monomorphic — a per-method `<U>` on a trait method is E0058, since the trait is dispatched dynamically and each `impl` would have to agree on the parameter; put the generic method on a concrete type, or make the whole trait generic (`trait T<U> { ... }`).
 
 ### Both at once
@@ -129,15 +131,21 @@ A **self-less** member of a generic class carrying its own uninferable parameter
 struct Todo { id: int }
 
 class Repo<T> {
+    pub items: List<T>
+    pub fn make(xs: List<T>): Repo<T> { return Repo { items: xs } }
     pub fn blank<U>(): string { return type_name::<T>() ~ "/" ~ type_name::<U>() }
+    pub fn tagged<U>(): string { return type_name::<U>() ~ "@${self.items.len()}" }
 }
 
-echo Repo::<Todo>.blank::<int>()    // Todo/int
+echo Repo::<Todo>.blank::<int>()          // Todo/int   — static: both turbofishes
+
+r = Repo::<Todo>.make([])
+echo r.tagged::<int>()                    // int@0      — self-taking: the member turbofish alone
 ```
 
-Every other combination has a shorter spelling, which is why this one is the case worth naming. `blank` never reads `self`, so it must be called on the type and the class's `T` can only come from the receiver; its own `U` appears only in the return, so no argument and no annotation can pin it either. With an argument to infer from you write `Repo::<Todo>.describe(1)`; on an instance you write `r.blank::<int>()`, because a value carries its own instantiation already — a receiver turbofish on one is E0058.
+Every other combination has a shorter spelling, which is why this one is the case worth naming. `blank` never reads `self`, so it must be called on the type and the class's `T` can only come from the receiver; its own `U` appears only in the return, so no argument and no annotation can pin it either. With an argument to infer from you write `Repo::<Todo>.describe(1)`. A `self`-taking method needs only the member turbofish — `r.tagged::<int>()` — because a value carries its own instantiation already, and a receiver turbofish on one is E0058. That shorter spelling is the *self-taking* case and only that one: `r.blank::<int>()` is E0047, since `blank` is a static function of `Repo` and a value is the wrong receiver for it.
 
-The two remain separate concepts checked against separate parameter lists: the turbofish before the `.` is arity-checked against the class's parameters, the one after the member against the method's own. One consequence is worth knowing: a method parameter that **reuses** a class parameter's name does not shadow it — the class's binding wins, and the method's parameter of that name is unreachable. Give it a different name (`fn blank<U>()`, not `fn blank<T>()`) and there is nothing to trip over.
+The two remain separate concepts checked against separate parameter lists: the turbofish before the `.` is arity-checked against the class's parameters, the one after the member against the method's own. Where a method parameter **reuses** a class parameter's name, the method's own wins — ordinary shadowing, as [Generic methods](#generic-methods) states, reported as the E0075 warning. Give it a different name (`fn blank<U>()`, not `fn blank<T>()`) and there is nothing to read twice.
 
 ## Forwarding `T`
 
@@ -295,14 +303,22 @@ The traits below are **built into the language** — a fixed set an `impl` or `@
 | `Mul` | `mul(other): T` | `*` |
 | `Div` | `div(other): T` | `/` |
 | `Concat` | `concat(other): T` | `~` |
-| `TryAdd` | `try_add(other): Result<T, E>` | fallible `+` (via `?`) |
+| `TryAdd` | `try_add(other): Result<T, E>` | the explicit `a.try_add(b)?` |
 | `Index` | `get(i): T` | `a[i]` |
 | `Length` | `len(): int` | `x.len()` on a `<T: Length>` parameter |
-| `Iterable` | `iter(): Iterator<T>` | `for x in o` |
+| `Iterable` | `iter(): List<T>` | `for x in o` |
 | `Callable` | `call(...)` — any arity | `obj(args)` |
+| `Members` | `get(name): T` | a `<T: Members>` bound — look a member up by name |
+| `DynamicCall` | `call(name, args): T` | a `<T: DynamicCall>` bound — invoke by name |
+| `Serialize` | — | `@derive(Serialize<Json>)` synthesizes the encoder — see [Derives](Derives) |
+| `Deserialize` | — | `@derive(Deserialize<Json>)` registers the decoder — see [Derives](Derives) |
 | `Clone` | — | structural clone |
 
 `Ordering` is a namable built-in enum (`Ordering.Less` / `Equal` / `Greater`); calling `.compare()` on a primitive returns it.
+
+**`TryAdd` is a method, not an operator.** Bare `+` is reserved for the infallible `Add`: a type whose only addition is `TryAdd` rejects `a + b` with E0007, and the addition is written out as `a.try_add(b)?`. That is the point of having two traits — an expression built from `+` never hides a failure path, so the one that can fail has to say so at the call site.
+
+**`Members` and `DynamicCall` are contracts you program against rather than syntax.** Neither wires an operator: `Members` requires `get(name)` and `DynamicCall` requires `call(name, args)`, and what implementing one buys is trait membership — a `<T: Members>` or `<T: DynamicCall>` bound (E0025 without the impl) and a `traits_of` entry. They name the capability "this type resolves a member, or a call, from a name at runtime" so a framework can require it; the methods themselves are ordinary methods, callable as `x.get(name)` and `x.call(name, args)` with or without the impl.
 
 ### Ordering your own type
 
@@ -423,7 +439,7 @@ echo (Rev { n: 1 } < Rev { n: 2 })                                // false — `
 echo [Rev { n: 1 }, Rev { n: 3 }].sorted()                        // [Rev {n: 3}, Rev {n: 1}]
 ```
 
-An empty body is the right thing only for a **marker** trait — one with no required method, like `Clone` or `Serialize<Json>` — where the impl is declaring a capability rather than supplying behavior.
+An empty body is the right thing only for a **marker** trait — one with no required method, like `Clone` or `Serialize` — where the impl is declaring a capability rather than supplying behavior. An `impl` names the trait bare: the format argument in `@derive(Serialize<Json>)` belongs to the *derive*, which synthesizes an encoder for that format, and `impl Serialize<Json>` is E0015. Write `impl Serialize for S { }`.
 
 **A standalone impl travels with its type.** Wherever the target type reaches — a sibling module, a consumer of your package, a consumer that never names the type and only ever holds it as a `dyn Trait` — its standalone impls go with it, and every surface that reads trait membership sees them: the `dyn Trait` coercion, trait-method dispatch, the precise `x is dyn Trait` test, a `<T: Trait>` bound, and `traits_of(x)`. Which spelling you choose is a matter of layout, never of reach — an in-body `impl Trait { … }` block and a standalone `impl Trait for T { … }` declare the same thing, and a type that must be written one way to be usable from another module is a bug, not a rule.
 
@@ -610,7 +626,7 @@ This is Rust's orphan rule with *crate* read as *package*, and — unlike Rust's
 
 ```noeta ignore
 // third.glue — depends on vendor.a and vendor.b, and is written by neither
-impl Speaks for Thing { fn speak(): string { return "glue says ${self.id}" } }
+impl Speaks for Thing { pub fn speak(): string { return "glue says ${self.id}" } }
 ```
 ```noeta ignore
 // your application, which imports vendor.a and vendor.b and never mentions third.glue

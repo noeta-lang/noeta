@@ -264,7 +264,7 @@ Parses and type-checks without running or building — the CI/pre-commit gate (t
 
 ```console
 $ noeta check .
-checked 3 files (tiers: test, debug): 0 error(s), 0 warning(s)
+checked 3 files (tiers: debug, test): 0 error(s), 0 warning(s)
 ```
 
 `--tier <NAME>`/`--target <NAME>` still select a shape explicitly, checked as one program the way that build would compile it; the per-tier sweep then covers whatever the selection left out. See [Dev Tiers](Dev-Tiers#checking-is-not-building) for why one tier at a time.
@@ -284,11 +284,11 @@ This whole guide is compiled into the binary, so it is searchable with no networ
 ```console
 $ noeta docs packed struct --limit 2
 1. Fixed-Width Ints & Packed Types › Packed value types — `@packed`
-   The `@packed` directive marks a **struct** as a *packed value type*: a `List` of it is stored…
+   The `@packed` directive marks a **struct** as a *packed value type*: a `List` of it is stored as a flat, unboxed, contiguous numeric buffer rather than an array of heap-object pointers. This is a pure…
    noeta docs --page Fixed-Width-Integers#packed-value-types--packed
 
 2. Fixed-Width Ints & Packed Types › `bytes` — serialize a packed list
-   A `List` of a packed type round-trips through an opaque `bytes` buffer with `.to_bytes()`…
+   @packed struct V3 { x: f32  y: f32  z: f32 }
    noeta docs --page Fixed-Width-Integers#bytes--serialize-a-packed-list
 
 2 results.
