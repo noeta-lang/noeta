@@ -75,14 +75,13 @@ impl<'m> Vm<'m> {
             return None;
         }
         if args.len() != row.arity {
+            // The shared arity wording every other method miscall uses — a derived method is not a
+            // new kind of callable, so it must not be a new kind of rejection either (the fuzz
+            // census pins the runtime's inventory of them).
             return Some(Err(self.error(
                 DiagnosticCode::TypeMismatch,
                 span,
-                format!(
-                    "method `{method}` takes {} argument(s) but {} were supplied",
-                    row.arity,
-                    args.len()
-                ),
+                arity_message("method", row.arity, row.arity, args.len()),
             )));
         }
         Some(match row.body {
