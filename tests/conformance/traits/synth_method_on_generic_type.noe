@@ -1,0 +1,77 @@
+// **A synthesized method on a generic type substitutes the type's arguments like a written one.**
+//
+// A `@derive`, a `via:` forward and a hoisted trait default all put a method on a type without the
+// author writing it, and the signature they register is what every call site reads. Registering it
+// without the enclosing type's generic information leaves the declaration's own `<T>` standing in
+// the recorded parameter types, so on a `Box<int>` the call is refused for an argument "of type
+// `Box<int>`, not assignable to `Box<T>`" — while `a == b`, the operator reading the *same*
+// membership, answers. That is the disagreement this case pins: for each route below, the method
+// and the operator (or the trait object, or `invoke`) are asked about one pair of values.
+//
+// Covered per declaration kind, because the three register their methods by different routes, and
+// per parameter shape, because only a parameter mentioning the type's own `<T>` can go wrong: a
+// nullary method (`to_string`) and a concretely-typed one were always callable, which is why a
+// generic derive could look correct.
+
+// expect: stdout "struct eq false false | cmp Ordering.Less true"
+// expect: stdout "struct render G {v: 1} | G {v: 1} | Ok(G {v: 1})"
+// expect: stdout "class eq true true | cmp Ordering.Greater true"
+// expect: stdout "enum eq false false | cmp Ordering.Less true"
+// expect: stdout "default self-typed d | d"
+// expect: stdout "via forward true | true"
+// expect: exit 0
+
+@derive(Display, Equatable, Comparable)
+struct G<T> { v: T }
+
+@derive(Equatable, Comparable)
+class Cell<T> {
+    v: T
+    pub fn of(v: T): Cell<T> { return Cell { v: v } }
+}
+
+@derive(Equatable, Comparable)
+enum Slot<T> { Empty; Full(T) }
+
+a = G { v: 1 }
+b = G { v: 2 }
+echo "struct eq ${a.eq(b)} ${a == b} | cmp ${a.compare(b)} ${a < b}"
+echo "struct render ${a.to_string()} | ${a} | ${invoke(a, "to_string", [])}"
+
+c = Cell.of(2)
+d = Cell.of(1)
+echo "class eq ${c.eq(Cell.of(2))} ${c == Cell.of(2)} | cmp ${c.compare(d)} ${c > d}"
+
+e = Slot.Empty
+f = Slot.Full(1)
+echo "enum eq ${e.eq(f)} ${e == f} | cmp ${e.compare(f)} ${e < f}"
+
+// A hoisted trait default whose parameter is `Self` — the shape that names the deriving type at
+// its own instantiation, and so needs the substitution even though the author wrote no derive.
+trait Pair {
+    fn tag(): string
+    fn beside(other: Self): string { return self.tag() }
+}
+struct P<T> {
+    v: T
+    impl Pair {
+        pub fn tag(): string { return "d" }
+    }
+}
+p = P { v: 1 }
+fn through_object(x: dyn Pair, y: dyn Pair): string { return x.beside(y) }
+echo "default self-typed ${p.beside(P { v: 2 })} | ${through_object(p, P { v: 2 })}"
+
+// A `via:` forward on a generic type, through a field the trait's method takes as a parameter.
+trait Beats { fn beats(o: Score): bool }
+struct Score {
+    n: int
+    impl Beats {
+        pub fn beats(o: Score): bool { return self.n > o.n }
+    }
+}
+@derive(Beats, via: score)
+struct Player<T> { score: Score; extra: T }
+w = Player { score: Score { n: 5 }, extra: "x" }
+fn through_beats(x: dyn Beats): bool { return x.beats(Score { n: 1 }) }
+echo "via forward ${w.beats(Score { n: 1 })} | ${through_beats(w)}"

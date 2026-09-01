@@ -304,16 +304,35 @@ impl Checker {
             }
         }
         self.record_receiver((type_name.to_string(), key.clone()), m, receiver);
+        let sig = self.method_signature(type_name, m, type_params);
+        self.symbols
+            .methods
+            .insert((type_name.to_string(), key), sig);
+    }
+
+    /// **The [`FnSig`] a method declaration presents on `type_name`** — the one place a method's
+    /// signature is typed, whether the declaration was written by the author or synthesized by a
+    /// derive, a `via:` forward or a hoisted trait default.
+    ///
+    /// The type's parameters, then the method's own LAYERED OVER them: a method `<T>` inside a
+    /// class `<T>` shadows, so an annotation in this signature resolves to the METHOD's `T`. Both
+    /// remain in `generic.params` — they are different parameters with different identities, and
+    /// each is seeded from its own channel (the receiver's type arguments for the class's, the
+    /// turbofish/arguments for the method's).
+    ///
+    /// `Self` in a signature names the declaring type, and it is resolved HERE rather than at the
+    /// body-checking pass: a recorded signature is what every call site, `dyn` dispatch and
+    /// reflection reads, so a `Self` left standing in one would meet the concrete argument at the
+    /// call and mismatch it.
+    ///
+    /// The [`GenericInfo`] is what carries the *enclosing type's* parameters into the call — and a
+    /// synthesized method needs it exactly as much as a written one. Registering one without it
+    /// leaves the declaration's own `<T>` standing in the recorded parameter types, so a
+    /// `@derive(Equatable) struct Box<T>`'s `b.eq(other)` on a `Box<int>` is refused for an
+    /// argument "of type `Box<int>`, not assignable to `Box<T>`" while `b == other` — the operator
+    /// reading the same membership — answers.
+    fn method_signature(&self, type_name: &str, m: &FnDecl, type_params: &[TypeParam]) -> FnSig {
         let xt = &self.imports.extern_types;
-        // The type's parameters, then the method's own LAYERED OVER them: a method `<T>` inside a
-        // class `<T>` shadows, so an annotation in this signature resolves to the METHOD's `T`.
-        // Both remain in `generic.params` below — they are different parameters with different
-        // identities, and each is seeded from its own channel (the receiver's type arguments for
-        // the class's, the turbofish/arguments for the method's).
-        // `Self` in a signature names the declaring type, and it is resolved HERE rather than at
-        // the body-checking pass: a recorded signature is what every call site, `dyn` dispatch and
-        // reflection reads, so a `Self` left standing in one would meet the concrete argument at
-        // the call and mismatch it.
         let type_scope = type_body_scope(type_name, type_params, xt);
         let scope = extend_param_scope(&type_scope, &m.type_params, xt);
         let type_generics: Vec<(ParamRef, Vec<BoundReq>)> = type_params
@@ -351,16 +370,13 @@ impl Checker {
                 raw_params,
                 raw_ret,
             });
-        self.symbols.methods.insert(
-            (type_name.to_string(), key),
-            FnSig {
-                params,
-                param_names: m.params.iter().map(|p| p.name.clone()).collect(),
-                ret,
-                required: required_params(&m.params),
-                generic,
-            },
-        );
+        FnSig {
+            params,
+            param_names: m.params.iter().map(|p| p.name.clone()).collect(),
+            ret,
+            required: required_params(&m.params),
+            generic,
+        }
     }
 
     /// The scope a type's own `impl` arguments and annotations resolve in: its generic parameters,
@@ -1564,39 +1580,22 @@ impl Checker {
         if self.symbols.methods.contains_key(&key) {
             return;
         }
-        // Hoisted from a trait, whose methods declare no type parameters of their own (E0058) —
-        // so the layering below adds nothing. What the scope IS for is `Self`: a trait's
-        // `fn me(): Self` hoisted onto an implementor returns that implementor, and recording the
-        // literal word instead would make the signature uncallable at every one of them.
-        let scope = extend_param_scope(
-            &self.target_scope(type_name),
-            &m.type_params,
-            &self.imports.extern_types,
-        );
-        let params: Vec<Type> = m
-            .params
-            .iter()
-            .map(|p| param_type(p, &self.imports.extern_types, &scope))
-            .collect();
-        let ret = async_return(
-            m.ret
-                .as_ref()
-                .map(|t| from_ref_q(t, &self.imports.extern_types, &scope))
-                .unwrap_or(Type::Unknown),
-            m.is_async,
-        );
+        // Typed by the same worker a written declaration goes through, against the target's own
+        // registered parameters — so a synthesized method on a generic type carries that type's
+        // `GenericInfo` and substitutes at the call exactly as a hand-written one does. What the
+        // scope also buys is `Self`: a trait's `fn me(): Self` hoisted onto an implementor returns
+        // that implementor, and recording the literal word instead would make the signature
+        // uncallable at every one of them.
+        let type_params = self
+            .symbols
+            .type_params
+            .get(type_name)
+            .cloned()
+            .unwrap_or_default();
+        let sig = self.method_signature(type_name, m, &type_params);
         self.record_receiver(key.clone(), m, receiver);
         self.note_trait_supplied(type_name, &key.1, m, trait_name);
-        self.symbols.methods.insert(
-            key,
-            FnSig {
-                params,
-                param_names: m.params.iter().map(|p| p.name.clone()).collect(),
-                ret,
-                required: required_params(&m.params),
-                generic: None,
-            },
-        );
+        self.symbols.methods.insert(key, sig);
     }
 
     /// Record an impl's associated-type bindings (slice 1a): fold its `type Name = Concrete;` entries
