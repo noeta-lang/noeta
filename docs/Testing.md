@@ -4,7 +4,7 @@ Tests live *in the same file as the code they test*, inside a `@test` block. On 
 
 ```console
 $ noeta test math.noe
-running 2 tests on 8 threads
+running 2 tests on 2 threads
   ok    adds
   ok    subtracts
 

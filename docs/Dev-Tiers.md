@@ -38,7 +38,7 @@ Stripping is a *build* decision, not a *checking* one: a stripped block is still
 
 ```console
 $ noeta check .
-checked 3 files (tiers: test, debug): 0 error(s), 0 warning(s)
+checked 3 files (tiers: debug, test): 0 error(s), 0 warning(s)
 ```
 
 The `(tiers: …)` clause names what it looked inside, so a green `noeta check` means the tier bodies compile too, not that nobody looked. It needs no `--target`: a green check is never followed by a `noeta test` that fails to compile.
