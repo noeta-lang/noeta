@@ -319,10 +319,6 @@ impl Checker {
         }
     }
 
-    /// Whether `operand` may be used with an operator requiring `trait_name`: a `dyn`/hole defers;
-    /// an in-scope **type parameter** is licensed only by its declared bounds; any other type by the
-    /// satisfaction model ([`Self::satisfies`] — built-in table + `@derive`/`impl` index).
-
     /// Whether `a ~ b` reaches a `concat` **implementation** rather than the display form — a
     /// question the LEFT operand alone answers, because that is how both backends dispatch it: an
     /// object or enum carrying `Concat` is asked for its `concat` before `~` renders anything, and
@@ -343,6 +339,9 @@ impl Checker {
         }
     }
 
+    /// Whether `operand` may be used with an operator requiring `t`: a `dyn`/hole defers; an
+    /// in-scope **type parameter** is licensed only by its declared bounds; any other type by the
+    /// satisfaction model ([`Self::satisfies`] — built-in table + `@derive`/`impl` index).
     pub(crate) fn operand_satisfies_operator(&self, operand: &Type, t: BuiltinTrait) -> bool {
         if operand.defers_to_runtime() {
             return true;

@@ -460,28 +460,23 @@ impl Checker {
     /// this type at all" read the same three sources. Asking them separately is how a rule ends up
     /// consulting two of the three: a `Duration` is a *fielded* declaration, which
     /// `Registry::resolve_type` — extern types only — does not see.
-    fn native_declared_traits(
-        &self,
-        name: &str,
-    ) -> impl Iterator<Item = &'static [&'static str]> + '_ {
+    fn native_declared_traits<'a>(
+        &'a self,
+        name: &'a str,
+    ) -> impl Iterator<Item = &'static [&'static str]> + 'a {
         use noeta_ext_abi::NominalType;
-        let name = name.to_string();
         let reg = self.reg();
         let types = reg
             .extensions()
             .iter()
             .flat_map(|ext| ext.types())
-            .filter_map({
-                let name = name.clone();
-                move |ty| ty.is_qualified(&name).then_some(ty.traits)
-            });
-        let fielded = reg.fielded().filter_map({
-            let name = name.clone();
-            move |f| f.is_qualified(&name).then_some(f.traits)
-        });
+            .filter_map(move |ty| ty.is_qualified(name).then_some(ty.traits));
+        let fielded = reg
+            .fielded()
+            .filter_map(move |f| f.is_qualified(name).then_some(f.traits));
         let enums = reg
             .enums()
-            .filter_map(move |en| en.is_qualified(&name).then_some(en.traits));
+            .filter_map(move |en| en.is_qualified(name).then_some(en.traits));
         types.chain(fielded).chain(enums)
     }
 
