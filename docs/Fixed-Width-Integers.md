@@ -61,6 +61,7 @@ echo 256 >> 2         // 64
 echo !0               // -1     (bitwise complement:  !x == -(x + 1))
 ```
 
+- Both operands of `& | ^ << >>` must be integers. A float, a string or anything else on either side is E0043, a non-integer bitwise operand, and the message names the operator and both types it found.
 - On a plain `int`, `!` is **bitwise complement**; on a `bool` it stays logical NOT.
 - Right shift `>>` is arithmetic on signed types and logical on unsigned types.
 - **Precedence is Rust-style**: bitwise operators bind *tighter than* comparison, and shifts bind just below `+`/`-`. So `5 & 3 == 1` parses as `(5 & 3) == 1` → `true`.
@@ -144,7 +145,7 @@ echo acc.len()                          // 3
 Rules:
 
 - `@packed` marks a **struct** only. On a class it is E0054, a misplaced directive (a class has identity; a packed value type is a value).
-- Fields must be packable — fixed-width ints, `int`, `f32`, `bool`, or a nested `@packed` struct. A non-primitive field is rejected.
+- Fields must be packable — fixed-width ints, `int`, `f32`, `bool`, or a nested `@packed` struct. A non-primitive field is E0038, an invalid packed type, reported at the field.
 - Every list operation (index, field read, iteration, `set`, `~`/concat, `slice`/`reverse`/`filter`/`map`) yields exactly what the boxed layout would.
 
 A packed struct whose fields are all integers/`bool` (or nested such structs) is also **key-capable**: it can key a `Map` (or element a `Set`) **by content** — the spatial-hash idiom:
