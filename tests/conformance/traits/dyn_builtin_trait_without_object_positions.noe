@@ -1,0 +1,31 @@
+// **The five built-in traits with no trait object are refused in every type position**, not only
+// at a parameter.
+//
+// `dyn Name` reaches the type system through one door, so a trait with no object should be refused
+// wherever the words are written. "Should" is the operative word: the door is one function, and a
+// position that forgets to call it names a type nothing can inhabit and reports nothing —
+// silently, because the annotation then simply never matches anything. The companion case
+// `dyn_builtin_trait_without_object` pins the refusal itself at a parameter; this pins that the
+// door is reached from every other position an annotation can occupy.
+//
+// One trait per position rather than five in each: the positions are what is being covered, and
+// the trait-by-trait half is already asserted next door. The `dyn` column of the built-in table is
+// restated a third time in `noeta-types`' own census, so widening the set costs three edits.
+// expect: error E0014 at 24:18
+// expect: error E0014 at 25:15
+// expect: error E0007 at 25:33
+// expect: error E0014 at 26:8
+// expect: error E0007 at 26:17
+// expect: error E0014 at 27:14
+// expect: error E0014 at 28:21
+// expect: error E0014 at 29:19
+// expect: error E0014 at 30:20
+// expect: exit 1
+struct Held { c: dyn Clone }
+fn returns(): dyn From { return 1 }
+bound: dyn To = 1
+listed: List<dyn Serialize> = []
+mapped: Map<string, dyn Deserialize> = {}
+fn nested(x: List<dyn Clone>): int { return 1 }
+fn tupled(x: (int, dyn Serialize)): int { return 1 }
+echo 0
