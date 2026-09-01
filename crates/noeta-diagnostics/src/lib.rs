@@ -208,12 +208,12 @@ pub enum DiagnosticCode {
     /// is not `Iterator<T>`, or a `return` with a value appears in a generator (only bare `return;`
     /// ends iteration — there is no completion value under pure-pull `next() -> ?T`).
     GeneratorMisuse,
-    /// An async construct is misused (Track A): `.await` appears outside an async context (a sync
-    /// `fn`, or a closure passed to a builtin — the coloring rule), `.await` is applied to a
-    /// non-`Future` value, `.await` sits in a condition or loop head (an `if`/`while` condition or a
-    /// `for` iterable — the one value position the desugar cannot hoist), an `async fn`'s body is
-    /// otherwise malformed, or a well-formed async program is not yet executable (the A.0 interim gate,
-    /// lifted in A.1).
+    /// An async construct is misused: `.await` appears outside an async context (a sync `fn`, or a
+    /// closure passed to a builtin — the coloring rule), `.await` is applied to a non-`Future`
+    /// value, `.await` sits in a condition or loop head (an `if`/`while` condition or a `for`
+    /// iterable) inside an `async fn`, where the state-machine desugar has nowhere to hoist it to —
+    /// the top level and a `concurrent` scope accept one, having no state machine to desugar into —
+    /// or an `async fn`'s body is otherwise malformed.
     AsyncMisuse,
     /// A structured-concurrency construct is misused (Track A.3b): a `spawn` appears outside any
     /// `concurrent { }` scope (an orphan task, forbidden by construction), a `spawn` operand is not a
