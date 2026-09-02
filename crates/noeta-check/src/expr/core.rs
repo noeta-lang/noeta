@@ -584,6 +584,13 @@ impl Checker {
         Type::subtype_with(actual, expected, &CheckerRules(self))
     }
 
+    /// Whether `actual` reaches `expected` **only by being read at a wider type** — registry-aware
+    /// [`Type::widens_only`], the question [`Checker::variance_refusal_help`] asks of a refused
+    /// argument pair.
+    pub(crate) fn widens_only(&self, actual: &Type, expected: &Type) -> bool {
+        Type::widens_only(actual, expected, &CheckerRules(self))
+    }
+
     /// Whether an argument of type `arg` may be passed where `param` is expected — the kind-aware
     /// counterpart of the free [`arg_compatible`]. A `dyn`/hole on either side defers to the runtime;
     /// otherwise the argument must be assignable to the parameter under the strict subtype lattice.

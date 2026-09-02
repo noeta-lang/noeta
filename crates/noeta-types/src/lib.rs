@@ -672,22 +672,34 @@ impl Type {
         Type::subtype_at(sub, sup, rules, true)
     }
 
+    /// Whether `sub` reaches `sup` **only by being read at a wider type** — the relation holds
+    /// where a widening is admitted and fails where it is not.
+    ///
+    /// This is the question a diagnostic asks after a refusal: the two types are related, and the
+    /// step between them is one an invariant position rejects. Asking it as the difference between
+    /// the two walks keeps it the same rule [`Self::subtype_at`] applies, so a widening added there
+    /// is one this answers for without being taught about it.
+    pub fn widens_only(sub: &Type, sup: &Type, rules: &impl NominalRules) -> bool {
+        Type::subtype_at(sub, sup, rules, true) && !Type::subtype_at(sub, sup, rules, false)
+    }
+
     /// The walk, carrying whether a value may be **read at a wider type in this position**.
     ///
-    /// Three relations read a value as something other than its own type, and all three are the same
+    /// Four relations read a value as something other than its own type, and all four are the same
     /// step: `T <: dyn` (the open top), `Named(n) <: DynTrait(t)` (a concrete implementor read as
-    /// the trait) and `Named(n) <: Kind(k)` (read as an abstract kind). Each is sound exactly where
-    /// reading at a wider type is: a covariant position. Every position is covariant (a container
-    /// element, a tuple slot, a function's return) except a generic argument of a declared type,
-    /// where whether a widened view can be written back through is a property of that declaration;
-    /// [`NominalRules::covariant_arg`] answers it, and the flag turns off for the descent when the
-    /// answer is no.
+    /// the trait), `Named(n) <: Kind(k)` (read as an abstract kind) and `T <: A | B` (a member read
+    /// as the union). Each is sound exactly where reading at a wider type is: a covariant position.
+    /// Every position is covariant (a container element, a tuple slot, a function's return) except a
+    /// generic argument of a declared type, where whether a widened view can be written back through
+    /// is a property of that declaration; [`NominalRules::covariant_arg`] answers it, and the flag
+    /// turns off for the descent when the answer is no.
     ///
-    /// The flag governs the open `dyn` and a `dyn Trait` alike, because the store that would corrupt
-    /// the original is the same store either way: a `Box<Dog>` reads as a `Box<dyn>` in exactly the
-    /// positions it reads as a `Box<dyn Speak>`. Identity is not a widening, so `dyn <: dyn` holds
-    /// everywhere, as do the two gradual escapes (an inference hole on either side, and an
-    /// unspecified `dyn` *argument* flowing into a concrete instantiation).
+    /// The flag governs all four together, because the store that would corrupt the original is the
+    /// same store whichever wider type the reader named: a `Box<Dog>` reads as a `Box<dyn>` in
+    /// exactly the positions it reads as a `Box<dyn Speak>` or a `Box<Dog | Cat>`. Identity is not a
+    /// widening, so `dyn <: dyn` holds everywhere, as do the two gradual escapes (an inference hole
+    /// on either side, and an unspecified `dyn` *argument* flowing into a concrete instantiation),
+    /// and so does a union against its own member set.
     fn subtype_at(sub: &Type, sup: &Type, rules: &impl NominalRules, widening_ok: bool) -> bool {
         use Type::*;
         // Inference holes: bidirectionally compatible (no false positives on missing info).
@@ -724,12 +736,24 @@ impl Type {
         match (sub, sup) {
             // Narrowing out of `dyn` is never implicit (only via a checked `.as<T>()`).
             (Dyn, _) => false,
-            // A union is a subtype of `sup` only if *every* arm is (`int | string <: dyn` already
-            // held above; `int | string <: A` needs both). Checked before the member rule so
-            // `(A|B) <: (C|D)` decomposes arm-by-arm on the left first.
+            // Two unions relate by their **member sets**, and this arm decides that pair before
+            // either rule below sees it. Covariantly the answer is the same one the two rules
+            // compose to: every arm on the left needs an arm on the right above it. Invariantly the
+            // right needs covering back, which makes the relation set equality — and that is what
+            // keeps it reflexive, since `A|B <: A|B` decomposed through the member rule would be a
+            // widening (`A <: A|B`) that an invariant position refuses. A union is normalized, so
+            // its members are distinct and none is itself a union.
+            (Union(a), Union(b)) => {
+                a.iter().all(|x| b.iter().any(|y| rec(x, y)))
+                    && (widening_ok || b.iter().all(|y| a.iter().any(|x| rec(x, y))))
+            }
+            // A union is a subtype of a non-union `sup` only if *every* arm is (`int | string <:
+            // dyn` already held above; `int | string <: A` needs both).
             (Union(members), _) => members.iter().all(|m| rec(m, sup)),
-            // A type widens into a union if it is a subtype of *any* member.
-            (_, Union(members)) => members.iter().any(|m| rec(sub, m)),
+            // A type **widens** into a union by being a subtype of any one member, which is a read
+            // at a wider type like the three above and gated with them: a `Box<Dog>` read as a
+            // `Box<Dog | Cat>` takes a store of a `Cat` into the slot the original calls a `Dog`.
+            (_, Union(members)) => widening_ok && members.iter().any(|m| rec(sub, m)),
             (List(a), List(b)) => rec(a, b),
             (Set(a), Set(b)) => rec(a, b),
             // A tuple is element-wise covariant — same arity, each position a subtype (`(int, A) <:
@@ -1394,6 +1418,67 @@ mod tests {
         let int_str_bool = Type::union([Type::Int, Type::String, Type::Bool]);
         assert!(Type::subtype(&int_or_str, &int_str_bool));
         assert!(!Type::subtype(&int_str_bool, &int_or_str));
+    }
+
+    /// A **union argument** of a declared generic is a widening like `dyn`, `dyn Trait` and an
+    /// abstract kind, so an invariant declaration refuses it — and still admits the pairs that are
+    /// not widenings at all, which is where a naive gate goes wrong.
+    ///
+    /// [`NoRegistry`] answers "invariant" to every argument, so it is the invariant half; the
+    /// covariant half needs a registry that says so.
+    #[test]
+    fn union_argument_widens_only_where_the_declaration_allows() {
+        struct AllCovariant;
+        impl NominalRules for AllCovariant {
+            fn is_of_kind(&self, _name: &str, _kind: TypeKind) -> bool {
+                false
+            }
+            fn implements_trait(&self, _name: &str, _trait_name: &str) -> bool {
+                false
+            }
+            fn covariant_arg(&self, _name: &str, _index: usize) -> bool {
+                true
+            }
+        }
+        let boxed = |arg: Type| Type::Named("Box".to_string(), vec![arg]);
+        let int_or_str = Type::union([Type::Int, Type::String]);
+        let str_or_int = Type::union([Type::String, Type::Int]);
+        let wider = Type::union([Type::Int, Type::String, Type::Bool]);
+
+        // The widening: refused at an invariant argument, admitted at a covariant one.
+        assert!(!Type::subtype(
+            &boxed(Type::Int),
+            &boxed(int_or_str.clone())
+        ));
+        assert!(Type::subtype_with(
+            &boxed(Type::Int),
+            &boxed(int_or_str.clone()),
+            &AllCovariant
+        ));
+        // A superset is the same widening between two unions.
+        assert!(!Type::subtype(&boxed(int_or_str.clone()), &boxed(wider)));
+
+        // Reflexivity survives the gate: the two unions match by their member sets rather than
+        // decomposing into `int <: int | string`, which the gate would refuse.
+        assert!(Type::subtype(
+            &boxed(int_or_str.clone()),
+            &boxed(int_or_str.clone())
+        ));
+        // A union IS its member set, so member order is not part of the identity.
+        assert!(Type::subtype(
+            &boxed(int_or_str.clone()),
+            &boxed(str_or_int)
+        ));
+        // The narrowing stays refused in every position.
+        assert!(!Type::subtype(
+            &boxed(int_or_str.clone()),
+            &boxed(Type::Int)
+        ));
+
+        // The question the refusal's help line asks: which argument is related by a widening.
+        assert!(Type::widens_only(&Type::Int, &int_or_str, &NoRegistry));
+        assert!(!Type::widens_only(&int_or_str, &int_or_str, &NoRegistry));
+        assert!(!Type::widens_only(&int_or_str, &Type::Int, &NoRegistry));
     }
 
     #[test]

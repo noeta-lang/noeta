@@ -680,7 +680,7 @@ This is the spelling to reach for, and it works for every declaration.
 
 #### Widening a value you already hold
 
-**Reading an existing value at a wider argument**, handing a `Box<Dog>` you already hold to something expecting a `Box<dyn Speak>`, depends on where the declaration puts its type parameter. It is allowed where the widened view has no way to put a `dyn Speak` back into the value, which is the case for a parameter that only comes *out*. One rule governs every wider argument, so `Box<Dog>` reads as a `Box<dyn>` and a `Box<Struct>` where it reads as a `Box<dyn Speak>`:
+**Reading an existing value at a wider argument**, handing a `Box<Dog>` you already hold to something expecting a `Box<dyn Speak>`, depends on where the declaration puts its type parameter. It is allowed where the widened view has no way to put a `dyn Speak` back into the value, which is the case for a parameter that only comes *out*. One rule governs every wider argument, so `Box<Dog>` reads as a `Box<dyn>`, a `Box<Struct>` and a `Box<Dog | Cat>` where it reads as a `Box<dyn Speak>`:
 ```noeta
 trait Speak { fn speak(): string }
 struct Dog { impl Speak { pub fn speak(): string { return "woof" } } }
@@ -708,19 +708,25 @@ Three occurrences of the parameter close that door, and each one is a way the wi
 - a **method parameter** of the parameter's type, in any kind. `fn matches(other: T)` is checked believing `other` is a `Dog`, so calling it through a widened receiver would hand it a `Cat`. A field of function type (`f: (T) -> string`) is the same occurrence, reached through a field.
 - reaching either of the above **through another generic type**. A `struct` that holds a `class` shares that class with its copies, so `struct Owner<T> { slot: Slot<T> }` is as restricted as `Slot` is.
 
-Where the widening is refused, E0007 names the occurrence that forced it and points at building the value at the wider type instead:
+#### Where a widening is refused
+
+E0007 names the occurrence that forced the refusal and points at building the value at the wider type instead:
 
 ```noeta error
 trait Speak { fn speak(): string }
 struct Dog { impl Speak { pub fn speak(): string { return "woof" } } }
+struct Cat { impl Speak { pub fn speak(): string { return "meow" } } }
 
 class Slot<T> { pub mut v: T }
 
 kennel: Slot<Dog> = Slot { v: Dog {} }
 wide: Slot<dyn Speak> = kennel   // E0007: `Slot` stores it in the `mut` field `v`
 open: Slot<dyn> = kennel         // E0007: the same occurrence, the same refusal
+some: Slot<Dog | Cat> = kennel   // E0007: a union argument is a wider argument too
 echo wide.v.speak()
 ```
+
+A value read at the argument it already has is not a widening, and an invariant declaration accepts it. A union is its set of members, so `Slot<Cat | Dog>` names the same type as `Slot<Dog | Cat>` and either reaches the other.
 
 The rule reads a declaration. A generic type declared by a [native package](Native-Extensions) has none, and is not widened.
 

@@ -7,8 +7,9 @@
 //! [`noeta_types::NominalRules::covariant_arg`] at every generic-argument position it descends into.
 //!
 //! One rule covers every wider argument a program can write. `C<Dog>` reads as a `C<dyn Speak>`, as
-//! a `C<dyn>` and as a `C<Struct>` in exactly the same declarations, because the store that would
-//! corrupt the original is the same store whichever of the three the reader named.
+//! a `C<dyn>`, as a `C<Struct>` and as a `C<Dog | Cat>` in exactly the same declarations, because
+//! the store that would corrupt the original is the same store whichever of the four the reader
+//! named.
 //!
 //! Three occurrences make a parameter unsafe to widen, and each is a different mechanism:
 //!
@@ -328,9 +329,12 @@ impl Checker {
     /// `C<Sub>` would have been readable as `C<Sup>` had `C` not written `T` into a position a
     /// widened view can reach.
     ///
-    /// The wider argument is a trait object (`C<dyn Speak>`), the open top (`C<dyn>`) or an abstract
-    /// kind (`C<Struct>`); all three are the same widening, refused for the same occurrence, so all
-    /// three name it.
+    /// The wider argument is a trait object (`C<dyn Speak>`), the open top (`C<dyn>`), an abstract
+    /// kind (`C<Struct>`) or a union the argument is a member of (`C<Dog | Cat>`); all four are the
+    /// same widening, refused for the same occurrence, so all four name it.
+    ///
+    /// Which argument that is comes from [`Checker::widens_only`] rather than a second reading of
+    /// the four shapes, so the answer here is the subtyping walk's own and cannot drift from it.
     ///
     /// `None` for every other mismatch, so an ordinary `E0007` is unchanged. Naming the occurrence
     /// is the point: the two types differ by one argument the reader can see is related, and
@@ -343,17 +347,7 @@ impl Checker {
             return None;
         }
         let (i, sup) = aa.iter().zip(ba).enumerate().find_map(|(i, (a, b))| {
-            let widens = match b {
-                // The open top takes any argument that is not already open: `dyn <: dyn` is
-                // identity, and a gradual hole is no claim at all.
-                Type::Dyn => !a.is_gradual() && !matches!(a, Type::Dyn | Type::Never),
-                Type::DynTrait(tr) => {
-                    matches!(a, Type::Named(sub, _) if self.implements_trait(sub, tr))
-                }
-                Type::Kind(k) => matches!(a, Type::Named(sub, _) if self.is_of_kind(sub, *k)),
-                _ => false,
-            };
-            (widens && !self.covariant_arg(an, i)).then_some((i, b))
+            (!self.covariant_arg(an, i) && self.widens_only(a, b)).then_some((i, b))
         })?;
         let cause = self.invariance_cause(an, i)?;
         let short = |t: &Type| t.to_string();
