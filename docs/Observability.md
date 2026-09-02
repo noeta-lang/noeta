@@ -233,11 +233,15 @@ Recording is gated on the metrics signal being enabled, so a `counter.add(...)` 
 
 Every distinct attribute set is a separate stored series, held host-side for the life of the process. Attribute *values* therefore want to be low-cardinality, like a route template, a status class or a tenant tier. A request id, a user id, a raw path with ids in it or a timestamp never repeats, which means a new series for every measurement.
 
-Each instrument aggregates at most **2000** attribute sets separately. Measurements whose attribute set arrives after that fold into one synthetic series marked `otel.metric.overflow=true`, so a counter's total stays exact and only its breakdown stops. That is what a data point carrying that attribute and nothing else is telling you: the metric has more attribute sets than it is allowed to keep apart, and the number under `otel.metric.overflow` is everything that could not be told apart.
+Each instrument aggregates at most **2000** attribute sets separately. Measurements whose attribute set arrives after that fold into one synthetic series marked `otel.metric.overflow=true`, so a counter's total stays exact and only its breakdown stops. A data point carrying that attribute and nothing else is reporting everything the instrument could no longer tell apart.
 
-The overflow series aggregates the way its instrument does, so what folding costs depends on the instrument. A counter or up/down counter keeps its total. A histogram keeps its count, its sum and its bucket distribution, over the same buckets as every other series. A **gauge** is last-value, so folded measurements overwrite each other and the overflow point reports only the most recent one, which is a reason to be stricter about attribute values on gauges than anywhere else.
+The limit is **per instrument**, so one counter carrying a bad attribute does not cost the rest of the program its detail. The sets an instrument saw *before* it filled up keep their own series and keep accumulating, and only sets first seen afterwards fold. What that folding costs depends on the instrument, since the overflow series aggregates the way its instrument does.
 
-The limit is **per instrument**, so one counter carrying a bad attribute does not cost the rest of the program its detail. The sets an instrument saw *before* it filled up keep their own series and keep accumulating, and only sets first seen afterwards fold.
+| Instrument | What the overflow series keeps |
+|---|---|
+| Counter, up/down counter | its total |
+| Histogram | its count, its sum and its bucket distribution, over the same buckets as every other series |
+| Gauge | only the most recent measurement, being last-value, so folded measurements overwrite each other. That is a reason to be stricter about attribute values on gauges than anywhere else. |
 
 Raise or lower it with `OTEL_METRIC_CARDINALITY_LIMIT`:
 
@@ -262,15 +266,22 @@ Once telemetry is configured, the runtime opens spans for you at the boundaries 
 
 **Server requests.** Every connection the bundled server (`server.serve`, from `std.http.server`) accepts is wrapped in a **SERVER** span named `"{method} {route}"`, parented on the inbound `traceparent` so it continues the caller's trace. It carries `http.request.method`, `url.path` and `http.response.status_code`, is timed across the handler, and is marked an error only on a `5xx`. Your handler's own spans and logs nest *under* it, giving one connected trace per request. See [Concurrency](Concurrency) for the server itself.
 
-The handler can annotate that span directly with [`tracing.set_attribute` / `add_event` / `record_error`](#annotating-the-span-you-are-in), which is usually what a per-request fact wants: no handle exists for the SERVER span, and a child span per fact is a span where an annotation belongs. The server ends the span itself, and a handler cannot.
+The handler annotates that span directly with [`tracing.set_attribute` / `add_event` / `record_error`](#annotating-the-span-you-are-in), which is usually what a per-request fact wants. No handle exists for the SERVER span, and the server ends it itself.
 
-**Server metrics.** The same requests record the `http.server.request.duration` histogram (seconds, keyed by method / route / status) and maintain an `http.server.active_requests` up/down counter, the metrics twin of the SERVER span, again with no code changes.
+**Server metrics.** The same requests record the `http.server.request.duration` histogram (seconds, keyed by method / route / status) and maintain an `http.server.active_requests` up/down counter, again with no code changes.
 
-**Async work.** A `with_span` over an `async` body follows the future: the span stays active across the body's suspensions and ends when the work *completes*, not when the coroutine is constructed. Spans the body creates after an `await` still nest correctly.
+**Async work.** A `with_span` over an `async` body follows the future. The span stays active across the body's suspensions and ends when the work *completes*, not when the coroutine is constructed, so spans the body creates after an `await` still nest correctly.
 
 **Channels and isolates.** Sending on a channel attaches the sender's trace context to the message, and the receiver, or a spawned `isolate`, is seeded with it automatically, so the far side continues the same trace with no manual threading. The message's *type* is untouched.
 
-**Reactive propagation** is opt-in: set `NOETA_TRACE_REACTIVE=1` alongside the endpoint. Every non-empty reactive flush becomes a `reactive.flush` span carrying `reactive.effects` (effect bodies run) and `reactive.changed` (distinct nodes whose value changed), and a LiveView view diff becomes a `view.diff` span carrying `view.dirty` (bindings inspected) against `view.pushed` (bindings actually sent). The flush span is the active parent while effect bodies run, so their own spans nest under it, and a click's trace reads *event → signal set → flush (N effects) → diff (K pushed)*. With the variable unset, the cost is one cached-boolean branch per flush.
+**Reactive propagation** is opt-in, on `NOETA_TRACE_REACTIVE=1` alongside the endpoint. With the variable unset, the cost is one cached-boolean branch per flush.
+
+| Span | What it carries |
+|---|---|
+| `reactive.flush`, one per non-empty reactive flush | `reactive.effects` (effect bodies run) and `reactive.changed` (distinct nodes whose value changed) |
+| `view.diff`, one per LiveView view diff | `view.dirty` (bindings inspected) against `view.pushed` (bindings actually sent) |
+
+The flush span is the active parent while effect bodies run, so their own spans nest under it, and a click's trace reads *event → signal set → flush (N effects) → diff (K pushed)*.
 
 ### Manual propagation (interop)
 

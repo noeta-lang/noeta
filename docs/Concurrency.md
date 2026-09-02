@@ -185,9 +185,7 @@ The structured guarantee holds throughout: every block joins all of its tasks be
 
 ### Cancellation
 
-A task handle, which is what `spawn` and `isolate` return and is itself a `Future<T>`, can be cancelled. `cancel` is a **request** and `join` is the **report**: you ask the work to stop, and the join tells you whether it did.
-
-That split is the whole contract, and it holds for a `spawn`ed task and a real parallel isolate alike, though the two stop for different reasons.
+A task handle, which is what `spawn` and `isolate` return and is itself a `Future<T>`, can be cancelled. `cancel` is a **request** and `join` is the **report**, so you ask the work to stop and the join tells you whether it did. That split is the whole contract, and it holds for a `spawn`ed task and a real parallel isolate alike, though the two stop for different reasons.
 
 | Operation | Behavior |
 |---|---|
@@ -213,19 +211,25 @@ concurrent {
 }
 ```
 
-**Where the stop happens.** A **task**, meaning a `spawn` or a `race` loser, is already parked between polls when the request lands, so it stops exactly there: at its last `.await`, with the code past that point never running.
+**Where the stop happens.**
 
-A **real isolate** is an OS thread that is running, so it stops at its next **safepoint**: a call, a return, a loop iteration, or a round of its own scheduler. Safepoints are dense enough that a compute-bound isolate with no suspension point anywhere in it is cancellable, and one cancelled part-way through an arithmetic loop stops within milliseconds.
+| Cancelled work | Stops at |
+|---|---|
+| a **task**: a `spawn`, or a `race` loser | its last `.await`. It is already parked between polls when the request lands, so the code past that point never runs. |
+| a **real isolate**, an OS thread that is running | its next **safepoint**: a call, a return, a loop iteration, or a round of its own scheduler. Safepoints are dense enough that a compute-bound isolate with no suspension point anywhere in it is cancellable. |
+| a worker parked in a long `sleep(3000).await`, or in one of the four host waits below | the round it wakes into. It is not running Noeta there, so the request is delivered with a **wake** that ends the wait. |
 
-**The limits of a cancellation.** Each of these is a deliberate boundary.
+Nothing is asked of your code: `while w < ms { sleep(5).await; w = w + 5 }` and `sleep(ms).await` stop alike.
 
-- **Work already done stays done.** A cancelled task keeps every file it wrote, every message it sent, every row it inserted. `Err(Cancelled)` means "this produced no value", so a caller that needs the effects reverted has to revert them.
-- **A request that arrives too late reports the value.** If the body finished before the request was noticed, `join` reports `Ok(v)`.
-- **A native call ends itself rather than being preempted.** An isolate inside the host is not executing Noeta and reaches no safepoint, so the call ends *itself* and the isolate stops at the safepoint just after. The table below is which calls do that.
+#### The limits of a cancellation
 
-**A long `sleep` is cancellable.** A worker parked in `sleep(3000).await` is not running Noeta either, since its clock advance is a single real sleep, so the request is delivered with a **wake** that ends that sleep and the worker stops at the round it wakes into. A 3 s sleep cancelled 200 ms in ends the run at 0.21 s.
+Each of these is a deliberate boundary.
 
-Nothing is asked of your code. `while w < ms { sleep(5).await; w = w + 5 }` and `sleep(ms).await` stop alike.
+| Limit | What it means for a caller |
+|---|---|
+| Work already done stays done | A cancelled task keeps every file it wrote, every message it sent, every row it inserted. `Err(Cancelled)` means "this produced no value", so code that needs the effects reverted reverts them itself. |
+| A request that arrives too late reports the value | If the body finished before the request was noticed, `join` reports `Ok(v)`. |
+| A native call ends itself rather than being preempted | An isolate inside the host is not executing Noeta and reaches no safepoint, so the call ends *itself* and the isolate stops at the safepoint just after. |
 
 **Blocking work stops where it can.** A run that is stopping tells its host so, and every place the host could wait on something that may never come ends its wait and reports that the run is stopping. There are four, the cases where waiting is unbounded by nature:
 
@@ -238,23 +242,15 @@ Nothing is asked of your code. `while w < ms { sleep(5).await; w = w + 5 }` and 
 
 Each of these stops *distinguishably*. A read that ends because the run is stopping reports that, where an end of stream answers `none`. A child you have stopped listening to and a child that has stopped talking are different things, and code that treats the first as the second walks past the loop it was supposed to stop in.
 
-**A file read is the exception, and deliberately so.** `fs.read` and its `_async` twin block in the operating system, so they are not interruptible. The only file read that never returns is a FIFO or a character device, so put a deadline on the operation rather than a cancel around it.
+**A file read is the exception, and deliberately so.** `fs.read` and its `_async` twin block in the operating system, so they are not interruptible. The only file read that never returns is a FIFO or a character device, so put a deadline on the operation rather than a cancel around it. The `_async` twins are otherwise as cancellable as their blocking forms, and awaiting one frees the scheduler to run your other tasks meanwhile.
 
-The `_async` twins are otherwise as cancellable as their blocking forms. Awaiting `p.read_line_async()` frees the scheduler to run your other tasks, and the read itself ends at the cancellation, so nothing is left holding the isolate open.
+#### Cancellation and the closing brace
 
-**Cancellation and the closing brace.** A `concurrent` block joins everything it spawned, a cancelled member included, and waits for it to actually stop before returning.
+A `concurrent` block joins everything it spawned, a cancelled member included, and waits for it to actually stop before returning. A cancelled isolate is joined rather than abandoned, so no thread outlives its scope still holding its heap and its handles and still writing to the world the program thinks it has finished with.
 
-That is the load-bearing half of structured concurrency. A cancelled isolate is joined rather than abandoned, so no thread outlives its scope still holding its heap and its handles and still writing to the world the program thinks it has finished with.
+**`join` and `await`.** `join` keeps the typed cancelled outcome in the language's ordinary `Result`/`match` vocabulary. Plain `await` stays `T` for the common uncancelled path and fails loudly (`E0056`) rather than silently if it meets a task that stopped cancelled, because Noeta has no exceptions to catch and a silent zero would be unsound. Both are offered on every `Future<T>`, because a handle *is* a `Future<T>`; on a bare, never-spawned future, `cancel` is a harmless no-op and `join` equals `Ok(future.await)`. The `Cancelled` marker is a payload-free prelude enum, matchable as `Err(Cancelled.Cancelled)` or just `Err(_)`, and it is `Send`.
 
-**`join` and `await`.** `join` is the pairing for cancellable work, keeping the typed cancelled outcome in the language's ordinary `Result`/`match` vocabulary. Plain `await` stays `T` for the common uncancelled path and fails loudly (`E0056`) rather than silently if it meets a task that stopped cancelled, because Noeta has no exceptions to catch and a silent zero would be unsound.
-
-`cancel` and `join` are offered on every `Future<T>`, because a handle *is* a `Future<T>`. On a bare, never-spawned future, `cancel` is a harmless no-op and `join` equals `Ok(future.await)`.
-
-The `Cancelled` marker is a payload-free prelude enum. It is matchable, as `Err(Cancelled.Cancelled)` or just `Err(_)`, and it is `Send`.
-
-Cancelling a producer task composes with channels: its `Sender` **producer hold** releases when its future is reclaimed at the scope's close, auto-closing the channel exactly as a completed producer's would. Cancelling an isolate that itself spawned isolates cancels those too, so a subtree stops together.
-
-Either way, a cancelled task's captured locals' destructors run when its future is reclaimed at the scope's close, so cancelling frees exactly as a normal join does and residency stays 0.
+Cancelling a producer task composes with channels. Its `Sender` **producer hold** releases when its future is reclaimed at the scope's close, auto-closing the channel exactly as a completed producer's would, and cancelling an isolate that itself spawned isolates cancels those too, so a subtree stops together. A cancelled task's captured locals are destroyed at that same close, so cancelling frees exactly as a normal join does.
 
 ## Isolates and `Send`
 
@@ -387,13 +383,11 @@ A streamed response has the same two halves as a buffered one, a head and a body
 
 Read the head before draining the body. A rate-limited provider answers a streaming request with `429` and a bare JSON error document, which is not an event stream, so `Framing.Sse` cuts it into **zero** frames and a reader that only drains cannot tell a rate limit from a model with nothing to say.
 
-The head is also where the actionable part lives. `stream.header("retry-after")` tells a backoff loop how long to wait, and a provider's `x-ratelimit-*` headers report the remaining budget.
+The head carries the actionable part too. `stream.header("retry-after")` tells a backoff loop how long to wait, and a provider's `x-ratelimit-*` headers report the remaining budget.
 
-The split follows the one-shot verbs exactly. Opening a stream returns `Err` when the request never got off the ground, meaning a transport failure, so plain `?` keeps its single meaning, and `error_for_status()` is how a caller opts a non-2xx into the same short-circuit.
+The split follows the one-shot verbs. Opening a stream returns `Err` when the request never got off the ground, a transport failure, so plain `?` keeps its single meaning, and `error_for_status()` opts a non-2xx into the same short-circuit.
 
-A `FrameStream` is a **handle** on a single consumable body: copies alias it, and it belongs to the task that opened it. A **`Frame` is a value struct**, so by the rule in [Isolates and `Send`](#isolates-and-send) it is `Send`.
-
-That split lets one task own the body while others receive frames over a channel, which is the shape of a streaming pipeline.
+A `FrameStream` is a **handle** on a single consumable body, so copies alias it, and it belongs to the task that opened it. A **`Frame` is a value struct**, so by the rule in [Isolates and `Send`](#isolates-and-send) it is `Send`. One task can therefore own the body while others receive frames over a channel.
 
 ```noeta ignore
 concurrent {

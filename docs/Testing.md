@@ -89,7 +89,7 @@ The top-level `echo` above prints nothing under `noeta test`; everything that de
 
 ### What runs, and what does not
 
-A top-level statement is shared setup if it declares something, binds something, or performs an effect that **finishes**. The split is by what the statement *does*, not by its shape:
+A top-level statement is shared setup if it declares something, binds something, or performs an effect that **finishes**. The split is by what the statement *does*, not its shape:
 
 | Kept — shared setup | Dropped |
 |---|---|
@@ -99,9 +99,9 @@ A top-level statement is shared setup if it declares something, binds something,
 | a statement-expression that returns: `conn.migrate(…)`, `log.push(…)` | `return` / `break` / `continue` |
 | `if` / `for` / `while`, and `concurrent { … }` | an `if` / `for` / `while` / `concurrent` whose body holds either of the two rows above, since it could not finish either |
 
-Dropping the second column is what makes a file with a `main` runnable as a test suite at all. A CLI entry's top-level `os.exit(run())` would otherwise exit the runner, and a server's `server.serve(…)` would block it forever.
+Dropping the second column is what makes a file with a `main` runnable as a test suite. A CLI entry's `os.exit(run())` would otherwise exit the runner, and a server's `server.serve(…)` would block it forever.
 
-The runner reads which calls those are from the language itself. A function that does not return declares its return type as [`never`](Type-System#never--the-bottom), the bottom type, and `os.exit`, `server.serve` and `panic` all do. The decision comes from that declared type, never from a name or a statement shape:
+The runner reads which calls those are from the language itself. A function that does not return declares its return type as [`never`](Type-System#never--the-bottom), and `os.exit`, `server.serve` and `panic` all do. The decision comes from that declared type, never from a name or a statement shape, so `fn boot(): void { os.exit(0) }` with a top-level `boot()` joins the setup and ends the run, while `fn boot(): never` is dropped. A `for` over an endless generator and a `while` whose condition never becomes false are kept for the same reason.
 
 ```noeta check
 conn = db.connect("sqlite::memory:")   // a binding — every test gets a live connection
@@ -116,9 +116,7 @@ server.serve(8080, fetch)              // declared `never` — dropped, or the r
 > [E0071] Warning: this statement is not part of the shared setup (`while true` with no `break` never exits), but it writes to `tick`, which `sees_the_loop` captures — so that test will see it unwritten
 > ```
 >
-> The fix is to do the work **inside a binding** (`applied = conn.migrate("migrations")`) or in a helper the tests call themselves. A binding runs once **per test**, not once per file, so it must be idempotent against any state that outlives the isolate, such as a file or a file-backed database. That is why `sqlite::memory:` is the well-behaved choice here: each test gets its own connection and therefore its own empty database to migrate.
-
-**Where the declaration is the whole answer.** Divergence is *declared*, not inferred, so a call that reaches a non-returning function indirectly stays in the setup: `fn boot(): void { os.exit(0) }` with a top-level `boot()` joins the setup and ends the run. Declare `fn boot(): never` and it is dropped like any other. A `for` over an endless generator, and a `while` whose condition never becomes false, are kept for the same reason and would not finish.
+> The fix is to do the work **inside a binding** (`applied = conn.migrate("migrations")`) or in a helper the tests call themselves. A binding runs once **per test**, not once per file, so it must be idempotent against state that outlives the isolate, such as a file-backed database. That is why `sqlite::memory:` is the well-behaved choice here, each test getting its own empty database to migrate.
 
 ## Metadata attributes
 
@@ -200,32 +198,25 @@ The deadline is **wall clock**, and it counts the time a test spends waiting for
 
 ### What the runner can and cannot do to a test that overruns
 
-When the deadline expires the runner **asks the test to stop**, waits a one-second grace for it to actually stop, and abandons it only if that grace expires. The report is written either way, and the rest of the suite runs either way.
+When the deadline expires the runner **asks the test to stop**, waits a one-second grace, and abandons it only if that grace expires. The report is written either way, and the rest of the suite runs either way.
 
-Almost every overrunning test stops. A test that is *running*, whether spinning in a loop, recursing or grinding through work, reaches a safepoint within an iteration and unwinds from there. It tears its isolate down exactly as a finished test does: its destructors run, its heap goes back to zero, and anything it spawned is cancelled and joined with it.
+| Outcome | Which tests, and what it costs the run |
+|---|---|
+| **Stopped**, which is almost every overrunning test | A test that is *running*, whether spinning in a loop, recursing or grinding through work, reaches a safepoint within an iteration. A test that is *parked*, in a long `sleep`, on a child that has stopped talking or has not exited, or on a request or a stream that has gone quiet, is roused out of that wait. Either way it unwinds from a safepoint and tears its isolate down exactly as a finished test does, so its `destruct` blocks fire, its heap goes back to zero, and anything it spawned is cancelled and joined with it. Its thread is joined, the core goes back to the pool, and no file or socket stays open. |
+| **Abandoned**: a test blocked in a file read the operating system will not return from, such as a FIFO with no writer or a character device | That thread is not executing Noeta, so no safepoint comes around, and the wait belongs to the kernel, so there is nothing to rouse. The thread keeps running until the process exits, and everything its isolate owns is held until then. |
 
-A test that is parked stops too, whether it waits in a long `sleep`, on a child that has stopped talking or has not exited, or on a request or a stream that has gone quiet. The stop request rouses it out of that wait, and it unwinds from the safepoint it wakes into. Its thread is then joined. Two things follow that are worth knowing:
-
-- **A stopped test's cleanup really runs.** If your test holds something with a `destruct`, that `destruct` fires on the way out.
-- **It costs the run nothing.** The thread is joined, the core goes back to the pool, and no file or socket stays open.
-
-One class cannot be stopped: **a test blocked in a file read the operating system will not return from**, such as a FIFO with no writer or a character device. That thread is not executing Noeta, so no safepoint comes around, and the wait belongs to the kernel, so there is nothing to rouse.
-
-Its thread is abandoned, it keeps running until the process exits, and everything its isolate owns is held until then. The report says so explicitly, because it changes what you do about it: the fix is a deadline on the *operation*, meaning the read's own timeout, rather than a bigger bound on the test around it.
+The report says which happened, because it changes what you do. The fix for a test that will not stop is a deadline on the *operation*, the read's own timeout, rather than a bigger bound on the test around it.
 
 ```console
   TIME  reads_the_device
         timed out: did not finish within 60s (the suite deadline). … It was asked to stop and did not, so its thread was abandoned: it keeps running — holding its isolate, its heap and any open files or sockets — until this run exits. A test that will not stop is blocked in a file read that the operating system will not return from — a FIFO or a character device rather than a file; put the deadline on that read rather than on the test around it
 ```
 
-An abandoned thread is safe to leave behind. A `@test` case is a whole program on its own thread with its own heap, so nothing in the runner frees what that thread is still using, and the process exit does not touch it. Two more consequences to know about:
+An abandoned thread is safe to leave behind. A `@test` case is a whole program on its own thread with its own heap, so nothing in the runner frees what that thread is using, and the process exit does not touch it. Abandoned threads are detached, so neither the worker pool nor the runner's own teardown waits on them, and the grace is waited out per worker rather than per test, so a suite with many wedged tests pays it once, in parallel.
 
-- **A stopped test reports what it managed to print; an abandoned one reports nothing.** A test that stops when asked unwinds through its ordinary teardown, so its captured output is complete as far as it got, and that output is printed under the `TIME` line. An abandoned test is still running and has produced no result to read, so its output is empty rather than partial.
-- **The process still exits promptly.** Abandoned threads are detached, so neither the worker pool nor the runner's own teardown waits on them. The grace is waited out per worker rather than per test, so a suite with many wedged tests pays it once, in parallel.
+The two outcomes report differently. A stopped test unwinds through its ordinary teardown, so its captured output is complete as far as it got and is printed under the `TIME` line. An abandoned test has produced no result to read, so its output is empty rather than partial.
 
-**A bounded test tiers up exactly like an unbounded one.** Staying stoppable means staying somewhere with safepoints, and the JIT emits a cancellation check at every loop header, in bodies compiled for a cancellable run only. The check costs about half a nanosecond per iteration: a 200-million-iteration counting loop runs at **0.76 s** bounded against **0.66 s** unbounded.
-
-An uncancellable run pays nothing for the check. Whether to emit it is a codegen input decided when the run's engine is built, from whether the run carries a cancellation flag, so a program that cannot be cancelled produces machine code with no check in it at all. `noeta bench` is outside the rail for the same reason.
+**A bounded test tiers up exactly like an unbounded one.** Staying stoppable means staying somewhere with safepoints, and the JIT emits a cancellation check at every loop header, in bodies compiled for a cancellable run only. Whether to emit it is a codegen input decided when the run's engine is built, from whether the run carries a cancellation flag, so a program that cannot be cancelled produces machine code with no check in it at all and pays nothing for the rail. `noeta bench` is outside it for the same reason.
 
 ## Command reference
 

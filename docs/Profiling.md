@@ -98,7 +98,7 @@ The view is a renderer for the standard artifacts above. It opens any `*.noeprof
 
 A profile session runs **tier-0** by default, the interpreter with the JIT unarmed, which is the same decision the [debugger](Debugging) makes: the sampler needs an observable instruction boundary and the instrumenting counter needs to see every call.
 
-That has one consequence to keep in mind. The profile reflects the **interpreter's** time distribution, which is faithful for the questions a language-level profiler answers, namely which function or line is hot and how many times it is called, because tier-0 preserves the exact call structure and relative work. Absolute wall-time belongs to the JIT-compiled build, where the JIT changes constants rather than shape. Call counts are tier-independent and exact.
+That has one consequence to keep in mind. The profile reflects the **interpreter's** time distribution, which is faithful for the questions a language-level profiler answers, which function or line is hot and how many times it is called, because tier-0 preserves the exact call structure and relative work. Absolute wall-time belongs to the JIT-compiled build. Call counts are tier-independent and exact.
 
 **`--jit` (tier-1 sampling)** arms the production hot-counter JIT so hot prototypes run native, and the sampler attributes their wall time, making the profile the shipped time distribution. Native code hits no interpreter instruction boundary, so the sampler polls at the **JIT trampoline**, the seam the VM crosses to enter and leave a compiled frame, and banks the wall time a native segment took onto the function that ran, labeled ` [jit]`.
 
