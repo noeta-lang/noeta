@@ -177,10 +177,10 @@ The manifest half exists because the parser is strict enough to be worth asking.
 `scripts/gate.sh` runs the CI workflow's jobs locally, in the same split, and prints a per-step PASS/FAIL summary. A step that cannot run is reported SKIP, never PASS, and a failure never stops the remaining steps. Run the tier that matches the moment:
 
 ```sh
-scripts/gate.sh --quick   # fmt + both clippy splits                        (1m20s warm)
+scripts/gate.sh --quick   # fmt + both clippy splits                          (a minute)
 scripts/gate.sh           # + the suite & oracles, lean-CLI and feature shapes,
                           #   doc samples, JIT gates, the real-socket hot-reload
-                          #   e2e suites, and the perf ratchet    (~20 min warm, 42 cold)
+                          #   e2e suites, and the perf ratchet     (tens of minutes)
 scripts/gate.sh --full    # + wasm portability/differential, the linked --native
                           #   AOT differential, miri, editor tooling  (before a release tag)
 ```

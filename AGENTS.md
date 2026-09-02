@@ -82,6 +82,8 @@ The patterns below are banned because each one costs a reader time without payin
 
 **One idea per paragraph, and stop.** A paragraph that restates its predecessor in other words should be deleted, not rephrased. Paired antithetical clauses ("keep what works, drop what doesn't") and mirrored "which … and which" contrasts are two sentences pretending to be one.
 
+**A number nothing asserts will drift, so either a test pins it or it does not go in prose.** `Type` has 23 variants and a call that skips a defaulted parameter can name the first 63: both are exact, and both are wrong the moment they change, which is why a lockstep test fails when they do. A wasm artifact "2.42 MiB" and a gate step "1m20s warm" have no such test, and the first was off by more than double before anyone noticed. State the shape instead, or add the assertion.
+
 **A measurement belongs on a page only if a reader acts on it.** That compiling a 6,000-line file takes about 120 ms tells someone whether the startup cache is worth caring about. That the armed peak stays under 2,000 live objects while the disarmed control grows past the iteration count proves a design decision to a reviewer who is not reading. Test paths, residency counts, before-and-after timings and win percentages are evidence that the work was done right, and they live in the repo, in the test that asserts them.
 
 **Claim only what you can point at.** A page must not assert what a reader's codebase looks like or where their project is heading.

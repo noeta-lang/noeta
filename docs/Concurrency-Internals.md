@@ -139,7 +139,7 @@ Three things about the shape are deliberate:
 - **The wake travels out, and the executor stays put.** A `RealExecutor` owns a `current_thread` tokio runtime and is built *on the worker's thread* by the `IsolateFactory`, so it cannot cross back. The parent creates the `CancelWake` at spawn beside the flag, hands the worker a clone, and the worker arms its executor through `Executor::set_cancel_wake` before any user code runs. The trait method defaults to a no-op, so `SandboxExecutor`, whose `advance` *jumps* logical time and cannot block, is untouched and the oracle stays byte-identical.
 - **Registering on an already-fired wake fires the hook at once.** The flag is stored first and the wake second, and a late registration re-fires, so a worker cancelled during its own startup is roused rather than parking.
 
-A 3 s sleep cancelled at 200 ms ends the run at **0.21 s**, so a worker stops within milliseconds of the request. A worker sleeping in one call and one sleeping in slices stop alike.
+A worker parked in a long sleep stops within milliseconds of the request, so one sleeping in a single call and one sleeping in slices stop alike.
 
 The same select covers the executor's *other* block, waiting on the `JoinSet` for whichever async IO leaf finishes first, so a worker awaiting `fs.read_async` or `p.read_line_async()` is roused too.
 
