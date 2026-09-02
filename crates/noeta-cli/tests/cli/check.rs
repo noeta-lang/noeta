@@ -485,3 +485,105 @@ fn compare_on_an_unordered_native_type_is_refused_statically() {
         .stderr(predicate::str::contains("has no method").not())
         .stderr(predicate::str::contains("E0005").not());
 }
+
+/// **A union refused for having no ordering BETWEEN its members says so**, and does not offer the
+/// repairs that fit a single type.
+///
+/// `int | string` is the shape that reads as a contradiction if the wording is generic: both members
+/// order perfectly well, so "`int | string` has no ordering" invites the reader to argue. What is
+/// missing is an ordering *across* members — only numbers compare across types — and the repair is
+/// to narrow, not to declare anything.
+///
+/// The **absent** strings carry the point, and they are why this is a CLI test rather than a corpus
+/// case (the `// expect:` grammar pins a code and a position, never a text). `@derive(Comparable)`
+/// and `impl Comparable` are the two repairs the general diagnostic names, and neither can be
+/// applied to a union — offering them sends the reader to write something the language will not
+/// accept.
+#[test]
+fn a_union_whose_members_do_not_pair_says_ordering_is_undefined_across_them() {
+    let file = temp_program(
+        "check_compare_union_unpaired",
+        "fn f(x: int | string): Ordering { return x.compare(1) }\necho \"ok\"\n",
+    );
+    lang()
+        .arg("check")
+        .arg(&file)
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("E0007"))
+        .stderr(predicate::str::contains(
+            "ordering is not defined for the union `int | string`",
+        ))
+        .stderr(predicate::str::contains(
+            "only numbers compare across types",
+        ))
+        .stderr(predicate::str::contains("@derive(Comparable)").not())
+        .stderr(predicate::str::contains("impl Comparable").not())
+        .stderr(predicate::str::contains("has no method").not())
+        .stderr(predicate::str::contains("E0005").not());
+}
+
+/// **A union refused for holding an unordered member names that member.**
+///
+/// The sibling above fails the pairing rule; this one fails the other half, and the reader's repair
+/// is different — the union is not the problem, `List<int>` is. So the member is named, and the
+/// "no ordering between them" story that fits the sibling must NOT appear here, because it would
+/// point at the wrong thing entirely.
+#[test]
+fn a_union_holding_an_unordered_member_names_the_member() {
+    let file = temp_program(
+        "check_compare_union_unordered_member",
+        "fn f(x: int | List<int>): Ordering { return x.compare(1) }\necho \"ok\"\n",
+    );
+    lang()
+        .arg("check")
+        .arg(&file)
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("E0007"))
+        .stderr(predicate::str::contains(
+            "ordering is not defined for the union `int | List<int>`",
+        ))
+        .stderr(predicate::str::contains(
+            "`List<int>` has no ordering, so the union has none either",
+        ))
+        .stderr(predicate::str::contains("only numbers compare across types").not())
+        .stderr(predicate::str::contains("has no method").not())
+        .stderr(predicate::str::contains("E0005").not());
+}
+
+/// **`number` orders, at every door.**
+///
+/// `number` is a union — `int | float | f32 | … | u64`, written short — so the union rule is what
+/// decides whether a `number` can be compared, sorted, reduced or passed to a `Comparable` bound.
+/// All five doors are here in one program because they are reached by different machinery and a
+/// repair to one does not imply the others.
+///
+/// The absent `E0025` is the bound door specifically: a union that does not satisfy `Comparable`
+/// fails there with a different code from the other four, so a check for `E0007` alone would pass
+/// while `biggest(a, b)` stayed refused.
+#[test]
+fn number_is_an_ordered_type_at_every_door() {
+    let file = temp_program(
+        "check_number_orders",
+        "fn biggest<T: Comparable>(x: T, y: T): T { return if x < y then y else x }\n\
+         fn f(x: number, y: number): bool { return x < y }\n\
+         fn g(x: number, y: number): Ordering { return x.compare(y) }\n\
+         fn h(xs: List<number>): List<number> { return xs.sorted() }\n\
+         fn i(xs: List<number>): ?number { return xs.min() }\n\
+         fn j(xs: List<number>): ?number { return xs.max() }\n\
+         fn k(x: number, y: number): number { return biggest(x, y) }\n\
+         echo \"ok\"\n",
+    );
+    lang()
+        .arg("check")
+        .arg(&file)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("E0007").not())
+        .stderr(predicate::str::contains("E0025").not())
+        .stderr(predicate::str::contains("does not satisfy the bound").not())
+        .stderr(predicate::str::contains("needs an ordered element type").not());
+}

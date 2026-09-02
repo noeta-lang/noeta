@@ -43,6 +43,9 @@ serde_json = { workspace = true }
 jit = ["noeta-vm/jit"]
 
 [dev-dependencies]
+# The type lattice, for the comparator-arm census: it restates the runtime comparator's arms so the
+# checker can decide a union's ordering, and the census drives both halves against each other.
+noeta-types = { workspace = true }
 insta = { workspace = true }
 assert_cmd = { workspace = true }
 predicates = { workspace = true }

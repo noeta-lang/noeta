@@ -305,9 +305,12 @@ impl Checker {
     /// itself: an `Iterator<T>`, a `Future<T>`, a channel endpoint. Those are nominal but no
     /// program's to implement, so what the checker knows about them is all there is to know.
     ///
-    /// Everything else — a type parameter, a `dyn`/hole, a **union** (whose members may order
-    /// individually while the pairing does not), a name the linker left unresolved — is undecided,
-    /// and stays licensed.
+    /// A **union** is the fifth, and it decides in both directions. Its members are all written
+    /// down, and [`Checker::union_orders`] answers from them and from the comparator's own arms —
+    /// so `number` orders and `int | string` does not, and either answer is as final as a scalar's.
+    ///
+    /// Everything else — a type parameter, a `dyn`/hole, a name the linker left unresolved — is
+    /// undecided, and stays licensed.
     pub(crate) fn orderability_is_decided(&self, recv: &Type) -> bool {
         match recv {
             Type::Named(n, _) => {
@@ -315,6 +318,7 @@ impl Checker {
                     || self.native_type_exists(n.as_str())
                     || PRELUDE_TYPES.contains(&n.as_str())
             }
+            Type::Union(_) => true,
             other => crate::expr::calls::closed_to_new_methods(other),
         }
     }
@@ -395,6 +399,39 @@ impl Checker {
         {
             return false;
         }
+        // A union is worth its own wording. Its members are frequently ordered types on their own,
+        // so "has no ordering" reads as a contradiction of what the reader can see, and the general
+        // help names two repairs — carry `@derive(Comparable)`, write an `impl` — that no union can
+        // be given. What a refused union lacks is an ordering *between* two of its members, and the
+        // repair is to narrow to one.
+        if let Type::Union(members) = recv {
+            // One `help` — the builder keeps the last one set, so the two halves are formatted
+            // together rather than chained.
+            let why = match self.unordered_union_member(members) {
+                // A member that does not order at all: name it, because it is the whole reason.
+                Some(bad) => format!(
+                    "`{bad}` has no ordering, so the union has none either; give `{bad}` an \
+                     ordering, or narrow the receiver to a member that has one"
+                ),
+                // Every member orders alone and no ordering exists between two of them.
+                None => "each member orders on its own, but there is no ordering between them — \
+                         only numbers compare across types; narrow the receiver to a single member \
+                         first (`if x is int { … }`)"
+                    .to_string(),
+            };
+            self.error(
+                DiagnosticCode::TypeMismatch,
+                span,
+                format!(
+                    "`compare()` needs an ordered receiver, but ordering is not defined for the \
+                     union `{recv}`"
+                ),
+            )
+            .help(format!(
+                "{why}; `<` on this type is refused for the same reason"
+            ));
+            return true;
+        }
         self.error(
             DiagnosticCode::TypeMismatch,
             span,
@@ -406,6 +443,16 @@ impl Checker {
              `<` on this type is refused for the same reason",
         );
         true
+    }
+
+    /// The first union member that does not order **on its own** — the discriminating half of a
+    /// refused union's diagnostic. `None` when every member orders alone, which means the union was
+    /// refused for the other reason: no ordering exists *between* two of them.
+    fn unordered_union_member(&self, members: &[Type]) -> Option<String> {
+        members
+            .iter()
+            .find(|m| !self.operand_satisfies_operator(m, BuiltinTrait::Comparable))
+            .map(|m| m.to_string())
     }
 
     /// Report a built-in collection method refused because the **element type** does not meet what

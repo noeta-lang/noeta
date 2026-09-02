@@ -1,0 +1,60 @@
+// **A union orders when its members are mutually comparable, and every ordering door agrees.**
+//
+// `number` is the case that matters: it is a union — `int | float | f32 | f64 | i8 | … | u64`,
+// written short — so every ordering surface asks the union rule about it. A function taking a
+// `number` accepts any numeric scalar, and it must be able to compare, sort and reduce what it
+// accepted, because the runtime comparator orders the whole numeric tower against itself.
+//
+// The doors are reached by different machinery and that is why they are all here. `<` asks whether
+// the operand type satisfies `Comparable`; `.compare()` is answered from a table with a row for
+// every receiver kind; `.sorted()`/`.min()`/`.max()` ask about a list's *element* type; a
+// `<T: Comparable>` bound asks at the instantiation. One rule feeds all five, and a receiver that
+// orders at one and not another is the drift this case exists to catch.
+//
+// `int | float` written long-hand is the same union rule reaching the same answer without the short
+// name, which is what says the rule is about the members rather than about the spelling `number`.
+//
+// The negative half — a union whose members are not mutually comparable — is
+// `compare_union_receiver.noe`.
+
+// expect: stdout "number lt true | compare Ordering.Less | agree true"
+// expect: stdout "sorted [1.5, 2, 3, 10.25]"
+// expect: stdout "min some(1.5) | max some(10.25)"
+// expect: stdout "bound 7 | 10.25"
+// expect: stdout "longhand Ordering.Less true | mixed some(2.5)"
+// expect: stdout "widths Ordering.Less | Ordering.Greater | Ordering.Equal"
+// expect: exit 0
+
+// The two doors on one pair, read together: the method's `Ordering`, and whether the operator says
+// the same thing about the same two values.
+fn agree(ordering: Ordering, less: bool): string { return "${(ordering == Ordering.Less) == less}" }
+
+fn lt(x: number, y: number): bool { return x < y }
+fn cmp(x: number, y: number): Ordering { return x.compare(y) }
+
+a: number = 3
+b: number = 10.25f32
+echo "number lt ${lt(a, b)} | compare ${cmp(a, b)} | agree ${agree(cmp(a, b), lt(a, b))}"
+
+// The element doors: a list of `number` is a list of an ordered element type, so it sorts and
+// reduces. The members are deliberately four *different* numeric kinds, so a sort that only ever
+// compared like with like would not produce this order.
+xs: List<number> = [3, 1.5, 2u8, 10.25f32]
+echo "sorted ${xs.sorted()}"
+echo "min ${xs.min()} | max ${xs.max()}"
+
+// A `Comparable` bound instantiated at a union.
+fn biggest<T: Comparable>(x: T, y: T): T { return if x < y then y else x }
+echo "bound ${biggest(a, 7)} | ${biggest(a, b)}"
+
+// The long-hand spelling of a two-member numeric union reaches the same rule.
+fn longhand(x: int | float, y: int | float): Ordering { return x.compare(y) }
+m: int | float = 1
+n: int | float = 2.5
+echo "longhand ${longhand(m, n)} ${m < n} | mixed ${[n, m].max()}"
+
+// Fixed-width members order by value across widths and signedness, not by their erased word.
+p: number = 200u8
+q: number = 300i16
+r: number = 200
+echo "widths ${p.compare(q)} | ${q.compare(r)} | ${p.compare(r)}"
