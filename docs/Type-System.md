@@ -214,9 +214,11 @@ Three edges worth knowing:
 - **`Self::Name` projections stay permissive.** A `.as<Self::Item>()`-style associated-type target has no runtime head to test, the binding being per-impl and the erased value carrying no impl identity, so it matches any value where the precise trait-object target would not.
 - **Five built-in traits have no `dyn` form.** A trait object is a value plus a method to call on it, so `dyn Clone`, `dyn Serialize`, `dyn Deserialize`, `dyn From` and `dyn To` name no type and are E0014 where they are written. The other seventeen built-ins, and every trait a program declares, do have one. The [built-in trait table](Generics-and-Traits#the-built-in-traits) says which is which.
 
-`dyn Trait` is a *declared* bound rather than a value's own type, and the two reflection queries split on exactly that line. `type_of(x)` on a value held behind a `dyn Trait` binding reports the **concrete** type (`Type.Struct(Dog, [])`), because that is what the value is. `params_of` on a `fn f(x: dyn Speaks)` reports `Type.DynTrait(Speaks)`, because that is what the signature says. A framework injecting a service by its interface needs both.
+### `dyn Trait` is a declared bound, not a value's own type
 
-It is also an ordinary type, so it instantiates a generic, `Box<dyn Speaks>` as readily as `List<dyn Speaks>`. Constructing the value in a position that states the wider type always works; reading a `Box<Dog>` you already have as a `Box<dyn Speaks>` depends on where `Box` puts its parameter. See [Trait objects as type arguments](Generics-and-Traits#trait-objects-as-type-arguments) for the rule and what E0007 says when it is refused.
+The two reflection queries split on exactly that line. `type_of(x)` on a value held behind a `dyn Trait` binding reports the **concrete** type (`Type.Struct(Dog, [])`), because that is what the value is. `params_of` on a `fn f(x: dyn Speaks)` reports `Type.DynTrait(Speaks)`, because that is what the signature says. A framework injecting a service by its interface needs both.
+
+`dyn Trait` is also an ordinary type, so it instantiates a generic, `Box<dyn Speaks>` as readily as `List<dyn Speaks>`. Constructing the value in a position that states the wider type always works; reading a `Box<Dog>` you already have as a `Box<dyn Speaks>` depends on where `Box` puts its parameter. See [Trait objects as type arguments](Generics-and-Traits#trait-objects-as-type-arguments) for the rule and what E0007 says when it is refused.
 
 ## Abstract kind-types
 

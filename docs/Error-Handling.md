@@ -278,16 +278,19 @@ fn load(id: string): Result<string, AppError> {
 echo load("7")
 ```
 
-The rules keep the language explicit:
+### Where a conversion applies
 
 - **`?` is the only implicit conversion position.** A `return Err(jsonErr)`, or an assignment with a mismatched error type, stays the plain type mismatch (E0007) it always was. Write `Err(AppError.from(e))` there, `from` being an ordinary static function callable anywhere as `Target.from(x)`.
-- **One conversion per source.** The conversion is declared on the target, where `impl From<Source>` names the source. The source may be an extern type like `JsonError`, which could not carry your impl anyway, since an `impl` targets a struct, class, or enum the program [declares](Generics-and-Traits#implementing-a-trait). A type may declare a conversion from each of several sources, which is how one application error type absorbs a transport failure and a decode failure, but only one from each: a repeated source is a coherence conflict (E0027).
-- **The target's package owns the `impl`.** Declaring the conversion on the target is what satisfies the [orphan rule](Generics-and-Traits#the-orphan-rule), because `From` is built into the language and so belongs to no package. A conversion *into* a dependency's error type is therefore written the other way round, with [`impl To<Target>`](#converting-into-a-type-you-do-not-own--impl-totarget) on your own type.
 - **Exactly one conversion path.** Which conversion runs is decided where the call is written, never at run time: a `?` converts through the one its propagated `Err` type names, and `Target.from(x)` through the one `x`'s type names. Sources are matched by type identity, so a site sees exactly one candidate, and **conversions never chain**. `A → B` and `B → C` do not make `A → C`; write the conversion you want.
 - **No conversion, no propagation.** A `?` whose `Err` type neither matches the declared error type nor has a `From` conversion is E0057. A `dyn` or unannotated context defers to runtime, as everywhere in the gradual checker.
-- `from` is an **associated** conversion. It builds a new target value from its argument, so a body referencing `self` is rejected (E0015), as is a parameter that disagrees with the declared source.
-- **A conversion produces its target, and cannot fail.** Its signature is pinned at both ends, the declared source against the parameter and the target against the return, because `?` applies a conversion implicitly and propagates whatever it returns. A `from` returning `Result<Target, E>` would make the propagated `Err` hold a `Result`, disagreeing with the error type the function declares, so it is E0015. A conversion that *can* fail is an ordinary function returning a `Result`, called and propagated like any other.
 - **A conversion is never guessed.** Where a target declares several, `Target.from(x)` needs `x`'s type to name one of them. An argument typed `dyn` leaves every conversion a candidate and is E0023, so narrow it (`if x is HttpError { … }`) or annotate it. An argument whose type names no declared source is E0007, and the diagnostic lists what the target does convert.
+
+### Declaring a conversion
+
+- **One conversion per source.** The conversion is declared on the target, where `impl From<Source>` names the source, and the source may be an extern type like `JsonError`, which could not carry an [impl](Generics-and-Traits#implementing-a-trait) anyway. A type may declare a conversion from each of several sources, and a repeated source is a coherence conflict (E0027).
+- **The target's package owns the `impl`.** Declaring the conversion on the target is what satisfies the [orphan rule](Generics-and-Traits#the-orphan-rule), because `From` is built into the language and so belongs to no package. A conversion *into* a dependency's error type is therefore written the other way round, with [`impl To<Target>`](#converting-into-a-type-you-do-not-own--impl-totarget) on your own type.
+- `from` is an **associated** conversion. It builds a new target value from its argument, so a body referencing `self` is rejected (E0015), as is a parameter that disagrees with the declared source.
+- **A conversion produces its target, and cannot fail.** Its signature is pinned at both ends, the declared source against the parameter and the target against the return, and a `from` returning `Result<Target, E>` is E0015. A conversion that *can* fail is an ordinary function returning a `Result`, called and propagated like any other.
 - **The conversion's own name carries its source.** A declared conversion answers to `from<HttpError>` rather than to `from`, which is what lets an enum keep its [wire-value conversion](Structs-Classes-and-Enums#converting-a-wire-value-to-a-case), `Plan.from("free")`, while also declaring `impl From<Raw>`. Writing the call never needs the built name, since `Target.from(x)` and `?` both pick by type, but reaching one by name does; see [A declared conversion is named after its counterpart](Attributes-and-Reflection#a-declared-conversion-is-named-after-its-counterpart).
 
 ## Converting *into* a type you do not own — `impl To<Target>`
@@ -329,9 +332,9 @@ echo match handler() {
 
 Everything the `From` rules say holds here, read from the other side:
 
-- **A conversion is one relation, whichever spelling states it.** `impl From<A>` on `B` and `impl To<B>` for `A` both declare `A → B`, so a program containing both is a coherence conflict (E0027) naming both sites. That keeps "exactly one conversion path" true by construction rather than by a precedence rule.
-- **The two can never collide across packages.** Each spelling needs its own type local and the other merely visible, so two packages declaring one conversion would have to depend on each other. A conflict is therefore always something one author can fix by deleting one of the two.
-- **`To` reaches a foreign target, and only that.** It cannot override a `From` you do not own, which would let one package silently retarget a `?` in code that never mentions it.
+- **A conversion is one relation, whichever spelling states it.** `impl From<A>` on `B` and `impl To<B>` for `A` both declare `A → B`, so a program containing both is a coherence conflict (E0027) naming both sites.
+- **The two can never collide across packages.** Each spelling needs its own type local and the other merely visible, so two packages declaring one conversion would have to depend on each other. A conflict is always something one author can fix by deleting one of the two.
+- **`To` reaches a foreign target, and only that.** It cannot override a `From` you do not own.
 - **One conversion per target.** A source may convert into several targets, one `impl To<Target>` block each, named apart by the target the way a target's conversions are named apart by their sources.
 - **The call names the target.** `value.to::<Target>()` selects the conversion, the bare `to` naming a set rather than one of them. The type argument selects; it does not instantiate anything.
 - `to` converts the value in hand, so it takes `self` and returns the declared target. A return type disagreeing with the trait argument is E0015, the mirror of the parameter check on `from`.
@@ -365,13 +368,11 @@ Some standard-library operations come in **pairs**: an aborting door named for t
 | `p.write(text)` | `p.try_write(text)` | the child's stdin is gone — it exited, or you closed it |
 | `regex.compile(pattern)` | `regex.try_compile(pattern)` | the pattern is not a valid regular expression |
 
-The rule for choosing is **whose mistake is it**. A configuration file your own build produced is your program's shape, so `json.parse` aborting on it is the right report; a body off a wire carries the *remote party's* shape, so `json.try_parse` is.
+The rule for choosing is **whose mistake is it**. A configuration file your own build produced is your program's shape, so `json.parse` aborting on it is the right report; a body off a wire carries the *remote party's* shape, so `json.try_parse` is. A pattern written into the source is yours the same way, and a redaction or routing rule loaded from configuration is the operator's.
 
 A tool your own installer placed is yours. A language server, an MCP server, or a formatter the user may or may not have installed is not, and a library whose contract is "a failing tool is a turn, not an outage" cannot call the aborting door at all.
 
-A pattern you wrote into the source is yours, so `regex.compile` aborting on it is the right report too. A redaction or routing rule loaded from configuration is the operator's, and validating one before compiling it would mean shipping a second, worse regex engine.
-
-What rides the `Err` side is whatever carries the failure's information. `JsonError` and `OsError` are types because a caller must *branch* on which failure it was, and `e.kind()` distinguishes `"not_found"` from `"permission_denied"`, which want different handling. `regex.try_compile` answers a plain `string`: a pattern has exactly one way to be invalid, so a `kind()` there would be a constant, and the engine's own caret-carrying diagnostic is the whole value.
+What rides the `Err` side is whatever carries the failure's information. `JsonError` and `OsError` are types because a caller must *branch* on which failure it was, and `e.kind()` distinguishes `"not_found"` from `"permission_denied"`. `regex.try_compile` answers a plain `string`, since a pattern has one way to be invalid and the engine's own caret-carrying diagnostic is the whole value.
 
 ```noeta
 use std.{regex}
@@ -384,7 +385,9 @@ echo match regex.try_compile(rule) {
 }
 ```
 
-The aborting door derives its message from the recoverable one, so the pair cannot drift and moving between them changes who decides what happens next rather than what the user reads.
+### Moving between the two doors
+
+The aborting door derives its message from the recoverable one, so moving between them changes who decides what happens next rather than what the user reads.
 
 ```noeta
 use std.{os}
@@ -399,9 +402,9 @@ echo match os.try_spawn("mcp-server-filesystem", ["/tmp"]) {
 ```
 
 > [!IMPORTANT]
-> **A liveness check is not a substitute for the recoverable door.** Polling a child with `try_wait()` before writing to it looks like it makes `p.write(…)` safe, and it does not: the child can exit in the gap between the poll and the write. That race cannot be closed from inside the language, which is why `try_write` exists. Branch on `e.kind()` instead. `"broken_pipe"` means the child is gone, so restart it; `"stdin_closed"` means you closed the pipe yourself, which is a bug in your own code.
+> **A liveness check is not a substitute for the recoverable door.** A child can exit in the gap between a `try_wait()` poll and the write, a race that cannot be closed from inside the language, which is why `try_write` exists. Branch on `e.kind()` instead. `"broken_pipe"` means the child is gone, so restart it, and `"stdin_closed"` means you closed the pipe yourself.
 
-The aborting door stays available when a recoverable twin is added. Fatal by default and recoverable when you ask is the shape, and a script that legitimately wants a missing program to stop the run should not have to write a `match` to get it.
+The aborting door stays available when a recoverable twin is added, so a script that wants a missing program to stop the run does not have to write a `match` to get it.
 
 ## `panic` and `assert`
 

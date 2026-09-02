@@ -304,7 +304,7 @@ A generic type's parameter reaches an instance method off the **value's recorded
 
 `field_specs_of::<T>()`, `variants_of::<T>()` and `construct::<T>(…)` are keyed on a type **name**. For a statically written type that key is a compile-time constant, resolved like an annotation and folded, with nothing left to look at at run time.
 
-A type **parameter** has no such constant, since one compiled body serves every instantiation and inside `fn f<T>()` the letter `T` stays the letter `T`. What the body has is the instantiation's *name*, delivered per call, and a name is all these queries key on:
+A type **parameter** has no such constant, since one compiled body serves every instantiation. What the body has is the instantiation's *name*, delivered per call, and a name is all these queries key on:
 
 ```noeta
 struct Todo {
@@ -319,11 +319,11 @@ fn count_of<T>(): int {
 echo count_of::<Todo>()      // 2 — the real schema, per instantiation
 ```
 
-This is exactly `field_specs_of(type_name::<T>())`, which the turbofish arm composes for you, through the same channel and the same helper `type_name::<T>()`, `v.as<T>()` and `v is T` read, so all of them agree about `T` by construction.
+This is exactly `field_specs_of(type_name::<T>())`, which the turbofish arm composes for you, through the same channel `type_name::<T>()`, `v.as<T>()` and `v is T` read.
 
-Two channels carry that name, and a surface reads whichever reaches it. A generic **type**'s parameter rides the receiver's recorded instantiation inside an instance method. A generic **function's or method's own** parameter rides the hidden type-argument slot the call site fills. A **self-less** member of a generic type, a constructor for instance, has no receiver yet and takes the slot too, filled from the call's own instantiation.
+Two channels carry that name. A generic **type**'s parameter rides the receiver's recorded instantiation inside an instance method. A generic **function's or method's own** parameter rides the hidden type-argument slot the call site fills, and a **self-less** member of a generic type takes that slot too.
 
-`E0058` is what remains when *neither* channel reaches the body, where the composed spelling fails for the same reason and the help leaves it out. The two cases are a nested `fn`'s own type parameter, which no call site instantiates, and a class's parameter inside a nested `fn`, which has no receiver to read the tag off. Reflect where the type is concrete and pass the result in: take a `List<FieldSpec>` or a `string` as a parameter and let the caller supply it.
+`E0058` is what remains when *neither* channel reaches the body. The two cases are a nested `fn`'s own type parameter, which no call site instantiates, and a class's parameter inside a nested `fn`, which has no receiver to read the tag off. Reflect where the type is concrete and pass the result in, taking a `List<FieldSpec>` or a `string` as a parameter.
 
 ```noeta error
 class Repo<T> {
@@ -339,7 +339,7 @@ class Repo<T> {
 
 The **static** arm's other guarantee holds here: a turbofish naming a type that resolves to nothing is `E0013`. Leniency about an unrecognized *name* belongs to the runtime-string arm, where the name is data.
 
-This holds for **every** name-keyed query on **both** channels, `attributes_of::<T>()` and `roles_of::<E>()` included. They are one operand contract resolved by one helper, so a capability one of them gains they all gain:
+This holds for **every** name-keyed query on **both** channels, `attributes_of::<T>()` and `roles_of::<E>()` included:
 
 ```noeta
 @attribute(Function)
@@ -356,7 +356,7 @@ echo attrs_of::<Route>()        // 1
 echo roles_in::<Semantic>()     // 1
 ```
 
-**`from_bytes::<T>(blob)`** stays turbofish-only, because of its operand. The others key on a *name*, which is what the two channels deliver, and decoding an opaque byte buffer needs `T`'s packed **layout**, meaning its field kinds and bit widths, which neither channel carries. A type parameter there is `E0058`, with a message naming the missing layout.
+**`from_bytes::<T>(blob)`** stays turbofish-only, because of its operand. Decoding an opaque byte buffer needs `T`'s packed **layout**, meaning its field kinds and bit widths, which neither channel carries. A type parameter there is `E0058`, with a message naming the missing layout.
 
 ### The prelude enums are ordinary enums
 
@@ -377,7 +377,9 @@ echo variants_of("Ordering").map(fn(v) => v.name).join(" ")   // Less Equal Grea
 echo field_specs_of("Ordering").len()                         // 0 — an enum declares no fields
 ```
 
-The prelude **structs** are ordinary structs in the same way. `Attributed`, `RoleBinding`, `ParamInfo`, `FieldEntry`, `FieldSpec`, `VariantSpec`, `TierRoot` and `TierText` are constructible by literal, and a constructed one equals the materialized one field for field:
+### The prelude structs are ordinary structs
+
+`Attributed`, `RoleBinding`, `ParamInfo`, `FieldEntry`, `FieldSpec`, `VariantSpec`, `TierRoot` and `TierText` are constructible by literal, and a constructed one equals the materialized one field for field:
 
 ```noeta
 struct P { a: int; b: string }
@@ -399,7 +401,9 @@ for f in field_specs_of("FieldSpec") {
 // attrs: Type.List(Type.Dyn)
 ```
 
-Each shadows like any prelude name: declaring your own `enum Ordering` or `struct FieldEntry` replaces it for that program.
+Every prelude name shadows. Declaring your own `enum Ordering` or `struct FieldEntry` replaces it for that program.
+
+### Native types reflect the same way
 
 A **native** enum, one an extension registers such as `std.http`'s `Framing`, behaves the same under either spelling. A leaf import binds the short name, and a group import lets you dot into the namespace, which is the spelling to reach for when two packages export the same short name:
 
@@ -472,13 +476,32 @@ for p in params_of("scale") {
 // label: Type.String optional=true
 ```
 
-**Which names have a signature.** A `fn` declaration and a method always do. A top-level *binding* does when it is immutable and its initializer is a closure literal; see [Dispatching a name and describing it are different questions](#dispatching-a-name-and-describing-it-are-different-questions). An unknown name answers with the empty list, the same answer a parameterless callable gives, so reach for `returns_of` and its `none` to tell a missing target from an empty one.
+**Which names have a signature.** A `fn` declaration and a method always do. A top-level *binding* does when it is immutable and its initializer is a closure literal; see [Which names have a describable signature](#which-names-have-a-describable-signature). An unknown name answers with the empty list, the same answer a parameterless callable gives, so reach for `returns_of` and its `none` to tell a missing target from an empty one.
 
 **Declared types and fixed widths.** `params_of` and `type_of` answer with the *same* `Type` for the same declared type, sharing one decoder.
 
 A runtime scalar carries no width tag, so at **top level** a declared fixed-width scalar erases exactly as its value does: every `iN` and `uN` parameter reflects `Type.Int` and `f64` reflects `Type.Float`, while `f32` is reified and keeps `Type.F32`. In **container-element position** a width is a physically distinct storage slot and is preserved at any depth, so `List<i32>` reflects `Type.List(Type.IntN(32, true))`.
 
 Matching a signature from `params_of` against runtime values, for dependency injection or for CLI and router derivation, therefore works for every scalar width: `type_of(5)` is `Type.Int`, and so is an `i32` parameter's `type`. See [Fixed-Width Integers](Fixed-Width-Integers) for the erasure model.
+
+#### Which names have a describable signature
+
+A description has to stay true for as long as the name exists, so `params_of` and `returns_of` cover only names whose signature cannot change: `fn` declarations, which are sealed, and **immutable** bindings of a closure literal. [`invoke`](#invokerecv-name-args-resultdyn-dyn--invokename-args-resultdyn-dyn) needs only the live value, so the set it can call is wider.
+
+```noeta
+fn declared(x: int): int { return x }
+
+scale = fn(factor: int, by: int = 2) => factor * by   // immutable: described
+mut hook = fn(x: int) => x + 1                        // reassignable: not described
+
+echo params_of("declared").len()         // 1
+echo params_of("scale").len()            // 2
+echo params_of("hook").len()             // 0
+```
+
+A `mut` binding is excluded because a parameter *name* is not part of a function type. `mut hook = fn(a: int, b: int) => a - b` accepts `hook = fn(b: int, a: int) => a - b`, the same type with the names swapped, so a description taken from the initializer would name the wrong positions. Declare the binding without `mut` when you want it described.
+
+A binding whose initializer is something other than a closure literal writes no parameter list at the binding site, so `alias = declared` and `made = build_handler()` have nothing there to describe. Describe `declared` under its own name.
 
 ### `returns_of(name): ?Type`
 
@@ -509,6 +532,8 @@ echo describe("UsersController.create")  // Type.List(Type.String)
 echo describe("UsersController.purge")   // Type.Unit
 echo describe("UsersController.crate")   // no such callable  (a typo, not a void method)
 ```
+
+An unannotated closure reports `Type.Dyn`, because its return type is inferred from its body rather than declared. A named `fn` must declare a return type, so an omitted one there means `void` and reports `some(Type.Unit)`.
 
 The result is a `?Type`, and the option carries the difference between a missing target and a `void` one. `void` is a real answer, `some(Type.Unit)`, so a mistyped target answers `none` and a reflection-driven framework detects the route that would otherwise vanish. `params_of` has the empty list to spare for the same job, since an empty parameter list is a legitimate answer.
 
@@ -599,9 +624,9 @@ The **type-level** variant schema of a declared enum, one `VariantSpec` per vari
 | `payload: List<FieldSpec>` | the variant's payload, as declared-field data |
 | `backing: ?dyn` | the variant's value in a backed enum |
 
-It is the enum half of the declaration-side query `field_specs_of` is the struct half of: two surfaces, turbofish and runtime string, one name-keyed query, the same **qualified**-identity resolution inside a module, and the same lenient answer for an unrecognized name. A struct, a class, or an unknown name yields the empty list, so a framework can probe any name without a guard.
+It is the enum half of the declaration-side query `field_specs_of` is the struct half of, with the same two surfaces, the same **qualified**-identity resolution inside a module, and the same lenient answer for an unrecognized name. A struct, a class, or an unknown name yields the empty list, so a framework can probe any name without a guard.
 
-Ask them **together**, because either alone leaves an arbitrary type ambiguous. `field_specs_of` answers an enum with the empty list and a field-less struct with the empty list too, so through that query alone an enum reads as an empty struct, and a schema builder recursing into an enum-typed field emits an empty object. With the pair, fields present means a struct or class, variants present means an enum, and both empty means nothing is known about the name:
+Ask them **together**. `field_specs_of` answers an enum with the empty list and a field-less struct with the empty list too, so through that query alone an enum reads as an empty struct. With the pair, fields present means a struct or class, variants present means an enum, and both empty means nothing is known about the name:
 
 ```noeta
 enum Sentiment { Positive; Negative }
@@ -621,7 +646,7 @@ echo field_specs_of("Sentiment").len()   // 0 — not a struct
 echo variants_of("Sentiment").len()      // 2 — an enum, and here are its cases
 ```
 
-A variant's **payload** is reported as ordinary declared-field data, through the same `FieldSpec` the struct side uses, because a payload *is* a field list. A positional payload carries a synthesized `_0` or `_1` name with its real declared type in the type slot, so a positional and a named payload read alike at the consumer. `optional` is always `false`, since a variant payload field has no syntax for a default and is always supplied.
+A variant's **payload** is reported as ordinary declared-field data, through the same `FieldSpec` the struct side uses. A positional payload carries a synthesized `_0` or `_1` name with its real declared type in the type slot, so a positional and a named payload read alike at the consumer. `optional` is always `false`, since a variant payload field has no syntax for a default.
 
 ```noeta
 enum Shape {
@@ -660,9 +685,7 @@ for v in variants_of::<Status>() {
 // Done = some(done)
 ```
 
-A variant's own `#[...]` attributes live in the manifest alone, keyed under the qualified `Enum.Variant` target, the same `Type.field` convention the struct side uses. `attributes_of::<T>()` is the one answer to "what is annotated on this variant".
-
-`FieldSpec.attrs` on the struct half covers the *member-of-a-signature* case, where a schema deriver walks parameters and fields side by side and needs the two descriptors to be one shape. A variant **payload** slot reports `attrs` as the empty list, the true answer, since a payload slot has no attribute syntax to carry one.
+A variant's own `#[...]` attributes live in the manifest alone, keyed under the qualified `Enum.Variant` target, the same `Type.field` convention the struct side uses, so `attributes_of::<T>()` is the one answer to "what is annotated on this variant". A variant **payload** slot reports `attrs` as the empty list, since a payload slot has no attribute syntax to carry one.
 
 ```noeta
 @attribute
@@ -732,11 +755,13 @@ Validation runs through one shared planner, so both backends accept, reject, and
 
 The last two rows are the door holding a value to the type's own declaration, which is the sense in which `construct` is the reflective form of a literal.
 
-**A private field cannot be set.** A `class`'s fields default private with a per-field `pub` opt-in, so `Box { secret: 9 }` written outside the class is `E0035`, and `construct("Box", {"secret": 9})` is that construction spelled reflectively. A *supplied* field is what gets refused: omit a private field that has a default and it fills from that default, exactly as an outside-the-class literal omitting it does. A value `struct`'s fields are always public, so a struct is unaffected.
+**A `Validate` implementor's invariant runs.** See [`construct` enforces `impl Validate`](#construct-enforces-impl-validate).
+
+#### A private field cannot be set through `construct`
+
+A `class`'s fields default private with a per-field `pub` opt-in, so `Box { secret: 9 }` written outside the class is `E0035`, and `construct("Box", {"secret": 9})` is that construction spelled reflectively. A *supplied* field is what gets refused, so omitting a private field that has a default fills it from that default, exactly as an outside-the-class literal omitting it does. A value `struct`'s fields are always public, so a struct is unaffected.
 
 The refusal is **context-free**. A runtime door knows neither its caller's type nor its tier, so it refuses inside the declaring type's own methods and inside a `@test` body as well, where the checker's gate relaxes. Those are the places where you can write the literal instead.
-
-**A `Validate` implementor's invariant runs.** See [`construct` enforces `impl Validate`](#construct-enforces-impl-validate).
 
 #### `construct` is the reflective literal, not your constructor
 
@@ -986,30 +1011,7 @@ echo match invoke("shout", ["ada"]) {
 
 The two-operand form searches the top-level namespace. A type name, a qualified `Type.method`, and a local variable holding a function are each a miss. The three-operand form reaches a type's methods, and a function value you already hold you can call directly.
 
-#### Dispatching a name and describing it are different questions
-
-The set of names this form can **call** is wider than the set [`params_of`](#params_ofname-listparaminfo) and [`returns_of`](#returns_ofname-type) can **describe**, and the two are answering different questions.
-
-Calling needs only the live value, so it reaches any top-level binding holding a callable. Describing a signature has to stay true for as long as the name exists, so it covers only names whose signature cannot change: `fn` declarations, which are sealed, and **immutable** bindings of a closure literal.
-
-```noeta
-fn declared(x: int): int { return x }
-
-scale = fn(factor: int, by: int = 2) => factor * by   // immutable: described
-mut hook = fn(x: int) => x + 1                        // reassignable: not described
-
-echo params_of("declared").len()         // 1
-echo params_of("scale").len()            // 2
-echo params_of("hook").len()             // 0
-```
-
-A `mut` binding is excluded because a parameter *name* is not part of a function type. `mut hook = fn(a: int, b: int) => a - b` accepts `hook = fn(b: int, a: int) => a - b`, the same type with the names swapped, so a description taken from the initializer would name the wrong positions. Declare the binding without `mut` when you want it described.
-
-A binding whose initializer is something other than a closure literal is excluded for a plainer reason. `alias = declared` and `made = build_handler()` write no parameter list at the binding site, so there is nothing there to describe. Describe `declared` under its own name.
-
-The **named**-argument form below binds through that signature index, so it follows the narrower set. A name with no signature to bind against is refused with ``does not take named arguments``. The positional form is unaffected.
-
-An unannotated closure reports `Type.Dyn` from `returns_of`, because its return type is inferred from its body rather than declared. A named `fn` must declare a return type, so an omitted one there means `void` and reports `some(Type.Unit)`.
+#### Passing `args` positionally or by name
 
 `args` accepts either shape, exactly as `construct`'s `fields` does, and in both the two- and three-operand forms:
 
@@ -1032,6 +1034,8 @@ echo match invoke("place", call) {
 ```
 
 The omitted `qty` runs its compiled default expression, exactly as at a direct `place(item: "widget", note: "rush")` call site, since the named form is the same calling convention reached by name. Parameter names come from the same signature index `params_of` reads, so reflecting a signature and then calling it by name round-trips on one target string.
+
+The named form therefore reaches only the names that index [describes](#which-names-have-a-describable-signature), which is narrower than the set `invoke` can call. The positional form is unaffected.
 
 Every rejection is an `Err` and nothing here aborts: an unknown name, a non-string name, args that are neither a list nor a map, an arity mismatch, and, in the named form:
 
