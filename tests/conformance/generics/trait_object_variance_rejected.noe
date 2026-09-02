@@ -1,7 +1,7 @@
 // Reading an existing value at a wider type argument where the declaration makes it **unsound** —
 // refused at check time, one `E0007` per widening.
 //
-// Five widenings over four distinct occurrences of the parameter, each a different reason the
+// Six widenings over four distinct occurrences of the parameter, each a different reason the
 // widened view could be used to break the original's type:
 //
 //   * `Slot` is a reference `class` with a `mut` field of the parameter's type. A widened view of a
@@ -14,15 +14,17 @@
 //   * `Callback` reaches that same occurrence through a field of function type: `wide.f` would be a
 //     `(dyn Speak) -> string`, and calling it hands a `Cat` to a body checked at `Dog`.
 //   * `Owner` is a value `struct` that holds a `Slot`. A struct copy shares the class it holds, so
-//     the store the first case describes is reachable through the copy.
+//     the store the first case describes is reachable through the copy. `Chan` is the same
+//     composition through a CHECKER-NATIVE generic: a `Sender<T>` takes its message in.
 //
 // Every widening sits in a function **nothing calls**: the refusal is static, so no program runs at
 // all, and a runtime abort could not produce these.
-// expect: error E0007 at 68:29
-// expect: error E0007 at 73:32
-// expect: error E0007 at 78:29
-// expect: error E0007 at 83:33
-// expect: error E0007 at 88:30
+// expect: error E0007 at 76:29
+// expect: error E0007 at 81:32
+// expect: error E0007 at 86:29
+// expect: error E0007 at 91:33
+// expect: error E0007 at 96:30
+// expect: error E0007 at 101:29
 // expect: exit 1
 trait Speak {
     fn speak(): string
@@ -64,6 +66,12 @@ struct Owner<T> {
     slot: Slot<T>
 }
 
+// A checker-native generic composes like a declared one. A `Sender<T>` takes its message IN
+// (`send(v: T)`), so a type that holds one is invariant exactly as `Owner` is.
+class Chan<T> {
+    pub tx: Sender<T>
+}
+
 fn widen_mut_field(s: Slot<Dog>): string {
     wide: Slot<dyn Speak> = s
     return wide.v.speak()
@@ -87,4 +95,9 @@ fn widen_fn_field(c: Callback<Dog>): string {
 fn widen_through_class(o: Owner<Dog>): string {
     wide: Owner<dyn Speak> = o
     return wide.slot.v.speak()
+}
+
+fn widen_native_sender(c: Chan<Dog>): string {
+    wide: Chan<dyn Speak> = c
+    return "unreachable"
 }

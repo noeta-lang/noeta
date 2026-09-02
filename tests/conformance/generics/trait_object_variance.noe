@@ -19,6 +19,7 @@
 // expect: stdout "woof"
 // expect: stdout "meow"
 // expect: stdout "woof"
+// expect: stdout "meow"
 // expect: exit 0
 trait Speak {
     fn speak(): string
@@ -84,3 +85,16 @@ heard = match maybe_wide {
     none => "none",
 }
 echo heard
+
+// A checker-native generic reached through a field composes like any other: `Iterator<T>` hands its
+// element OUT (`next`), so a `Feed<Cat>` reads as a `Feed<dyn Speak>`. Its channel twin `Sender<T>`
+// takes one IN, and is refused in the sibling file.
+class Feed<T> {
+    pub items: Iterator<T>
+}
+
+feed: Feed<Cat> = Feed { items: [Cat {}].iter() }
+wide_feed: Feed<dyn Speak> = feed
+for s in wide_feed.items {
+    echo s.speak()
+}

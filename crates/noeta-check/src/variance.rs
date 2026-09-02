@@ -35,7 +35,26 @@ use std::collections::HashMap;
 use noeta_ast::{FieldDecl, FnDecl, Program, Stmt, TypeRef};
 use noeta_types::{Type, TypeKind};
 
-use crate::{Checker, env::Receiver};
+use crate::{Checker, env::Receiver, stdlib};
+
+/// The **checker-native generics'** variance, stated rather than derived: their declarations are in
+/// the checker, not in the program, so the walk below has nothing to read for them.
+///
+/// Each carries one type argument, and each is decided the same way every declared type is — by
+/// whether a value of the widened argument can reach a position that expects the narrow one.
+/// `Iterator<T>`, `Future<T>` and `Receiver<T>` only ever hand a `T` *out* (`next`, `.await`,
+/// `recv`), so reading one at a wider argument is safe. A `Sender<T>` takes a `T` *in* — `send(v: T)`
+/// — which is the method-parameter occurrence, so it is not.
+///
+/// Everything else the program has no declaration for stays invariant by the same default a native
+/// extension type gets: nothing here can prove otherwise.
+fn native_variance(name: &str) -> Option<ArgVariance> {
+    match name {
+        stdlib::ITERATOR | stdlib::FUTURE | stdlib::RECEIVER => Some(vec![None]),
+        stdlib::SENDER => Some(vec![Some(InvarianceCause::MethodParam("send".to_string()))]),
+        _ => None,
+    }
+}
 
 /// Where a type parameter occurs, as the source names it — the half of an [`InvarianceCause`] that
 /// points at something the reader can go and look at.
@@ -209,6 +228,11 @@ impl Checker {
         // through it read as an opaque, invariant head). Every type this program *does* declare is
         // reset to covariant first, so a redeclaration is recomputed rather than remembered.
         let mut table: HashMap<String, ArgVariance> = self.symbols.arg_variance.clone();
+        table.extend(
+            stdlib::NATIVE_TYPE_NAMES
+                .iter()
+                .filter_map(|n| native_variance(n).map(|v| ((*n).to_string(), v))),
+        );
         table.extend(
             shapes
                 .iter()
