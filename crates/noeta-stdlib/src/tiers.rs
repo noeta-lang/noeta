@@ -39,7 +39,7 @@ pub const TIERS: &[ExtTier] = &[
         name: "bench",
         sites: &[TierSite::Function, TierSite::Method],
         // The **qualified** identity of the knob attribute the `@bench(…)` block desugar stamps —
-        // it must match `TIER_ATTR_BENCH` and the seeded `symbols.attributes` key (D2b). The stamped
+        // it must match `TIER_ATTR_BENCH` and the seeded `symbols.attributes` key. The stamped
         // FQN passes the gate with no `use` (a synthesized, already-qualified application).
         config: Some("std.bench.Bench"),
         text: None,
@@ -78,7 +78,7 @@ pub const TIERS: &[ExtTier] = &[
         expr: None,
         handler: None,
     },
-    // `@json { … ${s} … }` — a native **expression** tier (expr-tiers arc): its blocks are `string`
+    // `@json { … ${s} … }` — a native **expression** tier: its blocks are `string`
     // values (JSON text with safely-quoted holes), desugared to `std.template.render`. The dogfood
     // that a native package declares an expression tier — body language, value type, and a native
     // handler — through the same `ExtTier` surface a program `@tier(…, text/expr)` uses.
@@ -177,7 +177,7 @@ fn json_reindent(
     Some(format!("{base}{}", out.trim()))
 }
 
-/// The attributes std declares, each under its owning module's **namespace** (D2 — no global
+/// The attributes std declares, each under its owning module's **namespace** (no global
 /// attribute namespace): the test runner's metadata set under `std.test`
 /// (`Skip`/`Name`/`Group`/`Data`/`Timeout`), `bench`'s knob under `std.bench`
 /// (`Bench { iterations }`),

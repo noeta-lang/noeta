@@ -1,18 +1,18 @@
-//! The higher-order dispatch seam (higher-order-abi H0): how a native function that takes
+//! The higher-order dispatch seam: how a native function that takes
 //! **closures**, drives the **executor**, or orchestrates many futures crosses the extension ABI.
 //!
 //! The plain [`crate::registry::ModuleDispatch`] is value-in/value-out — it cannot carry a closure
 //! (a closure is backend-specific; [`crate::NativeValue`] has no variant for it and could not
-//! call one anyway), interleave more than one async spawn, or advance the scheduler mid-call. So
-//! every function needing those was a hardcoded per-backend `Builtin`, written twice with
-//! hand-maintained refcount discipline. This seam replaces that: the extension manipulates
+//! call one anyway), interleave more than one async spawn, or advance the scheduler mid-call. A
+//! function needing those would otherwise be a hardcoded per-backend `Builtin`, written twice with
+//! hand-maintained refcount discipline. This seam is the alternative: the extension manipulates
 //! **opaque slots** — indices into a per-call table of backend values it never sees — and
 //! re-enters the backend through one capability trait, [`NativeCtx`]. Each backend implements the
 //! trait once; the **slot table owns the refcount discipline centrally** (the VM retains on
-//! insert and releases on free/drop), so a dispatch cannot leak the way the hand-written builtins
-//! repeatedly did. The dispatch function itself stays a single shared `fn` in the extension crate,
-//! so the differential holds by construction — the registry's core promise, extended to
-//! orchestration code. See `plans/higher-order-abi/README.md`.
+//! insert and releases on free/drop), so a dispatch cannot leak the way a hand-written builtin
+//! can. The dispatch function itself stays a single shared `fn` in the extension crate, so the
+//! differential holds by construction — the registry's core promise, extended to orchestration
+//! code.
 
 use std::any::Any;
 use std::cell::RefCell;
@@ -30,7 +30,7 @@ use crate::registry::{NativeOut, NativeValue, Scalar};
 pub type Slot = u32;
 
 /// An opaque handle to one language value held in the backend's **per-run retained arena**
-/// (Class 3, higher-order-abi H4) — how an extension owns values *across* dispatches. Unlike a
+/// (Class 3) — how an extension owns values *across* dispatches. Unlike a
 /// [`Slot`] (per-call, auto-released), a `Retained` lives until [`NativeCtx::release_retained`]
 /// or program teardown. The extension stores these ids in its own state or inside extern boxes
 /// (`Cell` holds one; a reactive node holds one per signal) — the **values** stay backend-side,
@@ -76,7 +76,7 @@ pub fn ctx_arity(func: &str, args: &[Slot], expected: usize) -> CtxResult<()> {
     }
 }
 
-/// A neutral, read-only description of a packed list's element layout (package-manager N3.4) —
+/// A neutral, read-only description of a packed list's element layout —
 /// what a raw-buffer kernel needs to interpret the byte buffer [`NativeCtx::with_packed`] lends it.
 /// The backends hold *different* concrete schema representations (the VM an interned
 /// `&'static` schema, the reference interpreter an `Rc` over its type table), so — like
@@ -105,9 +105,9 @@ pub enum PackedField {
     Int,
     Float,
     F32,
-    /// An explicit 64-bit float field `f64` (packed-widths arc) — 8 bytes.
+    /// An explicit 64-bit float field `f64` — 8 bytes.
     F64,
-    /// A fixed-width integer field `i8..i64`/`u8..u64` (packed-widths arc): `bits/8` bytes, `signed`
+    /// A fixed-width integer field `i8..i64`/`u8..u64`: `bits/8` bytes, `signed`
     /// deciding read-back extension.
     IntN {
         bits: u8,
@@ -138,7 +138,7 @@ pub type CtxDispatch =
 /// a thin wrapper over the interpreter/VM plus the slot table.
 ///
 /// Growth points (later phases): per-run extension state + retained handles (Class 3, H4), a
-/// reactive-graph view (H5).
+/// reactive-graph view.
 pub trait NativeCtx {
     /// The host capability seam — filesystem, clock, network, … (what a plain dispatch receives).
     fn host(&mut self) -> &mut dyn Host;
@@ -244,7 +244,7 @@ pub trait NativeCtx {
     }
 
     /// Call a callable slot with `list[index]` as its single argument — the fused
-    /// `list_get` + `call` + `free` a bounded mapper's fill loop performs per item (H2). One
+    /// `list_get` + `call` + `free` a bounded mapper's fill loop performs per item. One
     /// re-entry instead of three and no element slot is minted, which is what keeps a
     /// 100k-item `map_bounded` at builtin speed; semantically identical to the unfused sequence.
     fn call_with_element(&mut self, callee: Slot, list: Slot, index: usize) -> CtxResult<Slot>;
@@ -257,7 +257,7 @@ pub trait NativeCtx {
 
     /// Build a list value from element slots, as a fresh slot. The element slots are **spent** —
     /// their references move into the list, so a 100k-result collect is a pointer pass, not a
-    /// retain/release round-trip (H2). (The one deliberate exception to "methods never consume
+    /// retain/release round-trip. (The one deliberate exception to "methods never consume
     /// argument slots"; a dispatch needing an element afterwards reads it off the list.)
     fn make_list(&mut self, items: &[Slot]) -> CtxResult<Slot>;
 
@@ -279,7 +279,7 @@ pub trait NativeCtx {
 
     /// Drive a future slot **to completion** — the backend's own await loop, with every
     /// backend-specific progress term (`concurrent`-scope rounds, channel progress, clock,
-    /// external wakes) exactly as `expr.await` has them (H3). For orchestrating *many* futures
+    /// external wakes) exactly as `expr.await` has them. For orchestrating *many* futures
     /// use [`NativeCtx::poll`] rounds; `drive` is for a quick leaf (`http.serve`'s reply write).
     /// Spends the future slot like a ready poll; the result takes over its index.
     fn drive(&mut self, future: Slot) -> CtxResult<Slot>;
@@ -298,12 +298,12 @@ pub trait NativeCtx {
     /// the stall escape valve of every drive loop.
     fn advance_clock(&mut self) -> Option<u64>;
 
-    /// Snapshot the backend's **external wake generation** before a drive round (H2). Work can
+    /// Snapshot the backend's **external wake generation** before a drive round. Work can
     /// arrive from outside the cooperative loop — a real OS-thread isolate finishing a channel
     /// send — and bump this counter. A backend with no external wake sources returns a constant.
     fn wake_generation(&mut self) -> u64;
 
-    /// Last resort of a stalled drive loop (H2): no task progressed and no timer is pending.
+    /// Last resort of a stalled drive loop: no task progressed and no timer is pending.
     /// Block until an external wake newer than the snapshot arrives (`true` — retry the round),
     /// or report `false` when none can ever arrive — the genuine deadlock. The tree-walker
     /// (sandbox-only, no external sources) always reports `false`.
@@ -314,7 +314,7 @@ pub trait NativeCtx {
     fn is_list(&mut self, slot: Slot) -> CtxResult<bool>;
 
     /// The slot value's runtime type name, exactly as the backend's diagnostics render it
-    /// (`"int"`, `"list"`, `"future"`, …) — for "found {…}" message parity with the migrated
+    /// (`"int"`, `"list"`, `"future"`, …) — for "found {…}" message parity with the backends'
     /// builtins.
     fn type_name(&mut self, slot: Slot) -> CtxResult<&'static str>;
 
@@ -344,7 +344,7 @@ pub trait NativeCtx {
         f: &mut dyn FnMut(&dyn crate::ExternValue),
     ) -> CtxResult<()>;
 
-    // ----- Class 3: per-run extension state + the retained-value arena (H4) -----
+    // ----- Class 3: per-run extension state + the retained-value arena -----
     // (The arena group also exists as the narrow consumer view [`RetainedArena`].)
 
     /// The dispatching extension's **per-run Rust state**, created by `init` on first access and
@@ -427,7 +427,7 @@ pub trait NativeCtx {
     /// untouched then.
     fn call_thunk_into(&mut self, body: Retained, dest: Retained) -> CtxResult<()>;
 
-    // ----- The raw-buffer ABI (package-manager N3.4): packed lists + structural objects -----
+    // ----- The raw-buffer ABI: packed lists + structural objects -----
     // (This group also exists as the narrow consumer view [`PackedBuffers`].)
 
     /// Read a packed list's element layout and raw byte buffer through a borrow — the
@@ -498,9 +498,8 @@ pub trait NativeCtx {
         fields: &[Scalar],
     ) -> CtxResult<Slot>;
 
-    /// The **packed field kinds** of a single value whose type is a `@packed` struct (scalar-
-    /// unification slice 3), in slot order, or `None` if the value's type has no resolvable packed
-    /// layout. The width source for the *element* bundle methods (`v.add(w)`, `Color.scale(2.0)`):
+    /// The **packed field kinds** of a single value whose type is a `@packed` struct, in slot
+    /// order, or `None` if the value's type has no resolvable packed layout. The width source for the *element* bundle methods (`v.add(w)`, `Color.scale(2.0)`):
     /// a bulk method reads a packed `List<T>`'s widths from [`NativeCtx::with_packed`], but an element
     /// method receives a single struct value whose fields are erased to width-less boxed scalars at the
     /// seam — this recovers the exact width so integer wrapping and saturation clamp at the right bits.
@@ -513,7 +512,7 @@ pub trait NativeCtx {
     // ----- scheduler-service sub-capabilities -----
     //
     // Three cross-cutting **backend services** an extension may consume, grouped behind their own
-    // traits rather than flattened onto this one (they are the concerns that used to grow `NativeCtx`
+    // traits rather than flattened onto this one (they are the concerns that would otherwise grow `NativeCtx`
     // one method at a time). The backend returns `self` from each accessor — no lookup, no allocation,
     // one virtual indirection on already-cold paths — and the sub-traits can move to their own crates
     // the day their consumers (`std.tracing`/`http.serve`) leave `std`, exactly as the reactive
@@ -521,17 +520,17 @@ pub trait NativeCtx {
     // another), these are the scheduler's own state exposed to extensions, so they live here on the
     // backend ABI.
 
-    /// The per-execution **task-local context** stack ([`TaskContext`], native-otel T5a).
+    /// The per-execution **task-local context** stack ([`TaskContext`]).
     fn task_context(&mut self) -> &mut dyn TaskContext;
 
-    /// The **future-completion tracing** hook ([`FutureTracing`], native-otel T5c).
+    /// The **future-completion tracing** hook ([`FutureTracing`]).
     fn future_tracing(&mut self) -> &mut dyn FutureTracing;
 
-    /// The **hot-reload** observation channel ([`HotReload`], server-hmr L3).
+    /// The **hot-reload** observation channel ([`HotReload`]).
     fn hot_reload(&mut self) -> &mut dyn HotReload;
 }
 
-// ----- focused consumer views over NativeCtx (audit-2 F9) ----------------------------------------
+// ----- focused consumer views over NativeCtx ----------------------------------------
 //
 // `NativeCtx` is the BACKEND-implementation surface: one wide trait each backend implements once
 // (~39 methods), spanning slot/call orchestration, the retained arena, and the raw-buffer packed
@@ -592,7 +591,7 @@ impl<C: NativeCtx + ?Sized> RetainedArena for C {
     }
 }
 
-/// The **raw-buffer packed ABI** view of a [`NativeCtx`] (package-manager N3.4): what a bulk
+/// The **raw-buffer packed ABI** view of a [`NativeCtx`]: what a bulk
 /// kernel needs and nothing else. See the same-named [`NativeCtx`] methods for full semantics.
 pub trait PackedBuffers {
     /// [`NativeCtx::with_packed`].
@@ -664,7 +663,7 @@ impl<C: NativeCtx + ?Sized> PackedBuffers for C {
 }
 
 /// The per-execution **task-local context**: a per-task stack of opaque `u64`s the backend carries
-/// with its cooperative scheduling (native-otel T5a). The **current** context belongs to whichever
+/// with its cooperative scheduling. The **current** context belongs to whichever
 /// strand is executing (the main strand's root cell, or a task's own — the scheduler swaps a task's
 /// context in around each poll of its step, and a `spawn`ed task inherits a snapshot of its
 /// spawner's). Extensions that need scope to follow *execution* rather than the run — `std.tracing`'s
@@ -690,7 +689,7 @@ pub trait TaskContext {
     fn swap(&mut self, ctx: Vec<u64>) -> Vec<u64>;
 }
 
-/// The **future-completion tracing** hook (native-otel T5c): a telemetry-specific scheduler service.
+/// The **future-completion tracing** hook: a telemetry-specific scheduler service.
 pub trait FutureTracing {
     /// Trace a future to completion — the backend registers the future in its traced set (holding a
     /// reference; teardown releases strays), runs every subsequent poll of it under a context of
@@ -705,7 +704,7 @@ pub trait FutureTracing {
     fn trace(&mut self, future: Slot, span: u64) -> CtxResult<bool>;
 }
 
-/// The **hot-reload** observation channel (server-hmr L3): how a long-running orchestrating dispatch
+/// The **hot-reload** observation channel: how a long-running orchestrating dispatch
 /// observes the hot-swap channel. The defaults are the "not in hot mode" answers, so only the backend
 /// that actually carries a swap mailbox (the VM under `noeta serve --watch`) overrides — the
 /// tree-walker and every ordinary run see a constant 0/None and the loops stay inert.

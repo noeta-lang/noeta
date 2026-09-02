@@ -1,0 +1,91 @@
+// Reading an existing value at a **union** type argument where the declaration makes it unsound —
+// refused at check time, one `E0007` per widening, exactly as the same widening to a `dyn Trait`,
+// to the open `dyn` and to an abstract kind is refused in the sibling files.
+//
+// A union argument is a widening like the other three and is gated with them. Left open it corrupts
+// a value the checker approved: a `Box<Dog>` read as a `Box<Dog | Cat>` takes a store of a `Cat`
+// through the widened view, and the original — still declared `Box<Dog>` — answers `meow` to
+// `speak`, or answers nothing at all where the member has no `speak`.
+//
+// Four refusals over the three occurrences that make a parameter unsafe to widen:
+//
+//   * `Box` is a reference `class` with a `mut` field of the parameter's type. A widened view of a
+//     class IS the original, so the store lands in the original.
+//   * A **superset** is the same widening between two unions: `Box<Dog | Cat>` read as a
+//     `Box<Dog | Cat | Mouse>` takes a store of a `Mouse` the original has no arm for.
+//   * `Matcher` takes the parameter as a **method parameter**, and `Pair` is a value `struct` that
+//     does the same. Neither is about aliasing: the body of `matches` is checked believing `other`
+//     is a `Dog`, so calling it through a widened receiver hands it a `Cat`.
+//
+// The reverse direction is a NARROWING and is refused wherever it appears, which the last function
+// pins: `Box<Dog | Cat>` read as a `Box<Dog>` would hand out a `Cat` where the reader's own type
+// says `Dog`. It carries no variance help, because no declaration would make it sound.
+//
+// Every widening sits in a function **nothing calls**: the refusal is static, so no program runs at
+// all, and a runtime abort could not produce these.
+// expect: error E0007 at 69:28
+// expect: error E0007 at 74:36
+// expect: error E0007 at 79:32
+// expect: error E0007 at 84:29
+// expect: error E0007 at 89:24
+// expect: exit 1
+struct Dog {
+    fn speak(): string {
+        return "woof"
+    }
+}
+
+struct Cat {
+    fn speak(): string {
+        return "meow"
+    }
+}
+
+struct Mouse {
+    n: int
+}
+
+class Box<T> {
+    pub mut v: T
+}
+
+class Matcher<T> {
+    v: T
+
+    pub fn matches(other: T): bool {
+        return self.v == other
+    }
+}
+
+struct Pair<T> {
+    v: T
+
+    pub fn matches(other: T): bool {
+        return self.v == other
+    }
+}
+
+fn widen_mut_field(b: Box<Dog>): string {
+    wide: Box<Dog | Cat> = b
+    return "unreachable"
+}
+
+fn widen_to_superset(b: Box<Dog | Cat>): string {
+    wide: Box<Dog | Cat | Mouse> = b
+    return "unreachable"
+}
+
+fn widen_method_param(m: Matcher<Dog>): string {
+    wide: Matcher<Dog | Cat> = m
+    return "unreachable"
+}
+
+fn widen_struct_method_param(p: Pair<Dog>): string {
+    wide: Pair<Dog | Cat> = p
+    return "unreachable"
+}
+
+fn narrow_out_of_union(b: Box<Dog | Cat>): string {
+    narrow: Box<Dog> = b
+    return "unreachable"
+}

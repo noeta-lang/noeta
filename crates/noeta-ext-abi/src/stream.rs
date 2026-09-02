@@ -1,4 +1,4 @@
-//! Streaming HTTP bodies (http-streaming arc) — the seam types behind `std.http.client.stream`
+//! Streaming HTTP bodies — the seam types behind `std.http.client.stream`
 //! and `std.http.server.sse`.
 //!
 //! The read side answers "consume a response body incrementally, cut into frames"; the write side

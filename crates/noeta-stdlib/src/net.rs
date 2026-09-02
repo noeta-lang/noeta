@@ -1,4 +1,4 @@
-//! The `Network` capability's deterministic sandbox responder (http arc H1) — the [`crate::fs::Vfs`]
+//! The `Network` capability's deterministic sandbox responder — the [`crate::fs::Vfs`]
 //! analog for the network. The seam *types* (`NetRequest`/`NetResponse`/`NetFetchIo`) live in the
 //! ABI crate ([`noeta_ext_abi::net`], re-exported here); the responder stays here because it uses
 //! `serde_json`, which the lean ABI crate deliberately does not pull.
@@ -19,7 +19,7 @@ pub use noeta_ext_abi::net::{
 
 use serde_json::json;
 
-/// The sandbox's fixed **inbound** request script (http-server S1) — the deterministic driver a
+/// The sandbox's fixed **inbound** request script — the deterministic driver a
 /// served program's handler runs against under `--differential`, the inbound mirror of the pure
 /// `sandbox_respond`. A finite, documented sequence, so conformance can pin a handler's behavior
 /// and the served program terminates in-oracle (a real accept loop never would). Every
@@ -34,11 +34,11 @@ use serde_json::json;
 ///      `content-type: application/x-www-form-urlencoded` — a form submission whose fields need
 ///      percent-decoding, including a multi-byte character (`req.form(name)`/`form_all()`)
 ///   7. `GET /ws`  headers `upgrade: websocket`, `sec-websocket-key: <fixed>`  — a websocket
-///      upgrade request (server-hmr L0). A handler that upgrades it is driven by the fixed
+///      upgrade request. A handler that upgrades it is driven by the fixed
 ///      client conversation ([`sandbox_ws_client_frames`]); one that responds normally treats
 ///      it as any other GET.
 ///   8. `GET /events`  header `accept: text/event-stream`  — a request a handler may answer with
-///      `server.sse` (http-streaming arc). It carries no upgrade headers because SSE needs none:
+///      `server.sse`. It carries no upgrade headers because SSE needs none:
 ///      any request can be answered with an event stream, so a handler that ignores it serves it
 ///      as an ordinary GET, exactly like `/ws`.
 ///
@@ -92,7 +92,7 @@ pub fn sandbox_request_script() -> Vec<NetRequest> {
     ]
 }
 
-/// The sandbox's fixed **websocket client conversation** (server-hmr L0) — the frames "the peer"
+/// The sandbox's fixed **websocket client conversation** — the frames "the peer"
 /// sends on any upgraded connection, then a clean close (recv yields `None`). The ws analog of
 /// the request script: finite and documented, so an upgraded handler's behavior pins exactly and
 /// the serve loop terminates in-oracle.
@@ -100,7 +100,7 @@ pub fn sandbox_ws_client_frames() -> Vec<String> {
     vec!["first frame".to_string(), "second frame".to_string()]
 }
 
-/// The sandbox's deterministic **streaming** response body (http-streaming arc) — the incremental
+/// The sandbox's deterministic **streaming** response body — the incremental
 /// twin of [`sandbox_respond`], and a pure function of the request for the same reason: both
 /// backends must compute the identical byte sequence or the differential cannot hold.
 ///

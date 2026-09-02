@@ -1,4 +1,4 @@
-//! `std.log` — the logs SDK surface (native OTEL, Phase L).
+//! `std.log` — the logs SDK surface.
 //!
 //! A facade over the [`Logging`](noeta_ext_abi::Logging) Host capability. Emits OTel `LogRecord`s:
 //! structured, exported log lines — **not** a `print`. The defining feature is **automatic

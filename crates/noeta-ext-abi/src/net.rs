@@ -1,4 +1,4 @@
-//! The `Network` capability's seam types (http arc H1): the request/response data that crosses
+//! The `Network` capability's seam types: the request/response data that crosses
 //! the [`crate::host::Network`] seam, the `Response` extern-type value behavior, and the default
 //! async fetch descriptor.
 //!
@@ -9,7 +9,7 @@ use crate::extern_value::ExternValue;
 use std::any::Any;
 use std::cmp::Ordering;
 
-/// The registered extern-type name of an HTTP response value (http arc H2): `http.get(url)`
+/// The registered extern-type name of an HTTP response value: `http.get(url)`
 /// returns one, and it narrows (`is Response`), compares by value, and exposes accessor methods.
 pub const RESPONSE_TYPE_NAME: &str = "Response";
 
@@ -30,7 +30,7 @@ pub struct NetRequest {
     pub headers: Vec<(String, String)>,
     /// The request body bytes — empty for a bodyless request.
     pub body: Vec<u8>,
-    /// The per-request deadline in milliseconds (http arc H7), or `None` for the host's default.
+    /// The per-request deadline in milliseconds, or `None` for the host's default.
     /// Set by a configured `Client`; the free verbs never carry one. Meaningless on an *inbound*
     /// request (the server side reuses this struct), where it stays `None`.
     pub timeout_ms: Option<u64>,
@@ -45,13 +45,13 @@ pub struct NetRequest {
     pub redirect_limit: Option<u32>,
 }
 
-/// The registered extern-type name of a transport failure (http arc H6).
+/// The registered extern-type name of a transport failure.
 pub const HTTP_ERROR_TYPE_NAME: &str = "HttpError";
 
 /// `HttpError`'s qualified runtime identity — the [`RESPONSE_TYPE_IDENTITY`] twin.
 pub const HTTP_ERROR_TYPE_IDENTITY: &str = "std.http.HttpError";
 
-/// Why a request never produced a response (http arc H6). A *transport* failure only — an HTTP
+/// Why a request never produced a response. A *transport* failure only — an HTTP
 /// error **status** is not one of these, it is an ordinary [`NetResponse`] the caller inspects with
 /// `ok()`/`status()`. That split is what lets `?` mean "the network broke" and nothing else.
 ///
@@ -125,7 +125,7 @@ impl NetErrorKind {
     }
 }
 
-/// A transport failure crossing the [`crate::host::Network`] seam (http arc H6): the classified
+/// A transport failure crossing the [`crate::host::Network`] seam: the classified
 /// twin of the [`NetResponse`] success. Carries the URL so a diagnostic names the request that
 /// failed without the caller having to thread it back through.
 ///
@@ -234,7 +234,7 @@ impl NetResponse {
     }
 }
 
-/// `NetResponse` IS the user-facing `Response` extern type (http arc H2) — pure, host-free, not
+/// `NetResponse` IS the user-facing `Response` extern type — pure, host-free, not
 /// key-capable. Accessor methods (`status`/`ok`/`body`/`body_bytes`/`header`) dispatch through the
 /// registry like `Uuid`'s; equality is by content, and it has no order.
 impl ExternValue for NetResponse {
@@ -264,7 +264,7 @@ impl ExternValue for NetResponse {
     }
 }
 
-/// Marshal a fetch outcome as the client's `Result<Response, HttpError>` (http arc H6). Shared by
+/// Marshal a fetch outcome as the client's `Result<Response, HttpError>`. Shared by
 /// the sync dispatch and every async descriptor (default, real, browser), so both doors return the
 /// identical shape and `await`ing an async verb yields the same `Result` the sync verb does.
 pub fn fetch_outcome(result: Result<NetResponse, NetError>) -> crate::NativeOut {
@@ -278,7 +278,7 @@ pub fn fetch_outcome(result: Result<NetResponse, NetError>) -> crate::NativeOut 
     }
 }
 
-/// The default async network descriptor (http arc H3): it performs the request synchronously
+/// The default async network descriptor: it performs the request synchronously
 /// through the Host **at spawn** and has no real body. The sandbox uses this (deterministic,
 /// resolved at spawn — the differential never observes a real body); the real host overrides
 /// [`crate::host::Network::net_spawn`] with a concurrent reqwest-backed descriptor. This is the
@@ -304,9 +304,9 @@ impl crate::ExternIo for NetFetchIo {
     }
 }
 
-// --- The server side (http-server S1) ------------------------------------------------------------
+// --- The server side ------------------------------------------------------------
 
-/// The registered extern-type name of an inbound HTTP request value (http-server S2): the serve
+/// The registered extern-type name of an inbound HTTP request value: the serve
 /// loop hands the handler one, and it reads the method/path/headers/body off it.
 pub const REQUEST_TYPE_NAME: &str = "Request";
 
@@ -316,8 +316,8 @@ pub const REQUEST_TYPE_IDENTITY: &str = "std.http.Request";
 /// An **inbound** HTTP request delivered to a server handler. Wraps the plain [`NetRequest`] the
 /// Network seam carries plus the `conn` id the serve loop replies to — the id rides *inside* the
 /// value so the loop can `net_reply` to the right connection after the handler returns, without a
-/// separate connection type in the language. The handler only ever sees the request accessors
-/// (http-server S2); `conn` is invisible to it.
+/// separate connection type in the language. The handler only ever sees the request accessors, and
+/// `conn` is invisible to it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Request {
     /// The connection this request arrived on — the serve loop replies here — or `None` for an
@@ -331,7 +331,7 @@ pub struct Request {
     pub inner: NetRequest,
 }
 
-/// `Request` is a pure, host-free extern type like [`NetResponse`]: accessor methods (S2) dispatch
+/// `Request` is a pure, host-free extern type like [`NetResponse`]: accessor methods dispatch
 /// through the registry, equality is by content, and it is not key-capable.
 impl ExternValue for Request {
     fn type_identity(&self) -> &'static str {
@@ -503,7 +503,7 @@ pub fn form_value(body: &str, name: &str) -> Option<String> {
 }
 
 /// The value of query parameter `name` in `url`'s query string (`?k=v&k2=v2`), or `None` — the
-/// dependency-free backing for a `Request`'s `query(name)` accessor (S2). First match wins, and the
+/// dependency-free backing for a `Request`'s `query(name)` accessor. First match wins, and the
 /// value is **percent-decoded**: a query string is percent-encoded by definition, so `?title=buy+milk`
 /// yields `buy milk` and `?q=caf%C3%A9` yields `café`. The key is decoded before matching too.
 pub fn query_value(url: &str, name: &str) -> Option<String> {
@@ -522,7 +522,7 @@ pub fn request_header<'a>(request: &'a NetRequest, name: &str) -> Option<&'a str
         .map(|(_, v)| v.as_str())
 }
 
-/// The default async accept descriptor (http-server S1): it resolves synchronously through the Host
+/// The default async accept descriptor: it resolves synchronously through the Host
 /// at spawn (the sandbox pops its request script; any host degrades serially) and has no real body.
 /// `RealHost` overrides [`crate::Network::net_accept`] with a genuine `TcpListener::accept().await`
 /// future — the same "serial degradation for free" the fs metadata twins and the client's
@@ -542,7 +542,7 @@ impl crate::ExternIo for AcceptIo {
     }
 }
 
-/// The default reply descriptor (http-server S1): writes the response through the Host at spawn
+/// The default reply descriptor: writes the response through the Host at spawn
 /// (the sandbox records it). `RealHost` overrides [`crate::Network::net_reply`] with an async
 /// socket write. One-shot — the response is moved out on the single run.
 #[derive(Debug)]
@@ -567,7 +567,7 @@ impl crate::ExternIo for ReplyIo {
     }
 }
 
-// ------------------------------------------------------------------ websocket hijack (L0)
+// ------------------------------------------------------------------ websocket hijack
 
 /// The websocket handshake GUID (RFC 6455 §4.2.2): `Sec-WebSocket-Accept` is
 /// `base64(sha1(key + GUID))`. Here so both hosts (and tests) share one constant.

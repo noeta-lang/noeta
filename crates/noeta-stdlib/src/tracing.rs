@@ -1,4 +1,4 @@
-//! `std.tracing` — the tracing SDK surface (native OTEL, T1–T3).
+//! `std.tracing` — the tracing SDK surface (T1–T3).
 //!
 //! A facade over the [`Tracing`](noeta_ext_abi::Tracing) Host capability. The span tree and
 //! export live host-side (the sandbox recorder / the real OTLP exporter); this module owns only the
@@ -13,7 +13,7 @@
 //! - `with_span(name, body) -> A` is the **scoped** form (the no-RAII answer, Class-2 `ctx.call`):
 //!   it starts a span, makes it the active parent for the duration of `body`, runs `body`, then ends
 //!   the span — **even if `body` aborts** (it records an error status and re-propagates). Returns
-//!   `body`'s value. An **async** body (T5c) returns its future and the span follows it through the
+//!   `body`'s value. An **async** body returns its future and the span follows it through the
 //!   backend's completion hook (`NativeCtx::trace_future`): every poll runs under the span's
 //!   context (spans created after a suspension still nest correctly) and the span ends when the
 //!   future completes — or aborts — so the duration is the work's, not the construction's.
@@ -249,7 +249,7 @@ pub fn tracing_ctx_dispatch<C: NativeCtx + ?Sized>(
             match result {
                 Ok(slot) => {
                     // An **async** body: `ctx.call` only constructed its future (lazily) — the
-                    // work hasn't run. Hand the future to the backend's completion hook (T5c):
+                    // work hasn't run. Hand the future to the backend's completion hook:
                     // its polls run under this span's context and the span ends when it
                     // completes, so the duration is the body's, not the construction's. A
                     // non-traceable future flavor falls back to ending now.
@@ -396,7 +396,7 @@ pub fn span_method_dispatch(
     }
 }
 
-// ----- active-span stack (the backend's task-local context, T5a) -----
+// ----- active-span stack (the backend's task-local context) -----
 //
 // The stack lives in the backend's per-strand context cell (`NativeCtx::context_*`), NOT in
 // per-run `ExtState`: the scheduler swaps each task's own stack in around its polls and a spawned
@@ -420,7 +420,7 @@ pub(crate) fn current_parent<C: NativeCtx + ?Sized>(ctx: &mut C) -> Option<Trace
 
 /// The **live** active span: the top of this task's stack, when that top is a real local span.
 ///
-/// The stack's top is not always one. Automatic propagation (T5d) seeds a receiving strand with a
+/// The stack's top is not always one. Automatic propagation seeds a receiving strand with a
 /// *remote-interned* pseudo-handle — a context that arrived on a channel message or across an
 /// isolate boundary, whose originating span lives in another host. It parents correctly (that is
 /// what it is for) but it is not live here, so every `tel_span_*` mutation no-ops on it. An

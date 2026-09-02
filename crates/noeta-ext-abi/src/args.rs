@@ -1,4 +1,4 @@
-//! Shared **argument extraction** for dispatch bodies (audit-2 F8) — the `want_*` guard family,
+//! Shared **argument extraction** for dispatch bodies — the `want_*` guard family,
 //! written once over both marshalling generations.
 //!
 //! Every dispatch re-validates what its declared signature already states (the checker gates
@@ -64,8 +64,8 @@ pub fn want_arity<T>(func: &str, args: &[T], expected: usize) -> Result<(), StdE
     }
 }
 
-/// Accept `min..=max` arguments — a function with trailing-optional parameters (http arc H4 /
-/// the core methods' optional-arg analogue). The checker already gates the range, so this is the
+/// Accept `min..=max` arguments — a function with trailing-optional parameters (the core methods'
+/// optional-arg analogue). The checker already gates the range, so this is the
 /// defensive twin of [`want_arity`]; on violation it reports `max` as the expected count.
 pub fn want_arity_range<T>(func: &str, args: &[T], min: usize, max: usize) -> Result<(), StdError> {
     if (min..=max).contains(&args.len()) {

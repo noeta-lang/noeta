@@ -1,8 +1,6 @@
-//! The **unified numeric-vector bundles** (scalar-unification slice 3): `vec.Kernels` (default
+//! The **unified numeric-vector bundles**: `vec.Kernels` (default
 //! arithmetic) and `vec.SatKernels` (saturating), each generic over the element type via the
-//! [`Scalar`](crate::scalar::Scalar) trait. These two bundles replace the three hand-written per-type
-//! bundles the array-ops arc shipped — `vec.Kernels` (f32, `vec3.rs`), `vec.IntKernels` (i32,
-//! `ivec.rs`), `vec.ColorKernels` (u8, `color.rs`) — collapsing them **by semantics, not by type**:
+//! [`Scalar`](crate::scalar::Scalar) trait. The two bundles divide **by semantics, not by type**:
 //!
 //! - **`vec.Kernels`** — DEFAULT arithmetic (wrap for integers, IEEE for floats), over ANY uniform
 //!   numeric `@packed` shape: every integer width `i8..u64`, `f32`, and now `f64`. Its constraint is
@@ -34,12 +32,10 @@ use crate::scalar::Scalar as Elem;
 use crate::{CtxError, CtxOut, CtxResult, NativeCtx, PackedField, Slot, ctx_arity};
 
 // ---------------------------------------------------------------------------------------------------
-// The two kernel traits (ExtBundle→ExtTrait convergence, slice 4 — the fold-in). Each was an
-// `ExtBundle` until this slice folded the bundle mechanism into `ExtTrait`: a fully-defaulted native
-// trait carrying a structural `self_constraint` (the old `ExtBundle::constraint`, slice 3),
-// native-derived `assoc_types` (`Wide`/`Float`, slice 1b — the old element-relative returns), and a
-// `dispatch` (the old `ctx_dispatch`, slice 2). The `impl vec.Kernels for T {}` / `@derive(vec.Kernels)`
-// surface is unchanged; the checker resolves the module-qualified spelling to these traits. The
+// The two kernel traits. Each is a fully-defaulted native `ExtTrait` carrying a structural
+// `self_constraint`, native-derived `assoc_types` (`Wide`/`Float`), and a `dispatch`. The
+// `impl vec.Kernels for T {}` / `@derive(vec.Kernels)` surface binds them; the checker resolves the
+// module-qualified spelling to these traits. The
 // per-method `receiver` marker keeps the bulk `*_all` forms on `List<Self>` (an accepted asymmetry).
 // ---------------------------------------------------------------------------------------------------
 
@@ -261,7 +257,7 @@ const KERNELS_METHODS: &[ExtTraitMethod] = &[
         RetTy::SameAsArg(0),
         BundleReceiver::Element,
     ),
-    // `abs` — the incidental gap the old f32 `vec.Kernels` lacked; now every width has it.
+    // `abs` — available at every width.
     tfn(
         "abs",
         &[],
@@ -688,7 +684,7 @@ fn distance_buf<S: Elem>(
 }
 
 /// The byte offset of element `i`'s field `k` within a buffer of `count` elements — row-major (each
-/// element's fields contiguous) or column-major (`[f0×n][f1×n]…`, P-SIMD). The generic reductions
+/// element's fields contiguous) or column-major (`[f0×n][f1×n]…`). The generic reductions
 /// respect the layout so a column buffer reduces correctly without a boxed detour.
 #[inline]
 fn field_at<S: Elem>(i: usize, k: usize, fields: usize, count: usize, column: bool) -> usize {

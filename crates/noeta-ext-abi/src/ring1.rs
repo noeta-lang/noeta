@@ -1,7 +1,7 @@
 //! The **Ring 1 semantic bodies** — the value-level string/int/collection/number semantics both
 //! backends execute, plus the legacy `Arg`/`Output` marshalling generation that carries them.
 //!
-//! Split out of the crate root (audit-2 F8) so `lib.rs` reads as the extension *contract*
+//! Split out of the crate root so `lib.rs` reads as the extension *contract*
 //! (`Extension`/`ExtModule`/`ExtType`/`NativeCtx`) rather than opening on a thousand lines of
 //! `pad_start` semantics. Everything here is re-exported at the crate root, so both backends and
 //! `noeta-stdlib` keep their existing paths — a verbatim move, not a new seam.
@@ -344,7 +344,7 @@ pub fn bytes_slice(data: &[u8], start: i64, end: Option<i64>) -> Result<Vec<u8>,
     Ok(data[start as usize..end as usize].to_vec())
 }
 
-/// Lowercase hex rendering of a byte buffer — the `bytes.to_hex()` method (crypto arc C1),
+/// Lowercase hex rendering of a byte buffer — the `bytes.to_hex()` method,
 /// defined once so both backends print digests identically.
 pub fn bytes_to_hex(data: &[u8]) -> String {
     let mut out = String::with_capacity(data.len() * 2);
@@ -357,8 +357,8 @@ pub fn bytes_to_hex(data: &[u8]) -> String {
 
 /// Format an `f64` for display and serialization: a whole finite value keeps one decimal place
 /// (`2.0`, not `2`), everything else uses the shortest round-tripping form. Both backends' `display`
-/// and the shared JSON serializer call this, so numbers render identically everywhere — the
-/// single source the two duplicated copies used to be.
+/// and the shared JSON serializer call this, so numbers render identically everywhere, from one
+/// source.
 pub fn format_float(f: f64) -> String {
     if f.is_finite() && f.fract() == 0.0 {
         format!("{f:.1}")
@@ -497,7 +497,7 @@ impl MapMethod {
     }
 }
 
-/// The bit-manipulation methods on `int` (P-BITS Tier B4) — the popcount-class intrinsics that turn a
+/// The bit-manipulation methods on `int` — the popcount-class intrinsics that turn a
 /// bitmask into an index/count. Enumerated (like [`ListMethod`]) so both backends' dispatch `match` is
 /// exhaustive; the actual computation is the shared [`int_method`] below, so the backends agree by
 /// construction. All operate on the full signed i64.
@@ -835,7 +835,7 @@ pub fn mask_to_width(value: i64, signed: bool, bits: u8) -> i64 {
 }
 
 /// A numeric scalar in either the integer or the float domain — the shared currency of the
-/// cross-domain conversion tower (S0 / P-VMT-CONV). Both backends read a receiver into one of these,
+/// cross-domain conversion tower. Both backends read a receiver into one of these,
 /// convert with [`num_convert`], and map the result back to their own `Value`. An integer (`int` or
 /// any fixed-width `IntN`) is carried as its erased, sign/zero-extended `i64` (the runtime
 /// representation); `f64` is the platform `float`, `f32` the 32-bit float.

@@ -1,5 +1,5 @@
-//! `std.reactive` — server-side signals (`signal`/`computed`/`effect`), **fully migrated** onto
-//! the extension ABI (higher-order-abi H5): the graph is per-run extension state over
+//! `std.reactive` — server-side signals (`signal`/`computed`/`effect`), built entirely on
+//! the extension ABI: the graph is per-run extension state over
 //! [`Retained`] arena cells, the handles are generic extern types, and the flush/coalescing/
 //! E0045 machinery is ordinary Rust in these dispatches. Neither backend knows reactivity exists.
 //!
@@ -84,8 +84,8 @@ pub const REACTIVE_CTX_FNS: &[ExtFn] = &[
         params: &[SigType::Fn(&[], &SigType::Dyn)],
         ret: RetTy::Concrete(SigType::Named(EFFECT_TYPE_NAME)),
     },
-    // `view() -> View` — a named window onto reactive state for the diff-push transport
-    // (server-hmr L1); see [`view_ctx_method_dispatch`] for the protocol.
+    // `view() -> View` — a named window onto reactive state for the diff-push transport;
+    // see [`view_ctx_method_dispatch`] for the protocol.
     ExtFn {
         param_names: &[],
         name: "view",
@@ -186,22 +186,22 @@ pub const COMPUTED_ARENA_GETTER: ArenaGetter = ("get", |e| computed_box(e).memo)
 pub(crate) struct ReactiveExt {
     pub graph: ReactiveGraph<Retained>,
     gates_open: std::cell::Cell<bool>,
-    /// Every live effect `(node, body)` in creation order — the hot-swap epoch registry
-    /// (server-hmr H1). A swap that re-runs the top level disposes all of them first
+    /// Every live effect `(node, body)` in creation order — the hot-swap epoch registry.
+    /// A swap that re-runs the top level disposes all of them first
     /// ([`hotswap_dispose_effects`]) and lets the re-run re-create them; a user-level
     /// `.dispose()` prunes its entry so the swap never double-releases a body cell.
     effects: std::cell::RefCell<Vec<(NodeId, Retained)>>,
-    /// Every `view()` created this run (server-hmr L1) — the diff-push subscribers. Views are
+    /// Every `view()` created this run — the diff-push subscribers. Views are
     /// never removed (they live with the run, like the graph); a swap's top-level re-run builds
     /// fresh ones and the old, unreferenced entries just stop being polled. Borrowed **mutably
     /// only in short, non-reentrant windows** — never across a body run.
     views: std::cell::RefCell<Vec<ViewState>>,
     /// Reused drain buffer for [`distribute_changes`] — a hot set→flush loop allocates nothing.
     changed_scratch: std::cell::RefCell<Vec<NodeId>>,
-    /// Reused drain buffer for [`release_reclaimed`] — the owner-tree cell reclaim (S4b) allocates
+    /// Reused drain buffer for [`release_reclaimed`] — the owner-tree cell reclaim allocates
     /// nothing in the steady state.
     reclaimed_scratch: std::cell::RefCell<Vec<Retained>>,
-    /// Whether the opt-in flush telemetry is on (server-hmr L4 / native-otel T5e): resolved once
+    /// Whether the opt-in flush telemetry is on: resolved once
     /// per run on first use — `tel_enabled()` AND `NOETA_TRACE_REACTIVE` truthy — then a plain
     /// bool read on the hot path. `None` until the first flush asks.
     trace: std::cell::Cell<Option<bool>>,
@@ -249,8 +249,8 @@ pub(crate) fn sync_gates<C: NativeCtx + ?Sized>(ctx: &mut C, ext: &ReactiveExt) 
     }
 }
 
-/// Release the arena cells of owner-tree children the graph disposed since the last drain
-/// (reactivity S4b) — the client half of the value-generic core's reclaim buffer. Cheap when empty
+/// Release the arena cells of owner-tree children the graph disposed since the last drain — the
+/// client half of the value-generic core's reclaim buffer. Cheap when empty
 /// (the steady state); called after every read/flush/dispose so a body that creates-then-drops
 /// reactive nodes each run reclaims their backing cells on the spot rather than at scope end.
 pub(crate) fn release_reclaimed<C: NativeCtx + ?Sized>(ctx: &mut C, ext: &ReactiveExt) {
@@ -274,15 +274,15 @@ pub(crate) fn release_reclaimed<C: NativeCtx + ?Sized>(ctx: &mut C, ext: &Reacti
     }
 }
 
-/// Run every queued effect to a fixpoint (the ordinary Rust that used to be each backend's
-/// `drive_flush`): bodies run via the fused [`NativeCtx::run_thunk`]; an abort inside a body is
+/// Run every queued effect to a fixpoint: bodies run via the fused [`NativeCtx::run_thunk`]; an
+/// abort inside a body is
 /// stashed and re-raised (the flush stops), and a non-converging update is the E0045
 /// reactive-cycle diagnostic. Gates are re-synced when the dust settles.
 pub(crate) fn drive_flush<C: NativeCtx + ?Sized>(
     ctx: &mut C,
     ext: &ReactiveExt,
 ) -> Result<(), CtxError> {
-    // Opt-in flush telemetry (server-hmr L4 / native-otel T5e): a span only when the flag is on
+    // Opt-in flush telemetry: a span only when the flag is on
     // AND the flush will actually run something — a no-op flush (a `set` with no subscribers)
     // emits nothing. The span is pushed as the active context so spans the effect bodies create
     // nest under it, connecting reactive propagation into the request/session trace.
@@ -312,9 +312,9 @@ pub(crate) fn drive_flush<C: NativeCtx + ?Sized>(
         })
         .is_err();
     sync_gates(ctx, ext);
-    // Release the cells of any owner-tree children the reruns disposed (reactivity S4b).
+    // Release the cells of any owner-tree children the reruns disposed.
     release_reclaimed(ctx, ext);
-    // The flush subscriber (server-hmr L1): every change path funnels through here (a top-level
+    // The flush subscriber: every change path funnels through here (a top-level
     // `set`/`update`/effect-creation/synced-merge drives a flush even when no effect is queued;
     // a set *inside* a flush lands in the graph's change log and is drained by this outer call),
     // so distributing once per flush marks every view binding whose node changed.
@@ -350,8 +350,8 @@ pub(crate) fn drive_flush<C: NativeCtx + ?Sized>(
     Ok(())
 }
 
-/// Resolve (once per run, then a plain bool read) the opt-in flush-telemetry flag (server-hmr
-/// L4): spans are emitted only when telemetry is active AND `NOETA_TRACE_REACTIVE` is `1`/`true`
+/// Resolve (once per run, then a plain bool read) the opt-in flush-telemetry flag: spans are
+/// emitted only when telemetry is active AND `NOETA_TRACE_REACTIVE` is `1`/`true`
 /// — per-flush tracing is far too noisy for default-on, and the flush is a perf-gated hot path,
 /// so the off state must cost one cached-bool branch.
 fn reactive_tracing<C: NativeCtx + ?Sized>(ctx: &mut C, ext: &ReactiveExt) -> bool {
@@ -367,7 +367,7 @@ fn reactive_tracing<C: NativeCtx + ?Sized>(ctx: &mut C, ext: &ReactiveExt) -> bo
     on
 }
 
-/// Hot-swap hook (server-hmr H1): dispose **every live effect** and release its body cell — the
+/// Hot-swap hook: dispose **every live effect** and release its body cell — the
 /// swap's re-run of the (new) top level re-creates the ones that still exist. Exactly the
 /// user-level `.dispose()` per effect, driven off the epoch registry. A program that never touched
 /// reactivity gets an empty state and this is a no-op.
@@ -380,12 +380,12 @@ pub fn hotswap_dispose_effects<C: NativeCtx + ?Sized>(ctx: &mut C) {
         ext.graph.dispose(node);
         ctx.release_retained(body);
     }
-    // Each root effect's dispose cascades to its owner-tree children (S4b) — release their cells.
+    // Each root effect's dispose cascades to its owner-tree children — release their cells.
     release_reclaimed(ctx, ext);
     sync_gates(ctx, ext);
 }
 
-/// Hot-swap hook (server-hmr H1): the given slots hold globals a swap fragment is about to
+/// Hot-swap hook: the given slots hold globals a swap fragment is about to
 /// re-bind. Any that carry a `Signal`/`Computed` handle gets its graph node disposed, so the
 /// replaced node stops participating in flushes (a preserved subscriber re-subscribes to the
 /// replacement on its next run — dependency edges are rebuilt per run). The content/memo arena
@@ -412,12 +412,12 @@ pub fn hotswap_dispose_handles<C: NativeCtx + ?Sized>(ctx: &mut C, handles: &[Sl
     for node in nodes {
         ext.graph.dispose(node);
     }
-    // A disposed handle may own owner-tree children (S4b) — release their cells.
+    // A disposed handle may own owner-tree children — release their cells.
     release_reclaimed(ctx, ext);
     sync_gates(ctx, ext);
 }
 
-// ----- views: the diff-push transport's flush subscriber (server-hmr L1) -----
+// ----- views: the diff-push transport's flush subscriber -----
 //
 // A `View` is a set of named bindings onto `Signal`/`Computed` (and `SyncedSignal`) handles plus
 // per-binding dirt and a serialized baseline. The graph's change log (drained once per flush by
@@ -455,8 +455,7 @@ struct ViewBinding {
 // the reactive extension contract. `view.expose` recognizes a foreign node type (e.g.
 // `para.synced`'s `SyncedSignal`) by consuming the foreign extension's `ViewSourceExtract`
 // **capability** after its own built-in `Signal`/`Computed` handles — without naming or depending
-// on that type, and scoped to the run's registry (audit-2 Finding 12: this replaced a
-// process-global extractor list).
+// on that type, and scoped to the run's registry rather than a process-global extractor list.
 
 // ===== The `ReactiveSource` capability provider (the capability-broker seam) =====================
 //
@@ -535,7 +534,7 @@ struct ViewState {
 /// Drain the graph's change log and mark every matching binding dirty, in every view. Runs once
 /// per [`drive_flush`]; alloc-free in the steady state (the drain buffer is reused, and with no
 /// views the log is empty because observation is only switched on by `view()`). Returns the
-/// number of distinct changed nodes (the `reactive.changed` span attribute, server-hmr L4).
+/// number of distinct changed nodes (the `reactive.changed` span attribute).
 fn distribute_changes(ext: &ReactiveExt) -> usize {
     let mut changed = ext.changed_scratch.borrow_mut();
     changed.clear();
@@ -587,7 +586,7 @@ fn binding_value_json<C: NativeCtx + ?Sized>(
                 memo
             });
             sync_gates(ctx, ext);
-            // The recompute may have torn down owner-tree children (S4b) — release their cells.
+            // The recompute may have torn down owner-tree children — release their cells.
             release_reclaimed(ctx, ext);
             if let Some(e) = aborted {
                 return Err(e);
@@ -805,7 +804,7 @@ pub fn view_ctx_method_dispatch<C: NativeCtx + ?Sized>(
                     })
                     .collect()
             };
-            // Opt-in diff telemetry (server-hmr L4): a span only when there is dirt to inspect,
+            // Opt-in diff telemetry: a span only when there is dirt to inspect,
             // active while serializing (a recompute's own spans nest under it). Aborts are
             // captured, not propagated mid-span, so the context stack cannot be left imbalanced.
             let dirty_count = work.len() as i64;
@@ -938,7 +937,7 @@ pub fn reactive_ctx_dispatch<C: NativeCtx + ?Sized>(
             let state = state_of(ctx);
             let ext = state.borrow();
             let ext: &ReactiveExt = ext.downcast_ref().expect("std.reactive state");
-            // The memo cell is seeded into the node too, so an owner-tree teardown (S4b) can reclaim
+            // The memo cell is seeded into the node too, so an owner-tree teardown can reclaim
             // it even for a computed that is disposed before it is ever read.
             let node = ext.graph.computed(body, memo);
             // Created dirty — the memo gate is now closed until the first read.
@@ -1047,8 +1046,7 @@ pub fn signal_ctx_method_dispatch<C: NativeCtx + ?Sized>(
         }
         "update" => {
             ctx_arity(method, args, 1)?;
-            // Read-modify-write: the read records a dependency edge if a body is running,
-            // exactly as the old backend arms did (they read via `read_reactive`).
+            // Read-modify-write: the read records a dependency edge if a body is running.
             let state = state_of(ctx);
             {
                 let ext = state.borrow();
@@ -1118,7 +1116,7 @@ pub fn computed_ctx_method_dispatch<C: NativeCtx + ?Sized>(
                 memo
             });
             sync_gates(ctx, ext);
-            // A recompute reruns the computed's body, which may have disposed owned children (S4b).
+            // A recompute reruns the computed's body, which may have disposed owned children.
             release_reclaimed(ctx, ext);
             if let Some(e) = aborted {
                 return Err(e);
@@ -1153,7 +1151,7 @@ pub fn effect_ctx_method_dispatch<C: NativeCtx + ?Sized>(
             // Prune the hot-swap epoch registry so a later swap never double-releases this body.
             ext.effects.borrow_mut().retain(|(n, _)| *n != node);
             sync_gates(ctx, ext);
-            // Disposing an effect cascades to its owner-tree children (S4b) — release their cells.
+            // Disposing an effect cascades to its owner-tree children — release their cells.
             release_reclaimed(ctx, ext);
             // The node held only ids; the body's arena cell is ours to release (its closure —
             // and whatever it captured — drops at its last reference, destructor-aware).

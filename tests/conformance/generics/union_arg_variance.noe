@@ -1,0 +1,105 @@
+// Reading an existing value at a **union** type argument — a `C<Dog>` as a `C<Dog | Cat>` — where
+// the declaration makes it sound. It is the same widening as reading it at a `dyn Trait` or at the
+// open `dyn`, and the declaration decides all of them the same way: a widened view is unsafe only
+// where a value of the wider type can be written back through it into something whose own type says
+// `Dog`.
+//
+// The two other shapes the union argument has to keep working are here too, because both are
+// decided by the same arm and neither is a widening:
+//
+//   * **Reflexivity**, `Box<Dog | Cat>` read as a `Box<Dog | Cat>`. `Box` is invariant, so this pair
+//     is decided without forming a widening anywhere: the two unions match by their member sets. A
+//     rule that decomposed it into `Dog <: Dog | Cat` would refuse a value being read at its own
+//     type.
+//   * **Member order**, `Box<Dog | Cat>` read as a `Box<Cat | Dog>`. A union is its set of members,
+//     so the two spellings name one type and either reaches the other.
+//
+// Each widened view is used afterwards, because a widening that type-checks and yields the wrong
+// value is the failure this file exists to exclude. The last three lines store through the original
+// `Box` and read the two views back: they alias it, and the store is a `Cat` into a slot both views
+// already call `Dog | Cat`, which is what makes the aliasing sound rather than merely permitted.
+// expect: stdout "dog"
+// expect: stdout "woof"
+// expect: stdout "dog"
+// expect: stdout "dog"
+// expect: stdout "cat"
+// expect: stdout "cat"
+// expect: exit 0
+trait Speak {
+    fn speak(): string
+}
+
+struct Dog {
+    impl Speak {
+        pub fn speak(): string {
+            return "woof"
+        }
+    }
+}
+
+struct Cat {
+    impl Speak {
+        pub fn speak(): string {
+            return "meow"
+        }
+    }
+}
+
+// A value struct: even a `mut` field is a read position as far as the ORIGINAL is concerned, because
+// a struct field-set rebinds the binding rather than writing through a shared object.
+struct Cell<T> {
+    mut v: T
+}
+
+// A reference class whose field is immutable and whose method only hands the parameter out.
+class Reader<T> {
+    v: T
+
+    pub fn new(v: T): Reader<T> {
+        return Reader { v: v }
+    }
+
+    pub fn get(): T {
+        return self.v
+    }
+}
+
+// A reference class with a `mut` field of the parameter's type: invariant, so every pair below that
+// mentions it relates two `Box`es of the SAME argument.
+class Box<T> {
+    pub mut v: T
+
+    pub fn new(v: T): Box<T> {
+        return Box { v: v }
+    }
+}
+
+// Takes the union, so calling it through a widened view is what proves the view carries the wider
+// static type rather than merely being accepted.
+fn kind_of(x: Dog | Cat): string {
+    if x is Dog {
+        return "dog"
+    }
+    return "cat"
+}
+
+c: Cell<Dog> = Cell { v: Dog {} }
+widened_cell: Cell<Dog | Cat> = c
+echo kind_of(widened_cell.v)
+echo c.v.speak()
+
+r: Reader<Dog> = Reader.new(Dog {})
+widened_reader: Reader<Dog | Cat> = r
+echo kind_of(widened_reader.get())
+
+// The construction the refusal's help line points at: a `Box<Dog>` cannot be read as a
+// `Box<Dog | Cat>`, and a `Box` built where the wider type is stated instantiates its argument at
+// the union directly.
+b: Box<Dog | Cat> = Box.new(Dog {})
+echo kind_of(b.v)
+
+same: Box<Dog | Cat> = b
+reordered: Box<Cat | Dog> = b
+b.v = Cat {}
+echo kind_of(same.v)
+echo kind_of(reordered.v)

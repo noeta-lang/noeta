@@ -1,15 +1,14 @@
-//! The `fs.open` cursor file handle (M2.5): a **mutable** streaming handle, shared by both
+//! The `fs.open` cursor file handle: a **mutable** streaming handle, shared by both
 //! backends so its observable behavior is identical by construction.
 //!
 //! A handle is the project's first mutable heap value type beyond field assignment, and the
 //! differential oracle compares it on the sandbox path — so the cursor logic must be byte-identical
 //! across the tree-walker and the VM. Keeping the whole state machine here (the tree-walker wraps it
-//! in `Rc<RefCell<FileHandle>>`, the VM stores it in a heap `Payload::Extern(ExternBox)` — the
-//! generic extern-value mechanism that superseded the old bespoke `Payload::FileHandle` variant)
-//! makes that
-//! identity structural rather than a property the two backends each re-derive.
+//! in `Rc<RefCell<FileHandle>>`, the VM stores it in a heap `Payload::Extern(ExternBox)`, the
+//! generic extern-value mechanism) makes that identity structural rather than a property the two
+//! backends each re-derive.
 //!
-//! ## A handle is a reference type — by design (Phase 5.2b)
+//! ## A handle is a reference type — by design
 //!
 //! Unlike the language's data (strings, lists, maps, records — value-semantic, copy-on-write), a
 //! file handle has **reference semantics**: it is a stateful external *resource* with identity. Its
@@ -35,13 +34,12 @@
 //! persists its buffer; that is the deliberate must-close-to-flush contract, and it is the same on
 //! both backends.
 //!
-//! ## Eager vs lazy reads (P-LAZY)
+//! ## Eager vs lazy reads
 //!
 //! A read handle does not own a file descriptor — the pure handle cannot reach the host — so its
 //! refill strategy is supplied at open as a [`ReadSource`]. The deterministic [`crate::SandboxHost`]
 //! hands over a whole-file [`ReadSource::Snapshot`]: the content is buffered up front and the cursor
-//! streams over it with no further host calls, exactly as before P-LAZY (so the differential is
-//! unchanged). The real host hands over a [`ReadSource::Lazy`] reader id and the handle pulls more
+//! streams over it with no further host calls. The real host hands over a [`ReadSource::Lazy`] reader id and the handle pulls more
 //! bytes on demand via [`crate::FileReader::fs_read_more`] as the cursor consumes them — so a large file is
 //! never buffered whole. The cursor/line/character logic below is identical for both; only where the
 //! bytes come from differs.
@@ -234,8 +232,8 @@ impl FileHandle {
 
     /// Pull the next chunk from a lazy source into `buffer`, returning whether anything was appended.
     /// An eager (snapshot) handle has nothing more to pull, so this is always `false` for it — which
-    /// is what makes the refill loops above no-ops on the snapshot path (behavior identical to the
-    /// pre-P-LAZY handle, so the sandbox differential is unchanged). The host delivers valid-UTF-8
+    /// is what makes the refill loops above no-ops on the snapshot path. The host delivers
+    /// valid-UTF-8
     /// chunks (it reads a line at a time), so appending can never split a character.
     fn fill_more(&mut self, host: &mut dyn FileReader) -> Result<bool, StdError> {
         // Copy the id out (so the `&mut self.backing` borrow ends) before touching `self.buffer`.
@@ -333,7 +331,7 @@ fn not_writable_error(path: &str) -> StdError {
         message: format!("file handle for `{path}` is not open for writing"),
     }
 }
-/// The `FileHandle` extern-value contract (extern-types X3): the hand-threaded hosting variants
+/// The `FileHandle` extern-value contract: the hand-threaded hosting variants
 /// are gone — both backends hold a handle through the one extern seam. Equality stays the full
 /// shared-state comparison (the derived `PartialEq`: path, mode, cursor, buffer, closed);
 /// unordered and NOT key-capable (a handle mutates — its hash/order could go stale under a key).

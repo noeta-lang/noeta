@@ -1,9 +1,9 @@
-//! The `task` concurrency module (higher-order-abi H0/H2): the async combinators, registered
+//! The `task` concurrency module: the async combinators, registered
 //! through the higher-order **ctx** dispatch table because they need the executor (and, for the
 //! combinators, closure call-backs) — capabilities the plain value-in/value-out registry seam
 //! deliberately does not carry.
 //!
-//! `sleep` was the seam's proving client (H0); `all`/`race`/`map_bounded` (H2) are the first
+//! `sleep` was the seam's proving client; `all`/`race`/`map_bounded` are the first
 //! genuine orchestrators — they call closures back, poll many futures, drive the scheduler — and
 //! their loops here are line-for-line the drive loops the deleted per-backend `Builtin` arms
 //! duplicated. One shared body, so the backends agree by construction; the slot table owns every
@@ -59,7 +59,7 @@ pub const TASK_CTX_FNS: &[ExtFn] = &[
     },
 ];
 
-/// Validate a list argument with the migrated builtins' own message shape (`` `all` expects a
+/// Validate a list argument with the builtins' own message shape (`` `all` expects a
 /// list of futures, found int ``) and hand back its length.
 fn expect_list(
     ctx: &mut dyn NativeCtx,

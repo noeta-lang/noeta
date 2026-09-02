@@ -4,7 +4,7 @@
 //! ## Why in-memory, not the real disk
 //!
 //! File IO has to be in the standard library, but the project's spine is the differential oracle
-//! (`TreeWalkBackend` ≡ `VmBackend` on every program) and a hard determinism rule (no wall clock,
+//! (`IrRefBackend` ≡ `VmBackend` on every program) and a hard determinism rule (no wall clock,
 //! no ambient machine state). Touching the real disk would break both: the two backends run in
 //! the same process during a differential check and would clobber each other's files, and the
 //! result would depend on the host's filesystem.
@@ -18,7 +18,7 @@
 //! preferred here. Real-disk / streaming IO is an M2 concern — see the slice plan.)
 //!
 //! Paths are `/`-separated keys. The namespace is flat at heart — a file is just a key in a map —
-//! but the surface presents a **directory hierarchy** (M2.5): a path's parent directories exist
+//! but the surface presents a **directory hierarchy**: a path's parent directories exist
 //! implicitly whenever it holds a file, and `mkdir` records explicit (possibly empty) directories.
 //! `list_dir` returns a directory's immediate children, and `is_dir` reports whether a path names a
 //! directory. Listing is sorted (the backing stores are ordered), so every `fs` query is
@@ -33,7 +33,7 @@ use std::collections::{BTreeMap, BTreeSet};
 #[derive(Debug, Default, Clone)]
 pub struct Vfs {
     /// Path → raw file bytes. A filesystem stores bytes; the text API ([`Vfs::read`]/[`Vfs::write`])
-    /// is the UTF-8 view, the binary API ([`Vfs::read_bytes`]/[`Vfs::write_bytes`], P-PACK 4.4) the
+    /// is the UTF-8 view, the binary API ([`Vfs::read_bytes`]/[`Vfs::write_bytes`]) the
     /// raw view — so a list serialized with `to_bytes` survives a write/read round-trip exactly.
     files: BTreeMap<String, Vec<u8>>,
     /// Directories created with [`Vfs::mkdir`]. A directory also exists *implicitly* whenever a
@@ -71,13 +71,13 @@ impl Vfs {
         }
     }
 
-    /// Write (creating or overwriting) the file at `path` with raw bytes (P-PACK 4.4 `fs.write_bytes`).
+    /// Write (creating or overwriting) the file at `path` with raw bytes (`fs.write_bytes`).
     pub fn write_bytes(&mut self, path: &str, data: &[u8]) {
         self.files.insert(path.to_string(), data.to_vec());
     }
 
     /// Read the file at `path` as raw bytes, or an [`ErrorKind::Io`] error if it does not exist
-    /// (P-PACK 4.4 `fs.read_bytes`).
+    /// (`fs.read_bytes`).
     pub fn read_bytes(&self, path: &str) -> Result<Vec<u8>, StdError> {
         match self.files.get(path) {
             Some(bytes) => Ok(bytes.clone()),
@@ -173,7 +173,7 @@ pub fn not_found_error(path: &str) -> StdError {
     }
 }
 
-/// The "file is not valid UTF-8" error (→ `E0021`) — reading a binary file as text (P-PACK 4.4).
+/// The "file is not valid UTF-8" error (→ `E0021`) — reading a binary file as text.
 pub fn not_utf8_error(path: &str) -> StdError {
     StdError {
         kind: ErrorKind::Io,

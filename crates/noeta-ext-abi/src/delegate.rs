@@ -1,11 +1,11 @@
-//! Host-capability **delegation** (audit-2 F7 / audit-6 F9): forwarding `impl`s for the [`crate::Host`]
+//! Host-capability **delegation**: forwarding `impl`s for the [`crate::Host`]
 //! union's capability traits, generated per capability by [`delegate_host!`](crate::delegate_host).
 //!
-//! A custom `Host` is otherwise all-or-nothing: the union is 12 supertraits and ~70 required
-//! methods, so an embedder that wants to override ONE capability (expose the engine's world as
-//! the fs/env, say) used to hand-write ~70 forwarding methods around a `SandboxHost` — and every
-//! capability later added to the union silently broke every out-of-tree host. With the macro, a
-//! wrapper hand-implements only what it changes and names the rest:
+//! A custom `Host` is otherwise all-or-nothing: the union is 14 supertraits, so an embedder that
+//! wants to override ONE capability (expose the engine's world as the fs/env, say) would hand-write
+//! a forwarding method for every method of every other one around a `SandboxHost` — and every
+//! capability later added to the union would silently break every out-of-tree host. With the macro,
+//! a wrapper hand-implements only what it changes and names the rest:
 //!
 //! ```ignore
 //! struct EngineHost { base: SandboxHost, world: World }
@@ -19,7 +19,7 @@
 //!     Tracing, Metrics, Logging);
 //! ```
 //!
-//! The same arms serve the **component** direction (audit-6 F9): a host that embeds per-capability
+//! The same arms serve the **component** direction: a host that embeds per-capability
 //! state structs (a seeded RNG, a logical clock) forwards each capability to its own field with one
 //! invocation per field — `SandboxHost` in `noeta-stdlib` is the in-tree proof.
 //!
@@ -361,7 +361,7 @@ macro_rules! __delegate_host_capability {
             fn net_ws_close(&self, conn: u64) -> Box<dyn $crate::ExternIo> {
                 self.$field.net_ws_close(conn)
             }
-            // Streaming bodies (http-streaming arc).
+            // Streaming bodies.
             fn net_stream_open(
                 &mut self,
                 request: $crate::NetRequest,

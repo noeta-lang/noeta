@@ -10,7 +10,7 @@
 //! constructed and drops it in its `Drop` impl. A program that reclaims cleanly returns the count
 //! to its starting value; the known global-function ↔ global-scope cycle keeps a `Scope` (and its
 //! `Closure`) alive past exit, so the oracle reports a positive residual for programs with
-//! top-level functions — the exact debt Phase 6 drives to zero.
+//! top-level functions — the debt the cycle collector drives to zero.
 //!
 //! The count is a signed integer so that a *missing* increment (a construction site that forgot to
 //! route through the counted constructor) surfaces as a negative count rather than an unsigned
