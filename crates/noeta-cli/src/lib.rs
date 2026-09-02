@@ -261,11 +261,11 @@ enum Command {
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         format: OutputFormat,
     },
-    /// Start an interactive REPL. Entries type-check before running (an entry with a type error
-    /// prints its `E0xxx` diagnostics and is skipped) — the default since session-checker C2/C5.
+    /// Start an interactive REPL. Entries type-check before running, and an entry with a type
+    /// error prints its `E0xxx` diagnostics and is skipped.
     Repl {
-        /// Skip per-entry type checking (the pre-C2 behavior: every well-parsed entry runs, type
-        /// errors surface at run time). Also toggleable at the prompt with `:check on` / `:check off`.
+        /// Skip per-entry type checking: every well-parsed entry runs, and type errors surface at
+        /// run time. Also toggleable at the prompt with `:check on` / `:check off`.
         #[arg(long)]
         no_check: bool,
         /// Run this program to completion first (fully checked, imports resolved), then open the
@@ -289,11 +289,9 @@ enum Command {
     Mcp,
     /// Install editor tooling matching this toolchain. `--vscode` downloads the Noeta VS Code
     /// extension (`noeta-<version>.vsix`) from **this binary's own GitHub release** and installs
-    /// it via the editor's `--install-extension` — the extension is pinned to the binary's
-    /// version so grammar and language-server behavior always match the toolchain; after
-    /// `noeta upgrade`, run `noeta ide --vscode` again to move the extension in step. The
-    /// release asset is the install path while the marketplace listing is pending, and remains
-    /// the one for VSCodium and offline installs.
+    /// it via the editor's `--install-extension`. The extension is pinned to the binary's version,
+    /// so grammar and language-server behavior match the toolchain. After `noeta upgrade`, run
+    /// `noeta ide --vscode` again to move the extension in step.
     Ide {
         /// Install the VS Code extension: download this release's `.vsix`, verify it against the
         /// release's `SHA256SUMS`, and run `<editor> --install-extension --force` (re-running
@@ -357,7 +355,7 @@ enum Command {
     // extension-contributed command, `noeta-stdlib/src/serve.rs::SERVE_COMMAND`, wired
     // dynamically in `main`.)
     /// Inspect or clean the per-user cache (`~/.cache/noeta/`). It holds three kinds of derived
-    /// state: cached compilations (`*.noeb` — the transparent startup cache, M3), composed
+    /// state: cached compilations (`*.noeb`, the transparent startup cache), composed
     /// toolchains (`compose/` — a full build per native-dependency set, easily 1–2 GiB each),
     /// and fetched package sources (`pkg/`). Everything in it is re-derivable, so deleting any
     /// of it is always safe — the next run recompiles, recomposes, or refetches what it needs.
@@ -393,7 +391,7 @@ enum Command {
         #[arg(long, value_name = "remove|add|preserve")]
         semicolons: Option<noeta_fmt::SemicolonStyle>,
     },
-    /// Generate editor grammar artifacts for this project's declared text tiers (text-tiers arc).
+    /// Generate editor grammar artifacts for this project's declared text tiers.
     /// A project's `@tier(<name>, text: "<lang>")` declarations open verbatim `@<name> { … }` bodies
     /// a *static* editor grammar cannot know about; this emits a per-project overlay so those bodies
     /// parse (and highlight) as their language. Mirrors the VS Code extension's TextMate generator.
@@ -401,7 +399,7 @@ enum Command {
         #[command(subcommand)]
         target: GrammarTarget,
     },
-    /// Add a dependency to the nearest `noeta.toml` and refresh `noeta.lock` (package-manager P2.4).
+    /// Add a dependency to the nearest `noeta.toml` and refresh `noeta.lock`.
     /// `noeta add company/pkg` needs no source: the registry is asked for the package's **current
     /// version** and a caret requirement for it is written (`0.2.0` → `^0.2`), so nothing has to
     /// hard-code a version that goes stale. A prerelease or a yanked release is never selected that
@@ -439,9 +437,9 @@ enum Command {
         #[arg(long)]
         package: Option<String>,
     },
-    /// Re-resolve dependencies and rewrite `noeta.lock` (package-manager P2.4): a git tag is
-    /// re-fetched at the remote and re-pinned to its current commit SHA, so `update` picks up a
-    /// moved tag that a locked build would otherwise reproduce from the old commit.
+    /// Re-resolve dependencies and rewrite `noeta.lock`: a git tag is re-fetched at the remote and
+    /// re-pinned to its current commit SHA, so `update` picks up a moved tag that a locked build
+    /// would otherwise reproduce from the old commit.
     Update,
     /// Self-update the **toolchain binary** from GitHub releases — the counterpart of `update`,
     /// which re-resolves a *project's dependencies*. Resolves the latest release, verifies the
@@ -458,10 +456,17 @@ enum Command {
         #[arg(long, conflicts_with = "version")]
         check: bool,
     },
-    /// Publish this package to the registry index (package-manager P2.5). Records this package's
-    /// `[package]` name + version → its git coordinates so others can depend on it by version. This
-    /// is the **client stub**: it writes to the local/offline index (`NOETA_REGISTRY_DIR`); the
-    /// hosted registry service is built and operated separately.
+    /// Publish a tagged release of this package to the registry, so others can depend on it by
+    /// version. Resolves `--tag` to its commit SHA, records this package's `[package]` name and
+    /// version against those git coordinates, and, when a signing identity is available, attests
+    /// the release with a signature over name + version → commit that a consumer verifies without
+    /// trusting the index (`--key` selects which identity signs). The
+    /// documentation artifact and `README.md` ride along by default. A published version is
+    /// immutable, and a manifest with `path`/`git` dependencies or a `[patch]` table is refused.
+    /// The release goes to the index this package's scope routes to: a `[registries]` entry for
+    /// the scope, else `NOETA_REGISTRY_URL`, else the file-backed local index at
+    /// `NOETA_REGISTRY_DIR`, else the hosted registry at `registry.noeta.dev`. A hosted registry
+    /// authenticates with the scope's publish token in `NOETA_REGISTRY_TOKEN` (see `noeta claim`).
     Publish {
         /// The git repository URL the release's source lives at. Not needed with `--docs-only`
         /// (nothing is pinned or published).
@@ -502,27 +507,32 @@ enum Command {
         #[arg(long, conflicts_with_all = ["no_docs", "no_readme", "key", "interactive", "oob", "tag"])]
         docs_only: bool,
     },
-    /// Report the dependency tree's **trust footprint** (package-manager Phase 4): every resolved
-    /// dependency, its source, and which ones run **native code** or contribute **CLI commands** —
-    /// the elevated authority your `[trust]` grants make active. Informed-consent transparency:
-    /// answer "what am I actually running?" before you build.
+    /// Report the dependency tree's **trust footprint**: every resolved dependency, its source,
+    /// and which ones run **native code** or contribute **CLI commands** under the elevated
+    /// authority your `[trust]` grants make active. It also checks each dependency against the
+    /// registry's security advisory feed. Answers "what am I actually running?" before you build.
     Audit {
         /// A file or directory in the project to audit (default: the current directory).
         #[arg(default_value = ".")]
         path: PathBuf,
     },
-    /// Manage the Ed25519 signing key used to attest published packages (package-manager Phase 4).
+    /// Manage the Ed25519 signing key used to attest published packages.
     Key {
         #[command(subcommand)]
         action: KeyAction,
     },
-    /// Claim a registry **scope** for yourself, proving you control the GitHub org/user of the same
-    /// name via a GitHub Actions OIDC token (namespace-protection #1). Self-service — no admin — and
-    /// squat-proof: you can only claim the scope that matches your GitHub identity. Run it from a
-    /// GitHub Actions workflow that grants `id-token: write`. Binds a publish token to the scope
-    /// (generated and printed unless you pass `--token`), which `noeta publish` then presents.
+    /// Claim a registry **scope**, the `company` half of `company/package`. Self-service and
+    /// squat-proof: the scope you can claim is the one whose name matches an identity you prove.
+    /// The default proof is GitHub. In a GitHub Actions workflow that grants `id-token: write`
+    /// the ambient OIDC token proves it with no configuration; elsewhere it falls back to the
+    /// GitHub device flow, printing a URL and a code you authorize in a browser. `--domain`
+    /// proves control of a domain instead. On success a publish token is bound to the scope,
+    /// either `--token` or a fresh one printed once, and `noeta publish` reads it from
+    /// `NOETA_REGISTRY_TOKEN`. Claiming needs the hosted registry the scope routes to: a
+    /// `[registries]` entry, else `NOETA_REGISTRY_URL`, else `registry.noeta.dev`.
     Claim {
-        /// The scope (your GitHub org/user name) to claim.
+        /// The scope to claim: your GitHub org or user name, or the first label of the
+        /// `--domain` you prove.
         scope: String,
         /// The publish token to bind (default: a fresh random token, printed on success).
         #[arg(long)]
@@ -538,18 +548,18 @@ enum Command {
         #[arg(long)]
         domain: Option<String>,
     },
-    /// Manage a registry scope you own — its publishing policy (namespace-protection #1). Authenticated
-    /// with the scope's publish token (`NOETA_REGISTRY_TOKEN`) against the registry the scope routes
-    /// to (`[registries]`, else `NOETA_REGISTRY_URL`, else the built-in default).
+    /// Manage the publishing policy of a registry scope you own. Authenticated with the scope's
+    /// publish token (`NOETA_REGISTRY_TOKEN`) against the registry the scope routes to
+    /// (`[registries]`, else `NOETA_REGISTRY_URL`, else the built-in default).
     Scope {
         #[command(subcommand)]
         action: ScopeAction,
     },
-    /// Issue, file, or monitor security advisories (advisory-intake arc). `publish` issues a
-    /// **publisher**-tier advisory for a package in a scope you own — keyless-signed with your OIDC
-    /// identity, so consumers verify it offline. `report` files a **public report** against any package
-    /// (unauthenticated, rate-limited) for an operator or the scope owner to triage. `watch` monitors
-    /// the advisory transparency log over time for suppression or rewrite.
+    /// Issue, file, or monitor security advisories. `publish` issues a **publisher**-tier advisory
+    /// for a package in a scope you own, keyless-signed with your OIDC identity, so consumers
+    /// verify it offline. `report` files a **public report** against any package (unauthenticated,
+    /// rate-limited) for an operator or the scope owner to triage. `watch` monitors the advisory
+    /// transparency log over time for suppression or rewrite.
     Advisory {
         #[command(subcommand)]
         action: AdvisoryCommand,
@@ -618,7 +628,7 @@ enum AdvisoryCommand {
         #[arg(long)]
         reporter: Option<String>,
     },
-    /// List the public reports queued for triage — what's **promotable** (advisory-intake residual a).
+    /// List the public reports queued for triage, the **promotable** ones.
     /// Without `--scope`, the operator triage queue (needs `NOETA_REGISTRY_ADMIN_TOKEN`); with it, the
     /// scope owner's own queue (only their packages' reports; needs the scope's `NOETA_REGISTRY_TOKEN`).
     /// Defaults to the `pending` (promotable) reports.
@@ -635,8 +645,8 @@ enum AdvisoryCommand {
         #[arg(long)]
         all: bool,
     },
-    /// **Promote** a queued report into a signed advisory (advisory-intake residual a). The advisory is
-    /// prefilled from the report (package, ranges, summary, details, url) — you supply the triaged `--id`
+    /// **Promote** a queued report into a signed advisory. The advisory is prefilled from the
+    /// report (package, ranges, summary, details, url) and you supply the triaged `--id`
     /// and `--severity`. As an **operator** (`--operator`, admin token) it becomes an `operator`-tier
     /// advisory; otherwise the report package's **scope owner** promotes it into a keyless-signed
     /// `publisher`-tier advisory (exactly like `advisory publish`), authenticated with the scope token.
@@ -676,10 +686,10 @@ enum AdvisoryCommand {
         #[arg(long, requires = "interactive")]
         oob: bool,
     },
-    /// Monitor a scope's advisory **transparency log** over time (advisory-intake arc, tier 6): verify
-    /// the log is an append-only extension of the last run's checkpoint and that no advisory previously
-    /// seen for the scope has silently disappeared — so a registry can't quietly suppress or rewrite a
-    /// scope's advisories after first use. `noeta audit` answers "does the feed verify *now*"; this
+    /// Monitor a scope's advisory **transparency log** over time: verify the log is an append-only
+    /// extension of the last run's checkpoint and that no advisory previously seen for the scope
+    /// has silently disappeared, so a registry cannot suppress or rewrite a scope's advisories
+    /// after first use. `noeta audit` answers "does the feed verify *now*"; this
     /// answers "has anything been rewritten since", which needs state pinned between runs (ideal for a
     /// CI cron). A detected suppression or rewrite exits non-zero.
     Watch {
@@ -784,10 +794,10 @@ enum CacheAction {
     Clear,
 }
 
-/// A resolved `[trust.commands]` binding, handed to [`run_cli`] by the composed shim (package-manager
-/// Phase 4): the local name a dependency command is registered under (`noeta <local>`), the name the
-/// providing package exported it under, and that package's extension units — the `exported` command
-/// lives in one of them. The binding both authorizes the command and fixes its local name, so two
+/// A resolved `[trust.commands]` binding, handed to [`run_cli`] by the composed shim: the local
+/// name a dependency command is registered under (`noeta <local>`), the name the providing package
+/// exported it under, and that package's extension units — the `exported` command lives in one of
+/// them. The binding both authorizes the command and fixes its local name, so two
 /// packages exporting the same command name coexist under distinct local names.
 pub struct CommandBinding {
     /// The name the command is registered + dispatched under.
@@ -889,10 +899,9 @@ pub fn formatter_only(
     Box::leak(Box::new(FormatterOnly { inner }))
 }
 
-/// The whole toolchain as a library entry (package-manager Phase 3, N3.0): the stock binary calls
-/// this with no extras; a **composed** binary (an app whose dependency graph carries native
-/// extension crates) calls it with the extra units, which register alongside the std units before
-/// anything can look them up. Everything else — every verb, the LSP, the DAP, extension
+/// The whole toolchain as a library entry: the stock binary calls this with no extras; a
+/// **composed** binary (an app whose dependency graph carries native extension crates) calls it
+/// with the extra units, which register alongside the std units before anything can look them up. Everything else — every verb, the LSP, the DAP, extension
 /// commands — runs identically in both, which is the point: the composed artifact IS the
 /// toolchain, not a runner.
 pub fn run_cli(
@@ -1041,7 +1050,7 @@ pub fn run_cli(
                 .value_parser(["auto", "always", "never"])
                 .default_value("auto")
                 .help(
-                    "When to colour diagnostics: auto (a terminal, unless NO_COLOR or TERM=dumb), \
+                    "When to color diagnostics: auto (a terminal, unless NO_COLOR or TERM=dumb), \
                      always, or never",
                 ),
         );
@@ -1331,14 +1340,14 @@ pub fn run_cli(
     }
 }
 
-/// Build the clap subcommand for an extension-contributed command (higher-order-abi H6) from
-/// its declared [`noeta_stdlib::ArgSpec`]s — real help text and validation, same as a core verb.
-/// The external-binary command form (package-manager Phase 3, N3.7 — the `cargo-<name>` model):
-/// `noeta <cmd>` with an unknown `<cmd>` looks for an executable `noeta-<cmd>` on `PATH` and runs
-/// it with everything after the subcommand as its argv, forwarding the exit code. Returns `None`
-/// (letting clap's error render) when the name can't be extracted or no such binary exists.
-/// `noeta <tier> <file>` for a **declared tier** (tier-providers T4). When the unknown subcommand
-/// names a tier the file's linked program declares with `@tier(name[, config: T])`, this owns the
+/// Build the clap subcommand for an extension-contributed command from its declared
+/// [`noeta_stdlib::ArgSpec`]s — real help text and validation, same as a core verb.
+/// The external-binary command form (the `cargo-<name>` model): `noeta <cmd>` with an unknown
+/// `<cmd>` looks for an executable `noeta-<cmd>` on `PATH` and runs it with everything after the
+/// subcommand as its argv, forwarding the exit code. Returns `None` (letting clap's error render)
+/// when the name can't be extracted or no such binary exists.
+/// `noeta <tier> <file>` for a **declared tier**. When the unknown subcommand names a tier the
+/// file's linked program declares with `@tier(name[, config: T])`, this owns the
 /// command: activate exactly that tier, then invoke its runner **in-process** with the activated
 /// roots — a synthesized `runner([TierRoot { name: "…", run: <fn> }, …])` fragment appended to the
 /// activated program and run through the ordinary real-host pipeline (the in-process
@@ -1362,7 +1371,7 @@ pub fn run_cli(
 ///
 /// **Everything else falls through to clap untouched**, so `--help`, `--version`, every error
 /// message, `--watch`, `--tier`, `-- <program args>`, the bare-file/shebang shortcut and the
-/// declared-tier dispatch all keep their existing behaviour byte for byte. It also declines when an
+/// declared-tier dispatch all keep their existing behavior byte for byte. It also declines when an
 /// extension has contributed a command named `run` (which the clap tree would have to arbitrate),
 /// so a composed toolchain can never take this path and get a different answer.
 fn try_plain_run(
