@@ -2432,9 +2432,7 @@ impl Checker {
                 type_name
             ));
         }
-        if let Some(spread) = &lit.spread {
-            self.synth(spread, env);
-        }
+        let spread_ty = lit.spread.as_ref().map(|spread| self.synth(spread, env));
         // Infer the type's arguments from the field values: match each field's declared
         // type (which may be a type parameter) against the value's type, then read the
         // parameters off in declaration order. `Box { value: 1 }` → `Box<int>`. With no
@@ -2562,6 +2560,9 @@ impl Checker {
                 }
             }
         }
+        // Every declared field must end up with a value (`E0009`), decided here wherever the
+        // literal's type settles it.
+        self.check_object_complete(lit, type_name, &decls, spread_ty.as_ref());
         // Fill any parameter the field values left unconstrained from the CHECKED position's
         // expectation. Purely additive — an argument the fields DID pin stays as inferred, so the
         // established "fields determine the instantiation" rule is untouched; this only decides
@@ -2593,6 +2594,69 @@ impl Checker {
         let ty = Type::Named(type_name.to_string(), args);
         self.note_construction(&ty, lit.span);
         ty
+    }
+
+    /// Report each declared field an object literal leaves unset (`E0009`) — the static half of the
+    /// full-initialization rule both backends enforce as they build the object.
+    ///
+    /// A field is filled by an initializer, by its own declared default, or by a `...base` spread
+    /// whose type declares a field of that name. All three are readable off the literal's type, so
+    /// a literal that names a type in `symbols.records` is decided here and never reaches a backend
+    /// incomplete.
+    ///
+    /// Two shapes stay with the backends, and the runtime check remains their backstop. A literal
+    /// whose name is not in `symbols.records` builds an anonymous object, which has no declared
+    /// field list to be incomplete against. And a spread whose type is anything but a record —
+    /// `dyn`, an inference hole, a type parameter — leaves the set of fields it contributes open
+    /// until there is a value to ask, so nothing here can rule the literal in or out.
+    fn check_object_complete(
+        &mut self,
+        lit: &ObjectLit,
+        type_name: &str,
+        decls: &[(String, Type)],
+        spread_ty: Option<&Type>,
+    ) {
+        if decls.is_empty() {
+            return;
+        }
+        let spread_fields: Vec<String> = match spread_ty {
+            None => Vec::new(),
+            Some(Type::Named(n, _)) => match self.symbols.records.get(n) {
+                Some(fields) => fields.iter().map(|(f, _)| f.clone()).collect(),
+                None => return,
+            },
+            Some(_) => return,
+        };
+        let missing: Vec<&str> = decls
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .filter(|name| {
+                !lit.fields.iter().any(|f| f.name == *name)
+                    && !spread_fields.iter().any(|f| f == *name)
+                    && !self.field_has_default(type_name, name)
+            })
+            .collect();
+        if missing.is_empty() {
+            return;
+        }
+        // The backends' sentence, word for word. They keep their own copies because the
+        // runtime-rejection census reads their source text for exactly these literals, and a reason
+        // that moved into a shared crate would leave the inventory it belongs in.
+        //
+        // Two tests hold the three spellings together from outside, one per link. `check.rs`'s
+        // `a_deferred_literal_reports_the_same_missing_field_at_construction` puts one literal
+        // through `noeta check` and another through `noeta run` and demands the same words; the
+        // differential runs `literal_missing_field_dynamic.noe` on both engines and compares their
+        // stderr, which is where the VM's copy and the tree-walker's meet.
+        let list = missing
+            .iter()
+            .map(|name| format!("`{name}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let message =
+            format!("missing field(s) {list} in `{type_name}` literal — every field must be set");
+        self.error(DiagnosticCode::MissingField, lit.span, message)
+            .help("give every field a value, spread one from another instance with `...base`, or declare a default on the field (`name: T = …`)");
     }
 }
 

@@ -82,7 +82,7 @@ cfg = Cfg { name: "svc" }   // retries = 3, tags = [1, 2]
 
 ## Constructing values
 
-The all-fields literal `T { f: v, … }` must set every non-defaulted field. A missing one is E0009.
+The all-fields literal `T { f: v, … }` must set every non-defaulted field. A missing one is E0009, which `noeta check` reports wherever the literal names its type.
 
 ```noeta check
 p = Point { x: 1, y: 2 }
@@ -120,6 +120,8 @@ c = Money { ...a, amount: 300 }    // the same — the explicit field wins eithe
 echo b == c        // true
 echo a             // Money {amount: 100, currency: "USD"} — the original is unchanged
 ```
+
+Spreading a `dyn` value fills whichever fields that value turns out to carry, and that is settled when the object is built. A literal whose remaining fields come only from such a spread raises E0009 at construction.
 
 ## Methods and `self`
 

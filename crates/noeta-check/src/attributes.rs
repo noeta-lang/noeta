@@ -3,7 +3,7 @@
 //! the capability gate (`#[Foo]` requires `Foo` marked `@attribute`) and the construction (every
 //! field set once, each literal assignable, defaults honored). Methods moved verbatim; the
 //! declaration-checking path in `lib.rs` is the caller, and the small `record_attribute` /
-//! `is_optional_attribute_field` recording helpers stay there (interleaved with the other recorders).
+//! `field_has_default` recording helpers stay there (interleaved with the other recorders).
 
 use super::*;
 
@@ -33,7 +33,7 @@ impl Checker {
             // `use`/qualified projection any type reference gets (`imports.extern_types`, populated
             // by `classify_use`). A `use pkg.Route` binds `Route → pkg.Route`; a same-file
             // `#[Route]` (or a name the linker already qualified) misses the map and stays as
-            // written. `symbols.attributes`/`attachable`/`records`/`attribute_optional_fields` are
+            // written. `symbols.attributes`/`attachable`/`records`/`defaulted_fields` are
             // all keyed by this identity, so every lookup below uses `key`, not the raw name.
             // There is no global attribute namespace: even std's `#[Skip]` resolves here through
             // `use std.test`.
@@ -158,7 +158,7 @@ impl Checker {
         }
         for (i, (fname, fty)) in fields.iter().enumerate() {
             // A field with a default (`name: T = …`) is optional — it may be omitted (slice 6i).
-            if !filled[i] && !self.is_optional_attribute_field(key, fname) {
+            if !filled[i] && !self.field_has_default(key, fname) {
                 self.error(
                     DiagnosticCode::MissingField,
                     attr.span,

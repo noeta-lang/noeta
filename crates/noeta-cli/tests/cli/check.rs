@@ -653,3 +653,65 @@ fn a_read_only_generic_widens_to_a_trait_object_silently() {
         .stderr(predicate::str::contains("0 error(s)"))
         .stderr(predicate::str::contains("cannot be read as").not());
 }
+
+/// E0009's wording, which the conformance header cannot pin: it grammars only the code and span.
+///
+/// `check` decides an incomplete literal wherever the literal's type is known, so the diagnostic
+/// arrives without the program running — the field values here would abort long before a
+/// construction-time check saw them, and no `boom` reaches stdout.
+#[test]
+fn check_reports_a_literal_that_leaves_a_field_unset() {
+    let file = temp_program(
+        "check_missing_field",
+        "struct Point { x: int  y: int }\n\
+         fn unused(): Point { return Point { x: 1 } }\n\
+         echo \"boom\"\n",
+    );
+    lang()
+        .arg("check")
+        .arg(&file)
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("E0009"))
+        .stderr(predicate::str::contains(
+            "missing field(s) `y` in `Point` literal — every field must be set",
+        ))
+        .stderr(predicate::str::contains(
+            "give every field a value, spread one from another instance with `...base`, or declare \
+             a default on the field (`name: T = …`)",
+        ))
+        .stderr(predicate::str::contains("boom").not());
+}
+
+/// The construction-time half of the same rule, in the same words. A `...base` spread of a `dyn`
+/// value fills whichever slots the value turns out to have, so the literal is decided when it is
+/// built; a reader who meets E0009 there and then meets it from `check` must not have to work out
+/// whether they are the same rule.
+#[test]
+fn a_deferred_literal_reports_the_same_missing_field_at_construction() {
+    let file = temp_program(
+        "run_missing_field_dyn",
+        "struct Point { x: int  y: int }\n\
+         struct Flat { x: int }\n\
+         fn opaque(): dyn { return Flat { x: 1 } }\n\
+         echo \"alive\"\n\
+         echo Point { ...opaque() }.y\n",
+    );
+    lang()
+        .arg("check")
+        .arg(&file)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("0 error(s)"));
+    lang()
+        .arg("run")
+        .arg(&file)
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(predicate::str::contains("alive"))
+        .stderr(predicate::str::contains(
+            "missing field(s) `y` in `Point` literal — every field must be set",
+        ));
+}

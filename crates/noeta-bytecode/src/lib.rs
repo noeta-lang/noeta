@@ -2263,8 +2263,12 @@ fn const_repr(c: &Const) -> String {
 /// filled exactly when bit `p` is set — which is what lets a named call skip a defaulted parameter
 /// in the middle (`f(1, c: 9)` fills 0 and 2, and `b` still runs its default).
 ///
-/// A parameter index at or past 64 is never in the mask, so masked calls are limited to the first
-/// 64 parameters; [`param_of_arg`] and the checker agree on that bound.
+/// A parameter index at or past 64 has no bit, so only a call whose parameters fit in the mask can
+/// carry one. That is exactly the calls that need one: lowering masks a call only when it **skips**
+/// a defaulted parameter, and the checker bounds a skipping call to the first
+/// [`noeta_ast::reflect::MASKED_PARAM_LIMIT`] parameters. A call that fills a dense prefix of the
+/// parameters — including one whose labels merely reorder them — carries no mask and reads by the
+/// prefix rule at any arity.
 #[inline]
 pub fn is_param_filled(p: usize, n_args: usize, supplied: Option<u64>) -> bool {
     match supplied {
@@ -2275,12 +2279,24 @@ pub fn is_param_filled(p: usize, n_args: usize, supplied: Option<u64>) -> bool {
 
 /// Which parameter argument `i` fills — the inverse of [`is_param_filled`]. Without a mask that is
 /// `i` itself; with one it is the position of the `i`-th set bit, read from the low end.
+///
+/// A mask names exactly as many parameters as the call passes arguments, so `i` is always inside
+/// it: lowering emits a mask only for a call that skips a defaulted parameter, and the checker
+/// bounds such a call to the first [`noeta_ast::reflect::MASKED_PARAM_LIMIT`] parameters, so every
+/// supplied index has a bit. `wrapping_sub` keeps the bit-clearing step defined anyway, so a
+/// hypothetical short mask reads as an exhausted one in every profile instead of underflowing in
+/// debug and wrapping into a wrong parameter in release.
 #[inline]
 pub fn param_of_arg(i: usize, supplied: Option<u64>) -> usize {
     let Some(mask) = supplied else { return i };
+    debug_assert!(
+        i < mask.count_ones() as usize,
+        "argument {i} has no parameter in a mask naming {}",
+        mask.count_ones()
+    );
     let mut remaining = mask;
     for _ in 0..i {
-        remaining &= remaining - 1; // clear the lowest set bit
+        remaining &= remaining.wrapping_sub(1); // clear the lowest set bit
     }
     remaining.trailing_zeros() as usize
 }

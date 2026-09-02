@@ -548,7 +548,7 @@ impl Checker {
                 .collect();
             if !optional.is_empty() {
                 self.symbols
-                    .attribute_optional_fields
+                    .defaulted_fields
                     .insert(qualified.clone(), optional);
             }
         }
