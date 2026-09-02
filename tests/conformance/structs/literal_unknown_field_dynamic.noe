@@ -1,0 +1,33 @@
+// `construct(name, fields)` builds a value from field names that are **runtime strings**, so which
+// names it offers is not in the source for a checker to hold against a declaration. The rule stays
+// where it can be decided: the reflection door validates the names as it binds them and answers
+// `Err`, the same shape a field whose value has the wrong type already gets.
+//
+// `alive` is printed before the construction, and the build's own answer is echoed, so the
+// expectations say the program ran. A checker that reached in and rejected this would print nothing,
+// and the stdout lines below would fail — which is what keeps the static half
+// (`literal_unknown_field_static.noe`) from quietly growing over a door it cannot see through.
+// expect: stdout "alive"
+// expect: stdout "dynamic: `Point` has no field `z`"
+// expect: stdout "declared names still build: Point {x: 1, y: 2}"
+// expect: exit 0
+struct Point { x: int  y: int }
+
+fn say(r: Result<dyn, string>): string {
+    return match r {
+        Ok(v) => "${v}",
+        Err(e) => e,
+    }
+}
+
+echo "alive";
+
+mut misnamed: Map<string, dyn> = {}
+misnamed["x"] = 1
+misnamed["z"] = 3
+echo "dynamic: " ~ say(construct("Point", misnamed));
+
+mut declared: Map<string, dyn> = {}
+declared["x"] = 1
+declared["y"] = 2
+echo "declared names still build: " ~ say(construct("Point", declared));

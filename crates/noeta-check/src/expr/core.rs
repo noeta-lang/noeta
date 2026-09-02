@@ -2596,19 +2596,21 @@ impl Checker {
         ty
     }
 
-    /// Report each declared field an object literal leaves unset (`E0009`) — the static half of the
-    /// full-initialization rule both backends enforce as they build the object.
+    /// Hold an object literal's field list against the type it builds: every initializer must name
+    /// a declared field (`E0005`), and every declared field must end up with a value (`E0009`).
+    /// Both are the static half of a rule the backends enforce as they build the object.
     ///
-    /// A field is filled by an initializer, by its own declared default, or by a `...base` spread
-    /// whose type declares a field of that name. All three are readable off the literal's type, so
-    /// a literal that names a type in `symbols.records` is decided here and never reaches a backend
-    /// incomplete.
+    /// The two are decidable over different facts, which is why one runs before the spread is
+    /// consulted and the other after. Whether a *written* name is a field of the type is settled by
+    /// the type's declaration alone, so `E0005` needs nothing else. Whether a declared field ends up
+    /// *filled* depends on the initializers, the field's own default, and the fields a `...base`
+    /// spread contributes, so `E0009` needs the spread's type as well.
     ///
-    /// Two shapes stay with the backends, and the runtime check remains their backstop. A literal
-    /// whose name is not in `symbols.records` builds an anonymous object, which has no declared
-    /// field list to be incomplete against. And a spread whose type is anything but a record —
-    /// `dyn`, an inference hole, a type parameter — leaves the set of fields it contributes open
-    /// until there is a value to ask, so nothing here can rule the literal in or out.
+    /// A literal whose name is not in `symbols.records` builds an anonymous object, whose fields are
+    /// whatever it lists, so neither rule has a declaration to hold it against. For `E0009` one
+    /// further shape stays with the backends: a spread whose type is not a record — `dyn`, an
+    /// inference hole, a type parameter — leaves the set of fields it contributes open until there
+    /// is a value to ask, and the construction-time check remains the backstop there.
     fn check_object_complete(
         &mut self,
         lit: &ObjectLit,
@@ -2616,8 +2618,39 @@ impl Checker {
         decls: &[(String, Type)],
         spread_ty: Option<&Type>,
     ) {
-        if decls.is_empty() {
+        // Membership in `records`, not `decls.is_empty()`: a declared type with no fields at all is
+        // still a declaration, and `E { z: 1 }` names a field it does not have.
+        if !self.symbols.records.contains_key(type_name) {
             return;
+        }
+        // An initializer naming something the type does not declare, in the backends' words. The
+        // spread is not consulted: it can only fill declared fields, never introduce a name, so a
+        // written name is either declared or it is not, whatever the spread turns out to hold.
+        //
+        // Every offending initializer is reported, where a backend stops at the first — a checker's
+        // job is to say everything it can see about the code in front of it.
+        let unknown: Vec<(String, Span)> = lit
+            .fields
+            .iter()
+            .filter(|f| !decls.iter().any(|(n, _)| n == &f.name))
+            .map(|f| (f.name.clone(), f.name_span))
+            .collect();
+        for (name, span) in unknown {
+            // Only a field the literal has not already set is a plausible typo: suggesting one it
+            // fills two lines up would name a duplicate, which is never what was meant.
+            let candidates = decls
+                .iter()
+                .map(|(n, _)| n.as_str())
+                .filter(|n| !lit.fields.iter().any(|f| f.name == **n));
+            let suggestion = noeta_diagnostics::closest(&name, candidates).map(str::to_string);
+            let diag = self.error(
+                DiagnosticCode::UnknownName,
+                span,
+                format!("type `{type_name}` has no field `{name}`"),
+            );
+            if let Some(s) = suggestion {
+                diag.help(format!("did you mean `{s}`?"));
+            }
         }
         let spread_fields: Vec<String> = match spread_ty {
             None => Vec::new(),

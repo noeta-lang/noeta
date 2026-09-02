@@ -1,0 +1,43 @@
+// An initializer must name a field the type declares (E0005), decided by the checker wherever the
+// literal names its type. Whether a written name is a field is settled by the declaration alone, so
+// nothing about the literal's other parts can change the answer.
+//
+// That is what separates this rule from the completeness rule beside it. E0009 asks which fields end
+// up *filled*, which a `...base` spread of a `dyn` value only answers at construction
+// (`literal_missing_field_dynamic.noe`), so that one defers. E0005 asks which names are *declared*,
+// and a spread can only fill declared fields, never introduce a name — so the second literal below
+// is refused statically even though its sibling rule cannot be.
+//
+// Every literal sits in a function nothing calls, so the rejection can only be the checker's: a
+// program that reached its runtime would print `alive` and exit 0, and both expectations below would
+// fail. That is what keeps this apart from the same code raised at the same span by a backend as it
+// builds the object.
+// expect: error E0005 at 27:26
+// expect: error E0005 at 31:26
+// expect: error E0005 at 35:31
+// expect: error E0005 at 40:21
+// expect: exit 1
+struct Point { x: int  y: int }
+struct Flat { x: int }
+struct Marker { }
+
+fn opaque(): dyn { return Flat { x: 1 }; }
+
+fn misnamed(): Point {
+    return Point { x: 1, z: 2, y: 3 };
+}
+
+fn misnamed_under_a_spread(): Point {
+    return Point { y: 2, z: 9, ...opaque() };
+}
+
+fn misnamed_target_typed(): Point {
+    p: Point = .{ x: 1, y: 2, z: 3 };
+    return p;
+}
+
+fn misnamed_on_a_fieldless_type(): Marker {
+    return Marker { z: 1 };
+}
+
+echo "alive";

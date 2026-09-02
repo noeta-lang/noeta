@@ -715,3 +715,75 @@ fn a_deferred_literal_reports_the_same_missing_field_at_construction() {
             "missing field(s) `y` in `Point` literal — every field must be set",
         ));
 }
+
+/// E0005's wording on an object literal, in the backends' words, plus the typo hint.
+///
+/// The literal sits in a function nothing calls, so only the checker can be speaking: a program that
+/// reached its runtime would print `boom` and exit 0.
+#[test]
+fn check_reports_a_literal_naming_a_field_the_type_lacks() {
+    let file = temp_program(
+        "check_unknown_field",
+        "struct Point { x: int  y: int }\n\
+         fn unused(): Point { return Point { x: 1, yy: 2 } }\n\
+         echo \"boom\"\n",
+    );
+    lang()
+        .arg("check")
+        .arg(&file)
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("E0005"))
+        .stderr(predicate::str::contains("type `Point` has no field `yy`"))
+        .stderr(predicate::str::contains("did you mean `y`?"))
+        .stderr(predicate::str::contains("boom").not());
+}
+
+/// The typo hint offers only a field the literal has not already set. `Point { x: 1, y: 2, z: 3 }`
+/// has no field left to have meant, so the diagnostic offers none rather than naming one that would
+/// be a duplicate.
+#[test]
+fn an_unknown_field_suggests_only_a_field_still_unset() {
+    let file = temp_program(
+        "check_unknown_field_no_hint",
+        "struct Point { x: int  y: int }\n\
+         fn unused(): Point { return Point { x: 1, y: 2, z: 3 } }\n\
+         echo \"boom\"\n",
+    );
+    lang()
+        .arg("check")
+        .arg(&file)
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("type `Point` has no field `z`"))
+        .stderr(predicate::str::contains("did you mean").not());
+}
+
+/// The dynamic door keeps the rule where its names are values. `construct` binds field names that
+/// arrive as runtime strings, so `check` has nothing to hold them against and the build answers
+/// `Err` naming the offender.
+#[test]
+fn a_dynamic_construction_reports_its_unknown_field_as_a_value() {
+    let file = temp_program(
+        "run_unknown_field_dynamic",
+        "struct Point { x: int  y: int }\n\
+         mut fields: Map<string, dyn> = {}\n\
+         fields[\"x\"] = 1\n\
+         fields[\"z\"] = 3\n\
+         echo match construct(\"Point\", fields) { Ok(v) => \"${v}\", Err(e) => e }\n",
+    );
+    lang()
+        .arg("check")
+        .arg(&file)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("0 error(s)"));
+    lang()
+        .arg("run")
+        .arg(&file)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("`Point` has no field `z`"));
+}
