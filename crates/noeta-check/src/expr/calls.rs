@@ -2624,6 +2624,7 @@ impl Checker {
                 continue;
             }
             if !self.arg_assignable(arg, param) {
+                let variance = self.variance_refusal_help(arg, param);
                 let (shown_param, shown_arg) = noeta_types::mismatch_pair(param, arg);
                 let d = self.error(
                     DiagnosticCode::TypeMismatch,
@@ -2637,6 +2638,10 @@ impl Checker {
                         "`number` is any numeric scalar: `int`, `float`, `f32`, `f64`, and the \
                          fixed widths `i8`…`u64`",
                     );
+                } else if let Some(help) = variance {
+                    // The argument twin of `subsume`'s: a refused widening of a generic
+                    // instantiation names the occurrence that forced it.
+                    d.help(help);
                 }
             }
         }

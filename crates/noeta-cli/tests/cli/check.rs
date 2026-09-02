@@ -485,3 +485,69 @@ fn compare_on_an_unordered_native_type_is_refused_statically() {
         .stderr(predicate::str::contains("has no method").not())
         .stderr(predicate::str::contains("E0005").not());
 }
+
+/// **A refused generic widening names the occurrence that forced it.**
+///
+/// `Slot<Dog>` and `Slot<dyn Speak>` look related, and they are: the only thing standing between
+/// them is where `Slot` puts its type parameter. A bare "expected … found …" therefore reads as
+/// "trait objects do not work in a generic", which is the wrong lesson — the *same* widening is
+/// accepted for a declaration that only ever reads the parameter out.
+///
+/// Asserted here rather than in the corpus because the `// expect:` grammar pins codes and spans,
+/// never diagnostic text. The **absent** string carries as much as the present one: the message
+/// must not be the bare mismatch alone.
+#[test]
+fn a_refused_trait_object_widening_names_the_occurrence() {
+    let file = temp_program(
+        "check_variance_cause",
+        "trait Speak { fn speak(): string }\n\
+         struct Dog { impl Speak { pub fn speak(): string { return \"woof\" } } }\n\
+         class Slot<T> { pub mut v: T }\n\
+         fn widen(s: Slot<Dog>): string {\n\
+         wide: Slot<dyn Speak> = s\n\
+         return wide.v.speak()\n\
+         }\n",
+    );
+    lang()
+        .arg("check")
+        .arg(&file)
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("E0007"))
+        .stderr(predicate::str::contains(
+            "`Slot` stores it in the `mut` field `v`",
+        ))
+        .stderr(predicate::str::contains(
+            "cannot be read as a `Slot<dyn Speak>`",
+        ))
+        .stderr(predicate::str::contains(
+            "a literal checked against `Slot<dyn Speak>` instantiates its type argument at \
+             `dyn Speak` directly",
+        ));
+}
+
+/// The **covariant** twin of the case above: the same widening, on a declaration that only reads
+/// the parameter out, is accepted — and says nothing at all.
+///
+/// It is the control that makes the refusal above mean something. Without it, a rule that refused
+/// *every* generic widening would pass the sibling test with an equally precise message.
+#[test]
+fn a_read_only_generic_widens_to_a_trait_object_silently() {
+    let file = temp_program(
+        "check_variance_ok",
+        "trait Speak { fn speak(): string }\n\
+         struct Dog { impl Speak { pub fn speak(): string { return \"woof\" } } }\n\
+         class Reader<T> { pub v: T }\n\
+         r: Reader<Dog> = Reader { v: Dog {} }\n\
+         wide: Reader<dyn Speak> = r\n\
+         echo wide.v.speak()\n",
+    );
+    lang()
+        .arg("check")
+        .arg(&file)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("0 error(s)"))
+        .stderr(predicate::str::contains("cannot be read as").not());
+}

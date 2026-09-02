@@ -181,6 +181,55 @@ impl TypeKind {
     }
 }
 
+/// The **registry-dependent rules** [`Type::subtype_with`] cannot decide from the lattice alone.
+///
+/// Each is a question about a *declaration*, and the lattice holds only types: whether a name is an
+/// enum, whether it implements a trait, where it puts its type parameter. The subtyping walk asks
+/// them at every position it reaches, so a rule stated once here composes through containers,
+/// unions, tuples and generic arguments without the walk being written twice.
+///
+/// [`NoRegistry`] answers "no" to all three — the pure lattice, which is the conservative direction:
+/// every rule here only ever *admits* a relation, so a missing registry narrows the relation rather
+/// than widening it.
+pub trait NominalRules {
+    /// Whether `name` is a declared type of `kind` — the abstract kind-type membership rule
+    /// (`Named(n) <: Enum` iff `n` is an enum).
+    fn is_of_kind(&self, name: &str, kind: TypeKind) -> bool;
+
+    /// Whether the type `name` implements the trait `trait_name` — trait-object membership
+    /// (`Named(n) <: dyn Trait` iff `n` implements it).
+    fn implements_trait(&self, name: &str, trait_name: &str) -> bool;
+
+    /// Whether the generic type `name` is **covariant** in its type argument at `index`: whether a
+    /// `name<Sub>` may be *read as* a `name<Sup>` when `Sub <: Sup`.
+    ///
+    /// It is a property of the declaration, not of the arguments. Reading at a wider argument is
+    /// safe only when nothing can write a `Sup` back through the widened view — which is decided by
+    /// where the declaration puts the parameter (an immutable field, a method return: safe; a
+    /// shared mutable field, a method parameter: not), and by the value semantics of the kind it is
+    /// declared as.
+    fn covariant_arg(&self, name: &str, index: usize) -> bool;
+}
+
+/// The [`NominalRules`] of a caller with **no type registry** — every registry-dependent rule
+/// answers "no", which is what makes [`Type::subtype`] the pure lattice.
+#[derive(Debug)]
+pub struct NoRegistry;
+
+impl NominalRules for NoRegistry {
+    fn is_of_kind(&self, _name: &str, _kind: TypeKind) -> bool {
+        false
+    }
+
+    fn implements_trait(&self, _name: &str, _trait_name: &str) -> bool {
+        false
+    }
+
+    fn covariant_arg(&self, _name: &str, _index: usize) -> bool {
+        false
+    }
+}
+
 /// A type in the lattice.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Type {
@@ -465,6 +514,32 @@ impl Type {
         }
     }
 
+    /// Whether this type mentions a **trait object** ([`Type::DynTrait`]) anywhere — at the top
+    /// level or nested inside a container / union / tuple / function type / generic argument.
+    ///
+    /// The lattice question behind "does this position state something no value can synthesize".
+    /// A trait object is abstract: no runtime value *has* the type `dyn Speak` — every one is a
+    /// concrete implementor — so a type mentioning one can only ever be **stated**, by an
+    /// annotation, a declared parameter, return or field. Wherever that matters (a construction
+    /// deciding whether the position's type arguments lead inference, or follow it) this is the
+    /// test, so the "abstract, hence stated" rule has one spelling.
+    pub fn contains_trait_object(&self) -> bool {
+        match self {
+            Type::DynTrait(_) => true,
+            Type::List(t) | Type::Set(t) | Type::Option(t) => t.contains_trait_object(),
+            Type::Map(k, v) | Type::Result(k, v) => {
+                k.contains_trait_object() || v.contains_trait_object()
+            }
+            Type::Named(_, args) | Type::Union(args) | Type::Tuple(args) => {
+                args.iter().any(Type::contains_trait_object)
+            }
+            Type::Fn { params, ret } => {
+                params.iter().any(Type::contains_trait_object) || ret.contains_trait_object()
+            }
+            _ => false,
+        }
+    }
+
     /// Whether an operation on a value of this type is **not statically checked** but deferred to
     /// the runtime — either because the type is an inference hole (`Unknown`) or because it is the
     /// dynamic escape (`Dyn`). Operator/member/index/`?` checks accept such a type without a
@@ -489,21 +564,53 @@ impl Type {
     ///   parameters and covariant in the return (the standard arrow rule).
     /// - Everything else holds only by identity.
     pub fn subtype(sub: &Type, sup: &Type) -> bool {
-        // The pure lattice: no registry, so `Named(n) <: Kind(k)` is conservatively false.
-        Type::subtype_with(sub, sup, &|_, _| false)
+        // The pure lattice: no registry, so every registry-dependent rule is conservatively false.
+        Type::subtype_with(sub, sup, &NoRegistry)
     }
 
-    /// The subtype relation, parameterized by a **nominal hook** deciding the one registry-dependent
-    /// rule the pure lattice cannot: whether a `Named(n)` is a member of an abstract `Kind(k)` (is `n`
-    /// an enum? a class?). The whole covariant/contravariant walk lives here once; [`subtype`] passes a
-    /// hook that always says "no" (the pure lattice), and the checker passes one backed by its type
-    /// registry (its `assignable`), so the nominal rule reaches every nested covariant position without
-    /// re-implementing the walk.
-    pub fn subtype_with(sub: &Type, sup: &Type, nominal: &impl Fn(&str, TypeKind) -> bool) -> bool {
+    /// The subtype relation, parameterized by the **registry-dependent rules** the pure lattice
+    /// cannot decide on its own ([`NominalRules`]). The whole covariant/contravariant walk lives
+    /// here once; [`subtype`] passes [`NoRegistry`] (the pure lattice), and the checker passes one
+    /// backed by its type registry (its `assignable`), so the nominal rules reach every nested
+    /// position without re-implementing the walk.
+    pub fn subtype_with(sub: &Type, sup: &Type, rules: &impl NominalRules) -> bool {
+        Type::subtype_at(sub, sup, rules, true)
+    }
+
+    /// The walk, carrying whether a **trait object may be formed at this position**.
+    ///
+    /// `Named(n) <: DynTrait(t)` is a widening — a concrete implementor is *read as* the trait — so
+    /// it is sound exactly where reading at a wider type is: a covariant position. Every position
+    /// is covariant (a container element, a tuple slot, a function's return) except a generic
+    /// argument of a declared type, where whether a widened view can be written back through is a
+    /// property of that declaration; [`NominalRules::covariant_arg`] answers it, and the flag turns
+    /// off for the descent when the answer is no.
+    ///
+    /// `false` reproduces the walk exactly as it is without the rule, which is what makes the rule
+    /// purely additive: nothing this function accepted before is refused because of the flag, and
+    /// [`NoRegistry`] (whose `implements_trait` is always `false`) is unaffected either way.
+    fn subtype_at(
+        sub: &Type,
+        sup: &Type,
+        rules: &impl NominalRules,
+        trait_objects_ok: bool,
+    ) -> bool {
         use Type::*;
         // Inference holes: bidirectionally compatible (no false positives on missing info).
         if sub.is_gradual() || sup.is_gradual() {
             return true;
+        }
+        // A **trait object** is the abstract supertype of every type that implements the trait — a
+        // registry-dependent membership rule like [`Type::Kind`]'s, and gated by the position's
+        // variance for the reason above. Placed before the arms below so it reaches a trait object
+        // wherever one appears: as the whole expected type, as a container's element, as a generic
+        // argument. Narrowing back OUT of one is never implicit, exactly as it is not out of `dyn`.
+        if let DynTrait(tr) = sup {
+            return match sub {
+                DynTrait(a) => a == tr,
+                Named(n, _) if trait_objects_ok => rules.implements_trait(n, tr),
+                other => other.defers_to_runtime(),
+            };
         }
         // `dyn` is the top type: everything widens into it.
         if matches!(sup, Dyn) {
@@ -515,7 +622,10 @@ impl Type {
         if matches!(sub, Never) {
             return true;
         }
-        let rec = |a: &Type, b: &Type| Type::subtype_with(a, b, nominal);
+        // Every position reached from here is a **read** position of the same value, so a trait
+        // object may be formed in it exactly when one could be formed here. The single exception is
+        // a declared type's generic argument, which asks the registry for itself below.
+        let rec = |a: &Type, b: &Type| Type::subtype_at(a, b, rules, trait_objects_ok);
         match (sub, sup) {
             // Narrowing out of `dyn` is never implicit (only via a checked `.as<T>()`).
             (Dyn, _) => false,
@@ -554,20 +664,31 @@ impl Type {
             // *argument* on either side is the per-argument analogue of that escape — an unspecified
             // element flows gradually into a concrete instantiation (`Tree<dyn> <: Tree<int>`), which
             // is how a nullary/partial generic constructor (`Tree.Empty` : `Tree<dyn>`) reaches a
-            // concrete parameter. (Covariance is sound here — generics are erased and immutable-by-default.)
+            // concrete parameter.
+            //
+            // Whether a *widening* argument step is sound is the declaration's business, not the
+            // lattice's: reading a `C<Sub>` as a `C<Sup>` is safe only if nothing can write a `Sup`
+            // back through the widened view, which depends on where `C` puts its parameter.
+            // [`NominalRules::covariant_arg`] carries that answer down into the descent.
             (Named(an, aa), Named(bn, ba)) => {
                 an == bn
                     && (aa.is_empty()
                         || ba.is_empty()
                         || (aa.len() == ba.len()
-                            && aa
-                                .iter()
-                                .zip(ba)
-                                .all(|(a, b)| matches!(a, Dyn) || matches!(b, Dyn) || rec(a, b))))
+                            && aa.iter().zip(ba).enumerate().all(|(i, (a, b))| {
+                                matches!(a, Dyn)
+                                    || matches!(b, Dyn)
+                                    || Type::subtype_at(
+                                        a,
+                                        b,
+                                        rules,
+                                        trait_objects_ok && rules.covariant_arg(an, i),
+                                    )
+                            })))
             }
-            // A `Named(n)` is a member of an abstract kind when the registry says so — the one rule
-            // the pure lattice defers to the `nominal` hook (`Named(n) <: Enum` iff `n` is an enum).
-            (Named(n, _), Kind(k)) => nominal(n, *k),
+            // A `Named(n)` is a member of an abstract kind when the registry says so — a rule the
+            // pure lattice defers to [`NominalRules`] (`Named(n) <: Enum` iff `n` is an enum).
+            (Named(n, _), Kind(k)) => rules.is_of_kind(n, *k),
             // Two type parameters relate only by IDENTITY — the same declaration, whatever either
             // is spelled. `ParamRef`'s `PartialEq` compares the id alone, so this is `sub == sup`;
             // it is written out rather than left to the catch-all because "a parameter is a

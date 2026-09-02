@@ -99,6 +99,7 @@ mod stdlib;
 mod subst;
 pub mod tiers;
 mod traits;
+mod variance;
 
 pub use setup::{SetupDrop, SetupWarning, dropped_setup_warnings, is_tier_setup, setup_drop};
 pub use tiers::{
@@ -1336,6 +1337,12 @@ struct Symbols {
     /// through the type's own block, its fields, or its collection elements (the fixpoint
     /// [`compute_destruct_reachable`] computes). The input to per-binding destructor-relevance.
     destruct_reachable: HashSet<String>,
+    /// Each generic type's **declaration-site variance**, per type argument: whether a `C<Sub>` may
+    /// be read as a `C<Sup>`, and where the parameter occurs when it may not. Computed by
+    /// [`Checker::compute_arg_variance`] and consulted through
+    /// [`noeta_types::NominalRules::covariant_arg`], so the rule composes through every nested
+    /// position of the subtyping walk. A type with no entry is invariant.
+    arg_variance: HashMap<String, crate::variance::ArgVariance>,
 }
 
 /// The checker's **import bindings** — the four `use`-import channels `collect_imports`

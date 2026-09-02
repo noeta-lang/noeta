@@ -1,0 +1,86 @@
+// Reading an **existing value** at a wider type argument — `C<Dog>` as a `C<dyn Speak>` — where the
+// declaration makes it sound.
+//
+// Soundness is decided by where the declaration puts the parameter, not by the arguments. A widened
+// view is only unsafe if a `dyn Speak` can be written back through it into something that believes
+// it holds a `Dog`, so each of these is a read-only route to the parameter:
+//
+//   * a value `struct`'s `mut` field — a struct field-set REBINDS the binding rather than writing
+//     through a shared object, so the store lands in the widened copy and not in the original;
+//   * a reference `class`'s immutable field, and a method that only RETURNS the parameter;
+//   * any depth of the value-semantic built-in containers, which copy on write.
+//
+// Every widening then dispatches through the trait object, because a widening that type-checks and
+// yields the wrong value is the failure this is here to exclude.
+// expect: stdout "woof"
+// expect: stdout "meow"
+// expect: stdout "woof"
+// expect: stdout "woof"
+// expect: stdout "woof"
+// expect: stdout "meow"
+// expect: stdout "woof"
+// expect: exit 0
+trait Speak {
+    fn speak(): string
+}
+
+struct Dog {
+    impl Speak {
+        pub fn speak(): string {
+            return "woof"
+        }
+    }
+}
+
+struct Cat {
+    impl Speak {
+        pub fn speak(): string {
+            return "meow"
+        }
+    }
+}
+
+// A value struct: even a `mut` field is a read position as far as the ORIGINAL is concerned.
+struct Cell<T> {
+    mut v: T
+}
+
+// A reference class whose field is immutable, and whose method only hands the parameter out.
+class Reader<T> {
+    pub v: T
+
+    pub fn get(): T {
+        return self.v
+    }
+}
+
+d: Cell<Dog> = Cell { v: Dog {} }
+wide: Cell<dyn Speak> = d
+echo wide.v.speak()
+
+// Storing through the widened copy is a rebind, so the original is untouched.
+mut wide2: Cell<dyn Speak> = d
+wide2.v = Cat {}
+echo wide2.v.speak()
+echo d.v.speak()
+
+r: Reader<Dog> = Reader { v: Dog {} }
+rwide: Reader<dyn Speak> = r
+echo rwide.get().speak()
+
+// The built-in containers are the same rule, one level down.
+pets: List<Dog> = [Dog {}]
+speakers: List<dyn Speak> = pets
+echo speakers[0].speak()
+
+named: Map<string, Cat> = {"a": Cat {}}
+by_name: Map<string, dyn Speak> = named
+echo by_name["a"].speak()
+
+maybe: ?Dog = some(Dog {})
+maybe_wide: ?dyn Speak = maybe
+heard = match maybe_wide {
+    some(s) => s.speak(),
+    none => "none",
+}
+echo heard

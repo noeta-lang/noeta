@@ -1,0 +1,90 @@
+// Reading an existing value at a wider type argument where the declaration makes it **unsound** —
+// refused at check time, one `E0007` per widening.
+//
+// Five widenings over four distinct occurrences of the parameter, each a different reason the
+// widened view could be used to break the original's type:
+//
+//   * `Slot` is a reference `class` with a `mut` field of the parameter's type. A widened view of a
+//     class IS the original — class values have reference identity — so `wide.v = Cat {}` stores a
+//     `Cat` into a `Slot<Dog>`, and the original's `v.bark()` then finds a `Cat`.
+//   * `Matcher` takes the parameter as a **method parameter**. This one is not about aliasing at
+//     all: the body of `matches` is checked believing `other` is a `Dog`, so calling it through a
+//     widened receiver hands it a `Cat`. It holds for a value `struct` for the same reason, which is
+//     why `Pair` below is refused too.
+//   * `Callback` reaches that same occurrence through a field of function type: `wide.f` would be a
+//     `(dyn Speak) -> string`, and calling it hands a `Cat` to a body checked at `Dog`.
+//   * `Owner` is a value `struct` that holds a `Slot`. A struct copy shares the class it holds, so
+//     the store the first case describes is reachable through the copy.
+//
+// Every widening sits in a function **nothing calls**: the refusal is static, so no program runs at
+// all, and a runtime abort could not produce these.
+// expect: error E0007 at 68:29
+// expect: error E0007 at 73:32
+// expect: error E0007 at 78:29
+// expect: error E0007 at 83:33
+// expect: error E0007 at 88:30
+// expect: exit 1
+trait Speak {
+    fn speak(): string
+}
+
+struct Dog {
+    impl Speak {
+        pub fn speak(): string {
+            return "woof"
+        }
+    }
+}
+
+class Slot<T> {
+    pub mut v: T
+}
+
+class Matcher<T> {
+    pub v: T
+
+    pub fn matches(other: T): bool {
+        return self.v == other
+    }
+}
+
+struct Pair<T> {
+    v: T
+
+    pub fn matches(other: T): bool {
+        return self.v == other
+    }
+}
+
+class Callback<T> {
+    pub f: (T) -> string
+}
+
+struct Owner<T> {
+    slot: Slot<T>
+}
+
+fn widen_mut_field(s: Slot<Dog>): string {
+    wide: Slot<dyn Speak> = s
+    return wide.v.speak()
+}
+
+fn widen_method_param(m: Matcher<Dog>): string {
+    wide: Matcher<dyn Speak> = m
+    return wide.v.speak()
+}
+
+fn widen_struct_method_param(p: Pair<Dog>): string {
+    wide: Pair<dyn Speak> = p
+    return wide.v.speak()
+}
+
+fn widen_fn_field(c: Callback<Dog>): string {
+    wide: Callback<dyn Speak> = c
+    return "unreachable"
+}
+
+fn widen_through_class(o: Owner<Dog>): string {
+    wide: Owner<dyn Speak> = o
+    return wide.slot.v.speak()
+}
