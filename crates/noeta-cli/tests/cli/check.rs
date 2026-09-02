@@ -788,7 +788,6 @@ fn a_dynamic_construction_reports_its_unknown_field_as_a_value() {
         .stdout(predicate::str::contains("`Point` has no field `z`"));
 }
 
-
 /// **The open `dyn` is the same widening, and says the same thing.**
 ///
 /// `Slot<Dog>` reads as a `Slot<dyn>` in exactly the declarations it reads as a `Slot<dyn Speak>`,
