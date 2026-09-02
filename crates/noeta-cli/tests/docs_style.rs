@@ -377,3 +377,63 @@ fn the_release_gate_reads_declarations_and_not_illustrations() {
         );
     }
 }
+
+/// The set of fence languages a page may use.
+///
+/// `noeta` is the one the sample gate extracts. Everything else is inert prose as far as
+/// `doc_samples` is concerned, which is exactly why this list is closed: a block tagged with
+/// anything outside it compiles nowhere and is checked by nothing.
+const FENCE_LANGUAGES: &[&str] = &[
+    "", "noeta", "text", "console", "toml", "sh", "rust", "yaml", "lua", "json",
+];
+
+/// **Every fenced block carries a language this repo knows.**
+///
+/// `.noe` is the file extension, so ```` ```noe ```` is the natural typo for ```` ```noeta ````,
+/// and it is invisible: `doc_samples` extracts on the exact tag `noeta`, so a mistagged block of
+/// real Noeta is never compiled and never run. Three had accumulated across two pages, one of them
+/// a full worked example of a method bundle.
+///
+/// That is the `.noe`-in-a-`#[test]` hazard in a form grep for `.noe` does not find. A closed set
+/// turns it into a failing test at the moment it is written.
+#[test]
+fn every_fence_names_a_language_the_repo_knows() {
+    let docs = repo_root().join("docs");
+    let mut violations = Vec::new();
+
+    for entry in std::fs::read_dir(&docs).expect("read docs/") {
+        let path = entry.expect("dir entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let stem = path.file_stem().unwrap().to_string_lossy().to_string();
+        let text = std::fs::read_to_string(&path).expect("read page");
+
+        let mut open = false;
+        for (i, line) in text.lines().enumerate() {
+            let Some(rest) = line.strip_prefix("```") else {
+                continue;
+            };
+            // A closing fence carries no info string; only opening fences are checked.
+            if open {
+                open = false;
+                continue;
+            }
+            open = true;
+            let lang = rest.split_whitespace().next().unwrap_or("");
+            if !FENCE_LANGUAGES.contains(&lang) {
+                violations.push(format!(
+                    "  {stem}.md:{}: ```{lang} is not a language this repo knows — \
+                     did you mean ```noeta? (a mistagged block is compiled by nothing)",
+                    i + 1
+                ));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "documentation uses a fence language nothing checks:\n\n{}\n",
+        violations.join("\n")
+    );
+}

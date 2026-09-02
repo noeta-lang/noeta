@@ -171,7 +171,7 @@ A **method bundle** binds a kernel set to a type nominally, so that the checker 
 
 Each `ExtTraitMethod` marks its receiver `Element`, for a value of the bound type, or `Bulk`, for a `List<T>` of it. A user type opts in explicitly:
 
-```noe
+```noeta ignore
 use std.{vec}
 
 @packed struct Px { x: f32; y: f32; z: f32 }

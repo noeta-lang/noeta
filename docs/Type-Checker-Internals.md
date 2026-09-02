@@ -15,7 +15,7 @@ Signatures are required at named boundaries (which give the checker its expected
 
 Both modes on one snippet:
 
-```noe
+```noeta ignore
 fn weight(x: float): float { return x * 2.0 }
 
 n = 1.5          // synthesis: no expected type, so the initializer's type flows UP — n: float
@@ -27,7 +27,7 @@ y = weight(n)    // checking: the argument `n` is checked DOWN against the param
 
 An expectation is only useful where it *reaches*, and some literal forms have no meaning without one: a heterogeneous `{"type": "array", "n": 1}` is a `Map<string, dyn>` or a type error, an empty `{}`/`[]` has no element type of its own, and a target-typed `.{ … }` has no name at all. So the checking mode pushes the expectation through the forms that merely *choose* between values rather than producing one:
 
-```noe
+```noeta ignore
 fn schema(x: int): Map<string, dyn> {
     return match x {                              // the return type reaches BOTH arms…
         1 => {"type": "array", "n": 1},           // …so the mixed literal is a Map<string, dyn>
