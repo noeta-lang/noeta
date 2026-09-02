@@ -40,8 +40,12 @@ struct Cat {
     }
 }
 
+// Deliberately a type that is INVARIANT in `T` — a `class` with a `mut` field, so a `Box2<Dog>`
+// cannot simply be read as a `Box2<dyn Speak>` (its own case is
+// `trait_object_variance_rejected.noe`). That is what makes every line below attributable to the
+// construction site: none of them could have gone through a widening instead.
 class Box2<T> {
-    pub v: T
+    pub mut v: T
 
     pub fn new(v: T): Box2<T> {
         return Box2 { v: v }

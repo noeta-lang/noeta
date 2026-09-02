@@ -600,6 +600,16 @@ impl Type {
         if sub.is_gradual() || sup.is_gradual() {
             return true;
         }
+        // `dyn` is the top type: everything widens into it.
+        if matches!(sup, Dyn) {
+            return true;
+        }
+        // `never` is the bottom type: it widens into everything. Checked before the arms below so a
+        // diverging call is accepted in *every* position — container types, function types and a
+        // trait object included. There is no value to be wrong about.
+        if matches!(sub, Never) {
+            return true;
+        }
         // A **trait object** is the abstract supertype of every type that implements the trait — a
         // registry-dependent membership rule like [`Type::Kind`]'s, and gated by the position's
         // variance for the reason above. Placed before the arms below so it reaches a trait object
@@ -611,16 +621,6 @@ impl Type {
                 Named(n, _) if trait_objects_ok => rules.implements_trait(n, tr),
                 other => other.defers_to_runtime(),
             };
-        }
-        // `dyn` is the top type: everything widens into it.
-        if matches!(sup, Dyn) {
-            return true;
-        }
-        // `never` is the bottom type: it widens into everything. Checked before the arms below so a
-        // diverging call is accepted in *every* position, container and function types included —
-        // there is no value to be wrong about.
-        if matches!(sub, Never) {
-            return true;
         }
         // Every position reached from here is a **read** position of the same value, so a trait
         // object may be formed in it exactly when one could be formed here. The single exception is

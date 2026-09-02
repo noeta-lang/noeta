@@ -203,11 +203,18 @@ impl Checker {
             }
         }
 
-        let mut table: HashMap<String, ArgVariance> = shapes
-            .iter()
-            .filter(|(_, s)| !s.params.is_empty())
-            .map(|(n, s)| ((*n).to_string(), vec![None; s.params.len()]))
-            .collect();
+        // Seeded from what the checker already knows, and **accumulated**, because a session entry
+        // collects only its own statements: a type declared at an earlier prompt is not in `shapes`
+        // here, and recomputing from scratch would forget it (and make a later entry's composition
+        // through it read as an opaque, invariant head). Every type this program *does* declare is
+        // reset to covariant first, so a redeclaration is recomputed rather than remembered.
+        let mut table: HashMap<String, ArgVariance> = self.symbols.arg_variance.clone();
+        table.extend(
+            shapes
+                .iter()
+                .filter(|(_, s)| !s.params.is_empty())
+                .map(|(n, s)| ((*n).to_string(), vec![None; s.params.len()])),
+        );
         loop {
             let mut changed = false;
             for (name, shape) in &shapes {

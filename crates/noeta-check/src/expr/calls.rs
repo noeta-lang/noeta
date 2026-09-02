@@ -32,6 +32,71 @@ impl Checker {
             let expected = params.get(i).cloned();
             *slot = self.absorb_deferred_arg(expr, expected.as_ref(), env);
         }
+        self.rebuild_literal_args_at_trait_objects(params, args, arg_exprs, env);
+    }
+
+    /// Re-read a **named object literal argument** at a parameter that states a **trait object**, so
+    /// an argument position instantiates a generic at `dyn Trait` exactly as an annotated binding,
+    /// a declared return and a declared field do.
+    ///
+    /// A named literal is synthesized *eagerly*, before the callee is resolved — deliberately, since
+    /// unlike a closure or a `.{ … }` it has a standalone type, and deferring it would cost a
+    /// generic callee the instantiation its argument pins (`wrap(Box { v: 1 })` binds `T = int`
+    /// from the argument's own type). So the parameter arrives too late for the literal's own
+    /// inference, and `Box { v: Dog {} }` has already settled on `Box<Dog>`.
+    ///
+    /// Re-checking is what closes that, and three conditions keep it from being a second, quieter
+    /// typing pass over every call in the language:
+    ///
+    /// * the parameter **states a trait object** — the one thing a field value can never synthesize
+    ///   ([`Checker::trait_object_seed`]), and so the only expectation re-reading can add;
+    /// * the eager type is **not assignable** to it, so the program as typed is already an error and
+    ///   the re-check can only turn one into a success, never the reverse;
+    /// * the re-check must **succeed**, or its diagnostics are rolled back and the eager typing —
+    ///   with its own error, reported by the caller's `check_args` — stands.
+    ///
+    /// The rollback is why this is a re-check and not a guess: whether the literal's fields really
+    /// widen into the stated instantiation is [`Checker::check`]'s question, and asking it twice
+    /// costs one walk of a literal in a program that was about to be rejected.
+    fn rebuild_literal_args_at_trait_objects(
+        &mut self,
+        params: &[Type],
+        args: &mut [Type],
+        arg_exprs: &[CallArg],
+        env: &mut Env,
+    ) {
+        for (i, expr) in CallArg::values(arg_exprs).enumerate() {
+            if !matches!(expr, Expr::Object(lit) if lit.type_name.is_some()) {
+                continue;
+            }
+            let (Some(param), Some(arg)) = (params.get(i), args.get(i)) else {
+                continue;
+            };
+            if !param.contains_trait_object() || self.arg_assignable(arg, param) {
+                continue;
+            }
+            let param = param.clone();
+            let mark = self.diags.len();
+            let rechecked = self.check(expr, &param, env);
+            if !self.arg_assignable(&rechecked, &param) {
+                self.diags.truncate(mark);
+                continue;
+            }
+            args[i] = rechecked;
+            // The second walk repeats whatever the first said about the literal's *interior* — an
+            // undefined name in a field value is reported by both — so a diagnostic identical to one
+            // already there is dropped. Only an *identical* one: the second walk checks each field
+            // against the stated trait object rather than the erased `dyn`, so a field that fails
+            // to widen reports something the first walk had no way to say, and that must survive.
+            let mut seen = mark;
+            for j in mark..self.diags.len() {
+                if !self.diags[..mark].contains(&self.diags[j]) {
+                    self.diags.swap(seen, j);
+                    seen += 1;
+                }
+            }
+            self.diags.truncate(seen);
+        }
     }
 
     /// Type one **deferred** argument against the callee's now-known parameter type — the single
