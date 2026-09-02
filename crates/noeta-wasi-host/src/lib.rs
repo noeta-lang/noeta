@@ -177,8 +177,8 @@ fn io_error(message: String) -> StdError {
 /// pretends. One builder so the wording stays uniform across the leaves.
 fn no_network(what: &str) -> StdError {
     io_error(format!(
-        "{what} is not available on the wasm/WASI target: networking arrives with the wasi:http \
-         component build (see plans/wasm/, W4)"
+        "{what} is not available on this wasm module: build the program as a wasi:http component \
+         with `noeta build --serve` to reach the network"
     ))
 }
 
