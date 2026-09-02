@@ -82,6 +82,10 @@ The patterns below are banned because each one costs a reader time without payin
 
 **One idea per paragraph, and stop.** A paragraph that restates its predecessor in other words should be deleted, not rephrased. Paired antithetical clauses ("keep what works, drop what doesn't") and mirrored "which … and which" contrasts are two sentences pretending to be one.
 
+**The wiki is not the source of truth for mechanism; the source is.** A page owes a reader what the thing is, how to use it, and where the detail lives. It does not owe them the mechanism in full, because the code already holds that and holds it accurately. A section that reconstructs an implementation in prose is a second copy that drifts, and it costs a reader the thing they came for.
+
+**No section runs past about 300 words of prose.** Tables and samples do not count against it; a reference entry is a signature, one sentence of what it does, a table if it has fields, and one example. Where a concept genuinely needs more, it is usually two concepts. `cargo test -p noeta-cli --test docs_style` measures this.
+
 **A number nothing asserts will drift, so either a test pins it or it does not go in prose.** `Type` has 23 variants and a call that skips a defaulted parameter can name the first 63: both are exact, and both are wrong the moment they change, which is why a lockstep test fails when they do. A wasm artifact "2.42 MiB" and a gate step "1m20s warm" have no such test, and the first was off by more than double before anyone noticed. State the shape instead, or add the assertion.
 
 **A measurement belongs on a page only if a reader acts on it.** That compiling a 6,000-line file takes about 120 ms tells someone whether the startup cache is worth caring about. That the armed peak stays under 2,000 live objects while the disarmed control grows past the iteration count proves a design decision to a reviewer who is not reading. Test paths, residency counts, before-and-after timings and win percentages are evidence that the work was done right, and they live in the repo, in the test that asserts them.

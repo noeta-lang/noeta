@@ -802,3 +802,65 @@ fn every_fence_names_a_language_the_repo_knows() {
         violations.join("\n")
     );
 }
+
+/// The prose budget for one section, in words. Tables and fenced samples do not count.
+///
+/// A reference entry is a signature, one sentence of what it does, a table if it has fields, and
+/// one example. Where a section runs past this it is usually two concepts, or it is reconstructing
+/// an implementation the source already holds accurately.
+const SECTION_PROSE_BUDGET: usize = 300;
+
+/// **No section reconstructs the implementation in prose.**
+///
+/// The wiki owes a reader what a thing is, how to use it, and where the detail lives. The code
+/// holds the mechanism, and holds it accurately; a section that restates it is a second copy that
+/// drifts. Length is the measurable proxy: 126 of 569 sections once ran past this budget, the
+/// worst at 1,109 words, and the largest section of the reflection reference was an essay about a
+/// distinction rather than an entry for a query.
+#[test]
+fn no_section_runs_past_its_prose_budget() {
+    let docs = repo_root().join("docs");
+    let mut violations = Vec::new();
+
+    for entry in std::fs::read_dir(&docs).expect("read docs/") {
+        let path = entry.expect("dir entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let stem = path.file_stem().unwrap().to_string_lossy().to_string();
+        let text = std::fs::read_to_string(&path).expect("read page");
+
+        let (mut heading, mut line_no, mut words, mut fenced) = (String::new(), 0usize, 0usize, false);
+        let mut flush = |heading: &str, line_no: usize, words: usize, out: &mut Vec<String>| {
+            if !heading.is_empty() && words > SECTION_PROSE_BUDGET {
+                out.push(format!("  {stem}.md:{line_no}: {words} words of prose under `{heading}`"));
+            }
+        };
+
+        for (i, line) in text.lines().enumerate() {
+            if line.starts_with("```") {
+                fenced = !fenced;
+                continue;
+            }
+            if fenced || line.starts_with('|') {
+                continue;
+            }
+            if line.starts_with("## ") || line.starts_with("### ") || line.starts_with("#### ") {
+                flush(&heading, line_no, words, &mut violations);
+                heading = line.trim_start_matches('#').trim().to_string();
+                line_no = i + 1;
+                words = 0;
+                continue;
+            }
+            words += line.split_whitespace().count();
+        }
+        flush(&heading, line_no, words, &mut violations);
+    }
+
+    assert!(
+        violations.is_empty(),
+        "sections run past the {SECTION_PROSE_BUDGET}-word prose budget \
+         (AGENTS.md → How a page reads):\n\n{}\n",
+        violations.join("\n")
+    );
+}
