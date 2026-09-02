@@ -19,7 +19,7 @@ use super::*;
 pub struct Sites {
     /// The full-fidelity `type_of` site map (see [`resolve_type_of_sites`]).
     pub type_of_sites: HashMap<Span, noeta_ast::reflect::TypeRepr>,
-    /// Runtime type-argument reflection (`plans/reflection/runtime-type-args.md`, slice A): the
+    /// Runtime type-argument reflection (`plans/reflection/runtime-type-args.md`): the
     /// resolved `TypeRepr` at each collection/object **construction** site (list/map/set/object/enum
     /// literal), so a value can be tagged with the type it was built as and `type_of`/`is` recover its
     /// type arguments after the static type is lost to `dyn`. Annotation-driven — a `List<dyn>` literal
@@ -100,18 +100,18 @@ pub struct Sites {
     /// presence here is exactly what distinguishes a *native typed* method call from an ordinary
     /// (erased) generic-method instantiation. A pure function of the program.
     pub typed_method_call_sites: HashMap<Span, noeta_ext_abi::TypeRecipe>,
-    /// `@derive(Deserialize<Json>)` decode recipes (L2.2 DI): each deriving **struct**'s type name
+    /// `@derive(Deserialize<Json>)` decode recipes: each deriving **struct**'s type name
     /// paired with the [`noeta_ext_abi::TypeRecipe`] the checker resolved from its fields, in declaration
     /// order. Baked into a per-type runtime registry both backends lift, so `json.decode_typed(name,
     /// text)` can decode a JSON body into the type named by a runtime string. A pure function of the
     /// program, like the other site maps.
     pub deserialize_recipes: Vec<(String, noeta_ext_abi::TypeRecipe)>,
-    /// `json.decode_typed(name, text)` call spans (L2.2 DI): the router-facing runtime decode. Lowering
+    /// `json.decode_typed(name, text)` call spans: the router-facing runtime decode. Lowering
     /// reads this to emit an [`Rvalue::DecodeTyped`](noeta_ir::Rvalue) at these spans instead of a
     /// generic method call. A pure function of the program.
     pub decode_typed_sites: HashSet<Span>,
     /// `map(...)` call spans whose result element type is packed → the result element's layout. The
-    /// VM's `map` builtin builds a flat result at these sites (P-PACK 2.6 category B); invisible to
+    /// VM's `map` builtin builds a flat result at these sites; invisible to
     /// `RunResult`, so the eval reference may ignore it and stay boxed.
     pub map_packed_sites: HashMap<Span, noeta_ast::reflect::PackedLayout>,
     /// Every `@packed` struct **bound to a `vec` method bundle** (`impl vec.Kernels for T {}`), by its
@@ -123,7 +123,7 @@ pub struct Sites {
     pub bundle_schema_layouts: Vec<noeta_ast::reflect::PackedLayout>,
     /// **Every** `@packed` struct's flat [`PackedLayout`](noeta_ast::reflect::PackedLayout) (source
     /// *and* native), by type name in a deterministic order — the from-scratch producer's
-    /// schema-availability channel (native type-declaration unification, Slice E2). The compiler
+    /// schema-availability channel (native type-declaration unification). The compiler
     /// interns each into the module's `packed_schemas` **unconditionally**, so a native fn calling
     /// [`NativeCtx::make_packed`](noeta_ext_abi::NativeCtx::make_packed) can resolve a produced
     /// `List<packed>`'s element schema BY (qualified) name even when the type never appears in a
@@ -144,7 +144,7 @@ pub struct Sites {
     /// names — and lowering permutes the evaluated atoms, so both backends bind identically by
     /// construction. Absent for a purely positional call, which is already in order.
     pub arg_orders: HashMap<Span, Vec<Option<usize>>>,
-    /// `for` statement spans whose iterable is statically an `Iterator<T>` (Track I.2) — the lowering
+    /// `for` statement spans whose iterable is statically an `Iterator<T>` — the lowering
     /// sets `Stmt::For.stream` so both backends drive the iterator's `next()` instead of snapshotting.
     pub for_stream_sites: HashSet<Span>,
     /// Fixed-width arithmetic sites (Tier W), keyed by the `Expr::Binary`/`Expr::Unary` span → the
@@ -313,9 +313,9 @@ pub struct Sites {
     pub member_method_call_sites: HashSet<Span>,
     /// Trait method call sites → the statically resolved route `(trait qualified identity, method)`.
     /// Recorded (a) when a call resolves to a native trait's *defaulted* method answered by the trait's
-    /// native default-body dispatch, and (b) — since the ExtBundle→ExtTrait fold-in
-    /// — for **every kernel-trait method** (`impl vec.Kernels for T {}`): the bundle runtime route was
-    /// unified onto the trait route, so lowering bakes it into an [`Rvalue::TraitMethod`] dispatched
+    /// native default-body dispatch, and (b) for **every kernel-trait method**
+    /// (`impl vec.Kernels for T {}`), whose runtime route is the trait route: lowering bakes either
+    /// into an [`Rvalue::TraitMethod`] dispatched
     /// through the trait's ctx dispatch with the receiver as slot 0. `dyn` receivers are the documented
     /// escape hatch (only statically-known concrete receivers route here).
     pub trait_call_sites: HashMap<Span, (String, String)>,
@@ -834,13 +834,13 @@ pub(crate) struct SiteMaps {
     /// presence here is exactly what distinguishes a *native typed* method call from an ordinary
     /// (erased) generic-method instantiation. A pure function of the program.
     pub(crate) typed_method_call_sites: HashMap<Span, noeta_ext_abi::TypeRecipe>,
-    /// `@derive(Deserialize<Json>)` decode recipes (L2.2 DI) — see [`Sites::deserialize_recipes`].
+    /// `@derive(Deserialize<Json>)` decode recipes — see [`Sites::deserialize_recipes`].
     /// Accumulated as each deriving struct is validated in `check_derives`.
     pub(crate) deserialize_recipes: Vec<(String, noeta_ext_abi::TypeRecipe)>,
-    /// `json.decode_typed(name, text)` call spans (L2.2 DI) — see [`Sites::decode_typed_sites`].
+    /// `json.decode_typed(name, text)` call spans — see [`Sites::decode_typed_sites`].
     pub(crate) decode_typed_sites: HashSet<Span>,
-    /// `map(list, fn)` call spans whose result element type is a `@packed` struct (P-PACK 2.6
-    /// category B), keyed by the whole-call span → the result element's [`PackedLayout`]. The VM's
+    /// `map(list, fn)` call spans whose result element type is a `@packed` struct, keyed by the
+    /// whole-call span → the result element's [`PackedLayout`]. The VM's
     /// `map` builtin consults this to build a flat result instead of N boxed objects; like the other
     /// site maps it is a pure function of the program, invisible to `RunResult`.
     pub(crate) map_packed_sites: HashMap<Span, noeta_ast::reflect::PackedLayout>,
@@ -872,7 +872,7 @@ pub(crate) struct SiteMaps {
     /// not projected into [`Sites`].
     pub(crate) piped_calls: HashSet<Span>,
     /// `for` statement spans whose iterable is statically an `Iterator<T>` — the loop streams via
-    /// `next()` instead of snapshotting a list (Track I.2). Lowering reads this (via
+    /// `next()` instead of snapshotting a list. Lowering reads this (via
     /// [`Checked::for_stream_sites`]) to set `Stmt::For.stream`. A pure function of the program; a
     /// collection or `dyn` iterable is absent here and keeps the snapshot/cursor fast path.
     pub(crate) for_stream_sites: HashSet<Span>,
@@ -912,7 +912,7 @@ pub(crate) struct SiteMaps {
     /// Bare float-literal spans adapted into an `f32` context (P-NUM-SYM) — lowering reads this (via
     /// [`Checked::f32_literal_sites`]) to emit a narrow `Const::F32` for the literal.
     pub(crate) f32_literal_sites: HashSet<Span>,
-    /// Trait method call sites (slice 2 default bodies + slice 4 kernel traits) — see
+    /// Trait method call sites (native default bodies and kernel traits) — see
     /// [`Sites::trait_call_sites`].
     pub(crate) trait_call_sites: HashMap<Span, (String, String)>,
     /// Namespace-group member-access sites — see [`Sites::namespace_module_sites`].

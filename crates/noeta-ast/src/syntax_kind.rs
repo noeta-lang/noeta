@@ -1,10 +1,9 @@
 //! `SyntaxKind`: the flat tag set for every token and node kind.
 //!
-//! Defined from M0 even though the lossless `rowan` green tree it will key (for the
-//! M2 LSP and formatter) is not built yet. Defining it now keeps the parser's
-//! concrete-syntax decisions recoverable rather than discarded. The `rowan::Language`
-//! impl that binds this to a green tree is added when the CST lands; until then this
-//! is a stable, exhaustive enum that grows alongside the grammar.
+//! Defined even though the lossless `rowan` green tree it will key is not built yet, because it
+//! keeps the parser's concrete-syntax decisions recoverable rather than discarded. The
+//! `rowan::Language` impl that binds this to a green tree is added when the CST lands; until then
+//! this is a stable, exhaustive enum that grows alongside the grammar.
 
 /// Every distinct token and node kind. `#[repr(u16)]` so it can later be the raw
 /// kind of a `rowan` green node with no conversion layer.

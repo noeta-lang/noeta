@@ -31,7 +31,7 @@ pub(crate) fn attr_field_type(ty: noeta_ext_abi::registry::AttrFieldType) -> Typ
 
 pub(crate) const PRELUDE_TYPES: &[&str] = &[
     "Ordering",
-    // The typed cancelled marker (Track A.8): the `Err` payload of `h.join(): Result<T, Cancelled>`.
+    // The typed cancelled marker: the `Err` payload of `h.join(): Result<T, Cancelled>`.
     "Cancelled",
     "Type",
     "Semantic",
@@ -44,10 +44,10 @@ pub(crate) const PRELUDE_TYPES: &[&str] = &[
     "VariantSpec",
     // The roots-list element a declared tier's runner receives.
     "TierRoot",
-    // The lazy-iterator type (Track I): a writable annotation now that `iter()`/adapters and
+    // The lazy-iterator type: a writable annotation now that `iter()`/adapters and
     // generator returns produce `Iterator<T>` values.
     "Iterator",
-    // The async completion type (Track A): a writable annotation. Calling an `async fn f(): T`
+    // The async completion type: a writable annotation. Calling an `async fn f(): T`
     // produces a `Future<T>`; `expr.await` unwraps it back to `T`.
     "Future",
     // The channel endpoint types (isolates I.1): writable annotations. `channel::<T>(cap)` yields a
@@ -56,7 +56,7 @@ pub(crate) const PRELUDE_TYPES: &[&str] = &[
     "Receiver",
 ];
 
-/// The type a **call** to an `async fn f(): T` produces: `Future<T>` (Track A). The body writes
+/// The type a **call** to an `async fn f(): T` produces: `Future<T>`. The body writes
 /// `return t` (checked against the inner `T`), but a call site sees the wrapped future; `.await`
 /// unwraps it again. A non-async function's return type is returned unchanged.
 pub(crate) fn async_return(inner: Type, is_async: bool) -> Type {
@@ -105,11 +105,10 @@ pub(crate) fn required_operator_trait(op: BinaryOp) -> Option<BuiltinTrait> {
 /// The reserved synthetic identities, for the two kinds of type parameter the language provides
 /// without a source declaration to take a span from.
 ///
-/// Both were previously "identified" by a *name nobody would write* — the prelude constructors
-/// used `$T`/`$E` on the reasoning that no user name contains a `$`. That is the same
-/// spelling-as-identity bet this arc removes everywhere else, so they are reserved ids instead:
-/// [`ParamId::synthetic`] lives in a `SourceId` the parser never stamps, and can therefore not
-/// alias a real declaration however it is spelled.
+/// Identifying either by a *name nobody would write* — `$T`/`$E`, on the reasoning that no user
+/// name contains a `$` — is the same spelling-as-identity bet ruled out everywhere else, so these
+/// are reserved ids instead: [`ParamId::synthetic`] lives in a `SourceId` the parser never stamps,
+/// and can therefore not alias a real declaration however it is spelled.
 pub(crate) mod synthetic {
     use super::{ParamId, ParamRef};
 
@@ -635,9 +634,9 @@ pub(crate) fn builtin_satisfies(ty: &Type, t: BuiltinTrait) -> bool {
     use Type::*;
     match t {
         Bt::Comparable | Bt::Equatable => ty.is_arith_numeric() || matches!(ty, String | Bool),
-        // Fixed-width `+ - *` are sign-agnostic (W2 — the low bits are the same read signed or
+        // Fixed-width `+ - *` are sign-agnostic (the low bits are the same read signed or
         // unsigned, so masking the result is correct); `Div` (and ordering) are sign-dependent and
-        // land in W3 via the width-carrying `Rvalue::WideInt`. (`%` is numeric-only — no trait.)
+        // go through the width-carrying `Rvalue::WideInt`. (`%` is numeric-only — no trait.)
         Bt::Add | Bt::Sub | Bt::Mul | Bt::Div => ty.is_arith_numeric(),
         Bt::Concat => matches!(ty, String | List(_)),
         Bt::Display => {
@@ -829,7 +828,7 @@ pub(crate) fn stmt_breaks(stmt: &Stmt) -> bool {
 /// a `dyn` `d`. That silently admitted a value whose type was never checked into a checked slot,
 /// which is precisely what `dyn <: T` being false everywhere else exists to prevent: `some(d)` into a
 /// `?T` was always the E0007 it should be, and the two now agree. The sound route out of `dyn` is the
-/// checked narrow — `d.as<T>()`, which resolves a type parameter as of the same arc as this note.
+/// checked narrow — `d.as<T>()`, which resolves a type parameter.
 pub(crate) fn unify_element(acc: &Type, next: &Type) -> Option<Type> {
     if acc.is_gradual() {
         return Some(next.clone());

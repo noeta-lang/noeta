@@ -3,7 +3,7 @@
 //! This is the textual form snapshot tests assert against (never `Debug` of raw
 //! structs, which is noisy and unstable). Spans are rendered as `@start..end` so a
 //! span regression shows up directly in a snapshot diff. It is also the printer the
-//! parse→print→parse property test (Slice 9) builds on.
+//! parse→print→parse property test builds on.
 //!
 //! # Every arm binds every field by name
 //!

@@ -1,4 +1,4 @@
-//! **Type-param forwarding pre-pass** (extended by poly-deferrals D2a): which
+//! **Type-param forwarding pre-pass**: which
 //! generic functions and methods forward a type parameter into a **call-site-typed position** — a
 //! native turbofish (`json.try_parse::<T>`), a reflection manifest query (`attributes_of::<T>`),
 //! the type's own name (`type_name::<T>()`), a **narrow** to it (`v.as<T>()` / `v is T`), the
@@ -246,7 +246,7 @@ pub(crate) fn compute_forwarding(
         })
         .collect();
     // Each candidate's raw declared signature (parameter/return types over its own parameters),
-    // for binding an ANNOTATED VALUE BINDING of a forwarding fn (D2c pass-through:
+    // for binding an ANNOTATED VALUE BINDING of a forwarding fn (the pass-through case:
     // `d: (string) -> Result<T, E> = load` inside another generic — the annotation instantiates
     // the callee, and any slot still mentioning OUR parameters becomes our slot).
     let sigs: HashMap<&str, (Vec<Type>, Type)> = fns
@@ -640,7 +640,7 @@ fn head_of(ty: &TypeRef) -> Option<&str> {
 fn walk_stmt(stmt: &Stmt, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
     match stmt {
         Stmt::Echo { value: e, .. } | Stmt::Yield { value: e, .. } => walk_expr(e, cx, mark),
-        // An ANNOTATED binding of a forwarding fn as a VALUE (D2c pass-through): the annotation
+        // An ANNOTATED binding of a forwarding fn as a VALUE (the pass-through case): the annotation
         // instantiates the callee's signature; a slot the substitution leaves mentioning OUR
         // parameters (`d: (string) -> Result<T, E> = load`) becomes our slot — the same
         // propagation an explicit turbofish call performs.

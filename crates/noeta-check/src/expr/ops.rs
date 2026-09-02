@@ -165,8 +165,8 @@ impl Checker {
             // `E0007` (the runtime's "cannot compare"); an unbounded type parameter is `E0025`.
             BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
                 // Fixed-width ordering is sign-dependent (unsigned `u64` ordering differs
-                // from signed past bit 63), so it consults the operand width the way W2's arithmetic
-                // does — same-width `IntN` only; mixed → E0044. Intercept before the generic
+                // from signed past bit 63), so it consults the operand width the way fixed-width
+                // arithmetic does — same-width `IntN` only; mixed → E0044. Intercept before the generic
                 // `Comparable` path (which the width-carrying `WideInt` op then implements).
                 if matches!(lt, Type::IntN { .. }) || matches!(rt, Type::IntN { .. }) {
                     self.synth_intn_compare(op, &lt, &rt, span);
@@ -228,7 +228,7 @@ impl Checker {
                 }
                 Type::Bool
             }
-            // Symmetric bitwise `& | ^` (P-BITS Tier B on `int`; W5 on fixed-width). Two same-width
+            // Symmetric bitwise `& | ^`, on `int` and on fixed-width values alike. Two same-width
             // `IntN` yield that width — the erased op is already correctly extended, so no mask.
             // Mixed-width or `IntN`+`int` → E0044. Otherwise both operands must be `int` → `int`
             // (a `dyn`/hole defers); anything else is E0043 (`bool` uses `&&`/`||`).

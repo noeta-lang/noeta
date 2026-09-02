@@ -11,7 +11,7 @@ use super::*;
 /// captures) and any named type or argument in `reachable` count as relevant; only the primitive
 /// scalars and aggregates built purely from non-relevant parts are ruled out. So a `false` result
 /// is a proof of non-relevance, while a `true` may be an over-approximation — exactly the direction
-/// that keeps Phase 4's destructor firing sound.
+/// that keeps destructor firing sound.
 pub(crate) fn type_relevant(ty: &Type, reachable: &HashSet<String>) -> bool {
     match ty {
         // No value, or a primitive scalar: a drop runs no destructor.

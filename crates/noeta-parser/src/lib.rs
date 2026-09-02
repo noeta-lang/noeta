@@ -21,8 +21,6 @@
 //! (integer overflow, string-interpolation holes, a non-name assignment target) are
 //! pushed through a captured side-channel (`Ctx::diags`) so the code is preserved
 //! exactly rather than being flattened to a generic "unexpected token".
-//!
-//! M0 scope grows one vertical slice at a time.
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -669,7 +667,7 @@ fn set_sugar_items(callee: &Expr) -> Option<&[Expr]> {
     }
 }
 
-/// Parse `@packed`'s optional layout argument (P-SIMD): the [`reflect::LAYOUT_ENUM`] vocabulary,
+/// Parse `@packed`'s optional layout argument: the [`reflect::LAYOUT_ENUM`] vocabulary,
 /// `@packed(Layout.Row)` / `@packed(Layout.Column)` — the same `Enum.Variant` shape `@role` takes.
 /// Bare `@packed` (no args) is [`PackedLayout::Row`]. Any malformed argument — unknown name or
 /// variant, missing qualifier, extra args, the retired `layout: row|column` form — emits `E0037`
@@ -2102,8 +2100,8 @@ where
     })
 }
 
-/// A type reference: `int`, `List<Item>`, `Result<Order, E>`, `?User`. Parsed and
-/// retained for M1's checker; M0 does not interpret it.
+/// A type reference: `int`, `List<Item>`, `Result<Order, E>`, `?User`. Parsed and retained for
+/// the checker.
 fn type_parser<'src, I>(ctx: Ctx<'src>) -> impl Parser<'src, I, TypeRef, Extra<'src>> + Clone
 where
     I: ValueInput<'src, Token = T, Span = SimpleSpan>,
@@ -2128,7 +2126,7 @@ where
                 }
                 name
             });
-        // `dyn Trait` — a trait object (L1 user traits): the identifier `dyn` immediately
+        // `dyn Trait` — a trait object: the identifier `dyn` immediately
         // followed by a (possibly dotted) trait name. Tried before `named` in the `base` choice; a
         // bare `dyn` (no following type name) fails here and falls through to `named` as the top type.
         let dyn_trait = ident_parser(ctx)
@@ -2520,7 +2518,7 @@ where
         .boxed()
 }
 
-/// A `match` pattern. Exhaustiveness is unchecked in M0 (a checker concern).
+/// A `match` pattern. Exhaustiveness is the checker's concern (`E0011`), not the parser's.
 fn pattern_parser<'src, I>(
     ctx: Ctx<'src>,
     type_p: TypeP<'src, I>,
@@ -3012,8 +3010,8 @@ where
 
         // `match scrutinee { pattern => body, ... }`. An arm body is a value EXPRESSION first —
         // so `=> {}` / `=> {"k": v}` keep their map/set-literal meaning — and only a brace body
-        // that is not an expression parses as a statement BLOCK (aether F1: side-effectful arms,
-        // value `unit`; `return` inside returns from the enclosing function). The fallback only
+        // that is not an expression parses as a statement BLOCK (side-effectful arms, value
+        // `unit`; `return` inside returns from the enclosing function). The fallback only
         // fires when the expression parse FAILS, so it depends on every brace-taking expression
         // refusing the braces it does not mean — see the map-entry grammar below, which is why
         // `=> { f(x) }` is a block rather than a one-entry map that errors after the fact.
@@ -3589,7 +3587,7 @@ where
                 span: ctx.to_span(e.span()),
             }),
             // `receiver.as<T>()` — checked narrowing of a `dyn` value to `?T` — and `receiver.await`,
-            // the postfix suspend operator (Track A). Both are `.` followed by a keyword, so they are
+            // the postfix suspend operator. Both are `.` followed by a keyword, so they are
             // folded into one postfix (chumsky's pratt op-tuple caps at 26 entries); `as`/`await` are
             // keywords, so neither collides with the `.ident` member-access postfix below. Binds as
             // tightly as call/member, so `f().await`, `f().await?`, and `f().await.g()` all chain.
@@ -3668,9 +3666,9 @@ where
             // arity cap) — see [`MemberPostfix`]:
             //
             //   * `.member` — plain member access, parsed exactly as before;
-            //   * `.member::<U, ...>(args)` — an explicit METHOD instantiation (generic methods,
-            //     D3). The turbofish half must see its `(` args to commit, so a bare `.member`
-            //     never loses its parse to it;
+            //   * `.member::<U, ...>(args)` — an explicit METHOD instantiation. The turbofish
+            //     half must see its `(` args to commit, so a bare `.member` never loses its parse
+            //     to it;
             //   * `::<T, ...>.member` — an explicit CLASS instantiation at the call site
             //     (`Repo::<Todo>.new("todos")`). The trailing `.member` is required, which is what
             //     keeps `Repo::<Todo>` from being an expression of its own and keeps `x.m::<T>`
@@ -3830,7 +3828,7 @@ where
                 expr: Box::new(operand),
                 span: ctx.to_span(e.span()),
             }),
-            // `-x` / `!x` — unary negation/not — and `spawn e` (Track A.3), all prefix at the same
+            // `-x` / `!x` — unary negation/not — and `spawn e`, all prefix at the same
             // precedence, folded into one pratt entry (chumsky's op-tuple caps at 26). `spawn` binds
             // looser than call/postfix, so `spawn f()` is `spawn (f())`.
             prefix(
@@ -3884,7 +3882,7 @@ where
             infix(left(11), just(T::Minus), move |l, _, r, e| {
                 binary(ctx, BinaryOp::Sub, l, r, e)
             }),
-            // Bitwise operators (P-BITS Tier B), Rust-style precedence: shifts bind just below the
+            // Bitwise operators, Rust-style precedence: shifts bind just below the
             // additive tier, then `&`, `^`, `|` — all *above* comparison/equality, so
             // `flags & MASK == 0` parses as `(flags & MASK) == 0` (avoiding the C footgun).
             // `>>` is **not** a lexer token — it is composed here from two adjacent `Gt`, so nested
@@ -4166,7 +4164,7 @@ where
                 span: ctx.to_span(e.span()),
             });
 
-        // `yield <expr>` — a generator step (Track G). The value is required (no bare `yield`).
+        // `yield <expr>` — a generator step. The value is required (no bare `yield`).
         let yield_ = just(T::YieldKw)
             .ignore_then(expr.clone())
             .then_ignore(stmt_terminator(ctx))
@@ -4224,7 +4222,7 @@ where
                 span: ctx.to_span(e.span()),
             });
 
-        // `concurrent { body }` — a structured-concurrency scope (Track A.3). `concurrent` is followed
+        // `concurrent { body }` — a structured-concurrency scope. `concurrent` is followed
         // directly by a brace block, so there is no head-expression ambiguity.
         let concurrent_ =
             just(T::ConcurrentKw)
@@ -4585,8 +4583,8 @@ where
             .then(just(T::AsyncKw).or_not())
             .then_ignore(just(T::FnKw))
             .then(id.clone())
-            // A method may declare its OWN type parameters (`fn pick<U>(...)`, generic methods
-            // D3), composing with the enclosing class's (which stay in scope around it).
+            // A method may declare its OWN type parameters (`fn pick<U>(...)`), composing with
+            // the enclosing class's (which stay in scope around it).
             .then(type_params.clone())
             .then(params.clone())
             .then(capture_clause.clone())
@@ -4828,7 +4826,7 @@ where
                     })
                 },
             );
-        // A trait-method signature (L1 user traits): `#[...]? async? fn name(params): Ret` with an
+        // A trait-method signature: `#[...]? async? fn name(params): Ret` with an
         // OPTIONAL body. A bodiless signature is a *required* method; a `{ ... }` body is a *default*
         // implementation an `impl` may omit.
         let trait_method = attr_decl
@@ -5020,8 +5018,8 @@ where
                             methods.extend(block.methods.iter().cloned());
                             impls.push(block);
                         }
-                        // A second `destruct` block silently keeps the last; the checker
-                        // will reject duplicates. M0/M1 accept the surface for now.
+                        // A second `destruct` block silently keeps the last; the checker rejects
+                        // duplicates. The grammar accepts the surface.
                         ClassMember::Destructor(body, _) => destructor = Some(body),
                     }
                 }
@@ -5507,7 +5505,7 @@ where
                             }
                             Some(BuiltinDirective::Packed) => {
                                 // `@packed` — the struct-only flat-layout marker. Its one
-                                // optional argument is `Layout.Row|Layout.Column` (P-SIMD): the
+                                // optional argument is `Layout.Row|Layout.Column`: the
                                 // storage layout its lists use. Anything else is E0037. The checker
                                 // validates placement (struct-only) and the all-primitive field
                                 // constraint.
@@ -6075,7 +6073,7 @@ mod tests {
 
     #[test]
     fn parses_bitwise_operators_alongside_unions_and_nested_generics() {
-        // P-BITS Tier B: the bitwise operators (`& | ^ <<`) parse in expression position, and crucially
+        // The bitwise operators (`& | ^ <<`) parse in expression position, and crucially
         // the reused `|` token and the `Lt`/`Gt` tokens still parse union *types* and nested generic
         // closes (`List<int>>`) — the design's headline hazard. All in one program, no diagnostics.
         let parsed = parse_str(
@@ -6598,7 +6596,7 @@ mod tests {
 
     #[test]
     fn packed_layout_argument() {
-        // P-SIMD: `@packed(Layout.Column)` selects the column-major storage layout; `Layout.Row`
+        // `@packed(Layout.Column)` selects the column-major storage layout; `Layout.Row`
         // is the explicit default.
         let col = parse_str("@packed(Layout.Column)\nstruct V { a: int }\n");
         assert!(col.diagnostics.is_empty(), "{:?}", col.diagnostics);

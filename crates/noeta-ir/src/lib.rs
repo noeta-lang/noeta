@@ -340,8 +340,8 @@ pub enum Rvalue {
     /// IR.
     ///
     /// `reuse` is the **in-place-reuse token** for a list **self-append** (`acc = acc ~ rhs`,
-    /// the desugaring of `acc ~= rhs`): set by the reuse-analysis pass ([`noeta_ir_passes`],
-    /// Phase 5) only on a `Concat` whose `lhs` is the very binding the result is reassigned to
+    /// the desugaring of `acc ~= rhs`): set by the reuse-analysis pass ([`noeta_ir_passes`]) only
+    /// on a `Concat` whose `lhs` is the very binding the result is reassigned to
     /// (and whose `rhs` does not mention that binding), so the old list is dead after this op
     /// and its backing buffer may be extended in place. Both backends consume the same token —
     /// the VM via `ConcatInPlace` (with a `TakeGlobal` first for a global accumulator), the IR
@@ -512,7 +512,7 @@ pub enum Rvalue {
     /// A **trait** method call with a baked-in route: `receiver.name(args)` where the checker
     /// statically resolved the call to a native trait's shared ctx dispatch. Two producers: (a) a
     /// native trait's *defaulted* method with a trait-level dispatch and no overriding implementor
-    /// ([`noeta_ext_abi::ExtTrait::dispatch`]); (b) — since the ExtBundle→ExtTrait fold-in — every
+    /// ([`noeta_ext_abi::ExtTrait::dispatch`]); (b) every
     /// kernel-trait method (`impl vec.Kernels for T {}`), whose bundle runtime route
     /// was unified onto this one. Dispatch goes straight to the registered trait's shared ctx dispatch
     /// with the receiver as slot 0, no runtime discovery (which is what makes an empty list receiver
@@ -598,7 +598,7 @@ pub enum Rvalue {
         span: Span,
     },
     /// Allocate an empty flat `List<packed>` buffer for a `List<@packed struct>` literal, filled
-    /// element-by-element by [`Rvalue::PackedListPush`] (P-PACK 2.5 streaming construction). The
+    /// element-by-element by [`Rvalue::PackedListPush`] (streaming construction). The
     /// `layout` is carried inline so the backends need no side channel — both build their packed
     /// schema from it identically. Produced only by lowering a list literal whose span the checker
     /// marked `List<packed>`; an unmarked literal stays a boxed [`Rvalue::List`].
@@ -705,12 +705,12 @@ pub enum Rvalue {
         span: Span,
     },
     /// Wrap a step closure into a generator iterator (`IterState::Gen`) — the tail of a lowered
-    /// generator function (Track G.1b). `step` is the lowered state-machine closure (its `mut`-captured
+    /// generator function. `step` is the lowered state-machine closure (its `mut`-captured
     /// cells hold the `$state` discriminant and the hoisted locals); the result is an ordinary
     /// `Iterator` that drives `step` once per element. Produced only by the generator desugar
     /// (`lower_generator`), never by surface syntax.
     MakeGen { step: Atom, span: Span },
-    /// Wrap a step closure into a `Future` — the tail of a lowered `async fn` (Track A.3). `thunk` is
+    /// Wrap a step closure into a `Future` — the tail of a lowered `async fn`. `thunk` is
     /// the async state-machine step closure (its `mut`-captured cells hold `$state` + the hoisted
     /// locals + the awaited-future cells); polling it runs one segment and returns the completion value
     /// or the pending sentinel. Produced only by the async desugar (`lower_async`), never by surface
@@ -718,22 +718,22 @@ pub enum Rvalue {
     /// calling convention became a poll.)
     MakeFuture { thunk: Atom, span: Span },
     /// `expr.await` at the async **top level** — drive a `Future` to completion via the executor and
-    /// yield its value (Track A.2/A.3): poll; on pending, advance the logical clock and re-poll. Inside
+    /// yield its value: poll; on pending, advance the logical clock and re-poll. Inside
     /// an `async fn` body the `.await` is instead compiled into a poll-suspend state of the state
     /// machine (see [`Self::PollFuture`]); this rvalue is only the root driver.
     RunFuture { future: Atom, span: Span },
-    /// Poll a `Future` once (Track A.3): returns `some(v)` if it is ready with `v`, or `none` if it is
+    /// Poll a `Future` once: returns `some(v)` if it is ready with `v`, or `none` if it is
     /// pending. The single-step primitive the async state machine uses at each `.await` — produced only
     /// by the async desugar (the synthetic `$poll(f)` call), never by surface syntax.
     PollFuture { future: Atom, span: Span },
-    /// The async **pending** sentinel (Track A.3) — the value a state-machine step returns to signal it
+    /// The async **pending** sentinel — the value a state-machine step returns to signal it
     /// suspended at an `.await`. Produced only by the async desugar (the synthetic `$pending`), never by
     /// surface syntax; always caught at a poll site, never bound to a user value.
     Pending { span: Span },
-    /// `spawn e` (Track A.3b): register the future `future` as a task in the current concurrency scope
+    /// `spawn e`: register the future `future` as a task in the current concurrency scope
     /// and yield a handle (itself a `Future<T>`). Legal only inside a `ScopeBegin`/`ScopeEnd` region.
     Spawn { future: Atom, span: Span },
-    /// Open a structured-concurrency scope and yield its **index** (Track A.7): the value form of
+    /// Open a structured-concurrency scope and yield its **index**: the value form of
     /// `Stmt::ScopeBegin`, emitted only by the async desugar (the synthetic `$scope_begin()`) when a
     /// `concurrent { }` block inside an async fn is split into state-machine states. The returned int is
     /// threaded to the block's join poll-state ([`Self::ScopeReady`]) so the join checks *this* scope's
@@ -741,13 +741,13 @@ pub enum Rvalue {
     /// sub-task may have pushed a deeper scope above it). The statement-position `Stmt::ScopeBegin` (used
     /// by the synchronous, non-flattened `concurrent` lowering) is unchanged.
     ScopeBegin { span: Span },
-    /// Whether every task in the scope at index `scope` has completed or been cancelled (Track A.7) —
+    /// Whether every task in the scope at index `scope` has completed or been cancelled —
     /// the boolean the async desugar's `concurrent` join poll-state tests each poll. Emitted only by the
     /// async desugar (the synthetic `$scope_ready(idx)`); when false the step suspends (`$pending`) so
     /// the scheduler round-robins the inner scope's tasks with the outer scope's siblings across polls,
     /// instead of driving the inner scope to completion inside one poll of the outer task.
     ScopeReady { scope: Atom, span: Span },
-    /// Close the (already-drained) scope at index `scope` (Track A.7): release its tasks' futures and
+    /// Close the (already-drained) scope at index `scope`: release its tasks' futures and
     /// results and tombstone the slot. The value form of `Stmt::ScopeEnd` that closes a **specific**
     /// scope by index rather than the innermost — necessary because a split `concurrent { }` in one task
     /// may finish while a *sibling* task's own `concurrent` scope is still open above it on the stack, so
@@ -906,7 +906,7 @@ pub enum Rvalue {
         dynamic: Option<Atom>,
         span: Span,
     },
-    /// The **router-facing** runtime JSON decode `json.decode_typed(name, text)` (L2.2 DI): decode
+    /// The **router-facing** runtime JSON decode `json.decode_typed(name, text)`: decode
     /// `text` into the type named by the runtime string `name`, using the recipe a
     /// `@derive(Deserialize<Json>)` type registered (baked into the backend's per-type recipe
     /// registry). Recoverable end to end — a malformed body **or** an unknown type name yields
@@ -1021,8 +1021,8 @@ pub enum Stmt {
         name: String,
         name_span: Span,
         value: Atom,
-        /// True when this bind is the reassignment wrapping a field-set `x.f = v` (object-model
-        /// slice 2b′). The backends **skip the immutable-reassignment check (E0006)** for it: a
+        /// True when this bind is the reassignment wrapping a field-set `x.f = v`. The backends
+        /// **skip the immutable-reassignment check (E0006)** for it: a
         /// reference `class` field-set mutates in place (the rebind just restores `x`), and a value
         /// `struct` field-set on an immutable `x` is already rejected *statically* by the checker.
         field_assign: bool,
@@ -1036,7 +1036,7 @@ pub enum Stmt {
     Break { span: Span },
     /// `continue;`.
     Continue { span: Span },
-    /// Open a structured-concurrency scope (Track A.3b) — the start of a lowered `concurrent { }`.
+    /// Open a structured-concurrency scope — the start of a lowered `concurrent { }`.
     /// Subsequent `Rvalue::Spawn`s register tasks in this scope; [`Self::ScopeEnd`] joins them.
     ScopeBegin { span: Span },
     /// Close the current concurrency scope: drive every task spawned in it to completion (the join),
@@ -1061,7 +1061,7 @@ pub enum Stmt {
     },
     /// `for pattern in iterable { body }`. The iterable is pre-computed to an atom; the
     /// loop pattern reuses the surface [`ForPattern`]. `stream` is set (from the checker's
-    /// `for_stream_sites`) when the iterable is statically an `Iterator<T>` (Track I.2): the loop
+    /// `for_stream_sites`) when the iterable is statically an `Iterator<T>`: the loop
     /// then drives `next()` one element at a time instead of snapshotting a list, so a lazy source
     /// streams (and `break` stops early). A collection iterable keeps the snapshot/cursor fast path.
     For {
@@ -1127,21 +1127,18 @@ pub enum Stmt {
     /// optimization (those land in a later phase).
     Drop(Temp),
     /// Release a **source variable's** value now, at its last use, rather than at scope/teardown
-    /// (memory-management migration). Inserted by the drop-insertion pass
+    /// Inserted by the drop-insertion pass
     /// ([`noeta_ir_passes`]) at a binding's death point — only for function-local bindings, never a
     /// top-level global (those stay teardown-reclaimed) and never an immediately-reassigned binding
     /// (its displaced value is released by the reassignment itself). `name` resolves through the
     /// runtime scope/register model exactly as a read would.
     ///
-    /// In Phase 3 this lowers to a **plain reference release** in both backends (prompt memory
-    /// reclamation, the peak-residency win) and fires **no** destructor — destructor firing stays
-    /// globals-only until Phase 4, which flips local drops to the destructor-running release.
-    ///
     /// `relevant` is the **destructor-relevance** annotation: `true` if dropping this
     /// binding's value could run *some* `destruct` block (its type transitively reaches one),
-    /// `false` if it provably cannot. Both backends ignore it in Phase 3 (every drop is a plain
-    /// release); Phase 4 reads it to skip the destructor-firing check for a `false` drop. Computed
-    /// from the checker's per-binding types; conservatively `true` when the type is unknown.
+    /// `false` if it provably cannot. A `true` drop takes the destructor-firing release, so a
+    /// `destruct` block runs at this last use when this is the final owning reference; a `false`
+    /// drop takes the plain release. Computed from the checker's per-binding types; conservatively
+    /// `true` when the type is unknown.
     DropVar {
         name: String,
         span: Span,
@@ -1360,8 +1357,8 @@ pub struct StructDef {
     pub decl: Rc<noeta_ast::StructDecl>,
     pub methods: Vec<(String, Rc<Func>)>,
     /// Each field declared with a default (`x: T = expr`), lowered to a parameterless value
-    /// [`Thunk`] run in the type's definition scope when a literal omits the field (object-model
-    /// slice 5). See [`ClassDef::field_defaults`].
+    /// [`Thunk`] run in the type's definition scope when a literal omits the field. See
+    /// [`ClassDef::field_defaults`].
     pub field_defaults: Vec<(String, Thunk)>,
     pub span: Span,
 }

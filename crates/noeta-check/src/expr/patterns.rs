@@ -517,7 +517,7 @@ impl Checker {
 
     pub(crate) fn bind_for_pattern(&mut self, pattern: &ForPattern, iter_ty: &Type, env: &mut Env) {
         // The element type a `for` loop binds: a list/set's element, a map's **value** (iteration
-        // yields values, like the runtime), or an `Iterator<T>`'s element (Track I.2). Anything else
+        // yields values, like the runtime), or an `Iterator<T>`'s element. Anything else
         // (a `dyn`/gradual source) binds a hole.
         let elem = match iter_ty {
             Type::List(t) | Type::Set(t) => (**t).clone(),
@@ -536,7 +536,7 @@ impl Checker {
                 bind(env, name, elem)
             }
             // `for (a, b, …) in …` destructures each iterated **tuple** element positionally
-            // (object-model slice 4b — `.enumerate()` yields `(int, T)` tuples). Each name binds to
+            // (`.enumerate()` yields `(int, T)` tuples). Each name binds to
             // its element type when the element is a known tuple, else `dyn`.
             ForPattern::Tuple { names, span } => {
                 // The destructure is only possible if the element really is a tuple with a
@@ -760,7 +760,7 @@ impl Checker {
     /// Resolve a source-written enum type name to the key it occupies in `symbols.enums` — the name
     /// itself for a user/prelude enum, or, for a **native** enum imported `use pkg.TheEnum`, the
     /// qualified identity its local short name aliases to. A native enum is seeded under its
-    /// qualified name alone (S1's two-identity model), so source-level construction
+    /// qualified name alone (the two-identity model), so source-level construction
     /// (`TheEnum.Variant`) follows the import alias — the same
     /// `extern_types` channel a native fn's *return* type resolves through — to find it and yield a
     /// construction result keyed by that qualified identity (so it unifies with a native signature).

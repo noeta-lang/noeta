@@ -166,7 +166,7 @@ pub(crate) struct FnSig {
     /// (defaulted) ones the callee fills in. Equals `params.len()` for a function with no defaults.
     pub(crate) required: usize,
     /// Generic instantiation data for a generic free function; `None` for non-generic functions
-    /// and for methods (whose bound enforcement is deferred — see slice S4).
+    /// and for methods.
     pub(crate) generic: Option<GenericInfo>,
 }
 

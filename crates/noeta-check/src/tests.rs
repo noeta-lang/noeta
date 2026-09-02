@@ -5,8 +5,8 @@
 use super::{check, resolve_type_of_sites};
 
 /// Seed the process-default registry with the std units. Production drivers do this before the
-/// checker runs (audit-6 F2 — the checker consumes the registry as data and no longer links the
-/// std units); these tests are their own driver, so every funnel below seeds first. Idempotent.
+/// checker runs (the checker consumes the registry as data rather than linking the std units);
+/// these tests are their own driver, so every funnel below seeds first. Idempotent.
 fn seed_std() {
     noeta_stdlib::registry::default_seeded();
 }
@@ -72,7 +72,7 @@ fn arithmetic_on_bool_is_type_mismatch() {
 
 #[test]
 fn mixed_numeric_arithmetic_is_fine() {
-    // int + float is valid in M0 (promotes to float); the checker must not flag it.
+    // int + float is valid (it promotes to float); the checker must not flag it.
     assert!(codes("echo 1 + 2.5;\n").is_empty());
 }
 
@@ -209,8 +209,8 @@ fn try_on_result_in_a_deferring_function_still_defers() {
 
 #[test]
 fn undeclared_type_annotation_is_e0013() {
-    // M1.9 lit up unknown-type checking: an annotation naming nothing declared, imported, or
-    // built-in is now a hard error, on the offending name.
+    // An annotation naming nothing declared, imported, or built-in is a hard error, reported on
+    // the offending name.
     assert_eq!(codes("fn f(x: Nope): int { return 0; }\n"), ["E0013"]);
     assert_eq!(
         codes("fn find(hit: bool): ?User { return none; }\n"),
@@ -943,8 +943,7 @@ fn bare_attribute_record_is_usable_anywhere() {
 
 #[test]
 fn packed_struct_of_primitives_is_clean() {
-    // P-PACK Phase 0: a `@packed` struct whose fields are all primitives (or other packed structs)
-    // checks clean — and a packed struct may name another packed struct (order-independent).
+    // A `@packed` struct whose fields are all primitives (or other packed structs) checks clean — and a packed struct may name another packed struct (order-independent).
     let src = "@packed struct Vec3 { x: float; y: float; z: float }\n@packed struct Segment { a: Vec3; b: Vec3 }\n";
     assert!(codes(src).is_empty(), "{:?}", codes(src));
 }
@@ -1002,7 +1001,7 @@ fn builtin_skip_reason_is_optional() {
     // The built-in `Skip` attribute's `reason` defaults to `""`, so both `#[Skip]` and
     // `#[Skip("…")]` construct it. A `@test` fn is stripped on a normal check, so this
     // exercises the construction gate via an ordinary declaration. `Skip` lives under `std.test`
-    // (D2b — no global attribute namespace), so it is imported like any attribute.
+    // (there is no global attribute namespace), so it is imported like any attribute.
     let src = "use std.test.{Skip}\n#[Skip]\nstruct A { id: int }\n#[Skip(\"flaky\")]\nstruct B { id: int }\n";
     assert!(codes(src).is_empty(), "{:?}", codes(src));
 }
@@ -1211,7 +1210,7 @@ fn attachable_to_with_an_unknown_kind_is_rejected() {
 #[test]
 fn attachable_to_field_only_attribute_rejects_a_method() {
     // A field-only attribute (`@attribute(Field)`) on a method is E0030 — exercising the
-    // method/function target axis added in P2.4.
+    // method/function target axis.
     let src = "@attribute(Field)\nstruct Column { name: string }\nclass Api {\n  #[Column(\"x\")]\n  fn list(): int { return 0; }\n}\n";
     assert_eq!(codes(src), ["E0030"]);
 }
@@ -1565,7 +1564,7 @@ fn a_nested_fn_return_does_not_clobber_the_enclosing_one() {
 //
 // Each of these only fails (E0007) if the method/prelude/module/index/user-method result is typed
 // concretely; if it were `Unknown` the return-type check would be suppressed. So they double as a
-// proof that the type flows, against the return-type expectation from S2.
+// proof that the type flows, against the return-type expectation.
 
 #[test]
 fn string_and_list_methods_are_typed() {
@@ -1818,8 +1817,8 @@ fn e0023_is_fixed_by_an_annotation_or_a_mut_accumulator() {
 #[test]
 fn e0023_does_not_fire_in_expression_position_or_on_typed_values() {
     // Empty collections in expression position are fine — only a *binding* commits to a type.
-    // (`.len()` is the method form; the free `len([])` was never valid — it left the prelude in
-    // P1.2 and is now caught at check time by the F1 unknown-name gate.)
+    // (`.len()` is the method form; a free `len([])` is not a prelude function, so the
+    // unknown-name gate catches it at check time.)
     assert!(codes("echo [];\necho [].len();\necho [].first();\n").is_empty());
     // A non-empty literal infers its elements; a typed value carries its type — neither is E0023.
     assert!(codes("xs = [1, 2, 3];\nm = {\"a\": 1};\n").is_empty());
@@ -2125,9 +2124,7 @@ fn a_skipping_named_call_is_bounded_by_the_parameter_it_names() {
 /// the call was unusable; where the two parameters happened to share a type it was worse than
 /// unusable, because the wrong parameter was checked and nothing said so.
 ///
-/// The free-function twin has been right since the arc landed and the generic paths were fixed with
-/// `supplied_at` — this was the one non-generic method path left checking positionally. Both halves
-/// are asserted together here: the point is that the two spellings agree.
+/// Both halves are asserted together here: the point is that the two spellings agree.
 #[test]
 fn a_labelled_method_call_checks_the_parameter_it_named() {
     let decl = "class T {\n\
@@ -2435,7 +2432,7 @@ fn a_list_of_a_destructor_bearing_type_is_relevant() {
     );
 }
 
-// --- P-PACK Phase 2: packed-list construction-site channel (`resolve_packed_list_sites`) ---
+// --- Packed-list construction-site channel (`resolve_packed_list_sites`) ---
 
 use super::resolve_packed_list_sites;
 use noeta_ast::reflect::{PackedKind, PackedLayout};
@@ -2532,7 +2529,7 @@ fn primitive_list_is_not_recorded() {
     assert!(packed_layouts("xs = [1, 2, 3]\necho xs.len()\n").is_empty());
 }
 
-// --- P-PACK 2.5+: fused `list[i].field` site channel (`Checked::index_field_sites`) ---
+// --- Fused `list[i].field` site channel (`Checked::index_field_sites`) ---
 
 /// Parse + check `text` and return how many `list[i].field` reads the checker marked fusable.
 fn index_field_count(text: &str) -> usize {
@@ -2597,7 +2594,7 @@ fn indexed_method_call_is_not_fusable() {
     assert_eq!(n, 0);
 }
 
-// --- P-PACK 2.6 category B: `map(...)` packed-result site channel (`Checked::map_packed_sites`) ---
+// --- `map(...)` packed-result site channel (`Checked::map_packed_sites`) ---
 
 /// Parse + check `text` and return how many `map(...)` calls produce a packed result.
 fn map_packed_count(text: &str) -> usize {
@@ -3501,7 +3498,7 @@ fn a_repl_session_defers_unknown_names_to_a_later_entry() {
 
 #[test]
 fn the_checker_resolves_native_names_against_the_injected_registry() {
-    // Instance-registry F2 (IR2): a checker given an explicit `Registry` resolves every native
+    // A checker given an explicit `Registry` resolves every native
     // name against *that* registry, not the process-global default. Proven differentially — the
     // same std-using program is clean against a registry that has `std`, and unresolved against
     // one that does not.
@@ -3578,7 +3575,7 @@ fn attribute_target_kind_vocabulary_is_in_lockstep() {
 
 #[test]
 fn derive_of_a_fully_defaulted_user_trait_checks_clean() {
-    // UT5: deriving a user trait adopts its defaults; valid when every method has one.
+    // Deriving a user trait adopts its defaults; valid when every method has one.
     let src =
         "trait D {\n    fn label(): string { return \"x\" }\n}\n@derive(D)\nstruct P { n: int }\n";
     assert_eq!(codes(src), Vec::<String>::new());
@@ -3606,7 +3603,7 @@ fn derived_user_trait_satisfies_dyn_coercion_and_types_the_defaults() {
 
 #[test]
 fn try_through_inference_seeds_the_success_arm() {
-    // D1 (poly-deferrals): `o: Order = load(text)?` binds `T = Order` through the `?` unwrap; a
+    // `o: Order = load(text)?` binds `T = Order` through the `?` unwrap; a
     // wrong expectation is caught as the ordinary subsumption mismatch (proving the seed flowed,
     // rather than the payload erasing to `dyn`).
     let ok = "struct Order { id: int }\nfn wrap<T>(v: T): Result<T, string> { return Ok(v) }\nfn go(o: Order): Result<int, string> {\n    r: Order = wrap(o)?\n    return Ok(r.id)\n}\n";
@@ -3619,7 +3616,7 @@ fn try_through_inference_seeds_the_success_arm() {
 
 #[test]
 fn coalesce_seeds_from_fallback_type() {
-    // D1: `v = wrap(o) ?? fallback` — the fallback's type seeds the success arm, so the binding
+    // `v = wrap(o) ?? fallback` — the fallback's type seeds the success arm, so the binding
     // is precisely typed (`.id` on the result checks; a bogus member would not).
     let src = "struct Order { id: int }\nfn wrap<T>(v: T): Result<T, string> { return Ok(v) }\no = Order { id: 1 }\npicked = wrap(o) ?? o\necho picked.id\n";
     assert_eq!(codes(src), Vec::<String>::new());

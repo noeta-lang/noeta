@@ -199,7 +199,7 @@ impl Checker {
         concrete.clone()
     }
 
-    /// The E0043 for a non-fixed-width bitwise/shift op whose operands are not `int` (P-BITS Tier B).
+    /// The E0043 for a non-fixed-width bitwise/shift op whose operands are not `int`.
     pub(crate) fn report_noninteger_bitwise(
         &mut self,
         op: BinaryOp,
@@ -218,7 +218,7 @@ impl Checker {
     }
 
     /// The shared E0044 for a fixed-width op whose operands are not the same `IntN` — `kind` is
-    /// `"arithmetic"`, `"comparison"`, or `"bitwise"` (the W2/W3/W5 sites).
+    /// `"arithmetic"`, `"comparison"`, or `"bitwise"`.
     fn report_intn_mismatch(&mut self, op: BinaryOp, lt: &Type, rt: &Type, kind: &str, span: Span) {
         self.error(
             DiagnosticCode::FixedWidthOutOfRange,
@@ -851,9 +851,9 @@ impl Checker {
     /// The packed layout of a **list element** type `elem` — a `@packed` struct (via [`packed_layout`])
     /// **or** a bare sub-8-byte fixed-width numeric ([`scalar_packed_kind`]), the latter as a scalar
     /// (`no-struct`) layout. This is the gate for `List<T>` *literal* construction and `from_bytes`,
-    /// where a bare `List<i32>`/`List<u8>`/`List<f32>` earns a compact flat buffer (packed-widths
-    /// bare-scalar arc). `note_map_packed` and nested struct-field recursion deliberately keep using the
-    /// struct-only `packed_layout`, so a mapped scalar result stays boxed (behaviourally identical) and a
+    /// where a bare `List<i32>`/`List<u8>`/`List<f32>` earns a compact flat buffer.
+    /// `note_map_packed` and nested struct-field recursion deliberately keep using the
+    /// struct-only `packed_layout`, so a mapped scalar result stays boxed (behaviorally identical) and a
     /// scalar struct field is still resolved by its field-kind, not by recursion.
     ///
     /// [`packed_layout`]: Self::packed_layout
@@ -1148,8 +1148,8 @@ impl Checker {
         let Type::Named(_, args) = ret else { return };
         // ERASED rather than open by a parameter: no instantiation reached this call at all —
         // nothing is waiting to be inferred, and the object provably never gets a tag. That is the
-        // check/run divergence this arc closes, and it is now sayable at the call site, so it gets
-        // its own diagnostic.
+        // check/run divergence, and it is sayable at the call site, so it gets its own
+        // diagnostic.
         if args.iter().all(|a| self.open_only_by_erasure(a)) {
             self.report_unsupplied_instantiation(type_name, method, span);
             return;
@@ -1238,7 +1238,7 @@ impl Checker {
     }
 
     /// Record a `map(...)` call site at `span` if its result element type `elem` is a packed struct
-    /// (P-PACK 2.6 category B) — the span the VM's `map` builtin keys on to build a flat result.
+    /// — the span the VM's `map` builtin keys on to build a flat result.
     pub(crate) fn note_map_packed(&mut self, elem: &Type, span: Span) {
         if let Some(layout) = self.packed_layout(elem) {
             self.sites.map_packed_sites.insert(span, layout);
@@ -1275,9 +1275,9 @@ impl Checker {
 /// candidate. Only fixed-width numerics **narrower than 8 bytes**
 /// qualify — `i8 u8 i16 u16 i32 u32` (widths 1/2/4) and `f32` (4). A `i64`/`u64`/`f64` element is
 /// already 8 bytes when boxed, so packing it buys **zero** storage and only adds materialization cost;
-/// the width is still reified through slice 1's construction tag, so no reflection fidelity is lost.
-/// `int`/`float` are the hot-path erased defaults (no width to store, no win) and `bool` is out of
-/// scope for this slice. A scalar element has no struct wrapper — see [`PackedLayout::scalar`].
+/// the width is still reified through the construction tag, so no reflection fidelity is lost.
+/// `int`/`float` are the hot-path erased defaults (no width to store, no win) and `bool` does not
+/// qualify. A scalar element has no struct wrapper — see [`PackedLayout::scalar`].
 ///
 /// [`PackedKind`]: noeta_ast::reflect::PackedKind
 /// [`PackedLayout::scalar`]: noeta_ast::reflect::PackedLayout::scalar

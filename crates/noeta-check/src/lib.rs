@@ -36,9 +36,8 @@
 //! ## What it checks
 //!
 //! - **Exhaustive `match`** (`E0011`) — a `match` on a concretely-typed enum (or `Result`/
-//!   `Option`) that omits a variant and has no catch-all. This promotes M1.5's *runtime*
-//!   non-exhaustive error to a compile-time one; the runtime `MatchFail` becomes unreachable
-//!   for checked programs.
+//!   `Option`) that omits a variant and has no catch-all. The runtime `MatchFail` is therefore
+//!   unreachable for checked programs.
 //! - **`?` on a non-fallible value** (`E0012`) — `expr?` where `expr` is concretely neither a
 //!   `Result` nor an `Option`. Same code for the **absence-position** rule: `?` on an `Option`
 //!   early-returns `none`, so the enclosing function must be declared to return one — the twin of
@@ -50,11 +49,11 @@
 //! - **Unknown type (`E0013`)** — a type annotation (a parameter, return, field, enum backing,
 //!   or generic argument) naming a type that resolves to nothing: not a built-in, not a declared
 //!   struct/class/enum, not a name brought in by a `use`, and not a generic type parameter in
-//!   scope. This was deferred until M1.9 for a reason — before module resolution, "undeclared"
-//!   could not be told apart from "valid but imported", so flagging it risked a false positive on
-//!   e.g. a `?User` annotation whose `User` came from a `use`. Now that the loader merges resolved
-//!   imports into the program and leaves opaque-stub `use`s in place, both referents are visible
-//!   to [`collect`], so an unresolvable name is genuinely unknown.
+//!   scope. The rule depends on module resolution: without it, "undeclared" cannot be told apart
+//!   from "valid but imported", and flagging a `?User` annotation whose `User` came from a `use`
+//!   would be a false positive. The loader merges resolved imports into the program and leaves
+//!   opaque-stub `use`s in place, so both referents are visible to [`collect`] and an unresolvable
+//!   name is genuinely unknown.
 //! - **Missing signature (`E0022`)** — a named function or method lacking a type on a parameter
 //!   or a return type. Inferred-static typing makes signatures mandatory at named boundaries
 //!   (only closures and local bindings stay inferred). Each `return <value>` is then checked
@@ -292,10 +291,9 @@ pub fn check_all_with_types(program: &Program) -> Checked {
 }
 
 /// [`check_all`] against the per-source [`EditionMap`] the loader built for a merged program, so the
-/// checker can recover each declaration's own language [`Edition`] from its span (editions compiler
-/// arc). Passing an empty map is identical to [`check_all`]. The whole-program compile/run and tool
-/// paths call this with `Linked::editions`; today, with one edition, the result is byte-identical to
-/// [`check_all`], but the per-package edition is now carried into the checker.
+/// checker can recover each declaration's own language [`Edition`] from its span. Passing an empty
+/// map is identical to [`check_all`]. The whole-program compile/run and tool paths call this with
+/// `Linked::editions`, which carries the per-package edition into the checker.
 pub fn check_all_with_editions(program: &Program, editions: EditionMap) -> Checked {
     check_all_with(program, CheckOptions::for_sources(editions))
 }
@@ -314,7 +312,7 @@ pub fn check_all_with_registry(
 }
 
 /// [`check_all_with_editions`], but polling `cancel` once per top-level declaration during body
-/// checking (audit F9 residual b). The salsa `checked`/`linked_checked_*` queries pass salsa's own
+/// checking. The salsa `checked`/`linked_checked_*` queries pass salsa's own
 /// revision-cancellation poll (`db.unwind_if_revision_cancelled()`) so a pending input write aborts
 /// a long check of a large module promptly — mid-module — rather than only between queries (a
 /// whole-program check is one salsa query). `cancel` signals cancellation by unwinding
@@ -360,7 +358,7 @@ fn check_all_impl(program: &Program, opts: CheckOptions, cancel: &dyn Fn()) -> C
 }
 
 /// A `@packed` layout name→layout map projected into a deterministically-ordered vector for the
-/// compiler's [`Sites::packed_type_layouts`] schema-availability channel (Slice E2). Sorted by type
+/// compiler's [`Sites::packed_type_layouts`] schema-availability channel. Sorted by type
 /// name so the interned `packed_schemas` table — and thus the `.noeb` startup cache — is order-stable
 /// regardless of the `HashMap`'s iteration order (the same determinism the `map_packed_sites` sort
 /// buys).
@@ -435,7 +433,7 @@ pub fn check_all_session_opts(program: &Program, opts: CheckOptions) -> (Checked
                 &checker.slot_feeds,
                 &mut sites,
             );
-            // Slice E2: seed the from-scratch producer's schema-availability channel (the
+            // Seed the from-scratch producer's schema-availability channel (the
             // accumulator projection above cannot — the layouts read `symbols`).
             sites.packed_type_layouts = sorted_packed_layouts(&checker.packed_layouts_public());
             sites
@@ -501,8 +499,8 @@ impl SessionChecker {
         Self::with_options(CheckOptions::for_program())
     }
 
-    /// A fresh session bound to an explicit per-session extension [`Registry`] (instance-registry
-    /// F2): every native name the session's entries reference resolves against `registry` rather
+    /// A fresh session bound to an explicit per-session extension [`Registry`]: every native name
+    /// the session's entries reference resolves against `registry` rather
     /// than the process-global default — the session-mode counterpart of [`check_all_with_registry`],
     /// so an embedding host's REPL/debug console sees exactly the host's extension set.
     pub fn with_registry(registry: &'static noeta_ext_abi::registry::Registry) -> SessionChecker {
@@ -590,8 +588,8 @@ impl SessionChecker {
 
     /// Type-check a debug-console **fragment** against the session: the fragment is wrapped as a
     /// bare closure expression whose parameters are `params` — the paused frame's in-scope local
-    /// names, the same shape the VM compiles it as — and checked as one entry (session-checker C3,
-    /// shared by `noeta dap` and `noeta mcp`). Closure parameters are inference-typed, so frame
+    /// names, the same shape the VM compiles it as — and checked as one entry (shared by
+    /// `noeta dap` and `noeta mcp`). Closure parameters are inference-typed, so frame
     /// locals check as unconstrained (never a false positive); everything the fragment touches in
     /// the PROGRAM — functions, methods, types, globals — checks precisely. The bare-closure
     /// wrapper commits nothing to the session: its bindings are closure-locals to the checker, so
@@ -644,7 +642,7 @@ impl SessionChecker {
             &self.checker.slot_feeds,
             &mut sites,
         );
-        // Slice E2: a checked session compile can also produce a `List<packed>` from scratch, so its
+        // A checked session compile can also produce a `List<packed>` from scratch, so its
         // snapshot carries every `@packed` struct's layout for `make_packed`'s by-name resolution.
         sites.packed_type_layouts = sorted_packed_layouts(&self.checker.packed_layouts_public());
         sites
@@ -700,7 +698,7 @@ pub fn unchecked_bodies_for(program: &Program) -> Vec<noeta_ast::bodies::BodySit
 /// Resolve the precise static type of every `type_of(value)` whose operand is concretely typed,
 /// keyed by the `Expr::TypeOf` span — the input both backends use to bake a full-fidelity `Type`
 /// constant (`type_of([1])` ⇒ `Type.List(Type.Int)`) instead of the erased runtime head constructor
-/// (P2.3 fidelity A). Runs the same inference as [`check`] (diagnostics discarded) and is **pure**,
+/// (fidelity A). Runs the same inference as [`check`] (diagnostics discarded) and is **pure**,
 /// so both backends harvest identical maps on the same program — the differential holds. A
 /// `dyn`/union/un-inferred operand is omitted, leaving that site on the runtime path (fidelity B).
 ///
@@ -938,9 +936,8 @@ fn target_sites(target: TargetKind) -> noeta_ast::Sites {
 /// One kernel-trait binding: which native kernel **trait** a type acquired via
 /// `impl <module>.<Trait> for T {}`, and through which module identity runtime dispatch routes.
 ///
-/// **Surface adapter, NOT a second mechanism** (ExtBundle→ExtTrait fold-in). The kernel
-/// traits were `ExtBundle`s until the fold-in; `bundle_impls` (the `HashMap` of these) survives purely
-/// as the **typing index** the checker's `bundle_method_call` reads to type a method on the bound `T`
+/// **Surface adapter, NOT a second mechanism**. `bundle_impls` (the `HashMap` of these) is purely
+/// the **typing index** the checker's `bundle_method_call` reads to type a method on the bound `T`
 /// (element receiver) and on `List<T>` (bulk receiver — the accepted `List<Self>` asymmetry a general
 /// trait has no notion of). Everything else — the trait's identity, `self_constraint`, native-derived
 /// `assoc_types`, and default-body `dispatch` — is the one `ExtTrait`, checked and dispatched through
@@ -1036,8 +1033,8 @@ struct Symbols {
     /// compares them field-wise and copy-on-write leaves no shared invariant to protect, so hiding
     /// them would be incoherent. API surface is orthogonal — a `Point` whose `x`/`y` are visible
     /// still benefits from an internal helper. Per-kind method visibility was considered and
-    /// rejected: it would mean a struct could never have a private helper, which is exactly the gap
-    /// this arc closes, merely narrowed to one kind.
+    /// rejected: it would mean a struct could never have a private helper, which is the gap this
+    /// rule exists to close.
     ///
     /// A method supplied by a `trait` — an `impl` block's own method, a hoisted default, a derive's
     /// bridge — never appears here: a trait is an outward contract, so implementing one puts the
@@ -1101,7 +1098,7 @@ struct Symbols {
     /// or `impl`s. The basis (with the built-in-type table in [`Checker::satisfies`]) for enforcing a
     /// generic call's trait bounds.
     trait_impls: HashMap<String, HashSet<BuiltinTrait>>,
-    /// User-defined traits (L1 user traits), by name → its declaration. Populated in pass 1
+    /// User-defined traits, by name → its declaration. Populated in pass 1
     /// (`collect`) so forward references resolve. The basis for `impl` conformance,
     /// `<T: UserTrait>` generic bounds, and `dyn UserTrait` trait-object dispatch. A name
     /// here is a legal trait in an `impl`/bound alongside the closed [`BuiltinTrait`] set.
@@ -1109,11 +1106,11 @@ struct Symbols {
     /// Which user traits each type implements: type name → user-trait name → the instantiation's
     /// type arguments (`impl Keyed<int> for Door` → `{"Door": {"Keyed": [int]}}`; empty args for
     /// a non-generic trait). From in-body/standalone `impl`s and `@derive`s. The user-trait
-    /// analogue of [`Self::trait_impls`]; the basis for UT3 generic-bound satisfaction (including
-    /// an instantiated bound `T: Keyed<int>`) and UT4 `dyn Trait` coercion. Populated in pass 1;
+    /// analogue of [`Self::trait_impls`]; the basis for generic-bound satisfaction (including an
+    /// instantiated bound `T: Keyed<int>`) and `dyn Trait` coercion. Populated in pass 1;
     /// coherence (one impl per trait per type) keeps a single entry per pair honest.
     user_trait_impls: HashMap<String, HashMap<String, Vec<Type>>>,
-    /// Trait default-body call routes (ExtBundle→ExtTrait convergence): `(type, method)` →
+    /// Trait default-body call routes: `(type, method)` →
     /// `(trait-qualified, trait-short)` for every method that a **native** trait carrying a
     /// default-body dispatch ([`noeta_ext_abi::ExtTrait::dispatch`]) answers on `type` — i.e. a
     /// defaulted method the type neither declares (native inherent) nor overrides (impl body). Computed
@@ -1141,7 +1138,7 @@ struct Symbols {
     /// same ground coherence rejects a duplicate impl: a method table has one slot per name, and a
     /// contest for it is answered by the programmer, not by the compiler.
     trait_default_conflicts: Vec<TraitDefaultConflict>,
-    /// Associated-type bindings per implementor (ExtBundle→ExtTrait convergence):
+    /// Associated-type bindings per implementor:
     /// `(type, trait)` → `assoc-name → concrete Type`. Populated at collect from each impl's
     /// `type Name = Concrete;` bindings merged over the trait's defaulted associated types. The basis
     /// for resolving a `Self::Name` projection ([`TypeRef::AssocProjection`]) in a trait/impl method
@@ -1149,7 +1146,7 @@ struct Symbols {
     /// resolution. An associated type never enters the [`Type`] lattice; it is projected at each
     /// typing site (or degrades to `Type::Unknown` under `dyn`, where the impl is unknown).
     trait_assoc: HashMap<(String, String), HashMap<String, Type>>,
-    /// Native traits' **structural `Self`-constraints** (ExtBundle→ExtTrait convergence):
+    /// Native traits' **structural `Self`-constraints**:
     /// local trait name → the [`noeta_ext_abi::PackedConstraint`] its [`noeta_ext_abi::ExtTrait::self_constraint`]
     /// declares. Populated by [`Checker::seed_ext_traits`] **only when the native trait actually won
     /// the `user_traits` slot** (a same-named user `trait` collected first shadows it — and carries no
@@ -1166,7 +1163,7 @@ struct Symbols {
     /// must not be required to bind them (they are computed from `T`'s element, not written per-impl),
     /// so the coherence "must bind non-default assoc" check skips them and the impl site folds each
     /// derivation over `T`'s `@packed` element into `trait_assoc[(T, trait)]` so `Self::Name` resolves.
-    /// Empty for a `.noe` trait or a native trait with no associated types (ExtBundle→ExtTrait fold-in).
+    /// Empty for a `.noe` trait or a native trait with no associated types.
     native_derived_assoc: HashMap<String, Vec<(String, noeta_ext_abi::AssocDerivation)>>,
     /// **Every declared conversion in the program, filed under its target** — both spellings, in one
     /// table, resolved at collection so a `?` site can consult them regardless of statement order.
@@ -1203,7 +1200,7 @@ struct Symbols {
     /// built-in and user traits alike. A via-derive's conditional constraint is the **via
     /// field's** alone — delegation exists precisely so sibling fields don't constrain the trait
     /// — so the instantiation-site checks (`satisfies`/`satisfies_user_trait`) consult this to
-    /// judge the substituted via field instead of every field (S4's `via:` twin).
+    /// judge the substituted via field instead of every field.
     via_derives: HashMap<String, Vec<(String, String)>>,
     /// Each generic user type's type parameters, in declaration order — so a field/method access
     /// can map an instance's type arguments (`Box<int>`) back onto the declaration's parameters
@@ -1245,8 +1242,8 @@ struct Symbols {
     /// binding is visible to method typing regardless of statement order; validated (packed
     /// target, constraint, conflicts) at the impl site in pass 2.
     bundle_impls: HashMap<String, Vec<BoundBundle>>,
-    /// Every struct marked `@attribute` — the names usable in `#[...]` annotation position (P2.5,
-    /// the opt-in that replaced the `Attribute` marker trait). The E0029 capability gate and
+    /// Every struct marked `@attribute` — the names usable in `#[...]` annotation position. The
+    /// E0029 capability gate and
     /// `attributes_of::<T>()` both consult this set. Attributes are **structs only**.
     attributes: HashSet<String>,
     /// Every enum marked `@semantic` (plus the built-in `Semantic`) — the enums whose fieldless
@@ -1311,7 +1308,7 @@ struct Symbols {
     json_forward_methods: HashSet<(String, String)>,
     /// Class names that declare a `destruct { ... }` block — the seeds of destruct-reachability.
     destructor_classes: HashSet<String>,
-    /// The **type-param forwarding table** (poly-values F2b + composite slots D2a): top-level
+    /// The **type-param forwarding table**: top-level
     /// generic fn name → its ordered forwarding SLOTS (each a type template — bare `T` or a
     /// composite like `List<T>` — flowing into a call-site-typed position:
     /// `json.try_parse::<T>`, `attributes_of::<T>`, or transitively another forwarding generic).
@@ -1415,8 +1412,8 @@ struct Coloring {
     /// The generic type parameters in scope while checking the current declaration, each mapped to
     /// its declared trait **bounds** (`<T: Comparable>` → `{"T": [Comparable]}`), including an
     /// instantiated bound's type arguments (`<T: Keyed<int>>`). Empty at top level; saved and
-    /// restored around each generic declaration. The bounds drive body-side enforcement (S4.3c —
-    /// an operation on `T` is only allowed if a bound licenses it) and body-side TYPING: a method
+    /// restored around each generic declaration. The bounds drive body-side enforcement (an
+    /// operation on `T` is only allowed if a bound licenses it) and body-side TYPING: a method
     /// call on a `T`-typed receiver resolves through a bound's trait at the bound's instantiation
     /// (`x.key(): int` under `T: Keyed<int>` — [`Checker::type_param_trait_method`]).
     /// Keyed by the SPELLING that resolves to each parameter — a resolver, not a membership set.
@@ -1451,17 +1448,17 @@ struct Coloring {
     /// restored around each closure so nesting is correct.
     collected_returns: Option<Vec<Type>>,
     /// When `Some(T)`, the checker is inside a **generator** body (a function containing `yield`)
-    /// whose element type is `T`: each `yield e` is checked `e <: T` (Track G). `None` outside a
+    /// whose element type is `T`: each `yield e` is checked `e <: T`. `None` outside a
     /// generator, so a stray `yield` is `E0039`. Saved/restored around each function and reset to
     /// `None` when entering a closure (so `yield` cannot cross a closure boundary — the coloring rule).
     current_yield: Option<Type>,
-    /// Whether the checker is inside an **async context** (Track A): the body of an `async fn`, or the
+    /// Whether the checker is inside an **async context**: the body of an `async fn`, or the
     /// implicitly-async module top level (a top-level body containing a `.await`). Each `expr.await`
     /// is only valid when this is `true`; otherwise it is `E0040` (the coloring rule). Saved/restored
     /// around each function and reset to `false` when entering a closure (so `.await` cannot cross a
     /// closure boundary — the same coloring rule as `yield`).
     current_async: bool,
-    /// The number of enclosing `concurrent { }` scopes around the statement being checked (Track A.3b).
+    /// The number of enclosing `concurrent { }` scopes around the statement being checked.
     /// A `spawn` is only valid when this is non-zero; otherwise it is an orphan task (E0041). Reset at a
     /// closure boundary (a closure is a fresh callable — a `concurrent` scope does not cross into it).
     concurrent_depth: u32,
@@ -1675,14 +1672,14 @@ struct Checker {
     /// program whose generic bodies build no composite.
     slot_feeds: packed::SlotFeeds,
     /// The destructor-relevance of each binding: the
-    /// drop-insertion pass reads it to mark a `DropVar`'s `relevant` bit, which Phase 4 uses to skip
-    /// the destructor check for a value whose type can run no destructor.
+    /// drop-insertion pass reads it to mark a `DropVar`'s `relevant` bit, which lets the backends
+    /// skip the destructor check for a value whose type can run no destructor.
     relevance: DestructorRelevance,
     /// The pending RETURN-position expectation for the METHOD call currently being synthesized
     /// (generic methods): `(the call's span, the expected type)`, armed by check-mode's
     /// default arm just before it synthesizes a `Call`-with-`Member`-callee and consumed by
     /// [`Checker::call_user_method`] on an exact span match — so `u: User = box.pick(text)` seeds
-    /// the method's own type parameters from the annotation, the method twin of the free-fn F2c
+    /// the method's own type parameters from the annotation, the method twin of the free-fn
     /// arm. Cleared unconditionally after the synthesis returns; sub-expression calls have
     /// different spans, so it can never mis-seed a nested call.
     pending_member_ret: Option<(Span, Type)>,
@@ -1742,10 +1739,10 @@ impl Checker {
     /// `SourceId`, defaulting to [`Edition::DEFAULT`] for any source without a recorded edition (a
     /// single-file check, a synthetic span, or the one-edition world).
     ///
-    /// This is the per-declaration edition switch for a merged program: every rule that will diverge
-    /// by edition reads it here rather than assuming the root's edition. No rule branches on it yet —
-    /// the first is the editions arc's S3 — so it is `allow(dead_code)` until then; it is wired and
-    /// unit-tested now so that slice adds only the divergent behaviour, not the plumbing.
+    /// This is the per-declaration edition switch for a merged program: every rule that diverges
+    /// by edition reads it here rather than assuming the root's edition. No rule branches on it
+    /// yet, so it is `allow(dead_code)`; it is wired and unit-tested so that the first divergent
+    /// rule adds only the behavior, not the plumbing.
     #[allow(dead_code)]
     fn edition_at(&self, span: Span) -> Edition {
         self.config.provenance.editions.at(span)
@@ -1813,7 +1810,7 @@ impl Checker {
         self.diags.last_mut().expect("just pushed a diagnostic")
     }
 
-    /// Reject a declaration that binds a **reserved prelude name** (E0046, prelude-redesign P3).
+    /// Reject a declaration that binds a **reserved prelude name** (E0046).
     /// The always-global prelude is deliberately tiny — `Ok`/`Err`/`some`/`none`/`panic`/`assert` —
     /// and those names cannot be bound by ANY form (binding, `mut`, param, `fn`, type, `for`/match
     /// binder): the tree-walker pre-declares them as immutable globals while the VM would resolve a
@@ -2013,7 +2010,7 @@ impl Checker {
     }
 
     /// [`Checker::check_program_in`], polling `cancel` once per **top-level declaration** before it
-    /// is checked (audit F9 residual b — intra-check cancellation granularity). The whole-file batch
+    /// is checked, for intra-check cancellation granularity. The whole-file batch
     /// entry ([`check_all_cancellable`]) threads salsa's revision-cancellation check here, so a
     /// pending input write aborts a long check of a large module promptly — mid-module — instead of
     /// only at query boundaries (a whole-program check is a *single* salsa query, so without this
@@ -2026,7 +2023,7 @@ impl Checker {
         env: &mut Env,
         cancel: &dyn Fn(),
     ) {
-        // Implicit async top level (Track A): if the module body contains a top-level `.await` (one
+        // Implicit async top level: if the module body contains a top-level `.await` (one
         // not inside a nested `fn`/closure), the top level is itself an async context, so its awaits
         // are legal (executable since A.1 — a top-level `.await` runs its future to completion).
         self.coloring.current_async = block_has_await(&program.stmts);
@@ -2606,7 +2603,7 @@ impl Checker {
                 span,
             } => {
                 let iter_ty = self.synth(iterable, env);
-                // A `for` over a statically-known `Iterator<T>` streams via `next()` (Track I.2); the
+                // A `for` over a statically-known `Iterator<T>` streams via `next()`; the
                 // lowering reads this set to set `Stmt::For.stream`. Collections / `dyn` keep the
                 // snapshot fast path.
                 if matches!(&iter_ty, Type::Named(n, _) if n == stdlib::ITERATOR) {
@@ -2636,7 +2633,7 @@ impl Checker {
                 self.coloring.loop_depth -= 1;
             }
             Stmt::Concurrent { body, span } => {
-                // `concurrent { }` is a structured-concurrency scope (Track A.3b). It is async-only —
+                // `concurrent { }` is a structured-concurrency scope. It is async-only —
                 // joining spawned tasks needs suspend machinery — so it is illegal in a sync context
                 // (the coloring rule, E0040), exactly like `.await`.
                 if !self.coloring.current_async {
@@ -2656,8 +2653,8 @@ impl Checker {
                 // `concurrent { }` is a **transparent** scope at runtime — a binding made inside it
                 // (`w = race([a, b])`) leaks to the enclosing function, exactly like an `if` body's
                 // bindings do not but a concurrent block's do. So check the body *in the current
-                // frame* rather than pushing one (F1: the unknown-name gate would otherwise flag a
-                // later reference to such a binding, which the tolerated-unknown behavior masked).
+                // frame* rather than pushing one: the unknown-name gate would otherwise flag a
+                // later reference to such a binding.
                 self.coloring.concurrent_depth += 1;
                 self.bind_nested_fns(body, env);
                 for stmt in body {
@@ -2716,8 +2713,8 @@ impl Checker {
             }
             Stmt::Trait(decl) => self.check_trait_decl(decl, env),
             Stmt::Namespace { .. } | Stmt::Use { .. } => {}
-            // A dev-tier block reaching the checker is an *inactive* residual (object-model
-            // slice 6): the strip pass already spliced any *active* block's items into the
+            // A dev-tier block reaching the checker is an *inactive* residual: the strip pass
+            // already spliced any *active* block's items into the
             // statement stream (where they are checked as ordinary declarations) and dropped the
             // inactive ones. So we validate only the tier name — a typo must not silently vanish
             // (E0036) — and do not type-check the (stripped) items.
@@ -2844,8 +2841,8 @@ impl Checker {
             // complaint about a name the registry knows perfectly well. Its sites gate exactly as a
             // tier's do below.
             let ext_directive = self.resolve_ext_directive_at(dir.name_span, &dir.name);
-            // Not an ext directive → resolve it as a tier for the package that wrote it (per-package
-            // naming arc). Owned facts (sites `&'static`, canonical id) so the diagnostic pushes below
+            // Not an ext directive → resolve it as a tier for the package that wrote it. Owned
+            // facts (sites `&'static`, canonical id) so the diagnostic pushes below
             // don't borrow the registry.
             let tier_facts = if ext_directive.is_none() {
                 self.resolve_tier_at(dir.name_span, &dir.name)
@@ -2969,7 +2966,7 @@ impl Checker {
         // the body already answers the question: a method that mentions `self` needs one and a
         // self-less one does not, derived, exactly, from source the reader is looking at. A
         // modifier there would be a second source of truth that can disagree with the first, which
-        // is the very failure this arc exists to remove — so it is refused rather than trusted or
+        // is the failure this rule exists to prevent — so it is refused rather than trusted or
         // silently ignored. E0015, the code every other "this implementation does not match what
         // was declared" mismatch already carries.
         if decl.is_static && !self.coloring.in_trait_contract {
@@ -3014,7 +3011,7 @@ impl Checker {
         // enumerate its instantiations.
         // The key this declaration's own forwarding slots are recorded under — its bare name for a
         // top-level `fn`, `Type.method` for a method. `None` for anything that carries no slots of
-        // its own: a nested `fn` (D2b — it reads the ENCLOSING fn's, through closure capture), a
+        // its own: a nested `fn` (it reads the ENCLOSING fn's, through closure capture), a
         // closure, a destructor.
         let fwd_key = if self.coloring.fn_depth == 0 {
             match target {
@@ -3075,7 +3072,7 @@ impl Checker {
         };
         // The forwarding *capability* alongside the realized layout: which parameters a
         // `type_name::<T>()` here would resolve through a hidden slot. Same top-level-fn scope and
-        // same D2b shadow-masking as the layout above, but derived from the declaration rather
+        // same shadow-masking as the layout above, but derived from the declaration rather
         // than from the sites, so a diagnostic can say whether a parameter is reachable at all
         // whether or not a site consuming it already appears in the body.
         // A **self-less member of a generic type** forwards its CLASS's parameters too: it has no
@@ -3225,7 +3222,7 @@ impl Checker {
             .as_ref()
             .map(|t| self.annot(t))
             .unwrap_or(Type::Unknown);
-        // A function whose body contains `yield` is a generator (Track G): its declared return must
+        // A function whose body contains `yield` is a generator: its declared return must
         // be `Iterator<T>`, and its body's `yield e` are checked against the element type `T`. The
         // yield context is reset for a non-generator (so an enclosing generator's context does not
         // leak into a nested ordinary function) and saved/restored around the body.
@@ -3259,7 +3256,7 @@ impl Checker {
             !is_generator && !matches!(ret, Type::Unknown) && !Type::subtype(&Type::Unit, &ret);
         let declared_ret = ret.clone();
         let saved_yield = std::mem::replace(&mut self.coloring.current_yield, yield_elem);
-        // An `async fn` body is an async context: its `.await`s are legal (Track A). `current_ret`
+        // An `async fn` body is an async context: its `.await`s are legal. `current_ret`
         // stays the *inner* declared type `T` (the body writes `return t`); a call site sees the
         // wrapped `Future<T>` via the signature. Reset for a non-async function so an enclosing async
         // context does not leak into a nested ordinary function.
@@ -3359,13 +3356,13 @@ impl Checker {
                 "every path must `return` a value; only a `void` function may fall off the end",
             );
         }
-        // An `async fn` body compiles to the async state machine (Track A.3a), which supports `.await`
+        // An `async fn` body compiles to the async state machine, which supports `.await`
         // only in statement position. Reject an `.await` buried in a sub-expression (E0040) rather than
         // silently driving it to completion — which would fail to yield to a sibling under concurrency.
         if decl.is_async {
             self.check_await_positions(&decl.body);
         }
-        // A generator desugars into a full state machine (Track G): `yield` runs at the top level and
+        // A generator desugars into a full state machine: `yield` runs at the top level and
         // inside any nesting of `if`/`while`/`for` — a `for x in src { … yield … }` lowers to the
         // iterator protocol with the source cursor held as machine state (G.4), so no control-flow
         // context around a `yield` is rejected here.

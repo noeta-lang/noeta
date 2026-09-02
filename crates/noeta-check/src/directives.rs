@@ -97,7 +97,7 @@ impl DirectiveRegistry {
     }
 
     /// As [`collect`](Self::collect), but resolving the extension half against an explicit registry
-    /// (instance-registry IR4 — an embed session's own extension set).
+    /// (an embed session's own extension set).
     pub fn collect_with_registry(
         program: &Program,
         registry: &'static noeta_ext_abi::registry::Registry,
@@ -455,10 +455,8 @@ impl Checker {
     /// Validate an extension directive's arguments against what it declared: how many positional
     /// arguments it takes, and which `name:` keys it understands.
     ///
-    /// `max_args` and `named_keys` shipped in the ABI with no reader — the same failure as
-    /// `ExtTier.sites`, repeated in code written during the arc that fixed it. A declared
-    /// constraint nothing enforces is worse than none: it tells an extension author their
-    /// contract is checked when nothing checks it.
+    /// A declared constraint nothing enforces is worse than none: it tells an extension author
+    /// their contract is checked when nothing checks it, so every field here has a reader.
     ///
     /// Deliberately mirrors what a `#[...]` data attribute already gets (E0005 for an unknown
     /// key, E0009 for the wrong count), because an extension directive's arguments are the same

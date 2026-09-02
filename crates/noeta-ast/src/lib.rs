@@ -1,11 +1,9 @@
 //! The abstract syntax tree: pure data, no behavior.
 //!
-//! Every node carries a [`Span`] (for diagnostics and, later, the LSP). Behavior
-//! lives in `noeta-eval` (and, from M1, `noeta-checker`/`noeta-bytecode`), never here.
-//! Surface sugar (`|>`, `~`, `?`, `?T`, ...) is kept as distinct nodes rather than
-//! desugared in the parser, so later passes can produce precise diagnostics.
-//!
-//! M0 scope is intentionally tiny; this grows one vertical slice at a time.
+//! Every node carries a [`Span`], for diagnostics and the LSP. Behavior lives in `noeta-check`,
+//! `noeta-eval` and `noeta-bytecode`, never here. Surface sugar (`|>`, `~`, `?`, `?T`, ...) is kept
+//! as distinct nodes rather than desugared in the parser, so later passes can produce precise
+//! diagnostics.
 
 use noeta_span::Span;
 use serde::{Deserialize, Serialize};
@@ -102,13 +100,14 @@ pub enum Stmt {
     /// {...}`) declares a capability such as `impl Serialize for Route {}`; it works uniformly
     /// for classes too. The target must be a type declared in the same module (the orphan rule).
     Impl(ImplDecl),
-    /// A user-defined trait declaration: `trait Name { fn sig(...): T }` (L1 user traits). Declares a
+    /// A user-defined trait declaration: `trait Name { fn sig(...): T }`. Declares a
     /// named contract of method signatures a type can `impl`, usable as a generic bound (`<T: Name>`)
     /// and as a trait object (`dyn Name`). A method with a body is a *default*; a bodiless one is
     /// *required*.
     Trait(TraitDecl),
-    /// `namespace App.Orders;` — declares the file's namespace. M0 records the path but
-    /// otherwise treats it as a no-op (real module scoping is M1).
+    /// `namespace App.Orders;` — declares the file's namespace. Accepted only for a loose script
+    /// with no manifest: inside a package a module's path is derived from where the file sits, so a
+    /// `namespace` declaration there is `E0072`.
     Namespace { path: Vec<String>, span: Span },
     /// `use App.Models.User;` or `use App.Billing.{Invoice, Receipt};` — imports names.
     /// `path` is the dotted prefix; `names` are the imported leaf names.
@@ -119,10 +118,10 @@ pub enum Stmt {
     },
     /// `return <expr>;` or `return;`.
     Return { value: Option<Expr>, span: Span },
-    /// `yield <expr>;` — produce the next element of a generator (Track G). Only valid in a generator
+    /// `yield <expr>;` — produce the next element of a generator. Only valid in a generator
     /// body (a function containing `yield`); checked, then desugared into the state machine.
     Yield { value: Expr, span: Span },
-    /// `concurrent { ... }` — a structured-concurrency scope (Track A.3). Tasks `spawn`ed inside the
+    /// `concurrent { ... }` — a structured-concurrency scope. Tasks `spawn`ed inside the
     /// body are joined at the closing brace: the block cannot be exited until every spawned task has
     /// finished, so nothing outlives the scope. Legal only in an async context.
     Concurrent { body: Vec<Stmt>, span: Span },
@@ -172,7 +171,7 @@ pub enum Stmt {
         items: Vec<Stmt>,
         /// The **verbatim body** of a `@doc { … }` *text* tier: the raw
         /// source between the braces, captured un-parsed, with the `\{ \} \\` escapes undone
-        /// (text-tiers S1). `Some` only for a text-tier block (whose `items` are then empty);
+        /// `Some` only for a text-tier block (whose `items` are then empty);
         /// `None` for a code tier (`@test`/`@bench`/`@debug`), whose body is the parsed `items`.
         /// `lang doc` extracts these; on a normal run the block is stripped. The formatter
         /// re-emits the raw source (sliced from `span`), *not* this — this is unescaped, so
@@ -763,7 +762,7 @@ impl core::str::FromStr for BuiltinDirective {
     }
 }
 
-/// The storage layout a `@packed` struct's lists use (P-SIMD `plans/perf/p-simd-column-layout.md`).
+/// The storage layout a `@packed` struct's lists use.
 /// A per-type performance attribute — **invisible to behaviour**; it only changes which kernel/offset
 /// math the runtime uses. Set by `@packed(Layout.Row|Layout.Column)`; bare `@packed` is [`Row`](Self::Row).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1072,7 +1071,7 @@ pub fn unsigned_field_slots<'a>(types: impl IntoIterator<Item = Option<&'a TypeR
         .collect()
 }
 
-/// The named field types of a `@packed` struct, for the key-capability fixpoint (P-PKEY):
+/// The named field types of a `@packed` struct, for the key-capability fixpoint:
 /// `Some(per-field entries)` for a packed declaration — each entry the field's plain `Named`
 /// type name, or `None` for a field that can never be key-capable (untyped, generic, optional,
 /// tuple, union, function) — and `None` for a non-packed declaration. Used by both backends and
@@ -1092,7 +1091,7 @@ pub fn packed_named_fields(decl: &StructDecl) -> Option<Vec<Option<String>>> {
     )
 }
 
-/// The field types a key-capable packed struct may use directly (P-PKEY): the integer family and
+/// The field types a key-capable packed struct may use directly: the integer family and
 /// `bool`. **Floats are deliberately excluded** — NaN ≠ NaN and `-0.0 == 0.0` make float keys a
 /// footgun; a bit-pattern opt-in can come later.
 ///
@@ -1115,7 +1114,7 @@ fn key_capable_primitive(name: &str) -> bool {
     }
 }
 
-/// The **key-capable** packed structs of a program (P-PKEY): a `@packed` struct every one of
+/// The **key-capable** packed structs of a program: a `@packed` struct every one of
 /// whose fields is a key-capable primitive ([`key_capable_primitive`]: the integer family and
 /// `bool`, no floats) or another key-capable packed struct. `packed` maps each packed struct's
 /// name to its [`packed_named_fields`] entries — callers accumulate it across declarations (a
@@ -1202,7 +1201,7 @@ pub struct TraitDecl {
     pub type_params: Vec<TypeParam>,
     /// The trait's method contract, in source order.
     pub methods: Vec<TraitMethod>,
-    /// The trait's **associated types** (ExtBundle→ExtTrait convergence): each `type Name;`
+    /// The trait's **associated types**: each `type Name;`
     /// (a required associated type an implementor must bind) or `type Name = Default;` (a bindable
     /// default), in source order. Referenced from a method signature as `Self::Name`
     /// ([`TypeRef::AssocProjection`]); resolved per-impl by the checker, never a lattice type.
@@ -1210,7 +1209,7 @@ pub struct TraitDecl {
     /// Every `@`-decorator and `#[...]` attribute written on this trait. See [`Decorators`].
     ///
     /// Most are misplacements the checker reports (`E0053`) — a trait is not a data type — but
-    /// `attrs` and `role` are meaningful (L1 UT6: reflected via `attributes_of`/`roles_of` keyed by
+    /// `attrs` and `role` are meaningful (reflected via `attributes_of`/`roles_of` keyed by
     /// the trait name, like a type's). `validated` previously had no field here at all and was
     /// therefore discarded by the parser without a diagnostic.
     pub decorators: Decorators,
@@ -1306,7 +1305,7 @@ pub struct FieldDecl {
     /// what was written rather than silently repairing a program the checker will refuse.
     pub is_public: bool,
     pub ty: Option<TypeRef>,
-    /// A per-field default value (`x: int = expr`), object-model slice 5. A field *with* a default
+    /// A per-field default value (`x: int = expr`). A field *with* a default
     /// is optional in a literal: the construction fills it from this expression when omitted, so the
     /// full-initialization guarantee still holds (a default is an explicit declared value, not a
     /// silent zero). Evaluated in the **type's definition scope** (globals — types are top-level),
@@ -1314,8 +1313,7 @@ pub struct FieldDecl {
     /// for a mandatory field (the common case). Allowed on `struct` and `class` fields, never on
     /// enum-variant fields.
     pub default: Option<Expr>,
-    /// Leading `#[...]` data attributes on the field/property (attribute-system pass 2).
-    /// Captured in the reflection manifest like a type's or method's attributes; `@derive` is not
+    /// Leading `#[...]` data attributes on the field/property. Captured in the reflection manifest like a type's or method's attributes; `@derive` is not
     /// permitted here. Empty for the common unannotated field.
     pub attrs: Vec<Attribute>,
     pub span: Span,
@@ -1363,16 +1361,15 @@ pub struct VariantDecl {
     pub fields: Vec<Param>,
     /// The backing value (`= "pending"`) for a backed enum's variant.
     pub backed_value: Option<Expr>,
-    /// Leading `#[...]` data attributes on the variant (attribute-system pass 2). Captured in
-    /// the reflection manifest like a field's or method's attributes; `@derive` is not permitted
+    /// Leading `#[...]` data attributes on the variant. Captured in the reflection manifest like a field's or method's attributes; `@derive` is not permitted
     /// here. Empty for the common unannotated variant.
     pub attrs: Vec<Attribute>,
     pub span: Span,
 }
 
 /// The binding form of a `for` loop: either one variable, or a **tuple destructure** `(a, b, …)`
-/// that unpacks each iterated **tuple** element positionally (object-model slice 4b — `.enumerate()`
-/// now yields `(index, value)` tuples, and any `List<(…)>` destructures the same way).
+/// that unpacks each iterated **tuple** element positionally (`.enumerate()` yields
+/// `(index, value)` tuples, and any `List<(…)>` destructures the same way).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ForPattern {
     Single {
@@ -1418,10 +1415,10 @@ pub struct FnDecl {
     /// the enclosing class's, not its own; only free functions carry their own here.
     pub type_params: Vec<TypeParam>,
     pub params: Vec<Param>,
-    /// The declared return type, if any. Checked by the M1 type checker.
+    /// The declared return type, if any. Checked by the type checker.
     pub ret: Option<TypeRef>,
-    /// Leading `#[...]` data attributes on the function or method (attribute-system pass 2).
-    /// Captured in the reflection manifest like a type's attributes; `@derive` is *not* permitted
+    /// Leading `#[...]` data attributes on the function or method. Captured in the reflection
+    /// manifest like a type's attributes; `@derive` is *not* permitted
     /// here (it is codegen for types only). Empty for the common unannotated function.
     pub attrs: Vec<Attribute>,
     /// Leading `@<tier>` directives on a **method** (`@test`/`@doc { … }`/`@bench(…)` before a method
@@ -1430,20 +1427,20 @@ pub struct FnDecl {
     /// carries them here. Validated for a known name and a permitted attachment site (E0054); empty
     /// for the common undecorated method and for every top-level function.
     pub directives: Vec<MethodDirective>,
-    /// Whether this fn was lifted from a **dev-tier block** (`@test`/`@bench`/…, object-model slice
-    /// 6d). Set by `activate_tiers` when it inlines a tier block's items; `false` for an ordinary fn
+    /// Whether this fn was lifted from a **dev-tier block** (`@test`/`@bench`/…). Set by
+    /// `activate_tiers` when it inlines a tier block's items; `false` for an ordinary fn
     /// or a method. A dev-tier fn is co-located developer-tooling code, so it gets **white-box access
     /// to its module's private fields** (the Rust `#[cfg(test)]` model) — the checker relaxes the
     /// type-scoped field-privacy gate (E0035) inside its body. (The same-module *restriction* — a
     /// separate test-tier file seeing only `pub` — lands with the package/test-file system; today
     /// every tier block is in-source, so program-wide access is same-module access.)
     pub is_dev_tier: bool,
-    /// Whether the declaration is `async fn` (Track A). An async function returns a `Future<T>` where
+    /// Whether the declaration is `async fn`. An async function returns a `Future<T>` where
     /// `T` is the declared inner return type; its body may use the postfix `.await` suspend operator.
     /// `false` for an ordinary function, method, or generator.
     pub is_async: bool,
-    /// Whether the declaration is `static fn` — a **receiverless** method, declared as such
-    /// (static-trait-methods arc). Meaningful in a **trait declaration only**, on a required
+    /// Whether the declaration is `static fn` — a **receiverless** method, declared as such.
+    /// Meaningful in a **trait declaration only**, on a required
     /// signature or on a default: it promises that no implementation binds `self`, which is what
     /// makes `T.m(…)` legal inside a generic body under a `<T: Trait>` bound without asking every
     /// implementor in the program. Every other declaration site — an inherent method, an `impl`
@@ -1482,13 +1479,13 @@ pub struct TierDecl {
     pub name_span: Span,
     /// The knob attribute type (`config: Fuzz`), if the tier has knobs.
     pub config: Option<(Name, Span)>,
-    /// The body language ID (`text: "markdown"`) when the tier is a **text tier** (text-tiers
-    /// arc): its `@<name> { … }` bodies are verbatim text the lexer captures un-parsed, tagged
+    /// The body language ID (`text: "markdown"`) when the tier is a **text tier**: its
+    /// `@<name> { … }` bodies are verbatim text the lexer captures un-parsed, tagged
     /// with this language for tooling (editor injection, extraction). `None` for a code tier.
     /// Mutually exclusive with `config` — a text body has no fns to stamp knobs onto (E0051).
     pub text: Option<(String, Span)>,
-    /// The block-value type (`expr: Query`) when the tier is an **expression tier** (expr-tiers
-    /// arc): its `@<name> { … }` bodies are expressions — verbatim text with `${…}` holes —
+    /// The block-value type (`expr: Query`) when the tier is an **expression tier**: its
+    /// `@<name> { … }` bodies are expressions — verbatim text with `${…}` holes —
     /// desugared to a call of the decorated fn (the tier's *handler*,
     /// `fn(statics: List<string>, holes: List<() -> U>): T`). The named type must match the
     /// handler's return type (E0051). Composes with `text:` (the lang id drives tooling) and is
@@ -1498,7 +1495,7 @@ pub struct TierDecl {
     pub span: Span,
 }
 
-/// A function parameter: a name, an optional type annotation (unchecked in M0), and an optional
+/// A function parameter: a name, an optional type annotation, and an optional
 /// default value (`name: T = expr`). A default makes the parameter optional at the call site; the
 /// checker enforces that defaults are trailing-only and that a default's type matches the
 /// parameter type. Defaults are only parsed for named callables (free functions, associated
@@ -1553,7 +1550,7 @@ impl Param {
 }
 
 /// A type reference in source (e.g. `int`, `List<Item>`, `Result<Order, OrderError>`,
-/// `?User`). Parsed and retained for M1's type checker; M0 does not interpret it.
+/// `?User`). Parsed and retained for the type checker.
 ///
 /// Serializable because [`AttrValue::TypeRef`] embeds one: a directive argument may be a generic
 /// type application (`@derive(Serialize<Json>)`), and attribute values travel into the serialized
@@ -1567,19 +1564,19 @@ pub enum TypeRef {
         args: Vec<TypeRef>,
         span: Span,
     },
-    /// A **trait object** `dyn Trait` (L1 user traits): a value of any type that `impl`s
+    /// A **trait object** `dyn Trait`: a value of any type that `impl`s
     /// `trait_name`, dispatched dynamically on its runtime type. The typed counterpart of the bare
     /// `dyn` top type — method calls resolve against the trait's declared signatures.
     DynTrait { trait_name: Name, span: Span },
-    /// `?T`, sugar for `Option<T>`. Kept as its own node (not desugared) so M1 can
+    /// `?T`, sugar for `Option<T>`. Kept as its own node (not desugared) so the checker can
     /// produce precise diagnostics on the nullability surface.
     Optional { inner: Box<TypeRef>, span: Span },
     /// A union `A | B | …` — a declared, closed `dyn`. Always ≥2 members at the surface (a lone
-    /// type parses as that type, not a one-member union). M1 desugars it through the normalizing
-    /// `Type::union`.
+    /// type parses as that type, not a one-member union). The checker desugars it through the
+    /// normalizing `Type::union`.
     Union { members: Vec<TypeRef>, span: Span },
-    /// A tuple type `(A, B, …)` — a fixed-arity, heterogeneous, positional value type (object-model
-    /// slice 4). Always ≥2 elements at the surface (`(T)` is just a parenthesized type, `()` is
+    /// A tuple type `(A, B, …)` — a fixed-arity, heterogeneous, positional value type. Always ≥2
+    /// elements at the surface (`(T)` is just a parenthesized type, `()` is
     /// `unit`).
     Tuple { elements: Vec<TypeRef>, span: Span },
     /// A function type `(A, B) -> R` — the surface for a closure/function value. `params` may be
@@ -2191,7 +2188,7 @@ pub enum Expr {
         span: Span,
     },
     /// Member access: `receiver.name`. When immediately called (`receiver.name(...)`)
-    /// it is a method call; bare field access lands with records (Slice 6).
+    /// it is a method call; bare field access lands with records.
     Member {
         receiver: Box<Expr>,
         name: String,
@@ -2219,14 +2216,14 @@ pub enum Expr {
     Object(ObjectLit),
     /// The `?` propagation operator: `expr?`. On `Ok(x)`/`some(x)` it yields `x`; on
     /// `Err(e)`/`none` it early-returns that value from the enclosing function. Kept as
-    /// its own node (not desugared) so M1 diagnostics can point at the `?`.
+    /// its own node (not desugared) so diagnostics can point at the `?`.
     Try { expr: Box<Expr>, span: Span },
-    /// The postfix suspend operator `expr.await` (Track A): given `expr : Future<T>`, it suspends the
+    /// The postfix suspend operator `expr.await`: given `expr : Future<T>`, it suspends the
     /// enclosing async function until the future resolves and yields the `T`. Kept as its own node
     /// (not desugared here — the IR lowering turns it into a poll-state of the async state machine) so
     /// the checker types it (`Future<T>` → `T`) and points diagnostics at the `.await`.
     Await { expr: Box<Expr>, span: Span },
-    /// `spawn e` (Track A.3): schedule the future `e` as a task in the enclosing `concurrent` scope,
+    /// `spawn e`: schedule the future `e` as a task in the enclosing `concurrent` scope,
     /// yielding a handle that is itself a `Future<T>` (so `spawn f().await` produces the result). Legal
     /// only inside a `concurrent { }` block (an orphan `spawn` is E0041).
     /// `spawn e` (task, `isolate: false`) or `isolate f(args)` (fresh isolate, `isolate: true`) — both
@@ -2247,7 +2244,7 @@ pub enum Expr {
     },
     /// The checked-narrowing operator: `expr.as<T>()` narrows a `dyn` value to `?T`, yielding
     /// `some(expr)` if the runtime value is a `T` and `none` otherwise. Kept as its own node (not
-    /// desugared) so M1 types it as `Option<T>` and points diagnostics at the `as`. `ty` is the
+    /// desugared) so the checker types it as `Option<T>` and points diagnostics at the `as`. `ty` is the
     /// target type written between the angle brackets.
     As {
         expr: Box<Expr>,
@@ -2282,7 +2279,7 @@ pub enum Expr {
         operand: ReflectOperand,
         span: Span,
     },
-    /// `channel::<T>(capacity)` — construct a bounded, typed channel (isolates milestone I.1),
+    /// `channel::<T>(capacity)` — construct a bounded, typed channel,
     /// yielding the split-endpoint pair `(Sender<T>, Receiver<T>)`. `elem` is the message type `T`
     /// (turbofish; carried only for the checker — the runtime channel is untyped), `capacity` the
     /// buffer size (an `int` expression). Endpoints are scheduler-owned ids: `tx.send(v)`/`tx.close()`
@@ -2320,8 +2317,7 @@ pub enum Expr {
         args: Vec<CallArg>,
         span: Span,
     },
-    /// An **explicitly instantiated METHOD call** — `recv.m::<U, ...>(args)` (generic methods,
-    /// poly-deferrals D3). `recv` is a value (→ instance method) or a bare type name (→
+    /// An **explicitly instantiated METHOD call** — `recv.m::<U, ...>(args)`. `recv` is a value (→ instance method) or a bare type name (→
     /// associated function); `type_args` bind to the METHOD's OWN type parameters in order
     /// (arity-checked E0058 — the class's parameters come from the receiver, never the
     /// turbofish). Explicit arguments win exactly as in [`Expr::TypedCall`]. Erased at runtime —
@@ -2391,8 +2387,8 @@ pub enum Expr {
         holes: Vec<Expr>,
         span: Span,
     },
-    /// A **resolved reference to a native module function** as a first-class value (expr-tiers
-    /// arc): `NativeFnRef { module: "std.json", func: "render" }` is the `Const::ModuleFn` value a
+    /// A **resolved reference to a native module function** as a first-class value:
+    /// `NativeFnRef { module: "std.json", func: "render" }` is the `Const::ModuleFn` value a
     /// `use std.json.render` binding would produce, but resolved by the compiler from a declaration
     /// rather than a user import. Compiler-synthesized only (never parsed): the expression-tier
     /// desugar uses it as the callee for a **native** tier's handler, so a native handler and a
@@ -2483,7 +2479,7 @@ pub enum ClosureBody {
     Block(Vec<Stmt>),
 }
 
-/// A `match` pattern. Exhaustiveness is unchecked in M0 (it is a checker concern).
+/// A `match` pattern. Exhaustiveness is the checker's concern (`E0011`), not the AST's.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Pattern {
     /// `_` — matches anything, binds nothing.
@@ -2818,7 +2814,7 @@ impl Expr {
         }
     }
 
-    /// Whether this expression contains a `.await` reachable **at this callable level** (Track A):
+    /// Whether this expression contains a `.await` reachable **at this callable level**:
     /// recurses through every sub-expression **except a closure body/defaults** — a closure is its
     /// own callable, so a `.await` inside it belongs to that closure's async coloring, not the
     /// enclosing one. Used to decide whether a function or the module top level is async, and to
@@ -2956,18 +2952,18 @@ pub enum BinaryOp {
     Ge,
     And,
     Or,
-    /// Bitwise AND `&` on `int` (P-BITS Tier B). Integer-only — `&&` remains the boolean operator.
+    /// Bitwise AND `&` on `int`. Integer-only — `&&` remains the boolean operator.
     BitAnd,
-    /// Bitwise OR `|` on `int` (P-BITS Tier B). Reuses the `Pipe` token, which until now only
-    /// appeared in *type* position (declared unions); the type and expression grammars are disjoint,
-    /// so this is unambiguous.
+    /// Bitwise OR `|` on `int`. Reuses the `Pipe` token, which otherwise appears only in *type*
+    /// position (declared unions); the type and expression grammars are disjoint, so this is
+    /// unambiguous.
     BitOr,
-    /// Bitwise XOR `^` on `int` (P-BITS Tier B).
+    /// Bitwise XOR `^` on `int`.
     BitXor,
-    /// Left shift `<<` on `int` (P-BITS Tier B).
+    /// Left shift `<<` on `int`.
     Shl,
-    /// Right shift `>>` on `int` (P-BITS Tier B) — arithmetic (sign-extending) on the signed `int`;
-    /// a logical (zero-fill) shift arrives with the unsigned fixed-width types (Tier W).
+    /// Right shift `>>` on `int` — arithmetic (sign-extending) on the signed `int`; on a
+    /// fixed-width value it is logical (zero-fill) when the width is unsigned.
     Shr,
 }
 
@@ -3157,7 +3153,7 @@ mod key_capable_tests {
             .collect()
     }
 
-    /// P-PKEY: primitives qualify, floats disqualify, nested capability resolves regardless of
+    /// Primitives qualify, floats disqualify, nested capability resolves regardless of
     /// declaration order, and a disqualified link poisons the whole chain.
     #[test]
     fn key_capability_fixpoint() {

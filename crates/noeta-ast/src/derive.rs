@@ -1,5 +1,5 @@
 //! **Derive planning** — the shared resolver behind `@derive(<UserTrait>)` bridging and
-//! `via:` delegation (derive layers 1+2, on top of UT5 default-method fallback).
+//! `via:` delegation, on top of the trait default-method fallback.
 //!
 //! Given a trait, the deriving type's shape, and the [`DeriveSpec`] (its explicit `member: target`
 //! bindings and optional `via: field`), [`plan_user_trait_derive`] produces the **synthesized
@@ -744,7 +744,7 @@ pub fn plan_native_derive(methods: &[(String, usize, String)], span: Span) -> Ve
         .collect()
 }
 
-// ---- generic-trait substitution ------------------------------------------------------------
+// ---- generic trait substitution ------------------------------------------------------------
 
 /// Instantiate a generic trait at concrete type arguments: `Ok(Some(trait))` with every method's
 /// signature and default body substituted (`K` → the argument) and the parameters cleared;

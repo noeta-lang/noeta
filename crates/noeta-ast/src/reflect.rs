@@ -1,6 +1,6 @@
 //! A pure, deterministic projection of the AST into **reflection data** — the attribute manifest
 //! plus a registry of every declared type's reflectable shape. Both backends build it from the same
-//! [`Program`] via [`build`], so runtime reflection (attribute-system pass 2) is identical across
+//! [`Program`] via [`build`], so runtime reflection is identical across
 //! the tree-walker and the VM **by construction** — there is no second walk to drift from the first.
 //! It carries no codegen or runtime meaning of its own; it is a read-only view of the program.
 
@@ -1431,8 +1431,8 @@ fn field_optional(fields: &[FieldDecl]) -> Vec<bool> {
 /// Whether each field is publicly settable, parallel to the field list — the visibility
 /// [`TypeInfo::field_public`] carries, and the same rule the checker's `collect` pass applies to
 /// `symbols.private_fields`: a value **`struct`**'s fields are always public (there is nothing to
-/// opt into), a reference **`class`**'s default private with a per-field `pub` opt-in (object-model
-/// slice 2d). Keyed off `kind` rather than off `is_public` alone, because a struct's field carries
+/// opt into), a reference **`class`**'s default private with a per-field `pub` opt-in. Keyed off
+/// `kind` rather than off `is_public` alone, because a struct's field carries
 /// `is_public: false` for want of the keyword and *is* public regardless — reading the raw bit would
 /// make `construct` refuse every struct field in the language.
 fn field_public(kind: TypeKind, fields: &[FieldDecl]) -> Vec<bool> {
@@ -2343,7 +2343,7 @@ impl TypeRepr {
             | TypeRepr::Class(_, args)
             | TypeRepr::Named(_, args) => args.iter().collect(),
             // The scalars have no arguments. Exhaustive on purpose (no `_`): a new `TypeRepr`
-            // variant must decide here whether the R3 matcher sees into it, rather than silently
+            // variant must decide here whether the narrow matcher sees into it, rather than silently
             // inheriting "no arguments" — the same guard every `BuiltinTy` site carries.
             TypeRepr::Int
             | TypeRepr::Float
@@ -2356,13 +2356,13 @@ impl TypeRepr {
             | TypeRepr::Unit
             | TypeRepr::Dyn
             // The bottom type has no arguments and never will: it is uninhabited, so there is
-            // nothing inside it for the R3 matcher to see into.
+            // nothing inside it for the narrow matcher to see into.
             | TypeRepr::Never => Vec::new(),
             // A trait object's trait name is identity, not a type argument — `arg_matches`
             // compares it by name in its own arm.
             TypeRepr::DynTrait(_) => Vec::new(),
             // A function type's parameters/return and a union's members are structural
-            // components, not R3 type arguments: neither is a narrowable tagged container, and
+            // components, not narrowable type arguments: neither is a tagged container, and
             // `arg_matches` handles unions member-wise in its own arms. Deliberately empty.
             TypeRepr::Fn(_, _) | TypeRepr::Union(_) => Vec::new(),
         }
@@ -2371,7 +2371,7 @@ impl TypeRepr {
     /// The nominal type name for a declared `struct`/`class`/`enum` or an unknown-kind `Named`, else
     /// `None`. Two nominal reprs of the same name are the same head **regardless of kind** — a narrow
     /// target built without kind information is `Named`, while a value's tag knows its kind
-    /// (`Struct`/`Class`/`Enum`), so R3 matching keys on the name, not the kind.
+    /// (`Struct`/`Class`/`Enum`), so narrow matching keys on the name, not the kind.
     fn nominal_name(&self) -> Option<&str> {
         match self {
             TypeRepr::Enum(n, _)
@@ -2722,7 +2722,7 @@ impl TypeRepr {
 
 /// Project a surface [`TypeRef`] onto a reflection [`TypeRepr`], **without kind information** (runtime
 /// type-argument reflection): a declared `struct`/`class`/`enum` maps to [`TypeRepr::Named`]
-/// (the R3 matcher keys on the name, not the kind, so `Named("Box")` matches a value tagged
+/// (the narrow matcher keys on the name, not the kind, so `Named("Box")` matches a value tagged
 /// `Struct("Box")`). Built-in scalars/collections map to their lattice variant; a `?T` is `Option<T>`.
 /// Used to turn a narrow target (`x is List<int>`) into the shape compared against a value's tag.
 /// The [`TypeRepr`] of a built-in type constructor, reading its type arguments through `arg`.
@@ -2748,8 +2748,8 @@ fn builtin_repr(
 ) -> Option<TypeRepr> {
     Some(match builtin {
         BuiltinTy::Int => TypeRepr::Int,
-        // A fixed width reifies only in **container-element position**, never as a top-level scalar
-        // (packed-widths arc). At the top a declared `i32`/`u8`/`f64` erases to `Int`/`Float` — the
+        // A fixed width reifies only in **container-element position**, never as a top-level
+        // scalar. At the top a declared `i32`/`u8`/`f64` erases to `Int`/`Float` — the
         // rule `params_of` and `type_of` agree on, since a scalar value carries no width tag. As a
         // list/map/option *element* it keeps its width, so `List<i32>` is distinguishable from
         // `List<int>` (the element is a physically distinct storage slot). `arg(_)` recurses in
@@ -2795,7 +2795,7 @@ fn builtin_repr(
 
 /// The **top-level** reflection of a surface type: a bare scalar `i32`/`f64` erases to `Int`/`Float`
 /// (declared-scalar erasure), while container elements keep their width. Used for a parameter's or
-/// attribute's declared type, and kind-agnostic for nominals (the R3 matcher keys on the name).
+/// attribute's declared type, and kind-agnostic for nominals (the narrow matcher keys on the name).
 pub fn typeref_to_repr(ty: &TypeRef) -> TypeRepr {
     typeref_repr_with(
         ty,
@@ -2816,8 +2816,8 @@ pub fn typeref_to_repr_arg(ty: &TypeRef) -> TypeRepr {
 }
 
 /// How a projection resolves a **nominal** type name — the one axis on which the two type-ref
-/// converters differ. [`typeref_to_repr`] answers [`TypeRepr::Named`] unconditionally (the R3
-/// narrow matcher keys on the name and is deliberately kind-tolerant); [`ReflectionInfo::typeref_repr`]
+/// converters differ. [`typeref_to_repr`] answers [`TypeRepr::Named`] unconditionally (the narrow
+/// matcher keys on the name and is deliberately kind-tolerant); [`ReflectionInfo::typeref_repr`]
 /// looks the name up in the type registry and answers `Struct`/`Class`/`Enum`.
 ///
 /// It is a parameter rather than two copies of the walk because the copies drifted: the kind-aware
@@ -2874,8 +2874,8 @@ fn typeref_repr_with(ty: &TypeRef, nominal: &NominalResolver<'_>, top: bool) -> 
 }
 
 /// Whether one narrow-target type argument (`expected`, from `x is List<int>`) matches a value's
-/// reflected argument (`actual`, from its R1/R2 tag or its head-only classification) — runtime
-/// type-argument reflection, R3. A [`TypeRepr::Dyn`] on **either** side is a wildcard: the target
+/// reflected argument (`actual`, from its reflected tag or its head-only classification). A
+/// [`TypeRepr::Dyn`] on **either** side is a wildcard: the target
 /// `<dyn>` matches anything, and an untagged/unknown actual (whose args classify to `Dyn`) is not
 /// rejected — preserving the head-only behavior for values that carry no tag. Otherwise the
 /// constructors must agree (nominal types by **name**, tolerant of kind) and their own arguments
@@ -2924,8 +2924,8 @@ pub fn arg_matches(expected: &TypeRepr, actual: &TypeRepr) -> bool {
 }
 
 /// Whether a parametrized narrow target's arguments (`target_args`, e.g. the `int` of `x is List<int>`)
-/// match a value's reflected type `actual` (its R1/R2 tag, or the head-only classification for an
-/// untagged value) — runtime type-argument reflection, R3. The head constructor is assumed already
+/// match a value's reflected type `actual` (its reflected tag, or the head-only classification for
+/// an untagged value). The head constructor is assumed already
 /// matched by the caller's head-only test; this checks the arguments position-wise via [`arg_matches`]
 /// (so an untagged value, whose reflected args are `Dyn`, matches any target — the head-only fallback).
 pub fn narrow_args_match(target_args: &[TypeRepr], actual: &TypeRepr) -> bool {
@@ -2970,7 +2970,7 @@ pub const PARAM_INFO: &str = "ParamInfo";
 /// (parameterized rows), and `#[Timeout(seconds)]` (raise or disable this test's per-test deadline).
 /// The single source of truth shared by the checker's prelude registration and the runner that
 /// interprets them.
-// D2b — the tier attributes live under their tier's namespace (no global attribute namespace), so
+// The tier attributes live under their tier's namespace (there is no global attribute namespace), so
 // these constants are the **qualified identity** every path shares: the loader rewrites a
 // user-written `#[Skip]` (after `use std.test.{Skip}`) to this FQN, the reflection manifest carries
 // it, and the runner reads it. A user must `use std.test` to apply them.
@@ -3079,7 +3079,7 @@ pub const VARIANT_SPEC: &str = "VariantSpec";
 pub const LAYOUT_ENUM: &str = "Layout";
 
 /// The `Layout.*` variants, in declaration order, mirroring [`PackedLayout`](crate::PackedLayout):
-/// `Row` (AoS, the bare-`@packed` default) and `Column` (SoA, P-SIMD). The single source of truth
+/// `Row` (AoS, the bare-`@packed` default) and `Column` (SoA). The single source of truth
 /// the parser validates `@packed(Layout.…)` against and completion offers.
 pub const LAYOUT_VARIANTS: &[&str] = &["Row", "Column"];
 
@@ -3092,7 +3092,7 @@ pub const ORDERING_ENUM: &str = "Ordering";
 /// into the values `.compare()` returns.
 pub const ORDERING_VARIANTS: &[&str] = &["Less", "Equal", "Greater"];
 
-/// The `Cancelled` prelude enum's name (Track A.8) — the `Err` payload of `h.join(): Result<T,
+/// The `Cancelled` prelude enum's name — the `Err` payload of `h.join(): Result<T,
 /// Cancelled>`. A one-variant marker enum, namable and constructible like the rest.
 pub const CANCELLED_ENUM: &str = "Cancelled";
 
@@ -3611,8 +3611,8 @@ pub struct PackedField {
 pub enum PackedKind {
     Int,
     Float,
-    /// A 32-bit float field. One word like the other primitives in slice 3.2a; slice
-    /// 3.2b narrows it to a 4-byte slot.
+    /// A 32-bit float field. One word in `word_count`, like every other primitive; a 4-byte slot
+    /// in `byte_size`.
     F32,
     /// An explicit 64-bit float field `f64` — 8 bytes, storage-identical to
     /// `Float` but a distinct kind so packed reflection reports `f64`.
@@ -3653,9 +3653,9 @@ impl PackedLayout {
         self.type_name.is_empty()
     }
 
-    /// The number of machine words one value of this layout occupies — the sum of each field's width
-    /// (a primitive is 1; a nested struct is its own `word_count`). Pre-Phase-3 every primitive is one
-    /// 64-bit word; Phase 3 (`f32`) will narrow specific slots.
+    /// The number of machine words one value of this layout occupies — the sum of each field's
+    /// width (a primitive is 1 whatever its byte width; a nested struct is its own `word_count`).
+    /// `byte_size` is the byte-addressed measure the backends lay values out against.
     pub fn word_count(&self) -> usize {
         self.fields
             .iter()
@@ -3672,9 +3672,8 @@ impl PackedLayout {
     }
 
     /// The number of **bytes** one value of this layout occupies in the byte-addressed packed buffer
-    /// (P-PACK 3.2b): `bool` is 1 byte, `f32` is 4, `int`/`float` are 8, a nested struct its own
-    /// `byte_size`. Both backends use this layout (the eval reference was narrowed to bytes too); the
-    /// legacy `word_count` survives only for any remaining word-addressed callers.
+    /// `bool` is 1 byte, `f32` is 4, `int`/`float` are 8, a nested struct its own `byte_size`.
+    /// Both backends lay values out against this; `word_count` is the word-addressed measure.
     pub fn byte_size(&self) -> usize {
         self.fields
             .iter()
@@ -4150,7 +4149,7 @@ mod tests {
     }
 
     /// The two converters agree on **everything except the nominal kind** — the one axis they are
-    /// meant to differ on ([`typeref_to_repr`] feeds the deliberately kind-tolerant R3 narrow
+    /// meant to differ on ([`typeref_to_repr`] feeds the deliberately kind-tolerant narrow
     /// matcher). Sharing one walk is what makes that the only difference.
     #[test]
     fn the_two_converters_differ_only_in_nominal_kind() {

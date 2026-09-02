@@ -43,7 +43,7 @@ impl Checker {
     /// collection unconditionally (heap free drops the field's box). Marking it in
     /// `destructor_classes` would falsely claim a language destructor and defer its destructor-free
     /// cycles to the exit reaper; leaving it out keeps mid-run cycle reclamation, and the field's
-    /// `Drop` fires on every free path regardless (verified by the S2 leak oracle).
+    /// `Drop` fires on every free path regardless (verified by the leak oracle).
     pub(crate) fn seed_ext_fielded(&mut self) {
         // Snapshot the qualified declarations first so the immutable registry borrow is released
         // before the `&mut self` symbol-table writes (the enum seeder takes the same shape). One
@@ -131,7 +131,7 @@ impl Checker {
     ///
     /// Runs **after** the collect pass's `Stmt::Trait` walk and uses `.or_insert` throughout, so a
     /// user `trait Widget` (collected first) **shadows** the same-short-named native trait —
-    /// consistent with S1/S2's "user shadows native".
+    /// consistent with "user shadows native" everywhere else.
     ///
     /// It also seeds the **3b dynamic-dispatch coercion channel**: for each native type advertising
     /// this trait (a name in its [`ExtType::traits`] list matching the trait), it records
@@ -166,7 +166,7 @@ impl Checker {
             .filter_map(|(local, qualified)| {
                 // A **dotted** local (`vec.Kernels`) is a module-namespace projection of a kernel
                 // trait, NOT a short-name type import (`Packable`). Kernel traits are the migrated
-                // bundle surface (ExtBundle→ExtTrait fold-in): they bind ONLY through the
+                // bundle surface: they bind ONLY through the
                 // module-qualified `impl vec.Kernels for T {}` spelling, resolved via
                 // `resolve_bundle_ref`/`bundle_impls`, and must NOT be seeded as short-name
                 // `user_traits` (that would make the collect bundle-binding loop skip them, and route
@@ -179,8 +179,8 @@ impl Checker {
                 let tr = reg.find_trait_qualified(qualified)?;
                 let decl = synth_trait_decl(reg, tr, local);
                 // Native declarations advertising this trait — a non-built-in name in `ExtType.traits`
-                // (Pass 1), `ExtFielded.traits` (Pass 2b, a class OR a struct), OR `ExtEnum.traits`
-                // (Slice C) matching the trait (short or qualified spelling). `record_trait_impls`
+                // `ExtFielded.traits` (a class OR a struct), OR `ExtEnum.traits` matching the
+                // trait (short or qualified spelling). `record_trait_impls`
                 // drops non-built-in names (they can't satisfy a built-in bound), so this is the one
                 // channel that records a native declaration's native-trait impl. Written over every
                 // kind so an ExtType, a class, a struct, and an enum advertiser seed the same
@@ -251,8 +251,8 @@ impl Checker {
                     .native_trait_self_constraints
                     .insert(local.clone(), constraint);
             }
-            // Which of this trait's associated types are **native-derived** (slice 1b / auto-supply,
-            // slice 4): a USER `impl <local> for T {}` must NOT be required to bind these — they are
+            // Which of this trait's associated types are **native-derived** (auto-supplied): a
+            // USER `impl <local> for T {}` must NOT be required to bind these — they are
             // computed from `T`'s element, not written per-impl — so `check_user_trait_impl` treats
             // them as auto-supplied (folding the derivation over `T`'s element into `trait_assoc`).
             if native_won && !assoc.is_empty() {
@@ -264,7 +264,7 @@ impl Checker {
             for ty in impls {
                 // Native-derived associated types: fold each `AssocDerivation` over this
                 // implementing type's uniform `@packed` element into `trait_assoc[(type, trait)]` —
-                // the SAME table slice 1a's `.noe` `type Name = …` bindings land in, so a native
+                // the SAME table a `.noe` `type Name = …` binding lands in, so a native
                 // trait method's `Self::Name` resolves on a concrete receiver unchanged. Computed
                 // (immutable `packed_layout`/element read) BEFORE the `&mut` symbol writes below. A
                 // non-`@packed` implementor (no uniform element) records nothing — the projection then
@@ -342,7 +342,7 @@ impl Checker {
     }
 
     /// Seed the **built-in directives** native fielded + enum types carry (native type-declaration
-    /// unification, Slice D) into the same `Symbols` tables the checker's collect pass writes from a
+    /// unification) into the same `Symbols` tables the checker's collect pass writes from a
     /// `.noe` type's `Decorators`. A native type bypasses the AST placement gate (E0054), so
     /// (kind, directive) legality is enforced at assembly by [`Registry::validate`]; this pass trusts
     /// that and performs only the table write:
@@ -400,7 +400,7 @@ impl Checker {
                     // against in-program attribute applications, not by a checker membership write.
                     // `Registry::validate` enforces its couplings at assembly.
                     noeta_ext_abi::ExtTypeDirective::Role(_) => {}
-                    // `@packed` (Slice E1) → the same `packed_structs` (and `column_structs` for a
+                    // `@packed` → the same `packed_structs` (and `column_structs` for a
                     // column layout) membership a `.noe` `@packed` struct seeds in `collect.rs`, keyed
                     // on the **qualified** identity (a native record is qualified-keyed in `records`, so
                     // `packed_layout` resolves its fields there and a source `List<Pt>` literal packs
@@ -425,8 +425,7 @@ impl Checker {
     }
 
     /// Whether a **native declaration** advertises the built-in trait `t` through the extension
-    /// registry (p2p P2; unified across kinds in native-extensibility Slice C) — the native
-    /// analogue of a user type's `@derive`/`impl`, and what makes `satisfies(Uuid, Comparable)`
+    /// registry, uniformly across kinds — the native analogue of a user type's `@derive`/`impl`, and what makes `satisfies(Uuid, Comparable)`
     /// true so a `T: Comparable` bound accepts a native type.
     ///
     /// Resolved **on the lookup**, against the `&'static` registry, rather than pre-written into
@@ -515,7 +514,8 @@ impl Checker {
         for attr in self.reg().ext_attributes() {
             // Key every table on the attribute's **qualified identity** (`std.test.Skip`), the same
             // identity it projects under through `nominal_types` — so a consumer's `use std.test.Skip`
-            // resolves `Skip → std.test.Skip` and D2a's gate binds it, while a bare `#[Skip]` with no
+            // resolves `Skip → std.test.Skip` and the attribute gate binds it, while a bare
+            // `#[Skip]` with no
             // `use` is the checker's E0029 (there is no global attribute namespace).
             let qualified = attr.qualified();
             let fields: Vec<(String, Type)> = attr
@@ -705,8 +705,8 @@ fn prelude_struct_field_type(field: noeta_ast::reflect::PreludeStructFieldTy) ->
     }
 }
 
-/// Synthesize a [`noeta_ast::TraitDecl`] from a native [`registry::ExtTrait`] (native-extensibility
-/// S3) — the declarative surface `seed_ext_traits` seeds into `symbols.user_traits`, so a native
+/// Synthesize a [`noeta_ast::TraitDecl`] from a native [`registry::ExtTrait`] — the declarative
+/// surface `seed_ext_traits` seeds into `symbols.user_traits`, so a native
 /// trait is indistinguishable from a `.noe` `trait` to `check_user_trait_impl` (E0015),
 /// `enforce_type_param_bounds` (E0025), and the `dyn`-method result typing. The decl is named by the
 /// imported **short** `local` name (alias-safe: the source writes that spelling); its methods' `sig`
@@ -768,7 +768,7 @@ fn synth_trait_decl(
             }
         })
         .collect();
-    // Native associated types (ExtBundle→ExtTrait convergence): faithfully carry each
+    // Native associated types: faithfully carry each
     // `ExtAssocType`'s name into the `TraitDecl` so a native trait is indistinguishable from a `.noe`
     // one to the coherence machinery. Their concrete values are **derived** (not per-impl `type Name
     // = …` bindings), so the synthesized decl carries no default `TypeRef`; `seed_ext_traits` folds

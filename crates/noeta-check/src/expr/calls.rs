@@ -150,7 +150,7 @@ impl Checker {
 
     /// Whether a call argument should be **deferred** until the callee's parameter types are
     /// known: the literal forms ([`is_deferred_literal_arg`] — closures and container literals),
-    /// plus (poly-values) a bare identifier naming an unshadowed **polymorphic named function**
+    /// plus a bare identifier naming an unshadowed **polymorphic named function**
     /// — a generic user fn, or a prelude constructor (`Ok`/`Err`/`some`) — whose precise type only
     /// an expected `Fn` type can instantiate, plus a generic type's **fresh-constructor call**
     /// ([`Self::fresh_constructor_type`]), whose instantiation only the parameter type pins.
@@ -309,8 +309,8 @@ impl Checker {
     /// is deliberately consulted from both ends of the same fact: [`Self::absorbs_constructor_expectation`]
     /// asks it before pushing an open expectation into a fresh-constructor call, and
     /// [`Self::note_constructor_call`] asks it again to record the site. Two answers here would mean a
-    /// call typed against an expectation nothing then recorded — silence exactly where the arc exists
-    /// to remove it.
+    /// call typed against an expectation nothing then recorded — silence exactly where a
+    /// diagnostic belongs.
     ///
     /// Both halves are load-bearing. `open_only_by_params` keeps a `dyn` or an inference hole out (a
     /// tag is a claim, and neither is one). The template match is what proves a *caller* is obliged to
@@ -329,7 +329,7 @@ impl Checker {
     }
 
     /// The precise monomorphic [`Type::Fn`] of a **polymorphic named function used in value
-    /// position** against an expected function type (poly-values): a generic user fn — or a
+    /// position** against an expected function type: a generic user fn — or a
     /// prelude constructor (`Ok`/`Err`/`some`, and `panic`) — instantiates its type parameters
     /// from the expectation via the same structural binding a call site uses
     /// ([`bind_type_params`]), enforces its declared bounds, and yields the substituted signature
@@ -527,7 +527,7 @@ impl Checker {
     /// If `expr` is a plain call of an unshadowed **generic user function** (`load(text)` — an
     /// `Ident` callee with a collected `GenericInfo`), the trio a return-position seeding arm
     /// needs: the callee's name, its span, and its un-erased generic signature. The shared guard
-    /// of the check-mode `Call`/`Try`/`??` seeding arms (F2c + poly-deferrals D1), so the three
+    /// of the check-mode `Call`/`Try`/`??` seeding arms, so the three
     /// positions cannot drift on what counts as seedable.
     pub(crate) fn seedable_generic_call(
         &self,
@@ -1232,9 +1232,9 @@ impl Checker {
                         .unwrap_or(Type::Unknown);
                 }
                 // Prelude functions are polymorphic/variadic — their result is typed, but their
-                // arguments are not arity-checked here. (The packed-result note the free `map`
-                // recorded here moved to the list-method `map` arm in `synth_call`'s Member case —
-                // the free form left the prelude, P1.2.) Closure arguments synthesize standalone
+                // arguments are not arity-checked here. (The packed-result note lives on the
+                // list-method `map` arm in `synth_call`'s Member case; there is no free `map`.)
+                // Closure arguments synthesize standalone
                 // first, so a payload-typed result (`some(fn…)`) sees the real closure type.
                 self.finalize_closure_args(&[], args, arg_exprs, env);
                 if let Some(t) = stdlib::prelude_return(name.as_str(), args) {
@@ -1403,7 +1403,7 @@ impl Checker {
                 }
                 .or_else(|| self.resolve_namespace_module(receiver, env));
                 if let Some(qm) = module_id {
-                    // The router-facing runtime decode `json.decode_typed(name, text)` (L2.2 DI): a
+                    // The router-facing runtime decode `json.decode_typed(name, text)`: a
                     // 2-string-arg call whose result is `Result<dyn, JsonError>` (it decodes a JSON
                     // body into the type named by a *runtime* string, recoverably — the same
                     // path-carrying error story as `json.try_parse::<T>`). It is not a registered
@@ -1692,11 +1692,12 @@ impl Checker {
                 {
                     self.note_json_hint(&recv, call_span);
                 }
-                // A trait default-body method (ExtBundle→ExtTrait convergence): a native
+                // A trait default-body method: a native
                 // trait's *defaulted* method the receiver's concrete type does not provide — the TRAIT
                 // answers (source 2). Checked FIRST, before the `symbols.methods` resolution below,
                 // because a native-default method has no real signature there (it is deliberately not
-                // UT5-registered — a synth signature would misclassify a no-`self` body as an associated
+                // registered as a default — a synth signature would misclassify a no-`self` body
+                // as an associated
                 // fn). `native_trait_default_sites` already excludes overrides and inherent methods, so
                 // a hit here is unambiguous; the route is baked at the call span.
                 if let Some(ret) =
@@ -1900,7 +1901,7 @@ impl Checker {
                     );
                 }
                 // `it.map(f)` → `Iterator<R>` where `R` is the closure's return type — known here from
-                // the argument but not to `method_return` (which sees only the receiver). (Track I.1c.)
+                // the argument but not to `method_return` (which sees only the receiver).
                 if name == "map"
                     && let Type::Named(rn, _) = &recv
                     && rn == stdlib::ITERATOR
@@ -1912,7 +1913,7 @@ impl Checker {
                     return Type::Named(stdlib::ITERATOR.to_string(), vec![r]);
                 }
                 // `xs.map(f)` on a list → `List<R>`, `R` the closure's return type — the eager list
-                // method form (prelude-redesign P1), refined here for the same reason as iterator
+                // method form, refined here for the same reason as iterator
                 // `map`. Matches the free `map(xs, f)` this replaces.
                 if name == "map" && matches!(recv, Type::List(_)) {
                     let r = match args.first() {
@@ -2051,10 +2052,10 @@ impl Checker {
                 env,
             ));
         }
-        // An **extern** type participates in the protocol exactly as a user type does (http arc
-        // H10): a registered `call` method makes its values invocable. Extern types already join
-        // every other protocol (`Display`, `Error`, `Equatable`); being uncallable was an
-        // inconsistency, not a decision. This is what lets a native extension hand user code a
+        // An **extern** type participates in the protocol exactly as a user type does: a
+        // registered `call` method makes its values invocable, alongside every other protocol an
+        // extern type joins (`Display`, `Error`, `Equatable`). This is what lets a native extension
+        // hand user code a
         // callable value — a middleware's `next` — without a parallel callback mechanism.
         // Resolved as a unit: a registered `call` whose parameters do not resolve would otherwise
         // be checked against an EMPTY signature, reporting "call expects 0 arguments" for a

@@ -121,17 +121,16 @@ impl Checker {
                         self.imports.extern_types.insert(local, qualified);
                     }
                     UseKind::ExtEnum(qualified) => {
-                        // A native-**enum** import (`use std.http.SameSite`, native-extensibility
-                        // S1): bind the local name to the enum's qualified identity through the SAME
-                        // `extern_types` channel — an annotation `SameSite` then resolves to the
+                        // A native-**enum** import (`use std.http.SameSite`): bind the local name
+                        // to the enum's qualified identity through the SAME `extern_types` channel — an annotation `SameSite` then resolves to the
                         // qualified `Type::Named` the enum was seeded under, so a native fn returning
                         // it unifies by identity and a `match` over it is exhaustive.
                         self.imports.extern_types.insert(local, qualified);
                     }
                     UseKind::ExtClass(qualified) | UseKind::ExtStruct(qualified) => {
-                        // A native **fielded-type** import — a class (`use res.Handle`,
-                        // native-extensibility S2) or a value struct (`use pkg.Point`, fielded
-                        // unification): bind the local name to the type's qualified identity through
+                        // A native **fielded-type** import — a class (`use res.Handle`) or a
+                        // value struct (`use pkg.Point`), under the same fielded unification: bind
+                        // the local name to the type's qualified identity through
                         // the SAME `extern_types` channel — an annotation `Handle`/`Point` and a
                         // construction `Handle { ... }` / `Point { ... }` then resolve to the
                         // qualified `Type::Named` the type was seeded under
@@ -720,8 +719,8 @@ impl Checker {
                         self.symbols.semantic_enums.insert(e.name.to_string());
                     }
                     // An enum satisfies a trait it `@derive`s or `impl`s (its in-body blocks are
-                    // uniform with a class's — object-model slice 3); record both so an operator
-                    // trait (`impl Add`, `impl Comparable`, …) is accepted on an enum operand.
+                    // uniform with a class's); record both so an operator trait (`impl Add`,
+                    // `impl Comparable`, …) is accepted on an enum operand.
                     self.record_trait_impls(
                         e.name.as_str(),
                         e.decorators
@@ -740,8 +739,8 @@ impl Checker {
                     self.symbols
                         .type_params
                         .insert(e.name.to_string(), e.type_params.clone());
-                    // Record each enum method's signature (inherent + impl-block, the unified body —
-                    // object-model slice 3) under `(Enum, method)`, exactly like a class's, so an
+                    // Record each enum method's signature (inherent + impl-block, the unified
+                    // body) under `(Enum, method)`, exactly like a class's, so an
                     // instance call `status.label()` and an associated call `Status.parse(s)` resolve
                     // to a concrete type. The enum's generic parameters are erased to `dyn`.
                     for m in &e.methods {
@@ -767,7 +766,7 @@ impl Checker {
                     let tps = param_ids(&f.type_params);
                     let raw_params: Vec<Type> =
                         f.params.iter().map(|p| param_type(p, xt, &scope)).collect();
-                    // An `async fn f(): T` call produces `Future<T>` (Track A); wrap before erasure so
+                    // An `async fn f(): T` call produces `Future<T>`; wrap before erasure so
                     // the erased signature and the generic instantiation both carry the future.
                     let raw_ret = async_return(
                         f.ret
@@ -850,8 +849,8 @@ impl Checker {
         // Record which user traits each type implements, from standalone `impl`s,
         // in-body `impl`s, and `@derive(UserTrait)` (a fully-defaulted trait adopted wholesale —
         // `check_derives` enforces the fully-defaulted part). Done after the main walk so every
-        // `trait` is registered regardless of source order. The basis for UT3 bound satisfaction
-        // and UT4 `dyn Trait` coercion.
+        // `trait` is registered regardless of source order. The basis for generic-bound
+        // satisfaction and `dyn Trait` coercion.
         for stmt in &program.stmts {
             let (type_name, impls, derives): (&str, &[noeta_ast::ImplBlock], &[DeriveSpec]) =
                 match stmt {
@@ -957,7 +956,7 @@ impl Checker {
         // Derive bridging/delegation (layers 1+2): a derive's *planned* methods — required-member
         // bridges, `via:` forwards, builtin `via:` templates — register their signatures, from
         // the same shared planner the backends' hoist materializes, so what the checker types and
-        // what runs can never drift. Runs BEFORE the generic UT5 defaults loop below: a `via:`
+        // what runs can never drift. Runs BEFORE the generic default-method loop below: a `via:`
         // forward replaces the trait's default wholesale (delegation dispatches into the field's
         // implementation), and registration keeps the first entry per name. A plan error is
         // ignored here; `check_derives` reports it.
@@ -1102,7 +1101,7 @@ impl Checker {
         // ran, and printed `false` — a wrong answer rather than a diagnostic.
         //
         // Placement is load-bearing. AFTER the type walk, so `symbols.type_params` already carries
-        // the target's parameters (stored there for exactly this purpose). BEFORE the UT5
+        // the target's parameters (stored there for exactly this purpose). BEFORE the
         // default-fallback below, whose `register_synth_method` skips an already-registered key —
         // so a method the impl really provides wins over the trait's default.
         // A standalone `impl From<Source> for Target { … }` files its conversion under the same
@@ -1221,8 +1220,8 @@ impl Checker {
                 _ => {}
             }
         }
-        // Trait default-body routes (ExtBundle→ExtTrait convergence): before the UT5
-        // fallback below, record which `(type, method)` pairs a NATIVE trait's default-body dispatch
+        // Trait default-body routes: before the default-method fallback below, record which
+        // `(type, method)` pairs a NATIVE trait's default-body dispatch
         // answers — a defaulted method the type neither declares nor overrides. Done here, with the AST
         // impl bodies in reach, because "omitted vs provided" is not decidable from `symbols.methods`.
         self.seed_native_trait_defaults(program);
@@ -1473,15 +1472,13 @@ impl Checker {
         })
     }
 
-    /// Resolve a dotted trait path (`vec.Kernels`) to its registered kernel **trait** (ExtBundle→ExtTrait
-    /// fold-in): everything before the last dot is a bound module name (`use std.{vec}`), the
-    /// last segment the trait. `None` when the module binding or the trait doesn't exist — the impl-site
-    /// check reports.
+    /// Resolve a dotted trait path (`vec.Kernels`) to its registered kernel **trait**: everything
+    /// before the last dot is a bound module name (`use std.{vec}`), the last segment the trait.
+    /// `None` when the module binding or the trait doesn't exist — the impl-site check reports.
     ///
-    /// **Surface adapter, NOT a second mechanism.** The kernel traits were `ExtBundle`s until the
-    /// fold-in; this resolves the *module-qualified spelling* (`vec.Kernels`) — the surface a bundle bind
-    /// was written in — to the one native `ExtTrait`, which the checker then treats through the ordinary
-    /// trait machinery (its `self_constraint`, `assoc_types`, `dispatch`). The returned `String` is the
+    /// **Surface adapter, NOT a second mechanism.** This resolves the *module-qualified spelling*
+    /// (`vec.Kernels`) — the surface a bundle binding is written in — to the one native `ExtTrait`,
+    /// which the checker then treats through the ordinary trait machinery (its `self_constraint`, `assoc_types`, `dispatch`). The returned `String` is the
     /// qualified module (`std.vec`), which equals the trait's `namespace` (so `find_trait_in_module`
     /// matches it) and, appended with the trait name, its `qualified()` runtime-dispatch identity.
     pub(crate) fn resolve_bundle_ref(
@@ -1551,8 +1548,8 @@ impl Checker {
     }
 
     /// Register a synthesized/fallback method's signature and instance classification for
-    /// `type_name`, unless the type already has one by that name — the registration UT5 default
-    /// fallback and derive bridging share (the body itself is materialized by the backends'
+    /// `type_name`, unless the type already has one by that name — the registration the
+    /// default-method fallback and derive bridging share (the body itself is materialized by the backends'
     /// hoist; the checker needs the signature so member calls resolve and type).
     ///
     /// `trait_name` is the trait the synthesized method stands in for — every caller has one, since
@@ -1560,9 +1557,9 @@ impl Checker {
     /// `impl` block's method does, so a hoisted default of a `static fn` narrows exactly like a
     /// written-out one.
     fn register_synth_method(&mut self, type_name: &str, trait_name: &str, m: &noeta_ast::FnDecl) {
-        // Every method reaching here comes from a trait: a hoisted UT5 default, or a `@derive`
+        // Every method reaching here comes from a trait: a hoisted default, or a `@derive`
         // plan's bridge/forward. So a self-less one is `Either` like any other trait method — an
-        // omitted default is reachable as `T.m()` (the documented UT5 spelling) *and* on a value,
+        // omitted default is reachable as `T.m()` (the documented spelling) *and* on a value,
         // exactly as the same body written out in the `impl` block would be, and narrowed back to
         // `Static` by the same pass if the trait declared it so.
         let receiver = Receiver::trait_method(m.body.iter().any(|s| s.mentions("self")));
@@ -1699,7 +1696,7 @@ impl Checker {
         }
     }
 
-    /// Populate [`Symbols::native_trait_default_sites`] (ExtBundle→ExtTrait convergence): for
+    /// Populate [`Symbols::native_trait_default_sites`]: for
     /// every `(type, trait)` where the trait is a **native** trait carrying a default-body dispatch,
     /// record each defaulted method the type does not itself provide — a native inherent method
     /// (resolved through `method_return`, covering every native kind) or an `impl` override body
@@ -1741,12 +1738,12 @@ impl Checker {
             }
         }
         // Resolve the routes under the immutable registry/import borrows, then write them in.
-        // Sorted for the same reason the UT5 fallback below is: a `(type, method)` reachable through
-        // *two* native traits used to be routed to whichever the hash walk reached last — and the
-        // route is the body that runs, so two traits whose defaults disagree (the shipped
-        // `vec.Kernels`/`vec.SatKernels` pair differs by wrapping vs saturating arithmetic) would
-        // compute different answers in different processes. Rival routes are a diagnostic now
-        // (E0027, reported in pass 2), so this order settles nothing but reproducibility.
+        // Sorted for the same reason the default-method fallback below is: an unordered hash walk
+        // would route a `(type, method)` reachable through *two* native traits to whichever it
+        // reached last, and the route is the body that runs — two traits whose defaults disagree
+        // (the shipped `vec.Kernels`/`vec.SatKernels` pair differs by wrapping vs saturating
+        // arithmetic) would then compute different answers in different processes. Rival routes are
+        // a diagnostic (E0027, reported in pass 2), so this order settles only reproducibility.
         let impls = self.symbols.user_trait_impls.clone();
         let mut sorted_impls: Vec<(String, Vec<String>)> = impls
             .iter()

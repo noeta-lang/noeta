@@ -39,12 +39,12 @@ pub struct DeclaredTier {
     pub name: String,
     /// The knob-attribute type from `config: T`, if the tier has knobs.
     pub config: Option<String>,
-    /// The body language ID from `text: "<lang>"`, when the tier is a **text tier** (text-tiers
-    /// arc): its blocks hold verbatim text (lexer-captured, un-parsed) tagged with this language
+    /// The body language ID from `text: "<lang>"`, when the tier is a **text tier**: its blocks
+    /// hold verbatim text (lexer-captured, un-parsed) tagged with this language
     /// for tooling. `None` for a code tier. Mutually exclusive with `config` (E0051).
     pub text: Option<String>,
-    /// The block-value type from `expr: T`, when the tier is an **expression tier** (expr-tiers
-    /// arc): its `@<name> { … }` blocks are expressions, desugared during activation to a call of
+    /// The block-value type from `expr: T`, when the tier is an **expression tier**: its
+    /// `@<name> { … }` blocks are expressions, desugared during activation to a call of
     /// the handler (`runner` doubles as the handler name). Mutually exclusive with `config`
     /// (E0051); no runner semantics (`noeta <tier>` rejects it, blocks never activate/strip).
     pub expr: Option<String>,
@@ -70,7 +70,7 @@ pub struct TierRegistry {
     /// which one is live. In declaration order per name.
     declared: std::collections::HashMap<String, Vec<DeclaredTier>>,
     /// The extension registry the **extension-tier** half of the name-space resolves against
-    /// (instance-registry IR4): `None` (the default) uses the process-global default registry — the
+    /// `None` (the default) uses the process-global default registry — the
     /// single-registry CLI/IDE/MCP path — while an embed session whose own extension declares a
     /// `@tier` threads its assembled set via [`TierRegistry::collect_with_registry`]. Read through
     /// [`TierRegistry::reg`]; `Option` so `#[derive(Default)]` (a `&'static` has no default) holds.
@@ -217,7 +217,7 @@ impl TierRegistry {
     }
 
     /// As [`TierRegistry::collect`], but resolving the **extension-tier** half of the name-space
-    /// against an explicit `registry` (instance-registry IR4) — so an embed session whose own
+    /// against an explicit `registry` — so an embed session whose own
     /// extension declares a `@tier` validates its `@<tier>` blocks against *its* registry, not the
     /// process-global default. The checker builds its `tier_registry` this way from its own registry.
     pub fn collect_with_registry(
@@ -255,7 +255,7 @@ impl TierRegistry {
     }
 
     /// The extension registry this name-space's extension tiers resolve against — the threaded one,
-    /// or the process-global default (instance-registry IR4).
+    /// or the process-global default.
     /// The extension registry this name-space resolves against — public so the directive registry
     /// composed over this one can reach the extension-declared `@`-directives.
     pub fn registry(&self) -> &'static noeta_ext_abi::registry::Registry {
@@ -660,7 +660,7 @@ pub fn expr_tier_statement_diagnostic(tier: &str, span: Span) -> Diagnostic {
 /// It used to say "unknown dev-tier", which was only ever right in the block position — an
 /// extension's `@`-directive written before a `fn` arrives here too, and calling it a dev-tier
 /// named the wrong thing entirely. The offer spans the whole name-space of `reg`
-/// (instance-registry IR4 — the session's registry, or the process-global default), with a
+/// (the session's registry, or the process-global default), with a
 /// did-you-mean when the name is close to a real one.
 pub fn unknown_tier_diagnostic(
     reg: &noeta_ext_abi::registry::Registry,
@@ -711,8 +711,8 @@ pub struct TierFn {
     pub is_async: bool,
 }
 
-/// A text-tier block's verbatim body (`@doc { … }`, or any declared `text:` tier — slice 6f,
-/// generalized by the text-tiers arc). The text is the source between the braces, captured
+/// A text-tier block's verbatim body (`@doc { … }`, or any declared `text:` tier). The text is
+/// the source between the braces, captured
 /// un-parsed by the lexer, with the `\{`/`\}`/`\\` escapes undone.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextBlock {
@@ -762,7 +762,7 @@ pub fn resolve_texts(program: &Program) -> Vec<TextBlock> {
     resolve_texts_with_registry(program, noeta_ext_abi::registry::single_registry_process())
 }
 
-/// As [`resolve_texts`], against an explicit extension registry (instance-registry IR4), so an
+/// As [`resolve_texts`], against an explicit extension registry, so an
 /// embed session's own text tier resolves its attachment against *its* set.
 pub fn resolve_texts_with_registry(
     program: &Program,
@@ -1520,7 +1520,7 @@ impl Checker {
     /// signature dispatch calls with the activated roots.
     pub(crate) fn check_tier_decls(&mut self, program: &Program) {
         // Resolve the extension-tier half of the name-space against THIS checker's registry
-        // (instance-registry IR4), so an embed session whose own extension declares a `@tier`
+        // so an embed session whose own extension declares a `@tier`
         // validates its `@<tier>` blocks correctly. Defaults to the process-global registry.
         self.symbols.tier_registry =
             tiers::TierRegistry::collect_with_registry(program, self.reg());
@@ -1903,7 +1903,7 @@ impl Checker {
                         })
                     })
                     .collect::<Option<Vec<_>>>()?;
-                // Validation arc: a struct implementing `Validate` carries the flag so the recipe
+                // A struct implementing `Validate` carries the flag so the recipe
                 // door re-enters to run `validate()` on the freshly-built value (bottom-up).
                 let has_validator = self.satisfies(
                     &Type::Named(name.clone(), Vec::new()),
@@ -2009,7 +2009,7 @@ impl Checker {
         if recipes.is_empty() {
             return None;
         }
-        // Validation arc: an enum implementing `Validate` carries the flag so the decode door
+        // An enum implementing `Validate` carries the flag so the decode door
         // re-enters to run `validate()` on the built case, exactly as a struct's does.
         let has_validator = self.satisfies(
             &Type::Named(name.to_string(), Vec::new()),

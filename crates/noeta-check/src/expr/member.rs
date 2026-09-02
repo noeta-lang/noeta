@@ -173,7 +173,7 @@ impl Checker {
         // Resolve the bound kernel **trait** + method (the surface adapter reads `bundle_impls`, the
         // typing index; the identity is the one `ExtTrait`). `trait_q` is the trait's qualified identity
         // (`std.vec.Kernels`) — the runtime dispatch key — and `assoc_types` resolves `Self::Wide` /
-        // `Self::Float` returns from the bound element (ExtBundle→ExtTrait fold-in).
+        // `Self::Float` returns from the bound element.
         let (trait_q, method, assoc_types) = bindings.iter().find_map(|b| {
             b.bundle
                 .methods
@@ -233,7 +233,7 @@ impl Checker {
         ))
     }
 
-    /// Type a **trait default-body** method call (ExtBundle→ExtTrait convergence): a method
+    /// Type a **trait default-body** method call: a method
     /// on a concrete receiver whose type implements a **native** trait, where the method is that
     /// trait's *defaulted* method, the trait carries a native default-body dispatch
     /// ([`noeta_ext_abi::ExtTrait::dispatch`]), and the receiver's type provides **no override**. On a
@@ -293,17 +293,17 @@ impl Checker {
     /// is legal at all.
     ///
     /// `T.m(…)` puts a **type parameter in receiver position**, and the only methods that may be
-    /// reached that way are the ones the bound's trait **declares `static`** (static-trait-methods
-    /// arc). That is a **trait-declaration lookup**: one map hit and one flag.
+    /// reached that way are the ones the bound's trait **declares `static`**. That is a
+    /// **trait-declaration lookup**: one map hit and one flag.
     ///
-    /// It used to be a whole-program scan. Receiver-ness was the one part of a signature derived
-    /// from a body and never declared — arity, parameter types, return type and `async`-ness are
-    /// all contract terms checked once per impl (E0015) and trusted thereafter — so answering
-    /// "may a `T` be a receiver here?" meant enumerating **every implementor in the linked
-    /// program** and asking each one's body. That is action at a distance (an `impl` in a distant
-    /// module changes whether a generic body compiles), and it is not a question salsa can cache
-    /// against one declaration. Declaring the fact in the trait moves receiver-ness where existence
-    /// already lives: guaranteed by the contract, checked once per impl, trusted at every use.
+    /// Undeclared, receiver-ness would be the one part of a signature derived from a body — arity,
+    /// parameter types, return type and `async`-ness are all contract terms checked once per impl
+    /// (E0015) and trusted thereafter — so answering "may a `T` be a receiver here?" would mean
+    /// enumerating **every implementor in the linked program** and asking each one's body. That is
+    /// action at a distance (an `impl` in a distant module changing whether a generic body
+    /// compiles), and not a question salsa can cache against one declaration. Declaring the fact in
+    /// the trait keeps receiver-ness where existence already lives: guaranteed by the contract,
+    /// checked once per impl, trusted at every use.
     ///
     /// Returns `(trait name, whether the trait declares `name` static)`. `None` when `param` is not
     /// in scope or no bound's trait declares `name` at all; the caller then falls through to the
@@ -541,7 +541,7 @@ impl Checker {
         {
             return sig.ret.clone();
         }
-        // A method call on a trait object (L1 user traits) resolves against the trait's declared
+        // A method call on a trait object resolves against the trait's declared
         // signatures — dispatched dynamically at runtime, but statically typed by the contract.
         if let Type::DynTrait(tr) = recv
             && let Some(call) = self.dyn_trait_method(tr, name)
@@ -636,7 +636,7 @@ impl Checker {
     }
 
     /// Whether method `name` of type `type_name` is reachable at the current checking context
-    /// (method-visibility arc) — the method twin of [`Self::field_visible`], deliberately written
+    /// — the method twin of [`Self::field_visible`], deliberately written
     /// as the same three clauses so the two rules cannot drift: a `pub` method always is; a private
     /// one only inside the declaring type's own bodies, or inside a dev-tier (`@test`) body, which
     /// is white-box over its module by design.
@@ -798,7 +798,7 @@ impl Checker {
         // A parameter of the receiver's type that is ALSO in scope here — i.e. we are inside that
         // very declaration — is not erased: it is the caller's own parameter and must survive.
         // Asked by identity, this now means exactly that; asked by name it also caught an
-        // unrelated declaration's `T`, which is the same conflation this arc removes.
+        // unrelated declaration's `T` — the same conflation identity rules out everywhere else.
         let pset: ParamSet = params
             .iter()
             .filter(|p| !self.param_in_scope(p))
@@ -943,7 +943,7 @@ impl Checker {
             // Fusable indexed field read: `list[i].field`, where the index receiver typed as a
             // built-in `List` (recorded in the `Expr::Index` arm) and the field resolved on the
             // element type `n`. Lowering reads `index_field_sites` to emit a single `Rvalue::IndexField`
-            // (P-PACK 2.5+); restricting to a `List` receiver keeps the backends' fast path / boxed
+            // restricting to a `List` receiver keeps the backends' fast path / boxed
             // fallback list-only (no map/string/`Index`-trait dispatch to reproduce).
             if let Expr::Index { span: idx_span, .. } = receiver
                 && self.coloring.index_on_list.contains(idx_span)
