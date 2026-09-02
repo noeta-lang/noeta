@@ -458,8 +458,9 @@ enum Command {
     },
     /// Publish a tagged release of this package to the registry, so others can depend on it by
     /// version. Resolves `--tag` to its commit SHA, records this package's `[package]` name and
-    /// version against those git coordinates, and attests the release with a signature over
-    /// name + version → commit that a consumer verifies without trusting the index. The
+    /// version against those git coordinates, and, when a signing identity is available, attests
+    /// the release with a signature over name + version → commit that a consumer verifies without
+    /// trusting the index (`--key` selects which identity signs). The
     /// documentation artifact and `README.md` ride along by default. A published version is
     /// immutable, and a manifest with `path`/`git` dependencies or a `[patch]` table is refused.
     /// The release goes to the index this package's scope routes to: a `[registries]` entry for
@@ -530,7 +531,8 @@ enum Command {
     /// `NOETA_REGISTRY_TOKEN`. Claiming needs the hosted registry the scope routes to: a
     /// `[registries]` entry, else `NOETA_REGISTRY_URL`, else `registry.noeta.dev`.
     Claim {
-        /// The scope (your GitHub org/user name) to claim.
+        /// The scope to claim: your GitHub org or user name, or the first label of the
+        /// `--domain` you prove.
         scope: String,
         /// The publish token to bind (default: a fresh random token, printed on success).
         #[arg(long)]
