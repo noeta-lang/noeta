@@ -1,8 +1,6 @@
 # Using Packages
 
-The practical walkthrough: install the toolchain, scaffold a project, add a dependency from the hosted registry, grant it what it needs, and run. The reference pages behind each step are [the `noeta.toml` Manifest](Manifest), [Package Registries](Package-Registries), and [Package Provenance](Package-Provenance).
-
-Every command and every line of output below was run live against the current release.
+This walkthrough installs the toolchain, scaffolds a project, adds a dependency from the hosted registry, grants it what it needs, and runs the result. The reference pages behind each step are [the `noeta.toml` Manifest](Manifest), [Package Registries](Package-Registries), and [Package Provenance](Package-Provenance).
 
 ## 1 · Install `noeta`
 
@@ -10,7 +8,7 @@ Every command and every line of output below was run live against the current re
 curl -fsSL https://noeta.dev/install | sh
 ```
 
-The script downloads the latest release, verifies its checksum, and installs to `~/.local/bin` by default — pass `--to <dir>` (or set `NOETA_INSTALL_DIR`) to install elsewhere. If the destination is not on your `PATH`, it prints the exact line to add for your shell. Later, `noeta upgrade` updates the binary in place (never to a prerelease).
+The script downloads the latest release, checks its SHA-256 against the release's `SHA256SUMS`, and installs to `~/.local/bin`. Pass `--to <dir>`, or set `NOETA_INSTALL_DIR`, to install somewhere else. If the destination is not on your `PATH`, the script prints the exact line to add for your shell. Later, `noeta upgrade` replaces the binary in place and never installs a prerelease.
 
 Pinning a version, macOS Gatekeeper, and building from source on other platforms are covered in [Getting Started](Getting-Started#1--install-the-toolchain).
 
@@ -33,9 +31,11 @@ noeta init
 initialized Noeta package `local/hello_cli` in .
 ```
 
-`noeta.toml` is the manifest and `src/main.noe` is a runnable entry point with example tests and benchmarks. `AGENTS.md` and `SYNTAX.md` teach coding agents how to drive the project and enough of the language to be productive from the first prompt; `noeta docs` fetches the rest on demand. `noeta init` never overwrites an existing file, so it is safe to re-run in a project that already has some of them.
+`noeta.toml` is the manifest and `src/main.noe` is a runnable entry point with example tests and benchmarks. `AGENTS.md` and `SYNTAX.md` give a coding agent the project's conventions and the language's syntax; `noeta docs` fetches the rest of the wiki on demand.
 
-The project runs before you edit anything, and a program with no dependencies needs none of what follows — the whole standard library is built in. Packages are for everything beyond it.
+`noeta init` writes only the files that are missing, so re-running it in a project that already has some of them adds the rest and leaves those alone. Inside an existing git repository it skips the `git init` step.
+
+The project runs before you edit anything. The whole standard library is built in, so a program with no dependencies needs none of what follows; packages cover everything beyond it.
 
 ## 3 · Add a dependency
 
@@ -48,26 +48,27 @@ noeta add para --package para/cli
 ```
 
 ```
-resolved `para/cli` to ^0.2 (the registry's current version)
+resolved `para/cli` to ^0.4 (the registry's current version)
 added `para` to …/hello-cli/noeta.toml
+  use para.cli
 ```
 
-No version is written by hand. With no source given, `noeta add` asks the registry what the package's current version is and writes a caret requirement for it, so the command in a tutorial does not go stale when the package ships a minor. A **prerelease** or a **yanked** release is never picked that way; to depend on one deliberately, say the version yourself with `--version`.
+No version is written by hand. With no source given, `noeta add` asks the registry what the package's current version is and writes a caret requirement for it, so the command in a tutorial does not go stale when the package ships a minor. A **prerelease** or a **yanked** release is never picked that way; to depend on one deliberately, say the version yourself with `--version`. The last line lists the module paths the new dependency binds, ready to paste into a `use`.
 
-The first argument (`para`) is the **import root** — the name you write after `use` — and `--package` is the **registry identity**. They are separate so that several packages of one scope can sit under one import root. (Shorter still, `noeta add para/cli` takes the identity as the positional and derives the import root from it — that binds the package under `cli`, so you would write `use cli.…`. We want `para` here, so we name it.) The manifest now contains:
+The first argument (`para`) is the **import root**, the name you write after `use`. `--package` is the **registry identity**. Keeping them separate lets several packages of one scope sit under one import root. Shorter still, `noeta add para/cli` reads the identity as the positional and derives the import root from its second half, which would bind the package under `cli` and make the import `use cli.…`. We want `para` here, so we name it. The manifest now contains:
 
 ```toml
 [dependencies]
-para = { version = "^0.2", package = "para/cli" }
+para = { version = "^0.4", package = "para/cli" }
 ```
 
-`noeta add` resolves the dependency immediately and writes `noeta.lock`, pinning the exact release tag, commit sha, and content hash, plus the scope's signing identity — the release workflow that produced it. Every later install verifies against these, and a release introducing commits from a committer new to that repo is called out for review before you trust it.
+`noeta add` then resolves the dependency and writes `noeta.lock`, pinning the release's tag, commit sha, content hash and language edition, plus the identity that signed it (the CI workflow the release's certificate names). Every later build verifies against those pins. `noeta add` and `noeta update` also compare the commits a new pin brings in against the old one, and call out a release that introduces a committer new to that repository.
 
-The other source forms — a local `{ path = "…" }` tree, a git repo pinned to a `{ git = "…", tag = "…" }` release or tracking a `branch`, and binding several packages of one scope under a single key (a **scope array**) — are covered in [the Manifest](Manifest). Mix them freely during development, but a *published* package may depend only via the registry.
+The other source forms are covered in [the Manifest](Manifest): a local `{ path = "…" }` tree, a git repo pinned to a `{ git = "…", tag = "…" }` release or tracking a `branch`, and binding several packages of one scope under a single key (a **scope array**). Mix them freely during development. A *published* package may depend only via the registry.
 
 ## 4 · `[trust]` — when a package is native or adds commands
 
-Packages get no elevated capability by default. A package that runs **native code** (Rust compiled into your toolchain — `para/db`'s database drivers, `para/p2p`'s networking) must be authorized explicitly, and so must one that contributes **`noeta <subcommand>` CLI commands** (like `para/db`'s `noeta migrate`):
+Packages get no elevated capability from appearing in `[dependencies]`. A package that runs **native code** (Rust compiled into your toolchain, such as `para/db`'s database drivers or `para/p2p`'s networking) must be authorized explicitly, and so must one that contributes **`noeta <subcommand>` CLI commands** (like `para/db`'s `noeta migrate`):
 
 ```toml
 [trust]
@@ -77,9 +78,9 @@ native = ["para/db"]
 migrate = "para/db"          # `noeta migrate`
 ```
 
-Native code is authorized per package. A command is authorized **one at a time**, and the same entry decides what you type: the key is the local name (`noeta migrate`), the value the provider — add `:exported` to rename one (`undo = "para/db:rollback"`), which is also how two packages exporting the same command name coexist.
+Native code is authorized per package. A command is authorized one at a time, and the same entry decides what you type: the key is the local name you will run (`noeta migrate`) and the value is the provider. Add `:exported` to bind a command under a different name, as `db = "para/db:migrate"` does for `noeta db`, which is also how two packages exporting the same command name coexist.
 
-An unauthorized native package or command is refused with an error naming the grant to add — nothing runs on the strength of appearing in `[dependencies]` alone. `noeta audit` reports the resulting trust footprint for the whole tree.
+An unauthorized native package or command is refused with an error naming the grant to add. `noeta audit` reports the resulting trust footprint for the whole tree.
 
 ## 5 · Write a program
 
@@ -110,7 +111,7 @@ checked 1 file: 0 error(s), 0 warning(s)
 
 ## 6 · Run
 
-There is no install step. `noeta run` (and `build`/`check`/`test`) resolves the graph on demand: it fetches each release's source (the registry serves *coordinates*; code comes from the package's own git repo), verifies its signed [provenance](Package-Provenance), and writes `noeta.lock` — commit that file. The lock pins every package's version, commit sha, content hash, and edition, plus each scope's trust root (trust-on-first-use), so every later build reproduces the same tree on any machine, offline once cached.
+`noeta run` (and `build`/`check`/`test`) resolves the graph on demand, so nothing has to be installed first. It fetches each release's source, verifies its signed [provenance](Package-Provenance), and writes `noeta.lock`; commit that file. The registry serves *coordinates*, and the code comes from the package's own git repo. The lock pins every package's version, commit sha, content hash, and edition, plus each release's trust root on first use, so every later build reproduces the same tree on any machine, offline once cached.
 
 Arguments for your program go after `--`; everything before it belongs to `noeta run`:
 
@@ -145,7 +146,7 @@ Arguments:
 ```
 
 > [!NOTE]
-> With exactly one `#[Command]` in the program, arguments are parsed directly by that command — you do not type `greet` as a subcommand. Add a second `#[Command]` function and `run()` switches to subcommand dispatch.
+> With exactly one `#[Command]` in the program, arguments are parsed directly by that command, so you do not type `greet` as a subcommand. Add a second `#[Command]` function and `run()` switches to subcommand dispatch.
 
 ## 7 · Build
 
@@ -154,24 +155,26 @@ noeta build src/main.noe
 ```
 
 ```
-wrote src/main.noeb (17376 bytes)
+wrote src/main.noeb (18657 bytes)
 ```
 
 The `.noeb` bundle is the compiled program; `noeta build --native` produces a standalone executable instead.
 
 ## 8 · What a package may implement
 
-A dependency can only add behavior to its **own** types, or to its own traits. `impl Trait for Type` must live in the package that declares the trait or the type — the [orphan rule](Generics-and-Traits#the-orphan-rule), E0070. So no package you install can quietly change what another package's types do, and no combination of dependencies can produce a coherence conflict you have no way to resolve.
+A dependency can add behavior to its **own** types, or to its own traits. `impl Trait for Type` must live in the package that declares the trait or the type, which is the [orphan rule](Generics-and-Traits#the-orphan-rule), E0070. A package you install can therefore never change what another package's types do, and no combination of dependencies produces a coherence conflict you have no way to resolve.
 
-The same rule applies to *your* code: to give a dependency's type behavior of your own, wrap it in a type you own and delegate — `@derive(Trait, via: field)` writes the newtype for you.
+The same rule applies to *your* code. To give a dependency's type behavior of your own, wrap it in a type you own and delegate; `@derive(Trait, via: field)` writes the newtype for you.
 
 ## 9 · Keeping up
 
-- **`noeta update`** re-resolves everything deliberately: newer versions satisfying your requirements, moved branch tips, drifted pins. Nothing else ever moves an existing pin.
-- **`noeta upgrade`** updates the *toolchain* itself (never to a prerelease).
-- **`noeta audit`** shows what you are actually running: every package's source, the active `[trust]` grants, each scope's pinned provenance identity, and any security-advisory hits.
+| Command | What it moves |
+|---|---|
+| `noeta update` | Re-resolves the whole graph: newer versions satisfying your requirements, moved branch tips, drifted pins. It is the only command that moves an existing pin. |
+| `noeta upgrade` | Replaces the *toolchain* binary with the latest release, never a prerelease. |
+| `noeta audit` | Reports what you are running: every package's source, the active `[trust]` grants, each pinned provenance identity, and any security-advisory hits. |
 
-By default everything resolves from `registry.noeta.dev`; private and per-scope registries (`[registries]`, `NOETA_REGISTRY_URL`, `NOETA_REGISTRY_DIR`) are on [Package Registries](Package-Registries).
+By default everything resolves from `registry.noeta.dev`. Private and per-scope registries (`[registries]`, `NOETA_REGISTRY_URL`, `NOETA_REGISTRY_DIR`) are on [Package Registries](Package-Registries).
 
 ## Where to go next
 
