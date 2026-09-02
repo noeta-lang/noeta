@@ -1,4 +1,4 @@
-//! The `wasi:http/outgoing-handler` glue (P-WASM W4 follow-up): the platform's HTTP client,
+//! The `wasi:http/outgoing-handler` glue (follow-up): the platform's HTTP client,
 //! injected into [`noeta_wasi_host::WasiHost`] as its outbound hook — so an edge handler's
 //! `client.get(...)` reaches upstream services through the host (connection-pooled, no CORS),
 //! closing the Network capability's last honest-error on the serve path.

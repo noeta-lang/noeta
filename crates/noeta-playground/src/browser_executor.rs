@@ -1,4 +1,4 @@
-//! The JSPI executor (P-WASM W3.1) — genuine async overlap in the browser, on the exact seam
+//! The JSPI executor — genuine async overlap in the browser, on the exact seam
 //! `RealExecutor` uses, with **zero ABI changes**.
 //!
 //! The mechanism: JSPI (JavaScript Promise Integration) lets one wasm import suspend the whole

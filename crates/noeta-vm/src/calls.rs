@@ -632,7 +632,7 @@ impl<'m> Vm<'m> {
         {
             return self.call_map_method(v, map_method, method, args, span);
         }
-        // `list.to_bytes()` — serialize a `List<@packed>` to its flat buffer (P-PACK 4.4);
+        // `list.to_bytes()` — serialize a `List<@packed>` to its flat buffer;
         // a boxed list has no canonical form, so it's a type error (surfaced, not silent).
         if method == "to_bytes" && matches!(hk, Some(HeapKind::List | HeapKind::PackedList)) {
             if !args.is_empty() {
@@ -1895,7 +1895,7 @@ impl<'m> Vm<'m> {
                     ));
                 }
                 // A `map(...)` whose result element type is packed (the checker marked this call span)
-                // builds a flat result directly (P-PACK 2.6 category B): each mapped element is packed
+                // builds a flat result directly (category B): each mapped element is packed
                 // into the buffer and its boxed object freed, so the result keeps the dense layout (and
                 // downstream `[i].field` fusion) instead of materializing N boxed objects. A packed
                 // input is read one element at a time (`packed_get`), so only one input element is live
@@ -1949,7 +1949,7 @@ impl<'m> Vm<'m> {
                         None => flat,
                     });
                 }
-                // Demote a packed list to a temporary boxed one (P-PACK 2.4); its elements are
+                // Demote a packed list to a temporary boxed one; its elements are
                 // borrowed for the per-element calls and the temporary is released afterward.
                 let list = args[0].realize_list();
                 let items = list.list_items().expect("list receiver");
@@ -1984,7 +1984,7 @@ impl<'m> Vm<'m> {
                         format!("`filter` expects a list, found {}", args[0].type_name()),
                     ));
                 }
-                // A packed list stays *flat* (P-PACK 2.6): test each element (materialized only for the
+                // A packed list stays *flat*: test each element (materialized only for the
                 // predicate call, then consumed by it), record the indices that pass, and rebuild a new
                 // packed buffer from those word-blocks — never demoting the whole list to boxed.
                 if args[0].is_packed_list() {
@@ -2014,7 +2014,7 @@ impl<'m> Vm<'m> {
                     }
                     return Ok(list.packed_select(&kept));
                 }
-                // Demote a packed list (P-PACK 2.4); elements are borrowed from the temporary, which
+                // Demote a packed list; elements are borrowed from the temporary, which
                 // is released after the loop (a kept element is retained into the result first).
                 let list = args[0].realize_list();
                 let items = list.list_items().expect("list receiver");
@@ -2067,7 +2067,7 @@ impl<'m> Vm<'m> {
                         format!("`sum` expects a list, found {}", args[0].type_name()),
                     ));
                 }
-                // Demote a packed list (P-PACK 2.4) to a temporary boxed one, sum its (numeric)
+                // Demote a packed list to a temporary boxed one, sum its (numeric)
                 // elements, then release the temporary. (A `List<packed struct>` would not type-check
                 // for `sum`, but the materialize keeps the path uniform.)
                 let list = args[0].realize_list();
@@ -2168,7 +2168,7 @@ impl<'m> Vm<'m> {
                 let message = args[0].display();
                 Err(self.error(DiagnosticCode::Panic, span, format!("panic: {message}")))
             } // (The orchestration family — `task`, `http.serve`, `signal`/`computed`/`effect` —
-              // dispatches through the registry's `NativeCtx`:
+              // Dispatches through the registry's `NativeCtx`:
               // `noeta-stdlib/src/{task,serve,reactive}.rs`, reached via
               // `call_ctx_function`/`call_ctx_type_method`. Only the language-level collection
               // builtins and `assert` live here.)

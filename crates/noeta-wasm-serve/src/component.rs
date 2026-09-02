@@ -1,4 +1,4 @@
-//! The `wasi:http/incoming-handler` glue (P-WASM W4): convert the platform's request into the
+//! The `wasi:http/incoming-handler` glue: convert the platform's request into the
 //! neutral [`NetRequest`], run [`crate::serve_once`], and stream the [`NetResponse`] back.
 //! Compiled only for the wasi target — the `wasi` crate's proxy-world bindings do not exist
 //! elsewhere, and the core it wraps is natively tested without it.

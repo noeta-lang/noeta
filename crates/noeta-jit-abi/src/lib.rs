@@ -128,13 +128,13 @@ pub const RETURN_HELPER: &str = "noeta_jit_return";
 /// Direct-call helpers (J3 native→native calls). `prepare_call` checks whether the `Op::Call` at a pc
 /// can be a direct native call (compiled callee, plain arity, no upvalues, stack capacity) and, if so,
 /// sets up the callee frame and returns two words — the callee's compiled entry pointer (else `0`, a
-/// fallback to `call`) and its reserved window base (P-JSSA S4.0: one roundtrip, not two);
+/// fallback to `call`) and its reserved window base (one roundtrip, not two);
 /// `after_call` inspects the callee's outcome and tells the caller to continue in place
 /// ([`OUTCOME_CONTINUE`]) or propagate.
 pub const PREPARE_CALL_HELPER: &str = "noeta_jit_prepare_call";
 pub const AFTER_CALL_HELPER: &str = "noeta_jit_after_call";
 
-/// **Fast-convention tag** (P-JSSA S4.1): the bit `jit_prepare_call` sets in the entry pointer it
+/// **Fast-convention tag**: the bit `jit_prepare_call` sets in the entry pointer it
 /// returns to say "this is a *fast*-convention body — its window was reserved uninitialized and the
 /// arguments travel as machine arguments". The native caller tests it and strips it (`& !1`) before
 /// the indirect call; a clear bit means the classic [`CompiledFn`] convention.
@@ -164,7 +164,7 @@ pub const LEAF_OP_HELPER: &str = "noeta_jit_run_leaf_op";
 /// calls this helper, whose body is Rust's `%` on f64 — the interpreter's exact semantics.
 pub const FMOD_HELPER: &str = "noeta_jit_fmod";
 
-/// A per-call-site **inline cache** slot (P-JSSA S4.2), allocated by the JIT (one per
+/// A per-call-site **inline cache** slot, allocated by the JIT (one per
 /// `Call`/`CallGlobal` pc, stable address baked into the code) and filled by the VM's
 /// `jit_prepare_call` when it resolves a fast-convention callee. Layout:
 /// `[key, untagged fast entry, callee num_registers, callee proto]`.
@@ -199,7 +199,7 @@ pub fn proto_symbol(p: usize) -> String {
     format!("noeta_jit_proto{p}")
 }
 
-/// The export symbol name of prototype `p`'s fast-convention body (P-JSSA S4.1), if it has one.
+/// The export symbol name of prototype `p`'s fast-convention body, if it has one.
 pub fn fast_symbol(p: usize) -> String {
     format!("noeta_jit_fast{p}")
 }
@@ -209,7 +209,7 @@ pub fn stub_symbol(p: usize) -> String {
     format!("noeta_jit_stub{p}")
 }
 
-/// The exported data symbol carrying the AOT dispatch table (P-AOT L3.2, approach A). **ABI** (the
+/// The exported data symbol carrying the AOT dispatch table (approach A). **ABI** (the
 /// runtime binding in L3.2b must match exactly): pointer-width little-endian words —
 /// `[count][main_0, fast_0, main_1, fast_1, …, main_{count-1}, fast_{count-1}]`. Word 0 is the
 /// prototype count; then two pointer slots per prototype in index order — its main native body and

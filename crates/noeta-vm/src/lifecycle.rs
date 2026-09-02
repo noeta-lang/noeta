@@ -298,12 +298,12 @@ pub(crate) enum Channel {
 pub(crate) struct Task {
     pub(crate) future: Value,
     pub(crate) result: Option<Value>,
-    /// Set when the task is **cancelled** (Track A.8) — e.g. a `race` loser. A cancelled task is
+    /// Set when the task is **cancelled** — e.g. a `race` loser. A cancelled task is
     /// never polled again and counts as done for the join; its future is reclaimed by `ScopeEnd`
     /// exactly like a completed task's, so cancellation frees no differently than a normal join (the
     /// leak oracle confirms residency 0). It stops cooperatively at its last suspension. (Running user
-    /// `destruct` on an async task's captured locals is a separate, pre-existing gap — see
-    /// `plans/deferred.md` — that affects completed and cancelled tasks alike.)
+    /// `destruct` on an async task's captured locals is a separate, pre-existing gap that
+    /// affects completed and cancelled tasks alike.)
     pub(crate) cancelled: bool,
     /// Set while this task's future is **being polled** (its step is executing). A nested
     /// `poll_all_scopes_round` — a `concurrent` join *inside* this task's own body — must skip it:
@@ -715,7 +715,7 @@ impl<'m> Vm<'m> {
                 noeta_stdlib::map_key::packed_names::register(&shape.name, shape.fields.iter());
             }
         }
-        // Resolve each packed `map(...)` result site to its shared schema (P-PACK 2.6 category B).
+        // Resolve each packed `map(...)` result site to its shared schema (category B).
         // Against the persistent (identity-carrying) schemas, so on a seeded entry an old span
         // still resolves to the same shared schema.
         let map_packed: HashMap<Span, &'static noeta_object::PackedSchema> = module

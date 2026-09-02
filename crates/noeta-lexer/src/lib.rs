@@ -161,7 +161,7 @@ pub enum TokenKind {
     /// disagree. A keyword for symmetry with `fields_of`/`type_of`.
     #[token("traits_of")]
     TraitsOfKw,
-    /// `from_bytes::<T>(blob)` — deserialize a `bytes` buffer back into a `List<T>` (P-PACK 4.4). A
+    /// `from_bytes::<T>(blob)` — deserialize a `bytes` buffer back into a `List<T>`. A
     /// keyword so the turbofish type argument parses unambiguously; generic over any declared
     /// `@packed` struct (no hardcoded type list — extension-friendly).
     #[token("from_bytes")]

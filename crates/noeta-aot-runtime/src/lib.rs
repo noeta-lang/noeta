@@ -1,4 +1,4 @@
-//! P-AOT L3.2b(3): the **AOT runtime** — the static library a `noeta build --native` program links
+//! The **AOT runtime** — the static library a `noeta build --native` program links
 //! against to become a self-contained native executable.
 //!
 //! A native artifact is laid out exactly like a Level-2 stapled exe: `[linked runtime | bundle |
@@ -21,7 +21,7 @@ use noeta_bytecode::Module;
 use noeta_span::{Source, SourceId, SourceMap};
 use noeta_vm::VmBackend;
 
-// The linker-defined dispatch table (P-AOT L3.2a): `[count][main_0, fast_0, main_1, fast_1, …]`,
+// The linker-defined dispatch table: `[count][main_0, fast_0, main_1, fast_1, …]`,
 // pointer-width words the linker resolved to the real code addresses of the AOT-compiled prototype
 // bodies (or null for an interpreted prototype / a prototype with no fast body). The program's AOT
 // object *defines* this symbol; here we only reference it. Its true size is the whole table — we
@@ -174,7 +174,7 @@ fn load_embedded_module() -> Result<Module, String> {
     noeta_bundle::read(bundle).map_err(|e| e.to_string())
 }
 
-/// Run `module` against the real host with its AOT-compiled prototypes bound in (P-AOT L3.2b). A
+/// Run `module` against the real host with its AOT-compiled prototypes bound in. A
 /// per-isolate factory mints a fresh real host + wall-clock executor (isolates I.4b), exactly as the
 /// CLI's `run_module_real_host` does; the extra step here is binding the linker-resolved
 /// [`noeta_aot_dispatch`] table so eligible prototypes dispatch to native code.

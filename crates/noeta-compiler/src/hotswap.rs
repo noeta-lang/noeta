@@ -8,7 +8,7 @@
 //! *signature* (built from the sub-node spans, sliced against each version's own source) separates
 //! a body-only edit (swappable) from a signature/layout change (restart).
 //!
-//! What is swappable rides on two shipped runtime invariants (see `plans/server-hmr/README.md`):
+//! What is swappable rides on two shipped runtime invariants:
 //!
 //! - **Function bodies** — top-level `fn`s dispatch through their global slot at call time
 //!   (`Op::CallGlobal`), so re-evaluating a changed `fn` declaration as a session entry stores a

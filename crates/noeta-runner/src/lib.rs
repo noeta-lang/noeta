@@ -4,7 +4,7 @@
 //! extensions (L1), and in later slices the compile front-end (L2) — with **no dev tooling (L3)**:
 //! no fmt, no formatter/parser (`malva`), no LSP/DAP/MCP. `noeta-cli` depends on it so the CLI's
 //! `run`/`build --exe` path and the standalone `noeta-runner` binary share ONE execution core — the
-//! drift firewall (see `plans/dev-deps`). The toolchain is excluded *structurally*: those crates are
+//! drift firewall. The toolchain is excluded *structurally*: those crates are
 //! simply not dependencies here, so a shipped artifact built on this crate cannot reach them.
 
 use std::io::Write as _;
@@ -26,7 +26,7 @@ pub use compile::{CompileFailure, Compiled, compile_real, compile_whole_file, re
 pub use noeta_backend::{Component as TailComponent, Part as TailPart, Stream as TailStream};
 
 /// Run an already-compiled [`Module`] against the real host — the shared execution core of the
-/// CLI's source-run path and the `.noeb` bundle runner (P-AOT L1.2), which loads a module directly
+/// CLI's source-run path and the `.noeb` bundle runner, which loads a module directly
 /// with no source to compile.
 ///
 /// `app_id` is the p2p application namespace (p2p P3.4), computed by the caller and passed in — the
@@ -133,7 +133,7 @@ pub fn exit_code(code: i32) -> ExitCode {
     ExitCode::from(u8::try_from(code).unwrap_or(1))
 }
 
-/// Decode a `.noeb` bundle blob and run it (P-AOT L1.2) — no source, no compile. `file` labels the
+/// Decode a `.noeb` bundle blob and run it — no source, no compile. `file` labels the
 /// synthetic source that diagnostics render against; `args` is the program's argument vector
 /// (`args.all()`), `app_id` its p2p namespace. Shared by the CLI's bundle path and the standalone
 /// runner's stapled/two-file paths.
@@ -206,7 +206,7 @@ pub fn run_source_file(
     }
 }
 
-/// P-AOT L2: detect and run a bundle stapled onto *this* executable (a `noeta build --exe`
+/// Detect and run a bundle stapled onto *this* executable (a `noeta build --exe`
 /// artifact), returning its exit code — or `None` when there is no trailer (the plain toolchain
 /// binary, or a bare runner), so the caller runs its normal path. Reads only the fixed trailer +
 /// embedded blob, seeking rather than slurping the whole binary, so a no-bundle startup is not

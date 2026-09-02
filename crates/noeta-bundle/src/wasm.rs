@@ -1,4 +1,4 @@
-//! Wasm stapling (P-WASM W1.2): inject a `.noeb` bundle into the wasm runner binary, producing
+//! Wasm stapling: inject a `.noeb` bundle into the wasm runner binary, producing
 //! the single-artifact `noeta build --wasm` output.
 //!
 //! The runner compiles in a magic-tagged, zero-initialized slot static

@@ -7,7 +7,7 @@
 //! (The `next_id()` counter now lives on the `Host`, which the session persists, so it carries across
 //! entries for free.)
 //!
-//! The design keeps the hot path untouched (see `plans/repl-on-vm`): the `Vm` struct and its dispatch
+//! The design keeps the hot path untouched: the `Vm` struct and its dispatch
 //! loop are unchanged. Each entry builds an **ephemeral** [`Vm`] over the session's persistent
 //! [`SessionState`] via [`Vm::load_seeded`], runs the entry chunk with [`Vm::run_top`] (no teardown),
 //! then moves the state back out with [`Vm::into_state`]. One [`Vm::teardown`] runs at session end,

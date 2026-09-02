@@ -186,7 +186,7 @@ impl<'m> Vm<'m> {
     /// `call_list_method`; the result is a freshly-owned value (refcount 1). The receiver's
     /// elements shared from `list_items` are not retained, so any element placed into a *new*
     /// list must be retained first (the list then owns that reference).
-    /// Dispatch a Ring 1 list method. A packed list (P-PACK 2.4) has no specialized list methods
+    /// Dispatch a Ring 1 list method. A packed list has no specialized list methods
     /// yet, so it is materialized to a temporary boxed list, dispatched, and released — the result
     /// is observably identical to the boxed equivalent. A boxed list dispatches directly.
     pub(crate) fn call_list_method(
@@ -199,7 +199,7 @@ impl<'m> Vm<'m> {
     ) -> Result<Value, Abort> {
         if list.is_packed_list() {
             // Selection producers keep the list *flat* — `reverse`/`slice` build a new packed buffer
-            // by copying the selected elements' word-blocks (P-PACK 2.6), instead of demoting to N
+            // by copying the selected elements' word-blocks, instead of demoting to N
             // boxed objects. Their arity/bounds checks and errors mirror the boxed arms exactly, so
             // the result is observably identical. Every other method demotes (materialize-on-read).
             match method {
@@ -1301,7 +1301,7 @@ impl<'m> Vm<'m> {
             ));
         }
         // Sole owner: overwrite the slot in place — O(word_count) for a packed list (its primitives
-        // copied into the buffer, P-PACK 2.6) or O(1) pointer-swap for a boxed one. An aliased list
+        // copied into the buffer) or O(1) pointer-swap for a boxed one. An aliased list
         // (or a packed element that does not pack) copies via `call_list_method` (still flat for a
         // packed receiver) and then drops the consumed reference.
         if list.is_uniquely_owned() {
@@ -1309,7 +1309,7 @@ impl<'m> Vm<'m> {
                 if list.packed_set_in_place(i as usize, args[1]) {
                     return Ok(list);
                 }
-                // element did not pack (impossible for a well-typed `List<packed>`) — copy below.
+                // Element did not pack (impossible for a well-typed `List<packed>`) — copy below.
             } else {
                 let value = args[1];
                 retain(value);

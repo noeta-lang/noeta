@@ -506,11 +506,11 @@ pub(crate) type MapStore =
 /// [`FxHasher`] instead of SipHash, since it is touched on every alloc and free.
 type RegistrySet = HashSet<u64, std::hash::BuildHasherDefault<FxHasher>>;
 
-/// are its field values in the shape's declared order; an `Enum`'s slots are its variant's
+/// Are its field values in the shape's declared order; an `Enum`'s slots are its variant's
 /// positional data. Freeing either releases its slots first (see [`free`]).
 pub(crate) enum Payload {
     Str(compact_str::CompactString),
-    /// A raw immutable byte buffer (`bytes`, P-PACK 4.4) — a GC leaf like `Str`; owns no child
+    /// A raw immutable byte buffer (`bytes`) — a GC leaf like `Str`; owns no child
     /// references, freeing it just drops the `Vec<u8>`.
     Bytes(Vec<u8>),
     /// A registered extern-type value — the ONE hosting variant every
@@ -546,7 +546,7 @@ pub(crate) enum Payload {
     // order-observing accessor (`map_keys`/`map_values`/`map_entries`/`repr`/`to_native_deep`) sorts
     // by key, so maps still present and compare in deterministic sorted order (differential-safe).
     Map(MapStore),
-    /// A flat `List<packed>` (P-PACK 2.4, byte-addressed since 3.2b): the elements packed as raw
+    /// A flat `List<packed>` (byte-addressed since 3.2b): the elements packed as raw
     /// primitive bytes, one contiguous `Vec<u8>` of `schema.byte_size` bytes per element (an `f32`
     /// field is 4 bytes, the others 8), interpreted through the shared `schema`. A GC **leaf** — it
     /// owns no child `Value`s (only primitive bytes), so freeing it just drops the buffer. Elements
@@ -1023,7 +1023,7 @@ pub(crate) fn free(value: Value) {
         Payload::ChannelSend(_, value, _) => release_child(*value),
         // A bound method handle owns its captured receiver.
         Payload::BoundMethod { recv, .. } => release_child(*recv),
-        // A packed list (P-PACK 2.4) owns only primitive words — no child references — so freeing it
+        // A packed list owns only primitive words — no child references — so freeing it
         // just drops the buffer (and its shared `Rc<PackedSchema>`), like any other leaf.
         Payload::Str(_)
         | Payload::Bytes(_)

@@ -17,8 +17,7 @@
 //! *identifies* the garbage and hands it back as a [`Garbage`] set for the VM to reclaim — running
 //! `__destruct` on the dead members that carry one before freeing. The dormant [`CycleCollector`]
 //! struct below is the original trial-deletion prototype, retained for its unit tests of the shared
-//! `mark_gray`/`scan`/`gather_white` primitives. (`plans/memory-management/phase-6-benchmarks.md` has
-//! the trace-vs-trial head-to-head and the default-collector rationale.)
+//! `mark_gray`/`scan`/`gather_white` primitives.
 
 use std::collections::HashSet;
 

@@ -510,7 +510,7 @@ impl Network for BrowserHost {
     fn net_listen(&mut self, _addr: &str) -> Result<u64, StdError> {
         Err(io_error(
             "serving (`http.serve`) is not available in a browser tab — deploy the program with \
-             `noeta build --wasm` instead (and see plans/wasm/ W4 for wasi:http)"
+             `noeta build --wasm` instead"
                 .to_string(),
         ))
     }

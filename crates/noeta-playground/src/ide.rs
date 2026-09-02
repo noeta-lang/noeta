@@ -1,4 +1,4 @@
-//! In-browser language smarts (P-WASM W2.3, the engine half): hover, completion,
+//! In-browser language smarts (the engine half): hover, completion,
 //! go-to-definition, and signature help over [`noeta_ide::DocumentStore`] — the same
 //! wire-protocol-free engine `noeta lsp` adapts over, so the playground's answers are the LSP's
 //! answers. There is no JSON-RPC here (a browser tab has no stdio peer); the editor calls these

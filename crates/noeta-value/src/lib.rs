@@ -260,7 +260,7 @@ impl Value {
         heap::alloc(Payload::Str(s))
     }
 
-    /// A heap byte buffer (`bytes`, refcount 1), taking ownership of `data` (P-PACK 4.4).
+    /// A heap byte buffer (`bytes`, refcount 1), taking ownership of `data`.
     pub fn bytes(data: Vec<u8>) -> Value {
         heap::alloc(Payload::Bytes(data))
     }
@@ -694,8 +694,8 @@ impl Value {
         }
     }
 
-    /// Whether this is a heap list — boxed (`Payload::List`) or flat-packed (`Payload::PackedList`,
-    /// P-PACK 2.4). Both are observably lists; a packed one materializes through
+    /// Whether this is a heap list — boxed (`Payload::List`) or flat-packed
+    /// (`Payload::PackedList`). Both are observably lists; a packed one materializes through
     /// [`Value::realize_list`] / [`Value::packed_get`] for any op not specialized for the flat form.
     pub fn is_list(self) -> bool {
         self.is_pointer()
@@ -1023,7 +1023,7 @@ impl Value {
     /// Push one `element` onto this boxed list's backing buffer **in place**, taking ownership of the
     /// caller's reference (no retain — the caller hands over one reference). The caller must guarantee
     /// a uniquely-owned list (`refcount == 1`). Used by the packed-list streaming demote fall-back
-    /// (P-PACK 2.5). No-op if this is not a boxed list.
+    ///. No-op if this is not a boxed list.
     pub fn list_push(self, element: Value) {
         debug_assert!(
             self.is_list() && heap::refcount(self) == 1 && !heap::is_shared(self),

@@ -1,4 +1,4 @@
-//! In-browser debugging (P-WASM W2.4) — the playground's DAP-shaped debug run.
+//! In-browser debugging — the playground's DAP-shaped debug run.
 //!
 //! The protocol-neutral debug machinery already lives in [`noeta_vm::debug`] (breakpoint
 //! resolution, line-granular stepping, owned stack capture — extracted from `noeta-dap` for

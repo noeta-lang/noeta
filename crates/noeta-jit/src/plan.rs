@@ -1,5 +1,5 @@
-//! P-JSSA S0/S5 — the register plan: per-pc **liveness** and the prototype-wide **residency
-//! permission** (`plans/jit/ssa.md`). This module is pure analysis; codegen consumes it.
+//! The register plan: per-pc **liveness** and the prototype-wide **residency
+//! permission**. This module is pure analysis; codegen consumes it.
 //!
 //! - **`live_in`** (flattened `[pc * nreg + r]`, over the tier-0 CFG) — may register `r`'s value
 //!   be read (as an operand, a branch scrutinee, a `Return`/`Echo` source, or a `Drop` release)
@@ -32,7 +32,7 @@ use crate::analysis::tier0_succ;
 /// The S0/S5 register plan for a prototype. See the module docs for the maps' contracts.
 pub(crate) struct RegPlan {
     live_in: Vec<bool>,
-    /// P-JSSA S5: residency is **universal** in a modeled prototype — every register (heap
+    /// Residency is **universal** in a modeled prototype — every register (heap
     /// values included) lives in its SSA variable, and `heap_in` decides release-on-overwrite
     /// and sync obligations instead of gating residency. An unmodeled prototype promotes
     /// nothing (no variable is ever defined or used) — byte-identical to the slot backend.
@@ -311,7 +311,7 @@ fn live_in_map(chunk: &Chunk) -> Vec<bool> {
     while changed {
         changed = false;
         for pc in (0..n).rev() {
-            // live_out = union of successors' live_in.
+            // Live_out = union of successors' live_in.
             let mut out = vec![false; nreg];
             tier0_succ(&chunk.code[pc], pc, n, &mut succ);
             for &s in &succ {
@@ -319,7 +319,7 @@ fn live_in_map(chunk: &Chunk) -> Vec<bool> {
                     *o |= live[s * nreg + r];
                 }
             }
-            // live_in = reads ∪ (live_out − def).
+            // Live_in = reads ∪ (live_out − def).
             match live_effect(&chunk.code[pc]) {
                 LiveEffect::Modeled { reads, def } => {
                     if let Some(d) = def {

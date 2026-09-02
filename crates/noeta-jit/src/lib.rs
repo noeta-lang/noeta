@@ -97,7 +97,7 @@ pub use noeta_jit_abi::{
     fast_symbol, proto_symbol, stub_symbol,
 };
 
-/// Per-phase compile accounting (P-JCT C0): where the engine's total compile time goes, plus the
+/// Per-phase compile accounting: where the engine's total compile time goes, plus the
 /// volume compiled — enough to compute a bytes/s throughput comparable against Cranelift's
 /// expected range. `define_ns` covers `Module::define_function` (lowering, regalloc, and the IR
 /// verifier when enabled); `finalize_ns` covers `finalize_definitions` (relocations + W^X page
@@ -120,7 +120,7 @@ pub struct CompileBreakdown {
 /// the interpreter dispatches on. `compiled[p]` is `Some` once prototype `p` has been JIT-compiled;
 /// the interpreter consults it at frame entry.
 pub struct Jit<M: ClifModule = JITModule> {
-    /// The Cranelift module backend. Generic over `cranelift_module::Module` (P-AOT L3.0): the
+    /// The Cranelift module backend. Generic over `cranelift_module::Module`: the
     /// runtime JIT uses `JITModule` (owns finalized machine-code pages — must outlive every
     /// [`CompiledFn`] handed out), and the ahead-of-time path uses `cranelift_object::ObjectModule`
     /// (accumulates the same bodies into a relocatable object file). Every emit routine drives this
@@ -135,7 +135,7 @@ pub struct Jit<M: ClifModule = JITModule> {
     /// A prototype may collect one window per hot loop, up to [`MAX_OSR_WINDOWS`]; the windows of
     /// one prototype are disjoint by construction (each is a union of overlapping loop extents).
     osr_compiled: Vec<Vec<OsrBody>>,
-    /// Fast-convention entry points (P-JSSA S4.1), keyed by prototype index: the type-erased
+    /// Fast-convention entry points, keyed by prototype index: the type-erased
     /// pointer to the prototype's second, frameless-window body — signature
     /// `(vm, regs, base, globals, frames, regs_vec, arg0..argN) -> (outcome, value)`, one `i64`
     /// argument per parameter. `None` = the prototype has no fast body (ineligible or not yet
@@ -175,18 +175,18 @@ pub struct Jit<M: ClifModule = JITModule> {
     cancel_addr: u64,
     /// How many prototypes were compiled to *real* native code (vs a bail stub) — the coverage stat.
     native_count: usize,
-    /// P-AOT L3.1 **dev oracle knob** (`NOETA_JIT_AOT=1`): make the *runtime* JIT emit its bodies in
+    /// **dev oracle knob** (`NOETA_JIT_AOT=1`): make the *runtime* JIT emit its bodies in
     /// AOT mode (inline caches off, null call sites) instead of the production IC-on form. Semantics
     /// are identical — the IC-off path is the always-correct helper slow path — so the jit-differential
     /// run under this knob proves the ahead-of-time codegen is byte-identical in behaviour across the
     /// whole corpus, before any object-linking work exists. Default `false` (production JIT unchanged).
     aot_bodies: bool,
-    /// Total / worst-case wall time spent inside [`Jit::compile`] (P-PAR S0c): every compile runs
+    /// Total / worst-case wall time spent inside [`Jit::compile`]: every compile runs
     /// synchronously on the mutator thread today, so these are the pauses the program felt. Cache
     /// hits don't count — only actual codegen work.
     compile_ns_total: u64,
     compile_ns_max: u64,
-    /// Where `compile_ns_total` actually goes (P-JCT C0) — see [`CompileBreakdown`].
+    /// Where `compile_ns_total` actually goes — see [`CompileBreakdown`].
     breakdown: CompileBreakdown,
     /// Imported runtime helpers, declared once (see the `*_HELPER` name constants).
     observe_id: FuncId,
@@ -218,14 +218,14 @@ impl<M: ClifModule> std::fmt::Debug for Jit<M> {
 }
 
 impl<M: ClifModule> Jit<M> {
-    /// Build the host target ISA under the JIT's codegen settings (P-AOT L3.0). Shared by every
+    /// Build the host target ISA under the JIT's codegen settings. Shared by every
     /// backend, so the AOT object path compiles under the *same* flags as the runtime JIT.
     ///
-    /// `NOETA_JIT_OPT` is a **dev measurement knob** (P-PAR S4): it lets the compile-time /
+    /// `NOETA_JIT_OPT` is a **dev measurement knob**: it lets the compile-time /
     /// code-quality trade be A/B'd without a rebuild (`none` compiles far faster, `speed` runs
     /// faster). Semantics are identical at every level, so the jit-differential is unaffected; the
     /// shipped default stays `speed`. `NOETA_JIT_VERIFY=1|0` overrides the verifier (default: on
-    /// under `debug_assertions`, off in release — P-JCT C1).
+    /// under `debug_assertions`, off in release).
     fn make_isa(is_pic: bool) -> Result<cranelift_codegen::isa::OwnedTargetIsa, String> {
         let mut flags = settings::builder();
         flags
@@ -244,7 +244,7 @@ impl<M: ClifModule> Jit<M> {
         flags
             .set("opt_level", &opt_level)
             .map_err(|e| e.to_string())?;
-        // P-JCT C1: Cranelift's IR verifier defaults **on** and re-checks the function at every
+        // Cranelift's IR verifier defaults **on** and re-checks the function at every
         // pass boundary — a pure debug tool (it never changes codegen) that dominated compile
         // time. Debug builds (the test suites, the jit-differential oracle in CI) keep it as a
         // safety net; release builds turn it off.
@@ -288,7 +288,7 @@ impl<M: ClifModule> Jit<M> {
     }
 
     /// Finish building a `Jit<M>` around an already-constructed `module`: declare the runtime-helper
-    /// imports and the codegen context (P-AOT L3.0). Everything here is `Module`-trait-only, so both
+    /// imports and the codegen context. Everything here is `Module`-trait-only, so both
     /// the runtime JIT (`JITModule`, via [`Jit::new`]) and the AOT object backend (`ObjectModule`,
     /// via [`Jit::new_object`]) share it. The helper `FuncId`s it returns are `Linkage::Import`
     /// symbols: the JIT resolves them to the registered Rust `extern "C"` pointers, the object path
@@ -388,14 +388,14 @@ impl<M: ClifModule> Jit<M> {
         self.osr_compiled.iter().map(Vec::len).sum()
     }
 
-    /// The fast-convention entry point for prototype `proto` (P-JSSA S4.1), or `None` if the
+    /// The fast-convention entry point for prototype `proto`, or `None` if the
     /// prototype has no fast body. Type-erased: the pointer's signature depends on the
     /// prototype's arity, and only compiled callers (which know the arity statically) invoke it.
     pub fn get_fast(&self, proto: usize) -> Option<usize> {
         self.fast_compiled.get(proto).copied().flatten()
     }
 
-    /// Emit **AOT-form** bodies from here on (P-AOT L3.1): inline caches off, null call sites, no
+    /// Emit **AOT-form** bodies from here on: inline caches off, null call sites, no
     /// cancellation poll — the exact codegen [`Jit::new_object`] produces for a `noeta build
     /// --native` object, but finalized to executable pages so an ordinary in-process run exercises
     /// it. Set by the VM from [`RunOptions::aot_bodies`], which is how the JIT differential gets its
@@ -430,17 +430,17 @@ impl<M: ClifModule> Jit<M> {
         self.native_count
     }
 
-    /// Total wall time spent compiling across the run, in nanoseconds (P-PAR S0c).
+    /// Total wall time spent compiling across the run, in nanoseconds.
     pub fn compile_ns_total(&self) -> u64 {
         self.compile_ns_total
     }
 
-    /// The single longest compile — the worst pause the mutator felt, in nanoseconds (P-PAR S0c).
+    /// The single longest compile — the worst pause the mutator felt, in nanoseconds.
     pub fn compile_ns_max(&self) -> u64 {
         self.compile_ns_max
     }
 
-    /// Per-phase breakdown of `compile_ns_total` plus compiled volume (P-JCT C0).
+    /// Per-phase breakdown of `compile_ns_total` plus compiled volume.
     pub fn compile_breakdown(&self) -> CompileBreakdown {
         self.breakdown
     }
@@ -461,7 +461,7 @@ impl<M: ClifModule> Jit<M> {
         sig
     }
 
-    /// The fast-convention signature for an `arity`-parameter prototype (P-JSSA S4.1):
+    /// The fast-convention signature for an `arity`-parameter prototype:
     /// `(vm, regs, base, globals, frames, regs_vec, arg0..argN) -> (outcome, value)`. No
     /// `entry_pc` — a fast body is entered only fresh at pc 0; the arguments travel as machine
     /// arguments instead of window slots, and a completed `Return`'s value comes back as the
@@ -482,7 +482,7 @@ impl<M: ClifModule> Jit<M> {
 
     /// Declare + define the current `self.ctx` under `name` into the module, returning its
     /// [`FuncId`] — **without** finalizing it to an executable pointer. This is the
-    /// backend-agnostic tail of body emission (P-AOT L3.0): it uses only `cranelift_module::Module`
+    /// backend-agnostic tail of body emission: it uses only `cranelift_module::Module`
     /// operations (`declare_function`/`define_function`/`clear_context`), so the *same* IR
     /// construction feeds both the runtime JIT (which then [`finalize_ptr`](Self::finalize_ptr)s to
     /// a code pointer) and an ahead-of-time [`cranelift_object::ObjectModule`] (which accumulates
@@ -642,7 +642,7 @@ impl<M: ClifModule> Jit<M> {
             } else {
                 Vec::new()
             };
-            // frame_ptr = regs + base * 8 (Value is 8 bytes). All register access is off this.
+            // Frame_ptr = regs + base * 8 (Value is 8 bytes). All register access is off this.
             let base_bytes = b.ins().imul_imm(base, 8);
             let frame_ptr = b.ins().iadd(regs, base_bytes);
             let pool = ConstPool::seed(&mut b);
@@ -857,7 +857,7 @@ impl<M: ClifModule> Jit<M> {
                     cg.b.ins().jump(op_blocks[0], &[]);
                 }
             } else {
-                // Fast-convention entry (P-JSSA S4.1): the window is reserved but UNINITIALIZED
+                // Fast-convention entry: the window is reserved but UNINITIALIZED
                 // and the arguments arrive as machine arguments. Guard the argument *values* (no
                 // slot loads); on a heap argument, materialize the window for the interpreter —
                 // store each argument to its parameter slot with the retain the classic setup
@@ -956,7 +956,7 @@ impl<M: ClifModule> Jit<M> {
     }
 }
 
-/// What an ahead-of-time compile produced for one prototype (P-AOT L3.1b) — its slot in an
+/// What an ahead-of-time compile produced for one prototype — its slot in an
 /// [`AotManifest`], indexed by the prototype's dispatch key. `native == false` means the prototype
 /// was left for the interpreter (ineligible), so no symbol was emitted.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -969,7 +969,7 @@ pub struct AotProtoEntry {
     pub fast_symbol: Option<String>,
 }
 
-/// The result of an ahead-of-time whole-module compile (P-AOT L3.1b): one [`AotProtoEntry`] per
+/// The result of an ahead-of-time whole-module compile: one [`AotProtoEntry`] per
 /// prototype, in prototype-index order. The runtime binds each `native` entry's symbol back into its
 /// per-proto dispatch tables at startup (L3.2); the shape is fully derivable from the `Module`
 /// (eligibility + symbol naming), so it need not be serialized separately — it travels *as* the
@@ -1191,7 +1191,7 @@ impl Jit<JITModule> {
 
     /// Finalize a defined `func_id` to its executable entry point — the JIT-only tail (relocations
     /// and the W^X page flip via `finalize_definitions`, then `get_finalized_function`). Split out of
-    /// body emission (P-AOT L3.0) so the shared codegen ([`define_body`](Self::define_body)) carries
+    /// body emission so the shared codegen ([`define_body`](Self::define_body)) carries
     /// no runtime-JIT dependency; the AOT path never calls this (it emits an object file instead).
     fn finalize_ptr(&mut self, func_id: FuncId) -> Result<CompiledFn, String> {
         let finalize_start = std::time::Instant::now();
@@ -1211,7 +1211,7 @@ impl Jit<JITModule> {
 }
 
 impl Jit<ObjectModule> {
-    /// Build an ahead-of-time object-file compiler (P-AOT L3.0): the *same* codegen as the runtime
+    /// Build an ahead-of-time object-file compiler: the *same* codegen as the runtime
     /// JIT, but bodies are accumulated into a relocatable object instead of finalized to executable
     /// pages. Runtime-helper calls become `Linkage::Import` relocations, resolved when the object is
     /// linked against the runtime crate (L3.2). `name` is the object's module name.
@@ -1243,7 +1243,7 @@ impl Jit<ObjectModule> {
         }
     }
 
-    /// Eagerly compile **every** J1-eligible prototype of `module` into the object (P-AOT L3.1b),
+    /// Eagerly compile **every** J1-eligible prototype of `module` into the object,
     /// returning the [`AotManifest`] the runtime uses to bind the finished symbols back into its
     /// per-proto entry tables at startup. Unlike the runtime JIT (which compiles hot prototypes on
     /// demand), this is whole-module: every eligible prototype gets a native main body — and its
@@ -1291,7 +1291,7 @@ impl Jit<ObjectModule> {
         Ok(AotManifest { protos })
     }
 
-    /// Emit the [`AOT_DISPATCH_SYMBOL`] data object (P-AOT L3.2, approach A): the proto-index →
+    /// Emit the [`AOT_DISPATCH_SYMBOL`] data object (approach A): the proto-index →
     /// entry-pointer table the runtime binds into its dispatch tables at startup. Layout is
     /// pointer-width words: `[count][main_0, fast_0, main_1, fast_1, …]`, each function slot a
     /// **relocation** to that proto's exported body (`write_function_addr`), or null (a zeroed slot)
@@ -1305,7 +1305,7 @@ impl Jit<ObjectModule> {
     ) -> Result<(), String> {
         let n = main_ids.len();
         let w = self.module.target_config().pointer_bytes() as usize;
-        // count word, then two pointer slots per proto.
+        // Count word, then two pointer slots per proto.
         let mut bytes = vec![0u8; w * (1 + 2 * n)];
         bytes[0..8].copy_from_slice(&(n as u64).to_le_bytes());
 
@@ -1342,7 +1342,7 @@ impl Jit<ObjectModule> {
 }
 
 /// Build the fast-convention signature for `arity` from the normal ABI signature's pointer
-/// params (P-JSSA S4.1): the six fixed pointers, then `arity` NaN-boxed `i64` arguments, and the
+/// params: the six fixed pointers, then `arity` NaN-boxed `i64` arguments, and the
 /// two-word (outcome, value) return. Must agree with [`Jit::fast_abi_signature`].
 fn fast_sig_for(
     abi_sig: &cranelift_codegen::ir::Signature,
@@ -1823,7 +1823,7 @@ fn in_region(region: Option<(usize, usize)>, pc: usize) -> bool {
     }
 }
 
-/// P-JCT C3: the fixed NaN-box/outcome constants every body needs, materialized **once in the
+/// The fixed NaN-box/outcome constants every body needs, materialized **once in the
 /// entry block** (which dominates every reachable block) instead of re-emitted at each use —
 /// duplicate `iconst`s were roughly a third of the IR handed to Cranelift, and compile time is
 /// proportional to what we hand it, not to what survives GVN. Unreachable-pc blocks (no
@@ -1889,9 +1889,9 @@ struct Codegen<'a, 'b> {
     /// path is only taken when no `reserve_window` reallocation can occur.
     regs: ClValue,
     frame_ptr: ClValue,
-    /// The entry-block constant pool (P-JCT C3) — see [`ConstPool`].
+    /// The entry-block constant pool — see [`ConstPool`].
     pool: ConstPool,
-    /// P-JCT C3: one shared bail block per pc, created and filled (frame sync + bail return) on
+    /// One shared bail block per pc, created and filled (frame sync + bail return) on
     /// the first [`guard`] at that pc; later guards of the same op reuse it. An op like
     /// `a = a * 3 + 1` carries several guards (operand tags, overflow fits), and each bail body
     /// is a full [`Codegen::sync_frame`] — per-guard bail blocks were a large slice of the IR
@@ -1956,7 +1956,7 @@ struct Codegen<'a, 'b> {
     const_bits: Vec<Option<u64>>,
     /// This prototype's index, passed to the call helper so it can read the `Op::Call` back.
     proto: u32,
-    /// P-JSSA S4.1: is this the **fast-convention** body? Entered only fresh at pc 0 with its
+    /// Is this the **fast-convention** body? Entered only fresh at pc 0 with its
     /// window uninitialized and its arguments as machine arguments; every native exit runs
     /// [`Codegen::normalize_frame`] instead of a plain spill, returns two words
     /// (outcome, value), and `Op::Return` tears the frame down natively.
@@ -1986,7 +1986,7 @@ struct Codegen<'a, 'b> {
     /// entry — [`backward_target`])? The cancellation poll's placement, computed once per body.
     /// Empty when `cancel_addr == 0`, so a non-cancellable compile does not even build it.
     loop_header: Vec<bool>,
-    /// P-AOT L3.1: emit for an ahead-of-time object (`true`) instead of the runtime JIT (`false`).
+    /// Emit for an ahead-of-time object (`true`) instead of the runtime JIT (`false`).
     /// The only codegen difference is at call sites: the JIT bakes each site's inline-cache slot as
     /// an absolute address (`site_addrs`), which is meaningless in a relocatable object. An AOT body
     /// therefore emits **no** inline-cache hit path and passes a null slot to `prepare_call` — the
@@ -2057,7 +2057,7 @@ impl Codegen<'_, '_> {
     /// ([`Codegen::may_be_heap`] of `r`). The caller is responsible for retaining `v` when it is
     /// a moved heap value (`LoadGlobal`/`Move`).
     ///
-    /// P-JSSA S5: for a promoted register the def is a pure `def_var` — the old value is
+    /// for a promoted register the def is a pure `def_var` — the old value is
     /// released **from the variable** (no load-old) and the slot is not written at all. The slot
     /// may then be heap-desynced (holding a released pointer, or missing the reference the
     /// variable now owns); the [`slot_hazard_map`] tracks exactly that, and every sync point
@@ -2259,7 +2259,7 @@ impl Codegen<'_, '_> {
         }
     }
 
-    /// P-JSSA S4.1: make a fast body's (initially uninitialized) window fully tier-0-valid at
+    /// Make a fast body's (initially uninitialized) window fully tier-0-valid at
     /// `pc`, slot by slot. A promoted register spills its variable when it is **live** (the
     /// interpreter may read it), **slot-hazardous** (S5 — the slot misses a release or a
     /// reference), or **may-heap** (S5 — the variable may own a heap reference that must reach
@@ -2606,13 +2606,13 @@ fn emit_op(
                 );
                 return;
             }
-            // false → jump target; true → fall through; anything else → bail so the interpreter
+            // False → jump target; true → fall through; anything else → bail so the interpreter
             // raises E0007 ("`if` condition must be a bool").
             let v = cg.read_reg(*reg);
             let fb = cg.pool.false_bits;
             let tb = cg.pool.true_bits;
             // Both continuations proved the scrutinee a bool, and the kind map claims it Bool
-            // downstream (P-JCT C3 guard strengthening) — define its raw 0/1 form here, where it
+            // downstream (guard strengthening) — define its raw 0/1 form here, where it
             // dominates both successors (`true` reaches the fallthrough only, so the bit is
             // exact on every path that reads it).
             let is_t = cg.b.ins().icmp(IntCC::Equal, v, tb);
@@ -2653,7 +2653,7 @@ fn emit_op(
     }
 }
 
-/// A native `Call` (P-JIT J3): hand the whole call to the `jit_call` runtime helper, which reads the
+/// A native `Call`: hand the whole call to the `jit_call` runtime helper, which reads the
 /// `Op::Call` back from `proto`/`pc` and runs the shared closure-call setup on the interpreter's
 /// frame/register stacks (pushing the callee frame). Whatever it returns — `CALLED` (frame pushed),
 /// a resume pc (a synchronous first-class-builtin call completed), or `ABORTED` — becomes this
@@ -2699,7 +2699,7 @@ fn emit_call(
     // S4.1's contract) callee window, copy the empty-`Frame` template, patch
     // `proto`/`base`/`ret_dst`, bump the frame count, and record the caller's resume pc.
     // In an AOT body the per-site inline-cache slot is a per-process heap address that cannot be
-    // baked into a relocatable object (P-AOT L3.1), so `site` is null and the inline-cache hit path
+    // baked into a relocatable object, so `site` is null and the inline-cache hit path
     // below is not emitted at all — calls go straight to the always-correct `prepare_call` helper,
     // which treats a null slot as "no site cache".
     let site = if cg.aot {
@@ -2748,7 +2748,7 @@ fn emit_call(
         cg.b.ins().brif(room, push_blk, &[], slow_blk, &[]);
 
         cg.b.switch_to_block(push_blk);
-        // regs.set_len(len + nregs) — the callee window, uninitialized by contract.
+        // Regs.set_len(len + nregs) — the callee window, uninitialized by contract.
         cg.b.ins()
             .store(MemFlagsData::trusted(), need, regs_vec, len_off);
         let fdata =
@@ -2756,7 +2756,7 @@ fn emit_call(
                 .load(types::I64, MemFlagsData::trusted(), frames, ptr_off);
         let foff = cg.b.ins().imul_imm(frames_len, l.frame_size as i64);
         let faddr = cg.b.ins().iadd(fdata, foff);
-        // frames.push(template) — write the empty frame's (emission-time-constant) words, then
+        // Frames.push(template) — write the empty frame's (emission-time-constant) words, then
         // patch the per-call fields. The template is fully built before compilation, so its words
         // are baked as immediates: no loads on the hot path.
         // SAFETY: `frame_template_addr` is the VM-owned template `Frame`'s address (alive for the
@@ -2878,7 +2878,7 @@ fn emit_call(
     let callee_outcome = cg.b.inst_results(iinst)[0];
     let continue_blk = cg.b.create_block();
     let return_blk = cg.b.create_block();
-    // Hot path inlined (P-CALL S2): a completed direct call returns `OUTCOME_RETURNED` (its result is
+    // Hot path inlined: a completed direct call returns `OUTCOME_RETURNED` (its result is
     // already in `dst` via the value-returning `Return`), which `after_call` would only map to
     // `CONTINUE` — so branch straight to the next op, skipping that per-call helper call. Only a
     // non-RETURNED outcome (a bail pc that must fix the callee frame's pc, or a nested CALLED/ABORTED)
@@ -2952,7 +2952,7 @@ fn emit_call(
     cg.ret_bail(f_after);
 }
 
-/// A native leaf heap/collection op (P-JIT J4): run it through the `run_leaf_op` helper, which does
+/// A native leaf heap/collection op: run it through the `run_leaf_op` helper, which does
 /// the interpreter's exact logic (refcounts included) and returns `OUTCOME_CONTINUE` (done — continue
 /// to `pc + 1`) or a resume pc (it bailed — a dispatch or an error the interpreter must handle).
 fn emit_leaf_op(cg: &mut Codegen, pc: usize, op_blocks: &[Block]) {
@@ -2981,7 +2981,7 @@ fn emit_leaf_op(cg: &mut Codegen, pc: usize, op_blocks: &[Block]) {
     cg.ret_bail(outcome);
 }
 
-/// A native `Op::Return` (P-JIT J3): hand the return value to the `jit_return` helper, which runs the
+/// A native `Op::Return`: hand the return value to the `jit_return` helper, which runs the
 /// shared return protocol (transfer to the caller's destination, pop this frame) on the interpreter's
 /// stacks, and propagate its outcome (`RETURNED`, or `HALTED` for the bottom frame). Value-returning
 /// so a native direct caller gets its callee's result back without a bail.
@@ -3032,7 +3032,7 @@ fn emit_return(cg: &mut Codegen, src: Reg, pc: usize) {
     cg.b.ins().return_(&[outcome]);
 }
 
-/// A fast body's `Op::Return` (P-JSSA S4.1): the whole return protocol, natively — no helper.
+/// A fast body's `Op::Return`: the whole return protocol, natively — no helper.
 /// The value goes back as the second return word; the frame it leaves behind was pushed by
 /// `jit_prepare_call`'s fast path (empty upvalues, `RetTransform::None`, never the bottom frame),
 /// so the teardown is: retain the value if it may be heap (it must survive the window release),
@@ -3057,7 +3057,7 @@ fn emit_return_fast(cg: &mut Codegen, src: Reg, pc: usize) {
             cg.release_if_heap(v);
         }
     }
-    // frames.len -= 1 (pop this frame).
+    // Frames.len -= 1 (pop this frame).
     let flen = cg.b.ins().load(
         types::I64,
         MemFlagsData::trusted(),
@@ -3067,7 +3067,7 @@ fn emit_return_fast(cg: &mut Codegen, src: Reg, pc: usize) {
     let flen1 = cg.b.ins().iadd_imm(flen, -1);
     cg.b.ins()
         .store(MemFlagsData::trusted(), flen1, cg.frames, cg.vec_len_off);
-    // regs.len = base (truncate this frame's window off the register stack).
+    // Regs.len = base (truncate this frame's window off the register stack).
     let base = cg.base;
     cg.b.ins()
         .store(MemFlagsData::trusted(), base, cg.regs_vec, cg.vec_len_off);
@@ -3229,7 +3229,7 @@ fn emit_binary(
     // dispatch, which bails to the interpreter exactly as before.)
     if (ka == Kind::Int && kb == Kind::Imm) || (ka == Kind::Imm && kb == Kind::Int) {
         // The guard proves the unknown side `Int` on every native continuation, and the kind
-        // map claims it downstream (P-JCT C3 guard strengthening) — so its raw variable must be
+        // map claims it downstream (guard strengthening) — so its raw variable must be
         // made current here, exactly like a typed def's.
         let (x, y) = if ka == Kind::Int {
             let x = cg.read_raw_int(a);
@@ -3387,7 +3387,7 @@ fn emit_int_binary_raw(
             let ok = cg.b.create_block();
             guard(cg, in_range, ok, pc);
             if op == BinaryOp::Shl {
-                // i64 `<<` with the interpreter's wrapping semantics; a result past the 48-bit
+                // I64 `<<` with the interpreter's wrapping semantics; a result past the 48-bit
                 // immediate range bails (the interpreter heap-boxes it), like `Add`'s overflow.
                 let r = cg.b.ins().ishl(x, y);
                 box_int_and_store(cg, dst, r, pc, op_blocks);
@@ -3780,7 +3780,7 @@ mod tests {
     /// only at a frame `'reload`, and a call-free outer loop has none.
     #[test]
     fn osr_window_grows_to_the_enclosing_loop() {
-        // outer header 2 .. back edge 12; inner header 5 .. back edge 9.
+        // Outer header 2 .. back edge 12; inner header 5 .. back edge 9.
         let mut code = vec![Op::Halt; 14];
         code[9] = back(5);
         code[12] = back(2);
@@ -3797,7 +3797,7 @@ mod tests {
     /// is to keep code the hot loop never reaches out of its register allocation.
     #[test]
     fn osr_window_excludes_a_sibling_loop() {
-        // loop A: header 1, back edge 4. loop B: header 8, back edge 11.
+        // Loop A: header 1, back edge 4. loop B: header 8, back edge 11.
         let mut code = vec![Op::Halt; 14];
         code[4] = back(1);
         code[11] = back(8);
@@ -3841,7 +3841,7 @@ mod tests {
         );
     }
 
-    /// P-AOT L3.0: the *same* codegen the runtime JIT uses now targets a `cranelift_object`
+    /// The *same* codegen the runtime JIT uses now targets a `cranelift_object`
     /// backend. Compile a real program's every prototype into a relocatable object via
     /// `Jit::<ObjectModule>` — reusing the identical `emit_*` routines, no finalize — and prove it
     /// finishes to a well-formed host object file. This is the generalization proof; it does *not*
@@ -3894,7 +3894,7 @@ mod tests {
         assert_eq!(&obj[..4], b"\x7fELF", "emits a host ELF object");
     }
 
-    /// P-AOT L3.1b: the eager whole-module driver compiles *every* eligible prototype into the object
+    /// The eager whole-module driver compiles *every* eligible prototype into the object
     /// and the manifest's symbols are actually defined in it. Reads the emitted ELF's symbol table and
     /// asserts each native prototype's main (and fast) symbol is a real definition — the contract the
     /// L3.2 runtime binding depends on.
@@ -3969,7 +3969,7 @@ mod tests {
             }
         }
 
-        // P-AOT L3.2a: the dispatch table is a defined data symbol, and every native entry (main +
+        // The dispatch table is a defined data symbol, and every native entry (main +
         // fast) is a relocation from it to the proto's body — the wiring the runtime binding reads.
         assert!(
             defined.contains(AOT_DISPATCH_SYMBOL),

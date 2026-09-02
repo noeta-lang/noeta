@@ -8,7 +8,7 @@
 //!
 //! Shapes are pure, immutable layout data — no runtime `Value` lives here, so this crate sits
 //! below `noeta-value` in the dependency DAG. The compiler emits a flat shape table into the
-//! compiled module; the VM [interns](intern_shape) each entry once (P-PAR S1b) and every value of
+//! compiled module; the VM [interns](intern_shape) each entry once and every value of
 //! that shape carries the same `Copy` `&'static Shape`, making shape identity a cheap pointer
 //! comparison with **zero refcount traffic** — and, being `'static` of a `Sync` type, a handle
 //! shared-region borrow-share can hand to other isolate threads for free.
@@ -260,12 +260,12 @@ pub struct PackedSchema {
     /// One entry per field, in `shape.fields` (slot) order. A scalar element (`shape == None`) holds
     /// exactly one — the element's own primitive kind.
     pub fields: Vec<PackedKind>,
-    /// **Bytes** per element — the sum of each field's [`PackedKind::byte_width`] (P-PACK 3.2b: the
+    /// **Bytes** per element — the sum of each field's [`PackedKind::byte_width`] (the
     /// VM stores a `List<packed>` as a byte buffer so an `f32` field is 4 bytes, not 8).
     pub byte_size: usize,
     /// Whether the list buffer is stored **column-major** (SoA: `[f0×n][f1×n]…`) rather than
     /// row-major (AoS: each element's fields contiguous) — the `@packed(Layout.Column)` attribute
-    /// (P-SIMD C2). A pure *performance* property: every op reads it to pick the byte offset, but the
+    ///. A pure *performance* property: every op reads it to pick the byte offset, but the
     /// observed value is identical either way (differential holds by construction). Top-level fields
     /// become columns; a nested `@packed` field stays a contiguous per-element chunk until leaf-
     /// flattening (C5) splits it into leaf columns.
@@ -340,7 +340,7 @@ impl PackedKind {
     }
 }
 
-// P-PAR S1: shape/schema handles ride inside shared-region objects that other isolate threads
+// Shape/schema handles ride inside shared-region objects that other isolate threads
 // borrow, so both types must stay `Send + Sync` (immutable plain data). Compile-time lock — a
 // future non-`Send` field is a build error here, not a latent data race.
 const _: () = {
@@ -349,7 +349,7 @@ const _: () = {
     assert_send_sync::<PackedSchema>();
 };
 
-/// The process-wide shape/schema interner (P-PAR S1b). Runtime values carry a bare
+/// The process-wide shape/schema interner. Runtime values carry a bare
 /// `&'static Shape` — a `Copy` handle with **zero refcount traffic** on the object hot path
 /// (construction, functional update, destruction), where per-object `Rc` cost ~2 plain RMWs and
 /// the `Arc` prerequisite for cross-thread borrow-share benched +10–12% on `vm_field_assign`

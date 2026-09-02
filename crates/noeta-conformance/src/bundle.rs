@@ -1,4 +1,4 @@
-//! The bundle oracle (P-AOT L1.0 + L1.3): compile every corpus program to a
+//! The bundle oracle (+ L1.3): compile every corpus program to a
 //! [`noeta_bytecode::Module`] and prove it survives serialization on two levels.
 //!
 //! - **L1.0 — structural round-trip.** The module encodes→decodes→re-encodes byte-for-byte, so the

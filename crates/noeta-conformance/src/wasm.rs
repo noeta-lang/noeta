@@ -1,4 +1,4 @@
-//! The wasm differential oracle (P-WASM W1.3): every corpus program, compiled to a `.noeb` and
+//! The wasm differential oracle: every corpus program, compiled to a `.noeb` and
 //! executed by the **wasm runner under wasmtime** (`--sandbox`), must be byte-identical to the
 //! native VM run — stdout, exit code, and the whole stderr stream: the program's own `std.io`
 //! `err`/`errln` output, then diagnostics, then the traceback, in the order a run tail writes them.

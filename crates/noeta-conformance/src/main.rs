@@ -253,7 +253,7 @@ fn cmd_leaks(file: Option<&std::path::Path>, dir: &std::path::Path) -> ExitCode 
     }
 }
 
-/// Run the wasm differential oracle (P-WASM W1.3): the wasm runner under wasmtime vs the native
+/// Run the wasm differential oracle: the wasm runner under wasmtime vs the native
 /// VM over the corpus. Missing tooling (wasmtime / built runner) is a loud setup error and exit 2
 /// — never a silent pass.
 fn cmd_wasm_differential(file: Option<&std::path::Path>, dir: &std::path::Path) -> ExitCode {

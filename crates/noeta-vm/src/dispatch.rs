@@ -1,7 +1,7 @@
 //! The tier-0 **dispatch loop**: [`Vm::run`] (the frame-stack driver) and
 //! [`Vm::dispatch`] — deliberately ONE function containing the whole op match
 //! (splitting it was assessed and declined for jump-table codegen and
-//! cohesion; see `plans/code-quality/split-vm-lib.md`) — plus its register
+//! cohesion;) — plus its register
 //! helpers (`set_reg`, `reserve_window`, [`ArgBuf`]). Moved verbatim from the
 //! crate root purely to shrink `lib.rs` — no behavior change.
 
@@ -483,7 +483,7 @@ impl<'m> Vm<'m> {
                         frames[top].upvalues[*index as usize].cell_set(v);
                         pc += 1;
                     }
-                    // A `List<packed>` literal (P-PACK 2.4): pack each element into a flat raw-primitive
+                    // A `List<packed>` literal: pack each element into a flat raw-primitive
                     // buffer (no boxed objects, no retains — the words are copied), then the element
                     // temporaries are released by the following compiler-emitted drops, exactly as for
                     // `MakeList`'s consumed operands. If any element fails to pack (a shape the schema
@@ -987,7 +987,7 @@ impl<'m> Vm<'m> {
                         let v = regs[fbase + *recv as usize];
                         let idx = regs[fbase + *index as usize];
                         // Fast path: a packed list decodes the one field's word(s) directly — no element
-                        // materialization (the P-PACK 2.5+ scalar-access win). Any miss (non-int index,
+                        // materialization (the scalar-access win). Any miss (non-int index,
                         // out of range, or unknown field) falls through to the boxed index-then-load,
                         // which reproduces the exact diagnostics of the unfused `Index` + `LoadField`.
                         if v.is_packed_list()
@@ -2425,7 +2425,7 @@ impl<'m> Vm<'m> {
                 }
                 Op::PackedListNew { dst, schema } => {
                     // Allocate the empty flat buffer the following `PackedListPush` chain fills
-                    // (P-PACK 2.5 streaming construction).
+                    // (streaming construction).
                     let schema = self.persist.packed_schemas[*schema as usize];
                     let list = Value::packed_list(schema, Vec::new());
                     set_reg(regs, fbase, *dst, list);
@@ -2438,7 +2438,7 @@ impl<'m> Vm<'m> {
                     validate,
                     span,
                 } => {
-                    // Deserialize a `bytes` buffer into a flat `List<T>` (P-PACK 4.4): wrap the raw
+                    // Deserialize a `bytes` buffer into a flat `List<T>`: wrap the raw
                     // bytes as a packed list of the interned schema — the inverse of `to_bytes`.
                     let blob = regs[fbase + *src as usize];
                     let Some(bytes) = blob.bytes_data() else {
@@ -3803,7 +3803,7 @@ impl<'m> Vm<'m> {
                     let recv_val = recv.map(|r| regs[fbase + r as usize]);
                     let name_val = regs[fbase + *name as usize];
                     let args_val = regs[fbase + *args as usize];
-                    // A packed args list (P-PACK 2.4) is materialized to a temporary boxed list for
+                    // A packed args list is materialized to a temporary boxed list for
                     // the duration of the dispatch, then released after the call frame is built (its
                     // elements retained into it). `arg_items` below borrows from this temporary.
                     let mut args_to_release: Option<Value> = None;
@@ -4444,7 +4444,7 @@ pub(crate) fn concat_in_place(l: Value, r: Value) -> Value {
             && l.packed_extend_in_place(r)
         {
             // Sole owner, both flat, same layout: append `rhs`'s words to `lhs`'s buffer in place
-            // (P-PACK 2.6). The single reference moves into the result.
+            //. The single reference moves into the result.
             l
         } else if !l.is_packed_list() && !r.is_packed_list() && l.is_uniquely_owned() {
             // Sole owner, both boxed: extend the backing buffer in place (O(1) amortized). The

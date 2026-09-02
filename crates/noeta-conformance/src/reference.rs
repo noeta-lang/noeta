@@ -15,8 +15,7 @@
 //! and leaf semantics the IR interpreter reuses, and as the AST-walk baseline the perf benches and
 //! property tests drive — neither of which is a reference oracle. The retained cross-checks (the
 //! IR-interpreter↔VM differential, the leak oracle on both backends, and the static-≤-dynamic
-//! property test) cover its former role; see `plans/memory-management/phase-7-finalize.md` for the
-//! decision and rationale.
+//! property test) cover its former role.
 
 use noeta_ast::Program;
 use noeta_backend::RunResult;
@@ -45,8 +44,8 @@ pub fn reference_run_traced(
     sites: noeta_check::Sites,
 ) -> (RunResult, Vec<noeta_backend::TraceFrame>) {
     crate::ensure_std_registry();
-    // Lower with the checker's site maps: packed-list literals stream into a flat buffer (P-PACK 2.5)
-    // and `list[i].field` reads fuse to `Rvalue::IndexField` (P-PACK 2.5+). Both ride on the IR, so
+    // Lower with the checker's site maps: packed-list literals stream into a flat buffer
+    // and `list[i].field` reads fuse to `Rvalue::IndexField`. Both ride on the IR, so
     // `run_ir` needs no map (the VM compiles the same).
     let ir = noeta_ir::lower_with_sites(program, noeta_ir::lowering_sites!(sites)).expect(
         "Core-IR lowering is total over the parsed language \

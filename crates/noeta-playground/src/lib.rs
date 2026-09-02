@@ -1,4 +1,4 @@
-//! The in-browser toolchain (P-WASM W2.1) — the engine behind the noeta.dev playground.
+//! The in-browser toolchain — the engine behind the noeta.dev playground.
 //!
 //! Compiled to `wasm32-unknown-unknown`, this crate puts the *real* pipeline in a visitor's tab:
 //! the same lexer → parser → checker → compiler → VM that `noeta run` uses, executing on the
