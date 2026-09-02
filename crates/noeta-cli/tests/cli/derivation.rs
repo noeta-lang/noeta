@@ -2,7 +2,7 @@
 //! declaration.
 //!
 //! Each test here pins one thing that was broken before derivation and is fixed by construction
-//! now — the three the arc ledger names (`plans/namespace-derivation.md`), plus the diagnostics
+//! now — the three derivation rules, plus the diagnostics
 //! that replaced two silent failures.
 
 use crate::support::*;

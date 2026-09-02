@@ -2,8 +2,7 @@
 //! (`noeta_stdlib::vec3::*_buffers`) — the P-SIMD target. These time the kernels **directly** on flat
 //! `f32` byte buffers, isolating the arithmetic from the language-level list-build/marshal cost that
 //! dominates the end-to-end `vm_vec_add_all` bench in `noeta-vm`. This is the lens where the SIMD swap
-//! (S2) shows its gain: a scalar baseline (S1) vs the `wide`-crate SIMD kernels (S2), recorded in
-//! `plans/perf/p-simd.md`.
+//! shows its gain: a scalar baseline vs the `wide`-crate SIMD kernels.
 //!
 //! Each buffer is `n` elements × 3 `f32` × 4 bytes = `12n` bytes of little-endian `f32`. The inputs
 //! are built once in setup; the timed closure runs only the kernel.
@@ -90,7 +89,6 @@ fn vec3_kernels(c: &mut Criterion) {
     // contiguous columns directly via `col_dot`/`col_length` (no decode — a per-call `SoaVec3` decode
     // benched *slower* than AoS), and the element-wise `add` is layout-agnostic (`add_buffers` on the
     // column bytes is a correct column result). This decides whether `column` is worth dispatching to.
-    // Numbers land in `plans/perf/p-simd-column-layout.md`.
     let mut disp = c.benchmark_group("column_dispatch");
     for &n in SIZES {
         let a_aos = make_buffer(n);
