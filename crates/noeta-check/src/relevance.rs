@@ -1,17 +1,17 @@
-//! **Destructor-relevance analysis** (memory-management Phase 3.2b): the destruct-reachability
+//! **Destructor-relevance analysis**: the destruct-reachability
 //! fixpoint over the declared type graph, the per-type/per-binding relevance queries, and the
 //! parameter-relevance recording walk. A pure analysis with its own output type
 //! ([`DestructorRelevance`]) — moved verbatim out of the crate root purely to shrink `lib.rs`.
 
 use super::*;
 
-/// Whether dropping a value of type `ty` could run *some* `destruct` block — destructor-relevance
-/// (Phase 3.2b), evaluated against the set of destruct-**reachable** type names. **Conservative in
+/// Whether dropping a value of type `ty` could run *some* `destruct` block — destructor-relevance,
+/// evaluated against the set of destruct-**reachable** type names. **Conservative in
 /// the "assume relevant" direction**: `dyn`/`Unknown`/a kind-type/a function value (which may own
 /// captures) and any named type or argument in `reachable` count as relevant; only the primitive
 /// scalars and aggregates built purely from non-relevant parts are ruled out. So a `false` result
 /// is a proof of non-relevance, while a `true` may be an over-approximation — exactly the direction
-/// that keeps Phase 4's destructor firing sound.
+/// that keeps destructor firing sound.
 pub(crate) fn type_relevant(ty: &Type, reachable: &HashSet<String>) -> bool {
     match ty {
         // No value, or a primitive scalar: a drop runs no destructor.
@@ -56,7 +56,7 @@ pub(crate) fn type_relevant(ty: &Type, reachable: &HashSet<String>) -> bool {
     }
 }
 impl Checker {
-    /// Compute destruct-reachability (Phase 3.2b), after [`Self::collect`] has registered every
+    /// Compute destruct-reachability, after [`Self::collect`] has registered every
     /// type. A type name is reachable when dropping a value of that type could run *some* `destruct`
     /// block: it has its own (a class in `destructor_classes`), or one of its fields / variant
     /// payloads / collection elements does — a monotone fixpoint over the declared type graph. Then
@@ -118,7 +118,7 @@ impl Checker {
                 break;
             }
         }
-        // Export the per-type reachable set for the backends' field-walk gate (Phase 4.3), alongside
+        // Export the per-type reachable set for the backends' field-walk gate, alongside
         // the per-binding sets the drop pass reads. **Ordered** ([`DestructorRelevance::reachable_types`]):
         // the compiler collects it straight into the serialized `Module::destruct_reachable`, so a
         // hash-derived order would be a per-process-random difference in the compiled bytes. The

@@ -1,5 +1,5 @@
-//! A snapshot "gallery" of the type checker's *rendered* diagnostics. Like the M0 runtime
-//! gallery in `noeta-eval`, this asserts the full rendered text (caret placement, code, help
+//! A snapshot "gallery" of the type checker's *rendered* diagnostics. Like the runtime gallery
+//! in `noeta-eval`, this asserts the full rendered text (caret placement, code, help
 //! line) of each checker diagnostic, not just the code enum — diagnostic quality is a product
 //! feature. Color is disabled in the renderer, so output is deterministic.
 
@@ -25,7 +25,7 @@ fn render_checks(src: &str) -> String {
 
 #[test]
 fn checker_diagnostic_gallery() {
-    // This test is its own assembling driver (audit-6 F2): seed the std units first.
+    // This test is its own assembling driver: seed the std units first.
     noeta_stdlib::registry::default_seeded();
     // One representative program per checker diagnostic. E0013 has a gallery of its own below,
     // because what it says about a *nearly* correct name is the whole point of it.
@@ -165,11 +165,10 @@ fn match_arm_gallery() {
 
 /// The **forwarding-refusal** gallery: the three spellings that can reach the one E0058 raised when
 /// a body has no forwarding slot to pass through. They are pinned by rendered text, not just by
-/// code, because for a full arc this seam answered all three with a single message that was false
-/// in every one of them — it claimed "call-site-typed forwarding is supported in top-level generic
-/// functions only" (generic methods have forwarded since the generic-forwarding arc, and the
-/// *inferred* case fires from inside a top-level generic `fn`), and its help advised the explicit
-/// turbofish that two of the three spellings already write. A conformance case can pin the code and
+/// code. One message for all three would be false in every one of them: "call-site-typed
+/// forwarding is supported in top-level generic functions only" misdescribes a generic method,
+/// which forwards, and the *inferred* case, which fires from inside a top-level generic `fn`; and
+/// help advising the explicit turbofish is advice two of the three spellings already write. A conformance case can pin the code and
 /// the span; only a snapshot can pin that the sentence stays true.
 #[test]
 fn forwarding_refusal_gallery() {

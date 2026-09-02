@@ -21,8 +21,6 @@
 //! (integer overflow, string-interpolation holes, a non-name assignment target) are
 //! pushed through a captured side-channel (`Ctx::diags`) so the code is preserved
 //! exactly rather than being flattened to a generic "unexpected token".
-//!
-//! M0 scope grows one vertical slice at a time.
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -326,9 +324,8 @@ enum ClassMember {
     Destructor(Vec<Stmt>, Span),
 }
 
-/// One member of an `enum` body: a variant, an inherent method, or an `impl Trait { ... }` block
-/// (object-model slice 3 — enums gained the unified body). Partitioned into [`EnumDecl`]'s
-/// `variants`/`methods`/`impls` after the body is parsed.
+/// One member of an `enum` body: a variant, an inherent method, or an `impl Trait { ... }` block.
+/// Partitioned into [`EnumDecl`]'s `variants`/`methods`/`impls` after the body is parsed.
 enum EnumMember {
     Variant(VariantDecl),
     Method(FnDecl),
@@ -339,7 +336,7 @@ enum EnumMember {
 }
 
 /// One member of an `impl` body (class-body `impl Trait { … }` or standalone `impl Trait for T { … }`):
-/// a method, or a `type Name = Concrete;` associated-type binding (slice 1a). Partitioned into the
+/// a method, or a `type Name = Concrete;` associated-type binding. Partitioned into the
 /// impl's `methods`/`assoc_bindings` after the body is parsed.
 enum ImplMember {
     // Boxed: a bare `FnDecl` dwarfs the binding tuple (clippy::large_enum_variant).
@@ -347,7 +344,7 @@ enum ImplMember {
     AssocBinding((String, TypeRef)),
 }
 
-/// Partition a parsed `impl` body's members into its methods and associated-type bindings (slice 1a).
+/// Partition a parsed `impl` body's members into its methods and associated-type bindings.
 fn split_impl_members(members: Vec<ImplMember>) -> (Vec<FnDecl>, Vec<(String, TypeRef)>) {
     let mut methods = Vec::new();
     let mut assoc_bindings = Vec::new();
@@ -389,14 +386,14 @@ fn destructor_is_class_only(kind: &str, name: &str, span: Span) -> Diagnostic {
 }
 
 /// One member of a `trait` body: an associated-type declaration (`type Name;` / `type Name = T;`) or
-/// a method signature (slice 1a). Partitioned into [`TraitDecl`]'s `assoc_types`/`methods`.
+/// a method signature. Partitioned into [`TraitDecl`]'s `assoc_types`/`methods`.
 enum TraitBodyMember {
     // Boxed: a `TraitMethod` dwarfs the assoc-type declaration (clippy::large_enum_variant).
     Method(Box<TraitMethod>),
     AssocType(AssocTypeDecl),
 }
 
-/// Partition a parsed `trait` body's members into its methods and associated types (slice 1a).
+/// Partition a parsed `trait` body's members into its methods and associated types.
 fn split_trait_members(members: Vec<TraitBodyMember>) -> (Vec<TraitMethod>, Vec<AssocTypeDecl>) {
     let mut methods = Vec::new();
     let mut assoc_types = Vec::new();
@@ -670,7 +667,7 @@ fn set_sugar_items(callee: &Expr) -> Option<&[Expr]> {
     }
 }
 
-/// Parse `@packed`'s optional layout argument (P-SIMD): the [`reflect::LAYOUT_ENUM`] vocabulary,
+/// Parse `@packed`'s optional layout argument: the [`reflect::LAYOUT_ENUM`] vocabulary,
 /// `@packed(Layout.Row)` / `@packed(Layout.Column)` — the same `Enum.Variant` shape `@role` takes.
 /// Bare `@packed` (no args) is [`PackedLayout::Row`]. Any malformed argument — unknown name or
 /// variant, missing qualifier, extra args, the retired `layout: row|column` form — emits `E0037`
@@ -778,7 +775,7 @@ fn parse_packed_layout(args: &[DirectiveArg], _directive_span: Span, ctx: &Ctx) 
     }
 }
 
-/// Interpret a `@tier(…)` directive's arguments (tier-providers T2): the first positional
+/// Interpret a `@tier(…)` directive's arguments: the first positional
 /// identifier is the tier name; an optional `config:` names the tier's knob-attribute type.
 /// Anything else — a missing name, a repeated or unknown argument, a non-identifier — is an E0037
 /// and the declaration is dropped (the `fn` still parses as an ordinary declaration, so one bad
@@ -1099,7 +1096,7 @@ fn build_use(
 /// Build a list-literal expression from its parsed elements, each flagged as a spread (`...xs`) or
 /// a plain element. With no spreads it is a plain `Expr::List`. With one or more spreads it
 /// desugars to `~` concatenation — `[...a, x, ...b]` becomes `[] ~ a ~ [x] ~ b` — reusing the
-/// list-concat operator (L1). Each spread operand is wrapped in `...` ([`UnaryOp::Spread`]) — a
+/// list-concat operator. Each spread operand is wrapped in `...` ([`UnaryOp::Spread`]) — a
 /// runtime-identity marker the checker uses to require the operand be a list (else `E0007`); the
 /// fold starts from an empty list so the result is always list-shaped.
 /// The kind of an assignment operator, carried from the `assign_op` parser into the desugar. A
@@ -2103,8 +2100,8 @@ where
     })
 }
 
-/// A type reference: `int`, `List<Item>`, `Result<Order, E>`, `?User`. Parsed and
-/// retained for M1's checker; M0 does not interpret it.
+/// A type reference: `int`, `List<Item>`, `Result<Order, E>`, `?User`. Parsed and retained for
+/// the checker.
 fn type_parser<'src, I>(ctx: Ctx<'src>) -> impl Parser<'src, I, TypeRef, Extra<'src>> + Clone
 where
     I: ValueInput<'src, Token = T, Span = SimpleSpan>,
@@ -2129,7 +2126,7 @@ where
                 }
                 name
             });
-        // `dyn Trait` — a trait object (L1 user traits, UT4): the identifier `dyn` immediately
+        // `dyn Trait` — a trait object: the identifier `dyn` immediately
         // followed by a (possibly dotted) trait name. Tried before `named` in the `base` choice; a
         // bare `dyn` (no following type name) fails here and falls through to `named` as the top type.
         let dyn_trait = ident_parser(ctx)
@@ -2156,10 +2153,9 @@ where
                 span: ctx.to_span(e.span()),
             })
             .boxed();
-        // A tuple type `(A, B, …)` — at least 2 comma-separated element types in parentheses
-        // (object-model slice 4). `()` and `(T)` are not tuple types (`unit`; a 1-tuple is
-        // unrepresentable), so the `at_least(2)` keeps this unambiguous against any future
-        // parenthesized-type form.
+        // A tuple type `(A, B, …)` — at least 2 comma-separated element types in parentheses.
+        // `()` and `(T)` are not tuple types (`unit`; a 1-tuple is unrepresentable), so the
+        // `at_least(2)` keeps this unambiguous against any future parenthesized-type form.
         let tuple_type = type_
             .clone()
             .separated_by(just(T::Comma))
@@ -2189,7 +2185,7 @@ where
                 span: ctx.to_span(e.span()),
             })
             .boxed();
-        // `Self::Name` — a projection through an associated type on the receiver (slice 1a). `Self`
+        // `Self::Name` — a projection through an associated type on the receiver. `Self`
         // is an ordinary identifier (not a keyword) followed by `::` and the associated-type name;
         // legal only in a trait/impl method signature. Tried before `named` so `Self::Item` is not
         // mis-parsed as a bare `Self` type; a bare `Self` (no `::`) still falls through to `named`.
@@ -2300,7 +2296,7 @@ where
             span: ctx.to_span(e.span()),
         })
         // A `#[...]` is a prefix of the declaration it decorates; absorb the woven hard-boundary `;`
-        // when it sits on its own line above the declaration (slice 7).
+        // when it sits on its own line above the declaration.
         .then_ignore(just(T::Semicolon).repeated())
         .boxed()
 }
@@ -2522,7 +2518,7 @@ where
         .boxed()
 }
 
-/// A `match` pattern. Exhaustiveness is unchecked in M0 (a checker concern, M1).
+/// A `match` pattern. Exhaustiveness is the checker's concern (`E0011`), not the parser's.
 fn pattern_parser<'src, I>(
     ctx: Ctx<'src>,
     type_p: TypeP<'src, I>,
@@ -2615,7 +2611,7 @@ where
                 span: ctx.to_span(e.span()),
             });
 
-        // A tuple pattern `(p, q, …)` — ≥2 sub-patterns in parens (object-model slice 4b.2). Starts
+        // A tuple pattern `(p, q, …)` — ≥2 sub-patterns in parens. Starts
         // with `(`, distinct from a variant pattern's `id(subs)`, so the two never collide.
         let tuple = pat
             .clone()
@@ -2671,7 +2667,7 @@ where
     expr_with(ctx, type_p, stmt, true, None)
 }
 
-/// The **control-flow-head** expression (object-model slice 7b): the expression grammar with a bare
+/// The **control-flow-head** expression: the expression grammar with a bare
 /// struct literal `T { … }` forbidden at the head's top level, so the `{` after an `if`/`while`/`for`
 /// condition is unambiguously the block — which is what lets the empty literal `T {}` be enabled
 /// everywhere else. Struct literals remain available inside parentheses/brackets/call-args within the
@@ -2810,7 +2806,7 @@ where
             just(T::RawStr).map_with(move |_, e| parse_raw_string(ctx, ctx.to_span(e.span())));
         let template = just(T::TemplateStr)
             .map_with(move |_, e| parse_template_string(ctx, ctx.to_span(e.span())));
-        // An **expression-tier block** `@sql { select ${id} }` (expr-tiers arc): `@` + a tier
+        // An **expression-tier block** `@sql { select ${id} }`: `@` + a tier
         // name + a lexer-captured verbatim body, split into statics and `${…}` holes. Only tiers
         // the lexer knows as text-capturing produce the `DocText` token this matches, so an
         // unknown `@name` in expression position fails the parse at the `@` (its body lexed as
@@ -2866,7 +2862,7 @@ where
             .ignore_then(sub.clone())
             .map(|value| ObjItem::Spread(Box::new(value)));
         // An object literal body. `at_least(0)` allows the **empty** literal `T {}` (a fully-defaulted
-        // type, object-model slice 5/7b) — unambiguous now that a control-flow head forbids a bare
+        // type) — unambiguous now that a control-flow head forbids a bare
         // struct literal, so `if cond {}` is always the empty *block*, never `cond{}`.
         let object_items = choice((obj_spread, obj_field))
             .separated_by(just(T::Comma))
@@ -3014,8 +3010,8 @@ where
 
         // `match scrutinee { pattern => body, ... }`. An arm body is a value EXPRESSION first —
         // so `=> {}` / `=> {"k": v}` keep their map/set-literal meaning — and only a brace body
-        // that is not an expression parses as a statement BLOCK (aether F1: side-effectful arms,
-        // value `unit`; `return` inside returns from the enclosing function). The fallback only
+        // that is not an expression parses as a statement BLOCK (side-effectful arms, value
+        // `unit`; `return` inside returns from the enclosing function). The fallback only
         // fires when the expression parse FAILS, so it depends on every brace-taking expression
         // refusing the braces it does not mean — see the map-entry grammar below, which is why
         // `=> { f(x) }` is a block rather than a one-entry map that errors after the fact.
@@ -3090,7 +3086,7 @@ where
         // The shorthand is restricted to a bare identifier by REJECTING anything else, not by
         // accepting it and reporting a diagnostic afterwards. That distinction is load-bearing
         // wherever `{ … }` is ambiguous between a map literal and a statement block (a match arm's
-        // body, aether F1): those sites try the value EXPRESSION first and fall back to the block
+        // body): those sites try the value EXPRESSION first and fall back to the block
         // only when the expression parse *fails*. A rule that accepts `{ f(x) }` as a one-entry map
         // and then complains has already consumed the braces — the block alternative is never
         // reached, and `1 => { log.info("hi") }` dies on a map-shorthand error.
@@ -3170,7 +3166,7 @@ where
 
         // A parenthesized expression `(e)` or a tuple literal `(a, b, …)` — disambiguated by arity:
         // exactly one element is the parenthesized expression (returned bare), two or more is an
-        // `Expr::Tuple` (object-model slice 4). `()` is not produced here (handled as `unit`
+        // `Expr::Tuple`. `()` is not produced here (handled as `unit`
         // elsewhere); a 1-tuple is unrepresentable by design.
         let paren = sub
             .clone()
@@ -3365,9 +3361,8 @@ where
                 }
             });
 
-        // `f::<T, ...>(args)` — an explicitly instantiated call of a user generic function
-        // (poly-values F2), generalizing the turbofish beyond the blessed forms. An atom like
-        // `typed_module_call` — `ident ::< T,+ > ( args )` — tried after the contextual `channel`
+        // `f::<T, ...>(args)` — an explicitly instantiated call of a user generic function. An atom
+        // like `typed_module_call` — `ident ::< T,+ > ( args )` — tried after the contextual `channel`
         // and the module form (which requires a `.`), so those win; a bare identifier with no `::`
         // fails here and falls through to `obj_or_ident`. Multiple type arguments are allowed —
         // the checker binds them to the function's declared type parameters in order (E0058 on an
@@ -3401,8 +3396,8 @@ where
                 },
             );
 
-        // `roles_of()` / `roles_of::<RoleEnum>()` / `roles_of(name)` — the semantic-role index query
-        // (P2.7). A keyword and an *optional* scope, which is the same two `TypeOperand` arms
+        // `roles_of()` / `roles_of::<RoleEnum>()` / `roles_of(name)` — the semantic-role index
+        // query. A keyword and an *optional* scope, which is the same two `TypeOperand` arms
         // `attributes_of` takes: `::<E>` names the role enum statically, `(name)` scopes by a
         // runtime string. Bare `roles_of()` (no scope at all) spans all role-tagged attributes.
         // Yields `List<RoleBinding>`.
@@ -3592,7 +3587,7 @@ where
                 span: ctx.to_span(e.span()),
             }),
             // `receiver.as<T>()` — checked narrowing of a `dyn` value to `?T` — and `receiver.await`,
-            // the postfix suspend operator (Track A). Both are `.` followed by a keyword, so they are
+            // the postfix suspend operator. Both are `.` followed by a keyword, so they are
             // folded into one postfix (chumsky's pratt op-tuple caps at 26 entries); `as`/`await` are
             // keywords, so neither collides with the `.ident` member-access postfix below. Binds as
             // tightly as call/member, so `f().await`, `f().await?`, and `f().await.g()` all chain.
@@ -3634,7 +3629,7 @@ where
                     span: ctx.to_span(e.span()),
                 },
             ),
-            // Tuple projection `receiver.0` / `receiver.1` (object-model slice 4): a `.` followed by
+            // Tuple projection `receiver.0` / `receiver.1`: a `.` followed by
             // an integer index. A *nested* projection `x.0.1` lexes its tail `0.1` as one float
             // literal (the digit-before-dot float rule), so a float token after the dot is accepted
             // and split on `.` into a chain (`x.0.1` ⟶ index 0 then index 1). Placed before the
@@ -3671,9 +3666,9 @@ where
             // arity cap) — see [`MemberPostfix`]:
             //
             //   * `.member` — plain member access, parsed exactly as before;
-            //   * `.member::<U, ...>(args)` — an explicit METHOD instantiation (generic methods,
-            //     D3). The turbofish half must see its `(` args to commit, so a bare `.member`
-            //     never loses its parse to it;
+            //   * `.member::<U, ...>(args)` — an explicit METHOD instantiation. The turbofish
+            //     half must see its `(` args to commit, so a bare `.member` never loses its parse
+            //     to it;
             //   * `::<T, ...>.member` — an explicit CLASS instantiation at the call site
             //     (`Repo::<Todo>.new("todos")`). The trailing `.member` is required, which is what
             //     keeps `Repo::<Todo>` from being an expression of its own and keeps `x.m::<T>`
@@ -3833,7 +3828,7 @@ where
                 expr: Box::new(operand),
                 span: ctx.to_span(e.span()),
             }),
-            // `-x` / `!x` — unary negation/not — and `spawn e` (Track A.3), all prefix at the same
+            // `-x` / `!x` — unary negation/not — and `spawn e`, all prefix at the same
             // precedence, folded into one pratt entry (chumsky's op-tuple caps at 26). `spawn` binds
             // looser than call/postfix, so `spawn f()` is `spawn (f())`.
             prefix(
@@ -3887,7 +3882,7 @@ where
             infix(left(11), just(T::Minus), move |l, _, r, e| {
                 binary(ctx, BinaryOp::Sub, l, r, e)
             }),
-            // Bitwise operators (P-BITS Tier B), Rust-style precedence: shifts bind just below the
+            // Bitwise operators, Rust-style precedence: shifts bind just below the
             // additive tier, then `&`, `^`, `|` — all *above* comparison/equality, so
             // `flags & MASK == 0` parses as `(flags & MASK) == 0` (avoiding the C footgun).
             // `>>` is **not** a lexer token — it is composed here from two adjacent `Gt`, so nested
@@ -4060,8 +4055,8 @@ where
     .ignored()
     .or(just(T::Semicolon).ignored());
 
-    // An empty statement — a lone `;` — produces no statement. With optional line-end semicolons
-    // (object-model slice 7) the parse input carries a woven zero-width `;` after a block-bodied
+    // An empty statement — a lone `;` — produces no statement. With optional line-end semicolons the
+    // parse input carries a woven zero-width `;` after a block-bodied
     // statement (`fn f() {}`, `if c {}`) when a newline follows ([`weave_hard_semicolons`]), and a
     // user may type a stray one; absorbing it here (a `None`, like a recovered token) keeps it a
     // silent no-op rather than a parse error.
@@ -4076,7 +4071,7 @@ where
     .map(|stmts| stmts.into_iter().flatten().collect())
 }
 
-/// A statement terminator (object-model slice 7): an explicit `;` or a woven hard-boundary `;`
+/// A statement terminator: an explicit `;` or a woven hard-boundary `;`
 /// ([`weave_hard_semicolons`]), or — making the `;` before a closing brace or end-of-input
 /// optional, Go-style — a **peeked** `}` or EOF that is left unconsumed, or a **soft** newline
 /// terminator ([`newline_terminator`]). So a one-line
@@ -4129,11 +4124,11 @@ where
 {
     recursive(move |stmt| {
         // Pass the lazy `stmt` handle into the expression grammar so a block-bodied closure can parse
-        // statements through it — the mutual expr↔stmt recursion (object-model: real anonymous
-        // functions) goes through this handle lazily, never rebuilding the statement grammar eagerly.
+        // statements through it — the mutual expr↔stmt recursion goes through this handle lazily,
+        // never rebuilding the statement grammar eagerly.
         let expr = expr_parser(ctx, type_p.clone(), stmt.clone()).boxed();
         // The condition/iterable of a control-flow head uses the **restricted** expression grammar
-        // (no bare top-level struct literal), so the `{` that follows is always the block (slice 7b).
+        // (no bare top-level struct literal), so the `{` that follows is always the block.
         let head_expr = head_expr_parser(ctx, type_p.clone(), stmt.clone(), expr.clone());
         let id = ident_parser(ctx);
         let block = recovering_list(stmt.clone()).delimited_by(just(T::LBrace), just(T::RBrace));
@@ -4169,7 +4164,7 @@ where
                 span: ctx.to_span(e.span()),
             });
 
-        // `yield <expr>` — a generator step (Track G). The value is required (no bare `yield`).
+        // `yield <expr>` — a generator step. The value is required (no bare `yield`).
         let yield_ = just(T::YieldKw)
             .ignore_then(expr.clone())
             .then_ignore(stmt_terminator(ctx))
@@ -4189,8 +4184,8 @@ where
                 span: ctx.to_span(e.span()),
             });
 
-        // `for (a, b, …) in …` — a tuple destructure (≥2 names), or a single `for x in …`
-        // (object-model slice 4b). The names bind positionally from each iterated tuple element.
+        // `for (a, b, …) in …` — a tuple destructure (≥2 names), or a single `for x in …`. The
+        // names bind positionally from each iterated tuple element.
         let for_pattern = choice((
             id.clone()
                 .separated_by(just(T::Comma))
@@ -4227,7 +4222,7 @@ where
                 span: ctx.to_span(e.span()),
             });
 
-        // `concurrent { body }` — a structured-concurrency scope (Track A.3). `concurrent` is followed
+        // `concurrent { body }` — a structured-concurrency scope. `concurrent` is followed
         // directly by a brace block, so there is no head-expression ambiguity.
         let concurrent_ =
             just(T::ConcurrentKw)
@@ -4461,7 +4456,7 @@ where
             );
 
         // Enum variant: plain `Red;`, algebraic `Code(n: int);`, or backed `P = "p";`, each with
-        // optional leading `#[...]` attributes (P2.4c).
+        // optional leading `#[...]` attributes.
         let variant = attr_decl
             .clone()
             .repeated()
@@ -4492,7 +4487,7 @@ where
         // span (E0077 — a struct's fields are already public), for the same reason `pub` on a
         // trait's own method is parsed here and refused there rather than left to fail as an
         // unexpected token. `pub` and `mut` are both opt-in; a field may carry
-        // leading `#[...]` attributes (P2.4b). A trailing `= expr` is a per-field default (slice 5),
+        // leading `#[...]` attributes. A trailing `= expr` is a per-field default,
         // making the field optional in a literal. Disambiguated from a method by the token after any
         // leading `#[...]` (`fn` opens a method; `pub`/`mut`/a name opens a field).
         let object_field = attr_decl
@@ -4521,7 +4516,7 @@ where
             );
         let class_field = object_field.clone().map(ClassMember::Field);
         // A bare `#[...]? fn ...` declaration, shared by plain class methods and `impl`-block
-        // methods. Leading `#[...]` attributes attach to the method (P2.4).
+        // methods. Leading `#[...]` attributes attach to the method.
         // A `@<tier>` directive leading a **method** (directive attachment sites): `@test`,
         // `@bench(1000)`, or a text-tier body `@doc { … }`. The tier name is any identifier that is
         // not a decorator directive (the same name-based dispatch `tier_name` uses, replicated here
@@ -4552,7 +4547,7 @@ where
                 .then(dir_args)
                 .then(dir_body)
                 // Absorb the woven hard-boundary `;` a directive on its own line above the method
-                // picks up (slice 7), exactly as `attr_decl` / `tier_decl_fn` do.
+                // picks up, exactly as `attr_decl` / `tier_decl_fn` do.
                 .then_ignore(just(T::Semicolon).repeated())
                 .map_with(
                     move |(((name, name_span), args), doc_text), e| MethodDirective {
@@ -4588,8 +4583,8 @@ where
             .then(just(T::AsyncKw).or_not())
             .then_ignore(just(T::FnKw))
             .then(id.clone())
-            // A method may declare its OWN type parameters (`fn pick<U>(...)`, generic methods
-            // D3), composing with the enclosing class's (which stay in scope around it).
+            // A method may declare its OWN type parameters (`fn pick<U>(...)`), composing with
+            // the enclosing class's (which stay in scope around it).
             .then(type_params.clone())
             .then(params.clone())
             .then(capture_clause.clone())
@@ -4645,7 +4640,7 @@ where
             );
         let class_method = method.clone().map(ClassMember::Method);
         // A trait reference: a bare built-in name (`Clone`) or a dotted path into a native
-        // module's method bundles (`vec.Kernels`, kernel-methods K1). Joined into one dotted
+        // module's method bundles (`vec.Kernels`). Joined into one dotted
         // name; the span covers the whole path.
         let trait_path = id
             .clone()
@@ -4668,7 +4663,7 @@ where
         // `impl Trait { fn ... }` — implementing a built-in trait lights up its operator/protocol.
         // The body is just methods; they are flattened into the class's method table below.
         // A generic trait implements at an instantiation: `impl Cache<string> { … }` — the
-        // arguments substitute through the trait's default methods (generic-trait UT5).
+        // arguments substitute through the trait's default methods.
         let trait_args = type_p
             .clone()
             .separated_by(just(T::Comma))
@@ -4677,7 +4672,7 @@ where
             .delimited_by(just(T::Lt), just(T::Gt))
             .or_not()
             .map(Option::unwrap_or_default);
-        // `type Name = Concrete` — an associated-type binding in an `impl` body (slice 1a). Binds an
+        // `type Name = Concrete` — an associated-type binding in an `impl` body. Binds an
         // associated type the trait declared, pinning `Self::Name` for this implementor.
         let assoc_binding = just(T::TypeKw)
             .ignore_then(id.clone())
@@ -4696,8 +4691,8 @@ where
             .then(
                 impl_member
                     .clone()
-                    // Absorb the woven hard-boundary `;` between members on separate lines
-                    // (object-model slice 7); a type/impl body is newline-separated, not `;`-ended.
+                    // Absorb the woven hard-boundary `;` between members on separate lines; a
+                    // type/impl body is newline-separated, not `;`-ended.
                     .then_ignore(just(T::Semicolon).repeated())
                     .repeated()
                     .collect::<Vec<_>>()
@@ -4727,7 +4722,7 @@ where
         let class_destructor = just(T::DestructKw)
             .ignore_then(block.clone())
             .map_with(move |body, e| ClassMember::Destructor(body, ctx.to_span(e.span())));
-        // An `enum` body (object-model slice 3): variants plus the unified body's methods and
+        // An `enum` body: variants plus the unified body's methods and
         // `impl Trait { ... }` blocks. `impl`/`fn` open a method or impl; anything else is a variant
         // (which begins with `#[...]?` then an uppercase name). The `choice` tries the keyword-led
         // forms first so an attributed `fn`/`impl` is never mis-read as a variant.
@@ -4749,7 +4744,7 @@ where
             .then(just(T::Colon).ignore_then(type_p.clone()).or_not())
             .then(
                 enum_member
-                    // Absorb the woven `;` between members on separate lines (slice 7).
+                    // Absorb the woven `;` between members on separate lines.
                     .then_ignore(just(T::Semicolon).repeated())
                     .repeated()
                     .collect::<Vec<_>>()
@@ -4805,8 +4800,8 @@ where
             .then(
                 impl_member
                     .clone()
-                    // Absorb the woven hard-boundary `;` between members on separate lines
-                    // (object-model slice 7); a type/impl body is newline-separated, not `;`-ended.
+                    // Absorb the woven hard-boundary `;` between members on separate lines; a
+                    // type/impl body is newline-separated, not `;`-ended.
                     .then_ignore(just(T::Semicolon).repeated())
                     .repeated()
                     .collect::<Vec<_>>()
@@ -4831,7 +4826,7 @@ where
                     })
                 },
             );
-        // A trait-method signature (L1 user traits): `#[...]? async? fn name(params): Ret` with an
+        // A trait-method signature: `#[...]? async? fn name(params): Ret` with an
         // OPTIONAL body. A bodiless signature is a *required* method; a `{ ... }` body is a *default*
         // implementation an `impl` may omit.
         let trait_method = attr_decl
@@ -4892,9 +4887,9 @@ where
                     }
                 },
             );
-        // `type Name;` / `type Name = Default;` — an associated-type declaration in a trait body
-        // (slice 1a). Bodiless is a *required* associated type (every impl must bind it); a `= T`
-        // provides a *default* an impl may omit. Referred to from a method signature as `Self::Name`.
+        // `type Name;` / `type Name = Default;` — an associated-type declaration in a trait body.
+        // Bodiless is a *required* associated type (every impl must bind it); a `= T` provides a
+        // *default* an impl may omit. Referred to from a method signature as `Self::Name`.
         let assoc_type_decl = just(T::TypeKw)
             .ignore_then(id.clone())
             .then(just(T::Eq).ignore_then(type_p.clone()).or_not())
@@ -4911,17 +4906,17 @@ where
             assoc_type_decl.map(TraitBodyMember::AssocType),
             trait_method.map(|m| TraitBodyMember::Method(Box::new(m))),
         ));
-        // `trait Name<T> { assoc-types; method-sigs }` — a user-defined trait declaration (L1). Names
+        // `trait Name<T> { assoc-types; method-sigs }` — a user-defined trait declaration. Names
         // a contract of associated types and method signatures a type `impl`s; usable as a `<T: Name>`
         // bound and a `dyn Name` trait object. The bare body only — leading `pub` and `#[...]`/`@role`/…
-        // decorators are applied by `attributed_type_decl` (UT6), the same uniform path structs/classes/
+        // decorators are applied by `attributed_type_decl`, the same uniform path structs/classes/
         // enums take.
         let trait_decl = just(T::TraitKw)
             .ignore_then(id.clone())
             .then(type_params.clone())
             .then(
                 trait_body_member
-                    // Absorb the synthetic `;` between members on separate lines (slice 7).
+                    // Absorb the synthetic `;` between members on separate lines.
                     .then_ignore(just(T::Semicolon).repeated())
                     .repeated()
                     .collect::<Vec<_>>()
@@ -4953,7 +4948,7 @@ where
                     class_destructor.clone(),
                     class_field.clone(),
                 ))
-                // Absorb the woven `;` between members on separate lines (slice 7).
+                // Absorb the woven `;` between members on separate lines.
                 .then_ignore(just(T::Semicolon).repeated())
                 .repeated()
                 .collect::<Vec<_>>()
@@ -5001,7 +4996,7 @@ where
             .then(type_params.clone())
             .then(
                 choice((class_method, class_impl, class_destructor, class_field))
-                    // Absorb the woven `;` between members on separate lines (slice 7).
+                    // Absorb the woven `;` between members on separate lines.
                     .then_ignore(just(T::Semicolon).repeated())
                     .repeated()
                     .collect::<Vec<_>>()
@@ -5023,8 +5018,8 @@ where
                             methods.extend(block.methods.iter().cloned());
                             impls.push(block);
                         }
-                        // A second `destruct` block silently keeps the last; the checker (M1.7)
-                        // will reject duplicates. M0/M1 accept the surface for now.
+                        // A second `destruct` block silently keeps the last; the checker rejects
+                        // duplicates. The grammar accepts the surface.
                         ClassMember::Destructor(body, _) => destructor = Some(body),
                     }
                 }
@@ -5188,7 +5183,7 @@ where
                             }
                         }
                         // `x.f[k] = v` ⟶ `x.f = x.f.set(k, v)` — index-assignment through a **field**
-                        // (object-model follow-on: enables `self.words[i] = v` in a method). The index
+                        // (enables `self.words[i] = v` in a method). The index
                         // receiver is a field access `x.f` over a bare name, so the update targets that
                         // field: compose the value-semantics `set` with the field-assignment path
                         // below, producing the same AST as writing `x.f = x.f.set(k, v)` by hand. Plain
@@ -5362,7 +5357,7 @@ where
                                 span,
                             }
                         }
-                        // `(a, b, …) = expr` — a tuple-destructuring binding (object-model slice 4b).
+                        // `(a, b, …) = expr` — a tuple-destructuring binding.
                         // Plain `=` only, no type annotation; every target must be a bare name.
                         // Evaluates `expr` once and binds each name to the corresponding tuple
                         // position (lowered to a temp + `.N` projections).
@@ -5413,7 +5408,7 @@ where
             });
 
         // A `@name(arg, ...)` directive. Several are recognized (partitioned below): `@derive(...)` —
-        // codegen — `@attribute` / `@attribute(Kind, ...)` — the attribute opt-in + placement (P2.5)
+        // codegen — `@attribute` / `@attribute(Kind, ...)` — the attribute opt-in + placement
         // — `@role(Enum.Variant, ...)` — semantic-role tags — and `@semantic` — the role-eligible
         // enum marker. Each argument is an identifier with an optional `.`-qualifier so a role's
         // `Enum.Variant` and a derive's bare `Trait` share one grammar. The argument list is optional
@@ -5446,7 +5441,7 @@ where
                 args,
             })
             // A `@derive(...)`/`@attribute`/`@role`/`@semantic` directive prefixes a type decl;
-            // absorb the woven `;` when it sits on its own line above the decl (slice 7).
+            // absorb the woven `;` when it sits on its own line above the decl.
             .then_ignore(just(T::Semicolon).repeated());
 
         // A `#[...]` data attribute in decorator position, wrapping the shared `attr_decl` (defined
@@ -5509,8 +5504,8 @@ where
                                 semantic = Some(name_span);
                             }
                             Some(BuiltinDirective::Packed) => {
-                                // `@packed` (P-PACK) — the struct-only flat-layout marker. Its one
-                                // optional argument is `Layout.Row|Layout.Column` (P-SIMD): the
+                                // `@packed` — the struct-only flat-layout marker. Its one
+                                // optional argument is `Layout.Row|Layout.Column`: the
                                 // storage layout its lists use. Anything else is E0037. The checker
                                 // validates placement (struct-only) and the all-primitive field
                                 // constraint.
@@ -5521,7 +5516,7 @@ where
                                 });
                             }
                             Some(BuiltinDirective::Validated) => {
-                                // `@validated` (validation arc) — the construction-channeling marker
+                                // `@validated` — the construction-channeling marker
                                 // for a struct/class. Takes no arguments; reject them rather than
                                 // dropping them silently (uniform directive-argument validation).
                                 if let Some(arg) = args.first() {
@@ -5585,7 +5580,7 @@ where
                 )
             });
 
-        // A **dev-tier block** `@<tier> { items }` (object-model slice 6): the directive grammar in
+        // A **dev-tier block** `@<tier> { items }`: the directive grammar in
         // its standalone *block* form (vs. the leading-decorator annotation form). Tried before
         // `attributed_type_decl` so `@test { … }` is read as a block; a `@derive(...) struct` finds
         // no `{` after the directive and backtracks to the decorator path. The body is a sequence of
@@ -5613,10 +5608,10 @@ where
             .map(Option::unwrap_or_default);
 
         // A tier block's body is **either** the verbatim text of a text-tier block (`@doc` et al.)
-        // — the lexer captured it as a single `DocText` token (slice 6f), which is sliced back out
+        // — the lexer captured it as a single `DocText` token, which is sliced back out
         // of the source here — or a statement list for a code tier (the same recovering list a
         // `{ }` block uses, absorbing the woven hard-boundary `;` between members on
-        // separate lines, slice 7). The text branch is tried first; a code body's first token is
+        // separate lines). The text branch is tried first; a code body's first token is
         // never `DocText`, so it falls through. This is the one point the body text materializes,
         // so the brace escapes (`\{`/`\}`/`\\`) are undone here — every content consumer
         // (extraction, hover, runners) sees clean text, while the formatter re-emits raw source
@@ -5650,7 +5645,7 @@ where
                 },
             );
 
-        // A **dev-tier annotation** `@<tier> fn …` (object-model slice 6c): a code tier on a single
+        // A **dev-tier annotation** `@<tier> fn …`: a code tier on a single
         // declaration — the base form the block is grouping sugar for. Desugared at parse time into a
         // one-item `TierBlock`, so activation, checking, lowering, and the runner see exactly the
         // block form (no separate machinery, full equivalence). The annotation wraps a top-level
@@ -5658,9 +5653,9 @@ where
         // disambiguates cleanly: `@test {` opens a block (no `fn`, so this fails over to
         // `tier_block`), and `@derive(...) struct` finds no `fn` after the directive and backtracks
         // to the decorator path. The directive may sit on its **own line above** the `fn` — the
-        // woven newline-boundary `;` between them is absorbed, exactly as a method's directive
-        // (slice 7) and a decorator ahead of a type decl absorb theirs — so the top-level form and
-        // the member form read identically.
+        // woven newline-boundary `;` between them is absorbed, exactly as a method's directive and a
+        // decorator ahead of a type decl absorb theirs — so the top-level form and the member form
+        // read identically.
         let tier_annotation = just(T::At)
             .ignore_then(tier_name.clone())
             .then(tier_args.clone())
@@ -5679,7 +5674,7 @@ where
                 },
             );
 
-        // A tier annotation carrying **leading `#[...]` data attributes** (object-model slice 6h):
+        // A tier annotation carrying **leading `#[...]` data attributes**:
         // `#[Skip] #[Group("fast")] @test fn … `. The attributes lead the declaration (one per line,
         // like any decorated `fn`); they attach to the wrapped `fn`, where the checker validates them
         // and the runner reads them as test metadata. Requires ≥1 leading `#[...]` (the no-attribute
@@ -5716,8 +5711,8 @@ where
                 }
             });
 
-        // A **tier declaration** `@tier(name[, config: Type]) fn runner(…) { … }` (tier-providers
-        // T2): the directive that brings a dev-tier into existence. The decorated `fn` is the
+        // A **tier declaration** `@tier(name[, config: Type]) fn runner(…) { … }`: the directive
+        // that brings a dev-tier into existence. The decorated `fn` is the
         // tier's runner; `name` (a bare identifier — parsed as the attr grammar's `TypeRef`) is
         // what consumers write as `@<name> { … }`; the optional `config:` names the `@attribute`
         // struct carrying the tier's knobs (the `Bench { iterations }` model). Argument-shape
@@ -5728,8 +5723,8 @@ where
                 BuiltinDirective::from_name(name) == Some(BuiltinDirective::Tier)
             }))
             .then(tier_args.clone())
-            // Absorb the woven `;` when the directive sits on its own line above the `fn`
-            // (slice 7), exactly as `derive_directive` does.
+            // Absorb the woven `;` when the directive sits on its own line above the `fn`, exactly
+            // as `derive_directive` does.
             .then_ignore(just(T::Semicolon).repeated())
             .then(fn_decl.clone())
             .map(move |(((_, tier_kw_span), args), mut item)| {
@@ -6078,7 +6073,7 @@ mod tests {
 
     #[test]
     fn parses_bitwise_operators_alongside_unions_and_nested_generics() {
-        // P-BITS Tier B: the bitwise operators (`& | ^ <<`) parse in expression position, and crucially
+        // The bitwise operators (`& | ^ <<`) parse in expression position, and crucially
         // the reused `|` token and the `Lt`/`Gt` tokens still parse union *types* and nested generic
         // closes (`List<int>>`) — the design's headline hazard. All in one program, no diagnostics.
         let parsed = parse_str(
@@ -6464,7 +6459,7 @@ mod tests {
 
     #[test]
     fn optional_semicolons_parse() {
-        // Object-model slice 7: a newline terminates a statement (no `;` needed); a trailing
+        // A newline terminates a statement (no `;` needed); a trailing
         // operator continues the line; a multi-line type body stays newline-separated; and an
         // explicit `;` still separates statements on one line. The AST is identical to the
         // fully-`;`-terminated spelling.
@@ -6475,7 +6470,7 @@ mod tests {
 
     #[test]
     fn tier_block_parses() {
-        // A `@<tier> { items }` dev-tier block (object-model slice 6) parses as a standalone block
+        // A `@<tier> { items }` dev-tier block parses as a standalone block
         // statement carrying its declarations. It coexists with the `@derive(...)` decorator form:
         // `@derive(Comparable) struct` still attaches the decorator (the parser backtracks from the
         // block path when no `{` follows the directive), proving the two `@`-forms don't collide.
@@ -6486,7 +6481,7 @@ mod tests {
 
     #[test]
     fn empty_literal_and_restricted_head_parse() {
-        // Object-model slice 7b: the empty literal `T {}` parses (a fully-defaulted type), and a
+        // The empty literal `T {}` parses (a fully-defaulted type), and a
         // control-flow head forbids a bare top-level struct literal so `if c { … }` is the block —
         // a struct literal in a condition is parenthesized. `(empty C)` is the empty-fields object,
         // and the `if` condition is the member access on the parenthesized literal, then the block.
@@ -6495,7 +6490,7 @@ mod tests {
 
     #[test]
     fn doc_tier_block_parses_verbatim_body() {
-        // A `@doc { … }` text tier (object-model slice 6f) carries its body verbatim: the lexer
+        // A `@doc { … }` text tier carries its body verbatim: the lexer
         // captured it as a single `DocText` token, which the parser slices back into the block's
         // `doc_text` (its `items` stay empty). The pretty form shows the text after `:text`. Prose
         // that would otherwise not tokenize (`#`, `*`, quotes) is preserved untouched.
@@ -6506,7 +6501,7 @@ mod tests {
 
     #[test]
     fn attributes_lead_a_tier_annotation() {
-        // Object-model slice 6h: `#[...]` data attributes lead a `@test`/`@bench` annotation, one per
+        // `#[...]` data attributes lead a `@test`/`@bench` annotation, one per
         // line, and attach to the wrapped `fn` (in source order). A `#[...]` leading a *type* still
         // backtracks to the decorator path, so the two forms coexist.
         let parsed = parse_str(
@@ -6529,7 +6524,7 @@ mod tests {
 
     #[test]
     fn attribute_name_may_be_dotted() {
-        // Namespace-aware attributes (D2): an attribute's name may be a **dotted path**
+        // Namespace-aware attributes: an attribute's name may be a **dotted path**
         // `#[pkg.Route]` — the qualified form the checker resolves through the same import map any
         // type reference uses. The segments join into one qualified string; a bare `#[Skip]` is the
         // one-segment case. The `name_span` covers the whole dotted run.
@@ -6550,8 +6545,8 @@ mod tests {
 
     #[test]
     fn packed_directive_marks_a_struct() {
-        // P-PACK Phase 0: `@packed` is a fifth decorator directive (name-based dispatch), marking a
-        // struct; it coexists with `@derive(...)`. Bare `@packed` is the default `layout: row`.
+        // `@packed` is a built-in decorator directive (name-based dispatch), marking a struct; it
+        // coexists with `@derive(...)`. Bare `@packed` is the default `layout: row`.
         let parsed = parse_str("@derive(Equatable)\n@packed\nstruct Vec3 { x: float; y: float }\n");
         assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
         let Stmt::Struct(s) = &parsed.program.stmts[0] else {
@@ -6601,7 +6596,7 @@ mod tests {
 
     #[test]
     fn packed_layout_argument() {
-        // P-SIMD: `@packed(Layout.Column)` selects the column-major storage layout; `Layout.Row`
+        // `@packed(Layout.Column)` selects the column-major storage layout; `Layout.Row`
         // is the explicit default.
         let col = parse_str("@packed(Layout.Column)\nstruct V { a: int }\n");
         assert!(col.diagnostics.is_empty(), "{:?}", col.diagnostics);
@@ -6732,7 +6727,7 @@ mod tests {
     #[test]
     fn negative_attribute_literals_fold_to_constants() {
         // `-1` / `-2.5` in attribute-argument position parse as unary minus over a literal and fold
-        // to a negative constant (object-model slice 6i) — the surface has no negative-number token.
+        // to a negative constant — the surface has no negative-number token.
         let parsed = parse_str("#[Cache(ttl: -1, rate: -2.5)]\nstruct X { id: int }\n");
         assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
         let Stmt::Struct(s) = &parsed.program.stmts[0] else {
@@ -6747,7 +6742,7 @@ mod tests {
     #[test]
     fn tier_directive_args_parse() {
         // A tier directive carries optional literal arguments in parentheses, the same arg grammar a
-        // `#[...]` attribute uses (object-model slice 6e). Both the block form `@bench(iterations: N)
+        // `#[...]` attribute uses. Both the block form `@bench(iterations: N)
         // { … }` and the annotation form `@bench(iterations: N) fn …` accept them; the pretty form
         // surfaces the args after the tier name. A bare `@test { }` carries none.
         insta::assert_snapshot!(pretty(
@@ -6757,7 +6752,7 @@ mod tests {
 
     #[test]
     fn tier_declaration_parses_onto_the_runner_fn() {
-        // `@tier(name[, config: Type]) fn …` (tier-providers T2) rides on the runner's FnDecl: the
+        // `@tier(name[, config: Type]) fn …` rides on the runner's FnDecl: the
         // positional identifier is the tier name, the named `config:` its knob-attribute type.
         let source = Source::new(
             SourceId::FIRST,
@@ -6795,7 +6790,7 @@ mod tests {
 
     #[test]
     fn tier_annotation_parses() {
-        // A `@<tier> fn …` annotation (object-model slice 6c) is grouping sugar for a one-item tier
+        // A `@<tier> fn …` annotation is grouping sugar for a one-item tier
         // block: it desugars to the same `(tier …)` node a `@test { fn … }` block produces, so the
         // pretty form is identical to wrapping the single fn in a block. It coexists with the block
         // form and with `@derive(...)` decorators (which still attach to the following type).
@@ -6806,7 +6801,7 @@ mod tests {
 
     #[test]
     fn field_defaults_parse() {
-        // A field may carry a trailing `= expr` default (object-model slice 5), on both `struct`
+        // A field may carry a trailing `= expr` default, on both `struct`
         // and `class` fields, mixing with `pub`/`mut`. The pretty-printer surfaces a default's
         // presence with a trailing `=` marker (the expression itself is not inlined).
         insta::assert_snapshot!(pretty(
@@ -6990,8 +6985,8 @@ mod tests {
     #[test]
     fn reports_unexpected_end_of_input() {
         // A *syntactically incomplete* statement that runs out of input. (A merely missing trailing
-        // `;` is no longer an error — slice 7 makes line-end/EOF terminate a statement — so the
-        // incompleteness here is the dangling binary operator with no right operand.)
+        // `;` is not an error — line-end and EOF both terminate a statement — so the incompleteness
+        // here is the dangling binary operator with no right operand.)
         let parsed = parse_str("x = 1 +");
         assert_eq!(
             parsed.diagnostics[0].code,

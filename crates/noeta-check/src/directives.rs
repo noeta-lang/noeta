@@ -97,7 +97,7 @@ impl DirectiveRegistry {
     }
 
     /// As [`collect`](Self::collect), but resolving the extension half against an explicit registry
-    /// (instance-registry IR4 — an embed session's own extension set).
+    /// (an embed session's own extension set).
     pub fn collect_with_registry(
         program: &Program,
         registry: &'static noeta_ext_abi::registry::Registry,
@@ -140,7 +140,7 @@ impl DirectiveRegistry {
 
     /// Resolve `@name` against only the **globally-scoped** halves — built-in directives and tiers
     /// (extension or program-declared). Extension *directives* are deliberately excluded: they resolve
-    /// **per-package** (per-package naming arc), which needs the using package's binding table and so
+    /// **per-package**, which needs the using package's binding table and so
     /// is done in the checker, not here. `None` means "not a built-in or tier" — the caller then tries
     /// the per-package directive resolution.
     pub fn lookup_builtin_or_tier(&self, name: &str) -> Option<DirectiveKind<'_>> {
@@ -246,7 +246,7 @@ impl Checker {
     /// syntax error no extension could make legal. Deciding here is what opens the name-space,
     /// and it also folds the old parser-level errors into the one placement check: `@tier` on a
     /// type is now a misplacement like any other, rather than a separate `UnexpectedToken`.
-    /// Resolve an extension `@name` **for the package that wrote it** (per-package naming arc): the
+    /// Resolve an extension `@name` **for the package that wrote it**: the
     /// span's package (via [`Self::package_at`]) → its `[directives]` binding for `name` → the
     /// provider's [`ExtDirective`](noeta_ext_abi::registry::ExtDirective), matched by the provider's
     /// namespace root + exported name. A *manifested* package that binds no such name yields `None`
@@ -276,7 +276,7 @@ impl Checker {
         self.reg().find_ext_directive(name)
     }
 
-    /// Resolve a `@name` **tier** block for the package that wrote it (per-package naming arc), the
+    /// Resolve a `@name` **tier** block for the package that wrote it, the
     /// tier counterpart of [`Self::resolve_ext_directive_at`]: the span's package → its `[directives]`
     /// binding (rename/provider) → the concrete tier, else the ambient std/program-declared tier of
     /// that bare name. The same [`crate::tiers::TierRegistry::resolve_at`] activation drives, so the
@@ -453,12 +453,10 @@ impl Checker {
 
 impl Checker {
     /// Validate an extension directive's arguments against what it declared: how many positional
-    /// arguments it takes, and which `name:` keys it understands.
+    /// arguments it takes (`max_args`), and which `name:` keys it understands (`named_keys`).
     ///
-    /// `max_args` and `named_keys` shipped in the ABI with no reader — the same failure as
-    /// `ExtTier.sites`, repeated in code written during the arc that fixed it. A declared
-    /// constraint nothing enforces is worse than none: it tells an extension author their
-    /// contract is checked when nothing checks it.
+    /// A declared constraint nothing enforces is worse than none: it tells an extension author
+    /// their contract is checked when nothing checks it, so both fields have a reader here.
     ///
     /// Deliberately mirrors what a `#[...]` data attribute already gets (E0005 for an unknown
     /// key, E0009 for the wrong count), because an extension directive's arguments are the same

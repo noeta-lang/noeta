@@ -12,7 +12,7 @@ impl Checker {
     ///
     /// The single entry point for every annotation the *checking* pass reads, so no site has to
     /// remember to resolve parameters — which is exactly the kind of "remember to consult the side
-    /// table" obligation this arc removes. (The *collecting* pass has no `coloring` yet and builds
+    /// table" obligation. (The *collecting* pass has no `coloring` yet and builds
     /// its scope explicitly; it calls the free [`from_ref_q`] with that scope.)
     pub(crate) fn annot(&self, ty: &TypeRef) -> Type {
         from_ref_q(ty, &self.imports.extern_types, &self.coloring.type_params)
@@ -109,7 +109,7 @@ impl Checker {
         }
     }
 
-    /// Validate each field's default value (`x: T = expr`), object-model slice 5. A default is
+    /// Validate each field's default value (`x: T = expr`). A default is
     /// checked in the type's **definition scope** — the `env` here carries globals only (fields are
     /// not yet bound), so a default that references `self` or a sibling field is an `E0007` unknown
     /// name, matching its globals-only runtime scope. Its inferred type must be assignable to the
@@ -278,7 +278,7 @@ impl Checker {
         self.check_coherence(&c.decorators.derives, &c.impls, &standalone);
         self.check_attrs(&c.decorators.attrs, TargetKind::Class);
         // Inside the class's own methods/destructor its private fields are accessible — on `self`
-        // and on any same-type value (the type-scoped privacy rule, object-model slice 2d).
+        // and on any same-type value (the type-scoped privacy rule).
         let saved_type = self.coloring.current_type.replace(c.name.to_string());
         for block in &c.impls {
             self.check_impl(block);
@@ -325,9 +325,8 @@ impl Checker {
         }
         self.check_derives(e.name.as_str(), &e.decorators.derives, &[], &e.methods);
         let standalone = self.standalone_for(e.name.as_str());
-        // An enum carries in-body `impl Trait { }` blocks and inherent methods (the unified body,
-        // object-model slice 3), checked exactly as a class's — coherence over its impls, then each
-        // method body.
+        // An enum carries in-body `impl Trait { }` blocks and inherent methods (the unified body),
+        // checked exactly as a class's — coherence over its impls, then each method body.
         self.check_coherence(&e.decorators.derives, &e.impls, &standalone);
         self.check_attrs(&e.decorators.attrs, TargetKind::Enum);
         // Inside an enum's own methods, `self` is the whole enum value (the variants differ, so —
@@ -386,11 +385,11 @@ impl Checker {
     /// instantiated bound (`T: Keyed<int>`) must match the trait's generic arity — built-ins take
     /// no bound arguments, a generic user trait takes exactly its parameter count (a BARE bound on
     /// a generic trait stays legal and accepts any instantiation). What the bounds demand is what
-    /// S4.2 enforces at instantiation; here we only check they are well-formed.
+    /// instantiation enforces; here we only check they are well-formed.
     pub(crate) fn check_type_param_bounds(&mut self, params: &[TypeParam]) {
         for p in params {
             for bound in &p.bounds {
-                // A bound may name a built-in trait or a user-defined one (L1, UT3).
+                // A bound may name a built-in trait or a user-defined one.
                 if let Some(decl) = self.symbols.user_traits.get(bound.name.as_str()) {
                     let arity = decl.type_params.len();
                     if !bound.args.is_empty() && bound.args.len() != arity {
@@ -472,7 +471,7 @@ impl Checker {
                 self.check_type_ref(ret);
             }
             TypeRef::Optional { inner, .. } => self.check_type_ref(inner),
-            // `Self::Name` — an associated-type projection (slice 1a). It names no nominal type to
+            // `Self::Name` — an associated-type projection. It names no nominal type to
             // resolve here; the checker projects it per-impl at each typing site (an unbound name
             // degrades to a gradual hole rather than an E0013), so there is nothing to reject.
             TypeRef::AssocProjection { .. } => {}
@@ -528,7 +527,7 @@ impl Checker {
                     // A module-qualified type rooted at a retained user import (`use geometry.vec`
                     // then `vec.Vec2` in an *isolated* check — REPL/session, a docs fragment): the
                     // linker resolves the dotted head in a full link, and an unlinked fragment
-                    // tolerates it exactly like other unresolved external names (F1). Root-only —
+                    // tolerates it exactly like other unresolved external names. Root-only —
                     // std namespace members keep their exact-key resolution and stay strict.
                     && !name
                         .as_str()
@@ -660,7 +659,7 @@ impl Checker {
     }
 
     /// Check-time key-capability of a **named** type in `Map<K, _>` key / `Set<T>` element
-    /// position (P-PKEY S3/S4): `Some(true)` for `string`, the integer family (S4 — `int` and
+    /// position: `Some(true)` for `string`, the integer family (`int` and
     /// every fixed-width `{i,u}N`, erased to the same word), a key-capable extern, or a
     /// key-capable `@packed` struct (all fields int/`{i,u}N`/bool or nested such structs — no
     /// floats); `Some(false)` for `float`/`f32` (the NaN footgun), `bool` in MAP position
@@ -692,7 +691,7 @@ impl Checker {
                 // by — `Map<number, _>` would need one key representation spanning twelve types.
                 // Barred like the float family, by a different route.
                 Number => Some(false),
-                // `bool` splits by role (post derive-soundness: bool is orderable, `false <
+                // `bool` splits by role (bool is orderable, `false <
                 // true`): a `Set<bool>` is fine — the runtime canonicalizes it like any orderable
                 // element — but a map key needs a `MapKey` kind, which bool deliberately lacks
                 // (two possible keys is a smell; use fields). The gates pass their role via
@@ -718,7 +717,7 @@ impl Checker {
         }
         if self.symbols.records.contains_key(key_name) || self.symbols.enums.contains_key(key_name)
         {
-            // A set additionally admits any **value kind** (derive-soundness follow-up F2): a
+            // A set additionally admits any **value kind**: a
             // non-packed struct or an enum orders structurally (`set_order`), so `Set<P>`/`Set<Dir>`
             // are fine whether or not the type declares `Comparable`. That is deliberate and is the
             // line `ElemReq::Ordered` draws: a set's buffer is how it gets membership and

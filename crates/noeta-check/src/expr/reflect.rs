@@ -110,7 +110,7 @@ impl Checker {
                 // A bare parameter of an enclosing generic is not erased after all: one of the two
                 // per-instantiation channels carries its name (the receiver's reflected type tag
                 // inside a generic type's instance method — generic constructor reflection, Gap B —
-                // or the enclosing fn's hidden type-argument slot, poly-values F2b). Recorded as a
+                // or the enclosing fn's hidden type-argument slot). Recorded as a
                 // site rather than folded to a constant: one compiled body serves every
                 // instantiation, so there is no constant to fold to.
                 //
@@ -364,7 +364,7 @@ impl Checker {
                 match self.packed_list_layout(&elem) {
                     Some(layout) => {
                         self.sites.packed_list_sites.insert(span, layout);
-                        // Validation arc: if the packed element type implements `Validate`, mark the
+                        // If the packed element type implements `Validate`, mark the
                         // site so both backends run `validate()` on each decoded element (the abort
                         // door — consistent with `from_bytes`'s shape-error behavior, and closing the
                         // hole a `@validated` packed type would otherwise have here).

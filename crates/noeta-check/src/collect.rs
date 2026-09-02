@@ -121,17 +121,16 @@ impl Checker {
                         self.imports.extern_types.insert(local, qualified);
                     }
                     UseKind::ExtEnum(qualified) => {
-                        // A native-**enum** import (`use std.http.SameSite`, native-extensibility
-                        // S1): bind the local name to the enum's qualified identity through the SAME
-                        // `extern_types` channel — an annotation `SameSite` then resolves to the
+                        // A native-**enum** import (`use std.http.SameSite`): bind the local name
+                        // to the enum's qualified identity through the SAME `extern_types` channel — an annotation `SameSite` then resolves to the
                         // qualified `Type::Named` the enum was seeded under, so a native fn returning
                         // it unifies by identity and a `match` over it is exhaustive.
                         self.imports.extern_types.insert(local, qualified);
                     }
                     UseKind::ExtClass(qualified) | UseKind::ExtStruct(qualified) => {
-                        // A native **fielded-type** import — a class (`use res.Handle`,
-                        // native-extensibility S2) or a value struct (`use pkg.Point`, fielded
-                        // unification): bind the local name to the type's qualified identity through
+                        // A native **fielded-type** import — a class (`use res.Handle`) or a
+                        // value struct (`use pkg.Point`), under the same fielded unification: bind
+                        // the local name to the type's qualified identity through
                         // the SAME `extern_types` channel — an annotation `Handle`/`Point` and a
                         // construction `Handle { ... }` / `Point { ... }` then resolve to the
                         // qualified `Type::Named` the type was seeded under
@@ -142,7 +141,7 @@ impl Checker {
                         self.imports.extern_types.insert(local, qualified);
                     }
                     UseKind::ExtTrait(qualified) => {
-                        // A native-**trait** import (`use fx.Widget`, native-extensibility S3): record
+                        // A native-**trait** import (`use fx.Widget`): record
                         // the short→qualified alias through the SAME `extern_types` channel — so a
                         // `dyn Widget` annotation / a native method's `Widget`-typed signature resolve
                         // to the qualified identity (`qualified_extern`). The user-trait table entry
@@ -191,7 +190,7 @@ impl Checker {
     /// Register one METHOD's signature under `(type_name, method)` — the shared worker of the
     /// struct/class/enum collection arms (they previously triplicated this verbatim). The
     /// registered signature is erased over BOTH the enclosing type's parameters and the method's
-    /// OWN (generic methods, poly-deferrals D3); the `GenericInfo` composes them — the class's
+    /// OWN (generic methods); the `GenericInfo` composes them — the class's
     /// parameters first (`class_params` many, seeded positionally by the receiver's type
     /// arguments), then the method's own (filled by turbofish/arguments/expectation).
     fn collect_method_sig(&mut self, type_name: &str, m: &FnDecl, type_params: &[TypeParam]) {
@@ -400,7 +399,7 @@ impl Checker {
     /// Pass 1: register every top-level declaration so forward references resolve before any
     /// body is checked. Mirrors the compiler's "register types first" pass.
     pub(crate) fn collect(&mut self, program: &Program) {
-        // Hoist top-level value-binding names (F1): a function body may reference a global
+        // Hoist top-level value-binding names: a function body may reference a global
         // declared textually later, so they are all "known" to the unknown-name gate.
         for stmt in &program.stmts {
             match stmt {
@@ -607,8 +606,8 @@ impl Checker {
                     if !muts.is_empty() {
                         self.symbols.mut_fields.insert(c.name.to_string(), muts);
                     }
-                    // Class fields default **private**; only those declared `pub` are public
-                    // (object-model slice 2d). Struct fields are always public, so structs never
+                    // Class fields default **private**; only those declared `pub` are public.
+                    // Struct fields are always public, so structs never
                     // register here.
                     let private: HashMap<String, DeclSite> = c
                         .fields
@@ -631,7 +630,7 @@ impl Checker {
                     // never reached its recipe and an omitted defaulted field decoded as a missing
                     // one; that stopped being invisible the moment a class gained a decode.
                     self.record_optional_fields(c.name.as_str(), &c.fields);
-                    // A class with a `destruct { ... }` block seeds destruct-reachability (Phase 3.2b).
+                    // A class with a `destruct { ... }` block seeds destruct-reachability.
                     if c.destructor.is_some() {
                         self.symbols.destructor_classes.insert(c.name.to_string());
                     }
@@ -686,7 +685,7 @@ impl Checker {
                         .map(|v| VariantInfo {
                             name: v.name.clone(),
                             // A variant's payload types, read from the annotation exactly as a
-                            // struct's field types are (R2b): one source of truth for
+                            // struct's field types are: one source of truth for
                             // enum-construction type-argument inference, the `Send` classifier, and
                             // destructor-relevance. This needed a `variant_field_type` helper that
                             // rebuilt a positional payload's type out of the `Param`'s *name*; the
@@ -720,8 +719,8 @@ impl Checker {
                         self.symbols.semantic_enums.insert(e.name.to_string());
                     }
                     // An enum satisfies a trait it `@derive`s or `impl`s (its in-body blocks are
-                    // uniform with a class's — object-model slice 3); record both so an operator
-                    // trait (`impl Add`, `impl Comparable`, …) is accepted on an enum operand.
+                    // uniform with a class's); record both so an operator trait (`impl Add`,
+                    // `impl Comparable`, …) is accepted on an enum operand.
                     self.record_trait_impls(
                         e.name.as_str(),
                         e.decorators
@@ -740,8 +739,8 @@ impl Checker {
                     self.symbols
                         .type_params
                         .insert(e.name.to_string(), e.type_params.clone());
-                    // Record each enum method's signature (inherent + impl-block, the unified body —
-                    // object-model slice 3) under `(Enum, method)`, exactly like a class's, so an
+                    // Record each enum method's signature (inherent + impl-block, the unified
+                    // body) under `(Enum, method)`, exactly like a class's, so an
                     // instance call `status.label()` and an associated call `Status.parse(s)` resolve
                     // to a concrete type. The enum's generic parameters are erased to `dyn`.
                     for m in &e.methods {
@@ -761,13 +760,13 @@ impl Checker {
                     // The registered signature is **erased** (generic parameters → `dyn`): the
                     // arity check and the non-generic fast path use it. A generic function also
                     // carries un-erased `GenericInfo` so a call site can instantiate it precisely
-                    // and enforce its bounds (S4.2); a non-generic function carries `None`.
+                    // and enforce its bounds; a non-generic function carries `None`.
                     let xt = &self.imports.extern_types;
                     let scope = param_scope(&f.type_params, xt);
                     let tps = param_ids(&f.type_params);
                     let raw_params: Vec<Type> =
                         f.params.iter().map(|p| param_type(p, xt, &scope)).collect();
-                    // An `async fn f(): T` call produces `Future<T>` (Track A); wrap before erasure so
+                    // An `async fn f(): T` call produces `Future<T>`; wrap before erasure so
                     // the erased signature and the generic instantiation both carry the future.
                     let raw_ret = async_return(
                         f.ret
@@ -829,7 +828,7 @@ impl Checker {
                             decl.trait_span,
                         ));
                 }
-                // A user-defined trait (L1) is registered up front so forward references (an `impl`
+                // A user-defined trait is registered up front so forward references (an `impl`
                 // or `<T: Trait>` bound textually above the `trait`) resolve. A duplicate declaration
                 // keeps the first; pass 2 (`check_trait_decl`) reports the collision.
                 Stmt::Trait(t) => {
@@ -841,17 +840,17 @@ impl Checker {
                 _ => {}
             }
         }
-        // Seed the imported **native traits** (native-extensibility S3) into `user_traits` /
+        // Seed the imported **native traits** into `user_traits` /
         // `user_trait_impls` now — AFTER the `Stmt::Trait` walk above, so a user `trait` of the same
         // short name (already in `user_traits`) shadows the native one (`.or_insert`), and BEFORE the
-        // impl-collection loop below, so an `impl NativeTrait for T` is recognized (UT2) and a native
+        // impl-collection loop below, so an `impl NativeTrait for T` is recognized and a native
         // type's advertised impl backs the `dyn NativeTrait` coercion (3b).
         self.seed_ext_traits();
-        // Record which user traits each type implements (L1, UT2), from standalone `impl`s,
+        // Record which user traits each type implements, from standalone `impl`s,
         // in-body `impl`s, and `@derive(UserTrait)` (a fully-defaulted trait adopted wholesale —
         // `check_derives` enforces the fully-defaulted part). Done after the main walk so every
-        // `trait` is registered regardless of source order. The basis for UT3 bound satisfaction
-        // and UT4 `dyn Trait` coercion.
+        // `trait` is registered regardless of source order. The basis for generic-bound
+        // satisfaction and `dyn Trait` coercion.
         for stmt in &program.stmts {
             let (type_name, impls, derives): (&str, &[noeta_ast::ImplBlock], &[DeriveSpec]) =
                 match stmt {
@@ -913,7 +912,7 @@ impl Checker {
                 }
             }
         }
-        // Associated-type bindings per implementor (slice 1a): fold each impl's `type Name = T;`
+        // Associated-type bindings per implementor: fold each impl's `type Name = T;`
         // bindings over the trait's defaulted associated types into `trait_assoc[(type, trait)]`.
         // Done after the `user_trait_impls` walk so every trait is registered; the basis for
         // projecting `Self::Name` in a method signature to the implementor's concrete type.
@@ -957,7 +956,7 @@ impl Checker {
         // Derive bridging/delegation (layers 1+2): a derive's *planned* methods — required-member
         // bridges, `via:` forwards, builtin `via:` templates — register their signatures, from
         // the same shared planner the backends' hoist materializes, so what the checker types and
-        // what runs can never drift. Runs BEFORE the generic UT5 defaults loop below: a `via:`
+        // what runs can never drift. Runs BEFORE the generic default-method loop below: a `via:`
         // forward replaces the trait's default wholesale (delegation dispatches into the field's
         // implementation), and registration keeps the first entry per name. A plan error is
         // ignored here; `check_derives` reports it.
@@ -1102,7 +1101,7 @@ impl Checker {
         // ran, and printed `false` — a wrong answer rather than a diagnostic.
         //
         // Placement is load-bearing. AFTER the type walk, so `symbols.type_params` already carries
-        // the target's parameters (stored there for exactly this purpose). BEFORE the UT5
+        // the target's parameters (stored there for exactly this purpose). BEFORE the
         // default-fallback below, whose `register_synth_method` skips an already-registered key —
         // so a method the impl really provides wins over the trait's default.
         // A standalone `impl From<Source> for Target { … }` files its conversion under the same
@@ -1121,7 +1120,7 @@ impl Checker {
                 .get(d.target.as_str())
                 .cloned()
                 .unwrap_or_default();
-            // Mirror the in-body path's `Self::Name` projection (slice 1a, `bake_impl_assoc`): a
+            // Mirror the in-body path's `Self::Name` projection (`bake_impl_assoc`): a
             // signature written against an associated type resolves to this impl's binding for it,
             // so a concrete receiver types against the implementor's type rather than a hole.
             let assoc: HashMap<&str, &TypeRef> = d
@@ -1221,17 +1220,17 @@ impl Checker {
                 _ => {}
             }
         }
-        // Trait default-body routes (ExtBundle→ExtTrait convergence, slice 2): before the UT5
-        // fallback below, record which `(type, method)` pairs a NATIVE trait's default-body dispatch
+        // Trait default-body routes: before the default-method fallback below, record which
+        // `(type, method)` pairs a NATIVE trait's default-body dispatch
         // answers — a defaulted method the type neither declares nor overrides. Done here, with the AST
         // impl bodies in reach, because "omitted vs provided" is not decidable from `symbols.methods`.
         self.seed_native_trait_defaults(program);
-        // Default-method fallback (UT5): a trait method the implementor omits falls back to the
+        // Default-method fallback: a trait method the implementor omits falls back to the
         // trait's default body (the backends hoist it via `hoist_standalone_impl_methods`), so its
         // SIGNATURE registers here — member calls on the implementing type resolve and type it. A
         // method the type provides itself wins (already registered above); a generic trait's
         // defaults are excluded (per-implementor substitution — deferred with generic-trait
-        // derivation). A **native** trait carrying a default-body dispatch (slice 2) is also excluded:
+        // derivation). A **native** trait carrying a default-body dispatch is also excluded:
         // its omitted defaults route through `native_trait_default_sites` (a native body, no hoisted
         // `.noe` signature to register — a synth one would misclassify a no-`self` body as an
         // associated fn), and a native/user override resolves through its own real method instead.
@@ -1303,7 +1302,7 @@ impl Checker {
                 }
             }
         }
-        // Method-bundle bindings (kernel-methods K1) resolve after the whole collect walk, so a
+        // Method-bundle bindings resolve after the whole collect walk, so a
         // binding is visible to method typing regardless of where the `impl`/`@derive` sits relative
         // to the `use` that binds its module. The TWO spellings register identically: a standalone
         // `impl <module>.<Bundle> for T {}` and a `@derive(<module>.<Bundle>)` on the type — the
@@ -1473,15 +1472,13 @@ impl Checker {
         })
     }
 
-    /// Resolve a dotted trait path (`vec.Kernels`) to its registered kernel **trait** (ExtBundle→ExtTrait
-    /// fold-in, slice 4): everything before the last dot is a bound module name (`use std.{vec}`), the
-    /// last segment the trait. `None` when the module binding or the trait doesn't exist — the impl-site
-    /// check reports.
+    /// Resolve a dotted trait path (`vec.Kernels`) to its registered kernel **trait**: everything
+    /// before the last dot is a bound module name (`use std.{vec}`), the last segment the trait.
+    /// `None` when the module binding or the trait doesn't exist — the impl-site check reports.
     ///
-    /// **Surface adapter, NOT a second mechanism.** The kernel traits were `ExtBundle`s until the
-    /// fold-in; this resolves the *module-qualified spelling* (`vec.Kernels`) — the surface a bundle bind
-    /// was written in — to the one native `ExtTrait`, which the checker then treats through the ordinary
-    /// trait machinery (its `self_constraint`, `assoc_types`, `dispatch`). The returned `String` is the
+    /// **Surface adapter, NOT a second mechanism.** This resolves the *module-qualified spelling*
+    /// (`vec.Kernels`) — the surface a bundle binding is written in — to the one native `ExtTrait`,
+    /// which the checker then treats through the ordinary trait machinery (its `self_constraint`, `assoc_types`, `dispatch`). The returned `String` is the
     /// qualified module (`std.vec`), which equals the trait's `namespace` (so `find_trait_in_module`
     /// matches it) and, appended with the trait name, its `qualified()` runtime-dispatch identity.
     pub(crate) fn resolve_bundle_ref(
@@ -1495,7 +1492,7 @@ impl Checker {
     }
 
     /// Record which of a type's `fields` carry a default (`name: T = …`) — and so are **optional** in
-    /// an attribute construction (object-model slice 6i). Used by the construction gate to omit a
+    /// an attribute construction. Used by the construction gate to omit a
     /// defaulted field without an E0009.
     ///
     /// The same walk records each default's **decode** classification (json-defaults) into
@@ -1551,8 +1548,8 @@ impl Checker {
     }
 
     /// Register a synthesized/fallback method's signature and instance classification for
-    /// `type_name`, unless the type already has one by that name — the registration UT5 default
-    /// fallback and derive bridging share (the body itself is materialized by the backends'
+    /// `type_name`, unless the type already has one by that name — the registration the
+    /// default-method fallback and derive bridging share (the body itself is materialized by the backends'
     /// hoist; the checker needs the signature so member calls resolve and type).
     ///
     /// `trait_name` is the trait the synthesized method stands in for — every caller has one, since
@@ -1560,9 +1557,9 @@ impl Checker {
     /// `impl` block's method does, so a hoisted default of a `static fn` narrows exactly like a
     /// written-out one.
     fn register_synth_method(&mut self, type_name: &str, trait_name: &str, m: &noeta_ast::FnDecl) {
-        // Every method reaching here comes from a trait: a hoisted UT5 default, or a `@derive`
+        // Every method reaching here comes from a trait: a hoisted default, or a `@derive`
         // plan's bridge/forward. So a self-less one is `Either` like any other trait method — an
-        // omitted default is reachable as `T.m()` (the documented UT5 spelling) *and* on a value,
+        // omitted default is reachable as `T.m()` (the documented spelling) *and* on a value,
         // exactly as the same body written out in the `impl` block would be, and narrowed back to
         // `Static` by the same pass if the trait declared it so.
         let receiver = Receiver::trait_method(m.body.iter().any(|s| s.mentions("self")));
@@ -1603,7 +1600,7 @@ impl Checker {
         self.symbols.methods.insert(key, sig);
     }
 
-    /// Record an impl's associated-type bindings (slice 1a): fold its `type Name = Concrete;` entries
+    /// Record an impl's associated-type bindings: fold its `type Name = Concrete;` entries
     /// over the trait's defaulted associated types into `trait_assoc[(type, trait)]`. A non-user trait
     /// (or one declaring no associated types and receiving no bindings) records nothing.
     fn record_assoc_bindings(
@@ -1641,7 +1638,7 @@ impl Checker {
             .insert((type_name.to_string(), trait_name.to_string()), map);
     }
 
-    /// Concrete-receiver projection bake (slice 1a): re-register each in-body impl block's methods with
+    /// Concrete-receiver projection bake: re-register each in-body impl block's methods with
     /// every `Self::Name` in their signatures replaced by the impl's binding for `Name`, so a call on a
     /// concrete receiver types against the implementor's associated type. Overwrites the flattened
     /// (unresolved) registration from the main method walk. A block with no bindings is skipped (there
@@ -1699,7 +1696,7 @@ impl Checker {
         }
     }
 
-    /// Populate [`Symbols::native_trait_default_sites`] (ExtBundle→ExtTrait convergence, slice 2): for
+    /// Populate [`Symbols::native_trait_default_sites`]: for
     /// every `(type, trait)` where the trait is a **native** trait carrying a default-body dispatch,
     /// record each defaulted method the type does not itself provide — a native inherent method
     /// (resolved through `method_return`, covering every native kind) or an `impl` override body
@@ -1741,12 +1738,12 @@ impl Checker {
             }
         }
         // Resolve the routes under the immutable registry/import borrows, then write them in.
-        // Sorted for the same reason the UT5 fallback below is: a `(type, method)` reachable through
-        // *two* native traits used to be routed to whichever the hash walk reached last — and the
-        // route is the body that runs, so two traits whose defaults disagree (the shipped
-        // `vec.Kernels`/`vec.SatKernels` pair differs by wrapping vs saturating arithmetic) would
-        // compute different answers in different processes. Rival routes are a diagnostic now
-        // (E0027, reported in pass 2), so this order settles nothing but reproducibility.
+        // Sorted for the same reason the default-method fallback below is: an unordered hash walk
+        // would route a `(type, method)` reachable through *two* native traits to whichever it
+        // reached last, and the route is the body that runs — two traits whose defaults disagree
+        // (the shipped `vec.Kernels`/`vec.SatKernels` pair differs by wrapping vs saturating
+        // arithmetic) would then compute different answers in different processes. Rival routes are
+        // a diagnostic (E0027, reported in pass 2), so this order settles only reproducibility.
         let impls = self.symbols.user_trait_impls.clone();
         let mut sorted_impls: Vec<(String, Vec<String>)> = impls
             .iter()
@@ -1948,7 +1945,7 @@ impl Checker {
         }
     }
 
-    /// Register a struct's `@attribute` opt-in (P2.5). `kinds` is `None` for an ordinary struct and
+    /// Register a struct's `@attribute` opt-in. `kinds` is `None` for an ordinary struct and
     /// `Some(list)` when the struct is marked `@attribute`: the struct joins [`Self::attributes`]
     /// (usable in `#[...]` position), and any placement kinds (`@attribute(Method, …)`) are validated
     /// — each must be a fixed [`TargetKind`] (unknown → `E0030` at its span) — and recorded so each
@@ -2230,7 +2227,7 @@ impl noeta_ast::derive::DeriveContext for CheckerDeriveContext<'_> {
     }
 }
 
-/// Rewrite every `Self::Name` projection inside a [`TypeRef`] to its bound concrete type (slice 1a),
+/// Rewrite every `Self::Name` projection inside a [`TypeRef`] to its bound concrete type,
 /// recursing through composite types so `List<Self::Item>` / `?Self::Item` are covered. A projection
 /// whose name has no binding is left as-is (it later degrades to `Type::Unknown` via `Type::from_ref`).
 fn subst_self_assoc(ty: &TypeRef, bindings: &HashMap<&str, &TypeRef>) -> TypeRef {
@@ -2275,7 +2272,7 @@ fn subst_self_assoc(ty: &TypeRef, bindings: &HashMap<&str, &TypeRef>) -> TypeRef
 }
 
 /// A method signature with every `Self::Name` in its parameter and return annotations resolved to the
-/// impl's binding (slice 1a). The body is untouched — projection is a typing concern, not a runtime one.
+/// impl's binding. The body is untouched — projection is a typing concern, not a runtime one.
 fn subst_self_assoc_in_fn(m: &FnDecl, bindings: &HashMap<&str, &TypeRef>) -> FnDecl {
     let mut out = m.clone();
     for p in &mut out.params {

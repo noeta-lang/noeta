@@ -54,7 +54,7 @@ fn walk(dir: &PathBuf) -> Vec<PathBuf> {
 }
 
 fn bench_check(c: &mut Criterion) {
-    // The bench is its own assembling driver (audit-6 F2): seed the std units before the first
+    // The bench is its own assembling driver: seed the std units before the first
     // check_all, outside the measured loop (production seeds at binary entry the same way).
     noeta_stdlib::registry::default_seeded();
     let corpus = parsed_corpus();

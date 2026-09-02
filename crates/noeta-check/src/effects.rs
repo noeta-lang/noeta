@@ -60,7 +60,7 @@ impl Checker {
         }
     }
 
-    /// Whether a value of type `ty` may cross an isolate boundary (isolates milestone). Value types are
+    /// Whether a value of type `ty` may cross an isolate boundary. Value types are
     /// `Send` (copied, or borrow-shared under the scope lifetime); reference `class`es and the stateful
     /// built-ins (`Future`/`Iterator`/`FileHandle`/closures) are `!Send`. Structural — a container /
     /// `struct` / `enum` is `Send` iff its elements / fields / payloads are — with a `visited` set so a
@@ -151,7 +151,7 @@ impl Checker {
         }
     }
 
-    /// Track A.3a/A.6: an `.await` inside an `async fn` is compiled into a poll-state of the state
+    /// An `.await` inside an `async fn` is compiled into a poll-state of the state
     /// machine. It is legal in every **value position** — statement position (a binding /
     /// expression-statement / `return` / `echo` / destructure value, optionally under one `?`), any
     /// unconditionally-evaluated sub-expression (hoisted to a preceding statement-position await by the
@@ -207,14 +207,14 @@ impl Checker {
     }
 }
 
-/// Whether a statement sequence contains a `yield` (Track G), making its enclosing function a
+/// Whether a statement sequence contains a `yield`, making its enclosing function a
 /// **generator**. Descends into control-flow bodies (`if`/`for`/`while`) but **not** into nested
 /// function declarations or closures — a `yield` there belongs to that inner callable, not this one.
 pub(crate) fn body_has_yield(stmts: &[Stmt]) -> bool {
     stmts.iter().any(stmt_has_yield)
 }
 
-/// Whether `stmts` contain a `.await` at **this callable level** (Track A): inspecting each
+/// Whether `stmts` contain a `.await` at **this callable level**: inspecting each
 /// statement's expressions with [`Expr::has_await`] (which stops at closures) and recursing through
 /// control flow, but NOT into a nested `fn` declaration (its own callable) or a stripped tier block.
 /// Decides whether a function body or the module top level is an async context.

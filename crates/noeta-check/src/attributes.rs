@@ -51,7 +51,7 @@ impl Checker {
                 );
                 continue;
             }
-            // Placement gate (P2.5): when `Foo` declared `@attribute(Kind, …)`, this use site's kind
+            // Placement gate: when `Foo` declared `@attribute(Kind, …)`, this use site's kind
             // must be among the permitted ones, else `E0030`.
             if let Some(allowed) = self.symbols.attachable.get(&key)
                 && !allowed.contains(&target)
@@ -157,7 +157,7 @@ impl Checker {
             self.check_attr_value(&arg.value, &fty, &fname, arg.span);
         }
         for (i, (fname, fty)) in fields.iter().enumerate() {
-            // A field with a default (`name: T = …`) is optional — it may be omitted (slice 6i).
+            // A field with a default (`name: T = …`) is optional — it may be omitted.
             if !filled[i] && !self.field_has_default(key, fname) {
                 self.error(
                     DiagnosticCode::MissingField,

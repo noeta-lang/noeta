@@ -38,7 +38,7 @@ pub(crate) struct VariantInfo {
 /// here instead, so a reader sees three cases and a `match` makes them decide.
 ///
 /// The variants say **static**, the word the language's own modifier and every diagnostic use for
-/// "takes no receiver" (static-trait-methods arc). They used to say "associated", which named the
+/// "takes no receiver". They used to say "associated", which named the
 /// same idea in a second vocabulary — the drift this classification exists to prevent, spelled in
 /// the classification itself.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -166,7 +166,7 @@ pub(crate) struct FnSig {
     /// (defaulted) ones the callee fills in. Equals `params.len()` for a function with no defaults.
     pub(crate) required: usize,
     /// Generic instantiation data for a generic free function; `None` for non-generic functions
-    /// and for methods (whose bound enforcement is deferred — see slice S4).
+    /// and for methods.
     pub(crate) generic: Option<GenericInfo>,
 }
 
@@ -204,7 +204,7 @@ pub(crate) struct Conversion {
 #[derive(Clone)]
 pub(crate) struct GenericInfo {
     /// `(type parameter, trait bounds)` in declaration order. For a METHOD with its own
-    /// type parameters (generic methods, poly-deferrals D3) this is the CLASS's parameters
+    /// type parameters (generic methods) this is the CLASS's parameters
     /// followed by the method's own — the two substitutions compose because the receiver's type
     /// arguments seed exactly the first `class_params` entries (positionally) and the method's
     /// own are filled by turbofish/arguments/expectation.
@@ -329,7 +329,7 @@ pub(crate) struct BoundReq {
 }
 
 /// One binding in a scope frame: its inferred type and whether it was declared `mut`. The `mutable`
-/// bit drives the kind-aware `x.f = v` rule (object-model slice 2b′): a value `struct` field-set is
+/// bit drives the kind-aware `x.f = v` rule: a value `struct` field-set is
 /// a rebind of `x`, so `x` must be `mut` (E0006); a reference `class` field-set mutates in place and
 /// needs no `mut` binding.
 #[derive(Clone)]

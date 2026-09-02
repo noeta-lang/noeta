@@ -22,7 +22,7 @@ use noeta_span::Span;
 /// and the disassembly snapshots show it.
 pub type Reg = u16;
 
-/// An interned name index into [`Module::names`] (P-VMT-OPSZ). Every instruction-embedded name —
+/// An interned name index into [`Module::names`]. Every instruction-embedded name —
 /// field/method names, the ext-call module+func, type names, and `match`-literal strings —
 /// is held as this 4-byte id instead of an inline 24-byte `String`, which is what shrinks `Op` from
 /// two cache lines toward one. The VM resolves it back to `&str` only at the cold lookup sites
@@ -32,7 +32,7 @@ pub type Reg = u16;
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NameId(pub u32);
 
-/// A global-variable **slot index** into the VM's per-run globals vector (P-VMT-GSLOT). Top-level
+/// A global-variable **slot index** into the VM's per-run globals vector. Top-level
 /// bindings and `fn` names used to be resolved by hashing their name against a `HashMap` on every
 /// access — the dominant cost of a top-level loop and of every global-function call. The compiler
 /// now assigns each global a dense slot at emit time, so `LoadGlobal`/`StoreGlobal`/`TakeGlobal`
@@ -42,7 +42,7 @@ pub struct NameId(pub u32);
 pub struct GlobalId(pub u32);
 
 /// Which operand of a logical operator is being checked, for the "expects a bool on the
-/// left/right" diagnostic (matching the M0 tree-walker's `eval_logical`).
+/// left/right" diagnostic (matching the tree-walker's `eval_logical`).
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BoolSide {
     Left,
@@ -71,9 +71,9 @@ pub enum Builtin {
     Filter,
     Sum,
     /// `assert(cond)` / `assert(cond, msg)` — abort (a `Panic` diagnostic) when `cond` is false.
-    /// The assertion primitive the test runner's `@test` blocks (object-model slice 6) rest on.
+    /// The assertion primitive the test runner's `@test` blocks rest on.
     Assert,
-    /// `Ok(x)` / `Ok()` — construct a `Result.Ok` (poly-values F3: also a first-class value).
+    /// `Ok(x)` / `Ok()` — construct a `Result.Ok` (also a first-class value).
     /// A direct, arity-correct call still compiles to the dedicated `MakeEnum` fast path; this
     /// variant carries the value form and the wrong-arity runtime error.
     MakeOk,
@@ -84,10 +84,10 @@ pub enum Builtin {
     /// `panic(msg)` — abort with an unrecoverable `Panic` diagnostic. As a value, calling it
     /// reproduces `Op::Panic`'s exact behavior and message.
     Panic,
-    // (The whole orchestration family — `task` at higher-order-abi H0/H2, `http.serve` at H3,
-    // `signal`/`computed`/`effect` at H5 — migrated onto the registry's `NativeCtx` dispatch,
-    // `noeta-stdlib/src/{task,serve,reactive}.rs`. Only the language-level collection builtins,
-    // `assert`, and the prelude constructors remain.)
+    // (The orchestration family — `task`, `http.serve`, `signal`/`computed`/`effect` — dispatches
+    // through the registry's `NativeCtx` in `noeta-stdlib/src/{task,serve,reactive}.rs`, so this
+    // enum holds only the language-level collection builtins, `assert`, and the prelude
+    // constructors.)
 }
 
 impl Builtin {
@@ -130,7 +130,7 @@ pub enum Const {
     Bool(bool),
     Int(i64),
     Float(f64),
-    /// A 32-bit float literal (`1.0f32`, P-PACK Phase 3).
+    /// A 32-bit float literal (`1.0f32`).
     F32(f32),
     Str(String),
     /// A Ring 2 native module, by surface name (`use std.{json}` lowers to loading this then
@@ -152,7 +152,7 @@ pub enum Const {
     },
 }
 
-/// One segment of a fused string interpolation ([`Op::BuildString`], P-VMT-STR). A `Literal` is a
+/// One segment of a fused string interpolation ([`Op::BuildString`]). A `Literal` is a
 /// constant-pool string copied verbatim; a `Hole` register is rendered through `display` (a
 /// `Display` object was already routed through its `to_string` by the preceding `Stringify`, so by
 /// this point the register holds a plain value). Replaces the old `LoadConst "" + N×(Stringify +
@@ -181,14 +181,14 @@ pub enum NarrowTarget {
     F32,
     Bool,
     String,
-    /// A `bytes` target (`x is bytes` / `x.as<bytes>()`) — P-PACK 4.4.
+    /// A `bytes` target (`x is bytes` / `x.as<bytes>()`).
     Bytes,
     Unit,
     List,
     Map,
     Set,
     /// A tuple target (`x.as<(int, string)>()`): matches any tuple value — head-constructor only,
-    /// arity and element types erased, like `List` ignoring its element type (object-model slice 4).
+    /// arity and element types erased, like `List` ignoring its element type.
     Tuple,
     Fn,
     Dyn,
@@ -207,12 +207,12 @@ pub enum NarrowTarget {
     AnyEnum,
     AnyStruct,
     AnyClass,
-    /// A **parametrized** target (`x is List<int>` / `x is Box<int>`, R3): `head` is the head-only
-    /// target (matched exactly as before — this preserves the widening `x is List` and the untagged
-    /// fallback), and `args` are the expected type arguments. When the value carries a reflected type
-    /// (R1/R2), the matcher additionally requires its arguments match `args` (a `dyn` on either side is
-    /// a wildcard), so `List<int>` no longer matches a value tagged `List<string>`. An untagged value
-    /// classifies its arguments to `dyn` and so still matches head-only.
+    /// A **parametrized** target (`x is List<int>` / `x is Box<int>`): `head` is the head-only
+    /// target, which preserves the widening `x is List` and the untagged fallback, and `args` are
+    /// the expected type arguments. When the value carries a reflected type, the matcher
+    /// additionally requires its arguments match `args` (a `dyn` on either side is a wildcard), so
+    /// `List<int>` does not match a value tagged `List<string>`. An untagged value classifies its
+    /// arguments to `dyn` and so still matches head-only.
     Generic {
         head: Box<NarrowTarget>,
         args: Vec<noeta_ast::reflect::TypeRepr>,
@@ -277,7 +277,7 @@ impl NarrowTarget {
             // The erased widths (`f64`, `i8..u64`) carry no runtime tag on a scalar, so they fall to
             // the nominal path and never match a scalar. The checker warns on a bare-scalar `is
             // i32`/`is f64` (statically always-false); giving them heads would need scalar
-            // reification, which the arc deliberately declines. `f32` alone is reified and handled
+            // reification, which the design deliberately declines. `f32` alone is reified and handled
             // above. Both backends agree.
             BuiltinTy::F64 | BuiltinTy::IntN { .. } => return None,
         })
@@ -319,7 +319,7 @@ pub enum ReuseCheck {
 /// `Some` only at a call that skips a defaulted parameter (`f(1, c: 9)`) — and such a call supplies
 /// at least one parameter, so an all-zero mask is not a reachable state. That lets `NonZeroU64`'s
 /// niche give the `Option` discriminant a home instead of a second word: `Option<u64>` is 16 bytes,
-/// this is 8. `Op` is pinned to a single 64-byte cache line (P-VMT-OPSZ, `tests/op_size.rs`), and
+/// this is 8. `Op` is pinned to a single 64-byte cache line (`tests/op_size.rs`), and
 /// with three call ops each carrying a mask *and* a type-argument channel, that word is the
 /// difference between one cache line and two.
 ///
@@ -346,11 +346,11 @@ pub fn supplied_of(mask: SuppliedMask) -> Option<u64> {
 }
 
 /// A call's **type-argument** registers — what fills a forwarding generic's leading
-/// [`Chunk::hidden`] slots (poly-values F2b), in slot order. See [`Op::Call::type_args`].
+/// [`Chunk::hidden`] slots, in slot order. See [`Op::Call::type_args`].
 ///
 /// Held out of line behind a **thin** pointer, and empty (one null word) for the overwhelming
 /// majority of calls, which forward nothing. `Op` is streamed through the dispatch loop and pinned
-/// to a single 64-byte cache line (P-VMT-OPSZ, `tests/op_size.rs`); an inline `Box<[Reg]>` is a
+/// to a single 64-byte cache line (`tests/op_size.rs`); an inline `Box<[Reg]>` is a
 /// *fat* pointer, and spending two words on a channel almost every call leaves empty is exactly
 /// what pushed `Op` over that line. The rare forwarding call pays one extra indirection, on a path
 /// that is already doing a frame push.
@@ -553,8 +553,9 @@ pub enum Op {
         global: GlobalId,
         span: Span,
     },
-    /// `globals[name] = src` (refcounted: release old binding, retain `src`). Only emitted at
-    /// the top level — functions never assign globals in the M1.2 subset.
+    /// `globals[name] = src` (refcounted: release old binding, retain `src`). Emitted for a
+    /// top-level binding and for any assignment that resolves to a module global, including one
+    /// made from inside a function or an async task.
     StoreGlobal {
         global: GlobalId,
         src: Reg,
@@ -578,10 +579,10 @@ pub enum Op {
     /// Clearing to `unit` keeps it idempotent with `set_reg`'s release-on-overwrite and frame teardown
     /// (both then release `unit`, a no-op) — so no value is double-freed. See `p-reuse-analysis.md`.
     ///
-    /// `relevant` (Phase 4, from the IR `DropVar`'s destructor-relevance bit): when `true`, the
+    /// `relevant` (from the IR `DropVar`'s destructor-relevance bit): when `true`, the
     /// release runs through the destructor-firing path (`release_value`) so a `destruct` block fires
     /// at this last use if this is the final owning reference; when `false`, the value provably
-    /// reaches no destructor, so the plain `release` is used (the fast path, unchanged from Phase 3).
+    /// reaches no destructor, so the plain `release` is used (the fast path).
     Drop {
         reg: Reg,
         relevant: bool,
@@ -653,13 +654,13 @@ pub enum Op {
     MakeList {
         dst: Reg,
         items: Box<[Reg]>,
-        /// The list's reflected element type (runtime type-argument reflection, R1): an index into
+        /// The list's reflected element type (runtime type-argument reflection): an index into
         /// [`Module::type_reprs`], or `None` when the literal carried no checker-resolved type (it
         /// stays untagged and reflects head-only). Stamped onto the freshly-built list so `type_of`
         /// recovers the element type after a `dyn` launder. Invisible to value semantics.
         reflect: Option<u32>,
     },
-    /// `dst = <empty List<packed>>` (P-PACK 2.5) — allocate an empty flat raw-primitive buffer for a
+    /// `dst = <empty List<packed>>` — allocate an empty flat raw-primitive buffer for a
     /// `List<@packed struct>` literal, using `schema` (an index into [`Module::packed_schemas`]). It
     /// is filled element-by-element by [`Op::PackedListPush`]; building this way (rather than from all
     /// N element registers at once) keeps only one element object live at a time.
@@ -667,7 +668,7 @@ pub enum Op {
         dst: Reg,
         schema: u32,
     },
-    /// `dst = packed-push(list, value)` (P-PACK 2.5) — pack the value-struct in `value` onto the flat
+    /// `dst = packed-push(list, value)` — pack the value-struct in `value` onto the flat
     /// `List<packed>` in `list` and place the (in-place-extended) list in `dst`. `list` is the
     /// streaming accumulator — an ANF temp, uniquely owned — so the buffer extends in place; `value`
     /// is consumed (its primitive fields copied into the buffer, the element object then dropped by
@@ -679,13 +680,13 @@ pub enum Op {
         value: Reg,
         span: Span,
     },
-    /// `dst = (items...)` — build a heap tuple (object-model slice 4), retaining each element into
+    /// `dst = (items...)` — build a heap tuple, retaining each element into
     /// it exactly like `MakeList`.
     MakeTuple {
         dst: Reg,
         items: Box<[Reg]>,
     },
-    /// `dst = receiver.N` — positional tuple projection by a constant index (object-model slice 4).
+    /// `dst = receiver.N` — positional tuple projection by a constant index.
     /// The index is in range by construction (the checker verifies it against the tuple's arity).
     TupleIndex {
         dst: Reg,
@@ -708,21 +709,21 @@ pub enum Op {
     MakeMap {
         dst: Reg,
         entries: Box<[(Reg, Reg)]>,
-        /// The map's reflected `Map(K, V)` type (R1): an index into [`Module::type_reprs`], or `None`
+        /// The map's reflected `Map(K, V)` type: an index into [`Module::type_reprs`], or `None`
         /// when the literal carried no checker-resolved type. Stamped onto the built map so `type_of`
         /// recovers it after a `dyn` launder. Invisible to value semantics, like `MakeList`'s tag.
         reflect: Option<u32>,
     },
     /// Require `reg` to be a string (a map key), else raise E0007 ("map keys must be strings,
     /// found <type>") at `span`. Emitted between a map entry's key and value so the error
-    /// timing matches the M0 tree-walker (key checked before the value is evaluated).
+    /// timing matches the tree-walker (key checked before the value is evaluated).
     RequireMapKey {
         reg: Reg,
         span: Span,
     },
     /// `dst = <elements of src to iterate>`. A list yields a retained shallow copy; a map
     /// yields a new list of its values in sorted-key order; anything else raises E0007
-    /// ("cannot iterate over <type>") at `span`. Snapshots iteration, as the M0 tree-walker
+    /// ("cannot iterate over <type>") at `span`. Snapshots iteration, as the tree-walker
     /// does, so `dst` is always a list the loop can index.
     IterSnapshot {
         dst: Reg,
@@ -742,7 +743,7 @@ pub enum Op {
         list: Reg,
         index: Reg,
     },
-    /// Streaming `for` step (Track I.2): advance the iterator in `iter` (a `Value::Iter`) one element.
+    /// Streaming `for` step: advance the iterator in `iter` (a `Value::Iter`) one element.
     /// On success `elem` ← the next element (retained, owned) and `has` ← `true`; at end `elem` ← unit
     /// and `has` ← `false`. A `map`/`filter` closure runs here, so it can raise (a closure error, or a
     /// non-bool `filter` verdict → E0007) at `span`. The loop tests `has` to continue or exit.
@@ -760,7 +761,7 @@ pub enum Op {
         args: Box<[Reg]>,
         span: Span,
     },
-    /// `dst = recv.method(args...)` — a runtime-dispatched method call (mirroring the M0
+    /// `dst = recv.method(args...)` — a runtime-dispatched method call (mirroring the
     /// tree-walker's `call_method`). On an object, `method` resolves through the module's
     /// instance-method table by the receiver's type name and pushes a call frame `[recv,
     /// args...]`; on a list/map/string, `count`/`enumerate` are the built-in zero-arg methods
@@ -781,7 +782,7 @@ pub enum Op {
         /// shape → resolved method prototype, so a monomorphic site skips the `(type, method)`
         /// hashmap lookup (and its two `String` clones). Assigned by the compiler.
         cache: u32,
-        /// In-place-reuse token (Phase 5.1c, from the IR `Rvalue::Method.reuse`): set on a collection
+        /// In-place-reuse token (from the IR `Rvalue::Method.reuse`): set on a collection
         /// **method self-update** `m = m.set(k, v)` whose receiver is a directly-held local. When the
         /// runtime receiver is actually a map and `method` is an in-place-capable update (`set`/
         /// `remove`), its sole-owned backing buffer is mutated in place (consuming the receiver
@@ -813,7 +814,7 @@ pub enum Op {
         index: Reg,
         span: Span,
     },
-    /// `dst = recv[index].field` — a fused indexed field read (P-PACK 2.5+). The compiler emits this
+    /// `dst = recv[index].field` — a fused indexed field read. The compiler emits this
     /// only when the checker proved `recv` is a built-in `List` (see `Rvalue::IndexField`): a packed
     /// list decodes the one field's word(s) directly, without materializing the indexed element; a
     /// boxed (demoted) list does the ordinary index-then-load. Either way the result equals the
@@ -836,7 +837,7 @@ pub enum Op {
         shape: u32,
         named: Box<[(u16, Reg)]>,
         spread: Option<Reg>,
-        /// The reflected type (R2): an index into [`Module::type_reprs`] for a **generic**
+        /// The reflected type: an index into [`Module::type_reprs`] for a **generic**
         /// instantiation, or `None` for a non-generic type (recovered head-only). Stamped onto the
         /// built struct so `type_of` recovers its type arguments after a `dyn` launder.
         reflect: Option<u32>,
@@ -858,14 +859,14 @@ pub enum Op {
         named: Box<[(u16, Reg)]>,
         base: Reg,
         check: ReuseCheck,
-        /// The reflected type (R2), as on [`Op::MakeStruct`]. A self-update rebuilds a value of the
+        /// The reflected type, as on [`Op::MakeStruct`]. A self-update rebuilds a value of the
         /// same type, so the reused node is (re)stamped with the current literal's tag.
         reflect: Option<u32>,
         span: Span,
     },
     /// `dst = Type { key: value, ...spread }` for an **opaque** `use`-imported type, whose
     /// real field set is unknown until the literal supplies it. The runtime object's shape is
-    /// built from the (spread ∪ named) keys in sorted order — matching the M0 tree-walker's
+    /// built from the (spread ∪ named) keys in sorted order — matching the tree-walker's
     /// `BTreeMap`-ordered field bag — with no missing/unknown-field checks.
     MakeOpaque {
         dst: Reg,
@@ -880,7 +881,7 @@ pub enum Op {
         dst: Reg,
         shape: u32,
         args: Box<[Reg]>,
-        /// The reflected type for a **generic** enum-variant construction (R2b.2): an index into
+        /// The reflected type for a **generic** enum-variant construction: an index into
         /// [`Module::type_reprs`], or `None` for a non-generic enum or an ordinary variant. Stamped
         /// onto the built value so `type_of` recovers the enum's type arguments after a `dyn` launder.
         reflect: Option<u32>,
@@ -920,7 +921,7 @@ pub enum Op {
         /// Assigned by the compiler.
         cache: u32,
     },
-    /// `dst = (obj with field = value)` — in-place field assignment (`x.f = v`, Phase 5.2),
+    /// `dst = (obj with field = value)` — in-place field assignment (`x.f = v`),
     /// **value semantics**. When `reuse` is set and `obj` is uniquely owned at runtime (`refcount
     /// == 1`) its slot is overwritten in place (the displaced old value's `destruct` fires now) and
     /// `obj` is consumed (its register cleared) into `dst`; otherwise a shallow copy with the field
@@ -945,7 +946,7 @@ pub enum Op {
     /// current frame (the M0 `Unwind::Return`); anything else raises E0007 at `span`. On the
     /// early-return path, the `(reg, relevant)` pairs in `on_error` are dropped first — the drop
     /// pass's reclamation of the frame locals this `?` abandons, destructor-relevant ones firing
-    /// `destruct` (Phase 4.2c) — in the order given (innermost scope first, reverse-construction).
+    /// `destruct` — in the order given (innermost scope first, reverse-construction).
     TryUnwrap {
         dst: Reg,
         src: Reg,
@@ -968,7 +969,7 @@ pub enum Op {
     Narrow {
         dst: Reg,
         src: Reg,
-        /// Boxed (P-VMT-OPSZ): `NarrowTarget` is 32 bytes and narrowing is a cold op, so it lives
+        /// Boxed: `NarrowTarget` is 32 bytes and narrowing is a cold op, so it lives
         /// behind a pointer to keep it off the hot instruction stream.
         target: Box<NarrowTarget>,
         /// A register holding the target's head name as a **string**, when `T` is a type parameter
@@ -990,13 +991,13 @@ pub enum Op {
     IsType {
         dst: Reg,
         src: Reg,
-        /// Boxed (P-VMT-OPSZ), as in [`Op::Narrow`].
+        /// Boxed, as in [`Op::Narrow`].
         target: Box<NarrowTarget>,
         /// The run-time head name, exactly as [`Op::Narrow`] carries it — the two share the matcher,
         /// so they share this channel.
         dynamic: Option<Reg>,
     },
-    /// `dst = make_gen(src)` (Track G.1b): wrap the step closure in `src` into a generator iterator
+    /// `dst = make_gen(src)`: wrap the step closure in `src` into a generator iterator
     /// (`IterState::Gen`). The generator desugar emits this as the tail of a generator function — the
     /// step closure is the lowered state machine over `mut`-captured cells; the resulting iterator
     /// composes with every Track-I adapter. Cannot fail, so it carries no span.
@@ -1004,14 +1005,14 @@ pub enum Op {
         dst: Reg,
         src: Reg,
     },
-    /// `dst = make_future(src)` (Track A.1): wrap the lazy thunk closure in `src` into a `Future`.
+    /// `dst = make_future(src)`: wrap the lazy thunk closure in `src` into a `Future`.
     /// The async desugar emits this as the tail of an `async fn` — the thunk defers the body until the
     /// future is awaited/run. Cannot fail, so it carries no span.
     MakeFuture {
         dst: Reg,
         src: Reg,
     },
-    /// `dst = run_future(src)` (Track A.2/A.3): drive the future in `src` to completion via the
+    /// `dst = run_future(src)`: drive the future in `src` to completion via the
     /// executor, yielding its value — the top-level `expr.await`. Polls; on pending advances the
     /// logical clock and re-polls. Carries a span for the call boundary (the step body can fault).
     RunFuture {
@@ -1019,7 +1020,7 @@ pub enum Op {
         src: Reg,
         span: Span,
     },
-    /// `dst = poll_future(src)` (Track A.3): poll the future in `src` once — `some(v)` if ready, `none`
+    /// `dst = poll_future(src)`: poll the future in `src` once — `some(v)` if ready, `none`
     /// if pending. The single-step primitive the async state machine emits at each `.await`. Carries a
     /// span (the step body can fault).
     PollFuture {
@@ -1027,14 +1028,14 @@ pub enum Op {
         src: Reg,
         span: Span,
     },
-    /// `dst = pending` (Track A.3): the async pending sentinel — what a state-machine step returns to
+    /// `dst = pending`: the async pending sentinel — what a state-machine step returns to
     /// signal it suspended at an `.await`. Cannot fail, so it carries no span.
     LoadPending {
         dst: Reg,
     },
-    /// Open a structured-concurrency scope (Track A.3b) — the start of a lowered `concurrent { }`.
+    /// Open a structured-concurrency scope — the start of a lowered `concurrent { }`.
     ScopeBegin,
-    /// `dst = scope_begin()` (Track A.7): open a scope and yield its **index** — the value form of
+    /// `dst = scope_begin()`: open a scope and yield its **index** — the value form of
     /// [`Self::ScopeBegin`], emitted by the async desugar's split `concurrent { }` so the block's join
     /// poll-state ([`Self::ScopeReady`]) can test *this* scope by index rather than whatever scope is
     /// innermost at re-poll time. Cannot fail (no span).
@@ -1042,7 +1043,7 @@ pub enum Op {
         dst: Reg,
         span: Span,
     },
-    /// `dst = scope_ready(src)` (Track A.7): whether every task in the scope whose index is in `src` has
+    /// `dst = scope_ready(src)`: whether every task in the scope whose index is in `src` has
     /// completed or been cancelled — the boolean the split `concurrent { }`'s join poll-state tests each
     /// poll (false ⇒ the step suspends, so the scheduler interleaves the inner scope's tasks with the
     /// outer scope's siblings). Carries a span (the operand must be a scope index).
@@ -1051,7 +1052,7 @@ pub enum Op {
         src: Reg,
         span: Span,
     },
-    /// `dst = spawn(src)` (Track A.3b): register the future in `src` as a task in the current scope and
+    /// `dst = spawn(src)`: register the future in `src` as a task in the current scope and
     /// yield a handle (a `Future<T>`). Carries a span (the operand must be a future).
     Spawn {
         dst: Reg,
@@ -1070,12 +1071,12 @@ pub enum Op {
         args: Box<[Reg]>,
         span: Span,
     },
-    /// Close the current concurrency scope (Track A.3b): drive every task spawned in it to completion
+    /// Close the current concurrency scope: drive every task spawned in it to completion
     /// (the join), then pop the scope. Carries a span (a task body can fault at the join).
     ScopeEnd {
         span: Span,
     },
-    /// Close the (already-drained) scope whose index is in `src` (Track A.7): release its tasks and
+    /// Close the (already-drained) scope whose index is in `src`: release its tasks and
     /// tombstone the slot — the value-directed close a split `concurrent { }` emits, which closes a
     /// **specific** scope by index (a sibling task's scope may still be open above it) rather than the
     /// innermost. No join (the `ScopeReady` poll-state already drained it). Carries a span.
@@ -1110,7 +1111,7 @@ pub enum Op {
     },
     /// `roles_of()` / `roles_of::<RoleEnum>()` / `roles_of(name)`: `dst = List<RoleBinding>` — the
     /// `(declaration, Role)` semantic-role index from the module's reflection info, each entry
-    /// materialized into a `RoleBinding { target, role }`. Reads `Module::reflection`. (P2.7.)
+    /// materialized into a `RoleBinding { target, role }`. Reads `Module::reflection`.
     ///
     /// `src` is `Some(reg)` for the scoped forms — the register holding the role enum's name as a
     /// runtime string, keeping only bindings whose role enum matches (mirroring [`Op::AttributesOf`],
@@ -1267,7 +1268,7 @@ pub enum Op {
         cases: Box<[noeta_ext_abi::HintCase]>,
     },
     /// `type_name::<T>()` where `T` is a **forwarded type parameter of the enclosing top-level
-    /// generic fn** (poly-values F2b): `dst = ` the qualified name of the [`Module::type_args`]
+    /// generic fn**: `dst = ` the qualified name of the [`Module::type_args`]
     /// entry whose index the hidden slot register `src` holds.
     ///
     /// The fn-side twin of [`Op::TypeArgName`] — same answer, different channel: a generic type
@@ -1299,14 +1300,14 @@ pub enum Op {
         dst: Reg,
         src: Reg,
     },
-    /// `from_bytes::<T>(blob)` — deserialize the `bytes` in `src` into a flat `List<T>` (P-PACK 4.4).
+    /// `from_bytes::<T>(blob)` — deserialize the `bytes` in `src` into a flat `List<T>`.
     /// `schema` is element `T`'s interned [`PackedSchemaDef`] index; the VM wraps the raw buffer as a
     /// packed list (validating the length is a whole number of elements). The inverse of `to_bytes`.
     FromBytes {
         dst: Reg,
         src: Reg,
         schema: u32,
-        /// Whether element `T` implements `Validate` (validation arc): when set, the VM runs
+        /// Whether element `T` implements `Validate`: when set, the VM runs
         /// `validate()` on each decoded element and aborts at `[i]` on the first rejection.
         validate: bool,
         span: Span,
@@ -1314,10 +1315,10 @@ pub enum Op {
     /// `type_of(value)` where the checker resolved the operand's **concrete** static type: `dst` is
     /// the full-fidelity [`noeta_ast::reflect::TypeRepr`] baked as a constant (`Type.List(Type.Int)`),
     /// recovering the element/argument types runtime erasure drops. The operand is still evaluated
-    /// (for its side effects) but its register is unused. (`type_of` fidelity A, P2.3.)
+    /// (for its side effects) but its register is unused.
     TypeOfStatic {
         dst: Reg,
-        /// Boxed (P-VMT-OPSZ): a full-fidelity `TypeRepr` is 56 bytes and `type_of` is a cold op.
+        /// Boxed: a full-fidelity `TypeRepr` is 56 bytes and `type_of` is a cold op.
         repr: Box<noeta_ast::reflect::TypeRepr>,
     },
     /// `dst = <the reflection `Type` value for `name`>` — materialize a bare type name as a
@@ -1333,7 +1334,7 @@ pub enum Op {
     /// by-name dispatch. `name` is a runtime `string`; `args` a runtime `List`. An unknown name, a
     /// non-string name, a non-list args, or an arity mismatch builds `Result.Err(string)` (via
     /// `err_shape`); a hit calls the resolved body and wraps its result in `Result.Ok` (via
-    /// `ok_shape`). A panic inside the invoked body propagates as a normal abort (P2.6).
+    /// `ok_shape`). A panic inside the invoked body propagates as a normal abort.
     ///
     /// `recv` selects the namespace, and there is no sentinel register for "no receiver" — a
     /// register always holds *some* value, so a sentinel would be indistinguishable from a real
@@ -1366,16 +1367,16 @@ pub enum Op {
         module: NameId,
         func: NameId,
         args: Box<[Reg]>,
-        /// Boxed (P-VMT-OPSZ): a `TypeRecipe` is 48 bytes and only a call-site-typed native call
+        /// Boxed: a `TypeRecipe` is 48 bytes and only a call-site-typed native call
         /// (`json.parse::<T>`) carries one, so it lives behind a pointer.
         recipe: Option<Box<noeta_ext_abi::TypeRecipe>>,
-        /// A forwarded type parameter (poly-values F2b): the register holding the hidden slot's
+        /// A forwarded type parameter: the register holding the hidden slot's
         /// index into [`Module::type_args`], whose entry supplies the per-instantiation recipe
         /// (`recipe` is `None` then).
         dynamic: Option<Reg>,
         span: Span,
     },
-    /// A **call-site-typed** native extern-METHOD call (`resp.json::<T>()`, http arc H8) — the
+    /// A **call-site-typed** native extern-METHOD call (`resp.json::<T>()`) — the
     /// [`Op::TypedModuleCall`] twin. The receiver register's runtime identity selects the extern
     /// type (as every method call does), so no type name is carried; `method` names the entry in
     /// that type's `typed_methods` table. The VM marshals receiver + arguments, runs the type's
@@ -1396,7 +1397,7 @@ pub enum Op {
         span: Span,
     },
     /// The **router-facing** runtime JSON decode (`json.decode_typed(name, text)` → `Result<dyn,
-    /// JsonError>`, L2.2 DI): decode the JSON in register `text` into the type named by the runtime
+    /// JsonError>`): decode the JSON in register `text` into the type named by the runtime
     /// string in register `name`, using the recipe registered for a `@derive(Deserialize<Json>)`
     /// type (baked into [`Module::deserialize_recipes`]). Fully recoverable — a malformed body **or**
     /// an unknown/unregistered type name lands as `Result.Err` (`err_shape`) wrapping a
@@ -1413,8 +1414,8 @@ pub enum Op {
     /// A **trait** method call with a baked-in route: `recv.method(args)` statically routed to a native
     /// trait's shared ctx dispatch, receiver as slot 0, no runtime discovery (so an empty list receiver
     /// works for the bulk kernels). Two producers: a native trait's defaulted method with a trait-level
-    /// dispatch and no override (slice 2); and — since the ExtBundle→ExtTrait fold-in (slice 4) — every
-    /// kernel-trait method (`impl vec.Kernels for T {}`), whose bundle route was unified onto this one.
+    /// dispatch and no override; and every kernel-trait method (`impl vec.Kernels for T {}`),
+    /// whose bundle route is unified onto this one.
     TraitMethod {
         dst: Reg,
         recv: Reg,
@@ -1449,7 +1450,7 @@ pub enum Op {
         arity: u16,
         fail: JumpPc,
     },
-    /// A `match` **tuple** test (object-model slice 4b.2): if `src` is a tuple of exactly `arity`
+    /// A `match` **tuple** test: if `src` is a tuple of exactly `arity`
     /// elements, continue; else jump to `fail`. Elements are then read with `TupleIndex` for the
     /// sub-patterns.
     MatchTuple {
@@ -1465,7 +1466,7 @@ pub enum Op {
         index: u16,
     },
     /// No `match` arm matched `src`: raise E0007 ("no match arm matched the value <...>") at
-    /// `span` (the M0 runtime non-exhaustive-match error).
+    /// `span` (the runtime non-exhaustive-match error).
     MatchFail {
         src: Reg,
         span: Span,
@@ -1478,7 +1479,7 @@ pub enum Op {
         callee: Reg,
         args: Box<[Reg]>,
         /// The registers holding this call's **type arguments** — what fills a forwarding
-        /// generic's leading [`Chunk::hidden`] slots (poly-values F2b), in slot order. Empty for
+        /// generic's leading [`Chunk::hidden`] slots, in slot order. Empty for
         /// the overwhelming majority of calls, which forward nothing.
         ///
         /// A channel of its own, beside `args` rather than prepended onto it: that is what keeps
@@ -1535,7 +1536,7 @@ pub enum Op {
         bits: u8,
     },
     /// `dst = a op b` read as a `signed`/unsigned `bits`-wide integer — the sign-dependent
-    /// fixed-width ops `/ % < <= > >=` (Tier W3). `/ %` may raise E0008 (division by zero) at `span`
+    /// fixed-width ops `/ % < <= > >=`. `/ %` may raise E0008 (division by zero) at `span`
     /// and mask their result into the width; `< <= > >=` yield a bool. The shared
     /// `apply_binary_wide` runs identically here and in the tree-walker. `op` ∈ {Div,Rem,Lt,Le,Gt,Ge}.
     WideInt {
@@ -1548,7 +1549,7 @@ pub enum Op {
         span: Span,
     },
     /// `dst = int_method_width(recv, method, arg, bits)` — a bit intrinsic computed **within a
-    /// fixed width** (Tier W5): `count_ones`/`leading_zeros`/`rotate_*`/`reverse_bits`/… on an `IntN`
+    /// fixed width**: `count_ones`/`leading_zeros`/`rotate_*`/`reverse_bits`/… on an `IntN`
     /// receiver act on the low `bits` bits, not the full erased i64. `arg` is the sole `rotate_*`
     /// shift amount (absent for the nullary intrinsics). Total (never raises). Shared with the
     /// tree-walker. `method` is never `Convert`.
@@ -1670,11 +1671,9 @@ pub enum Op {
         slots: Box<[Reg]>,
     },
     /// `dst = concat(display(part) for part in parts)` — build an interpolated string in one pass
-    /// and one output allocation (P-VMT-STR). Each `Literal` part is copied verbatim from the
+    /// and one output allocation. Each `Literal` part is copied verbatim from the
     /// constant pool; each `Hole` part is a register rendered via `display` (a `Display` object was
-    /// already dispatched to `to_string` by a preceding `Stringify`). Replaces the pre-S5
-    /// `LoadConst "" + N×(Stringify + Concat)` fold, which allocated an intermediate `String` per
-    /// part and reallocated the accumulator on every step.
+    /// already dispatched to `to_string` by a preceding `Stringify`).
     BuildString {
         dst: Reg,
         parts: Box<[StrPart]>,
@@ -1729,7 +1728,7 @@ pub struct Chunk {
     /// Parameters occupy registers `0..num_params` on entry.
     pub num_params: u16,
     /// How many of those leading registers are **type-argument slots** rather than value
-    /// parameters (poly-values F2b): a forwarding generic's `$ty0`, `$ty1`, … . They are ordinary
+    /// parameters: a forwarding generic's `$ty0`, `$ty1`, … . They are ordinary
     /// registers — the body reads them, register allocation places them — but they are filled from
     /// the call's own [`Op::Call::type_args`] channel, never from its value arguments.
     ///
@@ -1850,9 +1849,9 @@ impl Chunk {
     }
 
     /// Render the chunk as stable, human-readable disassembly for snapshot tests. `names` is the
-    /// owning module's interned name table (P-VMT-OPSZ), used to resolve each op's [`NameId`]s back
+    /// owning module's interned name table, used to resolve each op's [`NameId`]s back
     /// to their strings so the output is unchanged from the pre-interning inline-`String` form.
-    /// `global_names` (P-VMT-GSLOT) resolves each global slot back to its name likewise.
+    /// `global_names` resolves each global slot back to its name likewise.
     pub fn disassemble(&self, names: &[String], global_names: &[String]) -> String {
         let mut out = String::new();
         let _ = writeln!(
@@ -1893,7 +1892,7 @@ pub struct MethodEntry {
     pub proto: u32,
 }
 
-/// The compiled layout of one `List<packed>` element type (P-PACK 2.4) — the pure-data form of a
+/// The compiled layout of one `List<packed>` element type — the pure-data form of a
 /// `noeta_object::PackedSchema`, referenced by index from [`Op::PackedListNew`]. Shapes and nested
 /// schemas are held by **index** (into [`Module::shapes`] / [`Module::packed_schemas`]) so the
 /// module stays plain data; the VM resolves these to `Rc`-handles once at load.
@@ -1901,16 +1900,16 @@ pub struct MethodEntry {
 pub struct PackedSchemaDef {
     /// The element type's shape, an index into [`Module::shapes`] — the same entry `MakeStruct`
     /// uses for that type, so a materialized element shares shape identity with a constructed one.
-    /// **`None`** marks a bare-scalar element (packed-widths bare-scalar arc): a `List<i32>`/`List<f32>`
+    /// **`None`** marks a bare-scalar element: a `List<i32>`/`List<f32>`
     /// has one scalar field (in [`Self::fields`]) and no struct wrapper, so it materializes to a bare
     /// `int`/`f32` rather than an object — there is no shape to reference.
     pub shape: Option<u32>,
     /// One entry per field, in slot (declared) order.
     pub fields: Vec<PackedFieldDef>,
-    /// Bytes per element (the per-element stride into the flat byte buffer; P-PACK 3.2b — an `f32`
+    /// Bytes per element (the per-element stride into the flat byte buffer — an `f32`
     /// field is 4 bytes, the other primitives 8).
     pub byte_size: u32,
-    /// Whether the list is stored column-major (`@packed(Layout.Column)`, P-SIMD C2). Pure-data
+    /// Whether the list is stored column-major (`@packed(Layout.Column)`). Pure-data
     /// mirror of `noeta_object::PackedSchema::column`.
     pub column: bool,
 }
@@ -1921,11 +1920,11 @@ pub struct PackedSchemaDef {
 pub enum PackedFieldDef {
     Int,
     Float,
-    /// A 32-bit float field (P-PACK Phase 3).
+    /// A 32-bit float field.
     F32,
-    /// An explicit 64-bit float field `f64` (packed-widths arc).
+    /// An explicit 64-bit float field `f64`.
     F64,
-    /// A fixed-width integer field `i8..i64`/`u8..u64` (packed-widths arc): `bits/8` bytes, `signed`
+    /// A fixed-width integer field `i8..i64`/`u8..u64`: `bits/8` bytes, `signed`
     /// deciding read-back extension.
     IntN {
         bits: u8,
@@ -1974,10 +1973,10 @@ impl HintOperand {
 pub struct Module {
     pub protos: Vec<Chunk>,
     pub shapes: Vec<Shape>,
-    /// The packed-list element layouts (P-PACK 2.4), referenced by index from
+    /// The packed-list element layouts, referenced by index from
     /// [`Op::PackedListNew`]. Empty for a program with no `List<packed>` literal.
     pub packed_schemas: Vec<PackedSchemaDef>,
-    /// `map(...)` call sites whose result element type is packed (P-PACK 2.6 category B): the call's
+    /// `map(...)` call sites whose result element type is packed: the call's
     /// `Span` paired with the index (into [`Self::packed_schemas`]) of the result element layout. The
     /// VM's `map` builtin looks up its call span here to build a flat result. Empty for a program with
     /// no such `map`.
@@ -2024,8 +2023,8 @@ pub struct Module {
     /// destructor, compiled like a parameterless method (receiver in register 0). The VM runs
     /// it when the last reference to an instance of that type drops.
     pub destructors: Vec<(String, u32)>,
-    /// `(type_name, field_name, proto)` for each field declared with a default (`x: T = expr`,
-    /// object-model slice 5). Each `proto` is a parameterless value thunk compiled in global scope
+    /// `(type_name, field_name, proto)` for each field declared with a default (`x: T = expr`).
+    /// Each `proto` is a parameterless value thunk compiled in global scope
     /// (empty upvalues — types are top-level, so a default resolves globals only). `MakeStruct` runs
     /// it to fill the field when a literal omits it, mirroring the tree-walker's `TypeDef`
     /// field-default thunks so both backends construct an identical instance.
@@ -2036,7 +2035,7 @@ pub struct Module {
     /// Type names that `@derive(ToJson)` without a hand-written `to_json` method — the VM
     /// synthesizes a structural JSON serializer for `o.to_json()`.
     pub tojson_derives: Vec<String>,
-    /// `@derive(Deserialize<Json>)` decode recipes (L2.2 DI): each deriving struct's type name paired
+    /// `@derive(Deserialize<Json>)` decode recipes: each deriving struct's type name paired
     /// with the [`noeta_ext_abi::TypeRecipe`] the checker resolved from its fields. The VM lifts this
     /// into a name→recipe map so `json.decode_typed(name, text)` decodes a JSON body into the type
     /// named by a runtime string. Empty for a program with no `@derive(Deserialize<Json>)`.
@@ -2044,7 +2043,7 @@ pub struct Module {
     /// Type names whose value, when destroyed, can run *some* `destruct` block — its own or a
     /// transitively-owned field / variant-payload / collection element (the checker's
     /// destruct-reachability fixpoint). The VM's **container-before-contained field-walk gate**
-    /// (Phase 4.3, spec §4): an object/enum whose name is absent here owns no destructor in its
+    /// (spec §4): an object/enum whose name is absent here owns no destructor in its
     /// subtree and frees on the plain-release fast path; one that is present is walked
     /// container-first, releasing each child recursively so contained destructors fire in declared
     /// order. Includes every type with its own `destruct` (the fixpoint seeds with them).
@@ -2069,14 +2068,14 @@ pub struct Module {
     /// construction. A build artifact for tooling and runtime reflection (pass 2); the rest of the
     /// runtime ignores it.
     pub reflection: noeta_ast::reflect::ReflectionInfo,
-    /// The interned reflected element types (runtime type-argument reflection, R1), referenced by
+    /// The interned reflected element types (runtime type-argument reflection), referenced by
     /// index from [`Op::MakeList`]'s `reflect`. A list literal whose element type the checker resolved
     /// gets that [`TypeRepr`] interned here; the VM stamps a fresh `Rc` of it onto the built list so
     /// `type_of` recovers the element type after a `dyn` launder. Held as a module table (rather than
     /// inline on the op) so the op stays `Copy`-cheap and the `TypeRepr` — which is `Send` — keeps the
     /// module shareable across isolate threads. Empty for a program with no tagged list literal.
     pub type_reprs: Vec<noeta_ast::reflect::TypeRepr>,
-    /// The program-wide **type-argument table** (poly-values F2b): the concrete instantiations of
+    /// The program-wide **type-argument table**: the concrete instantiations of
     /// forwarding generics, indexed by the hidden call arguments (see
     /// [`Op::TypedModuleCall::dynamic`] / [`Op::AttributesOf::dynamic`]). Copied from the IR
     /// `Program`, so both backends resolve identical entries. Empty without forwarding.
@@ -2096,12 +2095,12 @@ pub struct Module {
     /// index — the answer to "how are this instantiation's erased words written and ordered". Empty
     /// for a program with no generic door over a `u64`, which is nearly all of them.
     pub type_arg_hints: Vec<noeta_ext_abi::TypeArgHints>,
-    /// The interned instruction name table (P-VMT-OPSZ): every [`NameId`] in an op indexes here.
+    /// The interned instruction name table: every [`NameId`] in an op indexes here.
     /// Deduped module-wide by the compiler, so a name used at N sites is stored once. Holds field /
     /// method / global / type names, ext-call module+func, and `match`-literal strings; the VM
     /// resolves an id to `&str` only at the cold lookup sites, the disassembler for readable output.
     pub names: Vec<String>,
-    /// The global slot table (P-VMT-GSLOT): `global_names[i]` is the name of the global in slot `i`.
+    /// The global slot table: `global_names[i]` is the name of the global in slot `i`.
     /// Its length is the number of slots the VM's per-run globals vector needs. The slot **index** is
     /// what `LoadGlobal`/`StoreGlobal`/`TakeGlobal` carry ([`GlobalId`]); the name here is only for
     /// the unbound-global diagnostic and disassembly, never the hot path.
@@ -2121,13 +2120,13 @@ impl Module {
         &self.protos[0]
     }
 
-    /// Resolve an interned [`NameId`] to its string (P-VMT-OPSZ). Ids are minted by the compiler
+    /// Resolve an interned [`NameId`] to its string. Ids are minted by the compiler
     /// against this same table, so the index is always in range.
     pub fn name(&self, id: NameId) -> &str {
         &self.names[id.0 as usize]
     }
 
-    /// Resolve a [`GlobalId`] to the global's name (P-VMT-GSLOT) — for the unbound-global diagnostic
+    /// Resolve a [`GlobalId`] to the global's name — for the unbound-global diagnostic
     /// and disassembly only.
     pub fn global_name(&self, id: GlobalId) -> &str {
         &self.global_names[id.0 as usize]
@@ -2219,11 +2218,11 @@ impl Module {
         out
     }
 
-    /// Serialize this module to a compact binary blob (P-AOT L1.0). The interned runtime `Shape`
+    /// Serialize this module to a compact binary blob. The interned runtime `Shape`
     /// handles are *not* stored here — the module carries owned `Vec<Shape>` (see [`Self::shapes`]),
     /// and the VM re-interns them on load, so a decoded module loads through the exact same path as
     /// a freshly compiled one. Raw payload only: the versioned `.noeb` header (magic + runtime
-    /// version) is added by the bundle layer (L1.1).
+    /// version) is added by the bundle layer.
     pub fn encode(&self) -> Vec<u8> {
         postcard::to_allocvec(self).expect("Module is plain owned data — postcard cannot fail")
     }
@@ -2352,9 +2351,9 @@ fn op_repr(
     names: &[String],
     global_names: &[String],
 ) -> String {
-    // Resolve an interned name id to its string for readable disassembly (P-VMT-OPSZ).
+    // Resolve an interned name id to its string for readable disassembly.
     let n = |id: &NameId| names[id.0 as usize].as_str();
-    // Resolve a global slot to its name (P-VMT-GSLOT).
+    // Resolve a global slot to its name.
     let g = |id: &GlobalId| global_names[id.0 as usize].as_str();
     match op {
         Op::LoadConst { dst, k } => format!("LoadConst   r{dst} <- k{k}"),

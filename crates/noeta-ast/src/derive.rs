@@ -1,5 +1,5 @@
 //! **Derive planning** — the shared resolver behind `@derive(<UserTrait>)` bridging and
-//! `via:` delegation (derive layers 1+2, on top of UT5 default-method fallback).
+//! `via:` delegation, on top of the trait default-method fallback.
 //!
 //! Given a trait, the deriving type's shape, and the [`DeriveSpec`] (its explicit `member: target`
 //! bindings and optional `via: field`), [`plan_user_trait_derive`] produces the **synthesized
@@ -11,7 +11,7 @@
 //!   onto an existing method;
 //! - with `via: f`, a **forward** `fn m(a: T): R { return self.f.m(a) }` for *every* trait method
 //!   (whole-trait delegation to a field whose type implements the trait);
-//! - plus the trait's **default** methods (UT5) for whatever remains.
+//! - plus the trait's **default** methods for whatever remains.
 //!
 //! Deduction, when a required method has no explicit binding: (1) a field with the **same name**
 //! and a compatible type wins; (2) else a **unique** type-compatible field wins; (3) anything else
@@ -744,7 +744,7 @@ pub fn plan_native_derive(methods: &[(String, usize, String)], span: Span) -> Ve
         .collect()
 }
 
-// ---- generic-trait substitution ------------------------------------------------------------
+// ---- generic trait substitution ------------------------------------------------------------
 
 /// Instantiate a generic trait at concrete type arguments: `Ok(Some(trait))` with every method's
 /// signature and default body substituted (`K` → the argument) and the parameters cleared;
@@ -835,7 +835,7 @@ fn substitute_ref(ty: &mut TypeRef, map: &std::collections::HashMap<String, Type
                 substitute_ref(a, map);
             }
         }
-        // `Self::Name` has no substitutable children — `Self` is not a type parameter (slice 1a).
+        // `Self::Name` has no substitutable children — `Self` is not a type parameter.
         TypeRef::DynTrait { .. } | TypeRef::AssocProjection { .. } => {}
         TypeRef::Optional { inner, .. } => substitute_ref(inner, map),
         TypeRef::Union { members, .. } => members.iter_mut().for_each(|m| substitute_ref(m, map)),
@@ -1129,7 +1129,7 @@ fn empty_fn(name: &str, span: Span) -> FnDecl {
         name_span: span,
         // A synthesized method stands in for a TRAIT IMPLEMENTATION — a `@derive`'s bridge, a
         // `via:` forward, a hoisted default — and a trait is an outward contract, so it is on the
-        // type's public surface by construction (method-visibility arc). The checker's own
+        // type's public surface by construction. The checker's own
         // registration path never asks (`register_synth_method` records no privacy, which is the
         // same answer said a different way); this is for everything that renders a plan back as
         // source, where a method printed without `pub` would be one the checker then refuses.

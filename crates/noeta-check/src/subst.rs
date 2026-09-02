@@ -31,7 +31,7 @@ pub(crate) fn attr_field_type(ty: noeta_ext_abi::registry::AttrFieldType) -> Typ
 
 pub(crate) const PRELUDE_TYPES: &[&str] = &[
     "Ordering",
-    // The typed cancelled marker (Track A.8): the `Err` payload of `h.join(): Result<T, Cancelled>`.
+    // The typed cancelled marker: the `Err` payload of `h.join(): Result<T, Cancelled>`.
     "Cancelled",
     "Type",
     "Semantic",
@@ -42,12 +42,12 @@ pub(crate) const PRELUDE_TYPES: &[&str] = &[
     "FieldSpec",
     // The variant-schema element `variants_of()` returns (`{ name, payload: List<FieldSpec>, backing }`).
     "VariantSpec",
-    // The roots-list element a declared tier's runner receives (tier-providers T2).
+    // The roots-list element a declared tier's runner receives.
     "TierRoot",
-    // The lazy-iterator type (Track I): a writable annotation now that `iter()`/adapters and
+    // The lazy-iterator type: a writable annotation now that `iter()`/adapters and
     // generator returns produce `Iterator<T>` values.
     "Iterator",
-    // The async completion type (Track A): a writable annotation. Calling an `async fn f(): T`
+    // The async completion type: a writable annotation. Calling an `async fn f(): T`
     // produces a `Future<T>`; `expr.await` unwraps it back to `T`.
     "Future",
     // The channel endpoint types (isolates I.1): writable annotations. `channel::<T>(cap)` yields a
@@ -56,7 +56,7 @@ pub(crate) const PRELUDE_TYPES: &[&str] = &[
     "Receiver",
 ];
 
-/// The type a **call** to an `async fn f(): T` produces: `Future<T>` (Track A). The body writes
+/// The type a **call** to an `async fn f(): T` produces: `Future<T>`. The body writes
 /// `return t` (checked against the inner `T`), but a call site sees the wrapped future; `.await`
 /// unwraps it again. A non-async function's return type is returned unchanged.
 pub(crate) fn async_return(inner: Type, is_async: bool) -> Type {
@@ -105,11 +105,10 @@ pub(crate) fn required_operator_trait(op: BinaryOp) -> Option<BuiltinTrait> {
 /// The reserved synthetic identities, for the two kinds of type parameter the language provides
 /// without a source declaration to take a span from.
 ///
-/// Both were previously "identified" by a *name nobody would write* — the prelude constructors
-/// used `$T`/`$E` on the reasoning that no user name contains a `$`. That is the same
-/// spelling-as-identity bet this arc removes everywhere else, so they are reserved ids instead:
-/// [`ParamId::synthetic`] lives in a `SourceId` the parser never stamps, and can therefore not
-/// alias a real declaration however it is spelled.
+/// Identifying either by a *name nobody would write* — `$T`/`$E`, on the reasoning that no user
+/// name contains a `$` — is the same spelling-as-identity bet ruled out everywhere else, so these
+/// are reserved ids instead: [`ParamId::synthetic`] lives in a `SourceId` the parser never stamps,
+/// and can therefore not alias a real declaration however it is spelled.
 pub(crate) mod synthetic {
     use super::{ParamId, ParamRef};
 
@@ -421,7 +420,7 @@ pub(crate) fn mentions_param(ty: &Type, params: &ParamSet) -> bool {
 
 /// The type parameters of `params` that `ty` mentions (bare or nested), in first-appearance
 /// order, deduplicated. The forwarding call-site resolution uses it to name the exact parameter a
-/// slot template needs but the call left open (D2a).
+/// slot template needs but the call left open.
 pub(crate) fn params_mentioned(ty: &Type, params: &ParamSet) -> Vec<ParamRef> {
     walk_params_mentioned(ty, Some(params))
 }
@@ -607,12 +606,12 @@ pub(crate) fn int_literal_value(expr: &Expr) -> Option<i128> {
 /// explicit `@derive`/`impl`, handled in [`Checker::satisfies`].)
 ///
 /// Fixed-width integers (Tier W) satisfy `Equatable`/`Display` here — equality and (small-value)
-/// display are correct on the erased `int` word. Fixed-width arithmetic (`+ - *`, W2) and now
-/// ordering/`/`/`%` (W3) are enabled: `+ - *` are sign-agnostic (masking the result suffices), while
+/// display are correct on the erased `int` word. Fixed-width arithmetic (`+ - *`) and now
+/// ordering/`/`/`%` are enabled: `+ - *` are sign-agnostic (masking the result suffices), while
 /// `Div`/`Comparable` need the operand width+signedness, which lowering carries on the op
 /// (`Rvalue::WideInt`) — so the erased op is never subtly wrong.
 /// If `lt` and `rt` are the **same** fixed-width integer type, its `(signed, bits)`. Fixed-width
-/// arithmetic (W2) and ordering (W3) both require identical operand types — no implicit widening —
+/// arithmetic and ordering both require identical operand types — no implicit widening —
 /// so this gates them and yields the width lowering records for masking / the sign-aware op.
 pub(crate) fn same_width_intn(lt: &Type, rt: &Type) -> Option<(bool, u8)> {
     match (lt, rt) {
@@ -635,9 +634,9 @@ pub(crate) fn builtin_satisfies(ty: &Type, t: BuiltinTrait) -> bool {
     use Type::*;
     match t {
         Bt::Comparable | Bt::Equatable => ty.is_arith_numeric() || matches!(ty, String | Bool),
-        // Fixed-width `+ - *` are sign-agnostic (W2 — the low bits are the same read signed or
+        // Fixed-width `+ - *` are sign-agnostic (the low bits are the same read signed or
         // unsigned, so masking the result is correct); `Div` (and ordering) are sign-dependent and
-        // land in W3 via the width-carrying `Rvalue::WideInt`. (`%` is numeric-only — no trait.)
+        // go through the width-carrying `Rvalue::WideInt`. (`%` is numeric-only — no trait.)
         Bt::Add | Bt::Sub | Bt::Mul | Bt::Div => ty.is_arith_numeric(),
         Bt::Concat => matches!(ty, String | List(_)),
         Bt::Display => {
@@ -829,7 +828,7 @@ pub(crate) fn stmt_breaks(stmt: &Stmt) -> bool {
 /// a `dyn` `d`. That silently admitted a value whose type was never checked into a checked slot,
 /// which is precisely what `dyn <: T` being false everywhere else exists to prevent: `some(d)` into a
 /// `?T` was always the E0007 it should be, and the two now agree. The sound route out of `dyn` is the
-/// checked narrow — `d.as<T>()`, which resolves a type parameter as of the same arc as this note.
+/// checked narrow — `d.as<T>()`, which resolves a type parameter.
 pub(crate) fn unify_element(acc: &Type, next: &Type) -> Option<Type> {
     if acc.is_gradual() {
         return Some(next.clone());
@@ -1007,8 +1006,8 @@ pub(crate) fn field_type(
 /// an explicit `self.field` resolves through [`Checker::synth_member`] to the field's declared type
 /// (a concrete field keeps it precisely, e.g. `List<u64>`; a generic field erases to `dyn` via the
 /// same parameter substitution as bare field access). Structs/classes bind this exactly as enums do.
-/// Compare a `@packed` struct's resolved layout against a bundle's declared constraint
-/// (kernel-methods K1) — the compile-time twin of the runtime `PackedView` check a raw-buffer
+/// Compare a `@packed` struct's resolved layout against a bundle's declared constraint — the
+/// compile-time twin of the runtime `PackedView` check a raw-buffer
 /// kernel performs. `None` = satisfied; `Some(message)` names exactly what disagrees.
 pub(crate) fn constraint_mismatch(
     layout: &noeta_ast::reflect::PackedLayout,

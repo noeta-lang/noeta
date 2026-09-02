@@ -1,4 +1,4 @@
-//! Dev-tier **activation** (object-model slice 6): resolve a program's `@<tier> { … }` blocks
+//! Dev-tier **activation**: resolve a program's `@<tier> { … }` blocks
 //! against an *active-tier set* before the checker and the backends see it.
 //!
 //! A tier block is co-located developer-tooling content (`test`/`bench`/`doc`/`debug`). Whether a
@@ -30,8 +30,8 @@ use noeta_span::Span;
 
 use super::*;
 
-/// A tier brought into existence by a `@tier(name[, config: T]) fn runner(…)` declaration
-/// (tier-providers T2) — the program-declared counterpart of an extension's [`ExtTier`] entry
+/// A tier brought into existence by a `@tier(name[, config: T]) fn runner(…)` declaration — the
+/// program-declared counterpart of an extension's [`ExtTier`] entry
 /// (`noeta_ext_abi::registry::ExtTier`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeclaredTier {
@@ -39,12 +39,12 @@ pub struct DeclaredTier {
     pub name: String,
     /// The knob-attribute type from `config: T`, if the tier has knobs.
     pub config: Option<String>,
-    /// The body language ID from `text: "<lang>"`, when the tier is a **text tier** (text-tiers
-    /// arc): its blocks hold verbatim text (lexer-captured, un-parsed) tagged with this language
+    /// The body language ID from `text: "<lang>"`, when the tier is a **text tier**: its blocks
+    /// hold verbatim text (lexer-captured, un-parsed) tagged with this language
     /// for tooling. `None` for a code tier. Mutually exclusive with `config` (E0051).
     pub text: Option<String>,
-    /// The block-value type from `expr: T`, when the tier is an **expression tier** (expr-tiers
-    /// arc): its `@<name> { … }` blocks are expressions, desugared during activation to a call of
+    /// The block-value type from `expr: T`, when the tier is an **expression tier**: its
+    /// `@<name> { … }` blocks are expressions, desugared during activation to a call of
     /// the handler (`runner` doubles as the handler name). Mutually exclusive with `config`
     /// (E0051); no runner semantics (`noeta <tier>` rejects it, blocks never activate/strip).
     pub expr: Option<String>,
@@ -70,7 +70,7 @@ pub struct TierRegistry {
     /// which one is live. In declaration order per name.
     declared: std::collections::HashMap<String, Vec<DeclaredTier>>,
     /// The extension registry the **extension-tier** half of the name-space resolves against
-    /// (instance-registry IR4): `None` (the default) uses the process-global default registry — the
+    /// `None` (the default) uses the process-global default registry — the
     /// single-registry CLI/IDE/MCP path — while an embed session whose own extension declares a
     /// `@tier` threads its assembled set via [`TierRegistry::collect_with_registry`]. Read through
     /// [`TierRegistry::reg`]; `Option` so `#[derive(Default)]` (a `&'static` has no default) holds.
@@ -217,7 +217,7 @@ impl TierRegistry {
     }
 
     /// As [`TierRegistry::collect`], but resolving the **extension-tier** half of the name-space
-    /// against an explicit `registry` (instance-registry IR4) — so an embed session whose own
+    /// against an explicit `registry` — so an embed session whose own
     /// extension declares a `@tier` validates its `@<tier>` blocks against *its* registry, not the
     /// process-global default. The checker builds its `tier_registry` this way from its own registry.
     pub fn collect_with_registry(
@@ -255,7 +255,7 @@ impl TierRegistry {
     }
 
     /// The extension registry this name-space's extension tiers resolve against — the threaded one,
-    /// or the process-global default (instance-registry IR4).
+    /// or the process-global default.
     /// The extension registry this name-space resolves against — public so the directive registry
     /// composed over this one can reach the extension-declared `@`-directives.
     pub fn registry(&self) -> &'static noeta_ext_abi::registry::Registry {
@@ -321,7 +321,7 @@ impl TierRegistry {
     }
 
     /// Resolve a `@local` written by the package at `origin` to a concrete [`ResolvedTier`] — the heart
-    /// of per-package tier resolution (per-package naming arc). **A `[directives]` binding wins**: the
+    /// of per-package tier resolution. **A `[directives]` binding wins**: the
     /// package's own local `@name` → the provider it named + the tier that provider exported (so a
     /// rename or a third-party provider resolves to exactly what the manifest declared). **Otherwise the
     /// name resolves ambiently** — a std extension tier or a program `@tier` of that bare name — which
@@ -484,7 +484,7 @@ impl TierRegistry {
         self.declared(tier).and_then(|d| d.text.as_deref())
     }
 
-    /// The value type of `tier` when it is an **expression tier** (expr-tiers arc) — the `expr: T`
+    /// The value type of `tier` when it is an **expression tier** — the `expr: T`
     /// its `@<name> { … }` blocks evaluate to — from an extension declaration or a program
     /// `@tier(…, expr: T)`, else `None`. Surfaced by the LSP alongside [`Self::text_lang`] so
     /// hovering an embedded block reports both its language and its type.
@@ -495,7 +495,7 @@ impl TierRegistry {
         self.declared(tier).and_then(|d| d.expr.as_deref())
     }
 
-    /// Whether `tier` is an **expression tier** (expr-tiers arc) — extension-declared or
+    /// Whether `tier` is an **expression tier** — extension-declared or
     /// program-declared. The single predicate the checker's E0052 statement-position guard and
     /// the CLI's `noeta <tier>` dispatch use, so both cover native and program tiers alike.
     pub fn is_expr_tier(&self, tier: &str) -> bool {
@@ -639,7 +639,7 @@ pub fn dedent_doc(text: &str) -> String {
         .join("\n")
 }
 
-/// The E0052 an **expression tier's** block raises in *statement* position (expr-tiers arc): the
+/// The E0052 an **expression tier's** block raises in *statement* position: the
 /// block is a value and never activates/strips, so a bare statement would silently discard it.
 /// Shared by the checker's in-place arm and activation, so the two never drift.
 pub fn expr_tier_statement_diagnostic(tier: &str, span: Span) -> Diagnostic {
@@ -660,7 +660,7 @@ pub fn expr_tier_statement_diagnostic(tier: &str, span: Span) -> Diagnostic {
 /// It used to say "unknown dev-tier", which was only ever right in the block position — an
 /// extension's `@`-directive written before a `fn` arrives here too, and calling it a dev-tier
 /// named the wrong thing entirely. The offer spans the whole name-space of `reg`
-/// (instance-registry IR4 — the session's registry, or the process-global default), with a
+/// (the session's registry, or the process-global default), with a
 /// did-you-mean when the name is close to a real one.
 pub fn unknown_tier_diagnostic(
     reg: &noeta_ext_abi::registry::Registry,
@@ -711,8 +711,8 @@ pub struct TierFn {
     pub is_async: bool,
 }
 
-/// A text-tier block's verbatim body (`@doc { … }`, or any declared `text:` tier — slice 6f,
-/// generalized by the text-tiers arc). The text is the source between the braces, captured
+/// A text-tier block's verbatim body (`@doc { … }`, or any declared `text:` tier). The text is
+/// the source between the braces, captured
 /// un-parsed by the lexer, with the `\{`/`\}`/`\\` escapes undone.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextBlock {
@@ -762,7 +762,7 @@ pub fn resolve_texts(program: &Program) -> Vec<TextBlock> {
     resolve_texts_with_registry(program, noeta_ext_abi::registry::single_registry_process())
 }
 
-/// As [`resolve_texts`], against an explicit extension registry (instance-registry IR4), so an
+/// As [`resolve_texts`], against an explicit extension registry, so an
 /// embed session's own text tier resolves its attachment against *its* set.
 pub fn resolve_texts_with_registry(
     program: &Program,
@@ -870,10 +870,10 @@ pub struct Activated {
     pub tests: Vec<TierFn>,
     /// The `@bench` fns activated by this resolution, in source order (roots for `lang bench`).
     pub benches: Vec<TierFn>,
-    /// The roots of every activated **declared** tier (tier-providers T2), keyed by tier name — a
+    /// The roots of every activated **declared** tier, keyed by tier name — a
     /// `@fuzz { fn f() }` block's fns under `"fuzz"`, for the dispatching runner.
     pub custom: std::collections::BTreeMap<String, Vec<TierFn>>,
-    /// The text blocks of every activated declared **text** tier (text-tiers arc), keyed by tier
+    /// The text blocks of every activated declared **text** tier, keyed by tier
     /// name — a `@spec { <case/> }` body under `"spec"`, for the dispatching runner (which
     /// receives them as `List<TierText>`). Built-in `doc` is not collected here: its activation
     /// surface is the `#[Doc]` stamp.
@@ -1059,7 +1059,7 @@ pub fn activate_tiers(program: &Program, active: &[&str], prov: &Provenance) -> 
         } else {
             std::collections::HashMap::new()
         };
-    // The text roots of active *declared* text tiers (text-tiers arc), resolved on the input program
+    // The text roots of active *declared* text tiers, resolved on the input program
     // like the doc stamps — the blocks themselves strip below, exactly like `@doc`. Keyed by the
     // block's local tier name (its `texts` bucket), but *gated* on its resolved identity: an active
     // program-declared text tier that is not the std `doc` tier (which the doc stamps own).
@@ -1332,7 +1332,7 @@ fn resolve_block(
         // Active tier: resolve the items (so a tier block nested among them, and each item's own
         // body, are handled), then splice them in place. The items are spliced at *this* level, so
         // `collect_roots` carries through unchanged. Each lifted `fn` is marked `is_dev_tier` so the
-        // checker grants it white-box access to the module's private fields (slice 6d), and the
+        // checker grants it white-box access to the module's private fields, and the
         // block's directive args are stamped onto it as the tier's config attribute
         // (`@bench(iterations: N)` ⇒ `#[Bench(iterations: N)]`) unless the fn already carries one —
         // a per-fn attribute wins. The checker then validates the stamp through the ordinary
@@ -1512,7 +1512,7 @@ impl Checker {
     /// must tag a struct that is itself an attribute and must name a fieldless variant of a
     /// `@semantic` enum. Well-formed tags are surfaced purely by `reflect::build`, so nothing is
     /// stored here.
-    /// Validate every `@tier` declaration (tier-providers T2, E0051) and build the program's
+    /// Validate every `@tier` declaration (E0051) and build the program's
     /// [`tiers::TierRegistry`]. Runs after `collect`, so a `config:` type declared later in the
     /// file (or in an imported module) is visible. Four rules: the name must not collide with a
     /// built-in tier; two declarations must not claim one name; `config:` must name an
@@ -1520,7 +1520,7 @@ impl Checker {
     /// signature dispatch calls with the activated roots.
     pub(crate) fn check_tier_decls(&mut self, program: &Program) {
         // Resolve the extension-tier half of the name-space against THIS checker's registry
-        // (instance-registry IR4), so an embed session whose own extension declares a `@tier`
+        // so an embed session whose own extension declares a `@tier`
         // validates its `@<tier>` blocks correctly. Defaults to the process-global registry.
         self.symbols.tier_registry =
             tiers::TierRegistry::collect_with_registry(program, self.reg());
@@ -1591,7 +1591,7 @@ impl Checker {
                      extraction); use a lowercase language name like \"markdown\", \"xml\", \"sql\"",
                 );
             }
-            // An **expression tier** (expr-tiers arc): `expr: T` makes the decorated fn the
+            // An **expression tier**: `expr: T` makes the decorated fn the
             // tier's *handler* — `fn(statics: List<string>, holes: List<() -> U>): T` — not a
             // runner. Its own rules, then skip the runner-signature branch entirely.
             if let Some((expr_ty, expr_span)) = &decl.expr {
@@ -1720,7 +1720,7 @@ impl Checker {
         }
     }
 
-    /// Whether `ty` can be a field of a `@packed` struct (P-PACK): a primitive (`int`/`float`/`bool`)
+    /// Whether `ty` can be a field of a `@packed` struct: a primitive (`int`/`float`/`bool`)
     /// or another packed struct (a non-generic `Named` in `packed_structs`). Everything else — a
     /// string/list/map/class/enum/`dyn`/generic — is heap-shaped and cannot lay out flat.
     pub(crate) fn is_packable_type(&self, ty: &Type) -> bool {
@@ -1735,7 +1735,7 @@ impl Checker {
         }
     }
 
-    /// The flat [`PackedLayout`] of `ty` if it is a `@packed` struct, else `None` (P-PACK Phase 2).
+    /// The flat [`PackedLayout`] of `ty` if it is a `@packed` struct, else `None`.
     /// Recurses through nested packed fields, flattening them inline. `check_packed_struct` has
     /// already guaranteed every field of a packed struct is packable, so the field walk never bails on
     /// a well-typed program; the `?`s defend against a malformed registry (and an unpacked element).
@@ -1903,7 +1903,7 @@ impl Checker {
                         })
                     })
                     .collect::<Option<Vec<_>>>()?;
-                // Validation arc: a struct implementing `Validate` carries the flag so the recipe
+                // A struct implementing `Validate` carries the flag so the recipe
                 // door re-enters to run `validate()` on the freshly-built value (bottom-up).
                 let has_validator = self.satisfies(
                     &Type::Named(name.clone(), Vec::new()),
@@ -2009,7 +2009,7 @@ impl Checker {
         if recipes.is_empty() {
             return None;
         }
-        // Validation arc: an enum implementing `Validate` carries the flag so the decode door
+        // An enum implementing `Validate` carries the flag so the decode door
         // re-enters to run `validate()` on the built case, exactly as a struct's does.
         let has_validator = self.satisfies(
             &Type::Named(name.to_string(), Vec::new()),
@@ -2274,7 +2274,7 @@ mod tests {
             JSON_ATTR_TRANSIENT, TEST_ATTR_DATA, TEST_ATTR_GROUP, TEST_ATTR_NAME, TEST_ATTR_SKIP,
             TEST_ATTR_TIMEOUT, TIER_ATTR_BENCH, TIER_ATTR_DOC,
         };
-        // The contract is the **qualified** identity now (D2b): the reflect constants are FQNs, so
+        // The contract is the **qualified** identity now: the reflect constants are FQNs, so
         // pin them against each declaration's `qualified()`, not its short `name`.
         let declared: Vec<String> = noeta_stdlib::registry::ext_attributes()
             .map(|a| a.qualified())
@@ -2607,7 +2607,7 @@ mod tests {
     /// `Bench` config attribute (the desugar), and a fn that already carries its own `#[Bench(…)]`
     /// keeps it — the per-fn attribute wins over the block's. The per-fn override is written by its
     /// **qualified** identity here (`std.bench.Bench`), the form the loader rewrites `#[Bench]` to
-    /// after `use std.bench.Bench` — `activate_tiers` runs post-loader, so it sees the FQN (D2b).
+    /// after `use std.bench.Bench` — `activate_tiers` runs post-loader, so it sees the FQN.
     #[test]
     fn bench_block_args_stamp_the_config_attribute() {
         let program = parse_program(
@@ -2673,7 +2673,7 @@ mod tests {
         );
     }
 
-    /// White-box (slice 6d): a private `class` field is visible inside an active dev-tier (`@test`)
+    /// White-box: a private `class` field is visible inside an active dev-tier (`@test`)
     /// fn body — read, write, and construct — so a white-box test type-checks with no E0035. With
     /// the tier inactive the block is stripped, so the bare program checks clean too.
     #[test]
@@ -2710,7 +2710,7 @@ mod tests {
         );
     }
 
-    /// The method twin of [`dev_tier_fn_gets_white_box_field_access`] (method-visibility arc): a
+    /// The method twin of [`dev_tier_fn_gets_white_box_field_access`]: a
     /// private METHOD is reachable inside an active dev-tier fn body, for the same reason a private
     /// field is — co-located tooling is inside the encapsulation boundary, not outside it. Written
     /// beside the field case rather than somewhere else, because the two are one rule and a reader

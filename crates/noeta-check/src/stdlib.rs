@@ -13,11 +13,11 @@ use noeta_ext_abi::NominalType;
 use noeta_ext_abi::registry;
 use noeta_types::Type;
 
-/// Reserved built-in type name for the value `iter()` returns (Track I.1a). `Iterator<T>` carries its
+/// Reserved built-in type name for the value `iter()` returns. `Iterator<T>` carries its
 /// element type as its single argument; a receiver of this `Named` type dispatches `next`/`collect`.
 pub(super) const ITERATOR: &str = "Iterator";
 
-/// Reserved built-in type name for the value an `async fn` call produces (Track A). `Future<T>`
+/// Reserved built-in type name for the value an `async fn` call produces. `Future<T>`
 /// carries its completion type as its single argument; `expr.await` unwraps it back to `T`.
 pub(super) const FUTURE: &str = "Future";
 
@@ -44,21 +44,21 @@ pub(crate) fn qualified_extern(reg: &registry::Registry, n: &str) -> String {
     if let Some(ty) = reg.resolve_type(n) {
         return ty.qualified();
     }
-    // A native enum (native-extensibility S1) is qualified the same way, so a signature naming an
+    // A native enum is qualified the same way, so a signature naming an
     // enum by its short name (`SigType::Named("SameSite")`) resolves to the qualified identity the
     // checker keys `symbols.enums`/`Type::Named` on — otherwise a native fn returning the enum would
     // type as an unqualified `Named` that never unifies with the seeded qualified enum.
     if let Some(en) = reg.resolve_enum(n) {
         return en.qualified();
     }
-    // A native fielded type — class (native-extensibility S2) or value struct (fielded unification)
+    // A native fielded type — class or value struct (fielded unification)
     // — qualifies the same way, so a signature naming it by its short name (`SigType::Named("Handle")`
     // / `SigType::Named("Point")` — a native fn's return/param) resolves to the qualified identity the
     // checker keys `symbols.records`/`Type::Named` on.
     if let Some(cl) = reg.resolve_fielded(n) {
         return cl.qualified();
     }
-    // A native trait (native-extensibility S3) qualifies the same way, so a signature naming a
+    // A native trait qualifies the same way, so a signature naming a
     // trait by its short name (`dyn Widget` in a native method's parameter, a `Var` bound) resolves
     // to the qualified identity the `use`-projection re-roots the short name onto.
     if let Some(tr) = reg.resolve_trait(n) {
@@ -68,7 +68,7 @@ pub(crate) fn qualified_extern(reg: &registry::Registry, n: &str) -> String {
 }
 
 /// Map a [`registry::SigType`] onto a checker [`Type`] with **no** call-site variable bindings —
-/// the prelude-time form used when seeding native declarations (native-extensibility S1: an
+/// the prelude-time form used when seeding native declarations (an
 /// [`registry::ExtEnum`] variant's payload types), where there is no call to bind type variables
 /// against. A bare `Var(n)` therefore resolves to a gradual hole, which is correct for a
 /// declaration position.
@@ -76,7 +76,7 @@ pub(crate) fn sig_to_type(reg: &registry::Registry, sig: &registry::SigType) -> 
     sig_to_type_bound(reg, sig, &[])
 }
 
-/// The **reverse map** `SigType → TypeRef` (native-extensibility S3) — the AST-level twin of
+/// The **reverse map** `SigType → TypeRef` — the AST-level twin of
 /// [`sig_to_type`]. `seed_ext_traits` synthesizes a [`noeta_ast::TraitDecl`] from an
 /// [`registry::ExtTrait`]; a `TraitDecl`'s method signatures ([`noeta_ast::FnDecl`]) carry their
 /// parameter and return types as **AST `TypeRef`** (not lattice [`Type`]), because the user-trait
@@ -146,10 +146,10 @@ pub(crate) fn sig_to_typeref(
         ),
         // A signature-level variable has no concrete declaration-site meaning — a permissive hole.
         SigType::Var(_) | SigType::BoundedVar(_, _) => named("dyn"),
-        // A trait associated-type projection (slice 1b): the ABI twin of the AST
+        // A trait associated-type projection: the ABI twin of the AST
         // `TypeRef::AssocProjection` — `synth_trait_decl` carries it into the synthesized
         // `TraitDecl`'s method signatures, where the user-trait machinery resolves `Self::Name`
-        // per-implementor exactly as it does for a `.noe` trait's associated type (slice 1a).
+        // per-implementor exactly as it does for a `.noe` trait's associated type.
         SigType::Assoc(n) => TypeRef::AssocProjection {
             name: (*n).to_string(),
             span: sp,
@@ -174,7 +174,7 @@ pub(crate) fn sig_to_typeref(
     }
 }
 
-/// The **return type** of a native trait method as a `TypeRef` (native-extensibility S3): the
+/// The **return type** of a native trait method as a `TypeRef`: the
 /// [`registry::RetTy`] twin of [`sig_to_typeref`]. A trait method declares a concrete return
 /// ([`registry::RetTy::Concrete`]); the polymorphic forms (`SameAsArg`/`NumericPreserving`/turbofish
 /// `TypeArg`) have no fixed declaration-site type, so they become a permissive `dyn` hole.
@@ -193,8 +193,8 @@ pub(crate) fn ret_to_typeref(
     }
 }
 
-/// Map a [`registry::SigType`] onto a checker [`Type`] under call-site variable `bindings`
-/// (higher-order-abi H1): `Var(n)` becomes its bound type, or a gradual hole when the call's
+/// Map a [`registry::SigType`] onto a checker [`Type`] under call-site variable `bindings`:
+/// `Var(n)` becomes its bound type, or a gradual hole when the call's
 /// arguments never determined it — permissive, never a wrong concrete type.
 fn sig_to_type_bound(
     reg: &registry::Registry,
@@ -235,7 +235,7 @@ fn sig_to_type_bound(
         SigType::Union(members) => {
             Type::union(members.iter().map(|m| sig_to_type_bound(reg, m, bindings)))
         }
-        // A trailing-optional param's type IS the wrapped type when present (http arc H4); the
+        // A trailing-optional param's type IS the wrapped type when present; the
         // optionality is carried separately as the required-argument count, not in the type.
         SigType::Optional(inner) => sig_to_type_bound(reg, inner, bindings),
         SigType::Fn(params, ret) => Type::Fn {
@@ -245,20 +245,20 @@ fn sig_to_type_bound(
                 .collect(),
             ret: Box::new(sig_to_type_bound(reg, ret, bindings)),
         },
-        // A bounded var (p2p P2) substitutes exactly like a plain var; the bound is enforced
+        // A bounded var substitutes exactly like a plain var; the bound is enforced
         // separately at the call site (see `module_var_bounds`).
         SigType::Var(n) | SigType::BoundedVar(n, _) => bindings
             .get(*n as usize)
             .and_then(Clone::clone)
             .unwrap_or(Type::Unknown),
-        // A generic extern-type instantiation (higher-order-abi H4): `cell.new(v: A) -> Cell<A>`.
+        // A generic extern-type instantiation: `cell.new(v: A) -> Cell<A>`.
         SigType::Generic(n, args) => Type::Named(
             qualified_extern(reg, n),
             args.iter()
                 .map(|a| sig_to_type_bound(reg, a, bindings))
                 .collect(),
         ),
-        // A trait associated-type projection (`Self::Wide`, slice 1b) has no declaration-site lattice
+        // A trait associated-type projection (`Self::Wide`) has no declaration-site lattice
         // type — it is resolved per-implementor against `trait_assoc` at the concrete call site
         // (`Checker::native_method_assoc_return`), so here it is a gradual hole.
         SigType::Assoc(_) => Type::Unknown,
@@ -270,8 +270,8 @@ fn sig_to_type_bound(
     }
 }
 
-/// Bind a declared signature's type variables from the call's actual argument types
-/// (higher-order-abi H1): walk each parameter structurally against its argument, binding each
+/// Bind a declared signature's type variables from the call's actual argument types: walk each
+/// parameter structurally against its argument, binding each
 /// `Var(n)` at its **first** occurrence with a determined type. Substituting the bindings back
 /// into the parameters makes a *second* occurrence of the same variable a concrete expectation —
 /// so `all(List<Future<T>>)` given `List<Future<int>>` types as `List<int>`, and a `map_bounded`
@@ -330,15 +330,15 @@ fn bind_sig(sig: &registry::SigType, arg: &Type, bindings: &mut Vec<Option<Type>
     }
 }
 
-/// Seed variable bindings for an extern-type **method** from the receiver's type arguments
-/// (higher-order-abi H4): `Var(i)` = the receiver's i-th argument, so `Cell<int>.get() -> Var(0)`
+/// Seed variable bindings for an extern-type **method** from the receiver's type arguments:
+/// `Var(i)` = the receiver's i-th argument, so `Cell<int>.get() -> Var(0)`
 /// recovers `int` and `.set(v: Var(0))` demands one. Call arguments may bind later variables via
 /// the ordinary [`bind_sig`] walk on top of this seed.
 fn receiver_bindings(receiver_args: &[Type]) -> Vec<Option<Type>> {
     receiver_args.iter().cloned().map(Some).collect()
 }
 
-/// The **trait bounds** on a registry function's bounded type variables (p2p P2), each paired with
+/// The **trait bounds** on a registry function's bounded type variables, each paired with
 /// the concrete type the call's arguments bound it to — for the checker to enforce (`E0025`). A
 /// bound whose variable the arguments left undetermined (a gradual hole) yields nothing: no
 /// information, so no error. `synced_signal(initial: BoundedVar(0, &["Mergeable"]), …)` called with a
@@ -424,10 +424,10 @@ pub(super) fn method_return(
         return Some(Type::Named("Ordering".to_string(), vec![]));
     }
     match receiver {
-        // A fixed-width integer exposes the same method surface as `int` (Tier W4): both are erased
+        // A fixed-width integer exposes the same method surface as `int`: both are erased
         // to the i64 word at runtime, so the bit intrinsics and conversions apply uniformly.
         Type::Int | Type::IntN { .. } => int_method(name),
-        // `float`, `f32`, and the strict `f64` carry only the numeric conversion tower (S0):
+        // `float`, `f32`, and the strict `f64` carry only the numeric conversion tower:
         // `to_int`/`to_i8`…, `to_float`/`to_f64`, `to_f32` — each a total, 0-arity cast.
         Type::Float | Type::F32 | Type::F64 => float_conversion_return(name),
         Type::String => string_method(name),
@@ -450,7 +450,7 @@ pub(super) fn method_return(
         // A registered extern type's methods come from its `ExtType` signature table
         // (extern-types X1) — the registry is the single source, so a new native type never
         // edits this file. A generic extern type's method signatures reference the receiver's
-        // type arguments as `Var(i)` (H4): `Cell<int>.get()` is `int`.
+        // type arguments as `Var(i)`: `Cell<int>.get()` is `int`.
         Type::Named(n, targs) if reg.resolve_type(n).is_some() => {
             let sig = reg.find_type_method_sig(n, name)?;
             Some(match sig.ret {
@@ -460,8 +460,8 @@ pub(super) fn method_return(
                 _ => Type::Dyn,
             })
         }
-        // A registered native **fielded type**'s instance methods (native-extensibility S3 / Pass
-        // 2a) — a class or a value struct — come from its `ExtFielded` signature table (resolved by
+        // A registered native **fielded type**'s instance methods — a class or a value struct —
+        // come from its `ExtFielded` signature table (resolved by
         // `find_class_method` over both), like the extern-type arm above. A native fielded type is
         // not generic, so there are no receiver type-variable bindings.
         Type::Named(n, _) if reg.find_class_method(n, name).is_some() => {
@@ -471,7 +471,7 @@ pub(super) fn method_return(
                 _ => Type::Dyn,
             })
         }
-        // A registered native **enum**'s instance methods (native-extensibility S1 / Slice B) come
+        // A registered native **enum**'s instance methods come
         // from its `ExtEnum` signature table (resolved by `find_enum_method`), the enum twin of the
         // fielded-method arm above. A native enum is not generic, so there are no receiver
         // type-variable bindings; it is consulted before the built-in `value()` accessor below (a
@@ -498,7 +498,7 @@ pub(super) fn method_return(
         {
             Some(Type::String)
         }
-        // A native **backed** enum's `.value()` accessor (native-extensibility S1): the constraint
+        // A native **backed** enum's `.value()` accessor: the constraint
         // `ExtEnum.backing` states the accessor's type — a `String`-backed enum's `.value()` is
         // `string`, an `Int`-backed one's is `int`. A non-backed enum has NO `.value()` (returns
         // `None` here, so a `.value()` call on it is an unknown method). This is the live enforcer
@@ -508,7 +508,7 @@ pub(super) fn method_return(
     }
 }
 
-/// The type of a native backed enum's `.value()` accessor (native-extensibility S1), read straight
+/// The type of a native backed enum's `.value()` accessor, read straight
 /// off its [`registry::ExtEnum::backing`] declaration — the live enforcer of the `ExtEnum.backing`
 /// constraint. `String` backing ⇒ `string`, `Int` backing ⇒ `int`; a non-backed enum (or a name
 /// that is not a native enum at all) has no `.value()` and yields `None`.
@@ -521,7 +521,7 @@ fn native_enum_backing_type(reg: &registry::Registry, n: &str) -> Option<Type> {
     }
 }
 
-/// A task handle `Future<T>` (Track A.8) — the cancellation surface a `spawn`/`isolate` handle
+/// A task handle `Future<T>` — the cancellation surface a `spawn`/`isolate` handle
 /// exposes. `cancel()` *requests* a stop (idempotent, `void` — at the moment you ask, nothing is yet
 /// known); `join()` drives the task to a terminal state and *reports* it as a typed
 /// `Result<T, Cancelled>` (`Ok(v)` if the body produced a value, including when the request arrived
@@ -560,7 +560,7 @@ fn receiver_method(name: &str, elem: &Type) -> Option<Type> {
     })
 }
 
-/// `iter()` (Track I.1a) — available on every iterable, returning an `Iterator<T>` over the element
+/// `iter()` — available on every iterable, returning an `Iterator<T>` over the element
 /// type. A map iterates its **values** (the order `for` uses), so its element type is the value type.
 fn iterable_iter(elem: Type) -> Type {
     Type::Named(ITERATOR.to_string(), vec![elem])
@@ -577,16 +577,16 @@ fn iterator_method(name: &str, elem: &Type, facts: ElemFacts) -> Option<Type> {
     Some(match name {
         "next" => opt(elem.clone()),
         "collect" => list(elem.clone()),
-        // Adapters return another `Iterator<T>` over the same element type (Track I.1b).
+        // Adapters return another `Iterator<T>` over the same element type.
         "take" | "drop" | "chain" => iterable_iter(elem.clone()),
-        // `enumerate()` → `Iterator<(int, T)>` (Track I.1b.2).
+        // `enumerate()` → `Iterator<(int, T)>`.
         "enumerate" => iterable_iter(Type::Tuple(vec![Type::Int, elem.clone()])),
         // `zip(other)` → `Iterator<(T, B)>`; the second element type comes from the argument, which
         // `method_return` cannot see, so the precise type is filled at the call site (`synth_call`).
         // This fallback is used only when that refinement does not apply.
         "zip" => iterable_iter(Type::Tuple(vec![elem.clone(), Type::Dyn])),
         // `filter(f)` keeps the element type; `map(f)` → `Iterator<R>` where `R` is the closure's
-        // return — also resolved at the call site (it needs the argument type). (Track I.1c.)
+        // return — also resolved at the call site (it needs the argument type).
         "filter" => iterable_iter(elem.clone()),
         "map" => iterable_iter(Type::Dyn),
         // `count()` is the number of remaining elements — cardinality, the one question a lazy
@@ -595,7 +595,7 @@ fn iterator_method(name: &str, elem: &Type, facts: ElemFacts) -> Option<Type> {
         // …and `count_true()` is the popcount, spelled the same here as on a list, so the bool
         // family reads identically on both surfaces.
         "count_true" => Type::Int,
-        // `sum()` → the element type for a concrete numeric `Iterator<T>` (array-ops arc): a narrow
+        // `sum()` → the element type for a concrete numeric `Iterator<T>`: a narrow
         // element (`iN`/`uN`/`f32`/`f64`) returns THAT type and wraps at its width, so
         // `xs.iter().take(k).sum()` agrees with `xs.sum()`; a non-numeric element stays `Unknown` (as
         // the eager `sum` builtin does, so it never newly rejects).
@@ -624,7 +624,7 @@ fn iterator_method(name: &str, elem: &Type, facts: ElemFacts) -> Option<Type> {
 fn bytes_method(name: &str) -> Option<Type> {
     Some(match name {
         "len" => Type::Int,            // the buffer length in bytes
-        "to_hex" => Type::String,      // lowercase hex rendering (crypto arc C1)
+        "to_hex" => Type::String,      // lowercase hex rendering
         "decode" => opt(Type::String), // UTF-8 decode — `none` on invalid UTF-8
         // The sequence-reading pair `bytes` was missing next to `string`/`List<T>`: `b.slice(a, b?)`
         // here and the index `b[i]` in `index_return`. A slice of a byte buffer is a byte buffer.
@@ -634,8 +634,8 @@ fn bytes_method(name: &str) -> Option<Type> {
 }
 
 /// The methods on `int` (and, identically, any fixed-width `IntN`): the bit-manipulation intrinsics
-/// (P-BITS Tier B4 — all return `int`; `rotate_*` take an `int`, the rest none) and the total
-/// numeric conversions (Tier W4 — `to_u8`/`to_i32`/…/`to_int`, each returning its destination type).
+/// (all return `int`; `rotate_*` take an `int`, the rest none) and the total numeric conversions
+/// (`to_u8`/`to_i32`/…/`to_int`, each returning its destination type).
 /// The method set is the shared `noeta_ext_abi::IntMethod` enum, so a bad arity is caught statically.
 fn int_method(name: &str) -> Option<Type> {
     // A conversion carries a destination type distinct from `int`; the bit intrinsics all return `int`.
@@ -645,12 +645,12 @@ fn int_method(name: &str) -> Option<Type> {
     noeta_ext_abi::IntMethod::from_name(name).map(|_| Type::Int)
 }
 
-/// The destination type of a `to_<type>` conversion method (Tier W4), or `None` if `name` is not a
+/// The destination type of a `to_<type>` conversion method, or `None` if `name` is not a
 /// conversion. `to_int` yields the platform `int`; `to_i8`/`to_u32`/… their fixed-width type. The
 /// checker decodes names to *types* (unlike the runtime `IntMethod::Convert`, it must tell `to_int`
 /// from `to_i64`); shared by the `int` and `IntN` method typing.
 fn int_conversion_return(name: &str) -> Option<Type> {
-    // Cross-domain destinations (S0): an integer converts to a float too.
+    // Cross-domain destinations: an integer converts to a float too.
     match name {
         "to_float" => return Some(Type::Float),
         "to_f64" => return Some(Type::F64),
@@ -676,7 +676,7 @@ fn int_destination_type(rest: &str) -> Option<Type> {
     Some(Type::IntN { signed, bits })
 }
 
-/// The destination type of a conversion method on a `float`/`f32` receiver (S0). The full tower:
+/// The destination type of a conversion method on a `float`/`f32` receiver. The full tower:
 /// `to_int` → `int`, `to_i8`/`to_u32`/… → the fixed-width type, `to_float` → `float`, `to_f64` → `f64`,
 /// `to_f32` → `f32`. `None` if `name` is not a conversion. (`int_conversion_return` already covers
 /// the same spellings on an integer receiver — this is its float-receiver twin, differing only in
@@ -1013,19 +1013,19 @@ fn list_method(name: &str, elem: &Type, facts: ElemFacts) -> Option<Type> {
         "join" => Type::String,
         "first" | "last" => opt(elem.clone()),
         "to_set" => set(elem.clone()),
-        // `len` is the collection length (P1.3 — `count` is iterator-only: a consuming terminal).
+        // `len` is the collection length (`count` is iterator-only: a consuming terminal).
         "len" => Type::Int,
-        // Eager collection methods reusing the free-function impls (prelude-redesign P1). `filter(f)`
+        // Eager collection methods reusing the free-function impls. `filter(f)`
         // keeps the element type; `map(f)` → a `List<R>` where `R` is the closure's return, refined at
         // the call site (like iterator `map`).
         "filter" => list(elem.clone()),
-        // Numeric reductions (packed-reductions arc): `sum`/`product` return the **element type**,
+        // Numeric reductions: `sum`/`product` return the **element type**,
         // wrapping at its width — folding `List<i32>` gives an `i32`, exactly as repeated `+`/`*`
         // would (settled decision). A packed scalar list folds its raw buffer; a boxed numeric list
         // folds element-wise — one shared kernel, so both agree. The numeric requirement is the
         // gate above, not a per-arm guard.
         "sum" | "product" => num(),
-        // `checked_sum()` (array-ops arc): the opt-in overflow-reporting sum — `?T`, `none` on
+        // `checked_sum()`: the opt-in overflow-reporting sum — `?T`, `none` on
         // integer overflow (the unchecked `sum` still wraps).
         "checked_sum" => opt(num()),
         // The **ordering** reductions: `min`/`max` return `?T` (`none` for an empty list, like
@@ -1034,7 +1034,7 @@ fn list_method(name: &str, elem: &Type, facts: ElemFacts) -> Option<Type> {
         // is the [`ElemReq::Ordered`] gate above, and which a bare type parameter meets through a
         // `Comparable` bound exactly as `a < b` does.
         "min" | "max" => opt(elem.clone()),
-        // Element-wise array-programming methods (array-ops arc): `scale(s)` (list × scalar),
+        // Element-wise array-programming methods: `scale(s)` (list × scalar),
         // `abs()`, `neg()`, and `clamp(lo, hi)` — each returns a list of the same numeric element
         // type (element-wise, wrapping for ints). Packed lists fold their buffer, boxed lists their
         // scalars — one shared `noeta-stdlib` kernel, so both agree.
@@ -1047,11 +1047,11 @@ fn list_method(name: &str, elem: &Type, facts: ElemFacts) -> Option<Type> {
         "any" | "all" => Type::Bool,
         "count_true" => Type::Int,
         "map" => list(Type::Dyn),
-        // `to_bytes` serializes a `List<@packed>` to its raw flat buffer (P-PACK 4.4).
+        // `to_bytes` serializes a `List<@packed>` to its raw flat buffer.
         "to_bytes" => Type::Bytes,
-        // `enumerate` yields a list of `(index, item)` tuples (object-model slice 4b).
+        // `enumerate` yields a list of `(index, item)` tuples.
         "enumerate" => list(Type::Tuple(vec![Type::Int, elem.clone()])),
-        // `iter()` → a lazy `Iterator<T>` over the elements (Track I.1a).
+        // `iter()` → a lazy `Iterator<T>` over the elements.
         "iter" => iterable_iter(elem.clone()),
         _ => return None,
     })
@@ -1109,7 +1109,7 @@ pub(super) fn method_params(
         Type::Named(n, args) if n == ITERATOR => {
             iterator_params(name, args.first().unwrap_or(&Type::Dyn))
         }
-        // `Future<T>` cancellation methods (Track A.8): both nullary.
+        // `Future<T>` cancellation methods: both nullary.
         Type::Named(n, _) if n == FUTURE => Some(match name {
             "cancel" | "join" => vec![],
             _ => return None,
@@ -1128,7 +1128,7 @@ pub(super) fn method_params(
         }),
         // A registered extern type's method parameters come from its `ExtType` signature table
         // (extern-types X1), like `method_return`, with the receiver's type arguments seeding
-        // any variables (H4): `Cell<int>.set(v)` demands an `int`.
+        // any variables: `Cell<int>.set(v)` demands an `int`.
         Type::Named(n, targs) if reg.resolve_type(n).is_some() => {
             let sig = reg.find_type_method_sig(n, name)?;
             let bindings = receiver_bindings(targs);
@@ -1140,14 +1140,14 @@ pub(super) fn method_params(
             )
         }
         // A native **fielded type**'s method parameters (class or value struct) come from its
-        // `ExtFielded` signature table (native-extensibility S3 / Pass 2a, resolved over both by
+        // `ExtFielded` signature table (resolved over both by
         // `find_class_method`), like `method_return`; a native fielded type is not generic.
         Type::Named(n, _) if reg.find_class_method(n, name).is_some() => {
             let sig = reg.find_class_method(n, name)?;
             Some(sig.params.iter().map(|p| sig_to_type(reg, p)).collect())
         }
         // A native **enum**'s method parameters come from its `ExtEnum` signature table
-        // (native-extensibility S1 / Slice B, resolved by `find_enum_method`), like `method_return`;
+        // (resolved by `find_enum_method`), like `method_return`;
         // a native enum is not generic.
         Type::Named(n, _) if reg.find_enum_method(n, name).is_some() => {
             let sig = reg.find_enum_method(n, name)?;
@@ -1166,9 +1166,9 @@ pub(super) fn method_params(
 }
 
 /// The count of **required** arguments a Ring 2 module function takes — everything up to its first
-/// trailing-optional param (http arc H4). Runs alongside [`module_params`] so the arity gate
-/// admits `http.get(url)` as well as `http.get(url, headers)` (and, since N3.4, `fs.list()` as
-/// well as `fs.list(dir)`).
+/// trailing-optional param. Runs alongside [`module_params`] so the arity gate
+/// admits `http.get(url)` as well as `http.get(url, headers)`, and `fs.list()` as well as
+/// `fs.list(dir)`.
 pub(super) fn module_required(reg: &registry::Registry, module: &str, name: &str) -> Option<usize> {
     reg.find_function_sig(module, name)
         .map(|f| registry::SigType::required_count(f.params))
@@ -1176,7 +1176,7 @@ pub(super) fn module_required(reg: &registry::Registry, module: &str, name: &str
 
 /// The required-argument count of a receiver method — the count below its trailing-optional
 /// params. `None` means "all of [`method_params`] are required" (the caller falls back to
-/// `params.len()`). A registered extern type reads it from its `ExtFn` signature (http arc H4);
+/// `params.len()`). A registered extern type reads it from its `ExtFn` signature;
 /// a **built-in** method reads it from [`builtin_method_required`] (the core analogue — a method
 /// like `split(sep, limit?)` accepts a range).
 pub(super) fn method_required(
@@ -1191,13 +1191,13 @@ pub(super) fn method_required(
             .find_type_method_sig(n, name)
             .map(|sig| registry::SigType::required_count(sig.params));
     }
-    // A native class's method required-arg count (native-extensibility S3 / Pass 2a).
+    // A native class's method required-arg count.
     if let Type::Named(n, _) = receiver
         && let Some(sig) = reg.find_class_method(n, name)
     {
         return Some(registry::SigType::required_count(sig.params));
     }
-    // A native enum's method required-arg count (native-extensibility S1 / Slice B).
+    // A native enum's method required-arg count.
     if let Type::Named(n, _) = receiver
         && let Some(sig) = reg.find_enum_method(n, name)
     {
@@ -1242,7 +1242,7 @@ fn iterator_params(name: &str, elem: &Type) -> Option<Vec<Type>> {
         // component); `Iterator<dyn>` accepts every `Iterator<B>` while still rejecting non-iterators.
         "zip" => vec![iterable_iter(Type::Dyn)],
         // `map(f)` takes a closure of the element type → any result; `filter(f)` one returning `bool`
-        // (so a wrongly-typed closure is rejected statically, matching the runtime check). (Track I.1c.)
+        // (so a wrongly-typed closure is rejected statically, matching the runtime check).
         "map" => vec![Type::Fn {
             params: vec![elem.clone()],
             ret: Box::new(Type::Dyn),
@@ -1255,7 +1255,7 @@ fn iterator_params(name: &str, elem: &Type) -> Option<Vec<Type>> {
     })
 }
 
-/// Parameter types for the `int` bit-manipulation intrinsics (P-BITS Tier B4): `rotate_left`/
+/// Parameter types for the `int` bit-manipulation intrinsics: `rotate_left`/
 /// `rotate_right` take an `int` amount; the rest take none. The method set is the shared enum, so a
 /// bad arity/arg-type is caught statically and neither backend needs a runtime arity check.
 fn int_params(name: &str) -> Option<Vec<Type>> {
@@ -1287,7 +1287,7 @@ fn list_params(name: &str, elem: &Type) -> Option<Vec<Type>> {
             vec![]
         }
         "contains" => vec![elem.clone()],
-        // Element-wise array-programming methods (array-ops arc): `scale(s)` takes one scalar of the
+        // Element-wise array-programming methods: `scale(s)` takes one scalar of the
         // element type, `clamp(lo, hi)` two — a numeric-literal argument adapts into a fixed-width
         // element type (`xs.scale(2)` on a `List<i32>`), like any other typed position.
         "scale" => vec![elem.clone()],
@@ -1335,7 +1335,7 @@ fn map_params(name: &str, key: &Type, val: &Type) -> Option<Vec<Type>> {
 /// The parameter types a Ring 2 module function expects, or `None` if unknown. Numeric-polymorphic
 /// parameters (`math.abs`/`min`/`max`, and any numeric position) are typed `dyn` so an `int` or
 /// `float` argument is accepted without a spurious mismatch. `args` — the call's actual argument
-/// types — feed the signature's type variables (higher-order-abi H1): the params come back with
+/// types — feed the signature's type variables: the params come back with
 /// each `Var` substituted by its first-occurrence binding, so the ordinary argument check enforces
 /// the repeated-variable positions.
 pub(super) fn module_params(
@@ -1344,9 +1344,9 @@ pub(super) fn module_params(
     name: &str,
     args: &[Type],
 ) -> Option<Vec<Type>> {
-    // Every module function types from the native-extension registry (the last non-registry
-    // stragglers died with package-manager N3.4: the `vec` bulk `*_all` kernels are registered
-    // ctx functions, and `fs.list`/`fs.list_async` carry a real trailing-`Optional` signature).
+    // Every module function types from the native-extension registry: the `vec` bulk `*_all`
+    // kernels are registered ctx functions, and `fs.list`/`fs.list_async` carry a real
+    // trailing-`Optional` signature.
     let f = reg.find_function_sig(module, name)?;
     let bindings = bind_params(f.params, args);
     Some(
@@ -1361,8 +1361,8 @@ pub(super) fn module_params(
 /// `None` if `name` is not a prelude function.
 pub(super) fn prelude_return(name: &str, args: &[Type]) -> Option<Type> {
     Some(match name {
-        // `len`/`map`/`filter`/`sum` left the prelude (P1.2, collection methods now — see
-        // `list_method`); `next_id` left it (P2c) for `use std.id`.
+        // `len`/`map`/`filter`/`sum` left the prelude (collection methods now — see
+        // `list_method`); `next_id` left it for `use std.id`.
         // The polymorphic constructors carry the argument type in the known position; the other
         // type parameter is unconstrained (a hole) at the call site.
         "Ok" => Type::Result(
@@ -1383,8 +1383,8 @@ pub(super) fn prelude_return(name: &str, args: &[Type]) -> Option<Type> {
         "panic" => Type::Never,
         // `assert(cond)` / `assert(cond, msg)` — checked for effect, yields nothing.
         "assert" => Type::Unit,
-        // `signal`/`computed`/`effect` left the prelude (P2a) for `use std.reactive`, and
-        // `sleep`/`all`/`race`/`map_bounded` (P2b) for `use std.task` — both typed in
+        // `signal`/`computed`/`effect` left the prelude for `use std.reactive`, and
+        // `sleep`/`all`/`race`/`map_bounded` for `use std.task` — both typed in
         // `module_return` under their virtual modules.
         _ => return None,
     })
@@ -1435,20 +1435,18 @@ pub(super) fn module_return(
     name: &str,
     args: &[Type],
 ) -> Option<Type> {
-    // (The `reactive` arm lived here until higher-order-abi H5 — `signal`/`computed`/`effect`
-    // now type through the registry fallback below, their `T`s recovered by `SigType::Generic`
-    // + `Var` bind-and-substitute, and the handle methods through the extern-type tables.)
-    // (`id` was virtual here until the id-entropy arc de-virtualized it, and `task` until
-    // higher-order-abi H0/H2 — the whole module now types through the registry fallback below,
-    // its combinators' `T`s recovered by the `SigType::Var` bind-and-substitute.)
-    // (`http.serve` was special-cased here until higher-order-abi H3 — it now types through the
-    // registry fallback below like any ctx function, with a real declared signature: the port is
-    // an `int` and the handler a `Fn(Request) -> dyn`, so a wrong handler shape is finally a
-    // static error.)
-    // Migrated modules: the result type comes from the registry's `RetTy`. `SameAsArg(i)` carries the
+    // `signal`/`computed`/`effect` type through the registry fallback below, their `T`s recovered
+    // by `SigType::Generic` + `Var` bind-and-substitute, and the handle methods through the
+    // extern-type tables. `id` and `task` type through that same fallback, the combinators' `T`s
+    // recovered by the `SigType::Var` bind-and-substitute.
+    // `http.serve` types through it like any other ctx function, with a real declared signature:
+    // the port is an `int` and the handler a `Fn(Request) -> dyn`, so a wrong handler shape is a
+    // static error.
+    //
+    // The result type comes from the registry's `RetTy`. `SameAsArg(i)` carries the
     // i-th argument's type (`vec.add(v, w): typeof v`); `NumericPreserving` is the `math.abs`/min/max
     // kind-preserving rule; `Concrete` maps directly, with any signature type variables bound from
-    // the argument types (higher-order-abi H1) — `all(List<Future<T>>) -> List<T>` recovers `T`.
+    // the argument types — `all(List<Future<T>>) -> List<T>` recovers `T`.
     use registry::RetTy;
     let f = reg.find_function_sig(module, name)?;
     Some(match f.ret {
@@ -1499,7 +1497,7 @@ pub(super) fn typed_module_call(
     Some((params, required, result))
 }
 
-/// The extern-type twin of [`typed_module_call`] (http arc H8): resolve `Type.method::<T>(args)`
+/// The extern-type twin of [`typed_module_call`]: resolve `Type.method::<T>(args)`
 /// against the receiver type's `typed_methods` table.
 ///
 /// `type_name` is the receiver's **qualified** identity (`std.http.Response`). Returns `None` when
@@ -1546,7 +1544,7 @@ pub(super) fn typed_type_method(
     Some((params, required, result))
 }
 
-/// A bundle method's parameter types under the receiver-at-0 convention (kernel-methods K2):
+/// A bundle method's parameter types under the receiver-at-0 convention:
 /// the receiver is NOT in `params` (it rides as ctx slot 0), so binding and substitution run
 /// over the call's own arguments exactly like a module function's.
 ///
@@ -1606,16 +1604,19 @@ fn sig_to_type_bundle(
     }
 }
 
-/// A bundle method's return type under the receiver-at-0 convention (kernel-methods K2):
+/// A bundle method's return type under the receiver-at-0 convention:
 /// `SameAsArg(0)` is **the receiver's type** (`xs.add_all(ys)` returns `xs`'s own `List<T>`),
 /// `SameAsArg(i > 0)` the call's argument `i - 1`.
 ///
-/// The **element-relative** returns (scalar-unification ABI) resolve against `elem` — the bound
-/// `@packed` shape's uniform element type, captured by the checker at the call site from the
-/// receiver's concrete field kind. `Elem` is that element itself, `ElemWide` its widened
-/// accumulator ([`elem_wide`]), `ElemFloat` its float promotion ([`elem_float`]); a `None` `elem`
-/// (a non-uniform shape reaching an element-relative method — never true for a well-formed
-/// `AnyNumeric` binding) degrades to a gradual hole rather than a wrong concrete type.
+/// The **element-relative** returns are associated-type projections (`Self::Wide`, `Self::Float`)
+/// resolved against `elem` — the bound `@packed` shape's uniform element type, captured by the
+/// checker at the call site from the receiver's concrete field kind. Each name resolves through the
+/// trait's [`registry::AssocDerivation`]: [`Element`](registry::AssocDerivation::Element) is that
+/// element itself, [`Widen`](registry::AssocDerivation::Widen) its widened accumulator
+/// ([`elem_wide`]), [`FloatPromote`](registry::AssocDerivation::FloatPromote) its float promotion
+/// ([`elem_float`]). A `None` `elem` (a non-uniform shape reaching an element-relative method —
+/// never true for a well-formed `AnyNumeric` binding) degrades to a gradual hole rather than a
+/// wrong concrete type.
 pub(super) fn bundle_method_return(
     reg: &registry::Registry,
     f: &registry::ExtFn,
@@ -1626,11 +1627,11 @@ pub(super) fn bundle_method_return(
 ) -> Type {
     use registry::{RetTy, SigType};
     match f.ret {
-        // The element-relative returns are now trait associated-type projections (`Self::Wide` /
-        // `Self::Float`, ExtBundle→ExtTrait fold-in, slice 4): resolve the name against the kernel
-        // trait's native-derived `assoc_types` folded over the bound element — the ONE derivation
-        // mechanism (slice 1b) instead of the retired `RetTy::Elem*` vocabulary. `List<Self::Wide>`
-        // (`dot_all`) / `List<Self::Float>` (`length_all`) nest through the same resolution.
+        // The element-relative returns are trait associated-type projections (`Self::Wide` /
+        // `Self::Float`): resolve the name against the kernel trait's native-derived `assoc_types`
+        // folded over the bound element — one derivation mechanism for every element-relative
+        // return. `List<Self::Wide>` (`dot_all`) / `List<Self::Float>` (`length_all`) nest through
+        // the same resolution.
         RetTy::Concrete(SigType::Assoc(name)) => resolve_bundle_assoc(name, assoc_types, elem),
         RetTy::Concrete(SigType::List(SigType::Assoc(name))) => {
             Type::List(Box::new(resolve_bundle_assoc(name, assoc_types, elem)))
@@ -1646,7 +1647,7 @@ pub(super) fn bundle_method_return(
 
 /// Resolve a kernel method's `Self::<name>` associated-type return against the trait's native-derived
 /// [`registry::ExtAssocType`]s folded over the bound `@packed` element — the SHARED derivation
-/// abstraction (slice 1b). A `None` element (a non-uniform shape reaching an element-relative method —
+/// abstraction. A `None` element (a non-uniform shape reaching an element-relative method —
 /// never true for a well-formed `AnyNumeric` binding) or an unknown name degrades to a gradual hole.
 fn resolve_bundle_assoc(
     name: &str,
@@ -1660,13 +1661,12 @@ fn resolve_bundle_assoc(
         .unwrap_or(Type::Unknown)
 }
 
-/// The **shared element-derivation abstraction** (ExtBundle→ExtTrait convergence, slice 1b): applies
+/// The **shared element-derivation abstraction**: applies
 /// a native trait's [`registry::AssocDerivation`] to a `@packed` shape's uniform element type,
 /// producing the associated type's concrete `Type`. The ONE code path both halves of the convergence
 /// use — the native-trait `trait_assoc` population (`seed_ext_traits`) and the bundle ABI's
-/// element-relative returns ([`bundle_method_return`]) — proving the derivation enum expresses exactly
-/// what `RetTy::Elem`/`ElemWide`/`ElemFloat` did. The ABI cannot itself produce a `Type` (it cannot
-/// see `noeta_types::Type`), so the interpretation lives here, on a local extension trait.
+/// element-relative returns ([`bundle_method_return`]). The ABI cannot itself produce a `Type` (it
+/// cannot see `noeta_types::Type`), so the interpretation lives here, on a local extension trait.
 pub(crate) trait DeriveApply {
     fn apply(&self, elem: &Type) -> Type;
 }
@@ -1682,9 +1682,9 @@ impl DeriveApply for registry::AssocDerivation {
     }
 }
 
-/// The associated-type shape a native (fielded or extern) method's return names, if any (slice 1b):
-/// `Self::Name` ([`AssocRet::Bare`]) or `List<Self::Name>` ([`AssocRet::List`], the `ListElemWide`
-/// analog). Read straight off the method's registry signature — the checker then resolves the named
+/// The associated-type shape a native (fielded or extern) method's return names, if any:
+/// `Self::Name` ([`AssocRet::Bare`]) or `List<Self::Name>` ([`AssocRet::List`]). Read straight off
+/// the method's registry signature — the checker then resolves the named
 /// associated type against `trait_assoc` at the concrete receiver
 /// ([`crate::Checker::native_method_assoc_return`]). A method whose return is not an associated-type
 /// projection yields `None` (it types through the ordinary [`method_return`] path).
@@ -1710,14 +1710,15 @@ pub(super) fn native_method_assoc_ret(
         .or_else(|| reg.find_type_method_sig(n, name))?;
     match sig.ret {
         RetTy::Concrete(SigType::Assoc(a)) => Some(AssocRet::Bare(a)),
-        // `List<Self::Name>` — the `RetTy::ListElemWide` analog; nests through the concrete resolution.
+        // `List<Self::Name>` nests through the concrete resolution.
         RetTy::Concrete(SigType::List(SigType::Assoc(a))) => Some(AssocRet::List(a)),
         _ => None,
     }
 }
 
-/// The **widened accumulator** of a numeric element (`Scalar::Wide`) — the type an
-/// [`registry::RetTy::ElemWide`] bundle method (`dot`) returns. Integer elements (`int` and every
+/// The **widened accumulator** of a numeric element (`Scalar::Wide`) — the type a bundle method
+/// returning `Self::Wide` (`dot`) resolves to, via
+/// [`registry::AssocDerivation::Widen`]. Integer elements (`int` and every
 /// `iN`/`uN`) widen to `int` (the i64 the seam's `Scalar::Int` carries — an unsigned `uN`'s u64
 /// accumulator crosses the ABI in the same 64-bit lane); `f32` stays `f32`, `f64` stays `f64`,
 /// `float` stays `float`. Kept in lock-step with the `noeta-stdlib` `Scalar` trait's `Wide`.
@@ -1731,8 +1732,9 @@ pub(super) fn elem_wide(elem: &Type) -> Type {
     }
 }
 
-/// The **float promotion** of a numeric element (`Scalar::Float`) — the type an
-/// [`registry::RetTy::ElemFloat`] bundle method (`length`) returns. Integer elements (`int` and
+/// The **float promotion** of a numeric element (`Scalar::Float`) — the type a bundle method
+/// returning `Self::Float` (`length`) resolves to, via
+/// [`registry::AssocDerivation::FloatPromote`]. Integer elements (`int` and
 /// every `iN`/`uN`) promote to `float` (f64); `f32` stays `f32`, `f64` stays `f64`, `float` stays
 /// `float`. Kept in lock-step with the `noeta-stdlib` `Scalar` trait's `Float`.
 pub(super) fn elem_float(elem: &Type) -> Type {
@@ -1781,10 +1783,8 @@ fn numeric_preserving(args: &[Type]) -> Type {
 
 #[cfg(test)]
 mod tests {
-    //! The H1 bind-and-substitute machinery, exercised directly: no *registered* function uses
-    //! `SigType::Fn`/`Var` until the H2 task-combinator migration, so these pin the semantics the
-    //! migration will rely on — first-occurrence binding, substitution into repeated positions,
-    //! and the unbound-variable hole.
+    //! The bind-and-substitute machinery, exercised directly: first-occurrence binding,
+    //! substitution into repeated positions, and the unbound-variable hole.
 
     use super::*;
     use registry::SigType;
@@ -1816,7 +1816,7 @@ mod tests {
 
     /// An **empty** registry for the bind-and-substitute tests: their signatures use only primitive
     /// and structural `SigType`s (no extern `Named`/`Generic`), so no registry lookup ever fires —
-    /// `sig_to_type_bound` needs *a* registry only to satisfy the instance-registry (F2) threading.
+    /// `sig_to_type_bound` needs *a* registry only to satisfy the registry threading.
     fn reg() -> registry::Registry {
         registry::Registry::new(vec![])
     }

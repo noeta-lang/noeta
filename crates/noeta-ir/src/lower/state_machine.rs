@@ -25,10 +25,10 @@ const STATE_VAR: &str = "$state";
 /// The ignored resume parameter of the step closure (one argument; the poll driver passes unit).
 const RESUME_PARAM: &str = "$resume";
 /// The async desugar's single-poll primitive: `$poll(future)` → `some(v)` (ready) / `none` (pending).
-/// The IR lowering (`Expr::Call` arm) turns this synthetic call into [`Rvalue::PollFuture`].
+/// The IR lowering (`Expr::Call` arm) turns this synthetic call into [`Rvalue::PollFuture`](crate::Rvalue::PollFuture).
 pub(super) const POLL_FN: &str = "$poll";
 /// The async desugar's pending sentinel: a state-machine step returns `$pending` when it suspends at
-/// an `.await`. The IR lowering (`Expr::Ident` arm) turns it into [`Rvalue::Pending`].
+/// an `.await`. The IR lowering (`Expr::Ident` arm) turns it into [`Rvalue::Pending`](crate::Rvalue::Pending).
 pub(super) const PENDING_IDENT: &str = "$pending";
 /// The A.7 nested-`concurrent` desugar's scope primitives. A `concurrent { }` block inside an async fn
 /// is split into state-machine states as `$scN = $scope_begin(); <body>; <join poll-state on
@@ -36,8 +36,8 @@ pub(super) const PENDING_IDENT: &str = "$pending";
 /// interleave with the outer scope's siblings across polls) instead of an in-place drive-to-completion
 /// loop. `$scope_begin()` opens the scope and yields its index; `$scope_ready(idx)` is the join's
 /// per-poll readiness test; `$scope_end()` closes the (already-drained) scope. Lexer-forbidden `$` names,
-/// so they never collide with source identifiers. Turned into [`Rvalue::ScopeBegin`]/[`Rvalue::ScopeReady`]
-/// / [`Stmt::ScopeEnd`] by the IR lowering (`Expr::Call` arm).
+/// so they never collide with source identifiers. Turned into [`Rvalue::ScopeBegin`](crate::Rvalue::ScopeBegin)/[`Rvalue::ScopeReady`](crate::Rvalue::ScopeReady)
+/// / [`Stmt::ScopeEnd`](crate::Stmt::ScopeEnd) by the IR lowering (`Expr::Call` arm).
 pub(super) const SCOPE_BEGIN_FN: &str = "$scope_begin";
 pub(super) const SCOPE_READY_FN: &str = "$scope_ready";
 pub(super) const SCOPE_END_FN: &str = "$scope_end";
@@ -60,7 +60,7 @@ pub(super) struct StateMachineDesugar {
     pub(super) step: Expr,
 }
 
-/// Build the [`StateMachineDesugar`] for a generator body (Track G.1b straight-line + G.2 control flow).
+/// Build the [`StateMachineDesugar`] for a generator body (straight-line + G.2 control flow).
 ///
 /// The body is flattened into a **control-flow graph of states** — a stackless state machine. Each
 /// `yield` is a suspend point; `if`/`while` carrying a `yield` (and any `break`/`continue` reaching an
@@ -105,7 +105,7 @@ pub(super) fn desugar_state_machine(
         tmp: 0,
         global_stores,
     };
-    // Track A.6: hoist mid-expression awaits to statement position before flattening (async only —
+    // Hoist mid-expression awaits to statement position before flattening (async only —
     // a generator has no awaits). After this the flattener only ever sees head/hoisted-binding awaits.
     let hoisted_body;
     let body = if mode == SuspendMode::Async {
@@ -215,7 +215,7 @@ enum Term {
         result: String,
         next: usize,
     },
-    /// Nested-`concurrent` join suspend point (poll-state, Track A.7). `scope` is the hoisted cell
+    /// Nested-`concurrent` join suspend point (poll-state). `scope` is the hoisted cell
     /// holding the index `$scope_begin()` returned for this block's scope; `next` is the state to resume
     /// at once every task in that scope has completed. Renders (at its own state `idx`): if
     /// `$scope_ready(scope)`, advance to `next` and continue; otherwise stay at `idx` and `return
@@ -327,7 +327,7 @@ struct BlockBuf {
     term: Term,
 }
 
-/// Flattens a generator body into a CFG of [`BlockBuf`] states (Track G.2). See
+/// Flattens a generator body into a CFG of [`BlockBuf`] states. See
 /// [`desugar_state_machine`].
 struct Flattener<'a> {
     blocks: Vec<BlockBuf>,
@@ -345,7 +345,7 @@ struct Flattener<'a> {
     /// binding is a bare `x = …` (which may reassign an outer, so hoisting must keep shadowing it), or
     /// when it is a destructure/tuple target or a synthetic cursor (`$for`/`$next`).
     disqualified: HashSet<String>,
-    /// The `for`-loop spans whose source is statically an `Iterator<T>` (Track I.2, computed by the
+    /// The `for`-loop spans whose source is statically an `Iterator<T>` (computed by the
     /// checker). A `for` across a `yield` (G.4) uses its source directly when it is already an
     /// iterator, or calls `.iter()` on it when it is a collection.
     stream_sites: &'a HashSet<Span>,
@@ -521,7 +521,7 @@ impl Flattener<'_> {
     /// Lower one statement into the CFG at state `cur`, returning the state control continues at.
     fn lower_one(&mut self, stmt: &AstStmt, cur: usize, loop_ctx: Option<(usize, usize)>) -> usize {
         let mode = self.mode;
-        // Async (Track A.3): a statement whose value is an `.await` (optionally under `?`) is a suspend
+        // Async: a statement whose value is an `.await` (optionally under `?`) is a suspend
         // point. Evaluate the awaited future into a hoisted cell, add a poll-state that parks on
         // `Pending`, then rebuild the statement with the `.await` replaced by the ready value and lower
         // that (so an async `return e.await` still becomes a `Complete`, a `?` still propagates, etc.).
@@ -694,7 +694,7 @@ impl Flattener<'_> {
                 self.blocks[body_exit].term = Term::Goto(head);
                 after
             }
-            // A `for` whose body suspends (Track G.4) lowers to the iterator protocol so the source's
+            // A `for` whose body suspends lowers to the iterator protocol so the source's
             // cursor becomes part of the machine state: a hoisted cell holds the iterator, and the loop
             // becomes a flattened `while` over `.next()`. `head` fetches the next element and branches
             // on `some`/`none`; the body binds the loop variable(s) from the unwrapped element. A `for`
@@ -744,7 +744,7 @@ impl Flattener<'_> {
                 self.blocks[body_exit].term = Term::Goto(head);
                 after
             }
-            // A `concurrent { }` block inside an async fn (Track A.7): split it across states so its
+            // A `concurrent { }` block inside an async fn: split it across states so its
             // join becomes a genuine suspension point. `$scope_begin()` opens the scope (its index
             // bound to a hoisted cell); the body's `spawn`s land in it and the body's own `.await`s
             // become poll-states; a `JoinPoll` state then suspends until every task in the scope has
@@ -810,7 +810,7 @@ fn has_suspend(stmts: &[AstStmt], mode: SuspendMode) -> bool {
     }
 }
 
-/// Whether a statement sequence contains an `.await` at this callable level (Track A.3). Built on
+/// Whether a statement sequence contains an `.await` at this callable level. Built on
 /// [`Expr::has_await`], which already stops at closure boundaries.
 fn body_has_await(stmts: &[AstStmt]) -> bool {
     stmts.iter().any(stmt_has_await)
@@ -834,7 +834,7 @@ fn stmt_has_await(stmt: &AstStmt) -> bool {
         }
         AstStmt::While { cond, body, .. } => cond.has_await() || body_has_await(body),
         AstStmt::For { iterable, body, .. } => iterable.has_await() || body_has_await(body),
-        // A `concurrent { }` block is itself a suspend point (Track A.7): its join lowers to a poll-state
+        // A `concurrent { }` block is itself a suspend point: its join lowers to a poll-state
         // (see the `AstStmt::Concurrent` arm of `lower_one`), so an enclosing `if`/`while` must flatten
         // for the split to take effect — regardless of whether the body contains explicit `.await`s.
         AstStmt::Concurrent { .. } => true,
@@ -842,7 +842,7 @@ fn stmt_has_await(stmt: &AstStmt) -> bool {
     }
 }
 
-/// The awaited future of a **statement-position** `.await` (Track A.3): the operand of an `.await` that
+/// The awaited future of a **statement-position** `.await`: the operand of an `.await` that
 /// is the whole value of a `Binding`/`Expr`/`Return`/`Echo`, optionally under one `?`. `None` for any
 /// other statement (including one whose `.await` is buried in a sub-expression — the checker rejects
 /// those with E0040, so they never reach the flattener through a clean program).
@@ -927,7 +927,7 @@ fn value_replace_await(value: &Expr, aw: &str) -> Expr {
     }
 }
 
-/// Track A.6 — the mid-expression-`.await` pre-pass. Rewrites an async fn body so that every `.await`
+/// the mid-expression-`.await` pre-pass. Rewrites an async fn body so that every `.await`
 /// in an **unconditionally-evaluated** sub-expression position is hoisted to a preceding
 /// statement-position `$hwN = <sub>.await`, left-to-right (evaluation order), and replaced by a
 /// reference to `$hwN`. After this pass, every remaining `.await` is either such a hoisted binding or
@@ -1113,7 +1113,7 @@ fn hoist_in_expr(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32, vp: &Varia
                 hoist_in_expr(lhs, pre, ctr, vp);
             }
             if is_short_circuit && rhs_await {
-                // Track A.6b — a short-circuit RHS holding an await becomes control flow so the await
+                // a short-circuit RHS holding an await becomes control flow so the await
                 // runs only when the operator would evaluate it.
                 desugar_short_circuit_await(e, pre, ctr, vp);
             } else if !is_short_circuit {
@@ -1131,7 +1131,7 @@ fn hoist_in_expr(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32, vp: &Varia
         }
         // `??`: the value is evaluated unconditionally (hoist its awaits); the fallback is
         // conditionally-evaluated (only on the `none`/`Err` path). A fallback holding an await becomes
-        // control flow (Track A.6b-residual) so the guarded await runs only when `??` would evaluate it.
+        // control flow so the guarded await runs only when `??` would evaluate it.
         Expr::Coalesce {
             value, fallback, ..
         } => {
@@ -1183,7 +1183,7 @@ fn hoist_in_expr(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32, vp: &Varia
         }
         // The scrutinee is evaluated unconditionally (hoist its awaits); each arm body is
         // conditionally-evaluated (only when its arm is selected). An arm body holding an await becomes
-        // control flow (Track A.6b-residual) so the guarded await runs only when its arm is taken.
+        // control flow so the guarded await runs only when its arm is taken.
         Expr::Match {
             scrutinee, arms, ..
         } => {
@@ -1252,7 +1252,7 @@ fn hoist_in_expr(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32, vp: &Varia
     }
 }
 
-/// `$poll(future)` — the async desugar's single-poll call (lowered to [`Rvalue::PollFuture`]).
+/// `$poll(future)` — the async desugar's single-poll call (lowered to [`Rvalue::PollFuture`](crate::Rvalue::PollFuture)).
 fn poll_call(future: Expr, span: Span) -> Expr {
     Expr::Call {
         callee: Box::new(ident(POLL_FN, span)),
@@ -1261,12 +1261,12 @@ fn poll_call(future: Expr, span: Span) -> Expr {
     }
 }
 
-/// `$pending` — the async pending sentinel reference (lowered to [`Rvalue::Pending`]).
+/// `$pending` — the async pending sentinel reference (lowered to [`Rvalue::Pending`](crate::Rvalue::Pending)).
 fn pending_expr(span: Span) -> Expr {
     ident(PENDING_IDENT, span)
 }
 
-/// `$scope_begin()` — open a concurrency scope and yield its index (lowered to [`Rvalue::ScopeBegin`]).
+/// `$scope_begin()` — open a concurrency scope and yield its index (lowered to [`Rvalue::ScopeBegin`](crate::Rvalue::ScopeBegin)).
 fn scope_begin_call(span: Span) -> Expr {
     Expr::Call {
         callee: Box::new(ident(SCOPE_BEGIN_FN, span)),
@@ -1275,7 +1275,7 @@ fn scope_begin_call(span: Span) -> Expr {
     }
 }
 
-/// `$scope_ready(scope)` — the join poll-state's readiness test (lowered to [`Rvalue::ScopeReady`]).
+/// `$scope_ready(scope)` — the join poll-state's readiness test (lowered to [`Rvalue::ScopeReady`](crate::Rvalue::ScopeReady)).
 fn scope_ready_call(scope: Expr, span: Span) -> Expr {
     Expr::Call {
         callee: Box::new(ident(SCOPE_READY_FN, span)),
@@ -1284,7 +1284,7 @@ fn scope_ready_call(scope: Expr, span: Span) -> Expr {
     }
 }
 
-/// `$scope_end(scope);` — close the drained scope by index (lowered to [`Rvalue::ScopeEndAt`]), as an
+/// `$scope_end(scope);` — close the drained scope by index (lowered to [`Rvalue::ScopeEndAt`](crate::Rvalue::ScopeEndAt)), as an
 /// expression statement. The index (not "innermost") because a sibling task's `concurrent` scope may
 /// still be open above this one — they close out of structured-stack order under interleaving.
 fn scope_end_stmt(scope: &str, span: Span) -> AstStmt {
@@ -1386,7 +1386,7 @@ fn mut_binding(name: &str, value: Expr, span: Span) -> AstStmt {
     }
 }
 
-/// Track A.6b — rewrite a short-circuit `lhs && rhs` / `lhs || rhs` whose RHS holds an `.await` into
+/// rewrite a short-circuit `lhs && rhs` / `lhs || rhs` whose RHS holds an `.await` into
 /// control flow, so the guarded await runs exactly when the operator would evaluate the RHS:
 ///
 /// ```text
@@ -1440,7 +1440,7 @@ fn desugar_short_circuit_await(
     });
 }
 
-/// Track A.6b-residual — rewrite a `value ?? fallback` whose **fallback** holds an `.await` into control
+/// rewrite a `value ?? fallback` whose **fallback** holds an `.await` into control
 /// flow, so the guarded await runs only on the `none`/`Err` path (exactly when `??` evaluates the
 /// fallback). `e` is the `Coalesce` (its `value`'s awaits already hoisted by the caller); it is replaced
 /// with a reference to the result cell `$coN` and the prelude is appended to `pre`:
@@ -1498,7 +1498,7 @@ fn desugar_coalesce_await(
     });
 }
 
-/// Track A.6b-residual — rewrite a `match` whose arm body/bodies hold an `.await` into a discriminant
+/// rewrite a `match` whose arm body/bodies hold an `.await` into a discriminant
 /// dispatch plus guarded awaits, so each arm's await runs only when that arm is selected (in statement
 /// position, where the flattener turns it into a poll-state). `if…then…else` desugars to a two-arm
 /// `match` (parser), so this covers it too. `e` is the `Match` (its `scrutinee`'s awaits already hoisted
@@ -1609,7 +1609,7 @@ fn desugar_match_await(
 }
 
 /// The statements that assign a match arm body's value to the result cell `mr`. An expression arm
-/// yields its value (`$mr = expr`); a statement-block arm (aether F1) runs its statements in the same
+/// yields its value (`$mr = expr`); a statement-block arm runs its statements in the same
 /// frame and yields unit (`stmts…; $mr = unit`).
 fn arm_body_to_result(mr: &str, body: ClosureBody, span: Span) -> Vec<AstStmt> {
     match body {
@@ -1836,7 +1836,7 @@ fn none_expr(span: Span) -> Expr {
     }
 }
 
-/// Whether a statement sequence contains a `yield` (Track G), descending into control-flow bodies but
+/// Whether a statement sequence contains a `yield`, descending into control-flow bodies but
 /// **not** into nested callables (a closure/`fn` resets the generator context). Mirrors the checker's
 /// generator detection so the lowering desugars exactly the bodies the checker treats as generators.
 pub(super) fn body_has_yield(stmts: &[AstStmt]) -> bool {

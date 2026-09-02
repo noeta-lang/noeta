@@ -1,4 +1,4 @@
-//! The **expression-tier desugar** (expr-tiers arc): the shared construction that turns a
+//! The **expression-tier desugar**: the shared construction that turns a
 //! `@<name> { … }` block of a declared expression tier into a call of the tier's handler —
 //!
 //! ```text

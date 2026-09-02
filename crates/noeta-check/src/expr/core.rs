@@ -212,7 +212,7 @@ impl Checker {
             Expr::Map { entries, span }
                 if entries.is_empty() && matches!(expected, Type::Map(..)) =>
             {
-                // Annotation-driven: record the *expected* map type (R1) so `Map<string, dyn> = {}`
+                // Annotation-driven: record the *expected* map type so `Map<string, dyn> = {}`
                 // tags `Map(String, Dyn)`, the map analogue of the list arm above.
                 self.note_construction(expected, *span);
                 expected.clone()
@@ -288,7 +288,7 @@ impl Checker {
                 expected.clone()
             }
             // A call of a generic user function absorbs the expected type through its RETURN
-            // position (poly-values F2c): `r: Result<Order, JsonError> = load(text)` binds `T`
+            // position: `r: Result<Order, JsonError> = load(text)` binds `T`
             // from the expectation via the same structural binding a call's arguments use, seeded
             // first-wins into the shared generic-call machinery — so the arguments can only fill
             // what the return leaves open. This is what lets a forwarding generic infer its
@@ -319,7 +319,7 @@ impl Checker {
                 self.subsume(&actual, expected, expr.span());
                 actual
             }
-            // Return-position inference THROUGH `?` (poly-deferrals D1): the expected type of the
+            // Return-position inference THROUGH `?`: the expected type of the
             // `?` EXPRESSION is the success-arm payload, and the callee's declared return names the
             // wrapper (`Result<T, E>` / `?T`) — so `o: Order = load(text)?` seeds `T = Order` by
             // binding the declaration's success arm against the expectation. The error arm still
@@ -365,7 +365,7 @@ impl Checker {
                 self.subsume(&actual, expected, expr.span());
                 actual
             }
-            // The same success-arm seeding in `??` fallback position (poly-deferrals D1):
+            // The same success-arm seeding in `??` fallback position:
             // `o: Order = load(text) ?? default` — the expectation reaches the call through the
             // coalesce's payload, and the fallback must satisfy the same expectation.
             Expr::Coalesce {
@@ -479,7 +479,7 @@ impl Checker {
                     return adapted;
                 }
                 // A polymorphic named function in value position instantiates against the expected
-                // `Fn` type (F1, poly-values): `f: (int) -> int = double_generic` and
+                // `Fn` type: `f: (int) -> int = double_generic` and
                 // `results.map(Ok)` see the precise monomorphic signature instead of the erased
                 // one. Subsumption still runs, so an incompatible instantiation reports.
                 if let Expr::Ident { name, span } = expr
@@ -490,7 +490,7 @@ impl Checker {
                     return fn_ty;
                 }
                 // A METHOD call in a checked position absorbs the expectation through its RETURN
-                // (generic methods, D3 — the method twin of the F2c free-fn arm): arm the pending
+                // (generic methods — the method twin of the free-fn arm): arm the pending
                 // expectation, keyed by THIS call's span, for `call_user_method` to seed a generic
                 // method's instantiation with; consumed only on an exact span match, and cleared
                 // unconditionally after synthesis so it can never leak into a sibling call.
@@ -910,7 +910,7 @@ impl Checker {
     /// cannot express.
     ///
     /// A narrow tests the head constructor and, for a parametrized target, its reflected type
-    /// arguments (R3) — recursing through a union, whose members are each tested. Every other
+    /// arguments — recursing through a union, whose members are each tested. Every other
     /// position is **erased** by the match and so cannot be wrong about a parameter: an
     /// `?T`/`(T, int)`/`fn(T)` target checks only "is an `Option`" / "is a tuple" / "is callable",
     /// exactly as it does for a concrete `?int`, and a `Self::Name` projection stays the permissive
@@ -1229,9 +1229,9 @@ impl Checker {
                     && self.symbols.functions.contains_key(name.as_str()) =>
             {
                 // A FORWARDING generic fn referenced bare — with NO expectation to pin its
-                // instantiation — is not a value (poly-values F2b): its hidden type-argument slot
-                // would be silently missing. With a pinning expected function type the reference
-                // IS a value (D2c — `instantiate_fn_value` binds the slots into a wrapper); this
+                // instantiation — is not a value: its hidden type-argument slot would be
+                // silently missing. With a pinning expected function type the reference IS a
+                // value (`instantiate_fn_value` binds the slots into a wrapper); this
                 // arm is only reached when synthesis finds nothing to pin it.
                 self.error(
                     DiagnosticCode::InvalidTypeArguments,
@@ -1311,8 +1311,8 @@ impl Checker {
                 // type — parameters included, so passing it where a `Fn(A) -> B` is declared
                 // (`map_bounded(items, n, dbl)`, `xs.map(inc)`) checks like the equivalent
                 // closure. A generic function's erased params are `dyn`, which defers per
-                // position. (Was params-erased until higher-order-abi H2 made module signatures
-                // carry declared `Fn` params, which an erased handle could never satisfy.)
+                // position. Module signatures carry declared `Fn` params, which an erased handle
+                // could never satisfy.
                 .or_else(|| {
                     self.symbols
                         .functions
@@ -1393,7 +1393,8 @@ impl Checker {
                     return self.check_intn_literal(*magnitude, *signed, *bits, true, *lit_span);
                 }
                 let t = self.synth(operand, env);
-                // A list spread `...xs` (the marker the L2 desugar wraps spread operands in) must
+                // A list spread `...xs` (the marker the list-literal desugar wraps spread
+                // operands in) must
                 // spread a list — otherwise the desugared `~` would silently fall through to
                 // display-concatenation. It always types list-shaped so the surrounding literal
                 // stays a list: a list passes through; a `dyn`/hole spread contributes `dyn`
@@ -1613,7 +1614,7 @@ impl Checker {
                     val_ty = Type::Dyn; // recover as a mixed map
                 }
                 // A literal keyed by a type without a runtime key form is rejected statically
-                // (extern-types X4 / P-PKEY S3), matching the `Map<K, _>` formation gate.
+                // matching the `Map<K, _>` formation gate.
                 if let Type::Named(key_name, _) = &key_ty
                     && self.named_key_capable(key_name, false) == Some(false)
                 {
@@ -1667,7 +1668,7 @@ impl Checker {
                         format!("`{recv}` is indexed by `{key}`, found `{idx}`"),
                     );
                 }
-                // Note a list-typed index so a `list[i].field` member access can fuse (P-PACK 2.5+).
+                // Note a list-typed index so a `list[i].field` member access can fuse.
                 // Recorded here — where the receiver's type is already in hand — so `synth_member`
                 // need not re-synthesize the inner receiver.
                 if matches!(recv, Type::List(_)) {
@@ -1729,7 +1730,7 @@ impl Checker {
             }
             Expr::Await { expr, span } => {
                 let inner = self.synth(expr, env);
-                // Coloring (Track A): `.await` is legal only inside an async context (an `async fn`
+                // Coloring: `.await` is legal only inside an async context (an `async fn`
                 // body or the implicitly-async top level). A `.await` in a sync `fn` — or in a closure
                 // passed to a builtin, where `current_async` was reset at the boundary — is E0040.
                 if !self.coloring.current_async {
@@ -1769,7 +1770,7 @@ impl Checker {
             } => {
                 let kw = if *isolate { "isolate" } else { "spawn" };
                 let inner = self.synth(future, env);
-                // Structured concurrency (Track A.3b): `spawn`/`isolate` are legal only inside a
+                // Structured concurrency: `spawn`/`isolate` are legal only inside a
                 // `concurrent { }` scope. An orphan one (no enclosing scope — incl. one in a closure,
                 // where the depth was reset) is E0041 by construction, so a spawned unit can never
                 // outlive a scope.
@@ -1802,8 +1803,8 @@ impl Checker {
                         Type::Named(stdlib::FUTURE.to_string(), vec![Type::Unknown])
                     }
                 };
-                // `isolate` runs in a fresh heap, so its arguments and result must be `Send` (E0042) —
-                // the check the object-model arc parked here. `spawn` (same heap) has no such limit.
+                // `isolate` runs in a fresh heap, so its arguments and result must be `Send`
+                // (E0042). `spawn` (same heap) has no such limit.
                 if *isolate {
                     self.check_isolate_send(future, &result, *span);
                 }
@@ -1815,7 +1816,7 @@ impl Checker {
                 span,
             } => {
                 // A generic-call value seeds its instantiation from the FALLBACK's type
-                // (poly-deferrals D1): `o = load(text) ?? default` — with no annotation, the only
+                // `o = load(text) ?? default` — with no annotation, the only
                 // expectation in sight is the fallback, so it is synthesized first and its type
                 // bound against the callee's declared success arm. A deferring fallback leaves the
                 // seed empty (bind_type_params never binds from `dyn`/holes), reducing to the
@@ -2061,7 +2062,7 @@ impl Checker {
                     _ => String::new(),
                 };
                 // `recv.func::<T>(args)` where the receiver is NOT an imported native module is a
-                // generic METHOD call (D3): the atom that spells `json.parse::<T>(s)` also captures
+                // generic METHOD call: the atom that spells `json.parse::<T>(s)` also captures
                 // a single-type-argument member turbofish on a bare identifier, so `box.pick::<U>(x)`
                 // (a value's instance method) and `Box.make::<U>(x)` (a user type's associated
                 // function) arrive here too. Route them to the one method-call typing path — the
@@ -2125,12 +2126,12 @@ impl Checker {
                     CallArg::values(args).map(|a| self.synth(a, env)).collect();
                 self.check_type_ref(ty);
                 let t = self.annot(ty);
-                // A turbofish MENTIONING an in-scope type parameter (poly-values F2b; composites
-                // D2a): the recipe is per-instantiation, delivered through the enclosing
+                // A turbofish MENTIONING an in-scope type parameter, bare or composite: the
+                // recipe is per-instantiation, delivered through the enclosing
                 // forwarding fn's hidden slot for this exact template — the bare `T` or the whole
                 // composite (`List<T>`), both computed identically by the pre-pass — so record
                 // the dynamic site instead of a baked recipe. Only a top-level generic fn (or a
-                // nested fn inside one, D2b) has hidden slots to read; method contexts are
+                // nested fn inside one) has hidden slots to read; method contexts are
                 // rejected — the honest boundary, not silently wrong.
                 let forwarded = if self.mentions_in_scope_param(&t) {
                     match self
@@ -2205,7 +2206,7 @@ impl Checker {
                     }
                 }
             }
-            // `f::<T, ...>(args)` — an explicitly instantiated user-generic call (poly-values F2).
+            // `f::<T, ...>(args)` — an explicitly instantiated user-generic call.
             // Arguments defer exactly as a plain call's do (a closure/polymorphic-fn argument
             // finalizes against the SUBSTITUTED parameter type inside the seeded generic check).
             Expr::TypedCall {
@@ -2245,8 +2246,8 @@ impl Checker {
                 }
                 ret
             }
-            // `recv.m::<U, ...>(args)` — an explicitly instantiated METHOD call (generic methods,
-            // D3). Arguments defer exactly as the free-fn turbofish's do.
+            // `recv.m::<U, ...>(args)` — an explicitly instantiated METHOD call. Arguments defer
+            // exactly as the free-fn turbofish's do.
             Expr::TypedMethodCall {
                 recv,
                 name,
@@ -2395,7 +2396,7 @@ impl Checker {
         type_name: &str,
         env: &mut Env,
     ) -> Type {
-        // Resolve the source-written name to its **canonical record key** (native-extensibility S2):
+        // Resolve the source-written name to its **canonical record key**:
         // a native class is seeded under its *qualified* identity (`geo.Point`), so a source literal
         // `Point { … }` must first map its short name through the `use`-import alias — exactly as
         // native-enum construction resolves `Hue.Red`. A user type of the same short name is in
@@ -2410,7 +2411,7 @@ impl Checker {
                 .unwrap_or_else(|| type_name.to_string())
         };
         let type_name: &str = &canonical;
-        // `@validated` (validation arc): a `@validated` type may only be built from OUTSIDE
+        // `@validated`: a `@validated` type may only be built from OUTSIDE
         // its own `impl`/methods through a validating constructor. A bare literal or a
         // record-update spread outside the type would bypass the invariant, so it is E0060.
         // Construction inside the type's own methods (`current_type`) stays legal; the recipe
@@ -2471,7 +2472,7 @@ impl Checker {
         };
         for f in &lit.fields {
             // A polymorphic named function assigned to a **concretely `Fn`-typed field**
-            // instantiates against the field's declared type (F1, poly-values) — the field
+            // instantiates against the field's declared type — the field
             // analogue of the parameter/binding absorption — so `Ops { op: double_generic }`
             // checks precisely. Any other value synthesizes exactly as before.
             let declared_field = decls.iter().find(|(n, _)| n == &f.name);
@@ -2535,7 +2536,7 @@ impl Checker {
                 None => self.synth(&f.value, env),
             };
             // A literal that sets a private field is only valid inside the declaring type's
-            // own methods (slice 2d) — a `class` with private fields is built externally
+            // own methods — a `class` with private fields is built externally
             // through an associated `fn`/constructor, not a bare literal.
             if !self.field_visible(type_name, &f.name) {
                 self.report_private_field(type_name, &f.name, FieldAccess::Set, f.name_span);

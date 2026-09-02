@@ -242,8 +242,8 @@ impl Printer<'_> {
                 reuse,
                 ..
             } => {
-                // The reuse token is only rendered when set (the rare list self-append), so every
-                // other binary dump — and its golden — is unchanged by Phase 5.
+                // The reuse token is only rendered when set (the rare list self-append), so an
+                // ordinary binary dump — and its golden — carries no marker.
                 let marker = if *reuse { " reuse" } else { "" };
                 format!("{} {} {}{}", atom(lhs), op.symbol(), atom(rhs), marker)
             }
@@ -389,8 +389,8 @@ impl Printer<'_> {
                 if let Some((a, _)) = spread {
                     parts.push(format!("...{}", atom(a)));
                 }
-                // The reuse token is only rendered when set, so non-self-update object dumps (and
-                // their goldens) are unchanged by Phase 5.
+                // The reuse token is only rendered when set, so a non-self-update object dump (and
+                // its golden) carries no marker.
                 let marker = if *reuse { " reuse" } else { "" };
                 format!("{} {{{}}}{}", type_name, parts.join(", "), marker)
             }
