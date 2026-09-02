@@ -89,7 +89,7 @@ Because immediate reclamation is unobservable, the two backends need no synchron
 
 The VM traces from its enumerated roots (register windows, upvalues, globals, channel buffers, extension arena, embed handles, scheduler-held tasks) and **aborts any collection whose garbage set does not exactly refcount-balance its internal in-edges**, so a missed root costs liveness until exit rather than safety. The reference interpreter runs trial deletion over the `Rc` graph seeded from its weak candidate registries, every Rust-held value being a counted owner, and verifies the dead set's strong counts the same way.
 
-The bounding proof lives in `noeta-conformance/tests/safepoint_residency.rs`: a 3,000-iteration cycle-building loop holds its armed peak under 2,000 live objects on both backends, while the disarmed control grows past the iteration count, with exit residency unchanged.
+A program that builds cycles in a loop therefore holds a bounded peak, whichever backend runs it.
 
 ## See also
 

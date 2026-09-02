@@ -82,6 +82,8 @@ The patterns below are banned because each one costs a reader time without payin
 
 **One idea per paragraph, and stop.** A paragraph that restates its predecessor in other words should be deleted, not rephrased. Paired antithetical clauses ("keep what works, drop what doesn't") and mirrored "which … and which" contrasts are two sentences pretending to be one.
 
+**A measurement belongs on a page only if a reader acts on it.** That compiling a 6,000-line file takes about 120 ms tells someone whether the startup cache is worth caring about. That the armed peak stays under 2,000 live objects while the disarmed control grows past the iteration count proves a design decision to a reviewer who is not reading. Test paths, residency counts, before-and-after timings and win percentages are evidence that the work was done right, and they live in the repo, in the test that asserts them.
+
 **Claim only what you can point at.** A page must not assert what a reader's codebase looks like or where their project is heading.
 
 Reference pages want tables. A method, its signature and one example belong in a row, and the prose around them should shrink to the rules a table cannot hold.

@@ -113,7 +113,7 @@ The JIT therefore carries a safepoint of its own. When the engine is built for a
 - **The engine keeps a strong `Arc` clone**, declared after the module it bakes code into, so the flag outlives every instruction that reads it even though `observe_cancel` drops the VM's own clone the moment a request is honored.
 - **It is an `atomic_load` rather than a plain load**, because Cranelift runs at `opt_level=speed` and an ordinary load would be free to be hoisted out of the loop or folded across iterations. That is the "checks once, then never again" failure the poll exists to remove.
 
-The poll costs roughly half a nanosecond per iteration: under `noeta test`, a 200M-iteration counting loop runs **0.76 s bounded against 0.66 s unbounded** (median of five, quiet machine). A loop that already carries a bail site is unaffected, since it never ran natively. A run with no cancellation flag emits no poll at all.
+The poll costs roughly half a nanosecond per iteration. A loop that already carries a bail site is unaffected, since it never ran natively. A run with no cancellation flag emits no poll at all.
 
 The `--jit-differential` oracle runs the whole corpus a second time with a never-set flag armed (`--cancel-poll`), which puts the poll-bearing bodies under the same byte-identity, zero-residency and zero-anomaly gate as the ordinary ones.
 
