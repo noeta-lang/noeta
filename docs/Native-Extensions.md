@@ -1,17 +1,19 @@
 # Native Extensions
 
-Native modules (like `math`, `json`, `fs`) are not hardcoded into the runtime — they are registered through one uniform seam, and the core `std` modules are themselves an extension registered *through* that seam rather than special-cased.
+Every native module, `math` and `json` and `fs` among them, is registered through one uniform seam. The core `std` modules are an extension registered through that same seam.
 
 > [!NOTE]
 > This seam is **open to third-party packages**: a dependency can ship a Rust crate that registers native modules, types, and CLI commands, statically composed into the consumer's toolchain by cargo. This page covers the concepts — the registry, the dispatch seams, and the `Host` capability; the author-facing walkthrough (entry crate, manifest, composition, building, publishing) is **[Writing a Native Package](Writing-Native-Packages)**, and the API contract is [Extension Compatibility](Extension-Compatibility).
 
-## Why a registry
+## The two crates
 
-Hardcoding native modules created four parallel seams that could drift: a `NativeModule` enum, per-backend `call_vec`/`call_json`/… dispatch, and checker tables of known modules. The registry dismantles all four into one mechanism — and it makes differential agreement *structural*: one shared dispatch function per module, not two mirrored copies. The design test: *could `vec`/`quat` be deleted from core and re-added as a third-party crate with no API change?* (They could — a real out-of-tree proving crate in the composition test suite answers it.)
+A native extension implements a contract that lives in **`noeta-ext-abi`**, a lean crate holding the registry vocabulary (`Extension`, `ExtModule`, `ExtType`, `ExtFn`, `SigType`, `RetTy`), the value contracts (`NativeValue`, `ExternValue`, `MapKey`, `Scalar`), the `Host` capability seam, the async `ExternIo`/`Executor` seam, and the Ring 1 primitives. It depends on `compact_str`, `equivalent` and `hashbrown`, and on none of the standard library's batteries.
 
-## Two crates: `noeta-ext-abi` (the ABI) and `noeta-stdlib` (the batteries)
+**`noeta-stdlib`** depends on that crate, re-exports it, and layers the concrete `std` modules and their heavy dependencies on top. The relationship is `core` to `std`.
 
-The contract a native extension implements lives in its own lean crate, **`noeta-ext-abi`**: the [registry] vocabulary (`Extension`/`ExtModule`/`ExtType`/`ExtFn`/`SigType`/`RetTy`/`TypeArgWrap`/`TypeRecipe`, `NativeValue`/`NativeOut`/`Scalar`), the `Host` capability seam and its traits, the `ExternValue` contract (`ExternBox`), `MapKey`, the async `ExternIo`/`Executor` seam, and the dep-free Ring 1 primitives. Its only dependencies are `compact_str`/`equivalent`/`hashbrown` — none of core's batteries (no crypto, uuid, JSON, or HTTP client). **`noeta-stdlib`** depends on it, re-exports it (`pub use noeta_ext_abi::*` — the `core`/`std` relationship), and layers the concrete `std` modules and their heavy deps on top. So a third-party extension (and internal mid-end crates like `noeta-ir`) links the lean ABI, not the whole standard library. This is the *consumed* boundary too: an out-of-tree entry crate depends on `noeta-ext-abi` alone, published to crates.io so it can be named by version range, and composition redirects that to the consumer's own copy (see [Writing a Native Package](Writing-Native-Packages)).
+Depend on `noeta-ext-abi` alone. An out-of-tree entry crate names it by version range from crates.io, and composition redirects that to the consumer's own copy. See [Writing a Native Package](Writing-Native-Packages).
+
+Everything the toolchain knows about a native module arrives through this one registry, so a module registered by a third-party crate reaches the checker and both backends exactly as `std.vec` does.
 
 ## The seam
 
@@ -42,9 +44,21 @@ trait Extension {
 
 ## First-class types: `ExtType` and `ExternValue`
 
-An extension contributes a **value type** the way it contributes a module. An `ExtType` declares a short display name plus a `namespace`; the type's **identity** is the qualified `namespace.name` (`std.id.Uuid`) — what the checker keys `Type::Named` on and what every value returns from `ExternValue::type_identity` (one pre-joined `&'static` literal, so dispatch compares pointers, never formats). Runtime method dispatch, `is`/`.as<T>()`, map-key capability, and reflection all key on that identity, so two extensions may register the same short name under distinct namespaces (`std.metrics.Counter` and `acme.metrics.Counter` coexist; the registry refuses only a duplicate *qualified* identity at assembly). Humans still see the short name where a human is reading — diagnostics and a value's own display strip the namespace, exactly like namespaced user types. Reflection does not: `type_of` reports the qualified identity in the `Type` payload (`Type.Enum(std.http.Framing, [])`), because that string is a registry key rather than prose. A signature that names a shared short name spells it qualified (`SigType::Named("acme.metrics.Counter")`); the checker resolves either spelling. Beyond identity an `ExtType` carries an instance-method signature table, one shared method dispatch, and a `key_capable` flag. The value behavior lives on one trait, `ExternValue` — equality, ordering, hashing, display, clone — and each backend hosts every extern type through a **single** variant (`Payload::Extern` in the VM, `Value::Extern` in the tree-walker), so a new native type touches no backend code at all.
+An extension contributes a value type the way it contributes a module. An `ExtType` declares a short display name and a `namespace`, and the type's identity is the qualified `namespace.name`, such as `std.id.Uuid`.
 
-The method dispatch has ONE signature covering the whole {pure, mutable} × {host-free, effectful} matrix: the receiver arrives `&mut` (a pure method just doesn't mutate) and the `Host` is always passed (a pure method just doesn't touch it). Three core types prove the corners: `Uuid` (pure, byte-ordered, key-capable — it can key a `Map`/member a `Set`), `FileHandle` (mutable cursor, fs-effectful methods, not key-capable), and `crypto`'s `Hasher` (mutable but host-free — `update` mutates the receiver through the shared cell without ever touching the `Host`). Effects reach the world only through the `Host`; construction of effectful values stays in module functions (`fs.open`).
+That identity is what the checker keys `Type::Named` on, and what every value returns from `ExternValue::type_identity`. It is one pre-joined `&'static` literal, so dispatch compares pointers.
+
+Runtime method dispatch, `is`, `.as<T>()`, map-key capability and reflection all key on the same identity. Two extensions may therefore register the same short name under different namespaces: `std.metrics.Counter` and `acme.metrics.Counter` coexist, and the registry refuses only a duplicate qualified identity.
+
+Method dispatch has one signature covering every combination of pure or mutating and host-free or effectful. The receiver arrives `&mut`, and the `Host` is always passed; a pure method simply does not use them. Three core types sit at the corners:
+
+| Type | Shape |
+|---|---|
+| `Uuid` | pure, byte-ordered, key-capable, so it can key a `Map` or member a `Set` |
+| `FileHandle` | mutable cursor, fs-effectful methods, not key-capable |
+| `crypto`'s `Hasher` | mutable but host-free, since `update` mutates the receiver through the shared cell without touching the `Host` |
+
+Effects reach the world only through the `Host`. Constructing an effectful value stays in a module function such as `fs.open`.
 
 ## First-class classes: `ExtClass` (a true reference type)
 
