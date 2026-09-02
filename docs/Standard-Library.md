@@ -99,7 +99,7 @@ None of these answers depend on how the list was built. A `List<u8>` folds at 8 
 
 ### What "an ordered `T`" means
 
-`sorted()`, `min()` and `max()` hand the program an order, so they ask the element type for the same thing `<` asks for: an ordering it **declares**. Without one the call is E0007, naming the element type.
+`sorted()`, `min()` and `max()` hand the program an order, so they ask the element type for what `<` asks for, an ordering it **declares**. Without one the call is E0007, naming the element type.
 
 | Element type | Where its order comes from |
 |---|---|
@@ -110,15 +110,15 @@ None of these answers depend on how the list was built. A `List<u8>` folds at 8 
 | a struct, class or enum you write | [`@derive(Comparable)`](Derives) for a field-wise order, or an `impl Comparable` of its own ([Ordering your own type](Generics-and-Traits#ordering-your-own-type)) when field-wise is not the order it wants |
 | a union | its members, when they are mutually comparable (below) |
 
-The declaration carries weight. A value kind orders field-wise in declaration order, so *swapping two fields* re-sorts every list of that type, and `@derive(Comparable)` is where you say that the field order is the sort order. The declared order is the one these three hand back, whichever way it was declared.
+A value kind orders field-wise in declaration order, so *swapping two fields* re-sorts every list of that type, and `@derive(Comparable)` is where you say that the field order is the sort order.
 
-A **union** orders when its members are *mutually comparable*: each one orders on its own, and any two of them can be compared with each other. Numbers are the family that crosses, since every numeric type compares against every other, so [`number`](Type-System#number--any-numeric-scalar) and any union of numeric members is an ordered `T`, and `[3, 1.5, 2u8].sorted()` under a `List<number>` annotation sorts by value across the widths.
+A **union** orders when its members are *mutually comparable*, meaning each one orders on its own and any two of them compare with each other. Numbers are the family that crosses, since every numeric type compares against every other, so [`number`](Type-System#number--any-numeric-scalar) and any union of numeric members is an ordered `T`, and `[3, 1.5, 2u8].sorted()` under a `List<number>` annotation sorts by value across the widths.
 
-Every other ordering is keyed to one type, so a union mixing families has none. `int | string` and `Uuid | Instant` are refused even though each member orders alone, and a union holding an unordered member (`int | List<int>`) is refused for the plainer reason. Both refusals name the union, and both reach `<` and `.compare()` alike. Narrowing is the way through: inside `if x is int { … }` the value is an `int`.
+Every other ordering is keyed to one type, so a union mixing families has none. `int | string` and `Uuid | Instant` are refused even though each member orders alone, as is a union holding an unordered member (`int | List<int>`). Both refusals name the union and reach `<` and `.compare()` alike. Narrow with `if x is int { … }` to get through.
 
-Inside a generic body the element type is whatever the caller chose, so the requirement becomes a **bound**: `fn top<T: Comparable>(xs: List<T>): ?T { return xs.max() }` compiles and instantiates at every ordered type. Without the bound the ordering is not promised and the call is E0025, naming the bound to add. The arithmetic and boolean reductions have no bound that promises a number or a `bool`, so they stay available only where the element type says so directly.
+Inside a generic body the element type is whatever the caller chose, so the requirement becomes a **bound**. `fn top<T: Comparable>(xs: List<T>): ?T { return xs.max() }` compiles and instantiates at every ordered type, and without the bound the call is E0025, naming the bound to add. The arithmetic and boolean reductions have no such bound, so they stay available only where the element type says so directly.
 
-A **set** asks for less than these three do: `to_set()` takes any set-capable element type, listed under [Set](#set) below, because a set sorts to get membership and de-duplication rather than to answer a question about order.
+A **set** asks for less than these three do. `to_set()` takes any set-capable element type, listed under [Set](#set) below, since a set sorts for membership and de-duplication rather than to answer a question about order.
 
 ## Map
 
