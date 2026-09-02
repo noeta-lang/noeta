@@ -111,6 +111,7 @@ fn parse(s: string): int | string {
 - A union is exhaustively matchable with **no `_`**, one `is T` arm per member (see [Control Flow & Pattern Matching](Control-Flow-and-Pattern-Matching)).
 - Narrow back to a member with `.as<T>()` or a match arm.
 - `?A | B` parses as `(?A) | B`, since `?` binds tighter than `|`.
+- As a **type argument** it is a wider argument like any other, so whether a `Box<Dog>` reads as a `Box<Dog | Cat>` is decided by where `Box` puts its parameter ([trait objects as type arguments](Generics-and-Traits#trait-objects-as-type-arguments)).
 
 ## `dyn` — the open top
 
@@ -122,7 +123,7 @@ echo d is int          // true
 echo d is string       // false
 ```
 
-As a *type argument* it is a wider argument like any other, so whether a `Box<Dog>` reads as a `Box<dyn>` is decided by where `Box` puts its parameter. [Trait objects as type arguments](Generics-and-Traits#trait-objects-as-type-arguments) carries that rule, and it is one rule for `dyn`, for `dyn Trait` and for a [kind-type](#abstract-kind-types).
+As a *type argument* it is a wider argument like any other, so whether a `Box<Dog>` reads as a `Box<dyn>` is decided by where `Box` puts its parameter. [Trait objects as type arguments](Generics-and-Traits#trait-objects-as-type-arguments) carries that rule, and it is one rule for `dyn`, for `dyn Trait`, for a [kind-type](#abstract-kind-types) and for a union.
 
 ## `never` — the bottom
 

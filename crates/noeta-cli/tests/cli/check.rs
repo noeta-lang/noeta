@@ -854,3 +854,74 @@ fn a_read_only_generic_and_a_stated_construction_widen_to_bare_dyn_silently() {
         .stderr(predicate::str::contains("0 error(s)"))
         .stderr(predicate::str::contains("cannot be read as").not());
 }
+
+/// **A union argument is the same widening, and names the same occurrence.**
+///
+/// `Slot<Dog>` reads as a `Slot<Dog | Cat>` in exactly the declarations it reads as a `Slot<dyn>`,
+/// so the help line has to name the union it was asked for rather than the spelling it was written
+/// for. Left ungated the widening corrupts a checked value: a store of a `Cat` through the widened
+/// view lands in something whose own type says `Slot<Dog>`.
+#[test]
+fn a_refused_union_widening_names_the_occurrence() {
+    let file = temp_program(
+        "check_variance_union",
+        "struct Dog { n: int }\n\
+         struct Cat { n: int }\n\
+         class Slot<T> { pub mut v: T }\n\
+         fn widen(s: Slot<Dog>): string {\n\
+         wide: Slot<Dog | Cat> = s\n\
+         return \"unreachable\"\n\
+         }\n",
+    );
+    lang()
+        .arg("check")
+        .arg(&file)
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("E0007"))
+        .stderr(predicate::str::contains(
+            "`Slot` stores it in the `mut` field `v`",
+        ))
+        .stderr(predicate::str::contains(
+            "cannot be read as a `Slot<Dog | Cat>`",
+        ))
+        .stderr(predicate::str::contains(
+            "a literal checked against `Slot<Dog | Cat>` instantiates its type argument at \
+             `Dog | Cat` directly",
+        ));
+}
+
+/// The **covariant** twin for a union argument, plus the two pairs an invariant declaration still
+/// has to accept.
+///
+/// Three claims one test carries, because a gate written as "refuse a union argument" would break
+/// all three: a read-only declaration widens, a value read at its own union type is not a widening
+/// at all, and a union is its member set rather than its spelling.
+#[test]
+fn a_read_only_generic_and_an_unchanged_union_widen_silently() {
+    let file = temp_program(
+        "check_variance_union_ok",
+        "struct Dog { n: int }\n\
+         struct Cat { n: int }\n\
+         class Reader<T> { pub v: T }\n\
+         class Slot<T> { pub mut v: T\n\
+         pub fn new(v: T): Slot<T> { return Slot { v: v } }\n\
+         }\n\
+         r: Reader<Dog> = Reader { v: Dog { n: 1 } }\n\
+         wide: Reader<Dog | Cat> = r\n\
+         echo wide.v.n\n\
+         built: Slot<Dog | Cat> = Slot.new(Dog { n: 2 })\n\
+         same: Slot<Dog | Cat> = built\n\
+         reordered: Slot<Cat | Dog> = built\n\
+         echo same.v.n\n\
+         echo reordered.v.n\n",
+    );
+    lang()
+        .arg("check")
+        .arg(&file)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("0 error(s)"))
+        .stderr(predicate::str::contains("cannot be read as").not());
+}
