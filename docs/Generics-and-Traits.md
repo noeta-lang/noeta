@@ -596,6 +596,73 @@ The bound and the trait object agree by construction: both read the trait's decl
 
 Every `trait` a program declares has a trait object. Among the [built-ins](#the-built-in-traits), the ones with a `yes` in the `dyn` column do — seventeen of the twenty-two; `dyn Clone`, `dyn Serialize`, `dyn Deserialize`, `dyn From` and `dyn To` are E0014.
 
+### Trait objects as type arguments
+
+`dyn Trait` is an ordinary type, so it instantiates a generic: `Box<dyn Speak>`, `List<dyn Speak>`, `Map<string, dyn Speak>`, and any generic you declare yourself.
+
+**Build the value where the wider type is stated, and every implementor fits.** A checked position — an annotated binding, a declared parameter, a declared return, another type's declared field, a container element, a call-site turbofish — hands its type arguments to the literal, which instantiates at `dyn Speak` and widens each implementor into the field:
+
+```noeta
+trait Speak { fn speak(): string }
+struct Dog { impl Speak { pub fn speak(): string { return "woof" } } }
+struct Cat { impl Speak { pub fn speak(): string { return "meow" } } }
+
+class Box<T> {
+    pub v: T
+    pub fn new(v: T): Box<T> { return Box { v: v } }
+}
+
+fn heard(b: Box<dyn Speak>): string { return b.v.speak() }
+
+pen: Box<dyn Speak> = Box { v: Dog {} }     // the annotation states `T`
+echo pen.v.speak()                          // woof
+echo heard(Box { v: Cat {} })               // meow — so does a parameter
+echo Box::<dyn Speak>.new(Dog {}).v.speak() // woof — and so does a turbofish
+```
+
+This is the spelling to reach for: it works for every declaration, and it says at the construction site what kind of collection you are building.
+
+**Reading an existing value at a wider argument** — handing a `Box<Dog>` you already have to something expecting a `Box<dyn Speak>` — depends on where the declaration puts its type parameter. It is allowed when nothing can put a `dyn Speak` back into the value through the widened view, which is the case for a parameter that only ever comes *out*:
+
+```noeta
+trait Speak { fn speak(): string }
+struct Dog { impl Speak { pub fn speak(): string { return "woof" } } }
+
+class Reader<T> {
+    pub v: T
+    pub fn get(): T { return self.v }
+}
+
+kennel: Reader<Dog> = Reader { v: Dog {} }
+speakers: Reader<dyn Speak> = kennel        // `T` is read-only in `Reader`
+echo speakers.get().speak()                 // woof
+
+pack: List<Dog> = [Dog {}]
+chorus: List<dyn Speak> = pack              // and the built-in containers are the same rule
+echo chorus[0].speak()
+```
+
+Three occurrences of the parameter close that door, and each one is a way the widened view could hand a `Cat` to code that was checked believing it holds a `Dog`:
+
+- a **`mut` field of a `class`**. A `class` has reference identity, so the widened view *is* the original value, and a store through it is a store into the original. A `struct` is exempt: a struct field-set rebinds the binding rather than writing through a shared object, so the store lands in the widened copy alone.
+- a **method parameter** of the parameter's type, in any kind. `fn matches(other: T)` is checked believing `other` is a `Dog`, so calling it through a widened receiver would hand it a `Cat`. A field of function type (`f: (T) -> string`) is the same occurrence, reached through a field.
+- reaching either of the above **through another generic type**. A `struct` that holds a `class` shares that class with its copies, so `struct Owner<T> { slot: Slot<T> }` is as restricted as `Slot` is.
+
+Where the widening is refused, E0007 names the occurrence that forced it, and building the value at the wider type stays available:
+
+```noeta error
+trait Speak { fn speak(): string }
+struct Dog { impl Speak { pub fn speak(): string { return "woof" } } }
+
+class Slot<T> { pub mut v: T }
+
+kennel: Slot<Dog> = Slot { v: Dog {} }
+wide: Slot<dyn Speak> = kennel   // E0007: `Slot` stores it in the `mut` field `v`
+echo wide.v.speak()
+```
+
+A generic type declared by a [native package](Native-Extensions) is never widened this way: the rule reads the declaration, and there is none to read.
+
 ## `@derive` — synthesized implementations
 
 `@derive(...)` generates trait impls from a type's shape — a *codegen* directive, distinct from `#[...]` data attributes (see [Attributes & Reflection](Attributes-and-Reflection)):

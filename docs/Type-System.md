@@ -210,6 +210,8 @@ Two edges worth knowing:
 
 `dyn Trait` is a *declared* bound, never a value's own type, and the two reflection queries split on exactly that line: `type_of(x)` on a value held behind a `dyn Trait` binding reports the **concrete** type (`Type.Struct(Dog, [])`), because that is what the value is, while `params_of` on a `fn f(x: dyn Speaks)` reports `Type.DynTrait(Speaks)`, because that is what the signature says. Neither is the other's answer, and a framework injecting a service by its interface needs both.
 
+It is also an ordinary type, so it instantiates a generic — `Box<dyn Speaks>` as readily as `List<dyn Speaks>`. Constructing the value in a position that states the wider type always works; reading a `Box<Dog>` you already have as a `Box<dyn Speaks>` depends on where `Box` puts its parameter. See [Trait objects as type arguments](Generics-and-Traits#trait-objects-as-type-arguments) for the rule and what E0007 says when it is refused.
+
 ## Abstract kind-types
 
 `Struct`, `Class`, and `Enum` are supertypes of every declared type of that kind — useful for runtime kind tests against a `dyn`:

@@ -15,6 +15,30 @@ use noeta_ast::{CallArg, ObjectLit, TypeOperand};
 /// firing on an operand that has no compile-time type to gate: a forwarded type parameter is not
 /// "not an attribute", it is a name that arrives per call, and whether that name is an attribute is
 /// a per-instantiation manifest fact — the same fact the dynamic string arm defers.
+/// The checker's type registry, as the subtyping walk asks it — one adapter rather than three
+/// closures, so adding a registry-dependent rule to [`Type::subtype_with`] is a method here and not
+/// a new parameter at every call site.
+///
+/// Membership goes through the single funnels [`Checker::is_of_kind`] and
+/// [`Checker::implements_trait`] — the same registration data the runtime `x is dyn Trait` test and
+/// `traits_of(x)` read — so a trait's object is formed by exactly the values that answer `true` to
+/// the test, and the static and dynamic answers cannot drift.
+struct CheckerRules<'a>(&'a Checker);
+
+impl noeta_types::NominalRules for CheckerRules<'_> {
+    fn is_of_kind(&self, name: &str, kind: noeta_types::TypeKind) -> bool {
+        self.0.is_of_kind(name, kind)
+    }
+
+    fn implements_trait(&self, name: &str, trait_name: &str) -> bool {
+        self.0.implements_trait(name, trait_name)
+    }
+
+    fn covariant_arg(&self, name: &str, index: usize) -> bool {
+        self.0.covariant_arg(name, index)
+    }
+}
+
 pub(crate) enum OperandKind {
     /// An ordinary type reference, resolved. Carries its annotated type, so the caller can gate it.
     Static(Type),
@@ -546,37 +570,18 @@ impl Checker {
         self.symbols.type_kinds.get(name) == Some(&kind)
     }
 
-    /// Kind-aware assignability: `actual <: expected`, extending [`Type::subtype`] with the one rule
-    /// it cannot decide on its own — a concrete `Named(n)` widens into an abstract `Kind(k)` when
-    /// `n` is a declared type of kind `k`. Recurses through the covariant containers and unions so
-    /// the rule composes (`List<WebRole> <: List<Enum>`); every non-kind case delegates to the pure
-    /// lattice. This is the single funnel for assignment, argument, return, and field checks.
+    /// Registry-aware assignability: `actual <: expected`, extending the pure lattice with the three
+    /// rules it cannot decide on its own — kind membership (`Named(n) <: Kind(k)`), trait-object
+    /// membership (`Named(n) <: dyn Trait`), and each declared generic's [`variance`]. All three
+    /// are threaded through [`Type::subtype_with`] rather than pre-tested here, so each composes
+    /// into every nested position of one walk (`List<WebRole> <: List<Enum>`, `List<Dog> <:
+    /// List<dyn Speak>`) instead of holding only at the top level. This is the single funnel for
+    /// assignment, argument, return, and field checks.
+    ///
+    /// [`crate::variance`] is the interesting one: a `Box2<Dog>` is readable as a `Box2<dyn Speak>`
+    /// exactly when `Box2` cannot have a `dyn Speak` written back into it through the widened view.
     pub(crate) fn assignable(&self, actual: &Type, expected: &Type) -> bool {
-        // A **trait object** `dyn Trait` — a registry-dependent membership rule like `Kind`, decided
-        // here rather than in the pure lattice. An implementor widens into it; a `dyn`/hole defers; a
-        // `dyn Trait` widens into bare `dyn` (or the same trait object). This is the direct/
-        // element-wise coercion the common cases (a `dyn Trait` parameter, an annotated
-        // `List<dyn Trait>` literal checked element-by-element) go through.
-        //
-        // Membership goes through the single funnel [`Checker::implements_trait`] — the same
-        // registration data the runtime `x is dyn Trait` test and `traits_of(x)` read — so a
-        // built-in trait's object is formed by exactly the values that answer `true` to the test.
-        if let Type::DynTrait(tr) = expected {
-            return match actual {
-                Type::DynTrait(a) => a == tr,
-                Type::Named(n, _) => self.implements_trait(n, tr),
-                other => other.defers_to_runtime(),
-            };
-        }
-        if let Type::DynTrait(_) = actual {
-            return matches!(expected, Type::Dyn)
-                || actual == expected
-                || expected.defers_to_runtime();
-        }
-        // The pure subtype lattice, plus the one registry-dependent rule it defers: whether a
-        // `Named(n)` is a member of an abstract `Kind(k)`. Threading it through [`Type::subtype_with`]
-        // reaches every nested covariant position without re-implementing the variance walk here.
-        Type::subtype_with(actual, expected, &|n, k| self.is_of_kind(n, k))
+        Type::subtype_with(actual, expected, &CheckerRules(self))
     }
 
     /// Whether an argument of type `arg` may be passed where `param` is expected — the kind-aware
@@ -693,12 +698,19 @@ impl Checker {
     pub(crate) fn subsume(&mut self, actual: &Type, expected: &Type, span: Span) {
         self.warn_erased_width(actual, expected, span);
         if !self.assignable(actual, expected) {
-            let (expected, actual) = noeta_types::mismatch_pair(expected, actual);
-            self.error(
+            let variance = self.variance_refusal_help(actual, expected);
+            let (shown_expected, shown_actual) = noeta_types::mismatch_pair(expected, actual);
+            let d = self.error(
                 DiagnosticCode::TypeMismatch,
                 span,
-                format!("expected `{expected}`, found `{actual}`"),
+                format!("expected `{shown_expected}`, found `{shown_actual}`"),
             );
+            // A refused *widening* of a generic instantiation is the one mismatch whose two types
+            // look related, so the message alone reads as "trait objects do not work here". Name
+            // the occurrence that forced it instead.
+            if let Some(help) = variance {
+                d.help(help);
+            }
         }
     }
 
@@ -2306,6 +2318,66 @@ impl Checker {
         }
     }
 
+    /// The **trait-object type arguments the checked position states**, keyed by the parameter each
+    /// one instantiates — the substitution [`Self::synth_object_named`] *starts* inference from
+    /// rather than arriving at.
+    ///
+    /// `b: Box2<dyn Speak> = Box2 { v: Dog {} }` instantiates `T = dyn Speak` before the fields are
+    /// read, so `Dog` then widens into `v` by the ordinary assignability rule — the same
+    /// element-wise coercion an annotated `List<dyn Speak>` literal goes through. This is the only
+    /// way a user generic *at* a trait object is constructible: the argument is abstract
+    /// ([`Type::contains_trait_object`]), so no field value can ever synthesize it, and inferring
+    /// from the field yields `Box2<Dog>` — a different type from the one the position names.
+    ///
+    /// Restricted to a [`Type::DynTrait`] argument on purpose, and the two exclusions are the rule:
+    ///
+    /// - A **concrete** expected argument must not pre-empt the fields. "The field values determine
+    ///   the instantiation" is the rule everywhere else, and `b: Box2<float> = Box2 { v: 1 }`
+    ///   remaining an `E0007` is part of it — seeding would silently retype the literal instead of
+    ///   reporting the mismatch.
+    /// - Bare **`dyn`** and the abstract **kind-types** need no seed: `Box2<Dog>` is already
+    ///   assignable to `Box2<dyn>` through the per-argument gradual escape, so seeding one would
+    ///   change only which instantiation the construction records, and buy nothing.
+    ///
+    /// Keyed by the literal's own span as well as its name, exactly as the unconstrained-parameter
+    /// fill below is, so a nested literal can never adopt an outer position's arguments.
+    fn trait_object_seed(&self, lit: &ObjectLit, type_name: &str, params: &[ParamRef]) -> Subst {
+        let Some((expected_span, Type::Named(n, expected_args))) = &self.coloring.expected_object
+        else {
+            return Subst::new();
+        };
+        if *expected_span != lit.span || n != type_name {
+            return Subst::new();
+        }
+        params
+            .iter()
+            .zip(expected_args)
+            .filter(|(_, arg)| matches!(arg, Type::DynTrait(_)))
+            .map(|(p, arg)| (p.id, arg.clone()))
+            .collect()
+    }
+
+    /// Whether a **named object literal in a field initializer** should be checked against that
+    /// field's declared type `expected` rather than synthesized bottom-up.
+    ///
+    /// Only when the field's type states a trait object, and only for a literal that already builds
+    /// that very type — `Outer { inner: Box2 { v: Dog {} } }` against `inner: Box2<dyn Speak>`. A
+    /// field initializer is a checked position with the declared type right there, but a literal
+    /// that could synthesize its own instantiation is left alone: pushing an expectation into it
+    /// would move where a mismatch is reported without making one more program check. An abstract
+    /// argument is the case where synthesis genuinely cannot get there ([`Self::trait_object_seed`]),
+    /// so it is the case that absorbs.
+    fn field_literal_absorbs_trait_object(value: &Expr, expected: &Type) -> bool {
+        let Expr::Object(lit) = value else {
+            return false;
+        };
+        let Type::Named(expected_name, _) = expected else {
+            return false;
+        };
+        expected.contains_trait_object()
+            && lit.type_name.as_ref().map(|n| n.as_str()) == Some(expected_name.as_str())
+    }
+
     /// Check/synthesize an object literal whose nominal type is already **known** — either spelled at
     /// the literal (`Name { … }`) or adopted from the expected type by the target-typed `.{ … }`
     /// form. Extracted so both entry points share one body: the two forms differ only in where the
@@ -2381,7 +2453,18 @@ impl Checker {
             .cloned()
             .unwrap_or_default();
         let pset: ParamSet = params.iter().map(|p| p.id).collect();
-        let mut subst: Subst = Subst::new();
+        // A **trait-object argument the checked position states** is adopted before any field is
+        // read, and every field mentioning that parameter is then checked against the trait object
+        // rather than against `dyn`. See [`Self::trait_object_seed`] for why this one shape of
+        // expected argument leads inference instead of following it.
+        let seed = self.trait_object_seed(lit, type_name, &params);
+        let mut subst: Subst = seed.clone();
+        // The field's declared type as this construction sees it: the seeded parameters resolved to
+        // the trait objects the position stated, every other parameter erased to `dyn` because it
+        // is inferred *from* the value being checked.
+        let field_expectation = |declared: &Type, erased: &ParamSet| {
+            erase_type_params(apply_subst(declared, &seed), erased)
+        };
         for f in &lit.fields {
             // A polymorphic named function assigned to a **concretely `Fn`-typed field**
             // instantiates against the field's declared type (F1, poly-values) — the field
@@ -2402,7 +2485,7 @@ impl Checker {
                 // they are inferred *from* this value, so they cannot also constrain it.
                 .or_else(|| match (&f.value, declared_field) {
                     (Expr::Object(l), Some((_, declared))) if l.type_name.is_none() => {
-                        Some(erase_type_params(declared.clone(), &pset))
+                        Some(field_expectation(declared, &pset))
                     }
                     _ => None,
                 });
@@ -2435,8 +2518,9 @@ impl Checker {
                 .collect();
             let absorbed_declared = if field_fn_expectation.is_none()
                 && let Some((_, declared)) = declared_field
-                && let e = erase_type_params(declared.clone(), &inferred_params)
-                && self.absorbs_constructor_expectation(&f.value, &e, env)
+                && let e = field_expectation(declared, &inferred_params)
+                && (self.absorbs_constructor_expectation(&f.value, &e, env)
+                    || Self::field_literal_absorbs_trait_object(&f.value, &e))
             {
                 Some(e)
             } else {
@@ -2460,7 +2544,7 @@ impl Checker {
                 // mirroring the field-default check. The type's own parameters are erased to
                 // `dyn` (they are inferred from this very value above), so a generic field
                 // accepts any value while a concrete field type is enforced.
-                let expected = erase_type_params(declared.clone(), &pset);
+                let expected = field_expectation(declared, &pset);
                 // …unless the value was just CHECKED against that very type above, whose `subsume`
                 // has already reported any mismatch at this same span. Re-testing it here would
                 // print the identical error twice.

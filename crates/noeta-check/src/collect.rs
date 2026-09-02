@@ -1357,6 +1357,10 @@ impl Checker {
         // LAST — every trait is registered by now, which is the whole reason this is a pass and not
         // a lookup at the classification site.
         self.narrow_declared_static();
+        // After it: declaration-site variance reads the receiver classification the line above
+        // finishes, because whether a method binds a receiver decides whether its parameters are
+        // reachable through a widened view at all.
+        self.compute_arg_variance(program);
     }
 
     /// Narrow every **declared-`static`** trait method from [`Receiver::Either`] to

@@ -1,0 +1,92 @@
+// A **user generic instantiated at a trait object**, built at the site that states the expectation.
+//
+// `dyn Speak` is abstract — no value HAS that type, every one is a concrete implementor — so no
+// field value can ever synthesize the argument, and inferring `Box2 { v: Dog {} }` bottom-up yields
+// `Box2<Dog>`. A checked position states the argument instead: the literal instantiates `T = dyn
+// Speak` and `Dog` widens into the field by the ordinary assignability rule, exactly as it does into
+// a `dyn Speak` parameter or an annotated `List<dyn Speak>` element.
+//
+// Every position an expectation can come from is exercised, because they are separate code paths
+// and one of them silently not propagating is what this pins: an annotated binding, a declared
+// parameter, a declared return, another type's field, a `List` element, and a call-site turbofish.
+// Each one then DISPATCHES through the trait object — a case that only type-checks proves nothing
+// about the value that came out.
+// expect: stdout "woof"
+// expect: stdout "meow"
+// expect: stdout "woof"
+// expect: stdout "meow"
+// expect: stdout "woof"
+// expect: stdout "meow"
+// expect: stdout "woof"
+// expect: stdout "meow"
+// expect: exit 0
+trait Speak {
+    fn speak(): string
+}
+
+struct Dog {
+    impl Speak {
+        pub fn speak(): string {
+            return "woof"
+        }
+    }
+}
+
+struct Cat {
+    impl Speak {
+        pub fn speak(): string {
+            return "meow"
+        }
+    }
+}
+
+// Deliberately a type that is INVARIANT in `T` — a `class` with a `mut` field, so a `Box2<Dog>`
+// cannot simply be read as a `Box2<dyn Speak>` (its own case is
+// `trait_object_variance_rejected.noe`). That is what makes every line below attributable to the
+// construction site: none of them could have gone through a widening instead.
+class Box2<T> {
+    pub mut v: T
+
+    pub fn new(v: T): Box2<T> {
+        return Box2 { v: v }
+    }
+}
+
+struct Holder {
+    inner: Box2<dyn Speak>
+}
+
+// A declared parameter.
+fn take(x: Box2<dyn Speak>): string {
+    return x.v.speak()
+}
+
+// A declared return.
+fn make_dog(): Box2<dyn Speak> {
+    return Box2 { v: Dog {} }
+}
+
+fn make_cat(): Box2<dyn Speak> {
+    return Box2 { v: Cat {} }
+}
+
+// An annotated binding.
+b1: Box2<dyn Speak> = Box2 { v: Dog {} }
+b2: Box2<dyn Speak> = Box2 { v: Cat {} }
+echo b1.v.speak()
+echo b2.v.speak()
+
+// A declared parameter.
+echo take(Box2 { v: Dog {} })
+echo take(Box2 { v: Cat {} })
+
+// A declared return, and another type's declared field.
+echo make_dog().v.speak()
+h = Holder { inner: Box2 { v: Cat {} } }
+echo h.inner.v.speak()
+
+// A `List` element's declared type, and a call-site turbofish.
+zoo: List<Box2<dyn Speak>> = [Box2 { v: Dog {} }]
+echo zoo[0].v.speak()
+turbo = Box2::<dyn Speak>.new(Cat {})
+echo turbo.v.speak()

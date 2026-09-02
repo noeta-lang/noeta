@@ -51,7 +51,7 @@ Dependency edges form a strict DAG (no back-edges): `noeta-span` is depended on 
 ### Types
 | Crate | Role |
 |---|---|
-| `noeta-types` | The structural `Type` lattice + subtyping (one documented function); built-in trait enum. |
+| `noeta-types` | The structural `Type` lattice + subtyping (one documented function, with the registry-dependent rules — kind membership, trait-object membership, per-argument variance — behind the `NominalRules` seam); built-in trait enum. |
 | `noeta-check` | Bidirectional type checker + local inference, run as a shared front-end upstream of both backends. Also collects codegen-hint site maps consumed during lowering. |
 
 ### IR & memory management
