@@ -135,7 +135,7 @@ pub struct LoweringSites<'a> {
     /// [`noeta_ast::reflect::PackedLayout`].
     pub packed_list_sites: &'a HashMap<Span, noeta_ast::reflect::PackedLayout>,
     /// A `from_bytes::<T>` whose span is here has a `Validate`-implementing packed element type:
-    /// the emitted [`Rvalue::FromBytes`] carries `validate: true`.
+    /// the emitted [`ReflectArgs::Bytes`](crate::ReflectArgs::Bytes) carries `validate: true`.
     pub from_bytes_validated: &'a HashSet<Span>,
     /// A `fields_of` whose span is here may report the operand's **private** fields: the emitted
     /// [`Rvalue::Reflect`] carries `private_fields: true`. Decided by the checker (the same rule a

@@ -19,12 +19,12 @@ use super::*;
 pub struct Sites {
     /// The full-fidelity `type_of` site map (see [`resolve_type_of_sites`]).
     pub type_of_sites: HashMap<Span, noeta_ast::reflect::TypeRepr>,
-    /// Runtime type-argument reflection (`plans/reflection/runtime-type-args.md`): the
-    /// resolved `TypeRepr` at each collection/object **construction** site (list/map/set/object/enum
+    /// Runtime type-argument reflection: the resolved `TypeRepr` at each collection/object
+    /// **construction** site (list/map/set/object/enum
     /// literal), so a value can be tagged with the type it was built as and `type_of`/`is` recover its
     /// type arguments after the static type is lost to `dyn`. Annotation-driven — a `List<dyn>` literal
     /// records `List(Dyn)`. Populated only for concretely-typed sites (a hole/`dyn` top is omitted →
-    /// the value stays untagged, i.e. the pre-track head-only runtime behavior).
+    /// the value stays untagged, and reflection falls back to the head-only classification).
     pub construction_sites: HashMap<Span, noeta_ast::reflect::TypeRepr>,
     /// **Dynamic** construction sites (generic-in-generic construction): a fresh-constructor call
     /// span whose instantiation is not in the compiled body at all → the **hidden type-argument

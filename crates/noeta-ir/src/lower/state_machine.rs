@@ -25,10 +25,10 @@ const STATE_VAR: &str = "$state";
 /// The ignored resume parameter of the step closure (one argument; the poll driver passes unit).
 const RESUME_PARAM: &str = "$resume";
 /// The async desugar's single-poll primitive: `$poll(future)` → `some(v)` (ready) / `none` (pending).
-/// The IR lowering (`Expr::Call` arm) turns this synthetic call into [`Rvalue::PollFuture`].
+/// The IR lowering (`Expr::Call` arm) turns this synthetic call into [`Rvalue::PollFuture`](crate::Rvalue::PollFuture).
 pub(super) const POLL_FN: &str = "$poll";
 /// The async desugar's pending sentinel: a state-machine step returns `$pending` when it suspends at
-/// an `.await`. The IR lowering (`Expr::Ident` arm) turns it into [`Rvalue::Pending`].
+/// an `.await`. The IR lowering (`Expr::Ident` arm) turns it into [`Rvalue::Pending`](crate::Rvalue::Pending).
 pub(super) const PENDING_IDENT: &str = "$pending";
 /// The A.7 nested-`concurrent` desugar's scope primitives. A `concurrent { }` block inside an async fn
 /// is split into state-machine states as `$scN = $scope_begin(); <body>; <join poll-state on
@@ -36,8 +36,8 @@ pub(super) const PENDING_IDENT: &str = "$pending";
 /// interleave with the outer scope's siblings across polls) instead of an in-place drive-to-completion
 /// loop. `$scope_begin()` opens the scope and yields its index; `$scope_ready(idx)` is the join's
 /// per-poll readiness test; `$scope_end()` closes the (already-drained) scope. Lexer-forbidden `$` names,
-/// so they never collide with source identifiers. Turned into [`Rvalue::ScopeBegin`]/[`Rvalue::ScopeReady`]
-/// / [`Stmt::ScopeEnd`] by the IR lowering (`Expr::Call` arm).
+/// so they never collide with source identifiers. Turned into [`Rvalue::ScopeBegin`](crate::Rvalue::ScopeBegin)/[`Rvalue::ScopeReady`](crate::Rvalue::ScopeReady)
+/// / [`Stmt::ScopeEnd`](crate::Stmt::ScopeEnd) by the IR lowering (`Expr::Call` arm).
 pub(super) const SCOPE_BEGIN_FN: &str = "$scope_begin";
 pub(super) const SCOPE_READY_FN: &str = "$scope_ready";
 pub(super) const SCOPE_END_FN: &str = "$scope_end";
@@ -1252,7 +1252,7 @@ fn hoist_in_expr(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32, vp: &Varia
     }
 }
 
-/// `$poll(future)` — the async desugar's single-poll call (lowered to [`Rvalue::PollFuture`]).
+/// `$poll(future)` — the async desugar's single-poll call (lowered to [`Rvalue::PollFuture`](crate::Rvalue::PollFuture)).
 fn poll_call(future: Expr, span: Span) -> Expr {
     Expr::Call {
         callee: Box::new(ident(POLL_FN, span)),
@@ -1261,12 +1261,12 @@ fn poll_call(future: Expr, span: Span) -> Expr {
     }
 }
 
-/// `$pending` — the async pending sentinel reference (lowered to [`Rvalue::Pending`]).
+/// `$pending` — the async pending sentinel reference (lowered to [`Rvalue::Pending`](crate::Rvalue::Pending)).
 fn pending_expr(span: Span) -> Expr {
     ident(PENDING_IDENT, span)
 }
 
-/// `$scope_begin()` — open a concurrency scope and yield its index (lowered to [`Rvalue::ScopeBegin`]).
+/// `$scope_begin()` — open a concurrency scope and yield its index (lowered to [`Rvalue::ScopeBegin`](crate::Rvalue::ScopeBegin)).
 fn scope_begin_call(span: Span) -> Expr {
     Expr::Call {
         callee: Box::new(ident(SCOPE_BEGIN_FN, span)),
@@ -1275,7 +1275,7 @@ fn scope_begin_call(span: Span) -> Expr {
     }
 }
 
-/// `$scope_ready(scope)` — the join poll-state's readiness test (lowered to [`Rvalue::ScopeReady`]).
+/// `$scope_ready(scope)` — the join poll-state's readiness test (lowered to [`Rvalue::ScopeReady`](crate::Rvalue::ScopeReady)).
 fn scope_ready_call(scope: Expr, span: Span) -> Expr {
     Expr::Call {
         callee: Box::new(ident(SCOPE_READY_FN, span)),
@@ -1284,7 +1284,7 @@ fn scope_ready_call(scope: Expr, span: Span) -> Expr {
     }
 }
 
-/// `$scope_end(scope);` — close the drained scope by index (lowered to [`Rvalue::ScopeEndAt`]), as an
+/// `$scope_end(scope);` — close the drained scope by index (lowered to [`Rvalue::ScopeEndAt`](crate::Rvalue::ScopeEndAt)), as an
 /// expression statement. The index (not "innermost") because a sibling task's `concurrent` scope may
 /// still be open above this one — they close out of structured-stack order under interleaving.
 fn scope_end_stmt(scope: &str, span: Span) -> AstStmt {

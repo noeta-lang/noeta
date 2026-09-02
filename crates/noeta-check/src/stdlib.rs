@@ -1608,12 +1608,15 @@ fn sig_to_type_bundle(
 /// `SameAsArg(0)` is **the receiver's type** (`xs.add_all(ys)` returns `xs`'s own `List<T>`),
 /// `SameAsArg(i > 0)` the call's argument `i - 1`.
 ///
-/// The **element-relative** returns (scalar-unification ABI) resolve against `elem` — the bound
-/// `@packed` shape's uniform element type, captured by the checker at the call site from the
-/// receiver's concrete field kind. `Elem` is that element itself, `ElemWide` its widened
-/// accumulator ([`elem_wide`]), `ElemFloat` its float promotion ([`elem_float`]); a `None` `elem`
-/// (a non-uniform shape reaching an element-relative method — never true for a well-formed
-/// `AnyNumeric` binding) degrades to a gradual hole rather than a wrong concrete type.
+/// The **element-relative** returns are associated-type projections (`Self::Wide`, `Self::Float`)
+/// resolved against `elem` — the bound `@packed` shape's uniform element type, captured by the
+/// checker at the call site from the receiver's concrete field kind. Each name resolves through the
+/// trait's [`registry::AssocDerivation`]: [`Element`](registry::AssocDerivation::Element) is that
+/// element itself, [`Widen`](registry::AssocDerivation::Widen) its widened accumulator
+/// ([`elem_wide`]), [`FloatPromote`](registry::AssocDerivation::FloatPromote) its float promotion
+/// ([`elem_float`]). A `None` `elem` (a non-uniform shape reaching an element-relative method —
+/// never true for a well-formed `AnyNumeric` binding) degrades to a gradual hole rather than a
+/// wrong concrete type.
 pub(super) fn bundle_method_return(
     reg: &registry::Registry,
     f: &registry::ExtFn,
@@ -1624,11 +1627,11 @@ pub(super) fn bundle_method_return(
 ) -> Type {
     use registry::{RetTy, SigType};
     match f.ret {
-        // The element-relative returns are now trait associated-type projections (`Self::Wide` /
-        // `Self::Float`): resolve the name against the kernel
-        // trait's native-derived `assoc_types` folded over the bound element — the ONE derivation
-        // mechanism instead of the retired `RetTy::Elem*` vocabulary. `List<Self::Wide>`
-        // (`dot_all`) / `List<Self::Float>` (`length_all`) nest through the same resolution.
+        // The element-relative returns are trait associated-type projections (`Self::Wide` /
+        // `Self::Float`): resolve the name against the kernel trait's native-derived `assoc_types`
+        // folded over the bound element — one derivation mechanism for every element-relative
+        // return. `List<Self::Wide>` (`dot_all`) / `List<Self::Float>` (`length_all`) nest through
+        // the same resolution.
         RetTy::Concrete(SigType::Assoc(name)) => resolve_bundle_assoc(name, assoc_types, elem),
         RetTy::Concrete(SigType::List(SigType::Assoc(name))) => {
             Type::List(Box::new(resolve_bundle_assoc(name, assoc_types, elem)))
@@ -1662,9 +1665,8 @@ fn resolve_bundle_assoc(
 /// a native trait's [`registry::AssocDerivation`] to a `@packed` shape's uniform element type,
 /// producing the associated type's concrete `Type`. The ONE code path both halves of the convergence
 /// use — the native-trait `trait_assoc` population (`seed_ext_traits`) and the bundle ABI's
-/// element-relative returns ([`bundle_method_return`]) — proving the derivation enum expresses exactly
-/// what `RetTy::Elem`/`ElemWide`/`ElemFloat` did. The ABI cannot itself produce a `Type` (it cannot
-/// see `noeta_types::Type`), so the interpretation lives here, on a local extension trait.
+/// element-relative returns ([`bundle_method_return`]). The ABI cannot itself produce a `Type` (it
+/// cannot see `noeta_types::Type`), so the interpretation lives here, on a local extension trait.
 pub(crate) trait DeriveApply {
     fn apply(&self, elem: &Type) -> Type;
 }
@@ -1681,8 +1683,8 @@ impl DeriveApply for registry::AssocDerivation {
 }
 
 /// The associated-type shape a native (fielded or extern) method's return names, if any:
-/// `Self::Name` ([`AssocRet::Bare`]) or `List<Self::Name>` ([`AssocRet::List`], the `ListElemWide`
-/// analog). Read straight off the method's registry signature — the checker then resolves the named
+/// `Self::Name` ([`AssocRet::Bare`]) or `List<Self::Name>` ([`AssocRet::List`]). Read straight off
+/// the method's registry signature — the checker then resolves the named
 /// associated type against `trait_assoc` at the concrete receiver
 /// ([`crate::Checker::native_method_assoc_return`]). A method whose return is not an associated-type
 /// projection yields `None` (it types through the ordinary [`method_return`] path).
@@ -1708,14 +1710,15 @@ pub(super) fn native_method_assoc_ret(
         .or_else(|| reg.find_type_method_sig(n, name))?;
     match sig.ret {
         RetTy::Concrete(SigType::Assoc(a)) => Some(AssocRet::Bare(a)),
-        // `List<Self::Name>` — the `RetTy::ListElemWide` analog; nests through the concrete resolution.
+        // `List<Self::Name>` nests through the concrete resolution.
         RetTy::Concrete(SigType::List(SigType::Assoc(a))) => Some(AssocRet::List(a)),
         _ => None,
     }
 }
 
-/// The **widened accumulator** of a numeric element (`Scalar::Wide`) — the type an
-/// [`registry::RetTy::ElemWide`] bundle method (`dot`) returns. Integer elements (`int` and every
+/// The **widened accumulator** of a numeric element (`Scalar::Wide`) — the type a bundle method
+/// returning `Self::Wide` (`dot`) resolves to, via
+/// [`registry::AssocDerivation::Widen`]. Integer elements (`int` and every
 /// `iN`/`uN`) widen to `int` (the i64 the seam's `Scalar::Int` carries — an unsigned `uN`'s u64
 /// accumulator crosses the ABI in the same 64-bit lane); `f32` stays `f32`, `f64` stays `f64`,
 /// `float` stays `float`. Kept in lock-step with the `noeta-stdlib` `Scalar` trait's `Wide`.
@@ -1729,8 +1732,9 @@ pub(super) fn elem_wide(elem: &Type) -> Type {
     }
 }
 
-/// The **float promotion** of a numeric element (`Scalar::Float`) — the type an
-/// [`registry::RetTy::ElemFloat`] bundle method (`length`) returns. Integer elements (`int` and
+/// The **float promotion** of a numeric element (`Scalar::Float`) — the type a bundle method
+/// returning `Self::Float` (`length`) resolves to, via
+/// [`registry::AssocDerivation::FloatPromote`]. Integer elements (`int` and
 /// every `iN`/`uN`) promote to `float` (f64); `f32` stays `f32`, `f64` stays `f64`, `float` stays
 /// `float`. Kept in lock-step with the `noeta-stdlib` `Scalar` trait's `Float`.
 pub(super) fn elem_float(elem: &Type) -> Type {
