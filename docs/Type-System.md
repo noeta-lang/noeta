@@ -122,6 +122,8 @@ echo d is int          // true
 echo d is string       // false
 ```
 
+As a *type argument* it is a wider argument like any other, so whether a `Box<Dog>` reads as a `Box<dyn>` is decided by where `Box` puts its parameter. [Trait objects as type arguments](Generics-and-Traits#trait-objects-as-type-arguments) carries that rule, and it is one rule for `dyn`, for `dyn Trait` and for a [kind-type](#abstract-kind-types).
+
 ## `never` — the bottom
 
 `never` is the bottom of the lattice: it widens into every type, and no value inhabits it. It is the return type of a function that **does not return**:

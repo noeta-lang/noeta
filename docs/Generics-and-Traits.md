@@ -660,9 +660,9 @@ echo heard(Box { v: Cat {} })               // meow — so does a parameter
 echo Box::<dyn Speak>.new(Dog {}).v.speak() // woof — and so does a turbofish
 ```
 
-This is the spelling to reach for. It works for every declaration, and it says at the construction site what kind of collection you are building.
+This is the spelling to reach for, and it works for every declaration.
 
-**Reading an existing value at a wider argument**, handing a `Box<Dog>` you already hold to something expecting a `Box<dyn Speak>`, depends on where the declaration puts its type parameter. It is allowed where the widened view has no way to put a `dyn Speak` back into the value, which is the case for a parameter that only comes *out*:
+**Reading an existing value at a wider argument**, handing a `Box<Dog>` you already hold to something expecting a `Box<dyn Speak>`, depends on where the declaration puts its type parameter. It is allowed where the widened view has no way to put a `dyn Speak` back into the value, which is the case for a parameter that only comes *out*. One rule governs every wider argument, so `Box<Dog>` reads as a `Box<dyn>` and a `Box<Struct>` where it reads as a `Box<dyn Speak>`:
 
 ```noeta
 trait Speak { fn speak(): string }
@@ -677,6 +677,9 @@ kennel: Reader<Dog> = Reader { v: Dog {} }
 speakers: Reader<dyn Speak> = kennel        // `T` is read-only in `Reader`
 echo speakers.get().speak()                 // woof
 
+anything: Reader<dyn> = kennel              // the open `dyn`, by the same rule
+echo anything.get().speak()                 // woof
+
 pack: List<Dog> = [Dog {}]
 chorus: List<dyn Speak> = pack              // and the built-in containers are the same rule
 echo chorus[0].speak()
@@ -688,7 +691,7 @@ Three occurrences of the parameter close that door, and each one is a way the wi
 - a **method parameter** of the parameter's type, in any kind. `fn matches(other: T)` is checked believing `other` is a `Dog`, so calling it through a widened receiver would hand it a `Cat`. A field of function type (`f: (T) -> string`) is the same occurrence, reached through a field.
 - reaching either of the above **through another generic type**. A `struct` that holds a `class` shares that class with its copies, so `struct Owner<T> { slot: Slot<T> }` is as restricted as `Slot` is.
 
-Where the widening is refused, E0007 names the occurrence that forced it, and building the value at the wider type stays available:
+Where the widening is refused, E0007 names the occurrence that forced it and points at building the value at the wider type instead:
 
 ```noeta error
 trait Speak { fn speak(): string }
@@ -698,10 +701,11 @@ class Slot<T> { pub mut v: T }
 
 kennel: Slot<Dog> = Slot { v: Dog {} }
 wide: Slot<dyn Speak> = kennel   // E0007: `Slot` stores it in the `mut` field `v`
+open: Slot<dyn> = kennel         // E0007: the same occurrence, the same refusal
 echo wide.v.speak()
 ```
 
-The rule reads a declaration, so it applies to the types a program declares. A generic type declared by a [native package](Native-Extensions) has no such declaration and is not widened.
+The rule reads a declaration. A generic type declared by a [native package](Native-Extensions) has none, and is not widened.
 
 ## `@derive` — synthesized implementations
 

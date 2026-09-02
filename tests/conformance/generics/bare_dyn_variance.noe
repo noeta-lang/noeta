@@ -1,0 +1,98 @@
+// Reading an existing value at the **open `dyn`** type argument — a `C<Dog>` as a `C<dyn>` — where
+// the declaration makes it sound. It is the same widening as reading it at a `dyn Trait`, and the
+// declaration decides both the same way: a widened view is unsafe only where a value of the wider
+// type can be written back through it into something whose own type says `Dog`.
+//
+// Each widening dispatches afterwards, because a widening that type-checks and yields the wrong
+// value is the failure this file exists to exclude. The `struct` case writes a `int` through the
+// widened copy and then reads the ORIGINAL back, which is the store the sibling file's `class` case
+// is refused for.
+// expect: stdout "woof"
+// expect: stdout "5"
+// expect: stdout "woof"
+// expect: stdout "woof"
+// expect: stdout "woof"
+// expect: stdout "leaf 5"
+// expect: stdout "woof"
+// expect: stdout "woof"
+// expect: stdout "woof"
+// expect: stdout "5"
+// expect: exit 0
+trait Speak {
+    fn speak(): string
+}
+
+struct Dog {
+    impl Speak {
+        pub fn speak(): string {
+            return "woof"
+        }
+    }
+}
+
+// A value struct: even a `mut` field is a read position as far as the ORIGINAL is concerned, because
+// a struct field-set rebinds the binding rather than writing through a shared object.
+struct Cell<T> {
+    mut v: T
+}
+
+// A reference class whose field is immutable, and whose method only hands the parameter out.
+class Reader<T> {
+    pub v: T
+
+    pub fn get(): T {
+        return self.v
+    }
+}
+
+// An enum has no `mut` field to write through: a payload is read out of a `match` and nothing else.
+enum Tree<T> { Leaf(T); Empty; }
+
+c: Cell<Dog> = Cell { v: Dog {} }
+mut wide: Cell<dyn> = c
+echo wide.v.speak()
+
+// Storing through the widened copy is a rebind, so the original is untouched and still a `Dog`.
+wide.v = 5
+echo "${wide.v}"
+echo c.v.speak()
+
+r: Reader<Dog> = Reader { v: Dog {} }
+rwide: Reader<dyn> = r
+echo rwide.get().speak()
+
+// The built-in containers copy on write, so every depth of them stays a read position.
+pets: List<Dog> = [Dog {}]
+speakers: List<dyn> = pets
+echo speakers[0].speak()
+
+t: Tree<int> = Tree.Leaf(5)
+twide: Tree<dyn> = t
+echo match twide {
+    Tree.Leaf(v) => "leaf ${v}",
+    Tree.Empty => "empty",
+}
+
+// Where the widening is refused (the sibling file), BUILDING at the wider type is the route the
+// help line names, and all three checked positions carry it: a literal, a call-site turbofish, and
+// the declared return the binding states. `Slot` is the very declaration the sibling refuses, so
+// these three are the constructive half of that refusal.
+class Slot<T> {
+    pub mut v: T
+
+    pub fn new(v: T): Slot<T> {
+        return Slot { v: v }
+    }
+}
+
+mut stated: Slot<dyn> = Slot { v: Dog {} }
+built: Slot<dyn> = Slot.new(Dog {})
+turbo: Slot<dyn> = Slot::<dyn>.new(Dog {})
+echo stated.v.speak()
+echo built.v.speak()
+echo turbo.v.speak()
+
+// `T` really is `dyn` in `stated`, so the store the sibling file refuses is legal here — and lands
+// where the reader can see it, because nothing else believes this slot holds a `Dog`.
+stated.v = 5
+echo "${stated.v}"

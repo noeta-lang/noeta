@@ -2318,30 +2318,29 @@ impl Checker {
         }
     }
 
-    /// The **trait-object type arguments the checked position states**, keyed by the parameter each
-    /// one instantiates — the substitution [`Self::synth_object_named`] *starts* inference from
-    /// rather than arriving at.
+    /// The **abstract type arguments the checked position states**, keyed by the parameter each one
+    /// instantiates — the substitution [`Self::synth_object_named`] *starts* inference from rather
+    /// than arriving at.
     ///
     /// `b: Box2<dyn Speak> = Box2 { v: Dog {} }` instantiates `T = dyn Speak` before the fields are
     /// read, so `Dog` then widens into `v` by the ordinary assignability rule — the same
     /// element-wise coercion an annotated `List<dyn Speak>` literal goes through. This is the only
-    /// way a user generic *at* a trait object is constructible: the argument is abstract
-    /// ([`Type::contains_trait_object`]), so no field value can ever synthesize it, and inferring
-    /// from the field yields `Box2<Dog>` — a different type from the one the position names.
+    /// way a user generic *at* an abstract argument is constructible: the argument is abstract
+    /// ([`Type::is_abstract`]), so no field value can ever synthesize it, and inferring from the
+    /// field yields `Box2<Dog>` — a different type from the one the position names.
     ///
-    /// Restricted to a [`Type::DynTrait`] argument on purpose, and the two exclusions are the rule:
+    /// All three abstract arguments seed, because all three are unreachable by synthesis and each is
+    /// a widening the declaration may refuse: `Box2<dyn>` and `Box2<Struct>` are stated exactly as
+    /// `Box2<dyn Speak>` is, and this is the route `E0007`'s help line names.
     ///
-    /// - A **concrete** expected argument must not pre-empt the fields. "The field values determine
-    ///   the instantiation" is the rule everywhere else, and `b: Box2<float> = Box2 { v: 1 }`
-    ///   remaining an `E0007` is part of it — seeding would silently retype the literal instead of
-    ///   reporting the mismatch.
-    /// - Bare **`dyn`** and the abstract **kind-types** need no seed: `Box2<Dog>` is already
-    ///   assignable to `Box2<dyn>` through the per-argument gradual escape, so seeding one would
-    ///   change only which instantiation the construction records, and buy nothing.
+    /// A **concrete** expected argument does not seed. "The field values determine the
+    /// instantiation" is the rule everywhere else, and `b: Box2<float> = Box2 { v: 1 }` remaining an
+    /// `E0007` is part of it — seeding would silently retype the literal instead of reporting the
+    /// mismatch.
     ///
     /// Keyed by the literal's own span as well as its name, exactly as the unconstrained-parameter
     /// fill below is, so a nested literal can never adopt an outer position's arguments.
-    fn trait_object_seed(&self, lit: &ObjectLit, type_name: &str, params: &[ParamRef]) -> Subst {
+    fn abstract_arg_seed(&self, lit: &ObjectLit, type_name: &str, params: &[ParamRef]) -> Subst {
         let Some((expected_span, Type::Named(n, expected_args))) = &self.coloring.expected_object
         else {
             return Subst::new();
@@ -2352,7 +2351,7 @@ impl Checker {
         params
             .iter()
             .zip(expected_args)
-            .filter(|(_, arg)| matches!(arg, Type::DynTrait(_)))
+            .filter(|(_, arg)| arg.is_abstract())
             .map(|(p, arg)| (p.id, arg.clone()))
             .collect()
     }
@@ -2360,21 +2359,21 @@ impl Checker {
     /// Whether a **named object literal in a field initializer** should be checked against that
     /// field's declared type `expected` rather than synthesized bottom-up.
     ///
-    /// Only when the field's type states a trait object, and only for a literal that already builds
-    /// that very type — `Outer { inner: Box2 { v: Dog {} } }` against `inner: Box2<dyn Speak>`. A
-    /// field initializer is a checked position with the declared type right there, but a literal
+    /// Only when the field's type states an abstract argument, and only for a literal that already
+    /// builds that very type — `Outer { inner: Box2 { v: Dog {} } }` against `inner: Box2<dyn Speak>`.
+    /// A field initializer is a checked position with the declared type right there, but a literal
     /// that could synthesize its own instantiation is left alone: pushing an expectation into it
     /// would move where a mismatch is reported without making one more program check. An abstract
-    /// argument is the case where synthesis genuinely cannot get there ([`Self::trait_object_seed`]),
-    /// so it is the case that absorbs.
-    fn field_literal_absorbs_trait_object(value: &Expr, expected: &Type) -> bool {
+    /// argument is the case where synthesis cannot get there ([`Self::abstract_arg_seed`]), so it is
+    /// the case that absorbs.
+    fn field_literal_absorbs_abstract_arg(value: &Expr, expected: &Type) -> bool {
         let Expr::Object(lit) = value else {
             return false;
         };
         let Type::Named(expected_name, _) = expected else {
             return false;
         };
-        expected.contains_trait_object()
+        expected.contains_abstract_arg()
             && lit.type_name.as_ref().map(|n| n.as_str()) == Some(expected_name.as_str())
     }
 
@@ -2453,15 +2452,15 @@ impl Checker {
             .cloned()
             .unwrap_or_default();
         let pset: ParamSet = params.iter().map(|p| p.id).collect();
-        // A **trait-object argument the checked position states** is adopted before any field is
-        // read, and every field mentioning that parameter is then checked against the trait object
-        // rather than against `dyn`. See [`Self::trait_object_seed`] for why this one shape of
-        // expected argument leads inference instead of following it.
-        let seed = self.trait_object_seed(lit, type_name, &params);
+        // An **abstract argument the checked position states** is adopted before any field is read,
+        // and every field mentioning that parameter is then checked against the stated argument
+        // rather than against an erased `dyn`. See [`Self::abstract_arg_seed`] for why this one
+        // shape of expected argument leads inference instead of following it.
+        let seed = self.abstract_arg_seed(lit, type_name, &params);
         let mut subst: Subst = seed.clone();
         // The field's declared type as this construction sees it: the seeded parameters resolved to
-        // the trait objects the position stated, every other parameter erased to `dyn` because it
-        // is inferred *from* the value being checked.
+        // the arguments the position stated, every other parameter erased to `dyn` because it is
+        // inferred *from* the value being checked.
         let field_expectation = |declared: &Type, erased: &ParamSet| {
             erase_type_params(apply_subst(declared, &seed), erased)
         };
@@ -2520,7 +2519,7 @@ impl Checker {
                 && let Some((_, declared)) = declared_field
                 && let e = field_expectation(declared, &inferred_params)
                 && (self.absorbs_constructor_expectation(&f.value, &e, env)
-                    || Self::field_literal_absorbs_trait_object(&f.value, &e))
+                    || Self::field_literal_absorbs_abstract_arg(&f.value, &e))
             {
                 Some(e)
             } else {

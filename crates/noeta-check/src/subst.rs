@@ -288,39 +288,78 @@ pub(crate) fn erase_type_params(ty: Type, params: &ParamSet) -> Type {
 }
 
 /// Bind generic type parameters by structurally matching a (possibly un-erased) parameter type
-/// `raw` against a concrete argument type `arg`, filling `subst`. Only **unbound** parameters are
-/// filled (the first concrete argument that constrains a parameter wins); a deferred argument
+/// `raw` against a **synthesized** argument type `arg`, filling `subst`. Only **unbound** parameters
+/// are filled (the first concrete argument that constrains a parameter wins); a deferred argument
 /// (`dyn`/hole) never pins a parameter, so a later concrete argument can. Matching descends into
 /// containers, options/results, and function arrows.
 pub(crate) fn bind_type_params(raw: &Type, arg: &Type, params: &ParamSet, subst: &mut Subst) {
+    bind_params_at(raw, arg, params, subst, Source::Synthesized);
+}
+
+/// [`bind_type_params`] against a **stated** type — an annotation, a declared return, a call-site
+/// turbofish — where the author wrote the instantiation rather than the checker deducing it.
+///
+/// The one difference is `dyn`. Synthesized, it is absence of information and must not pin a
+/// parameter, or a `dyn`-typed argument would fix `T` before a later concrete one could. Stated, it
+/// **is** the instantiation: `b: Box<dyn> = Box.new(Dog {})` names `T = dyn` exactly as
+/// `b: Box<dyn Speak> = Box.new(Dog {})` names `T = dyn Speak`, and reading the `Box<Dog>` the call
+/// would otherwise build as a `Box<dyn>` is the widening the declaration may refuse. An inference
+/// hole stays unbindable from either side: nobody states one.
+pub(crate) fn bind_stated_type_params(
+    raw: &Type,
+    arg: &Type,
+    params: &ParamSet,
+    subst: &mut Subst,
+) {
+    bind_params_at(raw, arg, params, subst, Source::Stated);
+}
+
+/// Where the type a parameter binds against came from — see [`bind_stated_type_params`].
+#[derive(Clone, Copy)]
+enum Source {
+    Synthesized,
+    Stated,
+}
+
+impl Source {
+    /// Whether `arg` pins a parameter it matches.
+    fn pins(self, arg: &Type) -> bool {
+        match self {
+            Source::Synthesized => !arg.defers_to_runtime(),
+            Source::Stated => !arg.is_gradual(),
+        }
+    }
+}
+
+fn bind_params_at(raw: &Type, arg: &Type, params: &ParamSet, subst: &mut Subst, source: Source) {
     match (raw, arg) {
-        // A deferred argument (`dyn`/hole) never pins a parameter, so a later concrete argument can.
-        (Type::Param(p), _) if params.contains(&p.id) && !arg.defers_to_runtime() => {
+        // A deferred argument never pins a parameter, so a later concrete argument can.
+        (Type::Param(p), _) if params.contains(&p.id) && source.pins(arg) => {
             subst.entry(p.id).or_insert_with(|| arg.clone());
         }
         // A named generic type (`Box<T>` matched against `Box<int>`): bind through the arguments.
         (Type::Named(rn, rargs), Type::Named(an, aargs)) if rn == an => {
             for (r, a) in rargs.iter().zip(aargs) {
-                bind_type_params(r, a, params, subst);
+                bind_params_at(r, a, params, subst, source);
             }
         }
-        (Type::List(r), Type::List(a)) => bind_type_params(r, a, params, subst),
-        (Type::Set(r), Type::Set(a)) => bind_type_params(r, a, params, subst),
-        (Type::Option(r), Type::Option(a)) => bind_type_params(r, a, params, subst),
+        (Type::List(r), Type::List(a)) => bind_params_at(r, a, params, subst, source),
+        (Type::Set(r), Type::Set(a)) => bind_params_at(r, a, params, subst, source),
+        (Type::Option(r), Type::Option(a)) => bind_params_at(r, a, params, subst, source),
         (Type::Map(rk, rv), Type::Map(ak, av)) => {
-            bind_type_params(rk, ak, params, subst);
-            bind_type_params(rv, av, params, subst);
+            bind_params_at(rk, ak, params, subst, source);
+            bind_params_at(rv, av, params, subst, source);
         }
         (Type::Result(rt, re), Type::Result(at, ae)) => {
-            bind_type_params(rt, at, params, subst);
-            bind_type_params(re, ae, params, subst);
+            bind_params_at(rt, at, params, subst, source);
+            bind_params_at(re, ae, params, subst, source);
         }
         // A tuple binds position-wise, like every other structural container: `(T, int)` matched
         // against `(int, int)` pins `T = int`. `zip` stops at the shorter one, so a mismatched
         // arity simply binds what lines up and leaves the rest to the arity check.
         (Type::Tuple(rs), Type::Tuple(as_)) => {
             for (r, a) in rs.iter().zip(as_) {
-                bind_type_params(r, a, params, subst);
+                bind_params_at(r, a, params, subst, source);
             }
         }
         // A **union** deliberately binds nothing. `T | string` matched against `int` could mean
@@ -338,9 +377,9 @@ pub(crate) fn bind_type_params(raw: &Type, arg: &Type, params: &ParamSet, subst:
             },
         ) => {
             for (r, a) in rp.iter().zip(ap) {
-                bind_type_params(r, a, params, subst);
+                bind_params_at(r, a, params, subst, source);
             }
-            bind_type_params(rr, ar, params, subst);
+            bind_params_at(rr, ar, params, subst, source);
         }
         _ => {}
     }
