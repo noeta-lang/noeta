@@ -22,7 +22,9 @@ The element type is **tracked through instances and literals**: `Box.new(42)` is
 
 ## Explicit instantiation — the turbofish
 
-Any generic function can be instantiated explicitly with `f::<T, ...>(args)`. The type arguments bind to the declared type parameters **in order** (one per parameter — an arity mismatch is E0058, a turbofish on a non-generic function too), and they **win** over argument inference: an argument that disagrees with the explicit binding fails assignability against the substituted parameter (E0007) rather than silently re-inferring `T`.
+Any generic function can be instantiated explicitly with `f::<T, ...>(args)`. The type arguments bind to the declared type parameters **in order**, one per parameter. An arity mismatch is E0058, as is a turbofish on a non-generic function.
+
+An explicit binding **wins** over argument inference. An argument that disagrees with it fails assignability against the substituted parameter, E0007.
 
 ```noeta
 fn empty<T>(): List<T> { return [] }
@@ -32,9 +34,13 @@ xs: List<int> = empty::<int>()      // T appears only in the return — turbofis
 echo pick::<string>("x", "y", false)
 ```
 
-The expected type at an annotated binding can carry the instantiation too — `r: List<int> = empty()` infers `T = int` from the **return position** (the bidirectional checker seeds `T` from the expectation, and the arguments fill only what it leaves open). Inference flows through `?` and `??` as well: `o: Order = load(text)?` seeds `T = Order` by inverting the `Result` wrapper at the checked `Try`, and `o: Order = load(text) ?? fallback` through the coalesce — no turbofish needed.
+The expected type at an annotated binding can carry the instantiation too. `r: List<int> = empty()` infers `T = int` from the **return position**: the bidirectional checker seeds `T` from the expectation, and the arguments fill what it leaves open.
 
-A **container literal written inline at the call** instantiates from what it holds, exactly as the same value bound to a local first does: `f([x])` and `ys = [x]; f(ys)` pin `T` identically, for a list, set, map, `.{ … }` and any nesting of them. An **empty** literal holds nothing to read an instantiation off, so a parameter only it could pin stays open and is E0023 — spell it (`f::<int>([])`) or annotate the value first.
+Inference flows through `?` and `??` as well, with no turbofish. `o: Order = load(text)?` seeds `T = Order` by inverting the `Result` wrapper at the checked `Try`, and `o: Order = load(text) ?? fallback` seeds it through the coalesce.
+
+A **container literal written inline at the call** instantiates from what it holds, exactly as the same value bound to a local first does. `f([x])` and `ys = [x]; f(ys)` pin `T` identically, for a list, set, map, `.{ … }` and any nesting of them.
+
+An **empty** literal holds nothing to read an instantiation off, so a parameter only it could pin stays open and is E0023. Spell it (`f::<int>([])`) or annotate the value first.
 
 ### Instantiating a generic *type* at the call site
 
@@ -53,11 +59,13 @@ r = Repo::<Todo>.new("todos")       // Repo<Todo> — the call says so itself
 echo r.model()                      // todos:Todo
 ```
 
-`Type::<Args>.method(args)` works for **any** static function, not just one called `new` — Noeta has no constructor concept, so `Repo::<Todo>.open(dsn)` and `Repo::<Todo>.from_dsn(dsn)` read the same way. The type arguments bind to the type's declared parameters in order, arity-checked (E0058, as is a turbofish on a non-generic type). They are the *class's* parameters, and only those: a method's own `<U>` is instantiated on the method, so `Repo.new::<Todo>` is an error (`new` declares no type parameters of its own). Where both are generic, both are spelled — see [Both at once](#both-at-once).
+`Type::<Args>.method(args)` works for **any** static function. Noeta has no constructor concept, so `Repo::<Todo>.open(dsn)` and `Repo::<Todo>.from_dsn(dsn)` read exactly as `new` does.
+
+The type arguments bind to the type's declared parameters in order, arity-checked as E0058, as is a turbofish on a non-generic type. They are the *class's* parameters and only those: a method's own `<U>` is instantiated on the method, so `Repo.new::<Todo>` is an error, since `new` declares no type parameters of its own. Where both are generic, both are spelled; see [Both at once](#both-at-once).
 
 The `::` is required: `Repo<Todo>.new(…)` is a parse error, because a bare `<` after an identifier is ambiguous with less-than in expression position. That is the same reason every other type argument in the language is written with a turbofish.
 
-**When to reach for it.** Prefer an annotation or a declared type where the position already has one — it documents the value where the reader looks for it, and inference is the language's declared direction. Four positions supply the instantiation that way, and all of them work:
+**When to reach for it.** Prefer an annotation or a declared type where the position already has one, which documents the value where a reader looks for it. Four positions supply the instantiation that way:
 
 ```noeta
 struct Todo { id: int }
@@ -81,7 +89,7 @@ h = Holder.new(Repo.new("notes"))                            // a field's declar
 echo describe(Repo.new("tags"))
 ```
 
-Reach for the call-site turbofish when **none** of them does — the value is echoed straight out, passed to a `dyn` parameter, or simply bound with no annotation you want to write. A construction that records no instantiation at all is a check-time E0058 whose help names this spelling, rather than a clean check and an abort at the first attempt to read `T` back off the value.
+Reach for the call-site turbofish where none of them does: the value is echoed straight out, passed to a `dyn` parameter, or bound with no annotation you want to write. A construction that records no instantiation at all is a check-time E0058 whose help names this spelling.
 
 If an annotation and a call-site turbofish **disagree**, the turbofish wins the instantiation and the disagreement is an ordinary assignability error at the binding:
 
@@ -97,11 +105,11 @@ class Repo<T> {
 r: Repo<User> = Repo::<Todo>.new("todos")   // E0007 — a Repo<Todo> is not a Repo<User>
 ```
 
-That is not a special rule. `Repo::<Todo>.new("todos")` is a self-sufficient expression of type `Repo<Todo>`, exactly as `5` is an `int`, so the mismatch is reported by the same rule and at the same span as `n: int = "s"`.
+`Repo::<Todo>.new("todos")` is a self-sufficient expression of type `Repo<Todo>`, exactly as `5` is an `int`, so the mismatch is reported by the same rule and at the same span as `n: int = "s"`.
 
 ## Generic methods
 
-A method may declare **its own** type parameters, instantiated per call — independently of the class's parameters, which the receiver pins. `Box<T>` fixes `T` from the value; a method `pick<U>(...)` adds `U` on top, and both substitutions compose (`Box<int>` with `pick::<string>(...)` binds `T = int`, `U = string`).
+A method may declare **its own** type parameters, instantiated per call and independent of the class's parameters, which the receiver pins. `Box<T>` fixes `T` from the value, a method `pick<U>(...)` adds `U` on top, and both substitutions compose: `Box<int>` with `pick::<string>(...)` binds `T = int` and `U = string`.
 
 ```noeta
 class Box<T> {
@@ -115,13 +123,21 @@ b = Box.new(7)
 p = b.paired::<string>("hi")        // Pair<int, string> — T from b, U from the turbofish
 ```
 
-All three instantiation paths a free function has apply, consistent with them: **argument inference** (`b.choose(99, true)` infers `U = int`), the **member turbofish** `recv.m::<U>(args)` (the class's parameter never appears among these — only the method's own, arity-checked E0058), and **expected-type seeding** (`xs: List<int> = b.collect()` seeds a return-only `U` from the annotation). Bounds on a method parameter ride the ordinary trait machinery (`fn bigger<U: Comparable>(...)`; a non-`Comparable` argument is E0025). The parameters are erased like every generic — one compiled method serves every instantiation.
+All three instantiation paths a free function has apply here, and mean the same things:
 
-**A method's own parameter shadows.** Reusing one of the class's names declares a *new* parameter that hides the outer one for the body's extent, exactly as a local binding hides a global — `Repo::<Todo>.label::<User>()` on a `fn label<T>()` inside `class Repo<T>` answers `User`, because the receiver's turbofish binds the class's `T` and the method's binds its own. The outer parameter is simply unreachable by that name inside the method; where you want both, give them different names (`fn paired<U>` above), which is also what reads better.
+- **argument inference**, so `b.choose(99, true)` infers `U = int`.
+- the **member turbofish** `recv.m::<U>(args)`, which carries the method's own parameters alone and is arity-checked against them (E0058).
+- **expected-type seeding**, so `xs: List<int> = b.collect()` seeds a return-only `U` from the annotation.
 
-That is what **E0075 (a warning, not an error)** says at the inner declaration: the program compiles and means what it says, but a reader cannot tell the two `T`s apart by sight, so the diagnostic asks you to rename one. Identity is the declaration site, never the spelling.
+Bounds on a method parameter ride the ordinary trait machinery (`fn bigger<U: Comparable>(...)`; a non-`Comparable` argument is E0025). The parameters are erased like every generic, so one compiled method serves every instantiation.
 
-A method's own parameter **forwards** into a call-site-typed position exactly as a free function's does — `json.try_parse::<U>` inside a method body is fine (see [Forwarding `T`](#forwarding-t) for the one thing to know about it). One boundary still holds statically: a **trait's** required-method set stays monomorphic — a per-method `<U>` on a trait method is E0058, since the trait is dispatched dynamically and each `impl` would have to agree on the parameter; put the generic method on a concrete type, or make the whole trait generic (`trait T<U> { ... }`).
+**A method's own parameter shadows.** Reusing one of the class's names declares a *new* parameter that hides the outer one for the body's extent, exactly as a local binding hides a global. `Repo::<Todo>.label::<User>()` on a `fn label<T>()` inside `class Repo<T>` answers `User`, because the receiver's turbofish binds the class's `T` and the method's binds its own. The outer parameter is unreachable by that name inside the method, so give the two different names (`fn paired<U>` above) where you want both.
+
+**E0075 is a warning**, raised at the inner declaration. The program compiles and means what it says, and a reader cannot tell the two `T`s apart by sight, so the diagnostic asks you to rename one. Identity is the declaration site rather than the spelling.
+
+A method's own parameter **forwards** into a call-site-typed position exactly as a free function's does, so `json.try_parse::<U>` inside a method body is fine. See [Forwarding `T`](#forwarding-t).
+
+A **trait's** required-method set stays monomorphic. A per-method `<U>` on a trait method is E0058, since the trait is dispatched dynamically and each `impl` would have to agree on the parameter. Put the generic method on a concrete type, or make the whole trait generic (`trait T<U> { ... }`).
 
 ### Both at once
 
@@ -143,13 +159,15 @@ r = Repo::<Todo>.make([])
 echo r.tagged::<int>()                    // int@0      — self-taking: the member turbofish alone
 ```
 
-Every other combination has a shorter spelling, which is why this one is the case worth naming. `blank` never reads `self`, so it must be called on the type and the class's `T` can only come from the receiver; its own `U` appears only in the return, so no argument and no annotation can pin it either. With an argument to infer from you write `Repo::<Todo>.describe(1)`. A `self`-taking method needs only the member turbofish — `r.tagged::<int>()` — because a value carries its own instantiation already, and a receiver turbofish on one is E0058. That shorter spelling is the *self-taking* case and only that one: `r.blank::<int>()` is E0047, since `blank` is a static function of `Repo` and a value is the wrong receiver for it.
+Every other combination has a shorter spelling. `blank` never reads `self`, so it must be called on the type and the class's `T` can come only from the receiver. Its own `U` appears only in the return, so no argument and no annotation pins it either. Where there is an argument to infer from you write `Repo::<Todo>.describe(1)`.
 
-The two remain separate concepts checked against separate parameter lists: the turbofish before the `.` is arity-checked against the class's parameters, the one after the member against the method's own. Where a method parameter **reuses** a class parameter's name, the method's own wins — ordinary shadowing, as [Generic methods](#generic-methods) states, reported as the E0075 warning. Give it a different name (`fn blank<U>()`, not `fn blank<T>()`) and there is nothing to read twice.
+A `self`-taking method needs the member turbofish alone, `r.tagged::<int>()`, because a value carries its own instantiation, and a receiver turbofish on a value is E0058. That shorter spelling belongs to the self-taking case: `r.blank::<int>()` is E0047, since `blank` is a static function of `Repo` and a value is the wrong receiver for it.
+
+The two are checked against separate parameter lists. The turbofish before the `.` is arity-checked against the class's parameters, and the one after the member against the method's own. Where a method parameter **reuses** a class parameter's name, the method's own wins by ordinary shadowing, reported as the E0075 warning ([Generic methods](#generic-methods)). Give it a different name, `fn blank<U>()`, and there is nothing to read twice.
 
 ## Forwarding `T`
 
-Inside a generic function's body, `T` is legal wherever a type goes — including as a turbofish argument to another generic, to a call-site-typed native function (`json.try_parse::<T>`), to the name-keyed reflection queries (`type_name::<T>()`, `field_specs_of::<T>()`, `variants_of::<T>()`, `construct::<T>(…)`, `attributes_of::<T>()`, `roles_of::<E>()`), and to `channel::<T>(cap)`:
+Inside a generic function's body, `T` is legal wherever a type goes, including as a turbofish argument to another generic, to a call-site-typed native function (`json.try_parse::<T>`), to the name-keyed reflection queries (`type_name::<T>()`, `field_specs_of::<T>()`, `variants_of::<T>()`, `construct::<T>(…)`, `attributes_of::<T>()`, `roles_of::<E>()`), and to `channel::<T>(cap)`:
 
 ```noeta check
 use std.{json}
@@ -166,13 +184,19 @@ order = load::<Order>("{\"id\": 1}")
 user  = load::<User>("{\"name\": \"Ada\"}")   // same body, per-instantiation decode
 ```
 
-Forwarding works from a **top-level generic function**, from a **nested `fn`** inside one, and from a **generic method** — its own `<T>`, not the class's. A **composite** parameter forwards too (`List<T>`, `Box<T>` in a `::<...>` position), not just the bare `T`.
+Forwarding works from a **top-level generic function**, from a **nested `fn`** inside one, and from a **generic method**, where the parameter is the method's own `<T>` rather than the class's. A **composite** parameter forwards as well as the bare `T`, so `List<T>` and `Box<T>` reach a `::<...>` position.
 
-The boundaries. An instantiation the call site cannot pin must be spelled with a turbofish (E0023), and a function that forwards `T` this way is not usable as a bare value (E0058) — call it, or wrap it in a closure.
+An instantiation the call site cannot pin must be spelled with a turbofish (E0023). A function that forwards `T` this way is E0058 as a bare value, so call it or wrap it in a closure.
 
-The remaining boundary is about **what the consumer needs**, not about which parameter it is. The two per-instantiation channels — the receiver's type tag, and the hidden slot the call site fills — both deliver the instantiation's *name*; only the slot additionally delivers a *build recipe*. So a **name** consumer (every reflection query listed above) forwards on either channel, including a generic type's parameter read off `self` in an instance method. A **recipe** consumer (`json.try_parse::<T>`) forwards on the slot alone, and a generic type's parameter in a method body is E0058 there — take the type as the method's own parameter instead. `from_bytes::<T>(blob)` forwards on neither: it needs the element's packed *layout*, which no channel carries.
+What forwards depends on what the consumer needs. Two per-instantiation channels exist: the receiver's type tag, and the hidden slot the call site fills. Both deliver the instantiation's *name*, and the slot alone also delivers a *build recipe*.
 
-One more, and it is about **spelling** rather than about what a parameter is. The slots a body forwards through are computed by a pass that runs before checking and reads the source as written, so it registers a forward from a call spelled on a **bare name** — `json.try_parse::<T>(s)`, `f::<T>(x)`, `self.load::<T>(s)`, `store.load::<T>(s)`, `Store.load::<T>(s)`. A receiver that is itself an expression (`self.inner.load::<T>(s)`) names its callee only once checking has typed it, which is too late, and is E0058. Bind the receiver first and the call is spelled on a name again:
+| Consumer | What it needs | Where it forwards |
+|---|---|---|
+| every reflection query listed above | the instantiation's name | either channel, including a generic type's parameter read off `self` in an instance method |
+| `json.try_parse::<T>` | a build recipe | the slot alone; a generic type's parameter in a method body is E0058, so take the type as the method's own parameter |
+| `from_bytes::<T>(blob)` | the element's packed *layout* | neither channel carries one |
+
+Spelling matters as well. The slots a body forwards through are computed by a pass that runs before checking and reads the source as written, so it registers a forward from a call spelled on a **bare name**: `json.try_parse::<T>(s)`, `f::<T>(x)`, `self.load::<T>(s)`, `store.load::<T>(s)`, `Store.load::<T>(s)`. A receiver that is itself an expression, such as `self.inner.load::<T>(s)`, names its callee only once checking has typed it, which is too late, and is E0058. Bind the receiver first and the call is spelled on a name again:
 
 ```noeta check
 use std.json
@@ -204,7 +228,7 @@ c = Cache.new()
 o = c.get::<Order>("{\"id\": 1}")
 ```
 
-The last one is a **runtime** boundary, and the only one that is. A forwarding method must be called by a name the checker can resolve a receiver type for, because that is what pins the instantiation. The four dynamic ways into a method — a `dyn` receiver, a bound handle (`v.m`), an unbound handle (`T.m`), and `invoke(v, "m", args)` — carry none, so a forwarding method reached through one of them **aborts** naming the callee rather than guessing. It is the same judgment `type_name::<T>()` makes on a value built at no known instantiation: a plausible-looking wrong type would travel silently, and the fix belongs at the call site that lost it.
+One boundary is enforced at **run time**, and it is the only one that is. A forwarding method must be called by a name the checker can resolve a receiver type for, because that is what pins the instantiation. Four dynamic ways into a method carry no instantiation: a `dyn` receiver, a bound handle (`v.m`), an unbound handle (`T.m`), and `invoke(v, "m", args)`. A forwarding method reached through one of them **aborts**, naming the callee. `type_name::<T>()` makes the same judgment on a value built at no known instantiation.
 
 ```noeta error
 use std.json
@@ -236,7 +260,7 @@ d.load("{\"id\": 1}")                 // aborts: no instantiation reaches here
 
 ### Asking what `T` is called
 
-`type_name::<T>()` forwards too, and it is the cheapest forward there is: it wants the instantiation's **name** and nothing else, so it rides the same hidden slot with no recipe involved — which means it also serves an instantiation that *has* no recipe, a `class` for instance.
+`type_name::<T>()` forwards too. It wants the instantiation's **name** and nothing else, so it rides the same hidden slot with no recipe involved, and it serves an instantiation that has no recipe, a `class` for instance.
 
 ```noeta check
 use std.{json}
@@ -252,9 +276,9 @@ fn decode<T>(text: string): Result<T, JsonError> {
 echo decode::<Order>("{\"id\": 1}")
 ```
 
-The answer is the **qualified** identity, byte-identical to what the concrete `type_name::<Order>()` yields at the same site — the declaring module's path, a `use … as` alias and a rename all followed. That agreement is the whole contract: the string exists to key a name-keyed registry, so a forwarded parameter answering the short name would silently miss every type declared in a module.
+The answer is the **qualified** identity, byte-identical to what the concrete `type_name::<Order>()` yields at the same site, following the declaring module's path, a `use … as` alias and a rename alike. The string exists to key a name-keyed registry, and that agreement is what makes a forwarded parameter usable as the key.
 
-It is also what opens the *other* name-keyed queries to a generic body. `field_specs_of::<T>()`, `variants_of::<T>()` and `construct::<T>(…)` key on that same name, so a parameter in their turbofish resolves through the same channel rather than demanding a compile-time constant — the compiler composes `field_specs_of(type_name::<T>())` for you, and the hand-written composition still means exactly the same thing:
+The *other* name-keyed queries reach a generic body through that same name. `field_specs_of::<T>()`, `variants_of::<T>()` and `construct::<T>(…)` key on it, so a parameter in their turbofish resolves through the same channel. The compiler composes `field_specs_of(type_name::<T>())` for you, and writing that composition by hand means the same thing:
 
 ```noeta check
 struct Order { id: int }
@@ -268,13 +292,13 @@ echo field_count::<Order>()
 
 See [Reflection over a type parameter](Attributes-and-Reflection#reflection-over-a-type-parameter).
 
-The two channels are separate and both reach a method body, so a method's own `<U>` and its class's `<K>` can be asked about in the same expression: `U` resolves through the slot the call supplied, `K` off the receiver's type tag. Where a name shadows, the method's own wins — ordinary scoping.
+Both channels reach a method body, so a method's own `<U>` and its class's `<K>` can be asked about in the same expression. `U` resolves through the slot the call supplied, and `K` off the receiver's type tag. Where a name shadows, the method's own wins by ordinary scoping.
 
-What stays E0058 is a site **no** channel reaches: a nested `fn`'s own parameter, which no call site instantiates, and a class's parameter inside a nested `fn`, which has no receiver to read the tag off. A *composite* turbofish is unaffected either way: `type_name::<List<T>>()` heads at `List` whatever `T` is, so it is a compile-time constant.
+A site **no** channel reaches is E0058: a nested `fn`'s own parameter, which no call site instantiates, and a class's parameter inside a nested `fn`, which has no receiver to read the tag off. A *composite* turbofish stands apart from all of this, since `type_name::<List<T>>()` heads at `List` whatever `T` is and is a compile-time constant.
 
 ## Generic functions as values
 
-A generic function referenced as a **value** in an expected-type position instantiates against the expectation and carries the precise monomorphic function type — no turbofish needed:
+A generic function referenced as a **value** in an expected-type position instantiates against the expectation and carries the precise monomorphic function type, with no turbofish needed:
 
 ```noeta
 fn wrap<T>(x: T): List<T> { return [x] }
@@ -283,21 +307,21 @@ ys = [1, 2, 3].map(wrap)             // List<List<int>> — wrap instantiates as
 f: (string) -> List<string> = wrap   // and here as (string) -> List<string>
 ```
 
-Declared bounds ride along (`g: (Box, Box) -> Box = biggest` is E0025 when `Box` is not `Comparable`). A bare, expectation-free binding (`f = wrap`) keeps the honest gradual value: the erased signature, parameters `dyn`, calls deferred per position. The runtime value is the same erased function either way — only the static judgment changes.
+Declared bounds ride along, so `g: (Box, Box) -> Box = biggest` is E0025 when `Box` is not `Comparable`. A bare, expectation-free binding (`f = wrap`) keeps the gradual value: the erased signature, parameters `dyn`, calls deferred per position. The runtime value is the same erased function either way, and the static judgment is what changes.
 
 ## The built-in traits
 
-The traits below are **built into the language** — a fixed set an `impl` or `@derive(...)` may name, and naming a trait that is neither one of these nor [declared in the program](#implementing-a-trait) is E0014. They are what operators and protocols dispatch through, which is why they are fixed: `==` has to know which method answers it. A program declares its own traits alongside them.
+The traits below are **built into the language**, a fixed set an `impl` or `@derive(...)` may name. Naming a trait that is neither one of these nor [declared in the program](#implementing-a-trait) is E0014. They are what operators and protocols dispatch through, so `==` knows which method answers it. A program declares its own traits alongside them.
 
 | Trait | Method | `dyn` | Lights up |
 |---|---|---|---|
 | `Equatable` | `eq(other): bool` | yes | `==` `!=` |
 | `Comparable` | `compare(other): Ordering` | yes | `< <= > >=` |
 | `Display` | `to_string(): string` | yes | `echo`, `${…}` |
-| `Error` | `message(): string` | yes | the idiomatic `Err` payload — see [Error Handling](Error-Handling) |
-| `Validate` | `validate(): Result<void, E>` | yes | a data-boundary invariant; auto-runs at typed decode — see [Validation](Validation) |
-| `From<Source>` | `from(value: Source): Target` — static | no | error conversion at `?` — see [Error Handling](Error-Handling#converting-errors-at---impl-fromsource) |
-| `To<Target>` | `to(): Target` | no | the same conversion declared on the **source**, for a target you do not own — see [Error Handling](Error-Handling#converting-into-a-type-you-do-not-own--impl-totarget) |
+| `Error` | `message(): string` | yes | the idiomatic `Err` payload ([Error Handling](Error-Handling)) |
+| `Validate` | `validate(): Result<void, E>` | yes | a data-boundary invariant, run at typed decode ([Validation](Validation)) |
+| `From<Source>` | `from(value: Source): Target`, static | no | error conversion at `?` ([Error Handling](Error-Handling#converting-errors-at---impl-fromsource)) |
+| `To<Target>` | `to(): Target` | no | the same conversion declared on the **source**, for a target you do not own ([Error Handling](Error-Handling#converting-into-a-type-you-do-not-own--impl-totarget)) |
 | `Add` | `add(other): T` | yes | `+` |
 | `Sub` | `sub(other): T` | yes | `-` |
 | `Mul` | `mul(other): T` | yes | `*` |
@@ -307,28 +331,34 @@ The traits below are **built into the language** — a fixed set an `impl` or `@
 | `Index` | `get(i): T` | yes | `a[i]` |
 | `Length` | `len(): int` | yes | `x.len()` on a `<T: Length>` parameter |
 | `Iterable` | `iter(): List<T>` | yes | `for x in o` |
-| `Callable` | `call(...)` — any arity | yes | `obj(args)` |
-| `Members` | `get(name): T` | yes | a `<T: Members>` bound — look a member up by name |
-| `DynamicCall` | `call(name, args): T` | yes | a `<T: DynamicCall>` bound — invoke by name |
-| `Serialize` | — | no | `@derive(Serialize<Json>)` synthesizes the encoder — see [Derives](Derives) |
-| `Deserialize` | — | no | `@derive(Deserialize<Json>)` registers the decoder — see [Derives](Derives) |
-| `Clone` | — | no | membership only: the type satisfies a `<T: Clone>` bound, and structs already copy on assignment |
+| `Callable` | `call(...)`, any arity | yes | `obj(args)` |
+| `Members` | `get(name): T` | yes | a `<T: Members>` bound: look a member up by name |
+| `DynamicCall` | `call(name, args): T` | yes | a `<T: DynamicCall>` bound: invoke by name |
+| `Serialize` | none | no | `@derive(Serialize<Json>)` synthesizes the encoder ([Derives](Derives)) |
+| `Deserialize` | none | no | `@derive(Deserialize<Json>)` registers the decoder ([Derives](Derives)) |
+| `Clone` | none | no | membership only: the type satisfies a `<T: Clone>` bound, and structs already copy on assignment |
 
-The **`dyn` column** says whether `dyn Trait` names a type ([Trait objects](#trait-objects)). A trait object is a value plus a method to call on it, so the five that lack one lack a piece of that: `Clone`, `Serialize` and `Deserialize` impose no method to dispatch, `From`'s `from` is `static` (called on the type, so there is no receiver to erase), and `From`, `To`, `Serialize` and `Deserialize` all take a type argument `dyn Name` has no syntax to carry — a `dyn To` would not say *to what*. Writing one of the five is E0014 where it is written; use a `<T: Trait>` bound, or the concrete type.
+The **`dyn` column** says whether `dyn Trait` names a type ([Trait objects](#trait-objects)). A trait object is a value plus a method to call on it, and five traits are missing one of those pieces. `Clone`, `Serialize` and `Deserialize` impose no method to dispatch. `From`'s `from` is `static`, called on the type, so there is no receiver to erase. `From`, `To`, `Serialize` and `Deserialize` each take a type argument that `dyn Name` has no syntax to carry, since a `dyn To` would not say *to what*.
+
+Writing one of the five is E0014 where it is written. Use a `<T: Trait>` bound, or the concrete type.
 
 `Ordering` is a namable built-in enum (`Ordering.Less` / `Equal` / `Greater`); calling `.compare()` on a primitive returns it.
 
-**`x.compare(y)` is available exactly where `x < y` is** — one trait, so one rule at both doors. Numbers, strings and bools order; so do `?T` and `Result<T, E>` when their payloads do (variant first, then payload); so does any type carrying `@derive(Comparable)` or an `impl Comparable`, and any native type that declares one. A receiver with no ordering is refused at `.compare()` where it is written, with the same E0007 `<` gives it: a `List`, a `Map`, a `Set`, a tuple, a type you declared without the trait, and a native type like `Duration` that deliberately declares none. A `dyn` value and an unbounded type parameter say nothing either way and keep the call, like every other member on them.
+**`x.compare(y)` is available exactly where `x < y` is**, since one trait answers both doors.
 
-**`~` produces what the left operand's `concat` produces.** The operator has two jobs — it display-concatenates any two operands into a `string`, and it is what `impl Concat` overloads — and the **left** operand decides which: a value whose type implements `Concat` is asked for its `concat`, and the result is whatever that method returns (a `Price`, a `bytes`, whatever the implementor wrote). A `string` or a list on the left never dispatches, so `"total: " ~ price` renders `price` into text as it reads.
+Numbers, strings and bools order. So do `?T` and `Result<T, E>` when their payloads do, variant first and then payload. So does any type carrying `@derive(Comparable)` or an `impl Comparable`, and any native type that declares one.
 
-**`TryAdd` is a method, not an operator.** Bare `+` is reserved for the infallible `Add`: a type whose only addition is `TryAdd` rejects `a + b` with E0007, and the addition is written out as `a.try_add(b)?`. That is the point of having two traits — an expression built from `+` never hides a failure path, so the one that can fail has to say so at the call site.
+A receiver with no ordering is refused at `.compare()` where it is written, with the same E0007 `<` gives it: a `List`, a `Map`, a `Set`, a tuple, a type you declared without the trait, and a native type such as `Duration` that declares none. A `dyn` value and an unbounded type parameter keep the call, like every other member on them.
 
-**`Members` and `DynamicCall` are contracts you program against rather than syntax.** Neither wires an operator: `Members` requires `get(name)` and `DynamicCall` requires `call(name, args)`, and what implementing one buys is trait membership — a `<T: Members>` or `<T: DynamicCall>` bound (E0025 without the impl) and a `traits_of` entry. They name the capability "this type resolves a member, or a call, from a name at runtime" so a framework can require it; the methods themselves are ordinary methods, callable as `x.get(name)` and `x.call(name, args)` with or without the impl.
+**`~` produces what the left operand's `concat` produces.** The operator has two jobs: it display-concatenates any two operands into a `string`, and it is what `impl Concat` overloads. The **left** operand decides which. A value whose type implements `Concat` is asked for its `concat`, and the result is whatever that method returns, a `Price` or a `bytes` or whatever the implementor wrote. A `string` or a list on the left display-concatenates rather than dispatching, so `"total: " ~ price` renders `price` into text as it reads.
+
+**`TryAdd` is a method rather than an operator.** Bare `+` is reserved for the infallible `Add`: a type whose only addition is `TryAdd` rejects `a + b` with E0007, and the addition is written out as `a.try_add(b)?`. An expression built from `+` therefore carries no failure path, and the one that can fail says so at the call site.
+
+**`Members` and `DynamicCall` are contracts you program against rather than syntax.** `Members` requires `get(name)` and `DynamicCall` requires `call(name, args)`, and implementing one buys exactly trait membership: a `<T: Members>` or `<T: DynamicCall>` bound (E0025 without the impl) and a `traits_of` entry. They name the capability "this type resolves a member, or a call, from a name at runtime" so a framework can require it. The methods are ordinary methods, callable as `x.get(name)` and `x.call(name, args)` with or without the impl.
 
 ### Ordering your own type
 
-A type that implements `Comparable` decides the order of its own values at **every door a program can observe one through**: the operators `< <= > >=`, and `.sorted()`, `.min()` and `.max()` over a list of it. One comparator, so those can never disagree — `xs.min()` is `xs.sorted().first()` for any type, whatever its `compare` says.
+A type that implements `Comparable` decides the order of its own values at **every door a program can observe one through**: the operators `< <= > >=`, and `.sorted()`, `.min()` and `.max()` over a list of it. One comparator serves all of them, so `xs.min()` is `xs.sorted().first()` for any type, whatever its `compare` says.
 
 ```noeta
 struct Rev { n: int }
@@ -341,13 +371,11 @@ echo xs.sorted()      // [Rev {n: 3}, Rev {n: 2}, Rev {n: 1}]
 echo xs.min()         // some(Rev {n: 3})
 ```
 
-Two rules bound it, and both are worth knowing before you write a `compare`.
+**A `compare` orders its own type's values.** `@derive(Comparable)` is *field-wise structural* ordering, so a derived type holding a field whose type writes its own `compare` still compares that field structurally. To get the field's order, write the outer type's `compare` and call it: `return self.field.compare(other.field)`. `<` and `.sorted()` then answer alike about the outer type.
 
-**A `compare` orders its own type's values, and nothing else.** `@derive(Comparable)` is *field-wise structural* ordering by definition, so a derived type holding a field whose type writes its own `compare` still compares that field structurally. If you want the field's order, write the outer type's `compare` and call it — `return self.field.compare(other.field)`. This is what keeps `<` and `.sorted()` answering alike about the outer type, since the operator has always compared a derived type's fields structurally.
+**A `set` and a `map` place a value by its own fields rather than by its `compare`.** Those are *identity* orders: a value is placed at one moment and looked for at another, so the placement stays a pure function of the value's own fields. A set of a type that orders descending therefore iterates ascending, `.sorted()` over the same elements gives the type's own order, and every member put in is found.
 
-**A `compare` never decides where a `set` or a `map` puts a value.** Those are *identity* orders: a value is placed at one moment and looked for at another, so the placement stays a pure function of the value's own fields. A set of a type that orders descending therefore iterates ascending, while `.sorted()` over the same elements gives you the type's own order — and every member you put in is still found. Running your code at insertion and again at lookup could lose a member that is present, which is a worse outcome than an iteration order that surprises a reader.
-
-A `compare` is not required to be a total order, and nothing checks that it is. One that isn't (reporting both `a < b` and `b < a`) yields some permutation of the input rather than a sorted list; it is never a crash, and both engines produce the same permutation.
+A `compare` may be any relation, and nothing checks it for totality. One that reports both `a < b` and `b < a` yields some permutation of the input rather than a sorted list. Both engines produce the same permutation, and neither aborts.
 
 ## Bounds
 
@@ -364,11 +392,11 @@ echo max("a", "b")      // b
 
 Bounds are enforced statically at both ends:
 
-- **Body-side requirement** — using `>` requires `Comparable`, `+` requires `Add`; on an *unbounded* `T` that operation is E0025 at the definition. The requirement follows `T` into a **collection** of it: `xs.sorted()`, `xs.max()` and `xs.iter().min()` all order `T`s, so each needs the same `Comparable` and is refused the same way without it.
-- **Call-site check** — instantiating with a type that does not satisfy the bound is E0025. The first argument pins `T`; later arguments are checked against that substitution (E0007 on mismatch).
+- **Body-side requirement.** Using `>` requires `Comparable` and `+` requires `Add`; on an *unbounded* `T` that operation is E0025 at the definition. The requirement follows `T` into a **collection** of it, so `xs.sorted()`, `xs.max()` and `xs.iter().min()` each order `T`s and each needs the same `Comparable`.
+- **Call-site check.** Instantiating with a type that does not satisfy the bound is E0025. The first argument pins `T`, and later arguments are checked against that substitution (E0007 on mismatch).
 - An unknown bound name is E0014.
 
-**Instantiated bounds.** A bound on a *generic user trait* may demand a specific instantiation: `<T: Keyed<int>>` is satisfied only by a type with an `impl Keyed<int>` (an `impl Keyed<string>` fails the bound, E0025 naming `Keyed<int>`). A bare `<T: Keyed>` accepts any instantiation. A bound argument may name a sibling parameter — `<K, T: Keyed<K>>` ties the two together, with `K` pinned by the call's arguments:
+**Instantiated bounds.** A bound on a *generic user trait* may demand a specific instantiation. `<T: Keyed<int>>` is satisfied by a type with an `impl Keyed<int>`, and an `impl Keyed<string>` fails it with E0025 naming `Keyed<int>`. A bare `<T: Keyed>` accepts any instantiation. A bound argument may name a sibling parameter, so `<K, T: Keyed<K>>` ties the two together with `K` pinned by the call's arguments:
 
 ```noeta check
 trait Keyed<K> {
@@ -391,9 +419,9 @@ fn matches<K, T: Keyed<K>>(item: T, k: K): bool {
 echo matches(Door { code: 7 }, 7)     // true
 ```
 
-An instantiated bound must match the trait's arity (`T: Keyed<int, string>` on a one-parameter trait is E0014), and built-in traits take no bound arguments. (The conversion traits are the ones whose *impl* carries a type argument — `impl From<JsonError> { … }`, `impl To<ServiceError> for DiskError { … }` — but neither is usable as an instantiated bound.)
+An instantiated bound must match the trait's arity, so `T: Keyed<int, string>` on a one-parameter trait is E0014. Built-in traits take no bound arguments. The conversion traits carry their type argument on the *impl* (`impl From<JsonError> { … }`, `impl To<ServiceError> for DiskError { … }`), and neither is usable as an instantiated bound.
 
-The bound also types the **body**: on a `T`-typed value, a method the bound's trait declares resolves at the bound's instantiation — under `<T: Keyed<int>>`, `item.key()` is an `int` and `item.same(x)` demands an `int`, so a wrong argument, return, or arity is E0007 at the definition, before any call site exists. A method no bound declares stays leniently deferred.
+The bound also types the **body**. On a `T`-typed value, a method the bound's trait declares resolves at the bound's instantiation: under `<T: Keyed<int>>`, `item.key()` is an `int` and `item.same(x)` demands an `int`, so a wrong argument, return, or arity is E0007 at the definition, before any call site exists. A method no bound declares stays leniently deferred.
 
 ## Implementing a trait
 
@@ -413,9 +441,9 @@ class Money {
 echo (Money.new(3) < Money.new(5))   // true
 ```
 
-**`Equatable` and `Comparable` answer to the operator, so their return types are fixed.** `a == b` is a `bool` and `a < b` is a `bool` because of the operator, not because of the method behind it: `eq`'s answer *is* the result of `==` and `compare`'s is read as a direction, so they must be declared `bool` and `Ordering` respectively (E0015, and the return type is required rather than optional here). Every other trait leaves the return to you — `x.len()` is typed from the signature `Length`'s implementor wrote, so whatever it says, every reader agrees.
+**`Equatable` and `Comparable` answer to the operator, so their return types are fixed.** `eq`'s answer *is* the result of `==`, and `compare`'s is read as a direction, so they must be declared `bool` and `Ordering` respectively. A mismatch is E0015, and the return type is required here rather than optional. Every other trait leaves the return to the implementor, so `x.len()` is typed from the signature `Length`'s implementor wrote and every reader agrees with it.
 
-**`Callable` makes an object invocable.** A type implementing `Callable` with a `call` method can be applied like a function — `obj(args)` dispatches to `obj.call(args)`, with the receiver's state in scope. The arity is the method's own (the protocol does not pin it), and the call is arity/argument-checked against the method's signature like any method call. A user type without a `call` method is statically not callable (E0007).
+**`Callable` makes an object invocable.** A type implementing `Callable` with a `call` method can be applied like a function: `obj(args)` dispatches to `obj.call(args)`, with the receiver's state in scope. The arity is the method's own, and the call is arity- and argument-checked against the method's signature like any method call. Applying a user type that has no `call` method is E0007 at check time.
 
 ```noeta
 class Adder {
@@ -428,7 +456,11 @@ add10 = Adder { base: 10 }
 echo add10(5)     // 15
 ```
 
-There is also a **standalone** `impl Trait for T { ... }`, which must target a struct, class, or enum **the program declares** — a target no module declares is E0013, a wrong or missing required method is E0015. "The program" is the whole linked program rather than the one file: a module may implement a trait for a sibling module's type, or for a type declared in the entry, so where in your package you put an impl is a matter of layout. Across a *package* boundary it is not free: the [orphan rule](#the-orphan-rule) requires the impl to sit with the trait or with the type (E0070). It carries method bodies for any trait, built-in or user-declared — a bodiless `struct` has nowhere inside it to write one, and this is where its operators and protocols go:
+A **standalone** `impl Trait for T { ... }` targets a struct, class, or enum **the program declares**. A target no module declares is E0013, and a wrong or missing required method is E0015.
+
+"The program" is the whole linked program rather than one file. A module may implement a trait for a sibling module's type, or for a type declared in the entry, so where in a package an impl sits is a matter of layout. Across a *package* boundary the [orphan rule](#the-orphan-rule) requires the impl to sit with the trait or with the type (E0070).
+
+It carries method bodies for any trait, built-in or user-declared. A bodiless `struct` has nowhere inside it to write one, so this is where its operators and protocols go:
 
 ```noeta
 struct Rev { n: int }
@@ -445,17 +477,25 @@ echo (Rev { n: 1 } < Rev { n: 2 })                                // false — `
 echo [Rev { n: 1 }, Rev { n: 3 }].sorted()                        // [Rev {n: 3}, Rev {n: 1}]
 ```
 
-An empty body is the right thing only for a **marker** trait — one with no required method, like `Clone` or `Serialize` — where the impl is declaring a capability rather than supplying behavior. An `impl` names the trait bare: the format argument in `@derive(Serialize<Json>)` belongs to the *derive*, which synthesizes an encoder for that format, and `impl Serialize<Json>` is E0015. Write `impl Serialize for S { }`.
+An empty body belongs to a **marker** trait, one with no required method such as `Clone` or `Serialize`, where the impl declares a capability. An `impl` names the trait bare: the format argument in `@derive(Serialize<Json>)` belongs to the *derive*, which synthesizes an encoder for that format, and `impl Serialize<Json>` is E0015. Write `impl Serialize for S { }`.
 
-**A standalone impl travels with its type.** Wherever the target type reaches — a sibling module, a consumer of your package, a consumer that never names the type and only ever holds it as a `dyn Trait` — its standalone impls go with it, and every surface that reads trait membership sees them: the `dyn Trait` coercion, trait-method dispatch, the precise `x is dyn Trait` test, a `<T: Trait>` bound, and `traits_of(x)`. Which spelling you choose is a matter of layout, never of reach — an in-body `impl Trait { … }` block and a standalone `impl Trait for T { … }` declare the same thing, and a type that must be written one way to be usable from another module is a bug, not a rule.
+**A standalone impl travels with its type.** Its impls go wherever the target type reaches: a sibling module, a consumer of your package, a consumer that holds it only as a `dyn Trait`. Every surface that reads trait membership sees them, meaning the `dyn Trait` coercion, trait-method dispatch, the precise `x is dyn Trait` test, a `<T: Trait>` bound, and `traits_of(x)`.
 
-**Default methods fall back.** A user trait's method *with* a body is a **default**: an implementor may omit it, and the omitted method falls back to the trait's default body — hoisted onto the implementing type, so it dispatches like any method (a default that mentions `self` is an instance method and may call the trait's required methods; a self-less default needs no receiver and may be called either way — see the receiver rule below). A method the impl provides always overrides its default — and an override is held to the trait's signature exactly like a required method is. A **generic** trait implements at an instantiation — `impl Keyed<int> { … }`, `impl Keyed<string> for Tag { … }`, `@derive(Keyed<string>)` — and its defaults substitute the type parameters through their signatures and bodies before hoisting; a bare `impl Keyed`/`@derive(Keyed)` on a generic trait is an arity error naming the parameters.
+An in-body `impl Trait { … }` block and a standalone `impl Trait for T { … }` declare the same thing and reach equally far, so the spelling is a matter of layout.
 
-**Implementations derive their receiver; contracts may declare it.** A method whose body mentions `self` is an **instance** method: call it on a value, `x.m(…)`. A self-less one is a **static** function — call it on the type, `T.m(…)` — unless a trait's interface supplies it and the trait left it undeclared, which is the third case below. Getting that backwards is E0047 either way, and the two halves are one rule about receivers that would not mean anything: a static call has no receiver to bind `self` to, and an instance call on a static function would evaluate a receiver and then discard it.
+**Default methods fall back.** A user trait's method *with* a body is a **default**. An implementor may omit it, and the omitted method falls back to the trait's default body, hoisted onto the implementing type so that it dispatches like any method. A default that mentions `self` is an instance method and may call the trait's required methods. A self-less default needs no receiver and may be called either way, by the receiver rule below.
 
-That derivation is the whole story for an implementation, and it is not something you may override: `static` on an inherent method, on a method inside an `impl` block, or on a top-level `fn` is E0015. The body already says it, exactly and visibly, and a modifier there would be a second source of truth that can drift from the first. The one place you may *declare* it is a `trait`'s method contract — see [Declaring a static method](#declaring-a-static-method) below.
+A method the impl provides overrides its default, and an override is held to the trait's signature exactly like a required method is.
 
-A self-less method that a **trait** supplies, and that the trait did *not* declare `static`, is the third case, and it accepts **both**. The trait's contract puts it in the instance interface — that is how `dyn Trait` reaches it — while its body needs no receiver, so `T.m(…)` is equally well-defined; both spellings run the same code. This holds identically for an in-body `impl Trait { … }` block, a standalone `impl Trait for T { … }`, and a hoisted default, so how you spell the implementation never changes how you may call it:
+A **generic** trait implements at an instantiation: `impl Keyed<int> { … }`, `impl Keyed<string> for Tag { … }`, `@derive(Keyed<string>)`. Its defaults substitute the type parameters through their signatures and bodies before hoisting. A bare `impl Keyed` or `@derive(Keyed)` on a generic trait is an arity error naming the parameters.
+
+**Implementations derive their receiver; contracts may declare it.** A method whose body mentions `self` is an **instance** method, called on a value as `x.m(…)`. A self-less one is a **static** function, called on the type as `T.m(…)`, unless a trait's interface supplies it and the trait left it undeclared, which is the third case below.
+
+Getting that backwards is E0047 either way, because a static call has no receiver to bind `self` to and an instance call on a static function would evaluate a receiver and then discard it.
+
+An implementation's receiver comes from its body alone, and `static` on an inherent method, on a method inside an `impl` block, or on a top-level `fn` is E0015. The one place you may *declare* it is a `trait`'s method contract, [below](#declaring-a-static-method).
+
+The third case is a self-less method a **trait** supplies where the trait left `static` off, and it accepts **both** spellings. The trait's contract puts it in the instance interface, which is how `dyn Trait` reaches it, and its body needs no receiver, so `T.m(…)` is equally well-defined. Both spellings run the same code, for an in-body `impl Trait { … }` block, a standalone `impl Trait for T { … }`, and a hoisted default alike:
 
 ```noeta
 trait Greeter { fn greet(who: string): string }
@@ -470,11 +510,11 @@ echo En.greet("Ada")             // hi Ada — on the type
 echo En { id: 1 }.greet("Bob")   // hi Bob — on a value
 ```
 
-(`From` is not an exception to any of this, though it reads like the obvious candidate for one: it declares its `from` **static** — a conversion *builds* a value rather than acting on one — so it is type-only on a concrete type and a `from` body that mentions `self` is E0015, both by the general rule below. It is an ordinary declared-static method; nothing about it is special-cased.)
+`From` follows the same rule as an ordinary declared-static method. It declares its `from` **static**, since a conversion builds a value rather than acting on one, so `from` is type-only on a concrete type and a `from` body that mentions `self` is E0015.
 
 #### Declaring a static method
 
-**`static fn m(…)` in a trait declaration promises no implementation binds `self`.** It is legal in a trait body only — on a required signature or on one that carries a default — and it makes receiver-ness a term of the contract, alongside arity, parameter types, return type and `async`-ness:
+**`static fn m(…)` in a trait declaration promises no implementation binds `self`.** It is legal in a trait body alone, on a required signature or on one that carries a default, and it makes receiver-ness a term of the contract alongside arity, parameter types, return type and `async`-ness:
 
 ```noeta
 trait Codec {
@@ -484,15 +524,15 @@ trait Codec {
 }
 ```
 
-Every implementation is held to it. A body that mentions `self` — in a fresh `impl`, in an *override* of a defaulted static method, or in the trait's own default body — is E0015, the same code and the same class of error as the wrong arity.
+Every implementation is held to it. A body that mentions `self` is E0015, in a fresh `impl`, in an *override* of a defaulted static method, and in the trait's own default body alike, the same code a wrong arity reports.
 
-**Unmarked stays unconstrained.** Leaving the modifier off means exactly what it always meant: implementations derive their own receiver-ness from their bodies, and a self-less one is reachable both ways. What the modifier buys is the two paragraphs below and the section on bounded type parameters after them — a receiver discipline the call sites can see, and the promise a generic body spends.
+**Unmarked stays unconstrained.** With the modifier off, implementations derive their own receiver-ness from their bodies, and a self-less one is reachable both ways.
 
-**A declared-`static` method is type-only on a concrete type.** `T.m(…)` is the call; `x.m(…)` on a value is E0047, exactly as it is for an inherent static function and for exactly the same stated reason — `T.m(…)` and `x.m(…)` reach the same prototype, so nothing binds the receiver and it would be evaluated and then discarded. This is the one thing the modifier withdraws, and it is what makes `static` mean one thing rather than two: an undeclared self-less trait method is `Either` because the trait put it in the instance interface and nothing said otherwise, while a declared one has a contract saying the receiver is not part of the method's meaning. The diagnostic names the trait and points at the `static fn` line, since unlike an inherent static function there is no self-less body in front of you to explain the refusal.
+**A declared-`static` method is type-only on a concrete type.** `T.m(…)` is the call, and `x.m(…)` on a value is E0047, as it is for an inherent static function and for the same reason: both spellings reach the same prototype, so nothing binds the receiver and it would be evaluated and then discarded.
 
-Nothing that was written before the modifier existed can notice: `static` is new syntax, so no such program has one, and a merely self-less trait method is untouched — it still answers both spellings.
+That is what the modifier withdraws. An undeclared self-less trait method takes either spelling, because the trait put it in the instance interface; a declared one carries a contract saying the receiver is not part of the method's meaning. The diagnostic names the trait and points at the `static fn` line, since there is no self-less body in front of you to explain the refusal.
 
-**`dyn Trait` still reaches it, through instance syntax.** That is not in tension with the paragraph above, and the difference is the whole reason the receiver rule is worded as "would be evaluated and then discarded" rather than "takes no `self`". On a concrete type the receiver really is discarded, because the type name already selected the code. A trait object has no type name to call on: the receiver is the only thing choosing which implementor runs, so it is not discarded there — it *is* the dispatch, and it is never bound to `self`.
+**`dyn Trait` reaches it through instance syntax.** On a concrete type the receiver is discarded, because the type name has already selected the code. A trait object has no type name to call on, so the receiver is what chooses which implementor runs. It *is* the dispatch, and it is never bound to `self`.
 
 ```noeta
 trait Codec {
@@ -524,11 +564,11 @@ struct Blob {
 echo Blob { v: "x" }.tag()      // E0047 — on a value of a concrete type
 ```
 
-**A bounded type parameter is a receiver too.** `T.m(…)` inside `fn f<T: Trait>` reaches the methods `Trait` declares **`static`**, because a bound is what licenses them and `T` is the type at run time. One compiled body serves every instantiation, so the call resolves the instantiation's name per call and dispatches on it; nothing is monomorphized.
+**A bounded type parameter is a receiver too.** `T.m(…)` inside `fn f<T: Trait>` reaches the methods `Trait` declares **`static`**, because a bound is what licenses them and `T` is the type at run time. One compiled body serves every instantiation, so the call resolves the instantiation's name per call and dispatches on it, with no monomorphization.
 
-Only those. `T.m(…)` where the bound's trait does not declare `m` static is E0047, reported at the *definition* — a generic body calling `T.m(…)` is promising something every implementor of the bound must keep, and the body is what makes a promise the bound does not carry. The fix the diagnostic names is to write `static` in the trait, which then holds every implementation to it.
+Those methods and no others. `T.m(…)` where the bound's trait does not declare `m` static is E0047, reported at the *definition*: a generic body calling `T.m(…)` promises something every implementor of the bound must keep. The fix the diagnostic names is to write `static` in the trait, which then holds every implementation to it.
 
-The declaration is doing real work here, and an implementation that happens to be self-less is not a substitute for it. Nor is a self-less *default*: a default says what the default does, never what an override does, and only the declaration binds an override. Everything else a type name can do (`T { … }` construction, `T.Variant`, `T` in an annotation) is not licensed by a bound and stays unavailable. Arguments bind positionally here: the dispatch is by name, and a name has no labels to bind with.
+Only the declaration licenses the call. A self-less implementation does not, and neither does a self-less *default*, since a default says what the default does and only the declaration binds an override. A bound licenses nothing else a type name can do, so `T { … }` construction, `T.Variant` and `T` in an annotation stay unavailable. Arguments bind positionally, because the dispatch is by name and a name has no labels to bind with.
 
 ```noeta
 trait Buildable { static fn make(seed: int): Self }
@@ -542,13 +582,13 @@ fn build<T: Buildable>(seed: int): T {
 echo build::<Thing>(3).v    // 3
 ```
 
-**The signature is the contract, `async` and `static` included.** An implementation must match the trait's declaration in arity, parameter types, return type, `async`-ness, *and* a declared `static`; a mismatch is E0015. `async` belongs on that list because every receiver form types a call from *some* signature and they must all agree: an `async fn m(): T` is called for a `Future<T>` and a plain `fn m(): T` for a `T`, so a synchronous method satisfying an `async` declaration (or the reverse) would make a bound's and a trait object's typing a promise the implementation does not keep.
+**The signature is the contract, `async` and `static` included.** An implementation must match the trait's declaration in arity, parameter types, return type, `async`-ness, *and* a declared `static`. A mismatch is E0015. `async` belongs on that list because every receiver form types a call from the declaration: an `async fn m(): T` is called for a `Future<T>` and a plain `fn m(): T` for a `T`, so a bound and a trait object type the call from whichever the trait declares.
 
-**`Self` is the implementing type.** A trait declaration may write `Self` anywhere a type goes — `fn decode(raw: string): Self`, `fn combine(other: Self): int`, `fn spread(): List<Self>` — and it stands for whichever type implements the trait. An implementation may write it back, where it means the type being implemented for, or spell that type out; the two say the same thing and the conformance check reads them the same way. In a trait's own **default body** `Self` is `dyn <the trait>` — there the implementor is only known to be one, which is exactly what `self` is bound to.
+**`Self` is the implementing type.** A trait declaration may write `Self` anywhere a type goes (`fn decode(raw: string): Self`, `fn combine(other: Self): int`, `fn spread(): List<Self>`), and it stands for whichever type implements the trait. An implementation may write `Self` back, where it means the type being implemented for, or spell that type out. The two say the same thing, and the conformance check reads them the same way. In a trait's own **default body** `Self` is `dyn <the trait>`, since there the implementor is known only to be one, which is what `self` is bound to.
 
-`Self` works the same way in any type body, not only a trait's — see [`Self` — the type in hand](Structs-Classes-and-Enums#self--the-type-in-hand).
+`Self` works the same way in any type body, a trait's included. See [`Self` — the type in hand](Structs-Classes-and-Enums#self--the-type-in-hand).
 
-Every way of reaching the method resolves `Self` to the receiver you actually have, so the same signature reads the same through all three of them: on a concrete value it is that value's type, under a `<T: Trait>` bound it is `T`, and on a `dyn Trait` it is `dyn Trait` — the receiver *is* some implementor, and that is as precise as the erasure allows.
+Every way of reaching the method resolves `Self` to the receiver in hand, so the same signature reads the same through all three: on a concrete value it is that value's type, under a `<T: Trait>` bound it is `T`, and on a `dyn Trait` it is `dyn Trait`, which is as precise as the erasure allows.
 
 ```noeta
 trait Decodable { fn decode(raw: string): Self }
@@ -566,7 +606,7 @@ echo rebuild(Thing { v: 0 }, "hello").v   // 5
 
 ## Trait objects
 
-A `dyn Trait` parameter or binding accepts any implementor and dispatches on the value's concrete type at run time, while typing statically from the trait's declaration — return type, parameter types, arity, and whether the method is `async`:
+A `dyn Trait` parameter or binding accepts any implementor and dispatches on the value's concrete type at run time, while typing statically from the trait's declaration: return type, parameter types, arity, and whether the method is `async`.
 
 ```noeta
 use std.task.{sleep}
@@ -592,15 +632,15 @@ echo via_dyn(Http {}).await         // body:one
 
 The bound and the trait object agree by construction: both read the trait's declaration, so a call is typed identically whether the receiver is a bound parameter, a declared `dyn Trait`, a `dyn` narrowed with `x is dyn Trait`, or the concrete type. A wrong argument type or arity through `dyn` is E0007, just as it is through a bound.
 
-`dyn` on a **generic** trait erases its parameters — there is no `dyn Trait<...>` surface form, so, as with a bare `<T: Store>` bound, the parameters instantiate permissively to `dyn` and those positions defer to run time. Name the instantiation with a bound (`<S: Store<int>>`) when you need them typed.
+`dyn` on a **generic** trait erases its parameters. There is no `dyn Trait<...>` surface form, so the parameters instantiate permissively to `dyn` and those positions defer to run time, as they do under a bare `<T: Store>` bound. Name the instantiation with a bound (`<S: Store<int>>`) when you need them typed.
 
-Every `trait` a program declares has a trait object. Among the [built-ins](#the-built-in-traits), the ones with a `yes` in the `dyn` column do — seventeen of the twenty-two; `dyn Clone`, `dyn Serialize`, `dyn Deserialize`, `dyn From` and `dyn To` are E0014.
+Every `trait` a program declares has a trait object. Among the [built-ins](#the-built-in-traits), the seventeen of the twenty-two carrying a `yes` in the `dyn` column do. `dyn Clone`, `dyn Serialize`, `dyn Deserialize`, `dyn From` and `dyn To` are E0014.
 
 ### Trait objects as type arguments
 
 `dyn Trait` is an ordinary type, so it instantiates a generic: `Box<dyn Speak>`, `List<dyn Speak>`, `Map<string, dyn Speak>`, and any generic you declare yourself.
 
-**Build the value where the wider type is stated, and every implementor fits.** A checked position — an annotated binding, a declared parameter, a declared return, another type's declared field, a container element, a call-site turbofish — hands its type arguments to the literal, which instantiates at `dyn Speak` and widens each implementor into the field:
+**Build the value where the wider type is stated, and every implementor fits.** A checked position hands its type arguments to the literal, which instantiates at `dyn Speak` and widens each implementor into the field. The checked positions are an annotated binding, a declared parameter, a declared return, another type's declared field, a container element, and a call-site turbofish.
 
 ```noeta
 trait Speak { fn speak(): string }
@@ -620,9 +660,9 @@ echo heard(Box { v: Cat {} })               // meow — so does a parameter
 echo Box::<dyn Speak>.new(Dog {}).v.speak() // woof — and so does a turbofish
 ```
 
-This is the spelling to reach for: it works for every declaration, and it says at the construction site what kind of collection you are building.
+This is the spelling to reach for. It works for every declaration, and it says at the construction site what kind of collection you are building.
 
-**Reading an existing value at a wider argument** — handing a `Box<Dog>` you already have to something expecting a `Box<dyn Speak>` — depends on where the declaration puts its type parameter. It is allowed when nothing can put a `dyn Speak` back into the value through the widened view, which is the case for a parameter that only ever comes *out*:
+**Reading an existing value at a wider argument**, handing a `Box<Dog>` you already hold to something expecting a `Box<dyn Speak>`, depends on where the declaration puts its type parameter. It is allowed where the widened view has no way to put a `dyn Speak` back into the value, which is the case for a parameter that only comes *out*:
 
 ```noeta
 trait Speak { fn speak(): string }
@@ -661,11 +701,11 @@ wide: Slot<dyn Speak> = kennel   // E0007: `Slot` stores it in the `mut` field `
 echo wide.v.speak()
 ```
 
-A generic type declared by a [native package](Native-Extensions) is never widened this way: the rule reads the declaration, and there is none to read.
+The rule reads a declaration, so it applies to the types a program declares. A generic type declared by a [native package](Native-Extensions) has no such declaration and is not widened.
 
 ## `@derive` — synthesized implementations
 
-`@derive(...)` generates trait impls from a type's shape — a *codegen* directive, distinct from `#[...]` data attributes (see [Attributes & Reflection](Attributes-and-Reflection)):
+`@derive(...)` generates trait impls from a type's shape. It is a *codegen* directive, distinct from the `#[...]` data attributes on [Attributes & Reflection](Attributes-and-Reflection):
 
 ```noeta check
 @derive(Equatable, Comparable, Display, Clone)
@@ -677,27 +717,31 @@ class Point {
 echo Point.new(1, 2) < Point.new(1, 3)   // true
 ```
 
-The built-ins a bare `@derive` synthesizes are `Equatable`, `Comparable`, `Display`, `Error`, `Clone`, `Serialize<Json>` and `Deserialize<Json>`; a fully-defaulted user trait derives too, and the `member:`/`via:` bindings bridge or delegate what a plain derive cannot reach. The full story — the recipe table, user-trait derives, bridging, delegation, native recipes, field constraints, and conditional generic derives — lives on [Derives](Derives).
+The built-ins a bare `@derive` synthesizes are `Equatable`, `Comparable`, `Display`, `Error`, `Clone`, `Serialize<Json>` and `Deserialize<Json>`. A fully-defaulted user trait derives too, and the `member:` and `via:` bindings bridge or delegate what a plain derive cannot reach. [Derives](Derives) carries the recipe table, user-trait derives, bridging, delegation, native recipes, field constraints, and conditional generic derives.
 
 ## Coherence
 
-Coherence has two halves: **uniqueness** — at most one implementation per (type, trait) pair — and the **orphan rule** — who is allowed to write one.
+Coherence has two halves. **Uniqueness** allows at most one implementation per (type, trait) pair, and the **orphan rule** says who may write one.
 
 ### Uniqueness
 
-Each type has **at most one** implementation of a given trait, across `@derive(T)`, an in-body `impl T { }`, and a standalone `impl T for Type { }`. A duplicate or competing impl is E0027 — including two *different modules* that each implement one trait for one type, which is a conflict like any other and is reported rather than silently resolved in someone's favor. The diagnostic labels **both** sites, each rendered against its own file, since the two are routinely in different modules.
+Each type has **at most one** implementation of a given trait, across `@derive(T)`, an in-body `impl T { }`, and a standalone `impl T for Type { }`. A duplicate or competing impl is E0027, including two *different modules* that each implement one trait for one type. The diagnostic labels **both** sites, each rendered against its own file, since the two are routinely in different modules.
 
-A conversion counts per **counterpart type** rather than per trait: `impl From<HttpError>` beside `impl From<JsonError>` declares two different conversions into one target, and only a repeated counterpart is the conflict (see [Converting errors at `?`](Error-Handling#converting-errors-at---impl-fromsource)). It can afford that because every site that reaches a conversion carries the source type — a `?`'s propagated `Err`, an argument's type — and so says which one it means; a second `impl Cache<int>` beside `impl Cache<string>` would hand the type two `get`s with nothing at the call site to choose between them, and stays E0027. The two conversion spellings state one relation between them, so `impl From<A>` on `B` beside `impl To<B>` for `A` is that same conflict — see [Converting into a type you do not own](Error-Handling#converting-into-a-type-you-do-not-own--impl-totarget).
+A conversion counts per **counterpart type** rather than per trait. `impl From<HttpError>` beside `impl From<JsonError>` declares two conversions into one target, and a repeated counterpart is the conflict (see [Converting errors at `?`](Error-Handling#converting-errors-at---impl-fromsource)). Every site that reaches a conversion carries the source type, a `?`'s propagated `Err` or an argument's type, and so says which conversion it means. A second `impl Cache<int>` beside `impl Cache<string>` would hand the type two `get`s with nothing at the call site to choose between them, and stays E0027.
 
-Uniqueness is always decidable here, and that is a property of the language: Noeta links **one whole program** at a time, so every module and every dependency is resolved into a single program before it is checked, and there is no separately-compiled unit that could hold an implementation this one cannot see.
+The two conversion spellings state one relation, so `impl From<A>` on `B` beside `impl To<B>` for `A` is that same conflict. See [Converting into a type you do not own](Error-Handling#converting-into-a-type-you-do-not-own--impl-totarget).
 
-The same rule holds one level down, over method **names**: two traits a type implements may not each hand it a default body for the same method. A method table has one slot per name — there is no overloading — so two inherited defaults are two bodies for one slot, and nothing in the source says which one is meant; that is E0027 too, labelling both bindings. Resolve it the way an implementor resolves any default it does not want: **provide the method**, which overrides every default and, where both traits' signatures accept it, satisfies both — or implement one of the traits fewer. Two traits merely *naming* the same method is not the conflict; only two defaults contending for a slot the type leaves empty is.
+Uniqueness is always decidable. Noeta links **one whole program** at a time, so every module and every dependency is resolved into a single program before it is checked, and the check sees every implementation in it.
+
+The same rule holds one level down, over method **names**. Two traits a type implements may not each hand it a default body for the same method. A method table has one slot per name, with no overloading, so two inherited defaults are two bodies for one slot and nothing in the source says which is meant. That is E0027, labeling both bindings.
+
+The conflict is two defaults contending for a slot the type leaves empty, so two traits that merely *name* the same method sit together fine. Resolve it by **providing the method**, which overrides every default and, where both traits' signatures accept it, satisfies both. Implementing one of the traits fewer works as well.
 
 ### The orphan rule
 
 An `impl Trait for Type` must live in the **same package** as the trait **or** as the type. A package that declares neither is E0070.
 
-This is Rust's orphan rule with *crate* read as *package*, and — unlike Rust's — it is not there to make coherence decidable. It is there because the alternative is invisible action at a distance. Without it, a package deep in your dependency graph can implement one vendor's trait for another vendor's type, and the behavior appears in an application that imports both and names the implementing package nowhere:
+This is Rust's orphan rule with *crate* read as *package*. It keeps a behavior attached to a package the application names. Without it, a package deep in a dependency graph could implement one vendor's trait for another vendor's type, and the behavior would appear in an application that imports both and names the implementing package nowhere:
 
 ```noeta ignore
 // third.glue — depends on vendor.a and vendor.b, and is written by neither
@@ -710,7 +754,7 @@ echo t is dyn Speaks   // true — from a package you did not write down
 echo t.speak()         // "glue says 7"
 ```
 
-Two such packages anywhere in one graph then collide as an E0027 the end user **cannot fix**: they own neither implementation, so they can remove neither, and the only escape is to drop a dependency. The cost of the feature is global and invisible; its benefit — attaching behavior to a foreign type — is already served by the newtype, below.
+Two such packages in one graph collide as an E0027 the end user **cannot fix**: they own neither implementation, so the only escape is dropping a dependency. Attaching behavior to a foreign type is what the newtype below is for.
 
 What the rule does **not** restrict:
 
@@ -718,11 +762,11 @@ What the rule does **not** restrict:
 - **`@derive(Trait)` and in-body `impl Trait { }`.** Both sit on the type's own declaration, so they are same-package by construction.
 - **Cross-*package* impls with one end at home.** Implementing your own trait for a foreign type is fine; so is implementing a foreign trait for your own type. Only the third-party case is refused.
 
-A **built-in** trait (`Display`, `Comparable`, …) and a trait provided by a native extension belong to no package, so they can never be the local end: `impl Display for SomeoneElsesType {}` has to live in that type's package.
+A **built-in** trait (`Display`, `Comparable`, …) and a trait provided by a native extension belong to no package, so the type's package is the only home an impl of one has: `impl Display for SomeoneElsesType {}` lives there.
 
 ### The escape hatch: a newtype
 
-To give a foreign type behavior from your own package, wrap it in a type you own. `@derive(Trait, via: field)` is [the newtype pattern without the boilerplate](Derives#delegating-through-a-field-via) — it forwards the whole trait through the field:
+To give a foreign type behavior from your own package, wrap it in a type you own. `@derive(Trait, via: field)` is [the newtype pattern without the boilerplate](Derives#delegating-through-a-field-via), forwarding the whole trait through the field:
 
 ```noeta ignore
 @derive(Speaks, via: inner)
@@ -733,4 +777,4 @@ The behavior is then yours, scoped to your type, and visible to exactly the code
 
 ## Operator errors
 
-Applying an operator to a type that does not implement its trait is an error: `+` or `<` on a plain struct is E0007; `===` on a value type (a struct) is E0034 (identity is a class-only concept).
+Applying an operator to a type that does not implement its trait is an error. `+` or `<` on a plain struct is E0007. `===` on a value type, meaning a struct, is E0034, since identity is a class-only concept.
