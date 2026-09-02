@@ -2782,6 +2782,7 @@ impl Checker {
                     return self.operand_satisfies_operator(ok, t)
                         && self.operand_satisfies_operator(err, t);
                 }
+                Type::Union(members) => return self.union_orders(members),
                 _ => {}
             }
         }
@@ -2822,6 +2823,31 @@ impl Checker {
             return true;
         }
         builtin_satisfies(ty, t)
+    }
+
+    /// Whether a **union** orders: every member orders on its own, and every pairing of two members
+    /// is one the runtime comparator can answer ([`Type::comparator_answers`]).
+    ///
+    /// Both halves are load-bearing and neither implies the other. `int | List<int>` fails the
+    /// first — a list has no ordering to contribute. `int | string` fails the second — each member
+    /// orders perfectly well alone, and no ordering exists *between* them, which is exactly what
+    /// the runtime says when a checked-clean `.compare()` reaches it (`cannot compare int and
+    /// string`). `number` passes both, because the comparator's numeric arm crosses the whole tower.
+    ///
+    /// The pair check is written over distinct pairs rather than over the whole set at once, so it
+    /// stays true to how the comparator is actually reached: a union-typed value is one member at a
+    /// time, and any two of them may meet at a `<`, inside a `sorted()`, or as the two arguments of
+    /// `compare`. A union whose members cannot all meet is refused wherever ordering is asked for,
+    /// which is what keeps the operator door and the method door answering alike.
+    fn union_orders(&self, members: &[Type]) -> bool {
+        members
+            .iter()
+            .all(|m| self.operand_satisfies_operator(m, BuiltinTrait::Comparable))
+            && members.iter().enumerate().all(|(i, a)| {
+                members[i + 1..]
+                    .iter()
+                    .all(|b| Type::comparator_answers(a, b))
+            })
     }
 
     /// The `via:` field through which `type_name`'s derive of `trait_name` delegates, if that

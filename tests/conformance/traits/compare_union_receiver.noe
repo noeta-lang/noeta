@@ -1,0 +1,65 @@
+// **A union whose members are not mutually comparable is refused at BOTH ordering doors**, where it
+// is written, and the two doors agree about every one of them.
+//
+// The agreement is the claim, not the refusal. `compare` is `Comparable`'s method and `< <= > >=`
+// are the operators that read its answer, so a receiver that orders at one door and not the other
+// is a contradiction the language cannot honor — and it is easy to reach, because the two are
+// decided by different machinery: the operator asks whether the operand type satisfies the trait,
+// while the method's return comes from a table with a row for every receiver kind. Each union below
+// is therefore put through **both** doors, one line apart and at the same column, so the two
+// `E0007`s are read together and a fix that repairs one door leaves the other's line uncovered.
+//
+// Three shapes of union, each failing the rule for a different reason:
+//
+//   * `int | string` — every member orders alone, and no ordering exists *between* them. The
+//     comparator's only cross-type arm is numeric, so an `int` against a `string` has no answer,
+//     which is exactly what the runtime says (`cannot compare int and string`).
+//   * `int | List<int>` — a member that does not order at all, so the union cannot either.
+//   * `Uuid | Instant` — two native types that each declare an ordering and order only against
+//     their own identity; an extern `cmp_value` answers `None` across kinds.
+//
+// The ordered unions are the control, and they live in `union_ordering_doors.noe`: `number` and
+// `int | float` pass both doors, so these refusals are the rule discriminating rather than a blanket
+// "unions do not order".
+//
+// **Every call below sits in a function nothing calls.** An abort raises the same `E0007` at the
+// same span a static rejection does, so a position alone would be satisfied by either — and the
+// `.compare()` half in particular used to check clean and abort at the first call. Unreachable code
+// has no run-time behavior to misread: without the rule this file compiles, runs `main`, prints `ok`
+// and exits 0.
+//
+// The undecided receivers are asserted by their absence: a `dyn` value and an unbounded type
+// parameter both reach `.compare()`, because "not known" is not "does not order".
+// expect: error E0007 at 44:9
+// expect: error E0007 at 45:9
+// expect: error E0007 at 50:9
+// expect: error E0007 at 51:9
+// expect: error E0007 at 56:9
+// expect: error E0007 at 57:9
+// expect: exit 1
+use std.id.Uuid
+use std.datetime.Instant
+
+fn members_order_but_not_together(x: int | string): Ordering {
+    a = x < x
+    b = x.compare(x)
+    return if a then b else b
+}
+
+fn a_member_does_not_order(x: int | List<int>): Ordering {
+    a = x < x
+    b = x.compare(x)
+    return if a then b else b
+}
+
+fn two_native_types_order_only_themselves(x: Uuid | Instant): Ordering {
+    a = x < x
+    b = x.compare(x)
+    return if a then b else b
+}
+
+// Undecided receivers keep the call: neither of these is refused.
+fn through_dyn(x: dyn, y: dyn): Ordering { return x.compare(y) }
+fn through_param<T>(x: T, y: T): Ordering { return x.compare(y) }
+
+echo "ok ${through_dyn(1, 2)} ${through_param(1, 2)}"

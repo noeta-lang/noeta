@@ -2638,6 +2638,7 @@ dependencies = [
  "noeta-span",
  "noeta-stdlib",
  "noeta-test-temp",
+ "noeta-types",
  "noeta-value",
  "noeta-vm",
  "predicates",

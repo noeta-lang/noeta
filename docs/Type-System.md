@@ -46,6 +46,25 @@ echo scaled(2.0f32, 3i16)  // the strict fixed widths, mixed freely
 
 It is a **union**, not a thirteenth scalar — `number` *is* `int | float | f32 | f64 | i8 | … | u64`, written short. So it behaves like any other union: a value of any member widens into it, `x is number` narrows out of a `dyn`, and the strict fixed-width rules are untouched (`number` does not make an `f32` and an `int` add together — each member keeps its own arithmetic).
 
+A `number` **orders**, and that follows from the members rather than from the name: every numeric type compares against every other, so a union over any of them has an ordering and reaches every door that asks for one — `< <= > >=`, `.compare()`, `.sorted()`, `.min()`/`.max()`, and a `Comparable` bound.
+
+```noeta
+fn biggest<T: Comparable>(a: T, b: T): T { return if a < b then b else a }
+xs: List<number> = [3, 1.5, 2u8, 10.25f32]
+small: number = 2u8
+large: number = 10.25f32
+// sample:start
+echo xs.sorted()             // [1.5, 2, 3, 10.25]
+echo xs.min()                // some(1.5)
+echo biggest(small, large)   // 10.25
+echo (200u8).compare(200)    // Ordering.Equal
+// sample:end
+```
+
+Comparison across members is by value, not by storage — a `200u8` and a `200` are equal, and a `300i16` sorts above both. Ordering is the one operation that crosses the members this way; arithmetic still keeps each member inside its own type.
+
+A union orders when its members are **mutually comparable**, which is what `number` satisfies and what a mixed union like `int | string` does not: each member orders on its own, and no ordering exists between an `int` and a `string`, so the union has none to offer. Narrowing is how a mixed union reaches an ordering — inside `if x is int { … }` the value is an `int` and compares like one.
+
 Because it is a set rather than a storage class, it cannot be a `@packed` field or a map key: both need one concrete width to lay out or hash by.
 
 ## Optionals — `?T`

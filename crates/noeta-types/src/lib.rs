@@ -317,6 +317,25 @@ pub enum Type {
 /// of the built-in name decoder, so it lives with the rest of the vocabulary rather than above it.
 pub use noeta_ast::{BuiltinTy, Spelling, parse_int_width};
 
+/// How the runtime value comparator answers a pairing involving a type ([`Type::comparator_arm`]).
+///
+/// Three shapes of arm, and the split that matters is the first one: exactly one family crosses
+/// types, and everything else is answered within a type or by descending into a payload. Kept as an
+/// enum rather than a bool so that adding a second cross-type family later is a change the compiler
+/// routes to every reader — including the census that drives this table against the comparator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComparatorArm {
+    /// The numeric tower, which orders **across** its members: `int`, `float`, `f32`, `f64` and
+    /// every fixed width compare against each other, so a union over any of them is ordered.
+    Numeric,
+    /// An arm keyed to one type: `string`, `bool`, an extern type against its own identity, a
+    /// declared struct/enum against its own shape. Two *different* such types have no arm.
+    SameType,
+    /// A reified prelude container (`?T`, `Result<T, E>`) ordered by variant index then payload:
+    /// the pairing question descends into the payload rather than being answered here.
+    Structural,
+}
+
 impl Type {
     /// The type's **name-keyed identity** — the qualified head name every name-keyed runtime
     /// registry is stored under (`attributes_of`'s manifest, `field_specs_of`, `variants_of`,
@@ -423,6 +442,74 @@ impl Type {
             return false;
         };
         members.len() == all.len() && all.iter().all(|t| members.contains(t))
+    }
+
+    /// Which arm of the **runtime value comparator** answers a pairing of this type with another —
+    /// `None` for a type the comparator has no arm for at all.
+    ///
+    /// This is a restatement of `noeta_value::ops::compare_primitive`'s arms in the type lattice,
+    /// and it exists so the checker can decide a *union*'s ordering from what the comparator can
+    /// actually answer rather than from a hand-kept list. The two are pinned together by the
+    /// lockstep census in `crates/noeta-conformance/tests/comparator_arm_census.rs`, which drives
+    /// real values through the comparator and asserts this table agrees in both directions — so a
+    /// new arm down there cannot silently leave the checker behind, and a widening up here cannot
+    /// invent an ordering the runtime would refuse.
+    ///
+    /// Whether a type orders **at all** is a different question, and not this one: a `struct` orders
+    /// only if it derives or implements `Comparable`, which the lattice cannot see. This says only
+    /// *which pairings* have an answer given the operands order, and the checker asks both.
+    pub fn comparator_arm(&self) -> Option<ComparatorArm> {
+        if self.is_arith_numeric() {
+            return Some(ComparatorArm::Numeric);
+        }
+        match self {
+            // The reified prelude enums order by variant index and then by payload, with no
+            // declaration anywhere — so their pairing question descends rather than resolving here.
+            Type::Option(_) | Type::Result(..) => Some(ComparatorArm::Structural),
+            // `string`/`string` and `bool`/`bool` are the comparator's own arms; a nominal type
+            // (extern or declared) orders through machinery keyed to one type — an extern
+            // `cmp_value` downcasts and answers `None` on a kind mismatch, and a structural compare
+            // requires two values of one shape.
+            Type::String | Type::Bool | Type::Named(..) => Some(ComparatorArm::SameType),
+            // Everything else has no ordering to pair: lists, maps, sets, tuples, functions,
+            // `bytes`, `void`, and the lattice's own holes.
+            _ => None,
+        }
+    }
+
+    /// Whether the runtime comparator can answer `a` against `b` — the pair predicate a union's
+    /// ordering is built from ([`Self::comparator_arm`]).
+    ///
+    /// The comparator has exactly **one cross-type arm**: every numeric scalar orders against every
+    /// other, across the whole tower (`int` against `f32`, `int` against `u8`), which is what makes
+    /// `number` an ordered type. Two *different* extern types, two different structs, a `string`
+    /// against a `bool` all have no answer, and the runtime says so rather than inventing one.
+    ///
+    /// A prelude container descends into its payload, because that is how it is ordered: `?int`
+    /// against `?float` answers exactly as `int` against `float` does. This recursion is safe to
+    /// state here precisely because those enums carry no user-written `compare` — the language
+    /// orders them.
+    ///
+    /// A **generic nominal type is deliberately not descended into**, even though the runtime would
+    /// often answer: `Box<int>` against `Box<float>` compares field-wise and returns an ordering.
+    /// The reason is that a `Box<T>` may carry a *hand-written* `impl Comparable` whose `compare`
+    /// declares a `Box<T>` parameter, and handing it a `Box<float>` at `T = int` would break the
+    /// signature the author wrote. So two instantiations of one generic type are refused as a pair;
+    /// the pinned census row in `comparator_arm_census` records that as a decision rather than an
+    /// oversight.
+    pub fn comparator_answers(a: &Type, b: &Type) -> bool {
+        match (a, b) {
+            (Type::Option(x), Type::Option(y)) => Type::comparator_answers(x, y),
+            (Type::Result(a_ok, a_err), Type::Result(b_ok, b_err)) => {
+                Type::comparator_answers(a_ok, b_ok) && Type::comparator_answers(a_err, b_err)
+            }
+            _ => match (a.comparator_arm(), b.comparator_arm()) {
+                (Some(ComparatorArm::Numeric), Some(ComparatorArm::Numeric)) => true,
+                (Some(ComparatorArm::SameType), Some(ComparatorArm::SameType))
+                | (Some(ComparatorArm::Structural), Some(ComparatorArm::Structural)) => a == b,
+                _ => false,
+            },
+        }
     }
 
     /// This numeric type's rank in the widening lattice `int (0) < float (1)`. Arithmetic over two
