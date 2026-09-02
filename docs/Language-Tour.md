@@ -1,8 +1,6 @@
 # Language Tour
 
-A guided, example-driven walk through the whole language in one sitting. Every snippet runs with `noeta run`. If you have not installed the toolchain yet, start with [Getting Started](Getting-Started).
-
-This tour teaches by building up. For the exhaustive rules on any topic, follow the links to the reference pages.
+An example-driven walk through the whole language in one sitting. Every snippet runs with `noeta run`; if you have not installed the toolchain yet, start with [Getting Started](Getting-Started). Each section links to the reference page holding its exhaustive rules.
 
 ---
 
@@ -18,13 +16,13 @@ count += 1          // compound assignment: count = count + 1
 echo count          // 2
 ```
 
-Reassigning an immutable binding is a compile error. A `mut` binding also keeps a **fixed type** — a reassignment must match it (`count = "two"` is an error); declare a union or `dyn` for a multi-type binding. You can annotate a binding's type — it is checked, then erased at runtime:
+Reassigning an immutable binding is a compile error. A `mut` binding also keeps a fixed type, so a reassignment must match it and `count = "two"` is an error. Declare a union or `dyn` for a binding that holds more than one type. You can annotate a binding's type, which is checked and then erased at runtime:
 
 ```noeta
 xs: List<int> = [1, 2, 3]
 ```
 
-The primitive types are `int` (64-bit, wraps on overflow), `float`, `f32`, `f64`, `bool`, `string`, and `void`. Number literals support underscores and radix prefixes:
+The scalar types you reach for first are `int` (64-bit, wraps on overflow), `float`, `bool`, `string`, and `void`; `f32`, `f64`, `bytes`, and the fixed-width integers `i8` through `u64` are there when a format demands them. Number literals support underscores and radix prefixes:
 
 ```noeta
 echo 1_000_000     // 1000000
@@ -51,13 +49,13 @@ echo `
 `                             // `...`  dedented multiline template (great for SQL/HTML)
 ```
 
-The `~` operator concatenates (display-concatenating non-strings):
+The `~` operator concatenates, display-concatenating non-strings:
 
 ```noeta
 echo "users/" ~ 42 ~ "/profile"    // users/42/profile
 ```
 
-Strings carry a rich method set — `.upper()`, `.trim()`, `.split(",")`, `.replace(a, b)`, `.contains(s)`, and more. See [Built-ins](Standard-Library).
+Strings carry a rich method set: `.upper()`, `.trim()`, `.split(",")`, `.replace(a, b)`, `.contains(s)`, and more. See [Built-ins](Standard-Library).
 
 ---
 
@@ -76,7 +74,7 @@ if n == 0 {
 }
 ```
 
-`if … then … else` is also an **expression** (note the `then` keyword):
+`if … then … else` is also an **expression**, and takes the `then` keyword:
 
 ```noeta
 n = 50
@@ -97,9 +95,9 @@ for (idx, x) in ["a", "b"].enumerate() {    // destructure the (index, value) tu
 }
 ```
 
-(No shadowing: the loop variables pick names distinct from the `mut i` above — one name, one meaning, per scope.)
+One name means one thing per scope stack, so the loop variables above take names distinct from the `mut i`. `break` and `continue` work as expected.
 
-`break` and `continue` work as expected. → [Control Flow & Pattern Matching](Control-Flow-and-Pattern-Matching).
+→ [Control Flow & Pattern Matching](Control-Flow-and-Pattern-Matching).
 
 ---
 
@@ -131,13 +129,13 @@ echo greet("Ada")           // Hello, Ada!
 echo greet("Ada", "Hi")     // Hi, Ada!
 ```
 
-An argument can **name** the parameter it fills, in any order — which also lets a call skip a defaulted parameter and supply a later one:
+An argument can **name** the parameter it fills, in any order, which also lets a call skip a defaulted parameter and supply a later one:
 
 ```noeta
 fn f(a: int, b: int = 2, c: int = 3): int { return a * 100 + b * 10 + c }
 
 echo f(b: 5, a: 1)   // 153
-echo f(1, c: 9)      // 129 — `b` still defaults
+echo f(1, c: 9)      // 129, with `b` still defaulted
 ```
 
 See [Functions and Closures](Functions-and-Closures#named-arguments).
@@ -161,7 +159,7 @@ twice = fn(f, x) => f(f(x))
 echo twice(inc, 10)         // 12
 ```
 
-The pipe `|>` threads a value into the next call as its first argument — or, if a [label](Functions-and-Closures#piping-into-a-parameter-that-isnt-the-first) has already claimed that parameter, into the first one still free. Either way it reads left-to-right:
+The pipe `|>` threads a value into the next call as its first argument. Where a [label](Functions-and-Closures#piping-into-a-parameter-that-isnt-the-first) has already claimed that parameter, it goes into the first one still free. Either way it reads left to right:
 
 ```noeta
 fn double(n: int): int { return n * 2 }
@@ -183,8 +181,8 @@ echo [1, 2, 3, 4]
 
 Two aggregate kinds, distinguished by **semantics**:
 
-- **`struct`** — a *value*. No identity; compares field-by-field; assigning a field copies-on-write.
-- **`class`** — a *reference*. Has identity (`===`); shared by reference; a `mut` field mutates in place, visible to every alias.
+- **`struct`** is a *value*. No identity; compares field by field; assigning a field copies on write.
+- **`class`** is a *reference*. Has identity (`===`); shared by reference; a `mut` field mutates in place, visible to every alias.
 
 ```noeta
 struct Point { x: int  y: int }        // value type
@@ -203,9 +201,9 @@ c.bump()
 echo c.n                                // 1
 ```
 
-A `class`'s fields are private by default; mark them `pub` to read from outside, `mut` to allow assignment. (A `struct`'s fields are always public — a value *is* its contents — so writing `pub` on one is refused, E0077.) Fields can have defaults, and literals support shorthand (`Point { x, y }`) and spread (`Point { ...p, x: 9 }`).
+A `class`'s fields are private by default; mark them `pub` to read from outside, `mut` to allow assignment. A `struct`'s fields are always public, since a value *is* its contents, so writing `pub` on one is refused (E0077). Fields can have defaults, and literals support shorthand (`Point { x, y }`) and spread (`Point { ...p, x: 9 }`).
 
-**Methods are private by default in every kind**, and `pub` puts one on the type's surface — so a `struct` with public data can still keep a helper to itself. A method implementing a `trait` must be written `pub`, because a trait is an outward contract. See [Method visibility](Structs-Classes-and-Enums#method-visibility).
+**Methods are private by default in every kind**, and `pub` puts one on the type's surface, so a `struct` with public data can still keep a helper to itself. A method implementing a `trait` must be written `pub`, because a trait is an outward contract. See [Method visibility](Structs-Classes-and-Enums#method-visibility).
 
 **Enums** model a closed set of alternatives, optionally carrying data:
 
@@ -223,9 +221,9 @@ enum Direction: string {               // string-backed
 }
 ```
 
-All three kinds share the same body grammar — they can hold methods and `impl Trait { }` blocks.
+All three kinds share the same body grammar, so they can hold methods and `impl Trait { }` blocks.
 
-**`Self` names the type in hand.** Inside any type body it stands for the type it is the body of, so a declaration never repeats its own name — `fn new(): Self` above, a self-referential field (`next: ?Self`), a recursive payload (`Node(Self, Self)`). It is `self`'s type: lowercase is the value, capitalized is what that value is.
+**`Self` names the type in hand.** Inside any type body it stands for the type it is the body of, so a declaration never repeats its own name: `fn new(): Self` above, a self-referential field (`next: ?Self`), a recursive payload (`Node(Self, Self)`). `Self` is the type of `self`.
 
 → [Structs, Classes & Enums](Structs-Classes-and-Enums).
 
@@ -233,7 +231,7 @@ All three kinds share the same body grammar — they can hold methods and `impl 
 
 ## Pattern matching
 
-`match` is an expression, and it is checked for exhaustiveness — a missing case (with no `_`) is a compile error:
+`match` is an expression, and it is checked for exhaustiveness. A missing case with no `_` is a compile error:
 
 ```noeta check
 enum Status { Pending; Paid; Refunded }
@@ -266,7 +264,7 @@ fn classify(p: (int, int)): string {
 
 ## Collections
 
-Lists, maps, and sets — all value-semantic (copy-on-write):
+Lists, maps, and sets are all value-semantic, copying on write:
 
 ```noeta
 xs = [1, 2, 3]
@@ -284,7 +282,7 @@ echo s                         // {1, 2, 3}
 echo s.contains(2)             // true
 ```
 
-Lazy **iterators** let you compose transformations without building intermediate lists:
+Lazy **iterators** compose transformations without building intermediate lists:
 
 ```noeta
 echo [1, 2, 3, 4, 5].iter()
@@ -297,12 +295,12 @@ echo [1, 2, 3, 4, 5].iter()
 
 ---
 
-## Errors: no `null`, no exceptions
+## Errors: absence and failure are values
 
-Absence and failure are ordinary values.
+There is no `null` and there are no exceptions. Two types carry both cases:
 
-- **`Option`** — `?T`. Constructed with `some(x)` / `none`.
-- **`Result<T, E>`** — constructed with `Ok(x)` / `Err(e)`.
+- **`Option`**, written `?T`. Constructed with `some(x)` / `none`.
+- **`Result<T, E>`**. Constructed with `Ok(x)` / `Err(e)`.
 
 ```noeta
 fn pick(hit: bool): ?int {
@@ -354,7 +352,7 @@ echo match place([]) {
 
 ## Generics and traits
 
-Generics let one definition serve many types without giving up checking — a `Box<T>` holds any `T`, and `max<T: Comparable>` accepts any type that can be ordered. Type parameters can be bounded by a built-in trait:
+One generic definition serves many types and stays fully checked: a `Box<T>` holds any `T`, and `max<T: Comparable>` accepts any type that can be ordered. Type parameters can be bounded by a trait:
 
 ```noeta
 class Box<T> {
@@ -368,7 +366,7 @@ fn max<T: Comparable>(a: T, b: T): T {
 }
 ```
 
-Operators dispatch through a fixed set of built-in traits (`Equatable` → `==`, `Comparable` → `<`, `Display` → `echo`, `Add` → `+`, …). Implement them in a type's body, or synthesize them with `@derive`:
+Operators dispatch through a fixed set of built-in traits (`Equatable` → `==`, `Comparable` → `<`, `Display` → `echo`, `Add` → `+`, and the rest). Implement them in a type's body, or synthesize them with `@derive`:
 
 ```noeta
 @derive(Equatable, Comparable, Display)
@@ -380,7 +378,7 @@ class Money {
 echo Money.new(5) < Money.new(9)     // true
 ```
 
-(Under the hood, one compiled shape serves every instantiation — type parameters do not affect dispatch — but values carry a reflected type tag, so `type_of` and `x is List<int>` still recover the type arguments.)
+Values carry a reflected type tag, so `type_of` and `x is List<int>` recover the type arguments wherever a construction site pinned them.
 
 → [Generics & Traits](Generics-and-Traits).
 
@@ -388,7 +386,7 @@ echo Money.new(5) < Money.new(9)     // true
 
 ## Modules
 
-Split code across files. A file **is** a module, and its path is derived from where the file sits — the package's import prefix plus the file's path inside the package — so there is nothing to declare. Declarations are private unless marked `pub`:
+Split code across files. A file **is** a module, and its path is derived from where the file sits: the package's import prefix plus the file's path inside the package, so there is nothing to declare. Declarations are private unless marked `pub`:
 
 ```noeta
 // src/models.noe, in the package `local/shop`  →  the module `shop.models`
@@ -445,7 +443,7 @@ concurrent {
 
 ## A capstone
 
-Putting it together — a small order pipeline (this is `examples/orders.noe`, trimmed):
+A small order pipeline:
 
 ```noeta
 struct Item { price: float  qty: int }
@@ -484,8 +482,6 @@ total: 24.48
 ```
 
 ## Next
-
-You have seen the whole surface. For depth:
 
 - **Conventions** — [how the ecosystem names things](Conventions), and which of those names the compiler enforces.
 - **Reference** — the [Language reference](Home#language-reference) has one page per topic.

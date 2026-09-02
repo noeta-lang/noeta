@@ -1,15 +1,13 @@
 # The Noeta Docs
 
-> **AI-native, human-first.** A general-purpose language that makes machine-written code checkable and human-readable — strong static types, an agent-native toolchain, single-binary output.
-
-Noeta is a general-purpose language for a world where agents write much of the code. An ML-grade type system — algebraic data types, `Result`-typed errors, exhaustive matching, real generics — makes machine-written code mechanically checkable, while every surface decision answers to human readability first. It compiles to a fast bytecode VM and ships from one toolchain that speaks agent natively (`noeta mcp`, an LSP, structured diagnostics).
+Noeta is a general-purpose language with an ML-grade type system: algebraic data types, `Result`-typed errors, exhaustive matching, and real generics. It compiles to a bytecode VM, and the whole toolchain ships as a single binary that speaks LSP, DAP and MCP.
 
 ## Start here
 
 1. **[Getting Started](Getting-Started)** — install the toolchain and run your first program.
 2. **[Language Tour](Language-Tour)** — the whole language, example-driven, in one sitting.
 
-Prefer to poke at it first? The [playground](https://play.noeta.dev) runs Noeta right in your browser.
+The [playground](https://play.noeta.dev) runs Noeta in your browser with nothing to install.
 
 ## A thirty-second taste
 
@@ -52,7 +50,7 @@ $ noeta run demo.noe
 total: 24.48
 ```
 
-One small program, and already: enums with payloads, `Result`-typed validation, an exhaustive nested `match`, closures over a typed list, and interpolated strings. The [Language Tour](Language-Tour) walks through all of it.
+That program uses enums with payloads, `Result`-typed validation, an exhaustive nested `match`, a closure over a typed list, and an interpolated string. The [Language Tour](Language-Tour) walks through each of them.
 
 ## Browse the docs
 
@@ -60,7 +58,7 @@ One small program, and already: enums with payloads, `Result`-typed validation, 
 Learn the language from zero.
 - [Getting Started](Getting-Started)
 - [Language Tour](Language-Tour)
-- [Conventions](Conventions) — how the ecosystem names things, and which of those names the compiler actually enforces
+- [Conventions](Conventions) — how the ecosystem names things, and which of those names the compiler enforces
 - [Using Packages](Using-Packages)
 
 ### Bundled tools
@@ -81,7 +79,7 @@ Everything the `noeta` binary does beyond running code.
 - [Edge Deployment (Fermyon Spin, Fastly Compute)](Edge-Deployment)
 
 ### Language reference
-The exhaustive rules, one page per topic. These are written to be read in order after the Tour, or dipped into for a specific rule.
+One page per topic, holding the exhaustive rules. Read them in order after the Tour, or open one to look a rule up.
 - [Syntax Basics](Syntax-Basics)
 - [Control Flow & Pattern Matching](Control-Flow-and-Pattern-Matching)
 - [Functions & Closures](Functions-and-Closures)
@@ -96,12 +94,12 @@ The exhaustive rules, one page per topic. These are written to be read in order 
 - [Diagnostics (`E0xxx`)](Diagnostics) — every code the toolchain reports, generated from the compiler
 
 ### Specialized
-Reach for these when the problem calls for them, not on the way through.
+Pages for one kind of problem.
 - [Fixed-Width Integers, Bitwise & Packed Types](Fixed-Width-Integers) — binary formats, protocol code, bulk numeric data
 - [Attributes & Reflection](Attributes-and-Reflection) — `#[…]` metadata and the runtime reflection surface, for framework and codegen work
 
 ### Concepts & design
-How the implementation actually works — for the curious and the systems-minded. Noeta runs on a register-based bytecode VM over NaN-boxed values, a shape-based object model with inline caches, compiled precise reference counting with in-place reuse, and a cycle collector.
+How the implementation works. Noeta runs on a register-based bytecode VM over NaN-boxed values, a shape-based object model with inline caches, compiled precise reference counting with in-place reuse, and a cycle collector.
 - [Architecture & Pipeline](Architecture-and-Pipeline)
 - [The Virtual Machine](The-Virtual-Machine)
 - [Memory Management](Memory-Management)
@@ -117,4 +115,6 @@ Build the compiler, run the tests, and add a feature.
 ## Project status
 
 > [!NOTE]
-> **Alpha.** Prebuilt binaries cover Linux and macOS (x86_64/aarch64) — see [Getting Started](Getting-Started#1--install-the-toolchain); other platforms build from source. The language core and its tooling are complete and usable today: the full syntax, the type system, traits/generics/derives, multi-file modules, a layered standard library, real host IO, structured concurrency, the package manager, native AOT and WebAssembly builds (`noeta build --native`/`--wasm`/`--serve`), and the `run`/`repl`/`test`/`bench`/`doc` toolchain, along with `noeta lsp`/`noeta dap` editor tooling and the `noeta mcp` agent surface. Until beta, anything may change without notice — syntax, stdlib, and file formats included. These docs describe what ships today.
+> **Alpha.** The language core and its tooling are complete and usable today: the full syntax, the type system, traits, generics and derives, multi-file modules, a layered standard library, host IO, structured concurrency, the package manager, native and WebAssembly builds (`noeta build --native`/`--wasm`/`--serve`), and the `run`/`repl`/`test`/`bench`/`doc` toolchain, alongside `noeta lsp`, `noeta dap` and `noeta mcp`.
+>
+> Prebuilt binaries cover Linux and macOS on x86_64 and aarch64; see [Getting Started](Getting-Started#1--install-the-toolchain) for other platforms, which build from source. Until beta, anything may change without notice, syntax and stdlib and file formats included. These docs describe what ships today.
