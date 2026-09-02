@@ -9,7 +9,7 @@ use crate::heap::{self, Payload};
 use crate::{CompactString, Value};
 
 impl Value {
-    // --- Display (mirrors the M0 tree-walker's `Value::display`) ---
+    // --- Display (mirrors the tree-walker's `Value::display`) ---
 
     /// The display form used by `echo` and `~` concatenation.
     /// Append this value's [`display`](Self::display) form to `out` **without** the intermediate
@@ -68,7 +68,7 @@ impl Value {
                 // both backends; its content round-trips through `from_bytes`, not display.
                 Payload::Bytes(b) => format!("<{} bytes>", b.len()),
                 Payload::Int(i) => i.to_string(),
-                // Mirrors the M0 tree-walker's `Value::Function(_) => "<fn>"` (and `Builtin`).
+                // Mirrors the tree-walker's `Value::Function(_) => "<fn>"` (and `Builtin`).
                 Payload::Closure { .. }
                 | Payload::NativeFn(_)
                 | Payload::ModuleFn { .. }
@@ -78,7 +78,7 @@ impl Value {
                 // compiler derefs it first); render transparently as its contents if it ever does.
                 Payload::Cell(inner) => inner.display(),
                 // Collections render their elements with `repr` (strings quoted), exactly
-                // like the M0 tree-walker's `Value::List`/`Value::Map` display.
+                // like the tree-walker's `Value::List`/`Value::Map` display.
                 Payload::List(items) => {
                     let parts: Vec<String> = items.iter().map(|v| v.repr()).collect();
                     format!("[{}]", parts.join(", "))
@@ -106,7 +106,7 @@ impl Value {
                         .collect();
                     format!("{{{}}}", parts.join(", "))
                 }
-                // `Type {field: repr, ...}` in slot (declared) order — M0's `ObjectValue`.
+                // `Type {field: repr, ...}` in slot (declared) order — the tree-walker's `ObjectValue`.
                 Payload::Object { shape, slots } => {
                     let parts: Vec<String> = shape
                         .fields
@@ -124,7 +124,7 @@ impl Value {
                 }
                 // `Ok(x)`/`none` for built-in Result/Option, else `Type.Variant(data...)`;
                 // a no-data variant is just the head. Data renders with `display` (unquoted),
-                // matching M0's `EnumValue::display`.
+                // matching the tree-walker's `EnumValue::display`.
                 Payload::Enum { shape, data } => {
                     let head = if shape.builtin_result_option {
                         shape.variant.clone().unwrap_or_default()
@@ -163,7 +163,7 @@ impl Value {
                 Payload::PackedList { .. } => unreachable!("packed list demoted before display"),
             })
         } else {
-            // The unit value (and any other singleton) displays as empty, as in M0.
+            // The unit value (and any other singleton) displays as empty, as in the tree-walker.
             String::new()
         }
     }
@@ -308,7 +308,7 @@ impl Value {
     }
 
     /// The representation of a value *inside* a collection: strings are quoted so the
-    /// structure stays legible (`["a", "b"]`, not `[a, b]`). Mirrors M0's `Value::repr`.
+    /// structure stays legible (`["a", "b"]`, not `[a, b]`). Mirrors the tree-walker's `Value::repr`.
     pub fn repr(self) -> String {
         match self.as_string() {
             Some(s) => format!("{s:?}"),

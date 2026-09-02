@@ -3,7 +3,7 @@
 //! behaviour are all exercised (none of which the library-level tests can reach). The conformance
 //! corpus runner moved to its own dev binary (`noeta-conformance`), with its CLI tests alongside it.
 //!
-//! One test binary, split into per-verb/area modules (audit-4 F12) so unrelated arcs no longer
+//! One test binary, split into per-verb/area modules so unrelated arcs no longer
 //! share one 6,000-line file, while still linking the `noeta` dependency tree once. Shared
 //! fixtures live in [`support`].
 

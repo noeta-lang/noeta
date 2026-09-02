@@ -1,6 +1,6 @@
 //! The Tier-0 register VM: executes a [`Module`] into a [`RunResult`].
 //!
-//! `VmBackend` is the second [`Backend`] (the M0 tree-walker is the first). The conformance
+//! `VmBackend` is the second [`Backend`] (the tree-walker is the first). The conformance
 //! harness runs both over the corpus and asserts identical `RunResult`s — the differential
 //! oracle. The VM compiles only a subset of the language, so [`VmBackend::try_run`] returns
 //! [`Unsupported`] for programs it can't lower yet; the harness skips those and tracks a
@@ -132,7 +132,7 @@ enum RetTransform {
     /// Map a returned `Ordering` enum to this operator's `bool` (for `< <= > >=` dispatched to
     /// `compare`); a non-`Ordering` value passes through (an ill-typed `compare`).
     Ordering(BinaryOp),
-    /// Wrap a by-name invocation's return value in `Result.Ok` (P2.6). The shape is the `Result.Ok`
+    /// Wrap a by-name invocation's return value in `Result.Ok`. The shape is the `Result.Ok`
     /// variant shape, baked into `Op::Invoke` and cloned in at frame setup; the raw return's
     /// reference transfers into the enum payload, so the original is *not* released afterward.
     WrapOk(&'static Shape),
@@ -169,7 +169,7 @@ impl RetTransform {
 /// itself lives on [`Vm::diagnostics`]; this is just the propagation token.
 struct Abort;
 
-/// The debug console's session machinery (tooling-unification T4), present only on a debug run
+/// The debug console's session machinery, present only on a debug run
 /// launched with an adopted session: the live incremental compiler (seeded from the launch's
 /// *checked* compile, so fragment ids append onto the program's own id-spaces) and the arena that
 /// keeps every extended module snapshot alive for the rest of the run. A fragment install
@@ -179,11 +179,11 @@ struct Abort;
 /// after the program resumes.
 struct DebugSession<'m> {
     /// The live incremental compiler, behind the [`FragmentCompiler`] seam so this struct — and the
-    /// install/eval paths that use it — stay compiler-free (native-size slice 2). The concrete
+    /// install/eval paths that use it — stay compiler-free. The concrete
     /// `noeta_compiler::SessionCompiler` is boxed in here by the (feature-gated) session entry points.
     compiler: Box<dyn FragmentCompiler>,
     arena: &'m typed_arena::Arena<Module>,
-    /// Compiled-wrapper memo (tooling-unification U3): `(fragment text, in-scope local names)` →
+    /// Compiled-wrapper memo: `(fragment text, in-scope local names)` →
     /// the installed entry proto. A watch panel re-evaluates its expressions on **every step**;
     /// without this each re-eval would append a fresh proto + global slot to the session for the
     /// rest of the run. A hit skips compile + install entirely and re-runs the existing entry with
@@ -213,7 +213,7 @@ struct DebugSession<'m> {
 /// trailing-expression sentinel).
 const FRAGMENT_SENTINEL: &str = "\0debug-fragment";
 
-/// Whether `expr` belongs to the hover-safe **read-only surface** (T6): names, `.field` chains,
+/// Whether `expr` belongs to the hover-safe **read-only surface**: names, `.field` chains,
 /// `[index]`, arithmetic / comparison / logical operators, and plain literals. Everything else —
 /// a call, a construction, a closure, an interpolated string (its holes hide expressions), a
 /// `match`/`if` form — is refused: a hover fires on mouse-over and must never run code. This is
@@ -275,7 +275,7 @@ struct RunOutput {
 /// of ~19 per-field gates; jit-only (Cranelift-needing) fields keep their finer gate inside.
 #[cfg(feature = "jit-rt")]
 struct Tier1State {
-    /// The tier-1 JIT engine (milestone P-JIT), present only when the `jit` feature is on *and* the
+    /// The tier-1 JIT engine, present only when the `jit` feature is on *and* the
     /// host ISA is available. `None` = interpret everything (tier 0). Never populated on a worker
     /// isolate — Cranelift's `JITModule` is `!Send`, and the deterministic path stays tier 0.
     #[cfg(feature = "jit")]
@@ -302,10 +302,10 @@ struct Tier1State {
     /// (which is faster for it than the tier-0↔tier-1 bounce) without a per-iteration re-scan.
     #[cfg(feature = "jit")]
     jit_declined: Vec<bool>,
-    /// The value the bottom frame produced when it returned inside native code (J3): `jit_return`
+    /// The value the bottom frame produced when it returned inside native code: `jit_return`
     /// parks it here for the dispatch loop to yield as the run's result.
     jit_ret: Value,
-    /// Closures pinned by the JIT's per-call-site inline caches (P-JSSA S4.2): `jit_prepare_call`
+    /// Closures pinned by the JIT's per-call-site inline caches: `jit_prepare_call`
     /// retains a closure when it caches it, so bits-equality at the site stays a proof of
     /// identity (no free/reuse while cached). Only 0-upvalue closures are cacheable — they hold
     /// nothing, so delaying their free to teardown is observably inert. Released (and the caches
@@ -317,11 +317,11 @@ struct Tier1State {
     /// `Vm`'s lifetime; the `Jit` and its generated code are dropped with the same `Vm`).
     #[cfg(feature = "jit")]
     jit_frame_template: Option<Box<Frame>>,
-    /// The off-thread compile service (P-PAR S4) — the production hot-counter path. Mutually
+    /// The off-thread compile service — the production hot-counter path. Mutually
     /// exclusive with the synchronous `jit` engine (which the `force_jit` oracle keeps).
     #[cfg(feature = "jit")]
     jit_service: Option<jit_service::JitService>,
-    /// Tier-1 engines **retired by a hot swap** (server-hmr H3). Their executable pages must
+    /// Tier-1 engines **retired by a hot swap**. Their executable pages must
     /// outlive any in-flight native frame (a frame beneath the long-running serve dispatch can
     /// be native code), so a swap never drops an engine — it parks it here, clears the mirror
     /// tables (no NEW dispatch can enter retired code), and re-arms fresh against the swapped
@@ -334,7 +334,7 @@ struct Tier1State {
     /// `Vm` teardown stops and joins it.
     #[cfg(feature = "jit")]
     jit_service_graveyard: Vec<jit_service::JitService>,
-    /// P-AOT L3.2b: native entries were **bound ahead of time** (from a linked dispatch table),
+    /// Native entries were **bound ahead of time** (from a linked dispatch table),
     /// not JIT-compiled — so `self.jit`/`jit_service` are both `None` yet the mirror tables carry
     /// real native entry points. This makes the frame-entry dispatch consult those pre-installed
     /// entries even with the compiler absent; an uncompiled (ineligible) prototype still falls
@@ -346,7 +346,7 @@ struct Tier1State {
     /// mutator in service mode (they live on the compile thread).
     jit_entries: Vec<Option<noeta_jit_abi::CompiledFn>>,
     jit_fast: Vec<Option<usize>>,
-    /// The **region-scoped OSR bodies** (P-OSRW), keyed by prototype: native bodies whose compiled
+    /// The **region-scoped OSR bodies**, keyed by prototype: native bodies whose compiled
     /// region is one hot loop's pc window — one per distinct hot loop, up to
     /// `noeta_jit::MAX_OSR_WINDOWS`, and disjoint by construction. A native re-entry whose pc falls
     /// inside a window goes there; every other entry uses `jit_entries`. Deliberately *not* the
@@ -427,7 +427,7 @@ pub(crate) struct SessionState {
     /// unblocks a sibling as progress even when no task completes. Mirrors the tree-walker's fields.
     channels: Vec<Channel>,
     channel_progress: u64,
-    /// The extensions' **retained-value arena** (higher-order-abi H4, Class 3): every `Some`
+    /// The extensions' **retained-value arena**: every `Some`
     /// entry owns one reference to a language value an extension holds *across* dispatches
     /// (`NativeCtx::retain`/`retained_get`/`retained_set`/`release_retained`); freed indices are
     /// reused via `ext_arena_free`. The arena is a first-class **root set**: teardown feeds it
@@ -435,18 +435,18 @@ pub(crate) struct SessionState {
     /// reactive graph's treatment), so residency returns to 0 whatever the program forgot.
     ext_arena: Vec<Option<Value>>,
     ext_arena_free: Vec<u32>,
-    /// **Embed handles** (server-hmr F3): language values an embedding HOST holds across
+    /// **Embed handles**: language values an embedding HOST holds across
     /// [`VmSession::call_by_name`] calls without marshalling them out — a game engine keeping an
     /// entity/object reference between frames. Each live slot owns one reference; freed slots are
     /// reused via `embed_handles_free`. Rooted and released exactly like `ext_arena`, so a handle
     /// the host forgets to release still reclaims at teardown (residency 0).
     embed_handles: Vec<Option<Value>>,
     embed_handles_free: Vec<u32>,
-    /// Per-run extension Rust state (`NativeCtx::state`, H4): plain data keyed by the
+    /// Per-run extension Rust state (`NativeCtx::state`): plain data keyed by the
     /// extension's own `'static` key, created on first access, dropped at VM drop. Language
     /// values never live here — they go through the arena above.
     ext_state: Vec<(&'static str, noeta_stdlib::ExtState)>,
-    /// Extern types whose **read gate** is currently closed (H5 perf): while a type is listed,
+    /// Extern types whose **read gate** is currently closed: while a type is listed,
     /// its declared `arena_getter` method takes the full ctx dispatch instead of the inlined
     /// arena read. Almost always empty (the hot check is `is_empty()`); toggled by extensions
     /// via `NativeCtx::set_read_gate` around tracking/dirty windows.
@@ -459,27 +459,26 @@ pub(crate) struct SessionState {
     /// elements that share shape identity with directly-constructed instances.
     packed_schemas: Vec<&'static noeta_object::PackedSchema>,
     /// One shared `Rc<TypeRepr>` per interned reflected element type (runtime type-argument
-    /// reflection, R1), built once at load from [`Module::type_reprs`]. `Op::MakeList` stamps a cheap
+    /// reflection), built once at load from [`Module::type_reprs`]. `Op::MakeList` stamps a cheap
     /// `Rc` clone of its indexed entry onto the built list, so `type_of` recovers the element type
     /// after a `dyn` launder. Empty for a program with no tagged list literal.
     type_reprs: Vec<Rc<noeta_ast::reflect::TypeRepr>>,
-    /// All host-coupled effects (filesystem, seeded PRNG, logical clock) behind the M2.1
+    /// All host-coupled effects (filesystem, seeded PRNG, logical clock) behind the
     /// [`noeta_stdlib::Host`] seam. The conformance harness constructs a deterministic
-    /// [`noeta_stdlib::SandboxHost`]; a real host (later M2 slices) swaps in without touching
-    /// this struct. See the eval backend's field of the same name.
+    /// [`noeta_stdlib::SandboxHost`]; a real host swaps in without touching this struct. See the eval backend's field of the same name.
     host: Box<dyn noeta_stdlib::Host>,
-    /// The async executor (Track A.2): the clock + pending-timer set that `sleep(ms)` and
+    /// The async executor: the clock + pending-timer set that `sleep(ms)` and
     /// drive-to-completion `.await` consult, behind the [`noeta_stdlib::Executor`] seam. The
     /// conformance harness keeps a deterministic [`noeta_stdlib::SandboxExecutor`] (identical to the
     /// tree-walker's by construction, so the differential holds); the CLI swaps in a real wall-clock
     /// executor (Track A.4). See the eval backend's field of the same name.
     executor: Box<dyn noeta_stdlib::Executor>,
-    /// The extension **registry** this VM resolves native names against (instance-registry IR3):
+    /// The extension **registry** this VM resolves native names against:
     /// module functions, extern types, method bundles, and their dispatch all consult it through
     /// [`Vm::reg`]. `None` — the default on every ordinary run — falls back to the process-global
     /// default registry (`noeta_stdlib::registry::default_seeded`), so a plain run is byte-for-byte
     /// unchanged. An embedding host that assembled its own extension set threads its `Registry` in
-    /// (the embed API / server-hmr F2), and a worker isolate inherits its parent's (a `&'static`
+    /// (the embed API), and a worker isolate inherits its parent's (a `&'static`
     /// registry is `Send`). The std-concrete `static_dispatch_ctx*` fast paths deliberately stay on
     /// the global — std is in every assembled registry, so monomorphizing them costs no correctness.
     registry: Option<&'static noeta_stdlib::registry::Registry>,
@@ -490,7 +489,7 @@ pub(crate) struct SessionState {
 /// prototype. See [`Vm::dispatch`].
 pub(crate) type MethodCacheEntry = Option<(&'static Shape, u32)>;
 
-/// One extern-method route-cache slot (H5 perf): the extern type-name pointer (a registry
+/// One extern-method route-cache slot: the extern type-name pointer (a registry
 /// `&'static str`, a stable identity) and the site's resolved routing. See [`Vm::dispatch`].
 pub(crate) type ExternCacheEntry = Option<(*const u8, crate::methods::ExternRoute)>;
 
@@ -505,19 +504,19 @@ struct Vm<'m> {
     module: &'m Module,
     /// See [`DebugSession`]; `None` on every non-debug run.
     debug_session: Option<DebugSession<'m>>,
-    /// This VM's seat on the hot-reload mailbox — see [`HotConsumer`] (server-hmr W1); `None` on
+    /// This VM's seat on the hot-reload mailbox — see [`HotConsumer`]; `None` on
     /// every run but `noeta serve --watch`'s in-process hot mode. A watcher thread deposits
     /// ready-to-apply [`SwapPlan`]s; the VM applies its pending ones at the scheduler tick
     /// ([`Vm::apply_pending_hotswap`] via `advance_tasks`), a safepoint every ctx-driven loop passes.
     ///
     /// [`SwapPlan`]: noeta_compiler::hotswap::SwapPlan
     hot_mailbox: Option<HotConsumer>,
-    /// How many swap plans this VM has applied from its [`HotChannel`] queue (server-hmr F5): the
+    /// How many swap plans this VM has applied from its [`HotChannel`] queue: the
     /// generation index it drains from, and — via [`NativeCtx::hot_swap_count`] — how the serve
     /// loop detects its own swaps to push `reload` to *its* clients. Per-VM, so N workers each
     /// track their own progress against the shared broadcast queue.
     applied_swaps: usize,
-    /// Set while a **hover** fragment runs (tooling-unification T6): a hover must stay
+    /// Set while a **hover** fragment runs: a hover must stay
     /// side-effect-free, so the dispatch loop refuses any frame push beyond the fragment wrapper's
     /// own frame — the one chokepoint every way of running user code (a call, an object's `Index`
     /// impl, a user ordering method) passes through. The fragment's AST is pre-gated to the
@@ -560,14 +559,14 @@ struct Vm<'m> {
     global_slots: HashMap<String, u32>,
     /// `type_name` to its `destruct` prototype, for classes with a destructor.
     destructors: HashMap<String, u32>,
-    /// `(type_name, field_name)` to the field's default-value thunk prototype (object-model
-    /// slice 5). `MakeStruct` runs the thunk (in global scope, empty upvalues) to fill a field the
+    /// `(type_name, field_name)` to the field's default-value thunk prototype. `MakeStruct` runs
+    /// the thunk (in global scope, empty upvalues) to fill a field the
     /// literal omits — mirroring the tree-walker's `TypeDef` field-default fill.
     field_defaults: HashMap<(String, String), u32>,
     /// Type names whose value, when destroyed, can run *some* `destruct` block — its own or a
     /// transitively-owned field / variant-payload / collection element (the checker's
     /// destruct-reachability fixpoint, threaded through the module). The container-before-contained
-    /// field-walk gate (Phase 4.3, spec §4): a value whose shape name is absent here owns no
+    /// field-walk gate (spec §4): a value whose shape name is absent here owns no
     /// destructor in its subtree and frees on the plain-release fast path.
     destruct_reachable: HashSet<String>,
     /// Type names that `@derive(Comparable)` (without a hand-written `compare`): their instances
@@ -576,17 +575,17 @@ struct Vm<'m> {
     /// Type names that `@derive(Serialize<Json>)` (without a hand-written `to_json`): `o.to_json()` on
     /// their instances synthesizes a structural JSON serializer.
     tojson_derives: HashSet<String>,
-    /// `@derive(Deserialize<Json>)` decode recipes (L2.2 DI), keyed by type name — lifted from
+    /// `@derive(Deserialize<Json>)` decode recipes, keyed by type name — lifted from
     /// [`noeta_bytecode::Module::deserialize_recipes`]. `Op::DecodeTyped` (`json.decode_typed(name,
     /// text)`) looks up the runtime type name here to decode a JSON body into that type.
     deserialize_recipes: HashMap<String, noeta_stdlib::TypeRecipe>,
     /// Async scheduler state — see [`SchedState`].
     sched: SchedState,
-    /// Spare ctx slot tables (H5 perf): a ctx dispatch pops one instead of allocating, and its
+    /// Spare ctx slot tables: a ctx dispatch pops one instead of allocating, and its
     /// drop clears + returns it — a hot `set` loop then runs alloc-free. A stack, so ctx
     /// re-entrancy (a called closure re-entering a dispatch) simply pops the next one.
     ctx_table_pool: Vec<Vec<Option<Value>>>,
-    /// Spare re-entrant run contexts (audit-1 finding 5, the `ctx_table_pool` pattern): a
+    /// Spare re-entrant run contexts (the `ctx_table_pool` pattern): a
     /// re-entrant [`Vm::run`] entry — a closure applied per element by `map`/`filter`/the
     /// iterator drains, a default thunk, a method handle, a destructor — pops a spare
     /// frame + register stack instead of allocating both, and [`Vm::run`] clears + returns
@@ -629,7 +628,7 @@ struct Vm<'m> {
 pub use noeta_backend::{RunResult, TraceFrame, render_trace, render_trace_colored};
 
 /// Tier-1 promotion threshold: a prototype interprets until it has been entered this many times,
-/// then the JIT compiles it (P-JIT). The `--jit-differential` oracle bypasses this via `force_jit`.
+/// then the JIT compiles it. The `--jit-differential` oracle bypasses this via `force_jit`.
 #[cfg(feature = "jit")]
 const JIT_HOT_THRESHOLD: u32 = 50;
 

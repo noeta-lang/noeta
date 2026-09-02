@@ -1,4 +1,4 @@
-//! Transitive dependency resolution (package-manager P2.4) — the graph walk that turns a root
+//! Transitive dependency resolution — the graph walk that turns a root
 //! manifest's `[dependencies]` into the full set of packages the loader links, keyed for the flat
 //! link pool.
 //!
@@ -23,7 +23,7 @@
 //! version, a path = one tree), so version *selection* is trivial today; the walk itself detects the
 //! one conflict our flat model can't allow — the same identity required at two different versions. The
 //! PubGrub resolver ([`crate::resolve`]) is still run as the authoritative selection/validation pass
-//! over the materialized versions, so when the registry lands (P2.5) real version *ranges* flow
+//! over the materialized versions, so when the registry lands real version *ranges* flow
 //! through the same call unchanged.
 
 use std::collections::{BTreeMap, HashSet};
@@ -35,8 +35,6 @@ use crate::error::PmError;
 use crate::manifest::{Dependency, Manifest};
 use crate::store::{Store, hash_tree};
 
-/// The resolved dependency graph: the packages the loader links (each a re-rooted [`DepPackage`]),
-/// plus the pinned coordinates for the lockfile (P2.4c).
 /// A resolved `[trust.commands]` binding — the manifest's local-name → `{provider, exported}`
 /// [`Binding`](crate::manifest::Binding) with its provider validated against the resolved graph (a
 /// native package actually present). The composer turns each into a shim registration that exposes
@@ -137,19 +135,21 @@ fn resolve_package_uses(
         .collect()
 }
 
+/// The resolved dependency graph: the packages the loader links (each a re-rooted [`DepPackage`]),
+/// plus the pinned coordinates for the lockfile.
 #[derive(Debug)]
 pub struct ResolvedGraph {
     /// One entry per resolved package identity, ready for [`noeta_loader::link_with_deps`], sorted by
     /// global segment for a deterministic link + cache order.
     pub packages: Vec<noeta_loader::DepPackage>,
-    /// The pinned packages, keyed by identity, for `noeta.lock` (consumed in P2.4c).
+    /// The pinned packages, keyed by identity, for `noeta.lock`.
     #[allow(dead_code)]
     pub locked: Vec<LockedPackage>,
-    /// Every native **entry crate** the graph carries (package-manager Phase 3, N3.1) — what the
-    /// composed-toolchain build (N3.2) compiles in. Empty for a pure-Noeta graph, which is the
+    /// Every native **entry crate** the graph carries — what the
+    /// composed-toolchain build compiles in. Empty for a pure-Noeta graph, which is the
     /// signal that no composition is needed. Sorted by identity (deterministic compose key).
     pub native_crates: Vec<NativeCrate>,
-    /// The resolved `[trust.commands]` bindings (package-manager Phase 4): each local name a
+    /// The resolved `[trust.commands]` bindings: each local name a
     /// dependency command is registered under, tied to the providing package identity and the name
     /// that package exported. The composer emits these into the shim so `run_cli` registers a
     /// dependency's command *under its local name* — trust keyed by package identity (never by
@@ -168,12 +168,12 @@ pub struct ResolvedGraph {
     /// [`PackageOrigin::Root`]. The checker reads this via a span's `SourceId`. Built once here where
     /// every package's `@name` bindings and its link segment are both known.
     pub package_uses: noeta_span::PackageUses,
-    /// scope (`company`) → the trust root established for it during the walk (provenance, Phase 4
-    /// #2 / Phase 5) — a registry-served Ed25519 key or a keyless-verified OIDC identity — to be
+    /// scope (`company`) → the trust root established for it during the walk — a registry-served
+    /// Ed25519 key or a keyless-verified OIDC identity — to be
     /// **pinned** in `noeta.lock` (trust-on-first-use). Empty when no registry dependency carried
     /// provenance.
     pub scope_trust: BTreeMap<String, crate::lock::ScopeTrust>,
-    /// The **root** package's effective language [`Edition`] (follow-on F1) — the edition the merged
+    /// The **root** package's effective language [`Edition`] — the edition the merged
     /// compilation unit compiles under. [`Edition::DEFAULT`] for a bare script with no `[package]`.
     /// Per-dependency editions live on each [`LockedPackage`]; this is the one the front-end reads.
     pub root_edition: crate::edition::Edition,
@@ -200,7 +200,7 @@ impl ResolvedGraph {
     }
 }
 
-/// A resolved package's native entry crate (Phase 3, N3.1): where the composed build finds its
+/// A resolved package's native entry crate: where the composed build finds its
 /// `Cargo.toml`, validated to exist at resolve time.
 #[derive(Debug, Clone)]
 pub struct NativeCrate {
@@ -222,7 +222,7 @@ pub struct NativeCrate {
     pub dev_only: bool,
 }
 
-/// A resolved package pinned for the lockfile (package-manager P2.4c).
+/// A resolved package pinned for the lockfile.
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // fields consumed by the lockfile writer (P2.4c)
 pub struct LockedPackage {
@@ -233,9 +233,9 @@ pub struct LockedPackage {
     pub content_hash: String,
     /// Where it came from — a local path or a git tag pinned to a commit SHA.
     pub source: ResolvedSource,
-    /// The manifest's relative native-crate dir, recorded in the lock as declared (Phase 3).
+    /// The manifest's relative native-crate dir, recorded in the lock as declared.
     pub native: Option<String>,
-    /// The package's effective language [`Edition`] (follow-on F1), pinned so a rebuild reproduces
+    /// The package's effective language [`Edition`], pinned so a rebuild reproduces
     /// the exact edition each dependency compiled under.
     pub edition: crate::edition::Edition,
     /// Whether this package was materialized via the root manifest's dev-time `[patch]` override.
@@ -247,7 +247,7 @@ pub struct LockedPackage {
     pub patched: bool,
 }
 
-/// A resolved dependency's origin (package-manager P2.4).
+/// A resolved dependency's origin.
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // fields consumed by the lockfile writer (P2.4c)
 pub enum ResolvedSource {
@@ -297,7 +297,7 @@ struct Instance {
     dir: PathBuf,
     content_hash: String,
     source: ResolvedSource,
-    /// The manifest's relative native-crate dir, validated against `dir` (Phase 3, N3.1).
+    /// The manifest's relative native-crate dir, validated against `dir`.
     native: Option<String>,
     /// The manifest's relative **dev-only** native-crate dir (`package.dev-native`) — a
     /// formatter/dev-tool crate, admitted untrusted and composed formatter-only. Mutually exclusive
@@ -348,9 +348,9 @@ fn resolve_patches(manifest: &Manifest, manifest_dir: &Path) -> BTreeMap<String,
         .collect()
 }
 
-/// Resolve the full dependency graph rooted at `entry`'s manifest (package-manager P2.4). Returns an
+/// Resolve the full dependency graph rooted at `entry`'s manifest. Returns an
 /// empty graph when there is no manifest or no `[dependencies]` (a bare script). Every failure — an
-/// unreadable/invalid manifest, a git fetch error, a registry dependency (pending P2.5), or a version
+/// unreadable/invalid manifest, a git fetch error, a registry dependency, or a version
 /// conflict — is a human-readable `Err`.
 pub fn resolve_graph(entry: &Path) -> Result<ResolvedGraph, PmError> {
     resolve_graph_for(entry, None)
@@ -382,7 +382,7 @@ pub fn resolve_graph_query_for(
     resolve_graph_impl(entry, target, LockRefresh::Skip)
 }
 
-/// As [`resolve_graph`], but resolving the graph for a specific build **target** (dev-deps arc): the
+/// As [`resolve_graph`], but resolving the graph for a specific build **target**: the
 /// root's dependency set is [`Manifest::active_dependencies`] for `target` — the global
 /// `[dependencies]` plus that target's own and inherited `[targets.<name>.dependencies]`. `None`
 /// (the [`resolve_graph`] default) is the global set, so every existing caller is unchanged. A
@@ -452,7 +452,7 @@ fn resolve_graph_impl(
     // The lock is consulted during the walk (git deps fetched by their pinned SHA — offline when
     // already stored) and refreshed afterwards.
     let lock = crate::lock::Lock::read(&manifest_dir);
-    // The root manifest's `[trust]` is the sole authority (Phase 4): a native-declaring package
+    // The root manifest's `[trust]` is the sole authority: a native-declaring package
     // anywhere in the tree must be listed here or resolution refuses it. A dependency's own trust
     // never applies — authority flows top-down from the human.
     let native_trust = &manifest.trust().native;
@@ -478,7 +478,7 @@ fn resolve_graph_impl(
         patches: &patches,
         patched_versions: BTreeMap::new(),
     };
-    // Phase 4, S5b: first *select versions* — gather the candidate graph (materialize the path/git
+    // First *select versions* — gather the candidate graph (materialize the path/git
     // spine, query the index for every registry candidate + its deps) and run PubGrub. This backtracks
     // over version ranges, so a solvable diamond resolves to a compatible set instead of a greedy
     // false conflict. The walk then materializes exactly the solved versions.
@@ -681,8 +681,7 @@ fn enforce_transparency(
             continue;
         };
         // A registry-resolved release is pinned to a tag; the transparency log is keyed by that tag.
-        // (`git_ref` generalized `tag` to tag/branch/HEAD in the private-registries arc — a non-tag
-        // git source is never a registry identity, so it is not logged.)
+        // (A non-tag git source is never a registry identity, so it is not logged.)
         let crate::manifest::GitRef::Tag(tag) = git_ref else {
             continue;
         };
@@ -714,13 +713,13 @@ struct Walker<'a> {
     instances: BTreeMap<String, Instance>,
     store: Option<Store>,
     lock: &'a crate::lock::Lock,
-    /// Registry indexes, opened on first use and cached by source key (private-registries arc): with a
+    /// Registry indexes, opened on first use and cached by source key: with a
     /// `[registries]` map a scope may resolve from a different registry than the default, so there can
     /// be more than one live index. Keyed so two scopes pointing at the same source share one client.
     indexes: BTreeMap<String, Box<dyn crate::registry::Index>>,
     /// The root manifest's `[registries]` — which registry each scope resolves from.
     registries: &'a crate::manifest::Registries,
-    /// The root manifest's `[trust].native` — package identities allowed to run native code (Phase 4).
+    /// The root manifest's `[trust].native` — package identities allowed to run native code.
     native_trust: &'a std::collections::BTreeSet<String>,
     /// The root manifest's `[trust].require_provenance` — scopes whose releases the consumer demands
     /// carry verified provenance (namespace-protection #1). An unsigned release from a required scope
@@ -730,16 +729,16 @@ struct Walker<'a> {
     /// release published more recently than this is dropped from the candidate set before PubGrub, so a
     /// too-fresh version is never newly selected. `None` = off.
     publish_cooldown: Option<u64>,
-    /// The resolved `identity → version` map (Phase 4, S5b), computed by [`Walker::solve`] before the
+    /// The resolved `identity → version` map, computed by [`Walker::solve`] before the
     /// walk. The walk materializes each registry dependency at *its* selected version rather than
     /// greedily picking the highest; empty until `solve` runs (a pure path/git graph leaves registry
     /// selection unused).
     solution: BTreeMap<String, Version>,
-    /// scope → the trust root established while materializing registry deps (provenance, Phase 4
-    /// #2 / Phase 5); pinned into `noeta.lock` afterwards.
+    /// scope → the trust root established while materializing registry deps; pinned into
+    /// `noeta.lock` afterwards.
     scope_trust: BTreeMap<String, crate::lock::ScopeTrust>,
     /// The identities materialized via a **registry** dependency (not a direct git/path source) —
-    /// what transparency-log enforcement applies to (namespace-protection #1, TLog).
+    /// what transparency-log enforcement applies to.
     registry_ids: std::collections::BTreeSet<String>,
     /// The registry candidate sets `solve` loaded from the index, kept so `materialize` reads the
     /// solved version's release from here instead of re-querying the index — the audit found every
@@ -876,11 +875,11 @@ impl Walker<'_> {
             return Ok(identity); // already materialized and its subtree walked
         }
 
-        // A declared native crate must exist where the manifest points (Phase 3, N3.1) —
+        // A declared native crate must exist where the manifest points —
         // checked here, where the materialized package root is known, so a git dep's typo'd
         // `native` fails at resolve time with the dependency named, not at compose time.
         if let Some(native) = &pkg.native {
-            // Phase 4 authority gate: a native-declaring package runs arbitrary Rust (its
+            // The authority gate: a native-declaring package runs arbitrary Rust (its
             // `cargo` build + the composed code), so it is refused unless the **root** app's
             // `[trust].native` lists its identity — even when reached transitively. Authority is
             // never inherited from a dependency, so a package can't smuggle native code in
@@ -1006,7 +1005,7 @@ impl Walker<'_> {
             && self.lock.locked_version(identity) == Some(version)
     }
 
-    /// Materialize one dependency to an on-disk directory (package-manager P2.4): a path dep is its
+    /// Materialize one dependency to an on-disk directory: a path dep is its
     /// local tree (relative to `base_dir`); a git dep is fetched into the store (its tag resolved to a
     /// commit SHA); a registry dep materializes its solved release. Returns the directory, the pinned
     /// source coordinates, and — when the fetch already computed it — the tree content hash.
@@ -1066,7 +1065,7 @@ impl Walker<'_> {
                 "internal error: scope dependency `{key}` reached `materialize` unexpanded"
             ))),
             Dependency::Registry { package, .. } => {
-                // Materialize the **resolver-selected** version (Phase 4, S5b): the PubGrub solve
+                // Materialize the **resolver-selected** version: the PubGrub solve
                 // already chose one compatible version per identity, so look up the coordinates of
                 // `solution[identity]` in the index rather than greedily re-picking the highest.
                 let package = package.as_ref().ok_or_else(|| {
@@ -1155,12 +1154,12 @@ impl Walker<'_> {
                             ))
                         })?,
                 };
-                // Provenance (Phase 4 #2 / Phase 5): pin the scope's trust root on first use,
+                // Provenance: pin the scope's trust root on first use,
                 // reject a changed key / changed identity / downgraded root, and verify the
                 // signature or keyless bundle (under the `provenance`/`keyless` features).
                 self.check_provenance(key, &name, &release, scope_key.as_deref())?;
                 let coords = release.coords;
-                // The registry pins the SHA (Phase 4, S2), so a first resolve fetches by it rather
+                // The registry pins the SHA, so a first resolve fetches by it rather
                 // than trusting the tag's current target. A published release is always a tag.
                 let git_ref = crate::manifest::GitRef::Tag(coords.tag.clone());
                 // Materialize from the index's already-fetched local clone when it has one (a git-forge
@@ -1177,7 +1176,7 @@ impl Walker<'_> {
         }
     }
 
-    /// Materialize a git `url`@`tag` into the store (package-manager P2.4). Shared by a direct `git`
+    /// Materialize a git `url`@`tag` into the store. Shared by a direct `git`
     /// dependency (`registry_sha = None`) and a resolved registry dependency (`registry_sha = Some`,
     /// the index-pinned commit). The SHA to fetch is, in precedence: the **lockfile** pin (the
     /// reproducibility authority once written) → the **registry** pin (closes trust-on-first-use on a
@@ -1185,8 +1184,8 @@ impl Walker<'_> {
     /// SHA already in the store needs no network at all.
     ///
     /// `url` is the **recorded** origin — the lock pin and `ResolvedSource` key, portable across
-    /// machines. `local_repo`, when set (a git-forge index's already-fetched bare clone,
-    /// private-registries arc), is where the tree is actually **fetched from**, so a git-forge release
+    /// machines. `local_repo`, when set (a git-forge index's already-fetched bare clone), is where
+    /// the tree is actually **fetched from**, so a git-forge release
     /// materializes offline from that clone instead of a second network clone; `url` is still what the
     /// lock records.
     fn fetch_git(
@@ -1223,7 +1222,7 @@ impl Walker<'_> {
         ))
     }
 
-    /// Provenance check for a resolved registry release (Phase 4 #2 / Phase 5). Three layers:
+    /// Provenance check for a resolved registry release. Three layers:
     ///  1. **Trust-root TOFU** (always, no crypto — [`provenance_decision`]): a scope's trust root
     ///     (key or keyless identity) is pinned in `noeta.lock` on first use. A later registry
     ///     serving a *different* key, or switching a scope's root in either direction, or serving
@@ -1348,8 +1347,8 @@ impl Walker<'_> {
         Ok(self.store.as_ref().expect("just opened"))
     }
 
-    /// The registry index for `company`'s packages, opened on first use and cached (private-registries
-    /// arc). The `[registries]` map routes the scope to its source — a specific hosted registry, a
+    /// The registry index for `company`'s packages, opened on first use and cached. The
+    /// `[registries]` map routes the scope to its source — a specific hosted registry, a
     /// GitHub org, or (unmapped) the default chain: `NOETA_REGISTRY_URL`, then `NOETA_REGISTRY_DIR`
     /// (the local index), then the built-in hosted registry at `registry.noeta.dev` (`registry-http`
     /// builds; without the HTTP client, always the local index). Two scopes on the same source share
@@ -1364,7 +1363,7 @@ impl Walker<'_> {
         Ok(self.indexes.get(&key).expect("just inserted").as_ref())
     }
 
-    /// Select one compatible version per package (Phase 4, S5b) and store it in `self.solution`.
+    /// Select one compatible version per package and store it in `self.solution`.
     /// Gathers the candidate graph — the **path/git spine** (materialized to learn each package's
     /// identity, version, and dependency edges) plus every reachable **registry candidate** (queried
     /// from the index, which serves per-version deps, so no cloning) — then runs PubGrub, which
@@ -1751,7 +1750,7 @@ fn exact_req(version: &Version) -> VersionReq {
     VersionReq::parse(&format!("={version}")).expect("=<version> is always a valid requirement")
 }
 
-/// A stable cache key for a `[registries]` source (private-registries arc), so two scopes routed to the
+/// A stable cache key for a `[registries]` source, so two scopes routed to the
 /// same registry share one opened index. `None` (the environment default) is one shared bucket.
 fn registry_cache_key(source: Option<&crate::manifest::RegistrySource>) -> String {
     match source {
@@ -1832,7 +1831,7 @@ fn human_secs(s: u64) -> String {
     }
 }
 
-/// A path/git package as a resolver candidate (Phase 4, S5b): its single pinned version and its
+/// A path/git package as a resolver candidate: its single pinned version and its
 /// dependency edges. A local/git source is authoritative, so it offers exactly one version.
 struct PathGitCandidate {
     version: Version,
@@ -1840,7 +1839,7 @@ struct PathGitCandidate {
     deps: Vec<(String, VersionReq)>,
 }
 
-/// The candidate graph fed to PubGrub (Phase 4, S5b): path/git packages (each a single pinned
+/// The candidate graph fed to PubGrub: path/git packages (each a single pinned
 /// version, overriding the registry for that identity) and registry packages (all published versions
 /// from the index, with their per-version deps). This is what lets the resolver backtrack over ranges.
 struct Candidates<'a> {
@@ -1915,7 +1914,7 @@ enum ProvenanceAction {
     },
 }
 
-/// The **trust-root decision** for one resolved release (Phase 4 #2 / Phase 5): given the scope's
+/// The **trust-root decision** for one resolved release: given the scope's
 /// pinned root (if any) and the release's provenance shape, decide what to verify and what to pin —
 /// or reject. Pure (no IO, no crypto), so every cell of the trust matrix is unit-tested:
 ///
@@ -2002,7 +2001,7 @@ fn provenance_decision(
             ),
         },
         (None, None, None) => match served_key {
-            // A served key with an unsigned release still pins (the existing Phase 4 behavior):
+            // A served key with an unsigned release still pins:
             // the scope's key is known, so a later key change is detectable even before the
             // maintainer signs releases.
             Some(served) => Ok(ProvenanceAction::Key {
@@ -2138,7 +2137,7 @@ fn assemble(
             // A native package's modules live in its Rust extension (composed in downstream), not the
             // link pool — so the loader retains, rather than flags, a `use` under its key.
             native: inst.native.is_some(),
-            // The package's own edition, carried to the loader (editions arc): each dependency's
+            // The package's own edition, carried to the loader: each dependency's
             // modules lex/parse/check under it. Typed end to end — `noeta_pm::edition` and the
             // loader's `noeta_lexer::Edition` are the same `noeta-edition` type.
             edition: inst.edition,
@@ -2267,8 +2266,6 @@ fn toolchain_req_satisfied(req: &semver::VersionReq, running: &semver::Version) 
     req.matches(&released)
 }
 
-/// Check a declared native entry crate exists: `<package root>/<native>/Cargo.toml` must be a
-/// file (Phase 3, N3.1). The manifest parser already rejected absolute/`..` values.
 /// The directory holding `manifest_path`, never empty.
 ///
 /// [`Path::parent`] answers `Some("")` — not `None` — for a bare relative filename, and that is
@@ -2288,6 +2285,8 @@ fn manifest_dir_of(manifest_path: &Path) -> PathBuf {
     }
 }
 
+/// Check a declared native entry crate exists: `<package root>/<native>/Cargo.toml` must be a
+/// file. The manifest parser already rejected absolute/`..` values.
 fn validate_native_crate(package_dir: &Path, native: &str) -> Result<(), PmError> {
     let crate_dir = package_dir.join(native);
     if !crate_dir.join("Cargo.toml").is_file() {
@@ -3381,8 +3380,8 @@ mod tests {
     }
 
     /// Lay out an app + one path dep under a fresh temp base; the dep declares `native = "native"`
-    /// when `with_crate` says to create the crate dir (Phase 3, N3.1). When `trusted`, the app's
-    /// `[trust].native` authorizes `acme/imgfx` (Phase 4) — otherwise resolution refuses the native.
+    /// when `with_crate` says to create the crate dir. When `trusted`, the app's
+    /// `[trust].native` authorizes `acme/imgfx` — otherwise resolution refuses the native.
     ///
     /// Returns the fixture guard beside the app's entry file; the guard deletes the tree on drop, so
     /// the caller keeps it bound for as long as it uses the path.
@@ -3433,7 +3432,7 @@ mod tests {
 
     #[test]
     fn a_target_scoped_dependency_resolves_only_for_its_target() {
-        // An app with a runtime dep `fx` and a dev-only dep `tool` (dev-deps arc): the global graph
+        // An app with a runtime dep `fx` and a dev-only dep `tool`: the global graph
         // sees `fx`; `--target dev` also sees `tool`.
         let base = crate::test_temp::TempDir::new("target-deps");
         let app = base.join("app");
@@ -3632,7 +3631,7 @@ mod tests {
 
     #[test]
     fn registry_cache_key_is_distinct_per_source() {
-        // private-registries S2: the per-scope index cache keys off the source, so two scopes on the
+        // The per-scope index cache keys off the source, so two scopes on the
         // same registry share one index and different registries get distinct ones (the routing seam).
         use crate::manifest::RegistrySource;
         assert_eq!(registry_cache_key(None), "default");
@@ -3692,8 +3691,8 @@ mod tests {
             .expect("dep locked");
         assert_eq!(dep_lock.edition, crate::edition::Edition::DEFAULT);
 
-        // The edition is also carried on the DepPackage that reaches the loader/compiler (editions
-        // arc) — the root and the dependency each get *their own*, in canonical string form.
+        // The edition is also carried on the DepPackage that reaches the loader/compiler — the root
+        // and the dependency each get *their own*, in canonical string form.
         let dep_pkg = graph
             .packages
             .iter()
@@ -3973,8 +3972,8 @@ mod tests {
 
     #[test]
     fn an_untrusted_native_dep_is_refused() {
-        // Phase 4: a native-declaring dependency the app did not authorize in `[trust].native` is
-        // refused — the mere presence of native code no longer runs arbitrary Rust.
+        // A native-declaring dependency the app did not authorize in `[trust].native` is refused —
+        // the mere presence of native code does not run arbitrary Rust.
         let (_fixture, entry) = native_dep_project("native_untrusted", true, false);
         let err = resolve_graph(&entry).expect_err("must be refused");
         assert!(err.message().contains("acme/imgfx"), "{err}");
@@ -4084,7 +4083,7 @@ mod tests {
         assert!(graph.native_crates.is_empty());
     }
 
-    // ── The trust-root decision matrix (Phase 4 #2 / Phase 5) ─────────────────────────────────
+    // ── The trust-root decision matrix ────────────────────────────────────────────────────────
     // `provenance_decision` is the crypto-free half of `check_provenance`; every cell of its
     // matrix is pinned here. The crypto halves are covered in `provenance`/`keyless` tests.
 

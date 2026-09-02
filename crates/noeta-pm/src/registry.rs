@@ -1,4 +1,4 @@
-//! The package **registry index** (package-manager P2.5).
+//! The package **registry index**.
 //!
 //! A registry is an *index*, not a code store (a locked user decision): it maps a package identity +
 //! version to the **git coordinates** (URL + tag) where that release's source lives. Resolving a
@@ -49,8 +49,8 @@ use crate::manifest::{Dependency, Manifest};
 pub const WIRE_MANIFEST_SHA256: &str =
     "4676d9af52bc492a267f407438a42a7abcfbaa7dedd3d29702a4168a4108d555";
 
-/// The git coordinates a registry release resolves to (package-manager P2.5). The **commit SHA** the
-/// tag resolved to at publish time is pinned here too (Phase 4, S2): the index — not just the
+/// The git coordinates a registry release resolves to. The **commit SHA** the
+/// tag resolved to at publish time is pinned here too: the index — not just the
 /// lockfile — is authoritative on "this version = this commit", so a *first* registry resolve fetches
 /// by the pinned SHA rather than trusting whatever the tag currently points at, and a moved tag is
 /// caught against the index. Immutability keys on the whole coordinate, so a tag that moves to a new
@@ -62,7 +62,7 @@ pub struct GitCoords {
     pub sha: String,
 }
 
-/// One registry dependency edge of a published release (package-manager Phase 4, S5): the depended-on
+/// One registry dependency edge of a published release: the depended-on
 /// **package identity** and the SemVer requirement. Carried in the index so the PubGrub resolver sees
 /// a package's dependencies without cloning it — the crates.io-index model that makes range
 /// backtracking practical.
@@ -146,10 +146,10 @@ fn release_dep(key: &str, dep: &Dependency, in_scope: bool) -> Result<Dep, PmErr
     }
 }
 
-/// A published release (package-manager Phase 4, S5): a version, its git [`GitCoords`], the registry
+/// A published release: a version, its git [`GitCoords`], the registry
 /// dependencies that version declares, and — when signed — the release's provenance. The `deps` let
 /// the resolver backtrack over ranges; the provenance lets a consumer verify "version → commit"
-/// independently of trusting the registry, under one of two trust roots (Phase 4 #2 / Phase 5):
+/// independently of trusting the registry, under one of two trust roots:
 /// a key-based `signature` **or** a keyless `bundle` — at most one (enforced at publish).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Release {
@@ -164,10 +164,10 @@ pub struct Release {
     pub yanked: bool,
     /// Hex Ed25519 signature over the attestation (key trust root), or `None`.
     pub signature: Option<String>,
-    /// JSON Sigstore bundle over the same attestation (keyless trust root, Phase 5): a DSSE
+    /// JSON Sigstore bundle over the same attestation (keyless trust root): a DSSE
     /// envelope + Fulcio certificate + Rekor inclusion proof, verified offline. Or `None`.
     pub bundle: Option<String>,
-    /// Publish time as Unix epoch **milliseconds** (publish-cooldown, namespace-protection #1), when
+    /// Publish time as Unix epoch **milliseconds**, when
     /// the index knows it. Drives the consumer's `[trust].publish_cooldown` filter — a release younger
     /// than the window is not newly selected. `None` for sources without a timestamp (the local index,
     /// path/git), which are never subject to cooldown.
@@ -204,8 +204,8 @@ impl Release {
 }
 
 /// The registry index contract: look up a package's published releases (each with its git coordinates
-/// **and dependencies**), record a new release, and serve a **scope's public key** (provenance,
-/// Phase 4 #2). Implemented by [`LocalIndex`] here; the hosted service implements the same shape.
+/// **and dependencies**), record a new release, and serve a **scope's public key**. Implemented by
+/// [`LocalIndex`] here; the hosted service implements the same shape.
 pub trait Index {
     /// Every published [`Release`] of `name` (`company/package`), **including yanked ones** (so an
     /// existing pin can still resolve — callers that *select* must skip `yanked`). An unknown package
@@ -265,8 +265,8 @@ pub trait Index {
     }
 
     /// A **local git repository** already holding `name`'s commits, if this index maintains one, so the
-    /// resolver can materialize a release's tree from it instead of a second network clone
-    /// (private-registries arc). The default `None` means "fetch from the release's coordinates URL"
+    /// resolver can materialize a release's tree from it instead of a second network clone.
+    /// The default `None` means "fetch from the release's coordinates URL"
     /// (the hosted/local index don't hold a clone). A git-forge index returns its cached bare clone.
     fn local_repo(&self, _name: &str) -> Option<PathBuf> {
         None
@@ -277,7 +277,7 @@ pub trait Index {
 /// version** of `name` satisfying `req`. A yanked release is never selected here (this is a *new*
 /// selection — only an existing pin may keep resolving one). Errors when the package is unknown or
 /// no published version matches. Used where a single dependency is materialized directly; the
-/// graph's PubGrub pass (Phase 4, S5b) instead reads whole candidate sets through
+/// graph's PubGrub pass instead reads whole candidate sets through
 /// [`Index::releases`].
 pub fn resolve_coords(
     index: &dyn Index,
@@ -370,7 +370,7 @@ pub fn caret_requirement(version: &Version) -> String {
     }
 }
 
-/// A file-backed [`Index`] (package-manager P2.5): one TOML file per package under a directory, used
+/// A file-backed [`Index`]: one TOML file per package under a directory, used
 /// offline and in tests. Located at `NOETA_REGISTRY_DIR` if set, else `<cache>/registry`. The hosted
 /// registry replaces this with an HTTP client of the same [`Index`] shape.
 #[derive(Debug)]
@@ -414,7 +414,7 @@ impl LocalIndex {
         self.dir.join(format!("{}.toml", name.replace('/', "__")))
     }
 
-    /// The file holding a scope's registered public key (provenance, Phase 4 #2).
+    /// The file holding a scope's registered public key.
     fn scope_key_file(&self, scope: &str) -> PathBuf {
         self.dir.join(format!("scope__{scope}.pub"))
     }
@@ -667,7 +667,7 @@ pub fn default_route(env_url: Option<std::ffi::OsString>, local_dir: bool) -> De
 }
 
 /// Open the registry index a resolve/publish should use when no `[registries]` mapping routes the
-/// scope (package-manager Phase 4, S4). Precedence: `NOETA_REGISTRY_URL` (an explicit hosted
+/// scope. Precedence: `NOETA_REGISTRY_URL` (an explicit hosted
 /// index), then `NOETA_REGISTRY_DIR` (the file-backed [`LocalIndex`] — offline / tests), then the
 /// **built-in hosted registry** at [`DEFAULT_REGISTRY_URL`] — the production index is live, so the
 /// bare default is networked. A build without the `registry-http` feature has no HTTP client and
@@ -695,7 +695,7 @@ pub fn open_default() -> Result<Box<dyn Index>, PmError> {
     }
 }
 
-/// Open the index for a `[registries]` source (private-registries arc): `None` = the environment
+/// Open the index for a `[registries]` source: `None` = the environment
 /// default ([`open_default`]); a hosted URL = an [`HttpIndex`] at that base; a GitHub org = a
 /// git-forge index over that org. This is what lets a project route each scope to its own registry.
 pub fn open_source(
@@ -723,12 +723,12 @@ fn open_hosted(_url: &str) -> Result<Box<dyn Index>, PmError> {
 }
 
 /// Open a git forge as a registry (a `[registries]` `github:`/`gitlab:`/`git:` source, normalized to a
-/// base URL): packages resolve from `<base>/<package>` by their semver tags (private-registries arc).
+/// base URL): packages resolve from `<base>/<package>` by their semver tags.
 fn open_git_forge(base: &str) -> Result<Box<dyn Index>, PmError> {
     Ok(Box::new(crate::git_forge::GitForgeIndex::from_base(base)?))
 }
 
-/// The networked registry index (package-manager Phase 4, S4): an HTTP client of the hosted index
+/// The networked registry index: an HTTP client of the hosted index
 /// (see the `noeta-registry` Worker + its `PROTOCOL.md`). Reads over `GET`, publishes over `POST`
 /// with a bearer token (`NOETA_REGISTRY_TOKEN`). The registry serves only git *coordinates*, never
 /// source, so a compromised index can at worst point at a different repo/tag — which the SHA pin and
@@ -801,7 +801,7 @@ struct ScopeResponse {
     public_key: Option<String>,
 }
 
-/// One public report as served by the registry's triage endpoints (advisory-intake arc, tier 4). A
+/// One public report as served by the registry's triage endpoints. A
 /// report is raw intake — it becomes an advisory only when an operator or the scope owner promotes it
 /// (`noeta advisory promote`), prefilling the advisory from these fields.
 #[cfg(feature = "registry-http")]
@@ -1037,7 +1037,7 @@ impl HttpIndex {
         )))
     }
 
-    /// File a **public report** against a package (advisory-intake arc, tier 4): `POST /v1/reports`.
+    /// File a **public report** against a package: `POST /v1/reports`.
     /// Unauthenticated (the registry rate-limits by IP); a report is never an advisory — it is queued
     /// for triage and only becomes an advisory when an operator or the scope owner promotes it. Returns
     /// the opaque report id the registry assigned.
@@ -1924,7 +1924,7 @@ fn error_detail(text: &str, status: reqwest::StatusCode) -> String {
 
 /// A proof of scope ownership presented to `POST /v1/scopes/claim` (namespace-protection #1): a GitHub
 /// Actions OIDC token (CI), a GitHub OAuth access token from the device flow (laptop), or a **domain**
-/// whose control the registry verifies via a well-known file (namespace-protection follow-on). The two
+/// whose control the registry verifies via a well-known file. The two
 /// GitHub proofs resolve server-side to one owner identity (interchangeable); a domain proof is its own
 /// `domain` owner kind.
 #[cfg(feature = "registry-http")]
@@ -2973,12 +2973,12 @@ mod http_tests {
         assert_eq!(path, "/v1/packages/acme/imgfx");
         assert!(body.contains("\"sha\":\"abc\""), "body: {body}");
         assert!(body.contains("\"version\":\"1.0.0\""), "body: {body}");
-        // The dependency metadata is sent so the index can serve it to the resolver (S5).
+        // The dependency metadata is sent so the index can serve it to the resolver.
         assert!(
             body.contains("\"package\":\"acme/bar\""),
             "deps in body: {body}"
         );
-        // The provenance signature rides along (Phase 4 #2).
+        // The provenance signature rides along.
         assert!(
             body.contains("\"signature\":\"deadbeef\""),
             "signature in body: {body}"
@@ -3138,7 +3138,7 @@ mod http_tests {
 
     #[test]
     fn http_index_sets_a_scope_policy_with_the_owner_token() {
-        // namespace-protection #1 Phase 1: `set_scope_policy` POSTs the require-provenance policy to
+        // `set_scope_policy` POSTs the require-provenance policy to
         // /v1/scopes/{scope}/policy under the scope's publish token, and surfaces the status.
         let (tx, rx) = mpsc::channel();
         let base = mock_server(move |method, path, body| {
@@ -3790,7 +3790,7 @@ mod wire_fixture_tests {
         assert!(!a.withdrawn);
         assert_eq!(a.seq, 0);
         assert_eq!(a.log_index, Some(0));
-        // The intake tier is carried and defaults to operator (advisory-intake arc); the fixture's
+        // The intake tier is carried and defaults to operator; the fixture's
         // signature verifying above already proves the tier is bound into the canonical bytes.
         assert_eq!(a.tier, crate::advisory::AdvisoryTier::Operator);
         // And it matches the versions the fixture yanked/patched story says it should.

@@ -1,4 +1,4 @@
-//! Multi-worker in-process hot reload (server-hmr F5): under `noeta serve --parallel N --watch`,
+//! Multi-worker in-process hot reload: under `noeta serve --parallel N --watch`,
 //! a source edit **broadcasts** to every worker isolate — each drains the shared swap queue and
 //! serves the new code, no restart.
 //!
@@ -180,7 +180,7 @@ fn idle_swap_round_trip(parallel: Option<usize>) -> Result<Swap, String> {
             before.push(get(&addr)?);
         }
         std::fs::write(&app_path, app("v2")).map_err(|e| e.to_string())?;
-        // The wake's whole job (server-hmr L3): the watcher deposits into a server with nothing in
+        // The wake's whole job: the watcher deposits into a server with nothing in
         // flight and rouses it *then*, rather than leaving the swap to be picked up by whichever
         // request happens along next. So: no traffic, then exactly one request.
         std::thread::sleep(IDLE);

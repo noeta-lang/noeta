@@ -31,7 +31,7 @@ pub(crate) struct SchedState {
     /// Whether each `scopes` slot is a closed tombstone (Track A.7). Parallel to `scopes`. Mirrors the
     /// tree-walker's `scope_closed`.
     pub(crate) scope_closed: Vec<bool>,
-    /// The **current strand's task-local context** (native-otel T5a): an opaque `u64` stack
+    /// The **current strand's task-local context**: an opaque `u64` stack
     /// extensions read through `NativeCtx::context_*` (telemetry's active-span stack is the first
     /// client). This cell always belongs to whichever strand is executing — the main strand (root)
     /// by default; the scheduler swaps a task's own saved context in around each poll of its step
@@ -45,11 +45,11 @@ pub(crate) struct SchedState {
     /// isolate, and `next_strand` (from `2`) hands out ids at each cooperative `isolate` spawn.
     pub(crate) current_strand: u32,
     pub(crate) next_strand: u32,
-    /// Whether telemetry is enabled, cached from the host at load (native-otel T5d perf): the
+    /// Whether telemetry is enabled, cached from the host at load: the
     /// enabled state is fixed per host (env-derived at construction), and the channel send/recv
     /// hot paths gate on it — a cached bool is one predictable branch instead of a virtual call.
     pub(crate) tel_on: bool,
-    /// **Traced futures** (native-otel T5c) — the future-completion hook behind
+    /// **Traced futures** — the future-completion hook behind
     /// `NativeCtx::trace_future`: each entry holds one retained reference to a step future whose
     /// polls run under its saved context and whose completion (or abort) ends its telemetry span.
     /// Almost always empty (the hot check in `poll_once` is `is_empty()`); entries leave on
@@ -124,7 +124,7 @@ impl<'m> Vm<'m> {
 
     /// Join a finished isolate's worker thread and drop it from the in-flight count. When the
     /// last in-flight isolate is joined, no thread can be borrowing the shared region any more,
-    /// so the promoted argument graphs are freed wholesale (P-PAR S2).
+    /// so the promoted argument graphs are freed wholesale.
     fn finish_isolate(&mut self, id: u32) {
         if let Some(handle) = self.isolates.isolates[id as usize].handle.take() {
             let _ = handle.join();
@@ -160,7 +160,7 @@ impl<'m> Vm<'m> {
         }
     }
 
-    /// Free the borrow-share region and its promote-once memo (P-PAR S2). Sound only when no
+    /// Free the borrow-share region and its promote-once memo. Sound only when no
     /// worker thread can still borrow it: every in-flight isolate joined (`finish_isolate` at
     /// count 0) or VM teardown after the defensive join loop. Idempotent (everything drains).
     pub(crate) fn free_shared_region(&mut self) {
@@ -233,7 +233,7 @@ impl<'m> Vm<'m> {
         true
     }
 
-    /// Poll a future once. The thin outer layer is the **traced-future hook** (native-otel T5c):
+    /// Poll a future once. The thin outer layer is the **traced-future hook**:
     /// a future registered via `NativeCtx::trace_future` polls under its own saved context (the
     /// task-swap discipline, applied to a bare future) and, on completion or abort, has its
     /// telemetry span ended here — the completion hook `with_span` over an async body needs.
@@ -282,7 +282,7 @@ impl<'m> Vm<'m> {
         polled
     }
 
-    /// The sender's trace context to ride an outbound channel message (native-otel T5d): the
+    /// The sender's trace context to ride an outbound channel message: the
     /// current strand's active span's W3C context — `None` when telemetry is off or no span is
     /// active. The enabled state is a bool cached at `Vm::load` (`tel_on` — it is fixed per host),
     /// so an untraced program pays one predictable branch per send, not a virtual host call.
@@ -294,7 +294,7 @@ impl<'m> Vm<'m> {
         Some(self.persist.host.tel_span_context(top))
     }
 
-    /// Seed the receiving strand's context from a dequeued message's (native-otel T5d) — but only
+    /// Seed the receiving strand's context from a dequeued message's — but only
     /// when the strand is **at top level**: an empty context, or exactly one remote seed left by a
     /// previous message (replaced, and released so a queue-worker's interned table stays bounded).
     /// A strand inside real active spans is never hijacked; a context-less message at top level
@@ -362,7 +362,7 @@ impl<'m> Vm<'m> {
         if let Some(id) = future.async_io_id() {
             return match self.persist.executor.poll_ext(id) {
                 // Ready → materialize the descriptor's `NativeOut` exactly like a synchronous
-                // dispatch result (extern-types X5); an IO failure aborts (E0021) at the
+                // dispatch result; an IO failure aborts (E0021) at the
                 // `.await`, matching the synchronous `fs.*`.
                 Some(Ok(out)) => Ok(Poll::Ready(crate::values::materialize_native(out))),
                 Some(Err(error)) => Err(self.std_dispatch_error(error, span)),
@@ -399,7 +399,7 @@ impl<'m> Vm<'m> {
                         // the message enters the one queue either way; the difference is the poll
                         // result and the phase transition.
                         SendAction::DeliverBuffered | SendAction::Deposit => {
-                            // The sender's trace context rides the message (T5d) — automatic
+                            // The sender's trace context rides the message — automatic
                             // propagation without touching the message type.
                             let context = self.outbound_trace_context();
                             let Channel::Local { buffer, .. } = &mut self.persist.channels[id]
@@ -467,7 +467,7 @@ impl<'m> Vm<'m> {
                                     ));
                                 }
                             };
-                            // The sender's trace context crosses the thread with the payload (T5d).
+                            // The sender's trace context crosses the thread with the payload.
                             let context = self.outbound_trace_context();
                             if core.try_push(wire, context) {
                                 release(msg);
@@ -502,7 +502,7 @@ impl<'m> Vm<'m> {
                                 unreachable!("just matched Local");
                             };
                             let (msg, context) = buffer.pop_front().expect("non-empty");
-                            // Seed the receiving strand from the message's context (T5d).
+                            // Seed the receiving strand from the message's context.
                             self.seed_context_from_message(context);
                             self.persist.channel_progress += 1;
                             return Ok(Poll::Ready(make_some(msg)));
@@ -523,7 +523,7 @@ impl<'m> Vm<'m> {
                                 &self.persist.shapes,
                                 &mut self.persist.channels,
                             );
-                            // Seed the receiving strand from the message's context (T5d).
+                            // Seed the receiving strand from the message's context.
                             self.seed_context_from_message(context);
                             self.persist.channel_progress += 1;
                             return Ok(Poll::Ready(make_some(value)));
@@ -576,7 +576,7 @@ impl<'m> Vm<'m> {
                 if task.result.is_none() && !task.cancelled && !task.polling {
                     let future = task.future;
                     self.sched.scopes[si][ti].polling = true;
-                    // Swap the task's own context in for the duration of its poll (T5a), so
+                    // Swap the task's own context in for the duration of its poll, so
                     // telemetry scope follows the task, not the interleaving. The paired swaps
                     // nest like parentheses across re-entrant rounds (a nested join inside this
                     // poll swaps inner tasks against *this* saved cell and restores it), and the
@@ -798,7 +798,7 @@ impl<'m> Vm<'m> {
         }
         let scope_idx = self.innermost_open();
         let task_idx = self.sched.scopes[scope_idx].len();
-        // The child inherits a snapshot of the spawner's task-local context (T5a).
+        // The child inherits a snapshot of the spawner's task-local context.
         let context = self.sched.ctx_current.clone();
         // ...and the spawner's strand (DAP worker debugging): a plain task is cooperative
         // concurrency *within* the current thread, not a new one. An isolate root overrides this
@@ -961,7 +961,7 @@ impl<'m> Vm<'m> {
             .collect();
         let mut iso_args = Vec::with_capacity(args.len());
         for &v in args {
-            // Borrow-share a promotable data graph (P-PAR S2): promote it into the VM's shared
+            // Borrow-share a promotable data graph: promote it into the VM's shared
             // region once — the memo makes the same corpus fanned to N workers a single
             // promotion — and hand the worker a zero-copy borrowed root. Immediates, channel
             // endpoints, function values, and anything else non-promotable keep the `Wire` copy.
@@ -1027,17 +1027,17 @@ impl<'m> Vm<'m> {
             .as_ref()
             .expect("parallel VM has a factory")
             .clone();
-        // The spawner's trace context crosses with the args (T5d): the worker interns it as its
+        // The spawner's trace context crosses with the args: the worker interns it as its
         // root seed, so the isolate's spans continue this trace — real-path parity with the
-        // cooperative task inheritance (T5a).
+        // cooperative task inheritance.
         let trace = self.outbound_trace_context();
-        // The worker inherits this VM's registry across the thread boundary (instance-registry
-        // IR3): a `&'static Registry` is `Send`, so a session with its own extension set resolves
+        // The worker inherits this VM's registry across the thread boundary: a `&'static Registry`
+        // is `Send`, so a session with its own extension set resolves
         // native names identically on its isolates. `None` (the default) keeps the worker on the
         // process-global default, exactly as the parent.
         let registry = self.persist.registry;
         let profile_seam = self.isolates.profile_seam.clone();
-        // The worker participates in the stall registry iff this parent does (isolates I.4c); its
+        // The worker participates in the stall registry iff this parent does; its
         // `active` slot is already registered above, on the parent thread.
         let stall_tracked = self.stall_active;
         // This worker's cancellation token (isolate-cancel): the parent requests through it from
@@ -1065,7 +1065,7 @@ impl<'m> Vm<'m> {
             );
             let _ = tx.send(msg);
             // The result landing is cross-thread progress: wake the parent's parked scheduler
-            // (P-PAR S3) so it harvests immediately instead of sleeping out its stall quantum.
+            // so it harvests immediately instead of sleeping out its stall quantum.
             isolate::WAKE.notify();
         });
         let id = self.isolates.isolates.len() as u32;
@@ -1158,7 +1158,7 @@ impl<'m> Vm<'m> {
             // `concurrent` block — runs no bytecode, so the dispatch loop's safepoints never come
             // around. `None` outside a worker, so this is a predicted no-op on every other run.
             self.check_cancel()?;
-            // Snapshot the wake generation before polling (P-PAR S3): progress a worker makes
+            // Snapshot the wake generation before polling: progress a worker makes
             // *during* this round then returns the stall wait immediately instead of parking.
             let wake_gen = isolate::WAKE.generation();
             let before = self.persist.channel_progress;

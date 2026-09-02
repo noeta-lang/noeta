@@ -1,4 +1,4 @@
-//! `noeta.lock` — the reproducible dependency pin (package-manager P2.4c).
+//! `noeta.lock` — the reproducible dependency pin.
 //!
 //! After the graph walk ([`crate::graph`]) resolves the dependency graph, the resolved coordinates
 //! are written here next to `noeta.toml`: each package's identity, version, source, and content hash.
@@ -40,12 +40,12 @@ pub const LOCK_NAME: &str = "noeta.lock";
 
 /// The lock format version. A lock written by a newer format is ignored (treated as absent) so an
 /// older toolchain re-resolves rather than misreading it. Bumped to `2` when the per-package
-/// language `edition` was recorded (follow-on F1) — an older toolchain re-resolves rather than
+/// language `edition` was recorded — an older toolchain re-resolves rather than
 /// reading a lock whose editions it wouldn't understand.
 const LOCK_VERSION: i64 = 2;
 
-/// A **pinned trust root**, recorded trust-on-first-use in `noeta.lock`. Two roots exist (Phase 4
-/// #2 / Phase 5) and the pin remembers *which* — that memory is the downgrade defense: something
+/// A **pinned trust root**, recorded trust-on-first-use in `noeta.lock`. Two roots exist and the
+/// pin remembers *which* — that memory is the downgrade defense: something
 /// pinned [`ScopeTrust::Keyless`] refuses a later key-signed or unsigned release, so a registry
 /// compromise can't quietly step it down to a weaker root. This type is deliberately crypto-free
 /// (plain strings): the lock layer — like the LSP — reasons about trust *shapes* without linking any
@@ -93,7 +93,7 @@ pub struct AdvisoryTrust {
     pub digest: String,
 }
 
-/// A read lockfile: the pins a build consults to reproduce (package-manager P2.4c). Missing or
+/// A read lockfile: the pins a build consults to reproduce. Missing or
 /// unreadable → [`Lock::empty`] (the walk then resolves from scratch).
 #[derive(Debug, Default)]
 pub struct Lock {
@@ -113,10 +113,9 @@ pub struct Lock {
     /// package identity → content hash (integrity check for immutable git sources).
     hashes: BTreeMap<String, String>,
     /// package identity → its pinned commit SHA (git sources) — the *previous* commit, so `noeta
-    /// update`/`add` can diff old→new and surface a new committer (namespace-protection, committer
-    /// signal). Keyed by identity because a version bump changes the tag, so `(url, tag)` won't match.
+    /// update`/`add` can diff old→new and surface a new committer. Keyed by identity because a version bump changes the tag, so `(url, tag)` won't match.
     shas: BTreeMap<String, String>,
-    /// **pinned** trust roots, trust-on-first-use (Phase 4 #2 / Phase 5): once a root is recorded
+    /// **pinned** trust roots, trust-on-first-use: once a root is recorded
     /// here, a later registry serving a different key, a different keyless identity, or a *weaker
     /// root* (keyless → key/unsigned) is rejected — so a registry compromised *after* first use
     /// can't forge releases or downgrade trust. Keyed by scope (`para`) for a key root and by
@@ -276,7 +275,7 @@ impl Lock {
     }
 
     /// The pinned trust root recorded under `key` — a scope (`para`) for a key root, a package
-    /// identity (`para/html`) for a keyless one (provenance TOFU, Phase 4 #2 / Phase 5).
+    /// identity (`para/html`) for a keyless one.
     pub fn scope_trust(&self, key: &str) -> Option<&ScopeTrust> {
         self.scope_trust.get(key)
     }
@@ -527,14 +526,14 @@ mod tests {
             lock.git_pin("../local", &crate::manifest::GitRef::Head),
             None
         );
-        // The pinned scope key round-trips (provenance TOFU, Phase 4 #2).
+        // The pinned scope key round-trips.
         assert_eq!(
             lock.scope_trust("acme"),
             Some(&ScopeTrust::Key("b".repeat(64)))
         );
         assert_eq!(lock.scope_trust("nobody"), None);
 
-        // The per-package edition is recorded for reproducibility (follow-on F1), under the bumped
+        // The per-package edition is recorded for reproducibility, under the bumped
         // format version. It is a record field (re-derived from manifests on resolve, like `native`),
         // so it round-trips via the rendered file, not the read model.
         let text = std::fs::read_to_string(dir.join(LOCK_NAME)).unwrap();

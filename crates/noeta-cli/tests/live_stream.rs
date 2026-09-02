@@ -1,4 +1,4 @@
-//! Streaming HTTP end-to-end over real sockets (http-streaming arc) — the only place the *real*
+//! Streaming HTTP end-to-end over real sockets — the only place the *real*
 //! host's streaming is exercised, since the conformance corpus always runs the deterministic
 //! sandbox.
 //!

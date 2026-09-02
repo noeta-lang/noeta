@@ -159,7 +159,7 @@ pub fn toolchain_roots() -> Vec<&'static str> {
     roots
 }
 
-/// Build the **API-reference** `docs.json` (docs-browser Arc 2) from the intrinsic registry — the
+/// Build the **API-reference** `docs.json` from the intrinsic registry — the
 /// stdlib and any composed native modules — rather than from `.noe` source. One module entry per
 /// registry module (`std.math`, `std.http.client`, …), each function an `fn` item carrying its
 /// rendered signature and any registered doc prose. Same schema-1 shape as [`generate`], so it

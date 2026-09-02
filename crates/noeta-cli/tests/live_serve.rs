@@ -1,4 +1,4 @@
-//! LiveView end-to-end over a real socket (server-hmr L2): serve the bundled counter example,
+//! LiveView end-to-end over a real socket: serve the bundled counter example,
 //! fetch the page and the bundled client shim over plain HTTP, then speak the view/diff protocol
 //! through a real RFC 6455 websocket — snapshot on connect, JSON events in, minimal patch frames
 //! out.

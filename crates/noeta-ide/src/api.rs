@@ -1,4 +1,4 @@
-//! The API-reference corpus (docs-browser arc, Arc 2): the stdlib and native-package surface read
+//! The API-reference corpus: the stdlib and native-package surface read
 //! straight from the intrinsic registry, so signatures are DRY against the real source of truth and
 //! third-party native packages appear through the same path.
 //!
@@ -166,7 +166,7 @@ fn types_in(exts: &[Ext], keep: &dyn Fn(Ext) -> bool) -> Vec<ApiType> {
                     signature: f.render(),
                     doc: doc_of_method(f.name),
                 })
-                // Call-site-typed methods (http arc H8) are part of the type's surface — without
+                // Call-site-typed methods are part of the type's surface — without
                 // them `resp.json::<T>()` would be invisible to completion, hover, and the docs
                 // browser, which is most of what makes the turbofish discoverable at all. Listed
                 // under their turbofish spelling, like a module's typed functions above (a name may
@@ -734,7 +734,7 @@ mod tests {
 
     #[test]
     fn extern_type_methods_carry_prose() {
-        // The Uuid type's methods are all documented (Arc 2 A3 backfill).
+        // The Uuid type's methods are all documented.
         let uuid = type_("std.id.Uuid").expect("std.id.Uuid present");
         assert!(!uuid.methods.is_empty());
         assert!(

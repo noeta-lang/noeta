@@ -1,8 +1,8 @@
-//! P-PAR S0c: measure the synchronous tier-1 compile pause (`plans/perf/parallel-seams/`).
+//! Measure the synchronous tier-1 compile pause.
 //!
 //! Generates a program with many int-only functions of mixed sizes, runs it under **ordinary
 //! hot-counter promotion** (the production tiering), and reports how much mutator wall time the
-//! in-line Cranelift compiles cost — the go/no-go input for the off-thread-JIT slice (S4).
+//! in-line Cranelift compiles cost.
 //!
 //! Run: `cargo run --release -p noeta-vm --features jit --example jit_pause`
 
@@ -12,7 +12,7 @@ use noeta_parser::parse;
 use noeta_span::{Source, SourceId};
 use noeta_vm::VmBackend;
 
-/// One int-only function of `stmts` chained arithmetic statements — J1-eligible, so promotion
+/// One int-only function of `stmts` chained arithmetic statements — JIT-eligible, so promotion
 /// compiles a real native body whose size scales with `stmts`.
 fn make_fn(name: &str, stmts: usize) -> String {
     let mut body = String::from("    mut a = x\n");
@@ -23,7 +23,7 @@ fn make_fn(name: &str, stmts: usize) -> String {
 }
 
 fn main() {
-    // Own assembling driver (audit-6 F2): seed the std units before compiling.
+    // Own assembling driver: seed the std units before compiling.
     noeta_stdlib::registry::default_seeded();
     // 30 functions, each called 60 times (> JIT_HOT_THRESHOLD = 50) so every one is promoted
     // mid-run. Sizes: mixed 5/40/160 statements by default; `JIT_PAUSE_STMTS=<n>` makes all 30
@@ -87,7 +87,7 @@ fn main() {
         stats.compile_ns_max / 1_000
     );
     println!("compile avg     {:>10} µs", avg_us);
-    // CAVEAT (P-JCT): with off-thread compilation (P-PAR S4) compile time OVERLAPS the mutator
+    // CAVEAT: with off-thread compilation compile time OVERLAPS the mutator
     // and the stats entry point drains the queue at exit, so `wall − compile` is NOT "runtime"
     // — a compile-bound run reports ~0 here. For generated-code quality, compare `wall` at call
     // counts large enough that runtime dominates.
@@ -95,7 +95,7 @@ fn main() {
         "runtime (wall − compile) {:>7.1} ms",
         (wall.as_nanos() as f64 - stats.compile_ns_total as f64) / 1e6
     );
-    // P-JCT C0: where compile total goes. `build` (IR construction) is the remainder.
+    // Where the compile total goes. `build` (IR construction) is the remainder.
     let b = stats.breakdown;
     let build_ns = stats
         .compile_ns_total

@@ -44,7 +44,7 @@ pub fn from_decl(decl: &FnDecl, active: usize) -> SignatureData {
     }
 }
 
-/// The signature to show while the cursor is inside a **directive's** argument list (C5): a
+/// The signature to show while the cursor is inside a **directive's** argument list: a
 /// synthetic signature naming the directive's own vocabulary — decorators from their fixed
 /// grammar, a tier annotation (`@bench(…)`) from its config attribute's fields. `None` when the
 /// directive takes no arguments the cursor could be typing (an unknown tier, a knob-less `@test`).

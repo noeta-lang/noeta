@@ -1,4 +1,4 @@
-//! Hot-swap oracle + behavior pins (server-hmr H0).
+//! Hot-swap oracle + behavior pins.
 //!
 //! The spine is the **swap differential**: for a program without retained state, hot-swapping
 //! v1 → v2 into a live session and then probing must be observationally identical to cold-starting
@@ -61,7 +61,7 @@ fn verdict(old_src: &str, new_src: &str) -> SwapDiff {
 
 /// The full driver dance: gate on the NEW version's check (transactional), require a swappable
 /// verdict, apply it **with that check's whole-program sites** — exactly what the hot watcher
-/// deposits (server-hmr H5), so the fragment compiles with the same site-keyed codegen and precise
+/// deposits, so the fragment compiles with the same site-keyed codegen and precise
 /// destructor relevance a cold start of the new version gets. Returns the plan (for bookkeeping
 /// assertions) and the swap entry's output (a re-running swap's re-executed top level lands its
 /// stdout here).
@@ -360,7 +360,7 @@ fn a_method_body_swap_reaches_instances_created_before_the_swap() {
     oracle(v1, v2, "echo c.describe();");
 }
 
-// ------------------------------------------- H5: the swap compiles against the check's own sites
+// --------------------------------- the swap compiles against the check's own sites
 //
 // Everything below is a body edit whose swapped code needs a **span-keyed checker site** to behave
 // the way a cold start behaves. Every one of them diverged from its own cold start under the
@@ -793,7 +793,7 @@ fn an_appended_declaration_leaves_the_rest_of_the_file_out_of_the_fragment() {
     );
 }
 
-/// The **live-VM** half of H5, end to end through the mailbox the CLI actually uses: a deposit
+/// The **live-VM** half, end to end through the mailbox the CLI actually uses: a deposit
 /// carrying its sites is drained at a scheduler tick and installed via `Vm::install_fragment` →
 /// `FragmentCompiler::extend_checked`. Same named-argument probe as above, so a checkerless install
 /// prints `2-1` on the post-swap line; with the bundle both lines bind by label. (The oracle tests
@@ -933,7 +933,7 @@ fn a_field_layout_change_blocks() {
     );
 }
 
-/// H3 — the swap lands while a **live force-JIT engine** is armed and `main`'s native frame is on
+/// The swap lands while a **live force-JIT engine** is armed and `main`'s native frame is on
 /// the machine stack (the await suspension is where the scheduler tick applies the pre-deposited
 /// plan). Exercises retire→re-arm end to end: the retired engine's pages must stay executable
 /// (main returns into them), the mirror tables clear, and the re-armed engine compiles the
@@ -972,9 +972,9 @@ fn a_swap_lands_under_a_live_force_jit_engine() {
         panic!("a body edit must be swappable");
     };
     let mailbox: HotSwapMailbox = std::sync::Arc::new(HotChannel::default());
-    // The mailbox queues `HotFragment`s (server-hmr F5): the watcher owns the compiler and hands the
+    // The mailbox queues `HotFragment`s: the watcher owns the compiler and hands the
     // VM only the applied-swap payload, mirroring `noeta_cli::watch`'s deposit — the gate's own
-    // whole-program sites included (H5).
+    // whole-program sites included.
     let new_checked = noeta_check::check_all(&parse(&v2));
     mailbox.deposit(noeta_vm::HotFragment {
         fragment: plan.fragment,
@@ -1046,8 +1046,8 @@ fn a_field_default_change_blocks() {
 
 #[test]
 fn a_comment_edit_inside_a_type_does_not_restart() {
-    // H2: the residual is compared as TOKENS, so trivia edits between fields — a doc tweak, a
-    // reflowed comment — no longer read as layout changes (H0's raw-text residual forced a
+    // The residual is compared as TOKENS, so trivia edits between fields — a doc tweak, a
+    // reflowed comment — do not read as layout changes (a raw-text residual would force a
     // state-losing restart here).
     let v1 = "struct P {\n    // the x coordinate\n    x: int\n\n    fn get(): int { return self.x; }\n}\n";
     let v2 = "struct P {\n    // the horizontal coordinate\n    x: int\n\n    fn get(): int { return self.x; }\n}\n";
@@ -1304,7 +1304,7 @@ fn signal_state_survives_a_swap_and_the_effect_reruns_with_its_new_body() {
 
 #[test]
 fn a_view_rebuilt_by_a_swap_diffs_against_a_fresh_baseline() {
-    // The L1∘H1 seam: a `view` is PLAIN state (rebuilt by the re-run) over PRESERVED reactive
+    // The view/re-run seam: a `view` is PLAIN state (rebuilt by the re-run) over PRESERVED reactive
     // state. After a swap edits an unrelated binding, the re-run re-creates the view and
     // re-exposes the surviving signal — the fresh baseline means diff() is quiet until a real
     // change, and the first post-swap change diffs against the preserved (not initial) value.
@@ -1433,7 +1433,7 @@ fn residency_returns_to_baseline_across_rerunning_swaps_with_reactivity() {
     );
 }
 
-// ------------------------------------------- broadcast-queue retention (server-hmr H5 retention)
+// ------------------------------------------------------- broadcast-queue retention
 
 /// The versions the two retention tests below swap through: one function body, one distinct tag
 /// each. `probe`'s await is the scheduler tick the drain happens at, so the second echo reports
@@ -1499,11 +1499,11 @@ fn run_hot_worker(mailbox: &noeta_vm::HotSwapMailbox) -> noeta_vm::RunResult {
 /// **A deposit's payload is reclaimed once — and only once — every worker has installed it.**
 ///
 /// The queue is append-only and a `--parallel N` fleet drains it by N independent cursors, so
-/// nothing may be dropped until the slowest worker has passed it. Since H5 made each deposit carry
-/// the whole-program `Sites` of the check that admitted it, "when the process exits" stopped being
-/// an acceptable answer: measured on a 293 KB app, that bundle is 204 KiB against 14 KiB for the
-/// one-function fragment beside it, and it scales with the PROGRAM where the fragment scales with
-/// the EDIT. A day of saves would retain hundreds of MB of superseded site maps.
+/// nothing may be dropped until the slowest worker has passed it. Each deposit carries the
+/// whole-program `Sites` of the check that admitted it, which is far larger than the one-function
+/// fragment beside it and scales with the PROGRAM where the fragment scales with the EDIT — so
+/// "when the process exits" is not an acceptable answer: a day of saves would retain hundreds of MB
+/// of superseded site maps.
 ///
 /// This drives the real path — `HotChannel::deposit` from the watcher's side, `Vm::apply_pending_hotswap`
 /// → `HotChannel::drain` → `Vm::install_fragment` from each worker's — with a three-consumer channel

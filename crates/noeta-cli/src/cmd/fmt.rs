@@ -85,9 +85,9 @@ pub(crate) fn cmd_fmt(
         lang_formatters.insert(language, formatter);
         sub_formatters.insert(language.to_string(), formatter);
     }
-    // Per-directory tier discovery (one scan per directory, audit-4 F10): the text-tier set —
+    // Per-directory tier discovery (one scan per directory): the text-tier set —
     // a tier declared in a sibling file or a dependency package must keep this file's
-    // `@<name> { … }` bodies verbatim (text-tiers arc) — and the tier → body-formatter map,
+    // `@<name> { … }` bodies verbatim — and the tier → body-formatter map,
     // produced together by `fmt_dir_tiers`.
     let mut dir_tiers: std::collections::HashMap<
         PathBuf,
@@ -168,11 +168,11 @@ pub(crate) fn unified_diff(path: &str, original: &str, formatted: &str) -> Strin
         .to_string()
 }
 
-/// The per-directory tier discovery for formatting, in **one scan** (audit-4 F10): each sibling
+/// The per-directory tier discovery for formatting, in **one scan**: each sibling
 /// `.noe` file — and, when the entry's package graph resolves (a manifest with dependencies),
 /// each dependency module — is read once, producing both artifacts together:
 ///
-/// - the project-wide **text-tier set** (text-tiers arc): the union of `@tier(…, text:/expr:)`
+/// - the project-wide **text-tier set**: the union of `@tier(…, text:/expr:)`
 ///   declarations, whose `@<name> { … }` bodies must stay verbatim. Mirrors the loader's
 ///   program-wide lex, so `noeta fmt` and `noeta run` agree on which bodies are verbatim. A
 ///   standalone file with no siblings or manifest gets the default set (same-file declarations

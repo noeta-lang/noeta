@@ -1,4 +1,4 @@
-//! `noeta serve --watch` hot-reload integration test (server-hmr W1): spawn the watch wrapper
+//! `noeta serve --watch` hot-reload integration test: spawn the watch wrapper
 //! around a stateful server, edit the handler mid-flight, and assert that (a) the edit's new body
 //! serves without a restart and (b) the signal-held request counter SURVIVES the swap — the arc's
 //! headline behavior.

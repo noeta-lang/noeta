@@ -1,8 +1,8 @@
-//! **In-run safepoint cycle collection** (memory-management 6.x): the VM half of the design in
-//! `noeta-gc` — trigger polling, root enumeration, and mid-run reclamation.
+//! **In-run safepoint cycle collection**: the VM half of the design in `noeta-gc` — trigger
+//! polling, root enumeration, and mid-run reclamation.
 //!
-//! The two exit-time reapers ([`Vm::teardown`]) bound residency only at program end; a program
-//! building reference cycles in a loop grew without bound until then. The safepoint path lets the
+//! The two exit-time reapers ([`Vm::teardown`]) bound residency only at program end, so a program
+//! building reference cycles in a loop would grow without bound until then. The safepoint path lets the
 //! tier-0 dispatch loop run a collection *during* execution, at points where the full root set is
 //! enumerable, under the semantic rule pinned in `noeta-gc`: **a safepoint collection never runs a
 //! destructor** — destructor-bearing dead components are deferred intact to the exit collection
@@ -115,7 +115,7 @@ impl<'m> Vm<'m> {
                 }
             }
         }
-        // Promoted-argument sources (P-PAR S2): retained for the promote memo's lifetime.
+        // Promoted-argument sources: retained for the promote memo's lifetime.
         roots.extend(self.isolates.promote_sources.iter().copied());
         // Values a depth-0 drive loop holds in Rust locals (the worker isolate's callee/future).
         roots.extend(self.transient_roots.iter().copied());

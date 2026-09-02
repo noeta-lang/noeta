@@ -1,9 +1,9 @@
 //! `noeta cache` — inspect and clean the per-user cache (`~/.cache/noeta/`).
 //!
 //! The cache root holds three kinds of derived state: **cached compilations** (top-level `*.noeb`
-//! blobs — the transparent startup cache, M3), **composed toolchains** (`compose/<key>/`,
-//! package-manager Phase 3 — a full cargo build per native-dependency set), and **fetched package
-//! sources** (`pkg/<key>/`, P2.3a). All of it is re-derivable — deleting
+//! blobs — the transparent startup cache), **composed toolchains** (`compose/<key>/` — a full
+//! cargo build per native-dependency set), and **fetched package sources** (`pkg/<key>/`). All of it
+//! is re-derivable — deleting
 //! any of it costs at most a recompile, a recompose, or a refetch — so every verb here is safe by
 //! construction. The one invariant is that nothing outside the resolved cache root is ever
 //! touched: every path is built by joining the root, and only the three known categories are

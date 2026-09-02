@@ -1,4 +1,5 @@
-//! The role-aware **static trace** walker (ide-ui U2, extracted from `noeta mcp`'s `trace` tool):
+//! The role-aware **static trace** walker, shared by the LSP trace document and `noeta mcp`'s
+//! `trace` tool:
 //! unfold the full path a request would take from an architectural role — start at every function
 //! bearing a `@role` binding (or a named function) and walk the [`callgraph`](crate::callgraph)
 //! forward. Each node is a function with its own roles and how it was reached (a syntactic call

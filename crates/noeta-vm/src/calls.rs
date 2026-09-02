@@ -483,7 +483,7 @@ impl<'m> Vm<'m> {
                 noeta_stdlib::Dispatch::Unknown => {}
             }
         }
-        // Bit-manipulation methods on `int` (P-BITS Tier B4) — the popcount-class
+        // Bit-manipulation methods on `int` — the popcount-class
         // intrinsics, delegating to the shared `int_method` so the backends agree. The
         // checker already arity/type-checked the call; `rotate_*` take one `int` amount.
         if matches!(hk, None | Some(HeapKind::Int))
@@ -534,7 +534,7 @@ impl<'m> Vm<'m> {
                 },
             );
         }
-        // Cross-domain numeric conversions (S0): `int→float/f32`, `float/f32→int`,
+        // Cross-domain numeric conversions: `int→float/f32`, `float/f32→int`,
         // `float↔f32`. The `IntMethod` branch above handled `int→int` and returned; an
         // integer receiver reaches here only for a float destination (`to_float`/`to_f32`),
         // a `float`/`f32` receiver for any. Shared `num_convert` keeps the backends in step.
@@ -566,7 +566,7 @@ impl<'m> Vm<'m> {
         {
             return self.call_set_method(v, set_method, method, args, span);
         }
-        // Extern-type methods (extern-types X1): every registry-contributed type routes through
+        // Extern-type methods: every registry-contributed type routes through
         // its registered `ExtType`'s one shared dispatch.
         if hk == Some(HeapKind::Extern) {
             return self.call_extern_method(v, method, args, span);
@@ -617,8 +617,7 @@ impl<'m> Vm<'m> {
                 _ => {}
             }
         }
-        // (The reactive handle methods lived here until higher-order-abi H5 — `Signal`/
-        // `Computed`/`Effect` are registry extern types now, dispatched through the ctx
+        // (`Signal`/`Computed`/`Effect` are registry extern types, dispatched through the ctx
         // seam like any other; `get` inlines via the declared arena read.)
         // Iterator methods (next/collect) — the shared `IterMethod` enum, like the file
         // handle above.
@@ -689,7 +688,7 @@ impl<'m> Vm<'m> {
             };
             return Ok(value);
         }
-        // Buffer-direct list reductions (packed-reductions arc): `sum`/`product`/`min`/`max` on a
+        // Buffer-direct list reductions: `sum`/`product`/`min`/`max` on a
         // numeric list, `any`/`all`/`count` on a `List<bool>`. A packed scalar list folds its raw byte
         // buffer through the shared `noeta-stdlib` kernel; a boxed list folds element-wise — one body,
         // so both representations and both backends agree. `sum` intercepts here (superseding the old
@@ -701,24 +700,23 @@ impl<'m> Vm<'m> {
         {
             return self.call_list_reduction(v, method, 0, span);
         }
-        // `checked_sum()` (array-ops arc): the opt-in overflow-reporting reduction, beside the folds.
+        // `checked_sum()`: the opt-in overflow-reporting reduction, beside the folds.
         if matches!(hk, Some(HeapKind::List | HeapKind::PackedList))
             && method == "checked_sum"
             && args.is_empty()
         {
             return self.call_list_checked_sum(v, span);
         }
-        // Element-wise array-programming methods (array-ops arc): `scale`/`abs`/`neg`/`clamp` produce
+        // Element-wise array-programming methods: `scale`/`abs`/`neg`/`clamp` produce
         // a new list; one shared kernel with the operators, so packed and boxed paths agree.
         if matches!(hk, Some(HeapKind::List | HeapKind::PackedList))
             && noeta_stdlib::is_bulk_method(method)
         {
             return self.call_list_bulk_method(v, method, args, span);
         }
-        // Eager collection methods reusing the prelude builtin impls (prelude-redesign
-        // P1): `xs.map(f)` / `xs.filter(f)` on a list, routed through `call_builtin` with the
-        // receiver as the first argument so the method and (legacy) free-function forms share one
-        // impl. A user object's own method wins (dispatched earlier); a list receiver is never an
+        // Eager collection methods reusing the prelude builtin impls: `xs.map(f)` /
+        // `xs.filter(f)` on a list, routed through `call_builtin` with the receiver as the first
+        // argument so the method and free-function forms share one impl. A user object's own method wins (dispatched earlier); a list receiver is never an
         // object.
         if matches!(hk, Some(HeapKind::List | HeapKind::PackedList))
             && let Some(builtin) = match method {
@@ -750,7 +748,7 @@ impl<'m> Vm<'m> {
             };
         }
         // Built-in zero-argument methods on lists/maps/strings. `len()` is the collection
-        // length (P1.3 — `count` is iterator-only, a consuming terminal).
+        // length (`count` is iterator-only, a consuming terminal).
         let result = if !args.is_empty() {
             None
         } else if method == "len" {
@@ -761,7 +759,7 @@ impl<'m> Vm<'m> {
                 .or_else(|| v.bytes_len())
                 .map(|n| Value::int(n as i64))
         } else if method == "to_hex" {
-            // Lowercase hex rendering of a `bytes` buffer (crypto arc C1) — the shared helper,
+            // Lowercase hex rendering of a `bytes` buffer — the shared helper,
             // so both backends print digests identically.
             v.bytes_data()
                 .map(|b| Value::string(&noeta_stdlib::bytes_to_hex(&b)))
@@ -774,7 +772,7 @@ impl<'m> Vm<'m> {
                 })
         } else if method == "enumerate" && matches!(hk, Some(HeapKind::List | HeapKind::PackedList))
         {
-            // A list of `(index, value)` **tuples** (object-model slice 4b), matching the
+            // A list of `(index, value)` **tuples**, matching the
             // tree-walker's `Value::Tuple` pairs. A packed list is materialized to a
             // temporary boxed list first (then released).
             let boxed = v.realize_list();
@@ -814,7 +812,7 @@ impl<'m> Vm<'m> {
         }
     }
 
-    /// Buffer-direct list reductions (packed-reductions arc): `sum`/`product`/`min`/`max` (numeric)
+    /// Buffer-direct list reductions: `sum`/`product`/`min`/`max` (numeric)
     /// and `any`/`all`/`count` (`List<bool>`), over the elements at or after `from`. A packed scalar
     /// list folds its raw byte buffer through the shared `noeta-stdlib` kernel; a boxed (or
     /// packed-struct) list folds its scalar elements — one body, so packed/boxed and both backends
@@ -1171,7 +1169,7 @@ impl<'m> Vm<'m> {
         Ok(scalars)
     }
 
-    /// Element-wise `+`/`-`/`*` over two numeric lists (array-ops arc). A length mismatch is a runtime
+    /// Element-wise `+`/`-`/`*` over two numeric lists. A length mismatch is a runtime
     /// error (E0007). Two packed scalar buffers of the same field fold directly (the result shares the
     /// operand's packed schema); otherwise both sides materialize to scalars and fold — one shared
     /// `noeta-stdlib` kernel, so packed/boxed and both backends agree. `left`/`right` are borrowed.
@@ -1226,7 +1224,7 @@ impl<'m> Vm<'m> {
         ))
     }
 
-    /// The bulk array-programming **methods** (array-ops arc): `scale(s)`, `abs()`, `neg()`,
+    /// The bulk array-programming **methods**: `scale(s)`, `abs()`, `neg()`,
     /// `clamp(lo, hi)` — each producing a new list of the operand's numeric element type. A packed
     /// list folds its buffer, a boxed list its scalars — the shared kernel, so the two agree. The
     /// receiver `v` is borrowed; `args` are borrowed.
@@ -1304,7 +1302,7 @@ impl<'m> Vm<'m> {
         ))
     }
 
-    /// `checked_sum()` (array-ops arc): the opt-in overflow-reporting sum — `none` on integer
+    /// `checked_sum()`: the opt-in overflow-reporting sum — `none` on integer
     /// overflow, `some(total)` otherwise. Beside the reduction folds; the receiver `v` is borrowed.
     pub(crate) fn call_list_checked_sum(&mut self, v: Value, span: Span) -> Result<Value, Abort> {
         let folded = match v.packed_parts() {
@@ -1428,7 +1426,7 @@ impl<'m> Vm<'m> {
             // opcode's Object-arm fallthrough (`find_class_method` → `call_native_class_method`) and
             // the tree-walker's `call_method`. This is the path the `@validated` recipe door's
             // `validate` re-entry takes for a native struct: `run_method_handle` is how both
-            // `validate_message` (validation arc) and a stored method handle dispatch, so without it
+            // `validate_message` and a stored method handle dispatch, so without it
             // a native struct materialized by `json.parse::<T>` could never run its validator.
             if self.reg().find_class_method(&type_name, method).is_some() {
                 let result = self.call_native_class_method(recv, method, &args[1..], span);
@@ -1532,7 +1530,7 @@ impl<'m> Vm<'m> {
     /// `resume_pc`).
     ///
     /// `ty_regs` is the call's **type-argument** channel: the registers filling the callee's
-    /// leading `Chunk::hidden` slots (poly-values F2b), empty for every call that forwards
+    /// leading `Chunk::hidden` slots, empty for every call that forwards
     /// nothing. They lay into the callee window ahead of the value arguments, which is why
     /// `supplied` — indexed over the value parameters — is unaffected by forwarding.
     #[allow(clippy::too_many_arguments)]
@@ -1697,8 +1695,8 @@ impl<'m> Vm<'m> {
                                 // validated way to populate it. Method-only, matching the
                                 // tree-walker's gate — a closure-valued FIELD named `call` is
                                 // member-call territory (`obj.call(args)`), not invocability.
-                                // An **extern** value participates in the protocol too (http arc
-                                // H10): a registered `call` method makes it invocable, routed
+                                // An **extern** value participates in the protocol too: a
+                                // registered `call` method makes it invocable, routed
                                 // through ordinary extern method dispatch. This is what lets a
                                 // native extension hand user code a callable value (a middleware's
                                 // `next`) without a parallel callback mechanism.
@@ -1752,7 +1750,7 @@ impl<'m> Vm<'m> {
     }
 
     /// The `Op::Return` protocol, factored so both the interpreter arm and the JIT's `jit_return`
-    /// helper share it (J3 native calls). `raw` is the value being returned (already read from the
+    /// helper share it. `raw` is the value being returned (already read from the
     /// returning frame). Retains it across teardown, pops the finished frame, releases its register
     /// window and upvalues, truncates the register stack, applies any `ret_transform`, and transfers
     /// the result into the caller's destination register. Returns `Some(v)` when the **bottom** frame
@@ -1767,7 +1765,7 @@ impl<'m> Vm<'m> {
         self.do_return_masked(frames, regs, raw, u64::MAX)
     }
 
-    /// [`Vm::do_return`] with a window-release mask (P-JSSA S4.0, see [`jit_return`]):
+    /// [`Vm::do_return`] with a window-release mask (see [`jit_return`]):
     /// `u64::MAX` releases every slot (the interpreter's path — it has no per-site analysis);
     /// any other value releases only the set bits, a guarantee from the JIT that the clear
     /// slots hold immediates at this (natively-executed) return site.
@@ -2080,7 +2078,7 @@ impl<'m> Vm<'m> {
                 let mut bad: Option<&'static str> = None;
                 for element in &items {
                     // Floats take the float path; every other numeric is an int (matching the
-                    // M0 tree-walker, which distinguishes `3` from `3.0`).
+                    // tree-walker, which distinguishes `3` from `3.0`).
                     if let Some(f) = element.as_float() {
                         any_float = true;
                         float_total += f;
@@ -2135,7 +2133,7 @@ impl<'m> Vm<'m> {
                     Err(self.error(DiagnosticCode::Panic, span, message))
                 }
             }
-            // The prelude constructors as callables (poly-values F3): the value path
+            // The prelude constructors as callables: the value path
             // (`results.map(Ok)`) and a wrong-arity direct call both land here, so their behavior
             // and error text are identical to the tree-walker's `call_builtin` by hand-matching.
             // The enum owns one reference to its payload, so the borrowed argument is retained.
@@ -2169,11 +2167,11 @@ impl<'m> Vm<'m> {
                 self.check_arity(builtin, args, 1, span)?;
                 let message = args[0].display();
                 Err(self.error(DiagnosticCode::Panic, span, format!("panic: {message}")))
-            } // (The whole `Builtin` orchestration family — `task` at higher-order-abi H0/H2,
-              // `http.serve` at H3, `signal`/`computed`/`effect` at H5 — migrated to the
-              // registry's `NativeCtx` dispatch: `noeta-stdlib/src/{task,serve,reactive}.rs`,
-              // reached via `call_ctx_function`/`call_ctx_type_method`. Only the language-level
-              // collection builtins and `assert` remain here.)
+            } // (The orchestration family — `task`, `http.serve`, `signal`/`computed`/`effect` —
+              // dispatches through the registry's `NativeCtx`:
+              // `noeta-stdlib/src/{task,serve,reactive}.rs`, reached via
+              // `call_ctx_function`/`call_ctx_type_method`. Only the language-level collection
+              // builtins and `assert` live here.)
         }
     }
 

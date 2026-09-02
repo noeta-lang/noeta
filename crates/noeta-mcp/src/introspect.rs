@@ -1,4 +1,4 @@
-//! M3 Introspect pillar: traverse the compiler's artifacts. `ast` (the pretty-printed syntax tree),
+//! The Introspect pillar: traverse the compiler's artifacts. `ast` (the pretty-printed syntax tree),
 //! `bytecode` (what actually runs — the VM disassembly), `pipeline` (a per-stage health summary),
 //! `module_graph` (the `use`/`namespace` import edges), and `reflect` (the `@role`/`@semantic`
 //! architectural graph). Every one is a pure read over the public salsa graph + AST — the same

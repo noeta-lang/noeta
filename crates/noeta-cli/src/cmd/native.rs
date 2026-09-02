@@ -53,18 +53,18 @@ pub(crate) fn resolve_serve_component() -> Result<std::path::PathBuf, String> {
     Ok(artifact)
 }
 
-/// Locate the lean `noeta-runner` native binary to staple a `--exe` bundle onto (dev-deps D4a): the
+/// Locate the lean `noeta-runner` native binary to staple a `--exe` bundle onto: the
 /// production runtime that links only app-execution layers — no fmt/LSP/DAP/formatter parsers.
 /// Priority mirrors [`resolve_wasm_runner`]: an explicit `NOETA_RUNNER` (packaged/hermetic path) → a
 /// runner shipped next to this toolchain binary → the workspace build, compiled on demand.
 ///
 /// The workspace build uses **`-p noeta-runner`** (not `--workspace`): building the runner as its own
 /// crate graph keeps `noeta-pm` at `[]` features so cargo's feature unification cannot turn
-/// `fmt-config` on and drag `noeta-fmt` into the artifact — the D3c build-isolation invariant.
+/// `fmt-config` on and drag `noeta-fmt` into the artifact — the build-isolation invariant.
 /// `--release` because a shipped artifact wants an optimized runtime. Packaging the runner with a
 /// shipped toolchain is the same later distribution decision as the wasm runner's.
 /// The base binary a `--exe` artifact staples onto: a **composed runner** (the lean runner + the
-/// app's native runtime extensions, dev tooling off — dev-deps D4c) when the app's dependency graph
+/// app's native runtime extensions, dev tooling off) when the app's dependency graph
 /// carries native crates, else the **stock** lean `noeta-runner` ([`resolve_native_runner`]). Both
 /// bases are free of dev tooling; the composed one additionally carries the runtime handlers the
 /// shipped program needs (without which the artifact would fail on an unknown native module).
@@ -164,13 +164,13 @@ pub(crate) fn resolve_wasm_runner() -> Result<std::path::PathBuf, String> {
     Ok(artifact)
 }
 
-/// Emit `module` as a **native** executable (P-AOT L3.2b(3)) — the final level. Steps:
+/// Emit `module` as a **native** executable — the final level. Steps:
 ///   1. AOT-compile every eligible prototype to a relocatable object (`compile_module_aot`), which
 ///      also defines the `noeta_aot_dispatch` table.
 ///   2. Link that object against the AOT runtime staticlib (`libnoeta_aot.a`) with a C toolchain
 ///      (`cc`) into a native binary: the runtime provides `main` + the `noeta_jit_*` helpers, the
 ///      object provides the native bodies + the dispatch table, and the linker resolves it all.
-///   3. Staple the program's bundle onto that binary (the L2 mechanism), so at startup the runtime
+///   3. Staple the program's bundle onto that binary (the `--exe` mechanism), so at startup the runtime
 ///      recovers the module and binds the linked-in native bodies through the dispatch table.
 ///
 /// The eligible prototypes run as machine code; ineligible ones interpret the same bytecode from the
@@ -247,7 +247,7 @@ pub(crate) fn emit_native(
         return cleanup(ExitCode::from(1));
     }
 
-    // 3. Staple the bundle onto the linked binary (L2), so the runtime recovers the module.
+    // 3. Staple the bundle onto the linked binary, so the runtime recovers the module.
     let runtime = match std::fs::read(&linked) {
         Ok(bytes) => bytes,
         Err(err) => {
@@ -323,7 +323,7 @@ pub(crate) fn aot_ring_features(module: &noeta_bytecode::Module) -> Vec<String> 
     // Module identities are root-qualified (`std.http`); the ring tables key on the module name, so
     // strip the root before looking up. A turbofish's module is the source receiver (a local name,
     // unrooted) and passes through `module_name` unchanged.
-    // The module→ring map is the registry's now (package-manager P1.0): each `ExtModule` declares its
+    // The module→ring map is the registry's now: each `ExtModule` declares its
     // `ring`, so both the whole-module and precisely-named forms funnel through one registry lookup —
     // no CLI-side table to keep in sync with the stdlib. `ring_of` accepts a root-qualified path, a
     // bare name, or a turbofish's bound local alike.
@@ -515,7 +515,7 @@ pub(crate) fn link_native(
     let mut cmd = std::process::Command::new(&cc);
     // `-s` strips the symbol table + DWARF during the link (~5 MB on a core binary — nearly half).
     // A shipped `--native` artifact never needs native debug symbols: its panic tracebacks come from
-    // the bundle's own line table (`<aot>` source, production-stack-traces arc), not DWARF — the same
+    // the bundle's own line table (`<aot>` source), not DWARF — the same
     // reason `profile.wasm-release` sets `strip = true`. Stripping HERE, at the link, is deliberate:
     // the caller staples the bundle onto this binary *after* we return, and stripping a stapled
     // executable would rewrite the ELF and discard the appended bundle ("no stapled bundle found").
@@ -591,7 +591,7 @@ mod tests {
         use noeta_bytecode::Const;
         let client = vec!["ring-http-client".to_string()];
 
-        // `use std.http.client` → a whole-module value. Post-split (P0.3b) this is *precise*: the
+        // `use std.http.client` → a whole-module value. Post-split this is *precise*: the
         // client module owns reqwest, so the whole-module reference selects the client ring. Module
         // identities are root-qualified (`std.http.client`), as the compiler now emits them.
         let via_module = module_with(

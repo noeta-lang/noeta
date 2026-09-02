@@ -1,4 +1,4 @@
-//! Snippet syntax highlighting for the docs browser (docs-browser-ui arc): classify a standalone
+//! Snippet syntax highlighting for the docs browser: classify a standalone
 //! Noeta code snippet — a doc page's signature or a ```` ```noeta ```` fence — into colorable
 //! spans using the **compiler's own lexer**, so the doc viewer's highlighting can never drift from
 //! the language (no third grammar copy; the TextMate grammar covers the editor, this covers docs).

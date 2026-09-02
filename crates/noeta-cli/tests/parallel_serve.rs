@@ -1,4 +1,4 @@
-//! Multi-core `noeta serve --parallel N` (server-hmr S1): N worker isolates share one bound
+//! Multi-core `noeta serve --parallel N`: N worker isolates share one bound
 //! socket, the kernel load-balances connections, and a SIGINT drains every worker.
 //!
 //! `#[ignore]`d for the real port, threads and signal it needs, and run by name from ci.yml's `jit`

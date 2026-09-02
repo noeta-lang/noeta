@@ -63,7 +63,7 @@ pub(crate) fn run_program(loaded: &Loaded, args: Vec<String>) -> i32 {
 }
 
 /// Execute an already-checked program against the **real host** (real `env`/`args`, real-disk IO)
-/// on a per-isolate tokio runtime (M2.3), returning its [`RunResult`].
+/// on a per-isolate tokio runtime, returning its [`RunResult`].
 ///
 /// Real execution runs on the **VM** backend (isolates I.4a). The tree-walker's `Rc`-based values are
 /// `!Send`, so it can never carry real inter-isolate parallelism (isolates I.4); the VM's NaN-boxed,
@@ -93,10 +93,7 @@ pub(crate) fn execute_real_host(
     Ok((result, trace))
 }
 
-/// Run an already-compiled [`Module`] against the real host — the shared execution core of
-/// [`execute_real_host`] (source path) and the `.noeb` bundle runner (P-AOT L1.2), which loads a
-/// module directly with no source to compile.
-/// The p2p application namespace for the running program (p2p P3.4): the package name of the
+/// The p2p application namespace for the running program: the package name of the
 /// nearest `noeta.toml` (stable and unique per project) when in a package, else the entry script's
 /// file stem — so two different Noeta apps never share one p2p identity/store dir. `None` ⇒ let the
 /// runtime fall back to its own default (the executable's file stem). `args[0]` is the entry path.
@@ -115,10 +112,11 @@ pub(crate) fn p2p_app_namespace(args: &[String]) -> Option<String> {
         .map(|s| s.to_string_lossy().into_owned())
 }
 
-/// The p2p application namespace for a source run: the CLI derives it from the nearest `noeta.toml`
-/// (via [`p2p_app_namespace`]) and passes it into the shared execution core (`noeta-runner`), which
-/// is package-manager-free by design. A convenience so the CLI's callers read the same as before the
-/// core was extracted.
+/// Run an already-compiled [`Module`] against the real host — the shared execution core of
+/// [`execute_real_host`] (source path) and the `.noeb` bundle runner, which loads a module directly
+/// with no source to compile. The CLI derives the p2p application namespace from the nearest
+/// `noeta.toml` (via [`p2p_app_namespace`]) and passes it into `noeta-runner`, which is
+/// package-manager-free by design.
 pub(crate) fn run_module_real_host(
     module: std::sync::Arc<noeta_bytecode::Module>,
     args: Vec<String>,
@@ -134,7 +132,7 @@ pub(crate) fn run_module_real_host(
     noeta_runner::run_module_real_host(module, args, app_id, jit_report, live_output, cancel)
 }
 
-/// P-AOT L2: detect and run a bundle stapled onto this executable (a `noeta build --exe` artifact),
+/// Detect and run a bundle stapled onto this executable (a `noeta build --exe` artifact),
 /// returning its exit code — or `None` when this is the plain toolchain binary (no trailer), so the
 /// normal CLI runs. Delegates to the shared runner core, supplying the CLI's `noeta.toml`-aware p2p
 /// namespace resolver (the lean `noeta-runner` binary uses the file-stem default instead).
@@ -162,12 +160,12 @@ pub(crate) fn cmd_run(
     args: &[String],
 ) -> ExitCode {
     // The compose probe hands back the graph it resolved (default selection) so the compile
-    // below doesn't resolve it again (audit-5 F2).
+    // below doesn't resolve it again.
     let resolved = match compose::maybe_delegate(file) {
         Err(code) => return code,
         Ok(resolved) => resolved,
     };
-    // P-AOT L1.2: a `.noeb` bundle runs directly — no source, no compile. Sniff the magic (cheap,
+    // A `.noeb` bundle runs directly — no source, no compile. Sniff the magic (cheap,
     // and we need the bytes to load it anyway); anything else is source, handled below. Tiers are a
     // *build*-time concern (they are already baked into the bundle), so `--tier`/`--target` on a
     // bundle run are meaningless — reject them rather than silently ignore.
@@ -211,7 +209,7 @@ pub(crate) fn cmd_run(
     }
 }
 
-/// Run a `.noeb` bundle (P-AOT L1.2): decode the module from the versioned container and execute it
+/// Run a `.noeb` bundle: decode the module from the versioned container and execute it
 /// on the real host, exactly as a source run does after compiling — but with no source to compile
 /// or type-check (both happened at build time). A runtime abort's diagnostics/trace carry spans but
 /// the bundle ships no source text, so they render against a synthetic empty source (message + code

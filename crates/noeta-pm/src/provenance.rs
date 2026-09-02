@@ -1,4 +1,4 @@
-//! Package **provenance** (package-manager Phase 4, #2): Ed25519-signed attestations that bind a
+//! Package **provenance**: Ed25519-signed attestations that bind a
 //! published release to its source commit, so a consumer can verify — independently of trusting the
 //! registry's database — that a maintainer attested "this version = this commit".
 //!
@@ -24,7 +24,7 @@ use semver::Version;
 
 use crate::error::PmError;
 
-/// The signed binding (package-manager Phase 4, #2): a release's identity, version, and the commit
+/// The signed binding: a release's identity, version, and the commit
 /// SHA it resolves to. Signing this is what makes "version → commit" verifiable and non-repudiable.
 #[derive(Debug)]
 pub struct Attestation<'a> {

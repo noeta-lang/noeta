@@ -1,4 +1,4 @@
-//! R3, the headline: `trace` — unfold the full static path a request would take from an
+//! `trace` — unfold the full static path a request would take from an
 //! architectural role. `trace(from: "EntryPoint")` starts at every declaration bearing that
 //! `@role` binding and walks the call graph forward: each node is a function with its own roles,
 //! location, and how it was reached (a syntactic call or a passed reference — a handler
@@ -9,7 +9,7 @@
 //! binding the trace reached — "this entry point crosses into these persistence/trust
 //! boundaries".
 //!
-//! Since ide-ui U2 the walk itself lives in [`noeta_ide::trace`] — the LSP's trace document runs
+//! The walk itself lives in [`noeta_ide::trace`] — the LSP's trace document runs
 //! the same engine, so agent and editor can never disagree. This module owns only the MCP wire
 //! shapes (span → file/line resolution, JSON schema) and the tool's notes.
 

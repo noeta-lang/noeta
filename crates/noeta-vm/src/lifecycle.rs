@@ -117,7 +117,7 @@ pub(crate) struct IsolateState {
     pub(crate) profile_seam: Option<(ProfileHookFactory, ProfileSink)>,
     pub(crate) isolates: Vec<IsolateSlot>,
     pub(crate) inflight_isolates: usize,
-    /// The borrow-share region for real-isolate arguments (P-PAR S2): promotable argument graphs
+    /// The borrow-share region for real-isolate arguments: promotable argument graphs
     /// are deep-copied into it **once** and every worker borrows zero-copy. `promote_memo` maps a
     /// source object's bits → its promoted root across spawns (the fan-out promote-once memo);
     /// each memoized source is retained into `promote_sources` so its address stays valid for the
@@ -270,7 +270,7 @@ pub(crate) struct IsolateFailure {
 /// so shipping a `Sender`/`Receiver` into a worker shares one queue. Send/recv still *poll*
 /// cooperatively (Pending on full/empty), never blocking a thread — a producer/consumer across
 /// isolate threads makes progress by each thread's scheduler re-polling the shared queue.
-/// Each queued message also carries the **sender's trace context** (native-otel T5d, `None` when
+/// Each queued message also carries the **sender's trace context** (`None` when
 /// telemetry is off or the sender had no active span) — the automatic-propagation envelope: recv
 /// seeds the receiving strand's context from it, so message *types* stay tracing-free.
 pub(crate) enum Channel {
@@ -311,7 +311,7 @@ pub(crate) struct Task {
     /// duplicated effects). The task is already progressing; "skip while polling" is the correct
     /// scheduling, and it is also what keeps per-task context swaps balanced.
     pub(crate) polling: bool,
-    /// The task's **saved task-local context** (native-otel T5a): a snapshot of the spawner's
+    /// The task's **saved task-local context**: a snapshot of the spawner's
     /// `ctx_current` taken at `spawn`, swapped into `Vm::ctx_current` around each poll of this
     /// task's step and back out after — so telemetry scope follows the task across suspensions
     /// instead of leaking between interleaved tasks. Plain `u64`s (span ids), not values — no
@@ -336,7 +336,7 @@ pub(crate) struct Task {
     pub(crate) isolate_strand: Option<u32>,
 }
 
-/// One traced future (native-otel T5c): the future-completion hook's entry. `future` is a
+/// One traced future: the future-completion hook's entry. `future` is a
 /// **retained** reference (identity = its NaN-box bits, stable while the reference is held);
 /// `context` is the stack its polls run under (the registering strand's context + `span`), swapped
 /// in/out around each poll exactly like a task's; `span` is ended when the future completes.
@@ -365,7 +365,7 @@ pub(crate) enum TryOutcome {
 }
 
 /// Classify a value for `?`/`??`. Only the built-in `Result`/`Option` enums qualify; the
-/// success payload is shared (not retained). Mirrors the M0 tree-walker's `try_branch`.
+/// success payload is shared (not retained). Mirrors the tree-walker's `try_branch`.
 pub(crate) fn try_classify(v: Value) -> Option<TryOutcome> {
     if !v.is_enum() {
         return None;
@@ -413,7 +413,7 @@ pub(crate) fn vm_nominal_name(v: &Value) -> Option<String> {
 
 /// Whether a value matches a narrowing target (`x.as<T>()`). Generics are erased, so only the
 /// runtime **head constructor** is tested. The primitive/collection kinds compare against
-/// [`Value::type_name`] — the same canonical strings the M0 tree-walker matches on, so both
+/// [`Value::type_name`] — the same canonical strings the tree-walker matches on, so both
 /// backends decide a narrowing identically; `Named` (a user struct/class/enum, or the built-in
 /// `Option`/`Result`) matches by shape name; `Dyn` always matches (no-op narrowing); `DynTrait`
 /// tests the value's nominal type against `reflection`'s trait-membership table (the same shared
@@ -472,7 +472,7 @@ pub(crate) fn narrow_matches(
         NarrowTarget::AnyClass => {
             return v.shape().is_some_and(|s| s.kind == ShapeKind::Class);
         }
-        // A parametrized target (R3): the head must match head-only (which handles the untagged and
+        // A parametrized target: the head must match head-only (which handles the untagged and
         // widening cases), and — when the value carries a reflected tag — its type arguments must
         // match `args` (a `dyn` on either side is a wildcard). An untagged value classifies its args
         // to `dyn`, so `vm_type_repr` yields `dyn` arguments and the check passes head-only.
@@ -618,7 +618,7 @@ impl<'m> Vm<'m> {
                 column: def.column,
             }));
         }
-        // Build one shared `Rc<TypeRepr>` per interned reflected element type (R1), so each tagged
+        // Build one shared `Rc<TypeRepr>` per interned reflected element type, so each tagged
         // `MakeList` is a cheap `Rc` clone rather than a fresh `TypeRepr` allocation per execution.
         let type_reprs: Vec<Rc<noeta_ast::reflect::TypeRepr>> =
             module.type_reprs.iter().cloned().map(Rc::new).collect();
@@ -699,7 +699,7 @@ impl<'m> Vm<'m> {
             )
             .collect();
         let tojson_derives = module.tojson_derives.iter().cloned().collect();
-        // Lift the `@derive(Deserialize<Json>)` decode recipes into a name→recipe map (L2.2 DI) so
+        // Lift the `@derive(Deserialize<Json>)` decode recipes into a name→recipe map so
         // `Op::DecodeTyped` can look up a runtime type name in O(1).
         let deserialize_recipes = module
             .deserialize_recipes
@@ -842,7 +842,7 @@ impl<'m> Vm<'m> {
         }
     }
 
-    /// The extension registry this VM resolves native names against (instance-registry IR3) — the
+    /// The extension registry this VM resolves native names against — the
     /// VM twin of `Checker::reg`. Every native dispatch and lookup goes through here so that an
     /// instance-scoped registry (an embed session's own extension set) takes effect uniformly; an
     /// unset field falls back to the process-global default, keeping every ordinary run unchanged.
@@ -908,7 +908,7 @@ impl<'m> Vm<'m> {
     /// cycles, drain channel buffers, clear the reactive graph, destroy the globals in reverse binding
     /// order (running each destructor), reap any remaining cycle garbage, and join outstanding isolate
     /// workers. Split from [`Vm::run_top`] so a session runs this **once** at the end rather than after
-    /// every entry (REPL-on-VM R0); leak residency must reach zero here.
+    /// every entry; leak residency must reach zero here.
     pub(crate) fn teardown(&mut self, mode: noeta_value::CollectorMode) -> RunResult {
         // Exit reached: suspend + disarm the safepoint-GC trigger. The destructor bodies teardown
         // runs below execute against a heap mid-surgery, and the exit collections reclaim
@@ -935,15 +935,15 @@ impl<'m> Vm<'m> {
                 .copied()
                 .filter(|v| !v.is_unbound())
                 .collect();
-            // The extensions' retained arena (higher-order-abi H4) holds a `+1` on every value
+            // The extensions' retained arena holds a `+1` on every value
             // an extension owns across dispatches — the same graph treatment: feed them in as
             // roots so the sweep cannot reclaim a value the arena release below would then
             // double-free.
             roots.extend(self.persist.ext_arena.iter().copied().flatten());
-            // Embed handles (server-hmr F3) hold a `+1` each — the same root treatment as the
+            // Embed handles hold a `+1` each — the same root treatment as the
             // arena, so a host-held value is not reclaimed out from under the host.
             roots.extend(self.persist.embed_handles.iter().copied().flatten());
-            // Traced futures (native-otel T5c) hold a `+1` each — the same graph treatment.
+            // Traced futures hold a `+1` each — the same graph treatment.
             roots.extend(self.sched.traced_futures.iter().map(|t| t.future));
             let garbage = collect_trace(&roots);
             self.reclaim_cycle_garbage(garbage);
@@ -958,9 +958,9 @@ impl<'m> Vm<'m> {
                 }
             }
         }
-        // Release every value still in the extensions' retained arena (higher-order-abi H4):
+        // Release every value still in the extensions' retained arena:
         // values an extension held across dispatches and the program never released (an
-        // undisposed `Cell`, an undisposed signal — reactivity lives here too since H5).
+        // undisposed `Cell`, an undisposed signal — reactivity lives here too).
         // Destructor-aware, so
         // residency returns to zero — the leak oracle's proof the arena's refcounting is exact.
         for value in std::mem::take(&mut self.persist.ext_arena)
@@ -970,7 +970,7 @@ impl<'m> Vm<'m> {
             self.release_value(value);
         }
         self.persist.ext_arena_free.clear();
-        // Release every value a host still holds a handle to (server-hmr F3): a forgotten handle
+        // Release every value a host still holds a handle to: a forgotten handle
         // reclaims here, destructor-aware, so residency returns to zero.
         for value in std::mem::take(&mut self.persist.embed_handles)
             .into_iter()
@@ -979,7 +979,7 @@ impl<'m> Vm<'m> {
             self.release_value(value);
         }
         self.persist.embed_handles_free.clear();
-        // Release any still-traced futures (native-otel T5c) — an abandoned `with_span`-async
+        // Release any still-traced futures — an abandoned `with_span`-async
         // future whose span never ended. The reference releases destructor-aware (residency 0);
         // the span simply stays unended (the recorder/exporter only consume ended spans).
         for traced in std::mem::take(&mut self.sched.traced_futures) {
@@ -993,7 +993,7 @@ impl<'m> Vm<'m> {
                 self.release_value(v);
             }
         }
-        // Backup collection (object-model slice 2c): a reference `class` cycle rooted in the globals
+        // Backup collection: a reference `class` cycle rooted in the globals
         // (`a.next = b; b.next = a`) survives the teardown above — each member still holds the other, so
         // refcounting never reaches zero. With the globals now gone there are **no roots left**, so every
         // still-live object is unreachable garbage; trace-collect from an empty root set to reclaim it,
@@ -1029,12 +1029,12 @@ impl<'m> Vm<'m> {
             self.deregister_worker_stall();
         }
         // Every worker is joined, so nothing borrows the shared region: free any promoted
-        // argument graphs (P-PAR S2) — normally already emptied by `finish_isolate` at in-flight
+        // argument graphs — normally already emptied by `finish_isolate` at in-flight
         // count 0; defensive here so the leak oracle's zero-residency balance holds on early
         // exits too.
         self.free_shared_region();
 
-        // Shut the off-thread compile service down LAST (P-PAR S4): the destructors above may
+        // Shut the off-thread compile service down LAST: the destructors above may
         // have called compiled code, and shutdown drops the code pages with the engine. The
         // mirrors are cleared first so no stale entry can outlive its pages; the service's final
         // compile accounting parks on the VM for the stats entry points.
@@ -1126,13 +1126,13 @@ pub(crate) fn run_isolate_worker(
     if let Some(seam) = &profile_seam {
         wvm.isolates.profile_seam = Some(seam.clone());
     }
-    // Resolve native names against the spawner's registry (instance-registry IR3); `None` falls
+    // Resolve native names against the spawner's registry; `None` falls
     // back to the process-global default, exactly like the parent.
     wvm.persist.registry = registry;
-    // Inherit the spawner's trace context across the thread boundary (native-otel T5d): the worker
+    // Inherit the spawner's trace context across the thread boundary: the worker
     // has its OWN host (span handles don't transfer), so the W3C context is interned as a remote
     // seed at the worker's root — its spans then continue the spawner's trace, exactly as a
-    // cooperative task inherits via its Task context (T5a). Real-path parity with the sandbox.
+    // cooperative task inherits via its Task context. Real-path parity with the sandbox.
     if let Some(ctx) = trace
         && wvm.persist.host.tel_enabled()
     {
@@ -1163,7 +1163,7 @@ pub(crate) fn run_isolate_worker(
             isolate::IsoArg::Copied(w) => {
                 isolate::rebuild(w, &wvm.persist.shapes, &mut wvm.persist.channels)
             }
-            // A borrowed shared-region root (P-PAR S2): usable as-is — no rebuild, no retain.
+            // A borrowed shared-region root: usable as-is — no rebuild, no retain.
             // The worker's ordinary retain/release discipline no-ops on it (shared tag), its
             // COW gates copy instead of mutating (`is_uniquely_owned` is false), and the
             // parent's region outlives this thread (freed only after the join).
@@ -1237,7 +1237,7 @@ pub(crate) fn run_isolate_worker(
         }),
     };
     // Tear the worker down so its thread-local heap returns to zero residency: release the JIT
-    // inline caches' closure pins (S4.2), reap reference cycles, destroy globals in reverse
+    // inline caches' closure pins, reap reference cycles, destroy globals in reverse
     // declaration order, then drain any channel buffers. This mirrors the main heap's
     // [`Vm::teardown`] exit reapers (isolates I.4b worker-teardown gap): a worker body can strand a
     // reference cycle (`a.next = b; b.next = a` on a `class`) that refcounting alone never reclaims,
@@ -1273,7 +1273,7 @@ pub(crate) fn run_isolate_worker(
             }
         }
     }
-    // Release the worker's extension arena (per-isolate, higher-order-abi H4/H5): whatever its
+    // Release the worker's extension arena (per-isolate): whatever its
     // program's extensions still held — signals, cells — drops here, destructor-aware.
     for value in std::mem::take(&mut wvm.persist.ext_arena)
         .into_iter()
@@ -1281,7 +1281,7 @@ pub(crate) fn run_isolate_worker(
     {
         wvm.release_value(value);
     }
-    // And its still-traced futures (native-otel T5c), same treatment.
+    // And its still-traced futures, same treatment.
     for traced in std::mem::take(&mut wvm.sched.traced_futures) {
         wvm.release_value(traced.future);
     }
@@ -1352,7 +1352,7 @@ impl<'m> Vm<'m> {
     /// Materialize the `(declaration, Role)` index from the module's reflection info into a
     /// `List<RoleBinding>` — each `{ target: string, role: Role }`. Shapes are built fresh; because
     /// shape equality is structural (name + variant + fields), the `Role` enum and `RoleBinding`
-    /// struct match the tree-walker's by construction. (P2.7.)
+    /// struct match the tree-walker's by construction.
     pub(crate) fn materialize_roles(&self, role_enum: Option<&str>) -> Value {
         let binding_shape = noeta_object::intern_shape(Shape::object(
             ShapeKind::Struct,
@@ -1944,10 +1944,9 @@ impl<'m> Vm<'m> {
     /// Release a value that may be the *last* reference to a destructor-carrying object. If so,
     /// the `destruct` block runs synchronously (with the instance's fields in scope) before the
     /// object is freed — the deterministic destruction the spec requires. Used at every
-    /// destructor-relevant drop point: reassignment, program end, and (Phase 4) a destructor-
+    /// destructor-relevant drop point: reassignment, program end, and a destructor-
     /// relevant `Op::Drop` at a local's last use. A non-relevant release uses the plain `release`.
-    /// Reclaim the garbage a cycle collector identified (Phase 6 destructor-on-collect + the trace's
-    /// external-reference fix). Runs each fresh member's `__destruct` while the whole dead subgraph is
+    /// Reclaim the garbage a cycle collector identified. Runs each fresh member's `__destruct` while the whole dead subgraph is
     /// still allocated (container-before-contained — a destructor may read a sibling's fields), then —
     /// for the trace, whose shallow free does not release children — drops every reference a freed
     /// member holds to a still-**live** value so that value is not left over-counted, and finally frees
@@ -1977,7 +1976,7 @@ impl<'m> Vm<'m> {
         for &g in fresh.iter().chain(&already_destructed) {
             retain(g);
         }
-        // Finalize cycle members in **reverse-creation order** (newest-first, object-model slice 2c)
+        // Finalize cycle members in **reverse-creation order** (newest-first)
         // so cyclic `destruct` order is deterministic and agrees with the tree-walker — the live
         // registry is a `HashSet`, so `fresh`'s own order is otherwise arbitrary.
         let mut to_destruct = fresh.clone();
@@ -2011,7 +2010,7 @@ impl<'m> Vm<'m> {
         self.gc_suspended = saved_suspended;
     }
 
-    /// Store `value` in the embed-handle table (server-hmr F3), taking ownership of its reference,
+    /// Store `value` in the embed-handle table, taking ownership of its reference,
     /// and return the handle. Reuses a freed slot when one is available. Only the embed API
     /// (`VmSession`) mints handles, so this is `compile`-gated; the table itself stays (GC roots it).
     #[cfg(feature = "compile")]
@@ -2029,7 +2028,7 @@ impl<'m> Vm<'m> {
         crate::session::EmbedHandle::from_index(idx)
     }
 
-    /// Release an embed handle's value (destructor-aware) and free its slot (server-hmr F3).
+    /// Release an embed handle's value (destructor-aware) and free its slot.
     #[cfg(feature = "compile")]
     pub(crate) fn embed_handle_release(&mut self, handle: crate::session::EmbedHandle) {
         let idx = handle.index();
@@ -2087,7 +2086,7 @@ impl<'m> Vm<'m> {
     /// `struct` copy-on-write, and the `reuse` fast path — returning `true` when the field exists and
     /// the store happened, or `false` when `obj` has no such field (the caller raises the E0022-family
     /// error or, from the tier-1 leaf helper, bails so the interpreter re-runs and raises it). Factored
-    /// so the interpreter arm and the JIT leaf helper (P-JIT J4) share one implementation and are
+    /// so the interpreter arm and the JIT leaf helper share one implementation and are
     /// refcount-identical by construction. The `false` path performs **no** mutation, so a leaf-helper
     /// bail re-runs from clean state (the bail-before-mutate rule).
     // The operands mirror `Op::SetField`'s fields one-to-one; both call sites already hold them
@@ -2109,7 +2108,7 @@ impl<'m> Vm<'m> {
             return false;
         };
         // A reference `class` mutates the shared instance **in place**, regardless of refcount or the
-        // reuse flag — the change must be visible through every alias (object-model slice 2b). A value
+        // reuse flag — the change must be visible through every alias. A value
         // `struct` keeps copy-on-write below.
         let is_class = v.shape().is_some_and(|s| s.kind == ShapeKind::Class);
         if is_class {
@@ -2154,7 +2153,7 @@ impl<'m> Vm<'m> {
     }
 
     /// Whether `value`'s subtree may contain a destructor — the container-before-contained
-    /// field-walk gate (spec §4, Phase 4.3). An object/enum is decided by its type name against the
+    /// field-walk gate (spec §4). An object/enum is decided by its type name against the
     /// checker's destruct-reachability set; a list/map/set is always walked because its element
     /// types are erased at runtime (a non-relevant element then takes the fast path on its own);
     /// any other value kind (string, closure, cell, handle, boxed int) is a leaf with no

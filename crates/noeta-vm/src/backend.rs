@@ -30,7 +30,7 @@ pub struct VmBackend;
 ///   JIT's bail-before-mutate contract, so turning the perf tier off changes speed, not
 ///   behavior. Also the `--jit-differential` oracle's pure tier-0 baseline.
 /// - `Hot` is production tiering: hot-counter + OSR promotion, compiling OFF-THREAD
-///   (P-PAR S4) so the mutator never pauses for Cranelift.
+///   so the mutator never pauses for Cranelift.
 /// - `Forced` compiles every eligible prototype synchronously from the first dispatch —
 ///   the oracle's tier-1 side and the deterministic hot-swap stress entry.
 ///
@@ -81,13 +81,13 @@ pub struct RunOptions {
     /// in [`RunOutcome::profiler`] so its accumulated counters can be reclaimed. Tier-0 only,
     /// like the debugger.
     pub profiler: Option<Box<dyn ProfileHook>>,
-    /// Debug-console / hot-reload session (tooling-unification T5): the live compiler
+    /// Debug-console / hot-reload session: the live compiler
     /// returned alongside `module`; every console fragment or swap plan compiles through it
     /// and installs into the running Vm. The arena owning each extended module snapshot
     /// lives inside the core runner, for exactly the run's duration.
     #[cfg(feature = "compile")]
     pub session: Option<noeta_compiler::SessionCompiler>,
-    /// Hot-reload mailbox the run thread polls at every scheduler tick (server-hmr W1);
+    /// Hot-reload mailbox the run thread polls at every scheduler tick;
     /// requires `session`.
     pub hot_mailbox: Option<HotSwapMailbox>,
     /// Real OS-thread isolates (isolates I.4b): the module by `Arc` (worker threads own it)
@@ -117,7 +117,7 @@ pub struct RunOptions {
     /// promotion counts don't race the program's runtime (the OSR tests assert them exactly).
     #[cfg(feature = "jit")]
     pub drain_at_exit: bool,
-    /// Emit **AOT-form** native bodies (P-AOT L3.1): inline caches off, null call sites, no
+    /// Emit **AOT-form** native bodies: inline caches off, null call sites, no
     /// cancellation poll — bit-for-bit the codegen `noeta build --native` links into an artifact,
     /// but finalized to executable pages so an ordinary in-process run executes it. Semantics are
     /// identical (the IC-off path is the always-correct helper slow path), which is exactly the
@@ -129,7 +129,7 @@ pub struct RunOptions {
     /// it there). `false` on every production run — the shipped JIT keeps its inline caches.
     #[cfg(feature = "jit")]
     pub aot_bodies: bool,
-    /// A **linked-in AOT dispatch table** to bind before the run (P-AOT L3.2b): the native bodies
+    /// A **linked-in AOT dispatch table** to bind before the run: the native bodies
     /// `noeta build --native` compiled ahead of time and the linker resolved into this executable's
     /// text. Binding installs them in the per-prototype mirror tables, so eligible prototypes
     /// dispatch straight to native code and the rest interpret — no JIT engine involved (pair with
@@ -142,7 +142,7 @@ pub struct RunOptions {
     pub aot_dispatch: Option<AotDispatch>,
 }
 
-/// A **linked AOT dispatch table** plus the caller's assertion that it is real (P-AOT L3.2b).
+/// A **linked AOT dispatch table** plus the caller's assertion that it is real.
 ///
 /// The table is `[count][main_0, fast_0, main_1, fast_1, …]` — pointer-width words the linker
 /// resolved to the entry points of the ahead-of-time-compiled prototype bodies, with a null slot for
@@ -319,7 +319,7 @@ impl VmBackend {
                 stop_generation: 0,
             });
         }
-        // Claim this VM's consumer cursor before the run can drain (server-hmr H5 retention): the
+        // Claim this VM's consumer cursor before the run can drain: the
         // channel reclaims a plan's payload only once every declared consumer has passed it, so a
         // worker still arming here holds the prefix back rather than losing a swap.
         vm.hot_mailbox = opts.hot_mailbox.map(|mailbox| {
@@ -358,7 +358,7 @@ impl VmBackend {
                 }
             }
         }
-        // Pre-compiled native bodies, bound instead of compiled (P-AOT L3.2b). After the tiering
+        // Pre-compiled native bodies, bound instead of compiled. After the tiering
         // arm and before the run: the mirror tables must carry the linked entries by the first
         // dispatch, and an AOT binary pairs this with `Tiering::Off` (it has no compiler at all).
         #[cfg(feature = "jit-rt")]
@@ -418,7 +418,7 @@ impl VmBackend {
 
     /// Execute an already-compiled [`Module`]. This is the seam the salsa graph (`noeta-db`)
     /// drives: it produces the `Module` via the memoized `bytecode` query, then hands it here.
-    /// Splitting compilation from execution is what lets the VM "consume `chunk(db)`" (M1.1)
+    /// Splitting compilation from execution is what lets the VM "consume `chunk(db)`"
     /// without the VM crate depending on the database. Runs against a deterministic
     /// [`noeta_stdlib::SandboxHost`] — the host the conformance differential always uses; pure
     /// tier-0, so it never auto-JITs (the oracle's tier-1 tier is `run_module_jit`'s explicit
@@ -434,10 +434,10 @@ impl VmBackend {
         (out.result, out.trace)
     }
 
-    /// Execute a module against a caller-provided [`noeta_stdlib::Host`] (M2.3). The CLI/REPL pass
+    /// Execute a module against a caller-provided [`noeta_stdlib::Host`]. The CLI/REPL pass
     /// a real host here; the conformance harness keeps using the sandbox default via
     /// [`VmBackend::run_module`], so the differential stays deterministic. A real-host production
-    /// run drives the tier-1 JIT under ordinary hot-counter promotion (P-JIT).
+    /// run drives the tier-1 JIT under ordinary hot-counter promotion.
     pub fn run_module_with_host(
         &self,
         module: &Module,
@@ -477,7 +477,7 @@ impl VmBackend {
 
     /// Execute a module against a real host + executor **with the JIT unarmed** — the debugger's run
     /// path (`noeta dap`); see the tier-0 observability contract on [`Tiering`]. Single-isolate /
-    /// cooperative (real OS-thread isolate debugging is a later milestone); the differential never
+    /// cooperative — real OS-thread isolate debugging is not supported here; the differential never
     /// calls this, so it is out-of-oracle.
     pub fn run_module_with_host_and_executor_no_jit(
         &self,
@@ -511,8 +511,8 @@ impl VmBackend {
         (out.result, out.trace)
     }
 
-    /// Like [`VmBackend::run_module_debug`], but with the **debug console armed** (tooling-
-    /// unification T5): `session` is the live compiler
+    /// Like [`VmBackend::run_module_debug`], but with the **debug console armed**: `session` is
+    /// the live compiler
     /// [`noeta_compiler::compile_with_sites_session`] returned alongside `module`, and every
     /// console fragment the debugger sends compiles through it and installs into the running Vm —
     /// full language, closures included.
@@ -538,12 +538,12 @@ impl VmBackend {
         (out.result, out.trace)
     }
 
-    /// Run a module with **in-process hot reload armed** (server-hmr W1): the debug-session
+    /// Run a module with **in-process hot reload armed**: the debug-session
     /// machinery (live [`SessionCompiler`] + module arena — the same stable-prefix swap the debug
     /// console uses) plus a [`HotSwapMailbox`] the run thread polls at every scheduler tick. This
     /// is `noeta serve --watch`'s hot mode: the CLI's watcher thread deposits [`SwapPlan`]s and the
     /// serving program absorbs them between polls without restarting. Hot serving runs tier-1 like
-    /// any production serve (server-hmr H3): the hot-counter service compiles off-thread, and a
+    /// any production serve: the hot-counter service compiles off-thread, and a
     /// swap retires + re-arms it (`install_fragment`).
     ///
     /// [`SessionCompiler`]: noeta_compiler::SessionCompiler
@@ -571,7 +571,7 @@ impl VmBackend {
         (out.result, out.trace)
     }
 
-    /// [`VmBackend::run_module_hot`] with the **synchronous force-JIT engine** — the H3 oracle
+    /// [`VmBackend::run_module_hot`] with the **synchronous force-JIT engine** — the swap oracle
     /// entry: every prototype (the in-flight `main` included) executes tier-1 from the first
     /// dispatch, so a swap deposited in `mailbox` deterministically exercises retire→re-arm
     /// under live native frames (the off-thread service would race the program's runtime). A
@@ -669,8 +669,8 @@ impl VmBackend {
         (out.result, out.trace, report)
     }
 
-    /// Run a module whose native prototype entries were **compiled ahead of time and linked in**
-    /// (P-AOT L3.2b). Instead of arming the JIT compiler, bind the entries from `dispatch` — the
+    /// Run a module whose native prototype entries were **compiled ahead of time and linked in**.
+    /// Instead of arming the JIT compiler, bind the entries from `dispatch` — the
     /// [`noeta_jit_abi::AOT_DISPATCH_SYMBOL`] table (`[count][main_0, fast_0, …]`, pointer-width words the
     /// linker resolved to real code addresses) — into the mutable per-proto mirror tables, then run.
     /// Prototypes with a null slot (ineligible, or no fast body) interpret. Real host + executor +
@@ -712,7 +712,7 @@ impl VmBackend {
         (out.result, out.trace)
     }
 
-    /// Execute under an explicit cycle-collector mode (Phase 6.4 benchmark seam). Production paths
+    /// Execute under an explicit cycle-collector mode (the benchmark seam). Production paths
     /// use the default [`CollectorMode::Trace`]; the head-to-head benchmark drives both.
     ///
     /// [`CollectorMode::Trace`]: noeta_value::CollectorMode::Trace
@@ -731,7 +731,7 @@ impl VmBackend {
         .result
     }
 
-    /// Execute a module through the tier-1 JIT (milestone P-JIT), forcing every eligible prototype
+    /// Execute a module through the tier-1 JIT, forcing every eligible prototype
     /// through native code — the `--jit-differential` and leak-under-JIT oracle path. It keeps the
     /// deterministic [`noeta_stdlib::SandboxHost`], so its [`RunResult`] is directly comparable to
     /// [`VmBackend::run_module`]: the only variable is tier 0 vs tier 1 — which is precisely what the
@@ -764,7 +764,7 @@ impl VmBackend {
 
     /// Like [`VmBackend::run_module_jit_with_stats`] but with **ordinary hot-counter promotion**
     /// (`Forced` off) — the real production tiering. A prototype compiles only once it crosses
-    /// [`JIT_HOT_THRESHOLD`] entries *or back-edges* (P-JIT J5 OSR), so this exercises the promotion
+    /// [`JIT_HOT_THRESHOLD`] entries *or back-edges* (OSR), so this exercises the promotion
     /// path itself: a top-level loop entered once must still go native via its loop back-edges.
     #[cfg(feature = "jit")]
     pub fn run_module_jit_hot_with_stats(&self, module: &Module) -> (RunResult, JitStats) {
@@ -844,21 +844,21 @@ impl<'m> Vm<'m> {
 
 /// JIT-coverage counts for one forced-JIT run: how many prototypes were compiled to real native code
 /// (`native`) out of the total that were compiled at all (`compiled`, native + bail stubs), plus the
-/// compile-pause accounting (P-PAR S0c) — compilation runs synchronously on the mutator thread, so
+/// compile-pause accounting — compilation runs synchronously on the mutator thread, so
 /// `compile_ns_max` is the worst single pause the program felt and `compile_ns_total` the sum.
 #[cfg(feature = "jit")]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct JitStats {
     pub native: usize,
     pub compiled: usize,
-    /// How many **region-scoped OSR bodies** were compiled (P-OSRW) — loop windows, not
+    /// How many **region-scoped OSR bodies** were compiled — loop windows, not
     /// prototypes, so this is counted alongside `native` rather than inside it. A top-level loop
     /// that promotes purely through a back-edge shows up here and nowhere else: its prototype may
     /// never need the whole-prototype body at all.
     pub osr_windows: usize,
     pub compile_ns_total: u64,
     pub compile_ns_max: u64,
-    /// Where `compile_ns_total` goes + compiled volume (P-JCT C0).
+    /// Where `compile_ns_total` goes + compiled volume.
     pub breakdown: noeta_jit::CompileBreakdown,
 }
 
@@ -885,7 +885,7 @@ pub struct JitReport {
     pub native: usize,
     /// Prototypes compiled at all (native + bail stubs).
     pub compiled: usize,
-    /// Region-scoped **OSR loop windows** compiled (P-OSRW) — bodies, not prototypes, so counted
+    /// Region-scoped **OSR loop windows** compiled — bodies, not prototypes, so counted
     /// beside `native` rather than inside it. A program that is one big top-level loop promotes
     /// here and nowhere else: `native` and `compiled` both stay 0 while its loop runs native, so
     /// anything asking "did tier 1 run?" must read this too.
@@ -909,8 +909,8 @@ pub struct JitDeclinedLoop {
     pub bail_pcs: Vec<u32>,
 }
 
-// The [`Backend`] contract compiles source → bytecode, so it rides the `compile` feature (native-size
-// slice 2). A shipped AOT runtime drives the VM through `run_module_aot` on a pre-compiled bundle and
+// The [`Backend`] contract compiles source → bytecode, so it rides the `compile` feature. A shipped
+// AOT runtime drives the VM through `run_module_aot` on a pre-compiled bundle and
 // never needs this, so it links without the compiler.
 #[cfg(feature = "compile")]
 impl Backend for VmBackend {
@@ -946,7 +946,7 @@ impl<'m> Vm<'m> {
     /// it leaves behind — the returned top value, any open `concurrent` scopes, and the JIT
     /// inline-cache closure pins. **Does not** touch the globals, channels, reactive graph, or run any
     /// collector: those are [`Vm::teardown`]'s job, deferred so a session can run many entries between
-    /// one load and one teardown (REPL-on-VM R0).
+    /// one load and one teardown.
     pub(crate) fn run_top(&mut self) {
         let (mut frames, regs) = self.pooled_run_stacks(self.module.main().num_registers as usize);
         frames.push(Frame {
@@ -974,7 +974,7 @@ impl<'m> Vm<'m> {
                 }
             }
         }
-        // Release the JIT inline caches' closure pins (S4.2) before any collector accounting: a
+        // Release the JIT inline caches' closure pins before any collector accounting: a
         // pinned closure the program itself dropped must read as garbage now, not as an anomaly.
         // Native code can no longer run (the run above is over), so the caches are dead.
         #[cfg(feature = "jit")]

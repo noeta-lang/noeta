@@ -1,4 +1,4 @@
-//! The **tier-1 (JIT) runtime glue** (P-JIT): the `extern "C"` helper symbols
+//! The **tier-1 (JIT) runtime glue**: the `extern "C"` helper symbols
 //! generated code calls back into, [`frame_layout`] / `fresh_frame_template` /
 //! [`compile_module_aot`], [`PreparedCall`] + the call/return trampolines, and
 //! the `impl Vm` engine management (`init_jit` / `init_jit_service` /
@@ -27,17 +27,17 @@ pub(crate) enum JitOutcome {
     Abort,
 }
 
-// Counts how many times a tier-1 bail stub has called `jit_observe` on this thread — the J0 proof
+// Counts how many times a tier-1 bail stub has called `jit_observe` on this thread — the proof
 // that generated native code actually ran (and reached a runtime helper), used by the tests.
 #[cfg(feature = "jit-rt")]
 thread_local! {
     static JIT_OBSERVE_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
-/// The J0 runtime-helper skeleton (P-JIT): the generated bail stub calls this once per frame entry,
-/// proving a compiled prototype can reach a Rust helper with the live VM pointer under the tier-1
-/// ABI. It only bumps a thread-local counter here; J1+ registers the real `retain`/`release`/`call`
-/// helpers beside it and reconstitutes `&mut Vm` from `vm` to service them.
+/// The bail stub's observation hook: the generated code calls this once per frame entry, proving a
+/// compiled prototype can reach a Rust helper with the live VM pointer under the tier-1 ABI. It
+/// only bumps a thread-local counter; the real `retain`/`release`/`call` helpers below sit beside
+/// it and reconstitute `&mut Vm` from `vm` to service them.
 #[cfg(feature = "jit-rt")]
 #[cfg_attr(
     feature = "aot",
@@ -49,7 +49,7 @@ extern "C" fn jit_observe(_vm: *mut core::ffi::c_void) {
 }
 
 /// This thread's running total of tier-1 bail-stub entries (see [`jit_observe`]). Test-only: the
-/// J0 proof that native code actually ran.
+/// proof that native code actually ran.
 #[cfg(all(test, feature = "jit"))]
 pub(crate) fn jit_observe_count() -> u64 {
     JIT_OBSERVE_COUNT.with(|c| c.get())
@@ -71,7 +71,7 @@ extern "C" fn jit_note_global_bound(vm: *mut core::ffi::c_void, g: u32) {
     vm.persist.global_order.push(g);
 }
 
-/// Runtime helper: bump a value's refcount (heap-aware register moves, J3). No-op on an immediate.
+/// Runtime helper: bump a value's refcount (heap-aware register moves). No-op on an immediate.
 #[cfg(feature = "jit-rt")]
 #[cfg_attr(
     feature = "aot",
@@ -82,7 +82,7 @@ extern "C" fn jit_retain(v: u64) {
     retain(Value::from_bits(v));
 }
 
-/// Runtime helper: float `%` (S2). Rust's `%` on f64 **is** fmod, so tier parity holds by
+/// Runtime helper: float `%`. Rust's `%` on f64 **is** fmod, so tier parity holds by
 /// construction; a NaN result is canonicalized by the caller's `box_float_and_store`, exactly as
 /// the other float ops.
 #[cfg(feature = "jit-rt")]
@@ -96,7 +96,7 @@ extern "C" fn jit_fmod(a: f64, b: f64) -> f64 {
 }
 
 /// Runtime helper: drop one reference to a value — the plain, non-destructor release the
-/// interpreter's `set_reg` uses on an overwritten register (J3). No-op on an immediate.
+/// interpreter's `set_reg` uses on an overwritten register. No-op on an immediate.
 #[cfg(feature = "jit-rt")]
 #[cfg_attr(
     feature = "aot",
@@ -108,7 +108,7 @@ extern "C" fn jit_release(v: u64) {
 }
 
 /// Runtime helper: the destructor-aware release for an IR-relevant `Drop` (may run a `destruct`
-/// block if this is the last reference), J3.
+/// block if this is the last reference).
 ///
 /// # Safety
 /// `vm` must be the live `*mut Vm` the tier-1 ABI passed (see [`jit_note_global_bound`]).
@@ -121,7 +121,7 @@ extern "C" fn jit_release_value(vm: *mut core::ffi::c_void, v: u64) {
 }
 
 /// The layout of [`Frame`] and the `Vec` header — the single source of truth the JIT bakes into its
-/// native call-frame codegen (P-CALL). Filled from `offset_of!`/`size_of!` on *this build's* `Frame`
+/// native call-frame codegen. Filled from `offset_of!`/`size_of!` on *this build's* `Frame`
 /// and a one-time `Vec`-header probe; because the JIT compiles in the same process/build, the numbers
 /// it bakes always match the real layout (a lock test asserts each offset locates its field). See
 /// [`noeta_jit_abi::FrameLayout`].
@@ -143,10 +143,10 @@ pub fn frame_layout() -> noeta_jit_abi::FrameLayout {
     }
 }
 
-/// The zero-initialized [`Frame`] the JIT bakes its call-frame push from (P-CALL): every field at its
+/// The zero-initialized [`Frame`] the JIT bakes its call-frame push from: every field at its
 /// resting value (`proto`/`base`/`pc`/`ret_dst` = 0, `ret_transform` = `None`, `upvalues` = empty
 /// `Vec`). The native frame-push codegen reads this template's *words* — not its address — and bakes
-/// them as position-independent immediates (L3.1a audit), so the same literal produces byte-identical
+/// them as position-independent immediates, so the same literal produces byte-identical
 /// codegen in the runtime JIT and the AOT object, and a bound native body writes a valid initial
 /// `Frame` into any VM's frame stack. Shared by [`Vm::init_jit`], [`Vm::init_jit_service`], and the
 /// AOT [`compile_module_aot`].
@@ -162,8 +162,8 @@ fn fresh_frame_template() -> Box<Frame> {
     })
 }
 
-/// Ahead-of-time compile **every** eligible prototype of `module` to a relocatable **object file**
-/// (P-AOT L3.2b): the same native codegen as the runtime JIT, emitted into a host object
+/// Ahead-of-time compile **every** eligible prototype of `module` to a relocatable **object file**:
+/// the same native codegen as the runtime JIT, emitted into a host object
 /// (ELF/Mach-O/COFF) with the [`noeta_jit_abi::AOT_DISPATCH_SYMBOL`] dispatch table, instead of
 /// finalized to executable pages. Returns the object bytes for `noeta build --native` to link
 /// against the AOT runtime staticlib, and **how many prototypes got a real native body** (the rest
@@ -211,7 +211,7 @@ fn vec_header_words() -> (usize, usize, usize) {
     (find(ptr), find(len), find(cap))
 }
 
-/// Runtime helper for a native `Op::Call` (J3): read the call back from `proto`/`pc` and run the
+/// Runtime helper for a native `Op::Call`: read the call back from `proto`/`pc` and run the
 /// shared closure-call setup on the interpreter's frame/register stacks (pushing the callee frame or
 /// completing a synchronous first-class-builtin call). Returns the [`noeta_jit`] outcome the compiled
 /// function propagates: `OUTCOME_CALLED` (frame pushed), a resume pc (synchronous call done, continue
@@ -298,11 +298,11 @@ extern "C" fn jit_call(
     }
 }
 
-/// Runtime helper for a native `Op::Return` (J3): run the shared return protocol (transfer the value
+/// Runtime helper for a native `Op::Return`: run the shared return protocol (transfer the value
 /// to the caller's destination, pop this frame). Returns `OUTCOME_RETURNED` when it transferred to a
 /// caller, or `OUTCOME_HALTED` (parking the value on `vm.jit_ret`) when the bottom frame returned.
 ///
-/// `release_mask` is the P-JSSA S4.0 fast teardown: bit `r` set means window slot `r` may hold a
+/// `release_mask` is the fast teardown: bit `r` set means window slot `r` may hold a
 /// heap value at this return site (the bare-store analysis row at the `Return`'s pc), so only
 /// those slots need a release; `u64::MAX` means "release every slot" (an unanalyzed prototype, or
 /// one with more than 64 registers). The mask is native-path-sound: this helper is reached only
@@ -336,7 +336,7 @@ extern "C" fn jit_return(
 
 /// The two-word result of [`jit_prepare_call`], returned by value (rax:rdx under SysV; the JIT
 /// declares the import with two `i64` returns, which lowers to the same registers — one helper
-/// roundtrip instead of the former `prepare_call` + `callee_base` pair, P-JSSA S4.0).
+/// roundtrip rather than a separate prepare-call and callee-base pair).
 #[cfg(feature = "jit-rt")]
 #[repr(C)]
 struct PreparedCall {
@@ -348,7 +348,7 @@ struct PreparedCall {
     base: usize,
 }
 
-/// Runtime helper for a native direct call (J3 native→native): decide whether the `Op::Call` at
+/// Runtime helper for a native direct call (native→native): decide whether the `Op::Call` at
 /// `pc` can be called directly and, if so, set up the callee frame on the shared stacks and return
 /// the callee's compiled entry pointer plus its window base; otherwise a zero `fnptr` (the caller
 /// falls back to `jit_call`). Direct-able means: a closure callee, plain arity (no defaults), no
@@ -435,13 +435,13 @@ extern "C" fn jit_prepare_call(
     if regs.len() + num_regs > regs.capacity() {
         return FALLBACK;
     }
-    // Fast convention (P-JSSA S4.1): the callee has a frameless-window body — reserve the window
+    // Fast convention: the callee has a frameless-window body — reserve the window
     // WITHOUT initializing it (the fast body normalizes it before the interpreter can ever see
     // it) and skip the argument copy/retain (the arguments travel as machine arguments, borrowed
     // from the caller's still-live registers). [`noeta_jit_abi::FAST_ENTRY_TAG`] tags the convention
     // into bit 0 of the returned pointer — free because `jit_install` only ever stored an aligned
     // body here.
-    // Lookups go through the VM's mirror tables (P-PAR S4) — empty when the JIT is off, and the
+    // Lookups go through the VM's mirror tables — empty when the JIT is off, and the
     // only tier-1 tables the mutator may read in service mode.
     if let Some(ff) = vm
         .tier1
@@ -450,7 +450,7 @@ extern "C" fn jit_prepare_call(
         .copied()
         .flatten()
     {
-        // S4.2: fill this call site's inline cache so the next call with the same callee pushes
+        // Fill this call site's inline cache so the next call with the same callee pushes
         // the frame natively, without this helper. The cached closure is **pinned** (retained +
         // held on `jit_cache_pins` until teardown) so its bits can never be reused by another
         // object while cached; a site that sees a second distinct callee is poisoned instead
@@ -525,7 +525,7 @@ extern "C" fn jit_prepare_call(
     }
 }
 
-/// Runtime helper: interpret a direct callee's outcome for its native caller (J3). `RETURNED` → the
+/// Runtime helper: interpret a direct callee's outcome for its native caller. `RETURNED` → the
 /// caller continues in place (`OUTCOME_CONTINUE`, result already in its destination). Otherwise the
 /// callee did not complete natively — a bail sets the (still-live) callee frame's pc so the
 /// interpreter resumes it there, and the caller propagates `CALLED`; `CALLED`/`ABORTED` pass through.
@@ -557,7 +557,7 @@ extern "C" fn jit_after_call(
     }
 }
 
-/// Runtime helper for a native leaf heap/collection op (J4): run the `Op` at `proto`/`pc` — the
+/// Runtime helper for a native leaf heap/collection op: run the `Op` at `proto`/`pc` — the
 /// interpreter's exact arm, refcounts and all — on the shared register stack, and return
 /// `OUTCOME_CONTINUE` when it completed. It handles only the non-dispatching, non-erroring path of
 /// each op; a receiver that would dispatch (a user `Iterable`/`Index`) or a case that would raise
@@ -779,10 +779,10 @@ extern "C" fn jit_run_leaf_op(
             // The interpreter's inline-cache lookup (`caches` is loop-local) is skipped here; the
             // cache-miss resolution — `slot_of` then `slot_at` — is the same read and is bailed on
             // exactly where the interpreter would raise (unknown field / non-object receiver). A
-            // tier-1 inline cache on this path was measured (J6 investigation) and does *not* help: a
+            // tier-1 inline cache on this path was measured and does *not* help: a
             // shape-pointer guard costs about as much as the short field-name scan it would replace,
             // and the real floor is this helper call itself — only a call-free native read (which
-            // needs a layout-stable object representation) beats the interpreter. See plans/jit.
+            // needs a layout-stable object representation) beats the interpreter.
             let field = module.name(*field);
             let v = regs[base + *obj as usize];
             match v
@@ -921,7 +921,7 @@ impl<'m> Vm<'m> {
     /// Build the tier-1 JIT engine and, when `force_jit` is set, eagerly compile every prototype so
     /// the whole run goes through tier 1 (the oracle path). Registers the runtime-helper symbols the
     /// generated code links against. If the host ISA is unavailable the JIT stays `None` and the run
-    /// interprets — behaviour is identical either way (J0 always bails to tier 0).
+    /// interprets — behavior is identical either way (an uncompiled prototype bails to tier 0).
     #[cfg(feature = "jit")]
     pub(crate) fn init_jit(&mut self) {
         let helpers = jit_helpers();
@@ -936,7 +936,7 @@ impl<'m> Vm<'m> {
         let cancel = self.isolates.cancel_flag.clone();
         match noeta_jit::Jit::new(&helpers, frame_layout(), template_ptr, cancel) {
             Ok(mut jit) => {
-                // AOT-form codegen (P-AOT L3.1), armed *before* the `force_jit` sweep below so every
+                // AOT-form codegen, armed *before* the `force_jit` sweep below so every
                 // body this engine emits carries it — a body already compiled keeps its form.
                 if self.tier1.aot_bodies {
                     jit.set_aot_bodies(true);
@@ -971,7 +971,7 @@ impl<'m> Vm<'m> {
         }
     }
 
-    /// Start the **off-thread** tier-1 compile service (P-PAR S4) — the production hot-counter
+    /// Start the **off-thread** tier-1 compile service — the production hot-counter
     /// path. Mutually exclusive with [`init_jit`](Self::init_jit) (the `force_jit` oracle's
     /// synchronous engine). Needs the module by `Arc` because the compile thread outlives every
     /// borrow the mutator holds.
@@ -997,7 +997,7 @@ impl<'m> Vm<'m> {
             jit_service::JitService::spawn(module, helpers, frame_layout(), template_addr, cancel);
     }
 
-    /// Bind a linked AOT dispatch table into the mirror tables (P-AOT L3.2b) — see
+    /// Bind a linked AOT dispatch table into the mirror tables — see
     /// [`noeta_jit_abi::AOT_DISPATCH_SYMBOL`] for the layout (`[count][main_0, fast_0, …]`, pointer-width
     /// words). Each non-null main slot is a finalized `CompiledFn`-ABI entry point; null slots
     /// (interpreted prototype, or no fast body) are skipped.
@@ -1065,7 +1065,7 @@ impl<'m> Vm<'m> {
         self.tier1.jit_entries.get(proto).copied().flatten()
     }
 
-    /// Install a prototype's **region-scoped OSR body** (P-OSRW) into its mirror table. Kept out
+    /// Install a prototype's **region-scoped OSR body** into its mirror table. Kept out
     /// of `jit_entries` on purpose: a region body has no fresh-frame entry, so the native call
     /// helpers — which read `jit_entries` to direct-call a callee at pc 0 — must never see it.
     #[cfg(feature = "jit")]
@@ -1080,7 +1080,7 @@ impl<'m> Vm<'m> {
     }
 
     /// The region-scoped body to re-enter `proto` at `entry_pc`, if that pc is inside one's
-    /// window (P-OSRW). One length test on every program that never OSRs.
+    /// window. One length test on every program that never OSRs.
     #[cfg(feature = "jit")]
     #[inline]
     fn jit_osr_entry_at(&self, proto: usize, entry_pc: usize) -> Option<noeta_jit_abi::CompiledFn> {
@@ -1096,7 +1096,7 @@ impl<'m> Vm<'m> {
     }
 
     /// Whether some native body of `proto` can be entered at `entry_pc`: the whole-prototype body
-    /// covers every entry, a region-scoped one only its own window (P-OSRW). The back-edge gate
+    /// covers every entry, a region-scoped one only its own window. The back-edge gate
     /// asks this rather than "is anything compiled" so a prototype whose *second* hot loop falls
     /// outside the first window still promotes.
     #[cfg(feature = "jit")]
@@ -1136,7 +1136,7 @@ impl<'m> Vm<'m> {
         for done in service.drain() {
             self.tier1.jit_pending = self.tier1.jit_pending.saturating_sub(1);
             // A window request is gated on "one in flight", not "once ever": release the gate so a
-            // second hot loop in the same prototype can ask for its own window (P-OSRW).
+            // second hot loop in the same prototype can ask for its own window.
             if done.osr
                 && let Some(f) = self.tier1.jit_osr_inflight.get_mut(done.proto)
             {
@@ -1155,9 +1155,9 @@ impl<'m> Vm<'m> {
         }
     }
 
-    /// Tier-0/tier-1 dispatch at a frame `'reload` (P-JIT). `entry_pc` is where native execution
+    /// Tier-0/tier-1 dispatch at a frame `'reload`. `entry_pc` is where native execution
     /// should resume — `0` for a fresh frame, or a post-call resume pc when re-entering a compiled
-    /// frame after its callee returned (J3 resume-native). Returns what the interpreter should do next
+    /// frame after its callee returned (resume-native). Returns what the interpreter should do next
     /// (the deopt contract). `None` when the prototype is not compiled and the interpreter should run
     /// it as usual. Hot-counter promotion happens only on a fresh entry (`entry_pc == 0`), so a resume
     /// never compiles — it only re-enters an already-native frame.
@@ -1248,7 +1248,7 @@ impl<'m> Vm<'m> {
 
     /// Bump prototype `proto`'s entry counter and, once it is hot (or immediately under `force_jit`),
     /// promote it. Synchronous mode compiles in place and returns the fresh entry point on the
-    /// promoting call; **service mode** (P-PAR S4) queues the compile off-thread and keeps
+    /// promoting call; **service mode** queues the compile off-thread and keeps
     /// interpreting — the entry lands in the mirror via the mailbox drain a later call performs.
     /// `None` while still cold, queued, or when the JIT is unavailable.
     #[cfg(feature = "jit")]
@@ -1298,7 +1298,7 @@ impl<'m> Vm<'m> {
     }
 
     /// Queue `proto` for off-thread compilation (service mode). `header` asks for the
-    /// region-scoped OSR body of the loop that got hot there (P-OSRW); `None` asks for the
+    /// region-scoped OSR body of the loop that got hot there; `None` asks for the
     /// whole-prototype body. `from_backedge` marks a request born at a loop back-edge, so the
     /// landing entry OSR-enters mid-loop rather than waiting for a frame entry a long-running loop
     /// may never make.
@@ -1348,7 +1348,7 @@ impl<'m> Vm<'m> {
         }
     }
 
-    /// On-stack replacement trigger (P-JIT J5): a taken **backward branch** in prototype `proto` is a
+    /// On-stack replacement trigger: a taken **backward branch** in prototype `proto` is a
     /// loop back-edge. Count it toward the hot threshold and, once the prototype crosses it, compile
     /// the prototype — returning `true` to signal the inner loop to re-enter native code at the loop
     /// header (the compiled body has an OSR entry block for every loop header). `false` = keep
@@ -1452,7 +1452,7 @@ impl<'m> Vm<'m> {
             Some(j) => j,
             None => return false,
         };
-        // The loop's own window first (P-OSRW). The engine declines when the window *is* the whole
+        // The loop's own window first. The engine declines when the window *is* the whole
         // prototype — a second body would then be the same code — or when the prototype has
         // collected its window budget; the whole-prototype compile below covers both cases.
         if let Some(body) = jit.compile_osr(module, proto, header) {

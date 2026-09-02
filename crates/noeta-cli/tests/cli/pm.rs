@@ -1,14 +1,14 @@
-//! Package manager: path dependencies (P2.1), registry + git-tag dependencies (P2.3),
+//! Package manager: path dependencies, registry + git-tag dependencies,
 //! git-forge registries, provenance/keys, and cross-package tiers.
 
 use crate::support::*;
 
-// --- package manager: path dependencies (P2.1) --------------------------------------------------
+// --- package manager: path dependencies ---------------------------------------------------------
 
 /// A single-file program declaring its own tier (`@tier(fuzz, config: Fuzz)`): the source of the
 /// tier-providers e2e fixtures. The runner reads each root's knobs via `attributes_of::<Fuzz>()`
-/// (block-stamped or per-fn), proving the T1 stamping + T5 reflection + T2 declaration + T4
-/// dispatch composition in one program.
+/// (block-stamped or per-fn), proving stamping, reflection, declaration and dispatch compose in
+/// one program.
 const DECLARED_TIER_PROGRAM: &str = "\
 @attribute(Function)\n\
 struct Fuzz { cases: int }\n\
@@ -99,7 +99,7 @@ fn tier_declaration_errors_are_e0051() {
         .stderr(predicate::str::contains("E0051").and(predicate::str::contains("List<TierRoot>")));
 }
 
-/// A single-file program declaring a **text** tier (`@tier(spec, text: "xml")`, text-tiers arc):
+/// A single-file program declaring a **text** tier (`@tier(spec, text: "xml")`):
 /// its `@spec { … }` bodies are captured verbatim by the lexer (same-file two-pass — no manifest
 /// involved), adjacency-targeted like `@doc`, and dispatched to the runner as `List<TierText>`.
 /// The first body deliberately contains XML quotes (invalid as Noeta tokens) and an escaped brace.
@@ -330,7 +330,7 @@ fn tests_in_a_dependency_using_program_run() {
 
 #[test]
 fn a_dependency_declared_tier_dispatches_cross_package() {
-    // The third-party proof (tier-providers T4): the tier, its config attribute, and its runner
+    // The third-party proof: the tier, its config attribute, and its runner
     // all live in a path dependency; the consumer opts in with one `[directives]` binding and writes
     // `@fuzz` blocks. No import — a tier directive is bound, never imported.
     let entry = tier_dep_project("tier_dep_dispatch");
@@ -433,7 +433,7 @@ fn a_renamed_collision_tier_dispatches_by_identity() {
         .stdout(predicate::str::is_empty());
 }
 
-/// A consumer app + a `speckit` path dependency declaring a **text** tier (text-tiers arc). The
+/// A consumer app + a `speckit` path dependency declaring a **text** tier. The
 /// consumer writes `@spec { <xml/> }` bodies with no local declaration at all — the loader's
 /// program-wide lex (union of every package's `@tier(…, text:)` decls) is what makes the body
 /// capture verbatim across the package boundary.
@@ -666,7 +666,7 @@ fn noeta_audit_reports_the_trust_footprint() {
 
 #[test]
 fn noeta_check_resolves_cross_package_use() {
-    // `noeta check` must see dependency packages too (package-manager P2.1c), so a cross-package
+    // `noeta check` must see dependency packages too, so a cross-package
     // `use` that references a real exported symbol checks clean rather than erroring.
     let entry = path_dep_project("pm_check_crosspkg");
     lang().arg("check").arg(&entry).assert().success();
@@ -686,7 +686,7 @@ fn noeta_check_resolves_cross_package_use() {
 fn a_transitive_path_dependency_resolves_and_runs() {
     // app → mid → low, each a path package. `mid` keys its own dependency `deep` (≠ low's root
     // segment `low`), so the graph walk must rewrite mid's internal `use deep.base.leaf` to low's
-    // global segment for it to link — a transitive reference the app never names (P2.4).
+    // global segment for it to link — a transitive reference the app never names.
     let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_transitive_run");
     let _ = std::fs::remove_dir_all(&base);
     let app = base.join("app");
@@ -735,7 +735,7 @@ fn a_transitive_path_dependency_resolves_and_runs() {
 #[test]
 fn a_version_conflict_is_reported() {
     // app depends on two packages that each pull a third at *different* versions — our flat link
-    // model permits one version per package, so this is an explainable conflict (P2.4).
+    // model permits one version per package, so this is an explainable conflict.
     let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_version_conflict");
     let _ = std::fs::remove_dir_all(&base);
     let app = base.join("app");
@@ -971,7 +971,7 @@ fn a_served_tree_at_another_version_is_refused() {
 
 #[test]
 fn the_lockfile_pins_registry_selection_and_bypasses_the_index() {
-    // The lock fast path (audit F1): once `noeta.lock` pins a registry version, later builds
+    // The lock fast path: once `noeta.lock` pins a registry version, later builds
     // adopt the pin — an upstream publish must not float the selection, and the index must not
     // even be consulted (offline builds). `noeta update` (or a changed requirement) re-solves.
     if !git_available() {
@@ -1186,7 +1186,7 @@ fn git_forge_registry_e2e(scope: &str, tmp_name: &str) {
 
 #[test]
 fn a_git_forge_resolve_tolerates_the_auth_token_override() {
-    // private-registries S5: with NOETA_GITHUB_TOKEN set, every git subprocess gets a scoped
+    // With NOETA_GITHUB_TOKEN set, every git subprocess gets a scoped
     // `-c http.https://github.com.extraHeader=…` auth config. Resolution against the local forge (a
     // file path, not github.com) must still succeed — proving git accepts the arg and the header is
     // scoped so it doesn't interfere. (Authenticating a *real* private repo needs real GitHub; here we
@@ -1243,7 +1243,7 @@ fn a_git_forge_resolve_tolerates_the_auth_token_override() {
 #[test]
 fn a_registry_dependency_without_a_package_is_an_error() {
     // A bare registry requirement names no package identity, so it can't be resolved — the error
-    // points the user to add `package = "company/pkg"` (P2.5).
+    // points the user to add `package = "company/pkg"`.
     let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_registrydep");
     let _ = std::fs::remove_dir_all(&base);
     std::fs::create_dir_all(&base).unwrap();
@@ -1264,7 +1264,7 @@ fn a_registry_dependency_without_a_package_is_an_error() {
 
 #[test]
 fn publishing_a_package_with_a_path_dependency_is_rejected() {
-    // Phase 4 #3: a published package must depend only via the registry — a path/git dependency
+    // A published package must depend only via the registry — a path/git dependency
     // would leave a consumer unable to resolve it. The lint fails before touching git.
     let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_publish_lint");
     let _ = std::fs::remove_dir_all(&base);
@@ -1441,10 +1441,9 @@ fn a_resolve_with_an_active_patch_is_loud_and_links_the_patched_tree() {
 
 #[test]
 fn a_target_scoped_dependency_links_only_under_its_target() {
-    // dev-deps D2, finally wired (audit-5 F3): `[targets.<name>.dependencies]` was parsed,
-    // validated, and documented — but no production path resolved it, so a declared dev-only
-    // dependency silently did nothing. Now: the dep links under `--target dev` and stays out of
-    // the default build.
+    // A `[targets.<name>.dependencies]` entry links under `--target dev` and stays out of the
+    // default build. Regression: the table was parsed and validated but no production path resolved
+    // it, so a declared dev-only dependency silently did nothing.
     let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("target_scoped_deps");
     let _ = std::fs::remove_dir_all(&base);
     let app = base.join("app");
@@ -1533,11 +1532,11 @@ fn publish_routes_through_the_manifest_registries_scope_map() {
     );
 }
 
-// --- package manager: git-tag dependencies (P2.3) -----------------------------------------------
+// --- package manager: git-tag dependencies ------------------------------------------------------
 
 #[test]
 fn provenance_signs_verifies_and_pins_the_scope_key() {
-    // End-to-end provenance (Phase 4 #2): `noeta key new` → a signed publish → a consumer that
+    // End-to-end provenance: `noeta key new` → a signed publish → a consumer that
     // verifies the signature and pins the scope key (TOFU); then a *changed* key is rejected.
     if !git_available() {
         return;
@@ -1636,9 +1635,9 @@ fn provenance_signs_verifies_and_pins_the_scope_key() {
 
 #[test]
 fn keyless_trust_pins_downgrades_and_switches_are_enforced_end_to_end() {
-    // The keyless trust model (Phase 5, K3) through the whole stack: the `noeta.lock` scope pin
+    // The keyless trust model through the whole stack: the `noeta.lock` scope pin
     // drives resolution. Negative paths only — they need no verifiable bundle (a *positive*
-    // keyless resolve is exercised with minted bundles in the K4 publish tests).
+    // keyless resolve is exercised with minted bundles in the keyless publish tests).
     if !git_available() {
         return;
     }
@@ -1739,7 +1738,7 @@ fn keyless_trust_pins_downgrades_and_switches_are_enforced_end_to_end() {
 
 #[test]
 fn interactive_oob_publish_signs_keyless_end_to_end() {
-    // The interactive browser-login path (Phase 5, K6), driven the way a human drives OOB mode:
+    // The interactive browser-login path, driven the way a human drives OOB mode:
     // the CLI prints the sign-in URL and prompts for a code; this test "is" the user — it visits
     // the URL (the mock OIDC provider, PKCE enforced), reads the code off the page, and types it
     // into the CLI's stdin. The publish then runs the same Fulcio/Rekor/bundle path as CI, and a
@@ -1903,7 +1902,7 @@ fn interactive_oob_publish_signs_keyless_end_to_end() {
 
 #[test]
 fn keyless_publish_verifies_pins_and_defends_end_to_end() {
-    // The POSITIVE keyless loop through the real CLI (Phase 5, K4): an ambient CI identity
+    // The POSITIVE keyless loop through the real CLI: an ambient CI identity
     // publishes a release whose Sigstore bundle is minted by a hermetic in-process Fulcio + CT
     // log + Rekor; a consumer resolves it, verifies the bundle offline under the DEFAULT policy
     // against the matching trust root, and TOFU-pins the identity in `noeta.lock`; a later
@@ -2043,7 +2042,7 @@ fn keyless_publish_verifies_pins_and_defends_end_to_end() {
 
 #[test]
 fn a_registry_diamond_backtracks_to_a_compatible_set() {
-    // The end-to-end proof of PubGrub range resolution (Phase 4, S5): a diamond where the greedy
+    // The end-to-end proof of PubGrub range resolution: a diamond where the greedy
     // pick (highest `foo`) forces an incompatible `bar`, but a lower `foo` resolves. The walk must
     // read candidate deps from the index and backtrack — a greedy resolver would fail here.
     //   app → foo ^1.0, baz ^1.0

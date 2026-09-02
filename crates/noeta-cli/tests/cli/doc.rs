@@ -1,8 +1,8 @@
-//! `noeta doc` (object-model slice 6f): the `@doc` text-tier extractor and docs publishing.
+//! `noeta doc`: the `@doc` text-tier extractor and docs publishing.
 
 use crate::support::*;
 
-// --- `doc` (object-model slice 6f: the `@doc` text-tier extractor) ------------------
+// --- `doc` (the `@doc` text-tier extractor) ----------------------------------------
 
 #[test]
 fn doc_extracts_verbatim_blocks() {

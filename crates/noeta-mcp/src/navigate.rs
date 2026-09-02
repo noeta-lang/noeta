@@ -1,4 +1,4 @@
-//! M5 Understand pillar, navigation half: `definition` / `references` / `completions` /
+//! The Understand pillar's navigation half: `definition` / `references` / `completions` /
 //! `signature` over the shared IDE engine ([`noeta_ide::DocumentStore`]) — the exact resolver,
 //! occurrence index, and completion logic the LSP serves, so an agent and an editor can never
 //! disagree about where a symbol lives.

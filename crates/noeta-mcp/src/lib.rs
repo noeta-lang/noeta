@@ -6,12 +6,11 @@
 //! agent** — a consumer that addresses code by name/snippet, has ~zero Noeta in its training data,
 //! and lives in a tight "does this compile, what's wrong, what does `E0007` mean" loop.
 //!
-//! M0 stands up the server skeleton (MCP handshake + capability/instructions advertisement over
-//! stdio, via the official `rmcp` SDK) and the single highest-value tool: [`check`], which runs a
-//! program through the same whole-workspace `linked_checked` query the LSP reads and returns the
-//! typed diagnostics (`E0xxx` code, severity, span → file/line/col, message, labels) as structured
-//! content the agent can act on. Later slices add the Ground / Understand / Introspect / Execute
-//! pillars (see `plans/mcp/README.md`).
+//! The server speaks the MCP handshake and advertises its capabilities/instructions over stdio (via
+//! the official `rmcp` SDK), serving the Ground / Understand / Introspect / Execute pillars. The
+//! highest-value tool is [`check`], which runs a program through the same whole-workspace
+//! `linked_checked` query the LSP reads and returns the typed diagnostics (`E0xxx` code, severity,
+//! span → file/line/col, message, labels) as structured content the agent can act on.
 
 mod analyze;
 mod corpus;
@@ -198,7 +197,7 @@ pub struct ExampleOut {
     pub expects: Vec<String>,
 }
 
-/// A `check`-style source input shared by the M3 analysis tools: inline `source` OR a `file` path.
+/// A `check`-style source input shared by the analysis tools: inline `source` OR a `file` path.
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 pub struct AnalyzeArgs {
     /// Inline Noeta source to analyze. Provide this or `file`.
@@ -1151,7 +1150,7 @@ pub(crate) struct ResolvedWorkspace {
     /// same query-path graph resolve that produced [`Self::deps`]. Threaded onto the salsa
     /// [`Workspace`](noeta_db::Workspace) so a renamed text tier (`[directives] docs = "std:doc"`) lexes
     /// verbatim under the MCP surface exactly as it does under `noeta run`/`noeta check` and the
-    /// editor (per-package tier-naming arc, 3g). Empty for inline `source` and manifest-less scripts.
+    /// editor. Empty for inline `source` and manifest-less scripts.
     pub package_uses: noeta_span::PackageUses,
     /// The root package's language edition — what the entry and its siblings are analyzed under
     /// (each dependency carries its own).
@@ -1750,7 +1749,7 @@ mod tests {
         server.abort();
     }
 
-    /// M2 gate fixture: drive a real MCP session and call `stdlib_api` with a module filter — the
+    /// The `stdlib_api` gate fixture: drive a real MCP session and call `stdlib_api` with a module filter — the
     /// tool is advertised and returns rendered signatures straight from the native registry.
     #[tokio::test]
     async fn round_trip_stdlib_api_over_a_duplex() {
@@ -1802,7 +1801,7 @@ mod tests {
         server.abort();
     }
 
-    /// M3 gate fixture: drive a real MCP session and call `type_at` — an Introspect/Understand tool
+    /// The `type_at` gate fixture: drive a real MCP session and call `type_at` — an Introspect/Understand tool
     /// is advertised and answers a `symbol` query with a type straight off the salsa graph.
     #[tokio::test]
     async fn round_trip_type_at_over_a_duplex() {
@@ -1859,7 +1858,7 @@ mod tests {
         server.abort();
     }
 
-    /// M4 gate fixture: drive a real MCP session and call `run` — an Execute-pillar tool is
+    /// The `run` gate fixture: drive a real MCP session and call `run` — an Execute-pillar tool is
     /// advertised and runs a program against the sandbox, returning its stdout and clean exit.
     #[tokio::test]
     async fn round_trip_run_over_a_duplex() {
@@ -1910,7 +1909,7 @@ mod tests {
         server.abort();
     }
 
-    /// M5 slice gate: the navigation tools are advertised and `definition` resolves over a real
+    /// The navigation gate: the navigation tools are advertised and `definition` resolves over a real
     /// client⇄server duplex.
     #[tokio::test]
     async fn round_trip_definition_over_a_duplex() {
@@ -1970,7 +1969,7 @@ mod tests {
         server.abort();
     }
 
-    /// M6 slice gate: the debug tools are advertised and a start → eval → stop session round-trips
+    /// The debug gate: the debug tools are advertised and a start → eval → stop session round-trips
     /// over a real client⇄server duplex.
     #[tokio::test(flavor = "multi_thread")]
     async fn round_trip_debug_session_over_a_duplex() {
@@ -2043,7 +2042,7 @@ mod tests {
         server.abort();
     }
 
-    /// R3 slice gate: `trace` is advertised and a role-driven trace round-trips over a duplex.
+    /// The trace gate: `trace` is advertised and a role-driven trace round-trips over a duplex.
     #[tokio::test]
     async fn round_trip_trace_over_a_duplex() {
         use rmcp::model::CallToolRequestParams;

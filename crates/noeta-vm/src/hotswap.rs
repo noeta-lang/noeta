@@ -1,18 +1,14 @@
-//! **Hot-swap and console-fragment installation** (tooling-unification T4,
-//! server-hmr W1): the [`FragmentCompiler`] seam and [`HotFragment`] /
-//! [`HotChannel`] mailbox vocabulary, plus the `impl Vm` apply/install/eval
-//! cluster (`apply_pending_hotswap`, `install_fragment`,
-//! `debug_eval_fragment`, `debug_set_variable`). Deliberately NOT
-//! `compile`-gated as a module: these paths are compiler-free by design
-//! (native-size slice 2) — the seam keeps `noeta-compiler` out of the VM core,
-//! and each item keeps exactly the `#[cfg]`s it had at the crate root. Moved
-//! verbatim purely to shrink `lib.rs` — no behavior change.
+//! **Hot-swap and console-fragment installation**: the [`FragmentCompiler`] seam and
+//! [`HotFragment`] / [`HotChannel`] mailbox vocabulary, plus the `impl Vm` apply/install/eval
+//! cluster (`apply_pending_hotswap`, `install_fragment`, `debug_eval_fragment`,
+//! `debug_set_variable`). Deliberately NOT `compile`-gated as a module: these paths are
+//! compiler-free by design — the seam keeps `noeta-compiler` out of the VM core.
 
 use crate::*;
 
 /// The **live incremental compiler** behind a debug console / REPL / hot-reload session
-/// (tooling-unification T4, server-hmr W1) — the seam that keeps the VM core free of the compiler
-/// crate (native-size slice 2). `noeta_compiler::SessionCompiler` implements it (behind the
+/// — the seam that keeps the VM core free of the compiler
+/// crate. `noeta_compiler::SessionCompiler` implements it (behind the
 /// `compile` feature); a shipped AOT binary, which runs a pre-compiled bundle and never compiles a
 /// fragment, links no implementor and sheds the whole compiler front-end. Names only always-present
 /// types ([`Program`], [`Module`]) so the trait — and every install path that drives it — compiles
@@ -48,10 +44,10 @@ pub trait FragmentCompiler: std::fmt::Debug {
     fn declare_global(&mut self, name: &str, mutable: bool, overwrite: bool);
 }
 
-/// One type checker's **span-keyed site bundle**, in transit through the VM core (server-hmr H5).
+/// One type checker's **span-keyed site bundle**, in transit through the VM core.
 ///
 /// The VM core cannot name `noeta_check::Sites`: the whole point of the [`FragmentCompiler`] seam
-/// (native-size slice 2) is that an AOT binary links no compiler and no checker at all, and a
+/// is that an AOT binary links no compiler and no checker at all, and a
 /// `HotFragment` field naming one would drag both into every build. So a bundle crosses the core as
 /// an opaque handle — deposited by the driver that ran the check, ferried by the mailbox, and
 /// downcast back to its real type by the *implementor*, which is the one place that owns it (the
@@ -66,7 +62,7 @@ pub trait FragmentSites: std::fmt::Debug + Send + Sync + std::any::Any {
 /// A shared handle to one [`FragmentSites`] bundle: cloned per worker, borrowed per install.
 pub type HotSites = Arc<dyn FragmentSites>;
 
-/// One VM's **seat** on a shared [`HotChannel`] (server-hmr F5 + H5 retention): the mailbox plus the
+/// One VM's **seat** on a shared [`HotChannel`]: the mailbox plus the
 /// consumer slot it claimed when the mailbox was armed. The channel tracks each consumer's drain
 /// cursor under that slot, which is both how a worker resumes where it left off and how the queue
 /// knows when a deposited plan has reached everyone and its program-sized `Sites` bundle can go.
@@ -100,7 +96,7 @@ fn is_observational(program: &Program) -> bool {
         .all(|stmt| matches!(stmt, Stmt::Expr { .. }))
 }
 
-/// A ready-to-apply hot-reload fragment (server-hmr W1) — the compiler-free hand-off the VM applies.
+/// A ready-to-apply hot-reload fragment — the compiler-free hand-off the VM applies.
 /// The watcher thread (which owns parsing, checking, and diffing) turns its `SwapPlan` into this
 /// plain record when depositing, so [`HotChannel`] — and thus the VM core — never names the compiler.
 #[derive(Debug, Clone)]
@@ -113,7 +109,7 @@ pub struct HotFragment {
     pub added: Vec<String>,
     /// Names changed by this edit (preferred over `added` in the report when non-empty).
     pub changed: Vec<String>,
-    /// The **whole-program** site bundle of the check that admitted this edit (server-hmr H5), so
+    /// The **whole-program** site bundle of the check that admitted this edit, so
     /// every worker installs it through [`FragmentCompiler::extend_checked`] and the swapped code
     /// is compiled exactly as a cold start would compile it. `None` falls back to the checkerless
     /// compile — sound, but silently degraded (see [`FragmentCompiler::extend`]).
@@ -131,7 +127,7 @@ pub struct HotFragment {
     pub sites: Option<HotSites>,
 }
 
-/// The hot-reload mailbox (server-hmr W1): a watcher thread — which owns parsing, checking
+/// The hot-reload mailbox: a watcher thread — which owns parsing, checking
 /// (transactional gate), and diffing — deposits a ready-to-apply [`HotFragment`]; the run thread
 /// takes it at the next scheduler tick and applies it to the live program. A deposit replaces an
 /// unconsumed predecessor (the depositor is responsible for diffing against the last *consumed*
@@ -139,7 +135,7 @@ pub struct HotFragment {
 pub type HotSwapMailbox = Arc<HotChannel>;
 
 /// The hot-reload channel shared by the watcher thread, the VM, and (through the [`NativeCtx`]
-/// accessors) the serve loop (server-hmr L3).
+/// accessors) the serve loop.
 ///
 /// - the plan queue — the swap mailbox (see [`HotSwapMailbox`] and [`PlanQueue`]), deposited into
 ///   by [`HotChannel::deposit`] and drained per consumer by [`HotChannel::drain`].
@@ -166,8 +162,8 @@ impl Default for HotChannel {
     }
 }
 
-/// The broadcast queue behind a [`HotChannel`] (server-hmr F5), plus the per-consumer cursors that
-/// let it **reclaim** what everyone has already installed (server-hmr H5 retention).
+/// The broadcast queue behind a [`HotChannel`], plus the per-consumer cursors that
+/// let it **reclaim** what everyone has already installed.
 ///
 /// **Generation = index, still.** `plans` is append-only in its *indices*: a deposit pushes, and an
 /// index once minted is never reused or shifted. What is reclaimed is a passed plan's *payload* —
@@ -345,7 +341,7 @@ impl PlanQueue {
 }
 
 impl<'m> Vm<'m> {
-    /// Apply a pending hot-swap plan, if one is waiting in the mailbox (server-hmr W1). Called at
+    /// Apply a pending hot-swap plan, if one is waiting in the mailbox. Called at
     /// the scheduler tick (`advance_tasks` — every ctx-driven loop's per-iteration safepoint), so
     /// a `noeta serve --watch` process absorbs edits between polls. Mirrors
     /// [`VmSession::hot_swap`]'s semantics on the live VM: on a re-running swap, dispose the
@@ -362,10 +358,10 @@ impl<'m> Vm<'m> {
         let Some(HotConsumer { mailbox, slot }) = &self.hot_mailbox else {
             return;
         };
-        // Drain the broadcast queue from this VM's own cursor (server-hmr F5): take a handle on each
+        // Drain the broadcast queue from this VM's own cursor: take a handle on each
         // plan it has not applied yet (the lock is held for the pointer bumps only, never across the
         // apply), then apply each in order. N workers each drain the same queue independently, and
-        // the drain reclaims whatever the slowest of them has now passed (server-hmr H5 retention).
+        // the drain reclaims whatever the slowest of them has now passed.
         let Some(pending) = mailbox.drain(*slot) else {
             return;
         };
@@ -377,8 +373,8 @@ impl<'m> Vm<'m> {
         }
     }
 
-    /// Apply a single swap plan to the live session (server-hmr W1/H1; the per-plan body the F5
-    /// queue drain calls). Failures report to stderr and keep the previous version serving.
+    /// Apply a single swap plan to the live session — the per-plan body the queue drain calls.
+    /// Failures report to stderr and keep the previous version serving.
     fn apply_one_swap(&mut self, plan: &HotFragment) {
         // Slots the re-run overwrites — resolved against the session compiler BEFORE the fragment
         // extends it, so only pre-existing bindings (the ones with old nodes) are collected.
@@ -399,7 +395,7 @@ impl<'m> Vm<'m> {
         if plan.rerun_top_level {
             self.hotswap_prepare(&rebound);
         }
-        // Installed WITH the deposit's whole-program sites when it carries them (server-hmr H5):
+        // Installed WITH the deposit's whole-program sites when it carries them:
         // the swapped bodies then compile with the same site-keyed codegen and precise destructor
         // relevance a cold start of this version gets, instead of degrading the running program
         // one edit at a time.
@@ -435,8 +431,7 @@ impl<'m> Vm<'m> {
                     what
                 );
                 // The serve loop detects this via `NativeCtx::hot_swap_count` (this VM's
-                // `applied_swaps`, bumped by the drain) and pushes `reload` to its live clients
-                // (server-hmr L3).
+                // `applied_swaps`, bumped by the drain) and pushes `reload` to its live clients.
             }
             Err(Abort) => {
                 let msg = self.last_diag_message();
@@ -445,11 +440,11 @@ impl<'m> Vm<'m> {
         }
     }
 
-    /// Install a debug-console **fragment** into this running Vm (tooling-unification T4). The
+    /// Install a debug-console **fragment** into this running Vm. The
     /// fragment compiles through the adopted session compiler — stable-prefix id accumulation,
     /// exactly a REPL entry; checkerless, or with `sites` through
     /// [`FragmentCompiler::extend_checked`] when the caller holds the whole-program bundle of the
-    /// check that admitted it (server-hmr H5: a hot swap does, a console entry does not) — and the
+    /// check that admitted it (a hot swap does, a console entry does not) — and the
     /// Vm then:
     ///
     /// 1. **Relocates the fragment's entry chunk** to a fresh proto index at the end of the table.
@@ -475,7 +470,7 @@ impl<'m> Vm<'m> {
         fragment: &Program,
         sites: Option<&dyn FragmentSites>,
     ) -> Result<u32, String> {
-        // Tier-1 across a swap (server-hmr H3): retire the armed engine (pages parked in the
+        // Tier-1 across a swap: retire the armed engine (pages parked in the
         // graveyard so in-flight native frames stay executable), install the fragment against a
         // clean tier-0 world, then re-arm fresh against the swapped module and let tiering
         // re-warm. Unarmed runs (the debug console, hover, the differential) skip both halves.
@@ -486,7 +481,7 @@ impl<'m> Vm<'m> {
         };
         // A real install relocates the new wrapper onto proto 0 and pushes it to the tail — and
         // because `extend` recycles proto 0, that tail index is *reused* by the next install. Any
-        // compiled-wrapper entry the U3 memo still holds therefore points at a proto this swap is
+        // compiled-wrapper entry the memo still holds therefore points at a proto this swap is
         // about to overwrite, so re-running it would run the wrong code ("the fragment did not
         // produce a value"). Drop the memo here: an install happens only on a compile *miss* (never
         // on a plain step, so cross-step reuse of an unchanged watch is untouched), and it is
@@ -615,7 +610,7 @@ impl<'m> Vm<'m> {
         Ok(entry_idx)
     }
 
-    /// Retire the armed tier-1 engine ahead of a module swap (server-hmr H3). The engine (or the
+    /// Retire the armed tier-1 engine ahead of a module swap. The engine (or the
     /// off-thread service) moves to the graveyard — its executable pages must outlive any native
     /// frame still on the machine stack beneath the swap safepoint — and every mirror entry is
     /// cleared, so no *new* dispatch enters retired code; everything falls back to the
@@ -654,7 +649,7 @@ impl<'m> Vm<'m> {
         was_armed
     }
 
-    /// Re-arm tier 1 against the freshly swapped module (server-hmr H3): the `force_jit` oracle
+    /// Re-arm tier 1 against the freshly swapped module: the `force_jit` oracle
     /// re-creates the synchronous engine (eager-compiling every proto of the NEW module, added
     /// ones included); production re-spawns the off-thread service around a clone of the new
     /// module — hot-counter promotion re-warms exactly what the program still runs.
@@ -667,8 +662,8 @@ impl<'m> Vm<'m> {
         }
     }
 
-    /// Evaluate a debug-console **fragment** against a paused frame by *compiling* it — the T5
-    /// evaluator: the console is a REPL over the paused program. The fragment is wrapped as a
+    /// Evaluate a debug-console **fragment** against a paused frame by *compiling* it: the console
+    /// is a REPL over the paused program. The fragment is wrapped as a
     /// closure whose parameters are the frame's in-scope locals (frame-scope binding via the
     /// ordinary call protocol — the REPL's sentinel idea in frame scope), its trailing bare
     /// expression rewritten to a `return`; the wrapper is bound to an unforgeable sentinel global
@@ -682,7 +677,7 @@ impl<'m> Vm<'m> {
     /// A fragment's transient diagnostics/abort-trace are rolled back afterwards, so a failed
     /// console entry never pollutes the debugged run.
     ///
-    /// With `pure` set (a **hover** — T6), the same engine runs gated to the read-only surface:
+    /// With `pure` set (a **hover**), the same engine runs gated to the read-only surface:
     /// the fragment must be a single expression built from names / members / indexing / operators /
     /// literals ([`is_pure_expr`]), and [`Vm::pure_eval`] backstops the receiver-dependent
     /// dispatches the AST cannot decide (an object's `Index` impl, a user ordering method) by
@@ -824,7 +819,7 @@ impl<'m> Vm<'m> {
                 .unzip()
         };
         let span = program.span;
-        // Compiled-wrapper memo (U3): a watch panel re-evaluates its expressions on every step —
+        // Compiled-wrapper memo: a watch panel re-evaluates its expressions on every step —
         // key on (raw text, in-scope local names) and reuse the installed entry on a hit, so a
         // repeated watch appends nothing to the session. Values stay fresh (they are call
         // arguments). Only a successful compile is memoized, and the param names are part of the
@@ -852,7 +847,7 @@ impl<'m> Vm<'m> {
     }
 
     /// Compile-and-install one fragment wrapper (the memo-miss path of
-    /// [`Vm::eval_fragment_owned`]): apply the U2 binding promotion, rewrite the trailing bare
+    /// [`Vm::eval_fragment_owned`]): apply the binding promotion, rewrite the trailing bare
     /// expression to a `return`, wrap as the sentinel-bound closure whose parameters are `params`,
     /// install through the session, and memoize the entry under `memo_key`.
     fn compile_fragment_entry(
@@ -865,7 +860,7 @@ impl<'m> Vm<'m> {
     ) -> Result<u32, String> {
         // Wrap: `mut <sentinel> = fn(<locals>) { <fragment>; return <trailing expr> };`
         let mut body = program.stmts.clone();
-        // Persistent console bindings (U2): a fragment's top-level `mut x = e` — and a bare
+        // Persistent console bindings: a fragment's top-level `mut x = e` — and a bare
         // `x = e` introducing a NEW name — binds a SESSION GLOBAL, the console analogue of a REPL
         // binding, not a closure-local that dies with the entry. Each such name is pre-registered
         // in the session compiler (so the assignment inside the wrapper resolves globally) and the
@@ -954,10 +949,10 @@ impl<'m> Vm<'m> {
         args: Vec<Value>,
         span: Span,
     ) -> Result<Value, String> {
-        // Liveness bound (MCP M6b): the nested run executes with the session's own debugger held
-        // out of `self` (so a fragment never trips a breakpoint), which also meant nothing could
-        // stop it — an infinite-loop watch expression hung the paused session. Arm a budget-only
-        // debugger over the same per-op seam for exactly this run: on a trip it terminates the
+        // Liveness bound: the nested run executes with the session's own debugger held out of
+        // `self` (so a fragment never trips a breakpoint), which leaves nothing to stop an
+        // infinite-loop watch expression. Arm a budget-only debugger over the same per-op seam for
+        // exactly this run: on a trip it terminates the
         // *fragment* (an ordinary nested abort — the paused program is untouched and resumable).
         let tripped = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let saved = self.debugger.take();
@@ -1009,7 +1004,7 @@ impl<'m> Vm<'m> {
         result.map_err(|Abort| self.last_diag_message())
     }
 
-    /// Service a paused-frame **`setVariable`** (U1): evaluate `value` as a console fragment (frame
+    /// Service a paused-frame **`setVariable`**: evaluate `value` as a console fragment (frame
     /// locals visible), then overwrite the named in-scope local's register in the selected frame.
     /// The old value is released with destructor semantics (this is a reassignment); on any error
     /// the frame is untouched. `self` is refused — replacing a method's receiver mid-body is a

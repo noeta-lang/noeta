@@ -2,8 +2,8 @@
 //!
 //! The language made line-end `;` optional, and the formatter keeps each statement's choice instead
 //! of forcing one way. Semicolon presence is not stored on the AST — it is recovered from the source
-//! at print time by looking just past a statement's span. (Comment trivia is collected by the lexer;
-//! its reattachment lands in F4.)
+//! at print time by looking just past a statement's span. (Comment trivia is collected by the lexer
+//! and reattached to the AST before printing.)
 
 /// Whether the statement ending at byte offset `stmt_end` in `source` was written with a trailing
 /// `;`. Scans forward over same-line spaces/tabs only: a `;` binds to the statement it follows, so

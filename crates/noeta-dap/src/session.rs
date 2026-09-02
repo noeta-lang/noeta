@@ -20,13 +20,13 @@ use noeta_vm::{Debugger, VmBackend};
 
 /// A program compiled and ready to run under the debugger: the bytecode, the source map that
 /// resolves each instruction's span back to a file + line, and the **live session compiler** the
-/// checked compile left behind (tooling-unification T3/T5) — console fragments extend it at run
+/// checked compile left behind — console fragments extend it at run
 /// time, appending onto the program's own id-spaces.
 pub struct Compiled {
     pub module: Module,
     pub sources: SourceMap,
     pub session: noeta_compiler::SessionCompiler,
-    /// The session type-checker the checked launch compile left behind (session-checker C3) —
+    /// The session type-checker the checked launch compile left behind —
     /// console fragments check against it before running.
     pub checker: noeta_check::SessionChecker,
     /// The launch compile's non-blocking diagnostics, already rendered. A warning must not refuse to
@@ -77,7 +77,7 @@ pub fn compile_file(path: &Path) -> Result<Compiled, RunOutput> {
         }
     };
 
-    // The session flavor keeps the checker alive (C3): console fragments will check against the
+    // The session flavor keeps the checker alive: console fragments will check against the
     // typing environment this whole-program check accumulates.
     let (checked, checker) = loaded.check_session();
     // Errors only: an advisory diagnostic describes a program that still runs, and a debugger that
@@ -171,7 +171,7 @@ pub fn run_compiled(compiled: Compiled, debugger: Option<Box<dyn Debugger>>) -> 
 }
 
 /// Compile an already-checked program to a bytecode [`Module`] **with debug info**, keeping the
-/// compiler alive as a session (tooling-unification T3/T5). The same checked compile the CLI's
+/// compiler alive as a session. The same checked compile the CLI's
 /// `compile_real` performs (the checker's [`noeta_check::Sites`] bundle threaded through), with two
 /// debug-run differences: `debug = true` (the debug-info side-tables — reg→name locals, proto
 /// names + spans — and named locals pinned through coalescing), and the session-flavored entry so

@@ -1,9 +1,8 @@
-//! The string-map hot paths (extern-types X4 gate): `MapStore` moved from
-//! `HashMap<CompactString, _>` to `HashMap<MapKey, _>` (hashbrown) so extern types can key maps.
-//! The claim under test: the string paths are unchanged — content-only hashing keeps the `&str`
-//! probe hash-identical and allocation-free, inserts keep the P-SSO move/clone fast paths, and
-//! the only added cost is one predicted discriminant check in `eq` — so gets and set-churn must
-//! not regress vs the pre-X4 baseline.
+//! The string-map hot paths. `MapStore` is a `HashMap<MapKey, _>` (hashbrown) so extern types can
+//! key maps, and the claim under test is that the string paths pay nothing for it: content-only
+//! hashing keeps the `&str` probe hash-identical and allocation-free, inserts keep the
+//! short-string move/clone fast paths, and the only added cost is one predicted discriminant check
+//! in `eq`. Gets and set-churn must not regress.
 
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 
@@ -14,7 +13,7 @@ use noeta_span::{Source, SourceId};
 use noeta_vm::VmBackend;
 
 fn compile(src: &str) -> Module {
-    // The bench is its own assembling driver (audit-6 F2): the compiler resolves std names
+    // The bench is its own assembling driver: the compiler resolves std names
     // against the process-default registry. Outside the measured loop; idempotent.
     noeta_stdlib::registry::default_seeded();
     let source = Source::new(SourceId::FIRST, "bench.noe", src);

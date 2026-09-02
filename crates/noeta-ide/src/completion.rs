@@ -1,18 +1,18 @@
-//! Completion candidates for `textDocument/completion` (slice **L5**).
+//! Completion candidates for `textDocument/completion`.
 //!
 //! Three forms, chosen by the caller from the cursor context:
 //!
-//! - [`complete`] — **identifier completion** (C1): the language keywords, the reflection
+//! - [`complete`] — **identifier completion**: the language keywords, the reflection
 //!   primitives (as functions, with their signatures), the top-level declarations (functions and
 //!   types), and the value bindings in scope at the cursor (locals, parameters, `for`/`match`/closure
 //!   bindings, and earlier module-level bindings). In-scope bindings come from
 //!   [`resolve::visible_at`], so the same scoping walk backs completion and go-to-definition.
-//! - [`members_of`] — **member completion** (C2): the fields, enum variants, and methods of a named
+//! - [`members_of`] — **member completion**: the fields, enum variants, and methods of a named
 //!   type, offered on a `receiver.member` access once the caller has resolved the receiver's type.
-//! - [`directives`] — **directive completion** (C4): the decorator directives and the tier
+//! - [`directives`] — **directive completion**: the decorator directives and the tier
 //!   name-space, offered right after an `@` (detected textually via [`is_directive_position`] —
 //!   a dangling `@` never parses).
-//! - [`directive_arg_candidates`] — **directive-argument completion** (C5): the vocabulary inside
+//! - [`directive_arg_candidates`] — **directive-argument completion**: the vocabulary inside
 //!   a directive's parens (`@derive(` → what a bare derive accepts, `@role(` → the semantic enums,
 //!   `@packed(` → the `Layout` variants, `@bench(` → its config knobs), from the same sources the
 //!   parser/checker validate against. Context via [`directive_arg_context`].
@@ -48,12 +48,12 @@ pub enum CandidateKind {
     EnumMember,
     /// A built-in type name (`int`, `List`, …) offered in a type-annotation position.
     Type,
-    /// A user-defined `trait` (L1) — offered as a bound and after `dyn`.
+    /// A user-defined `trait` — offered as a bound and after `dyn`.
     Trait,
     /// A native module or namespace-group member (`http.client`, member completion on a group).
     Module,
     /// An `@`-directive: a decorator (`@derive`, `@packed`, …) or a dev-tier (`@test`, `@doc`,
-    /// a declared `@tier`'s name) — offered right after an `@` (C4).
+    /// a declared `@tier`'s name) — offered right after an `@`.
     Directive,
 }
 
@@ -239,7 +239,7 @@ pub fn namespace_members(prefix: &str) -> Vec<Candidate> {
         .collect()
 }
 
-/// The directive candidates offered right after an `@` (**directive completion**, C4): the built-in
+/// The directive candidates offered right after an `@` (**directive completion**): the built-in
 /// decorator directives (the parser's closed set, so completion and the grammar can never drift)
 /// followed by the **tier name-space** — the installed extensions' tiers (`test`/`bench`/`doc`/
 /// `debug` plus any native package's) and the program's own `@tier` declarations, read from the
@@ -265,7 +265,7 @@ pub fn directives(program: &Program) -> Vec<Candidate> {
 }
 
 /// The directive-argument position the cursor is in: inside the parens of `@<directive>(…)`,
-/// with enough of the current argument decoded to pick the right vocabulary (C5). Detection is
+/// with enough of the current argument decoded to pick the right vocabulary. Detection is
 /// textual (a half-typed directive argument does not parse) and stays within the cursor's line
 /// (a directive's argument list never spans lines).
 #[derive(Debug, Clone, PartialEq)]
@@ -354,7 +354,7 @@ pub fn directive_arg_context(text: &str, offset: u32) -> Option<DirectiveArgCont
     })
 }
 
-/// The completion candidates inside a directive's argument list (C5), from the directive's own
+/// The completion candidates inside a directive's argument list, from the directive's own
 /// vocabulary — the same sources the parser/checker validate against, so completion can never
 /// offer what they would reject. `program` should be the merged workspace program (an imported
 /// `@semantic` enum or a dependency's `@tier` declaration is offered). Unknown vocabulary (a
@@ -408,8 +408,7 @@ pub fn directive_arg_candidates(ctxt: &DirectiveArgContext, program: &Program) -
 }
 
 /// `@derive(…)`: the built-ins a bare derive synthesizes and the program's derivable **user
-/// traits** (UT5:
-/// non-generic, every method defaulted — deriving adopts the defaults); inside
+/// traits** (non-generic, every method defaulted — deriving adopts the defaults); inside
 /// `Serialize<…>`/`Deserialize<…>`, the serialization formats.
 fn derive_candidates(ctxt: &DirectiveArgContext, program: &Program) -> Vec<Candidate> {
     if ctxt.in_generic.is_some() {
@@ -774,11 +773,10 @@ fn push_derived(
     }
 }
 
-/// Append each method as a `Method` candidate carrying its signature.
-/// The methods a **kernel-trait binding** contributes to a receiver (ExtBundle→ExtTrait fold-in,
-/// slice 4): resolve each of the type's recorded `(qualified module, trait name)` bindings to its
-/// native `ExtTrait` and list the methods matching the receiver kind (`Element` on a `T` receiver,
-/// `Bulk` on a `List<T>`), with the declared signature as detail.
+/// The methods a **kernel-trait binding** contributes to a receiver: resolve each of the type's
+/// recorded `(qualified module, trait name)` bindings to its native `ExtTrait` and list the methods
+/// matching the receiver kind (`Element` on a `T` receiver, `Bulk` on a `List<T>`), with the
+/// declared signature as detail.
 pub fn bundle_members(
     bindings: &[(String, String)],
     receiver: noeta_stdlib::BundleReceiver,
@@ -814,6 +812,7 @@ pub fn bundle_members(
     members
 }
 
+/// Append each method as a `Method` candidate carrying its signature.
 fn push_methods(members: &mut Vec<Candidate>, methods: &[noeta_ast::FnDecl]) {
     for method in methods {
         members.push(Candidate {
@@ -844,7 +843,7 @@ fn builtin_type_names() -> Vec<String> {
     names
 }
 
-/// The type names offered in a type-annotation position (C3): the user-declared `struct`/`class`/
+/// The type names offered in a type-annotation position: the user-declared `struct`/`class`/
 /// `enum` types (with their precise kinds) followed by the built-in types. De-duplicated by label.
 /// `program` should be the merged workspace program so an imported type is offered.
 pub fn type_names(program: &Program) -> Vec<Candidate> {
@@ -1071,7 +1070,7 @@ mod tests {
 
     #[test]
     fn whitespace_gap_in_a_body_offers_params_and_prior_locals() {
-        // A blank line inside the function body — no AST node covers the cursor (C1.1).
+        // A blank line inside the function body — no AST node covers the cursor.
         let src = "fn f(count: int): int {\n  total = count\n  \n  return total\n}";
         let offset = src.find("\n  \n").unwrap() as u32 + 2; // on the blank line's whitespace
         let cands = complete_at(src, offset);
@@ -1371,7 +1370,7 @@ mod tests {
 
     #[test]
     fn derive_arguments_offer_fully_defaulted_user_traits() {
-        // UT5: a non-generic, fully-defaulted user trait is derivable and offered; a trait with a
+        // A non-generic, fully-defaulted user trait is derivable and offered; a trait with a
         // required method or generics is not.
         let program = program_of(
             "trait Full {\n    fn label(): string { return \"x\" }\n}\n\

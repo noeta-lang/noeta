@@ -547,7 +547,7 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
             args.iter().for_each(&mut *f);
         }
         // A forwarding call's `type_args` are operands like any other — a pass-through slot reads
-        // the enclosing fn's `$ty` local, and a NESTED fn (D2b) reaches it as a *capture*, so
+        // the enclosing fn's `$ty` local, and a NESTED fn reaches it as a *capture*, so
         // skipping them here would leave that capture unrecorded.
         Rvalue::Call {
             callee,
@@ -679,7 +679,7 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
         Rvalue::MakeChannel { capacity, .. } => f(capacity),
         Rvalue::TypedModuleCall { args, dynamic, .. } => {
             args.iter().for_each(&mut *f);
-            // The hidden type-argument slot (F2b) is a read — a closure inside a forwarding fn
+            // The hidden type-argument slot is a read — a closure inside a forwarding fn
             // captures it like any local.
             dynamic.iter().for_each(&mut *f);
         }

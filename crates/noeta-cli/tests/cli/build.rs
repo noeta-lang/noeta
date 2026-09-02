@@ -1,9 +1,9 @@
-//! `noeta build`: `.noeb` bundles (P-AOT L1.2), `--exe` self-contained executables (L2), and
-//! `--native` machine-code AOT (L3).
+//! `noeta build`: `.noeb` bundles, `--exe` self-contained executables, and
+//! `--native` machine-code AOT.
 
 use crate::support::*;
 
-// --- `build` / `.noeb` bundles (P-AOT L1.2) -----------------------------------------
+// --- `build` / `.noeb` bundles ------------------------------------------------------
 
 #[test]
 fn build_then_run_bundle_matches_source_run() {
@@ -32,12 +32,12 @@ fn build_then_run_bundle_matches_source_run() {
         .stdout(predicate::str::diff(src_stdout));
 }
 
-// --- `build --exe` / self-contained executables (P-AOT L2) --------------------------
+// --- `build --exe` / self-contained executables -------------------------------------
 
 #[test]
 fn build_exe_runs_the_program_with_no_source_or_bundle_alongside() {
     // `noeta build --exe -o app` staples the compiled program onto a copy of the LEAN `noeta-runner`
-    // (dev-deps D4a — not the toolchain). The resulting `app` runs the program directly — no `.noe`,
+    // (not the toolchain). The resulting `app` runs the program directly — no `.noe`,
     // no `.noeb`, no `noeta run` — and its stdout matches a source run byte-for-byte. Running it also
     // proves the startup trailer detection fires (the runner would otherwise print usage).
     let Some(runner) = lean_runner_path() else {
@@ -96,7 +96,7 @@ fn build_exe_reports_a_runtime_abort_from_the_stapled_program() {
     let _ = std::fs::remove_file(&app);
 }
 
-// --- `build --native` / native AOT executables (P-AOT L3) ---------------------------
+// --- `build --native` / native AOT executables --------------------------------------
 
 /// Build the AOT runtime staticlib (`libnoeta_aot.a`) for `--native` to link against, reusing the
 /// workspace's `target/debug` (so its deps are already compiled), and return the archive path plus
@@ -181,15 +181,12 @@ fn build_native(file: &std::path::Path, app: &std::path::Path) -> Option<()> {
 #[cfg(feature = "jit")] // `--native` exists only in the JIT-enabled build (it exits 2 otherwise).
 fn build_native_matches_a_source_run_byte_for_byte() {
     // This is a smoke test, not the gate: the corpus-wide gate is the conformance harness's
-    // AOT differential (`--aot-differential`), which links an artifact per corpus program. For
-    // years this test WAS the gate, and being one hand-written all-int program that compared
-    // stdout only, it watched neither the AOT run tail nor any other codegen shape.
-    // P-AOT L3.2b(3), the end-to-end AOT differential: `noeta build --native` compiles the eligible
-    // prototypes to machine code, links them into a native binary, and staples the bundle on. That
-    // binary — dispatching native bodies for the hot loop / `sq` / `fib` and interpreting the rest —
-    // must produce exactly what `noeta run` produces on the same source. This is the linked-binary
-    // proof the in-process test (`aot_bound_dispatch_runs_native_in_process`) forecast: only the
-    // linker was unproven, and here it runs for real.
+    // AOT differential (`--aot-differential`), which links an artifact per corpus program.
+    // `noeta build --native` compiles the eligible prototypes to machine code, links them into a
+    // native binary, and staples the bundle on. That binary — dispatching native bodies for the hot
+    // loop / `sq` / `fib` and interpreting the rest — must produce exactly what `noeta run` produces
+    // on the same source. It is the linked-binary counterpart of the in-process test
+    // (`aot_bound_dispatch_runs_native_in_process`), which leaves the linker itself unexercised.
     //
     // "Byte for byte" now means **both** streams and the exit code, not stdout alone. Comparing
     // stdout only is what let the AOT tail drop the program's own `stderr` stream — `std.io`'s
@@ -481,10 +478,10 @@ fn build_native_strips_debug_info_from_the_shipped_binary() {
 
 #[test]
 fn aot_runtime_does_not_link_the_compiler_frontend() {
-    // native-size slice 2 (structural guard): a shipped `--native` binary runs a *pre-compiled*
-    // stapled bundle and must never carry the type checker / compiler / IR pipeline — dead weight in
-    // a run-only artifact AND reachable attack surface (the same property the dev-deps arc gave dev
-    // tooling, one layer down: L2 out of a shipped L1). The AOT runtime opts out of noeta-vm's
+    // A structural guard: a shipped `--native` binary runs a *pre-compiled* stapled bundle and must
+    // never carry the type checker / compiler / IR pipeline — dead weight in a run-only artifact AND
+    // reachable attack surface, the same property that keeps dev tooling out of a shipped
+    // artifact's base. The AOT runtime opts out of noeta-vm's
     // `compile` feature; assert the front-end is absent from its (non-dev) dependency graph, so a
     // future edit that re-links it (a new default feature, a compiler dep on noeta-host-real) fails HERE
     // rather than silently re-bloating and re-arming the artifact.
@@ -541,7 +538,7 @@ fn bundle_run_rejects_build_time_flags() {
 
 #[test]
 fn repl_check_skips_an_ill_typed_entry_and_keeps_the_session_usable() {
-    // Under --check (session-checker C2): entry 2 retypes a mut binding → E0007 printed, entry
+    // Under --check: entry 2 retypes a mut binding → E0007 printed, entry
     // SKIPPED (x keeps its value); entry 3 still runs against the intact session.
     lang()
         .arg("repl")
@@ -567,7 +564,7 @@ fn repl_check_applies_static_rules_the_unchecked_repl_defers() {
 #[test]
 fn repl_check_toggles_at_the_prompt() {
     // ON by default: the retype is rejected (E0007). After `:check off`, the same shape runs
-    // (checkerless semantics — the pre-C2 behavior).
+    // (checkerless semantics).
     lang()
         .arg("repl")
         .write_stdin("mut a = 1\na = \"s\"\n:check off\nmut b = 2\nb = \"t\"\necho b ~ \"!\";\n")
@@ -590,7 +587,7 @@ fn repl_no_check_flag_restores_checkerless_sessions() {
 
 #[test]
 fn repl_checked_codegen_gives_type_of_full_fidelity() {
-    // C5: a fully-checked session compiles entries with the checker's site bundle — `type_of` on a
+    // A fully-checked session compiles entries with the checker's site bundle — `type_of` on a
     // list literal recovers the element type, exactly as `noeta run` does...
     lang()
         .arg("repl")
@@ -610,7 +607,7 @@ fn repl_checked_codegen_gives_type_of_full_fidelity() {
 
 #[test]
 fn repl_checked_registers_deserialize_recipes_for_prompt_declared_types() {
-    // aether F2 / L2.2 DI: `@derive(Deserialize<Json>)` on a type DECLARED AT THE PROMPT must bake
+    // `@derive(Deserialize<Json>)` on a type DECLARED AT THE PROMPT must bake
     // its decode recipe into the running session, so `json.decode_typed(name, text)` resolves it —
     // the checked-session analogue of what a whole-program `noeta run` already does. The struct is
     // declared in an early entry and decoded in a LATER one (with an intervening entry), proving the

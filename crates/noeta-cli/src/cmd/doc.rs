@@ -11,7 +11,7 @@ use crate::context::{load_linked, provider_escape, target_gate};
 use crate::output::plural;
 use crate::{compose, docgen};
 
-/// `noeta doc <FILE>` — extract the program's `@doc { … }` text blocks (object-model slice 6f) to
+/// `noeta doc <FILE>` — extract the program's `@doc { … }` text blocks to
 /// stdout, in source order. Each block's verbatim body is dedented (the common leading indentation
 /// and the surrounding blank lines from sitting inside `@doc { … }` are stripped) and preceded by an
 /// HTML-comment header noting its source location — valid markdown that renders to nothing. The
@@ -215,8 +215,8 @@ pub(crate) fn cmd_doc(
     // No path and no `--package`/`--api`: document the current directory, as `check`/`test` do.
     let here = PathBuf::from(".");
     let file = file.as_deref().unwrap_or(&here);
-    // The compose probe hands back the graph it resolved (default selection) for the load below
-    // (audit-5 F2); the `--out` generator path never links, so it simply drops it.
+    // The compose probe hands back the graph it resolved (default selection) for the load below;
+    // the `--out` generator path never links, so it simply drops it.
     let resolved = match compose::maybe_delegate(file) {
         // Composition needed but failed (a fixed exit-1 delegation); the tier subsystem is `u8`.
         Err(_) => return 1,

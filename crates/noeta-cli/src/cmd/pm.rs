@@ -269,8 +269,7 @@ pub(crate) fn acquire_claim_proof(audience: &str) -> Result<registry::ClaimProof
 }
 
 /// `noeta add [key|company/pkg] [--path|--git+--tag|--version] [--package company/pkg]` — add a
-/// dependency to the nearest `noeta.toml`, then resolve so `noeta.lock` reflects it
-/// (package-manager P2.4d).
+/// dependency to the nearest `noeta.toml`, then resolve so `noeta.lock` reflects it.
 ///
 /// A source is **optional** for a registry dependency: given an identity and no `--path`/`--git`/
 /// `--version`, `add` asks the registry for the package's current version and writes a caret
@@ -672,7 +671,7 @@ fn identity_half(identity: Option<&str>, index: usize) -> Option<String> {
         .map(str::to_string)
 }
 
-/// `noeta update` — discard the current pins and re-resolve, rewriting `noeta.lock` (P2.4d). Removing
+/// `noeta update` — discard the current pins and re-resolve, rewriting `noeta.lock`. Removing
 /// the lock forces the graph walk to re-`ls-remote` each git tag and re-pin its current commit SHA.
 pub(crate) fn cmd_update() -> ExitCode {
     let manifest_path = match locate_manifest() {
@@ -746,7 +745,7 @@ pub(crate) fn warn_new_committers(old_lock: &lock::Lock, graph: &graph::Resolved
 }
 
 /// `noeta publish --git <url> [--tag <tag>]` — record this package's identity + version → git
-/// coordinates in the registry index (package-manager P2.5, client stub). The tag defaults to
+/// coordinates in the registry index. The tag defaults to
 /// `v<version>`. Writes to the local/offline index; the hosted registry is operated separately.
 /// With `--docs-only`, skip the index entirely and only regenerate + re-upload the docs artifact
 /// for an already-published version (remediation for a release whose stored docs are wrong).
@@ -823,7 +822,7 @@ pub(crate) fn cmd_publish(
     // The one-line search blurb, likewise.
     let description = pkg.description.clone();
 
-    // A published package must depend **only via the registry** (Phase 4, follow-up #3): a path
+    // A published package must depend **only via the registry**: a path
     // dependency can't travel to a consumer, and a git dependency isn't expressible in the index's
     // (identity, req) shape — so a consumer resolving this release from the index would silently miss
     // it and fail to build. Reject up front (before touching git), naming the offending dependency.
@@ -853,7 +852,7 @@ pub(crate) fn cmd_publish(
         .map(str::to_string)
         .unwrap_or_else(|| format!("v{version}"));
     // Publish to the registry that OWNS this package's scope: route through the manifest's
-    // `[registries]` map exactly like resolution does (private-registries arc), falling back to
+    // `[registries]` map exactly like resolution does, falling back to
     // the environment default only for an unmapped scope. Without this, a project that resolves
     // `acme/*` from a private registry would publish `acme/pkg` to whatever NOETA_REGISTRY_URL
     // points at — leaking a private package to the public registry. A `github:` forge source gets
@@ -872,7 +871,7 @@ pub(crate) fn cmd_publish(
             return ExitCode::from(1);
         }
     };
-    // Pin the commit SHA at publish time (Phase 4, S2): the index — not just a consumer's lockfile —
+    // Pin the commit SHA at publish time: the index — not just a consumer's lockfile —
     // records "this version = this commit", so a first registry resolve fetches the exact commit and
     // a later tag move is caught. A tag that doesn't resolve is a publish error (nothing to pin).
     let sha = match noeta_pm::resolve_tag_sha(git, &tag) {
@@ -887,7 +886,7 @@ pub(crate) fn cmd_publish(
         tag: tag.clone(),
         sha: sha.clone(),
     };
-    // Attest the release (Phase 4 #2 / Phase 5) under one of two trust roots:
+    // Attest the release under one of two trust roots:
     //  - **keyless** (preferred when available): an ambient OIDC identity (CI) signs via
     //    Sigstore — ephemeral key, Fulcio cert, transparency log; nothing to steal afterwards.
     //  - **key**: the Ed25519 file from NOETA_SIGNING_KEY / `noeta-signing.key` (`--key` forces
@@ -901,7 +900,7 @@ pub(crate) fn cmd_publish(
     let ambient = if force_key {
         None
     } else if interactive {
-        // Interactive browser login (K6): Sigstore's OAuth signs you in with GitHub/Google/
+        // Interactive browser login: Sigstore's OAuth signs you in with GitHub/Google/
         // Microsoft and the certified identity is the account email. `--oob` prints the URL
         // and prompts for the code instead of opening a browser.
         match noeta_pm::keyless::interactive_identity(oob) {
@@ -1170,7 +1169,7 @@ fn cmd_publish_docs_only(
     }
 }
 
-/// `noeta audit [path]` — report the dependency tree's trust footprint (package-manager Phase 4, S6):
+/// `noeta audit [path]` — report the dependency tree's trust footprint:
 /// every resolved dependency, its source, and the elevated authority (`native` / `commands`) the root
 /// `[trust]` grants make active. Transparency/informed-consent: since an *unauthorized* native
 /// dependency fails resolution, a successful audit lists exactly the elevated authority that is live.
@@ -1264,7 +1263,7 @@ pub(crate) fn cmd_audit(path: &std::path::Path) -> ExitCode {
          authorized (an unauthorized native dependency would have failed resolution)."
     );
 
-    // Provenance (Phase 4 #2 / Phase 5): each scope's pinned trust root. Resolution *enforces*
+    // Provenance: each scope's pinned trust root. Resolution *enforces*
     // verification (a bad signature/bundle, a changed key/identity, or a downgraded root fails the
     // resolve), so a successful audit means every signed release verified against its pinned root.
     println!("\n  Provenance (pinned trust roots):");
@@ -1303,7 +1302,7 @@ pub(crate) fn cmd_audit(path: &std::path::Path) -> ExitCode {
                 continue;
             };
             // Registry releases are tags; the transparency log is keyed by the tag (a non-tag git
-            // source isn't registry-logged). `git_ref` generalized `tag` in the private-registries arc.
+            // source isn't registry-logged).
             let noeta_pm::manifest::GitRef::Tag(tag) = git_ref else {
                 continue;
             };
@@ -1400,7 +1399,7 @@ pub(crate) fn cmd_audit(path: &std::path::Path) -> ExitCode {
                 for pkg in &deps {
                     for a in &feed.advisories {
                         if a.is_active() && a.package == pkg.identity && a.affects(&pkg.version) {
-                            // Per-tier policy (advisory-intake arc, tier 5): `off` skips entirely,
+                            // Per-tier policy: `off` skips entirely,
                             // `warn` prints, `fail` prints and fails the audit.
                             let action = trust.advisories.action_for(a.tier.as_str());
                             if action == noeta_pm::manifest::AdvisoryAction::Off {
@@ -1557,7 +1556,7 @@ fn advisory_severity_display(advisory: &noeta_pm::advisory::Advisory) -> String 
     }
 }
 
-/// The provenance note appended to a matched advisory in the audit report (advisory-intake arc). For a
+/// The provenance note appended to a matched advisory in the audit report. For a
 /// **publisher**-tier advisory, verify its keyless bundle offline against the scope's pinned identity
 /// (from resolve-time `scope_trust`): a verified owner attestation is the strong signal that the scope
 /// owner really issued it. Operator/imported tiers carry no bundle — an empty note. A verification
@@ -1609,7 +1608,7 @@ fn advisory_provenance_note(
 }
 
 /// `noeta advisory publish <id> <package> <ranges> <severity> <summary>` — issue (or update) a
-/// **publisher**-tier advisory for a package in a scope you own (advisory-intake arc, tier 2). The
+/// **publisher**-tier advisory for a package in a scope you own. The
 /// advisory is keyless-signed with your OIDC identity (ambient CI, or `--interactive`), so consumers
 /// verify it offline against your scope's pinned identity; it is sent authenticated with the scope's
 /// publish token (`NOETA_REGISTRY_TOKEN`).
@@ -1694,8 +1693,8 @@ pub(crate) fn cmd_advisory_publish(
     }
 }
 
-/// `noeta advisory report <package> <summary>` — file a **public report** against a package
-/// (advisory-intake arc, tier 4). Unauthenticated + rate-limited; a report is not an advisory — it is
+/// `noeta advisory report <package> <summary>` — file a **public report** against a package.
+/// Unauthenticated + rate-limited; a report is not an advisory — it is
 /// queued for an operator or the scope owner to triage.
 pub(crate) fn cmd_advisory_report(
     package: &str,
@@ -2051,7 +2050,7 @@ pub(crate) fn render_binding_table(
     }
 }
 
-/// Sign a release attestation for `noeta publish` (Phase 4, #2), returning the hex signature — or
+/// Sign a release attestation for `noeta publish`, returning the hex signature — or
 /// `None` (with a warning) when no signing key is configured, so publishing stays possible while
 /// provenance is adopted gradually. Reads the private key from `NOETA_SIGNING_KEY` (a path) or
 /// `noeta-signing.key`. When it signs, it also registers the scope's public key with the index (a
@@ -2089,7 +2088,7 @@ pub(crate) fn provenance_sign(
     Ok(Some(signature))
 }
 
-/// `noeta key new` — generate an Ed25519 signing keypair (package-manager Phase 4, #2). The private
+/// `noeta key new` — generate an Ed25519 signing keypair. The private
 /// key is written to a file (kept secret); the public key is printed to register with the registry
 /// scope. `noeta publish` signs releases with the private key; consumers verify with the public one.
 pub(crate) fn cmd_key(action: &KeyAction) -> ExitCode {
@@ -2179,7 +2178,7 @@ pub(crate) fn toml_string(s: &str) -> String {
     noeta_pm::toml_quote(s)
 }
 
-/// The pinned state `noeta advisory watch` carries between runs (advisory-intake arc, tier 6): the keys it
+/// The pinned state `noeta advisory watch` carries between runs: the keys it
 /// trusts (advisory feed + transparency log), the last checkpoint it saw, and the set of advisory ids
 /// it has ever seen for the scope. Persisted as TOML so a later run can prove the log only grew
 /// (append-only) and no previously-seen advisory silently vanished.
@@ -2198,8 +2197,8 @@ struct WatchState {
     seen: Vec<String>,
 }
 
-/// `noeta advisory watch [scope]` — the transparency-log suppression monitor (advisory-intake arc,
-/// tier 6). Watches the scope named, or — the form a CI cron wants — **every scope this project's
+/// `noeta advisory watch [scope]` — the transparency-log suppression monitor. Watches the scope
+/// named, or — the form a CI cron wants — **every scope this project's
 /// `noeta.lock` pins**, since the set worth watching is the set you depend on and nobody should have
 /// to keep that list current in a cron file by hand. Exits non-zero if any watched scope drifted.
 ///
@@ -2529,7 +2528,7 @@ fn watch_one_scope(scope: &str, state_file: &std::path::Path) -> ExitCode {
 }
 
 /// Verify the transparency log at `to_size`/`to_root` is an append-only extension of the pinned
-/// `from_size`/`from_root` (advisory-intake arc, tier 6). Fetches the registry's consistency proof and
+/// `from_size`/`from_root`. Fetches the registry's consistency proof and
 /// checks it reconstructs both roots.
 fn verify_log_extension(
     index: &registry::HttpIndex,

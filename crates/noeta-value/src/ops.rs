@@ -1,4 +1,4 @@
-//! Operator semantics on NaN-boxed values — a faithful port of the M0 tree-walker's
+//! Operator semantics on NaN-boxed values — a faithful port of the tree-walker's
 //! `ops.rs`, so the differential oracle sees identical results and identical error text.
 //! Pure functions returning a [`Value`] or an [`OpError`]; the VM attaches the span.
 //!
@@ -12,7 +12,7 @@ use noeta_diagnostics::DiagnosticCode;
 use crate::Value;
 
 /// A failed operator application: the diagnostic code and message (the span is added by the
-/// VM, which knows the expression's location). Mirrors the M0 `OpError`.
+/// VM, which knows the expression's location). Mirrors the tree-walker's `OpError`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpError {
     pub code: DiagnosticCode,
@@ -52,7 +52,7 @@ pub fn apply_binary(op: BinaryOp, left: Value, right: Value) -> Result<Value, Op
                 right_boxed.release();
                 Ok(out)
             } else {
-                // Render both operands straight into one payload-representation buffer (P-SSO):
+                // Render both operands straight into one payload-representation buffer:
                 // no `format!` machinery, no second copy, and a short result stays inline.
                 let mut out = crate::CompactString::default();
                 left.display_into(&mut out);
@@ -77,7 +77,7 @@ pub fn apply_binary(op: BinaryOp, left: Value, right: Value) -> Result<Value, Op
     }
 }
 
-/// Sign-dependent fixed-width integer op (Tier W3): `/ % < <= > >=` where the operand width and
+/// Sign-dependent fixed-width integer op: `/ % < <= > >=` where the operand width and
 /// signedness matter (unsigned `u64` division and ordering differ from signed once bit 63 is set).
 /// The erased-i64 operands are read as `signed`/unsigned; `/ %` mask their result back into `bits`
 /// (so signed `MIN / -1` wraps like `wrapping_div`), and `< <= > >=` yield a bool. The checker
@@ -93,7 +93,7 @@ pub fn apply_binary_wide(
     let (Some(a), Some(b)) = (left.as_int(), right.as_int()) else {
         return apply_binary(op, left, right);
     };
-    // `>>` on a fixed-width value (W5): `a` is the value, `b` the shift count (same `0..=63` domain as
+    // `>>` on a fixed-width value: `a` is the value, `b` the shift count (same `0..=63` domain as
     // Tier B `int` shifts). It is **arithmetic** (sign-filling) on a signed width and **logical**
     // (zero-filling) on an unsigned one — the only place they differ is `u64` with bit 63 set. A right
     // shift never grows the value past the width, so no mask is needed.
@@ -182,7 +182,7 @@ pub fn apply_unary(op: UnaryOp, value: Value) -> Result<Value, OpError> {
         UnaryOp::Neg if value.as_float().is_some() => Ok(Value::float(-value.as_float().unwrap())),
         UnaryOp::Neg if value.is_f32() => Ok(Value::f32(-value.as_f32().unwrap())),
         UnaryOp::Not if value.as_bool().is_some() => Ok(Value::bool(!value.as_bool().unwrap())),
-        // `!` on an `int` is bitwise complement (P-BITS Tier B2), exactly as Rust: `!x == -(x+1)`,
+        // `!` on an `int` is bitwise complement, exactly as Rust: `!x == -(x+1)`,
         // so `!0 == -1`. `int` and `bool` are disjoint, so the arm order is irrelevant. A fixed-width
         // operand is erased to its i64 word here and reduced back into its declared width by the
         // `MaskWidth` lowering emits after the op, exactly as unary `-` and `+ - *` are.
@@ -212,7 +212,7 @@ fn arithmetic(op: BinaryOp, left: Value, right: Value) -> Result<Value, OpError>
         };
     }
 
-    // Numeric widening lattice `int < f32 < float` (P-PACK Phase 3): the result takes the higher
+    // Numeric widening lattice `int < f32 < float`: the result takes the higher
     // rank. A `float` operand promotes to f64; otherwise (operands `int`/`f32` with at least one
     // `f32`, the int+int case having returned above) the computation is at f32.
     let rank = |v: Value| {
@@ -274,7 +274,7 @@ pub fn compare_primitive(left: Value, right: Value) -> Option<Ordering> {
     if let (Some(a), Some(b)) = (left.as_bool(), right.as_bool()) {
         return Some(a.cmp(&b));
     }
-    // Extern-type values order through their contract (extern-types X1): a total order per
+    // Extern-type values order through their contract: a total order per
     // key-capable kind (set canonicalization, `x.compare(y)`); `None` for unordered kinds.
     if left.is_extern() && right.is_extern() {
         return left.with_extern(|a| right.with_extern(|b| a.cmp_value(b)));
@@ -296,7 +296,7 @@ pub fn compare_primitive(left: Value, right: Value) -> Option<Ordering> {
     num(left)?.partial_cmp(&num(right)?)
 }
 
-/// The content order of two **key-capable `@packed` struct** values (P-PKEY): type name first,
+/// The content order of two **key-capable `@packed` struct** values: type name first,
 /// then the slots in declaration order — bools `false < true`, ints numerically (unsigned where the
 /// shape declares the slot `u64`), nested capable structs recursively. The order every
 /// *order-observing* surface shows, including a rendered map's keys. `None` unless both sides are
@@ -534,7 +534,7 @@ fn values_equal(left: Value, right: Value) -> bool {
     if left.is_unit() && right.is_unit() {
         return true;
     }
-    // Object `==` is kind-dependent (object-model slice 2): a value `struct` compares
+    // Object `==` is kind-dependent: a value `struct` compares
     // **structurally** (same type + equal fields), while a reference `class` defaults to
     // **identity** (same instance) — its structural-equality opt-in is `impl Equatable`, which the
     // compiler dispatches *before* reaching this fallback, so a class seen here has no `eq` and
@@ -550,7 +550,7 @@ fn values_equal(left: Value, right: Value) -> bool {
             && sa.fields == sb.fields
             && slices_equal(&left.slots().unwrap(), &right.slots().unwrap());
     }
-    // Enum values compare by enum name, variant, and positional data (M0's `EnumValue` eq).
+    // Enum values compare by enum name, variant, and positional data (the tree-walker's `EnumValue` eq).
     if let (Some(sa), Some(sb)) = (left.shape(), right.shape())
         && left.is_enum()
         && right.is_enum()
@@ -577,8 +577,8 @@ fn values_equal(left: Value, right: Value) -> bool {
         right_boxed.release();
         return equal;
     }
-    // Tuples compare structurally element-wise (same arity, equal positions) — value semantics
-    // (object-model slice 4), matching the tree-walker's `Value::Tuple` equality.
+    // Tuples compare structurally element-wise (same arity, equal positions) — value semantics,
+    // matching the tree-walker's `Value::Tuple` equality.
     if left.is_tuple() && right.is_tuple() {
         return slices_equal(&left.tuple_items().unwrap(), &right.tuple_items().unwrap());
     }
@@ -621,7 +621,7 @@ fn values_equal(left: Value, right: Value) -> bool {
     {
         return ma == mb && values_equal(ra, rb);
     }
-    // Extern-type values compare through their contract (extern-types X1) — appended LAST so
+    // Extern-type values compare through their contract — appended LAST so
     // every pre-existing kind's comparison path is untouched.
     if left.is_extern() && right.is_extern() {
         return left.with_extern(|a| right.with_extern(|b| a.eq_value(b)));
@@ -629,7 +629,7 @@ fn values_equal(left: Value, right: Value) -> bool {
     false
 }
 
-/// Reference identity for `===`/`!==` (object-model slice 2): two heap objects are identical iff
+/// Reference identity for `===`/`!==`: two heap objects are identical iff
 /// they are the **same allocation** (their NaN-boxed words encode the same pointer, so bit-equality
 /// is pointer-equality). For non-object operands `===` has no reference to ask about, so it falls
 /// back to [`values_equal`] — keeping the operator total and agreeing with the tree-walker, while
@@ -647,7 +647,7 @@ fn slices_equal(a: &[Value], b: &[Value]) -> bool {
 }
 
 /// The integer value of an operand, but only if it is *not* a float — so `arithmetic` and
-/// `values_equal` treat `3` and `3.0` distinctly (int path vs. float path), as M0 does.
+/// `values_equal` treat `3` and `3.0` distinctly (int path vs. float path), as the tree-walker does.
 fn int_operand(value: Value) -> Option<i64> {
     if value.as_float().is_some() {
         None
@@ -665,7 +665,7 @@ fn as_f64(value: Value) -> Option<f64> {
         .or_else(|| value.as_int().map(|i| i as f64))
 }
 
-/// Numeric coercion to `f32`, for the f32 arithmetic path (`int`/`f32` operands, P-PACK Phase 3).
+/// Numeric coercion to `f32`, for the f32 arithmetic path (`int`/`f32` operands).
 fn as_f32(value: Value) -> Option<f32> {
     value.as_f32().or_else(|| value.as_int().map(|i| i as f32))
 }

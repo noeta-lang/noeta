@@ -1,4 +1,4 @@
-//! Graceful drain + `--host` (server-hmr S0), end to end.
+//! Graceful drain + `--host`, end to end.
 //!
 //! `#[ignore]`d for the real port and signal it needs, and listed in `scripts/hot-e2e.sh`, which
 //! both ci.yml and `scripts/gate.sh` run (`tests/cli/automation.rs` keeps that list honest). By
@@ -45,7 +45,7 @@ fn sigint_drains_in_flight_requests_and_host_binds_local_only() {
     // The server's output goes to a file this test can quote rather than to `/dev/null` — see
     // `noeta_test_temp::ServerLog`, and the three investigations that line cost.
     let log = noeta_test_temp::ServerLog::new("drain");
-    // --host 127.0.0.1 binds local-only (S0): the loopback connect must work.
+    // --host 127.0.0.1 binds local-only: the loopback connect must work.
     let mut child = log
         .spawn(Command::new(env!("CARGO_BIN_EXE_noeta")).args([
             "serve",

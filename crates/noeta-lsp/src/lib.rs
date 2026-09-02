@@ -1,7 +1,7 @@
 //! The Noeta language server (`noeta lsp`).
 //!
 //! A thin JSON-RPC **wire adapter** over the shared IDE engine
-//! ([`noeta_ide::DocumentStore`]) — since MCP slice M5, every language feature (diagnostics,
+//! ([`noeta_ide::DocumentStore`]) — every language feature (diagnostics,
 //! hover, go-to-definition, references, rename, symbols, signature help, semantic tokens,
 //! completion, inlay hints, formatting) lives in `noeta-ide`, where `noeta mcp` reads the same
 //! implementation. This crate owns only what is LSP: the tower-lsp transport and lifecycle, the
@@ -364,7 +364,7 @@ struct TraceResult {
     content: Option<String>,
 }
 
-/// A located node of the Architecture view (`noeta/architecture[Children]`, ide-ui U3). Positions
+/// A located node of the Architecture view (`noeta/architecture[Children]`). Positions
 /// are **UTF-16** line/character regardless of the negotiated encoding — custom requests bypass
 /// the client library's position conversion, and the consumer is the VS Code extension (JS string
 /// semantics).
@@ -457,7 +457,7 @@ struct TestItemWire {
     end_line: u32,
 }
 
-// ---- The docs browser (docs-browser arc, slice 1): thin JSON adapters over the unified doc
+// ---- The docs browser: thin JSON adapters over the unified doc
 // model. Positions are UTF-16 like the other custom requests. Every handler delegates to
 // `DocumentStore::doc_*`, the same model the MCP `docs` tools serve. ----
 
@@ -761,7 +761,7 @@ impl Backend {
         (store.revision() == revision).then_some(result)
     }
 
-    /// The `noeta/trace` custom request (ide-ui U2): render the role-aware static trace as a
+    /// The `noeta/trace` custom request: render the role-aware static trace as a
     /// plain-text document for the editor's `noeta-trace:` virtual-document view. The same
     /// [`noeta_ide::trace`] walk the MCP `trace` tool serves. `content: null` when no open
     /// workspace covers the URI.
@@ -806,7 +806,7 @@ impl Backend {
         })
     }
 
-    /// `noeta/architecture` (ide-ui U3): the workspace's role surface — role groups with their
+    /// `noeta/architecture`: the workspace's role surface — role groups with their
     /// located bearers — for the Architecture tree view's top level.
     async fn noeta_architecture(&self, params: ArchitectureParams) -> Result<ArchitectureResult> {
         let roles = {
@@ -826,7 +826,7 @@ impl Backend {
         })
     }
 
-    /// `noeta/architectureChildren` (ide-ui U3): one lazily-unfolded call level for a tree node.
+    /// `noeta/architectureChildren`: one lazily-unfolded call level for a tree node.
     async fn noeta_architecture_children(
         &self,
         params: ArchChildrenParams,
@@ -840,7 +840,7 @@ impl Backend {
         })
     }
 
-    /// `noeta/tests` (ide-ui U3): the file's `@test` fns — the runner's own discovery walk, so
+    /// `noeta/tests`: the file's `@test` fns — the runner's own discovery walk, so
     /// the editor's test explorer and `noeta test` can never disagree.
     async fn noeta_tests(&self, params: TestsParams) -> Result<TestsResult> {
         let tests = {
@@ -865,7 +865,7 @@ impl Backend {
         })
     }
 
-    /// `noeta/docs` (docs-browser slice 1): the documentation corpus roots — the docs browser's
+    /// `noeta/docs`: the documentation corpus roots — the docs browser's
     /// top level. Delegates to the unified model the MCP `docs` tools also serve.
     async fn noeta_docs(&self, params: DocsParams) -> Result<DocsResult> {
         let nodes = {
@@ -1045,9 +1045,8 @@ impl LanguageServer for Backend {
             }),
             capabilities: ServerCapabilities {
                 position_encoding,
-                // Full-document sync for L0: `didChange` ships the whole buffer. Salsa still only
-                // recomputes what the edit touched, so this is not a bottleneck; incremental
-                // (range) sync is a later refinement.
+                // Full-document sync: `didChange` ships the whole buffer. Salsa still only
+                // recomputes what the edit touched, so this is not a bottleneck.
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
                     TextDocumentSyncKind::FULL,
                 )),
@@ -1129,10 +1128,10 @@ impl LanguageServer for Backend {
                     trigger_characters: Some(vec![".".to_string(), "@".to_string()]),
                     ..Default::default()
                 }),
-                // Call hierarchy (ide-ui U1) over the shared static call graph — the same
+                // Call hierarchy over the shared static call graph — the same
                 // engine the MCP `trace` tool reads; items carry `@role` bindings in the detail.
                 call_hierarchy_provider: Some(CallHierarchyServerCapability::Simple(true)),
-                // Role CodeLenses (ide-ui U2): one lens per `@role` binding in the file; a
+                // Role CodeLenses: one lens per `@role` binding in the file; a
                 // traceable one carries the client's `noeta.showTrace` command. Lenses are
                 // complete at production — no resolve round-trip.
                 code_lens_provider: Some(CodeLensOptions {
@@ -1747,11 +1746,11 @@ async fn serve() {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
     let (service, socket) = LspService::build(Backend::new)
-        // The trace document (ide-ui U2) — a custom request, since LSP has no "render me a
+        // The trace document — a custom request, since LSP has no "render me a
         // read-only report" method; the VS Code extension opens the answer as `noeta-trace:`.
         .custom_method("noeta/trace", Backend::noeta_trace)
         .custom_method("noeta/traceTree", Backend::noeta_trace_tree)
-        // The Architecture view + test explorer (ide-ui U3): the role surface, lazy call levels,
+        // The Architecture view + test explorer: the role surface, lazy call levels,
         // and `@test` discovery — all custom requests read by the VS Code extension.
         .custom_method("noeta/architecture", Backend::noeta_architecture)
         .custom_method(
@@ -1759,7 +1758,7 @@ async fn serve() {
             Backend::noeta_architecture_children,
         )
         .custom_method("noeta/tests", Backend::noeta_tests)
-        // The docs browser (docs-browser slice 1): the doc tree, page bodies, search, and
+        // The docs browser: the doc tree, page bodies, search, and
         // "docs for the symbol under the cursor" — thin adapters over the unified doc model.
         .custom_method("noeta/docs", Backend::noeta_docs)
         .custom_method("noeta/docsChildren", Backend::noeta_docs_children)
@@ -1775,7 +1774,7 @@ async fn serve() {
 mod tests {
     use super::*;
 
-    /// Tests are their own assembling driver (audit-6 F2): seed the std units before the
+    /// Tests are their own assembling driver: seed the std units before the
     /// document store's first check.
     fn store() -> DocumentStore {
         noeta_stdlib::registry::default_seeded();

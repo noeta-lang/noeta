@@ -1,4 +1,4 @@
-//! Impact-filtered test watch, end to end (server-hmr W3): under `noeta test --watch`, editing a
+//! Impact-filtered test watch, end to end: under `noeta test --watch`, editing a
 //! leaf function reruns exactly the tests that (transitively) call it; an inert edit reruns
 //! nothing.
 //!

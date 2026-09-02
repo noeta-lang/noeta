@@ -1,4 +1,4 @@
-//! The shared Noeta IDE engine (MCP arc, slice **M5** — extracted from `noeta-lsp`).
+//! The shared Noeta IDE engine.
 //!
 //! Every editor-facing language feature over the compiler's salsa query graph (`noeta-db`), with
 //! **no wire protocol**: the [`DocumentStore`] owns a [`LangDatabase`], the open buffers, and one
@@ -6,11 +6,10 @@
 //! buffers overlaying disk) plus resolved dependency packages, SHARED by every open document in
 //! it. Each document reads its own merged program through the entry-parametric
 //! [`linked_from`](noeta_db::linked_from) query family (memoized per `(workspace, document)`),
-//! so the per-file lex/parse work memoizes once per file no matter how many documents are open
-//! (audit-4 finding 6). Every language feature is then a *read* of a memoized query; editing a
-//! document calls the salsa `set_text` setter on its ONE input, and salsa recomputes only the
-//! queries that edit invalidated. That incremental spine is inherited wholesale from M1, not
-//! built here.
+//! so the per-file lex/parse work memoizes once per file no matter how many documents are open.
+//! Every language feature is then a *read* of a memoized query; editing a document calls the salsa
+//! `set_text` setter on its ONE input, and salsa recomputes only the queries that edit invalidated.
+//! That incremental spine is `noeta-db`'s, not this crate's.
 //!
 //! Features: **live diagnostics** over the whole-workspace `linked_checked_ide` query — the same
 //! single checker run every other feature reads, so one edit checks once (an imported
@@ -22,7 +21,7 @@
 //! **document symbols** (see [`symbols`]); **signature help** (see [`signature`]); **semantic
 //! tokens** (see [`semtokens`]); **completion** — member, bare-dot, type-position, and identifier
 //! forms (see [`completion`]); **inlay type hints** (see [`inlay`]); **formatting** over the
-//! shared `noeta fmt` engine; and the **call hierarchy** (see [`callgraph`]; ide-ui U0) — cursor →
+//! shared `noeta fmt` engine; and the **call hierarchy** (see [`callgraph`]) — cursor →
 //! function, incoming/outgoing call groups with `@role` bindings on every item, the same
 //! graph+reflection join the MCP `trace` tool serves. Positions convert encoding-aware (see
 //! [`offsets`]).
@@ -114,7 +113,7 @@ pub struct TextEdit {
 /// to, never a node to expand (its selection range sits on a call site, not a declaration).
 pub const TOP_LEVEL: &str = "(top level)";
 
-/// A function in the call hierarchy (ide-ui U0): its name (`Type.method` for methods), the `@role`
+/// A function in the call hierarchy: its name (`Type.method` for methods), the `@role`
 /// bindings it bears (`Enum.Variant`, from the merged program's reflection index — the item
 /// detail), and where it lives. Field-compatible with the LSP `CallHierarchyItem` essentials.
 #[derive(Debug, Clone, PartialEq)]
@@ -141,7 +140,7 @@ pub struct HierarchyCall {
     pub sites: Vec<(Range, bool)>,
 }
 
-/// One `@role` binding located in a document (ide-ui U2) — the data behind a role CodeLens.
+/// One `@role` binding located in a document — the data behind a role CodeLens.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RoleLens {
     /// The annotated declaration's *name* range (where the lens hangs).
@@ -155,7 +154,7 @@ pub struct RoleLens {
     pub traceable: bool,
 }
 
-/// One node of the Architecture view (ide-ui U3): a role bearer, or a callee reached from one —
+/// One node of the Architecture view: a role bearer, or a callee reached from one —
 /// located when it lives in source, honestly labeled when it doesn't.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ArchNode {
@@ -181,7 +180,7 @@ pub struct ArchRole {
     pub bearers: Vec<ArchNode>,
 }
 
-/// One `@test` fn discovered in a document (ide-ui U3): what the editor's test explorer lists and
+/// One `@test` fn discovered in a document: what the editor's test explorer lists and
 /// the gutter run-arrows anchor to. `name` is the fn to pass to `noeta test --name`; `display` is
 /// the `#[Name("…")]` label when present.
 #[derive(Debug, Clone, PartialEq)]
@@ -283,7 +282,7 @@ impl DocumentStore {
             self.refresh_workspace(&key);
         } else if let Some(cache) = self.workspaces.remove(&key) {
             // Last document in the directory closed: reclaim the whole workspace's resident content
-            // before dropping it (audit F9 residual a) — salsa keeps the memos alive otherwise.
+            // before dropping it — salsa keeps the memos alive otherwise.
             cache.release_all(&mut self.db);
         }
     }
@@ -351,7 +350,7 @@ impl DocumentStore {
         }
     }
 
-    /// The document's workspace-wide text-tier set (text-tiers arc) — what keeps a `@<name> { … }`
+    /// The document's workspace-wide text-tier set — what keeps a `@<name> { … }`
     /// body verbatim under formatting when the tier is declared in a sibling or dependency. A
     /// document with no workspace falls back to the default set (same-file declarations are
     /// discovered by the lexer itself).
@@ -1819,7 +1818,7 @@ impl DocumentStore {
             Err(_) => &entry_ast.0.program,
         };
 
-        // A directive's argument list (`@derive(|`, `@bench(|` — C5) gets a synthetic signature
+        // A directive's argument list (`@derive(|`, `@bench(|`) gets a synthetic signature
         // naming the directive's vocabulary; a half-typed directive never resolves as a call, so
         // this comes first.
         if let Some(args) = completion::directive_arg_context(text, offset) {
@@ -1854,13 +1853,13 @@ impl DocumentStore {
 
     /// The completion candidates at `position` in `uri`. When the cursor is on a member access
     /// `receiver.member`, the receiver's type is resolved and the completions are that type's fields,
-    /// variants, and methods (**member completion**, C2) — nothing else, since an identifier after a
+    /// variants, and methods (**member completion**) — nothing else, since an identifier after a
     /// `.` would be noise. A *partial* member (`c.ge`) is read straight from the workspace type index;
     /// a *bare* dot (`c.`, the `.`-trigger case) does not parse, so a lightly-munged buffer is
-    /// re-checked off the salsa graph to recover the receiver type (C2.1). Otherwise the completions
+    /// re-checked off the salsa graph to recover the receiver type. Otherwise the completions
     /// are the language keywords, the top-level declarations, and the value bindings in scope at the
-    /// cursor (**identifier completion**, C1). An `@` prefix instead offers the decorator directives
-    /// and the tier name-space (**directive completion**, C4).
+    /// cursor (**identifier completion**). An `@` prefix instead offers the decorator directives
+    /// and the tier name-space (**directive completion**).
     ///
     /// A best-effort read of the mid-edit document: it relies on the recovering parser and the
     /// client's prefix filtering. `None` if the document is not open.
@@ -1885,14 +1884,14 @@ impl DocumentStore {
             Err(_) => &entry_ast.0.program,
         };
 
-        // Directive completion (`@|`, `@te|` — the `@`-trigger case, C4): the decorator directives
+        // Directive completion (`@|`, `@te|` — the `@`-trigger case): the decorator directives
         // and the tier name-space. Detected textually (a dangling `@` never parses), before the
         // member branches — an `@` prefix is never a member access.
         if completion::is_directive_position(entry_text, offset) {
             return Some(completion::directives(program));
         }
 
-        // Directive-argument completion (`@derive(|`, `@role(Semantic.|`, `@bench(|` — C5): the
+        // Directive-argument completion (`@derive(|`, `@role(Semantic.|`, `@bench(|`): the
         // directive's own vocabulary. Also before the member branches — `@packed(Layout.|` must
         // complete the layout variants, not munge a member access out of `Layout.`. An empty
         // vocabulary still returns (suppressing identifier completion, which is noise inside a
@@ -1922,7 +1921,7 @@ impl DocumentStore {
             if members.is_empty() {
                 members = type_receiver_members(entry_text, receiver_span, program);
             }
-            // Bundle-contributed methods (kernel-methods K4): a bound `@packed` type offers its
+            // Bundle-contributed methods: a bound `@packed` type offers its
             // bundles' Element methods, a `List<T>` of one their Bulk methods.
             if let Some(repr) = checked.expr_types.get(&receiver_span) {
                 members.extend(bundle_members_for(repr, &checked.bundle_bindings));
@@ -2053,7 +2052,7 @@ impl DocumentStore {
         Some(cache.source(source)?.text(&self.db))
     }
 
-    /// The function the cursor addresses, as a call-hierarchy item (ide-ui U0): its declared name,
+    /// The function the cursor addresses, as a call-hierarchy item: its declared name,
     /// the `@role` bindings it bears, and its location. The cursor may be on the function's name,
     /// on a call/reference site (resolving to the callee), or anywhere inside the declaration.
     /// `uri` may be any file of an open workspace, not just an open document (see
@@ -2076,7 +2075,7 @@ impl DocumentStore {
     /// The calls **out of** the function at `position`, grouped by callee, each group carrying its
     /// sites in the caller's document. Callees the static graph cannot place in source — external
     /// module calls, dynamic closure calls — are omitted here (a hierarchy item needs a real
-    /// location); the trace document renders them as labeled leaves instead (ide-ui U2).
+    /// location); the trace document renders them as labeled leaves instead.
     pub fn outgoing_calls(
         &self,
         uri: &str,
@@ -2166,7 +2165,7 @@ impl DocumentStore {
         )
     }
 
-    /// The `@role` bindings declared in `uri` (ide-ui U2), in source order — each locating the
+    /// The `@role` bindings declared in `uri`, in source order — each locating the
     /// annotated declaration's name. The data behind the editor's role CodeLenses. Roles are
     /// indexed over the **merged** program (the `@attribute` struct conferring a role may live in
     /// a sibling), then filtered to bindings whose target is declared in this file.
@@ -2421,7 +2420,7 @@ impl DocumentStore {
         Some(format!("{path}:{line}"))
     }
 
-    /// The workspace's architectural surface (ide-ui U3): every `@role`, with its bearers, in
+    /// The workspace's architectural surface: every `@role`, with its bearers, in
     /// declaration order — the Architecture view's top level. A bearer that is a graph function
     /// is expandable (its outgoing calls unfold lazily via
     /// [`architecture_children`](Self::architecture_children)); a role on a non-function
@@ -2519,7 +2518,7 @@ impl DocumentStore {
         )
     }
 
-    // ---- The unified documentation model (docs-browser arc, slice 0). ----------------------
+    // ---- The unified documentation model. --------------------------------------------------
     //
     // These four methods are the single interface every tool goes through: `noeta lsp` (the
     // editor's docs browser) and `noeta mcp` (the agent's docs tool) are both thin adapters over
@@ -2661,7 +2660,7 @@ impl DocumentStore {
         docs::id_for_name_span(&env, &members, def_span)
     }
 
-    /// The `@test` fns declared in `uri` (ide-ui U3), in source order — what the editor's test
+    /// The `@test` fns declared in `uri`, in source order — what the editor's test
     /// explorer lists and its gutter run-arrows anchor to. Discovery is the runner's own
     /// [`activate_tiers`](noeta_check::activate_tiers) walk over the merged program, filtered to
     /// this file, so the explorer and `noeta test` can never disagree about what a test is.
@@ -2701,7 +2700,7 @@ impl DocumentStore {
                 .filter(|t| t.span.source == source)
                 .map(|t| TestItem {
                     name: t.name.clone(),
-                    // The tier metadata attributes are namespace-scoped now (D2b); read them by their
+                    // The tier metadata attributes are namespace-scoped now; read them by their
                     // qualified identity, the form the loader rewrites the application to.
                     display: attr_str(&t.attrs, noeta_ast::reflect::TEST_ATTR_NAME),
                     group: attr_str(&t.attrs, noeta_ast::reflect::TEST_ATTR_GROUP),
@@ -2787,7 +2786,7 @@ impl DocumentStore {
         span: Span,
         encoding: Encoding,
     ) -> Option<(String, Range)> {
-        // Members and dependency modules (package-manager P2.1c) both jump the same way — the
+        // Members and dependency modules both jump the same way — the
         // difference is only which file the id names, which is the lookup's job, not this site's.
         // An id the workspace does not map is `None`: the editor gets no jump rather than a jump
         // into the wrong file.
@@ -2845,7 +2844,7 @@ fn attr_str(attrs: &[noeta_ast::Attribute], name: &str) -> Option<String> {
 /// The declared type name a reflected [`TypeRepr`] refers to, for member resolution — the nominal
 /// variants (`struct` / `class` / `enum` / unknown-kind named). Scalars, containers, functions, and
 /// unions have no user declaration to jump into, so they yield `None`.
-/// Bundle-contributed members for a receiver type (kernel-methods K4): a bound `@packed` type
+/// Bundle-contributed members for a receiver type: a bound `@packed` type
 /// `T` gets its bundles' `Element` methods, a `List<T>` their `Bulk` methods; anything else none.
 fn bundle_members_for(
     repr: &TypeRepr,
@@ -3437,8 +3436,8 @@ fn tier_name_at(
             | Stmt::Expr { expr: value, .. } => in_expr(value, offset, source),
             Stmt::Return { value, .. } => value.as_ref().and_then(|v| in_expr(v, offset, source)),
             Stmt::Fn(f) => in_fn(f, offset, source),
-            // A type declaration: its methods may carry leading `@<tier>` directives
-            // (directive-sites arc) — the tier name there hovers like any other tier position.
+            // A type declaration: its methods may carry leading `@<tier>` directives — the tier
+            // name there hovers like any other tier position.
             Stmt::Struct(d) => d.methods.iter().find_map(|m| in_fn(m, offset, source)),
             Stmt::Class(d) => d.methods.iter().find_map(|m| in_fn(m, offset, source)),
             Stmt::Enum(d) => d.methods.iter().find_map(|m| in_fn(m, offset, source)),
@@ -3725,7 +3724,7 @@ fn bare_dot_members(
     if members.is_empty() {
         members = type_receiver_members(&munged, receiver_span, program);
     }
-    // Bundle-contributed methods (kernel-methods K4), as in the parsed-member path above.
+    // Bundle-contributed methods, as in the parsed-member path above.
     members.extend(bundle_members_for(repr, &checked.bundle_bindings));
     Some(members)
 }
@@ -5078,7 +5077,7 @@ mod tests {
 
     #[test]
     fn workspace_captures_a_text_tier_declared_in_a_sibling() {
-        // Text-tiers arc: a sibling declares `@tier(spec, text: "xml")`; the open document's
+        // A sibling declares `@tier(spec, text: "xml")`; the open document's
         // `@spec { … }` body — invalid as Noeta tokens (XML quotes) — must still capture verbatim
         // in the editor, i.e. the workspace lex (`tokens_in` via `workspace_text_tiers`) applies
         // the sibling's declaration and the file diagnoses clean.
@@ -5104,7 +5103,7 @@ mod tests {
 
     #[test]
     fn workspace_captures_a_renamed_text_tier_bound_in_the_manifest() {
-        // Per-package tier-naming arc (3g), editor seam: a `noeta.toml` binds std's `doc` **text**
+        // The editor seam: a `noeta.toml` binds std's `doc` **text**
         // tier under a local `@docs` (`[directives] docs = "std:doc"`). The IDE lexes through its own salsa
         // `ast`/`tokens_in` query, not the loader — so it must resolve the SAME per-package text-tier
         // set the loader now does, or the `@docs { … }` markdown body (a bare `"` opens an
@@ -5772,7 +5771,7 @@ mod tests {
 
     #[test]
     fn goto_definition_jumps_into_a_dependency_package() {
-        // package-manager P2.1c: with dependency resolution wired into the salsa workspace, a
+        // With dependency resolution wired into the salsa workspace, a
         // cross-package `use hi.hello.Greeter` resolves in-editor — goto-definition on the type
         // jumps into the dependency package's own source file.
         //
@@ -6918,7 +6917,7 @@ mod tests {
     }
 
     /// An entry point calling through a helper into a persistence boundary, plus an external
-    /// module call — the same shape the MCP `trace` fixtures use (ide-ui U0).
+    /// module call — the same shape the MCP `trace` fixtures use.
     const HIER_SRC: &str = "\
 @attribute
 @role(Semantic.EntryPoint)

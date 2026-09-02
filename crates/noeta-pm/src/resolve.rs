@@ -1,8 +1,8 @@
-//! Dependency resolution (package-manager P2.2) — a PubGrub resolver over the package graph.
+//! Dependency resolution — a PubGrub resolver over the package graph.
 //!
 //! The resolver is **pure**: it works on package identities (`company/package`) + SemVer, never
 //! touching the network. A [`Registry`] abstracts *where* package metadata comes from — a synthetic
-//! in-memory map in tests, the real git/registry index in P2.3+ — so the algorithm is unit-tested in
+//! in-memory map in tests, the real git/registry index in production — so the algorithm is unit-tested in
 //! isolation. Resolution walks the reachable dependency graph into a [`OfflineDependencyProvider`],
 //! then runs [`pubgrub::resolve`], which yields either a `name → version` solution or an
 //! **explainable** conflict report (the reason the user's choice was PubGrub).
@@ -21,8 +21,8 @@ use crate::error::PmError;
 /// PubGrub's version-set type over SemVer versions — a union of half-open intervals.
 type Vs = Ranges<Version>;
 
-/// A source of package metadata for resolution (package-manager P2.2). Abstracts the registry/git
-/// index so the resolver stays pure: tests supply a synthetic map, P2.3+ supplies the real index.
+/// A source of package metadata for resolution. Abstracts the registry/git
+/// index so the resolver stays pure: tests supply a synthetic map, production supplies the real index.
 pub trait Registry {
     /// Every published version of `package` (order irrelevant — PubGrub picks the highest in range).
     fn versions(&self, package: &str) -> Vec<Version>;
@@ -299,7 +299,7 @@ mod tests {
 
     #[test]
     fn backtracks_past_a_greedy_dead_end() {
-        // The case a greedy resolver gets *wrong* (Phase 4, S5b): picking the highest `foo` forces an
+        // The case a greedy resolver gets *wrong*: picking the highest `foo` forces an
         // incompatible `bar`, but a solution exists at a lower `foo`. PubGrub backtracks to find it.
         //   root → foo ^1, baz ^1
         //   foo 1.1 → bar ^2 ;  foo 1.0 → bar ^1 ;  baz 1.0 → bar ^1 ;  bar ∈ {1.0, 2.0}
