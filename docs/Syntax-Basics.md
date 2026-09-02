@@ -1,10 +1,10 @@
 # Syntax Basics
 
-The lexical foundation: comments, statement termination, bindings, primitive types, literals, strings, and operators. Everything here runs with `noeta run`.
+Comments, statement termination, bindings, primitive types, literals, strings, and operators. Everything here runs with `noeta run`.
 
 ## Comments
 
-`//` starts a line comment (to end of line); `/* … */` is a block comment. Block comments **nest**, so you can comment out a region that already contains a block comment.
+`//` starts a line comment, running to the end of the line, and `/* … */` is a block comment. Block comments **nest**, so a region that already contains a block comment can be commented out whole.
 
 ```noeta
 // a line comment
@@ -16,11 +16,11 @@ x = /* inline */ 2 + /* they nest: /* inner */ still commented */ 3
 echo x        // 5
 ```
 
-A block comment may span a statement boundary — like a line continuation, the enclosing statement continues across it.
+A block comment may span a statement boundary. Like a line continuation, the enclosing statement continues across it.
 
 ## Statements and semicolons
 
-**Semicolons are optional** — a newline ends a statement. A `;` is still valid, and required to put two statements on one line.
+A newline ends a statement, so **semicolons are optional**. A `;` is still valid, and it is required to put two statements on one line.
 
 ```noeta
 echo "a"
@@ -28,7 +28,7 @@ echo "b"
 echo "c"; echo "d"   // two statements, one line
 ```
 
-A line **continues** onto the next (no statement break inserted) when the break is clearly mid-expression — the next line starts with an infix/postfix operator, `.`, `|>`, `??`, `..`, a comma, `=>`, `->`, a closing bracket, or a clause keyword (`else`, `then`, `in`, `as`, `is`), or the break sits inside an open `(`/`[` (a multi-line call or list):
+A line **continues** onto the next, with no statement break inserted, when the break is clearly mid-expression. That covers a next line starting with an infix or postfix operator, `.`, `|>`, `??`, `..`, a comma, `=>`, `->`, a closing bracket, or a clause keyword (`else`, `then`, `in`, `as`, `is`), and any break sitting inside an open `(` or `[`, such as a multi-line call or list:
 
 ```noeta
 total = 1 +          // trailing operator → continues
@@ -39,7 +39,7 @@ scaled = [1, 2, 3]
 echo total               // 6
 ```
 
-A `{ … }` block opens a fresh statement context wherever it appears — including a closure body nested inside a call — so newlines terminate statements there as usual:
+A `{ … }` block opens a fresh statement context wherever it appears, closure bodies nested inside a call included, so newlines terminate statements there as usual:
 
 ```noeta check
 ys = xs.map(fn(n) {
@@ -48,13 +48,13 @@ ys = xs.map(fn(n) {
 })
 ```
 
-Termination is also a **barrier**: after a line that can stand as a complete statement, a next line starting with `(` or `[` begins a new statement — it is never a call or index on the previous line's value. This holds at every nesting level, closure bodies included. To call across the break, keep the `(` on the same line.
+Termination is also a **barrier**. After a line that can stand as a complete statement, a next line starting with `(` or `[` begins a new statement, never a call or index on the previous line's value. This holds at every nesting level, closure bodies included. To call across the break, keep the `(` on the same line.
 
-Type, `struct`, and `class` bodies are newline-separated — fields need no terminator.
+Type, `struct`, and `class` bodies are newline-separated, so fields need no terminator.
 
 ### Parentheses around control-flow headers
 
-The condition of `if`/`while` and the iterable of `for` may **optionally** be parenthesized — both styles are valid and mean the same thing (a lone `(expr)` is just `expr`):
+The condition of `if` and `while`, and the iterable of `for`, may be parenthesized. Both styles mean the same thing, since a lone `(expr)` is just `expr`:
 
 ```noeta check
 if x > 0 { echo "a" }
@@ -64,7 +64,7 @@ while (running) { tick() }
 for x in (items) { echo x }
 ```
 
-Both choices — header parentheses and trailing semicolons — are normalized by `noeta fmt`, configured in the `[fmt]` table of `noeta.toml`; see [The `noeta` CLI](The-CLI#noeta-fmt).
+`noeta fmt` normalizes both choices, header parentheses and trailing semicolons, from the `[fmt]` table of `noeta.toml`. See [The `noeta` CLI](The-CLI#noeta-fmt).
 
 ## `echo`
 
@@ -78,7 +78,7 @@ echo [1, 2, 3]  // [1, 2, 3]
 
 ## Bindings and mutability
 
-`name = expr` binds immutably; `mut name = expr` binds mutably. Reassigning an immutable binding is a **compile-time** error (E0006) — caught statically, even on a branch that never runs.
+`name = expr` binds immutably and `mut name = expr` binds mutably. Reassigning an immutable binding is a **compile-time** error (E0006), caught statically even on a branch that never runs.
 
 ```noeta
 x = 10               // immutable
@@ -86,7 +86,7 @@ mut total = 0        // mutable
 total = total + 5    // ok
 ```
 
-A `mut` binding has a **fixed type**. It is set when the binding is declared — from an annotation, or inferred from the initializer — and a reassignment must be assignable to that type. The type you see is the type it keeps; a later write never silently retypes it:
+A `mut` binding has a **fixed type**, set when the binding is declared, from an annotation or inferred from the initializer. A reassignment must be assignable to that type, so the type you see is the type it keeps.
 
 ```noeta
 mut x = 1
@@ -94,7 +94,7 @@ x = 2          // ok — still an int
 echo x         // 2
 ```
 
-Assigning an incompatible value is E0007 — the shown type is a promise, not a starting point:
+Assigning an incompatible value is E0007:
 
 ```noeta error
 mut x = 1
@@ -111,25 +111,31 @@ d = "hi"       // ok — dyn opts out of a fixed type
 echo u         // hi
 ```
 
-A value outside the declared set is still rejected (that is the point of a union over `dyn`):
+A value outside the declared set is still rejected:
 
 ```noeta error
 mut u: int | string = 1
 u = true       // E0007: bool is not a member of `int | string`
 ```
 
-A binding may carry a type annotation, which is a **checked boundary** (mismatch is E0007), erased at runtime:
+A binding may carry a type annotation, which is a **checked boundary** (a mismatch is E0007) and is erased at runtime:
 
 ```noeta
 xs: List<int> = [1, 2, 3]
 count: int = 3
 ```
 
-**There is no shadowing** — one name means one thing per scope stack: a binder (closure parameter, `for` variable, match-pattern binding) may not reuse a name already bound in a scope it can see (E0059), a binding may not reuse an imported name (E0020), and a plain `name = expr` never introduces a second binding — the first use in a scope declares it, and a later one reassigns it (E0006 if immutable, E0007 if the type would change). Named functions stay ergonomic because they are **sealed** — their bodies don't see surrounding value bindings, so their parameters conflict with nothing (see [Functions & Closures](Functions-and-Closures#sealed-functions--the-use--capture-clause)).
+**There is no shadowing.** One name means one thing per scope stack. A binder, meaning a closure parameter, a `for` variable, or a match-pattern binding, may not reuse a name already bound in a scope it can see (E0059), and a binding may not reuse an imported name (E0020).
+
+A plain `name = expr` never introduces a second binding. The first use in a scope declares it and a later one reassigns it, which is E0006 when the binding is immutable and E0007 when the type would change.
+
+Named functions stay ergonomic under this rule because they are **sealed**. Their bodies do not see surrounding value bindings, so their parameters conflict with nothing (see [Functions & Closures](Functions-and-Closures#sealed-functions--the-use--capture-clause)).
 
 ### Reserved words
 
-A name has to be one the language has not already taken. The reserved words are the keywords of the grammar (`fn`, `for`, `match`, `mut`, `struct`, `use`, `is`, `in`, …), the two boolean literals `true`/`false`, the reflection primitives (`type_of`, `type_name`, `fields_of`, `field_specs_of`, `variants_of`, `construct`, `invoke`, `params_of`, `returns_of`, `roles_of`, `traits_of`, `attributes_of`, `from_bytes`), and the six prelude names `Ok`, `Err`, `some`, `none`, `panic`, `assert`. None of them can be bound — not as a parameter, a binding, a `for` variable, a closure parameter, a pattern binding, a field, a type, a generic parameter, or a function name.
+A name has to be one the language has not already taken. Three families are reserved: the keywords of the grammar (`fn`, `for`, `match`, `mut`, `struct`, `use`, `is`, `in`, …), the two boolean literals `true` and `false`, and the thirteen reflection primitives (`type_of`, `type_name`, `fields_of`, `field_specs_of`, `variants_of`, `construct`, `invoke`, `params_of`, `returns_of`, `roles_of`, `traits_of`, `attributes_of`, `from_bytes`). The six prelude names `Ok`, `Err`, `some`, `none`, `panic` and `assert` are held back the same way.
+
+None of them can be bound, in any binder position: a parameter, a binding, a `for` variable, a closure parameter, a pattern binding, a field, a type, a generic parameter, or a function name.
 
 Writing one where a name belongs is **E0046**, and the message names the word and what took it:
 
@@ -140,19 +146,18 @@ fn field_help(type_name: string, field: string): string {
 ```
 
 ```text
-[E0046] Error: `type_name` cannot be used as a name — it is one of the reflection primitives,
-        reserved by the language so it means one thing everywhere it appears
+[E0046] Error: `type_name` cannot be used as a name — it is one of the reflection primitives, reserved by the language so it means one thing everywhere it appears
    ╭─[ app.noe:1:15 ]
    │
  1 │ fn field_help(type_name: string, field: string): string {
-   │               ────┬────
+   │               ────┬────  
    │                   ╰────── `type_name` is reserved
-   │
-   help: rename it to `type_name_`
+   │ 
+   │ Help: rename it to `type_name_`
 ───╯
 ```
 
-The reflection primitives are keywords for a specific reason: each has a call form — `type_name::<T>()`, `construct(name, fields)` — that a *user* function of the same name would be indistinguishable from at the call site, so the name cannot be shared.
+The reflection primitives are keywords because each has a call form, `type_name::<T>()` or `construct(name, fields)`, that a *user* function of the same name would be indistinguishable from at the call site. The name cannot be shared.
 
 **Compound assignment** `name OP= expr` desugars to `name = name OP expr` for `+= -= *= /= %= ~=`:
 
@@ -163,7 +168,7 @@ mut s = "a";  s ~= "b";  echo s            // ab
 ```
 
 > [!NOTE]
-> An immutable, unannotated binding to a *context-free* literal — `[]`, `{}`, or an `Ok(x)` whose `Err` type is unknown — is E0023 ("cannot infer"). Fix it with a type annotation, or use a `mut` accumulator whose later writes supply the element type.
+> An immutable, unannotated binding to a *context-free* literal (`[]`, `{}`, or an `Ok(x)` whose `Err` type is unknown) is E0023, "cannot infer". Fix it with a type annotation, or use a `mut` accumulator whose later writes supply the element type.
 
 ## Primitive types
 
@@ -186,7 +191,7 @@ echo 9223372036854775807 + 1   // -9223372036854775808  (int wraps)
 
 ## Number literals
 
-Underscores may separate digits anywhere; `0x`/`0o`/`0b` are radix prefixes; a `.` or `e` makes a literal a `float`.
+Underscores may separate digits anywhere, `0x`/`0o`/`0b` are radix prefixes, and a `.` or `e` makes a literal a `float`.
 
 ```noeta
 echo 1_000_000   // 1000000
@@ -200,11 +205,11 @@ echo 3.141_592   // 3.141592
 ```
 
 > [!NOTE]
-> **Numeric conversions are explicit at a boundary.** An `int` is not implicitly a `float`: a binding, argument, return, or element of type `float` rejects an `int` — write the literal in the target type (`sqrt(4.0)`, not `sqrt(4)`). Widening happens only *inside an expression* — `int` and `float` combine in **arithmetic** (`x + 1` where `x` is a `float` is a `float`) — and that result is then checked against its boundary like any other value, so a widened `float` can never slip into an `int` binding.
+> **Numeric conversions are explicit at a boundary.** An `int` is not implicitly a `float`, so a binding, argument, return, or element of type `float` rejects an `int`. Write the literal in the target type, `sqrt(4.0)` rather than `sqrt(4)`. Widening happens only *inside an expression*, where `int` and `float` combine in arithmetic and `x + 1` is a `float` when `x` is one. That result is then checked against its own boundary like any other value, so a widened `float` can never reach an `int` binding.
 
 ### `f32` / `f64` — strict fixed-width floats
 
-Written with an `f32` or `f64` suffix. Unlike `float`, these are **strict fixed-width** types: they do **not** participate in the `int`/`float` widening described above. Mixing types in arithmetic is a compile error (E0044) — `f32 + float`, `f32 + int`, and `f64 + float` all require an explicit conversion; both operands must already be the same type. `f64` is a 64-bit float that is *distinct from* `float` — assigning one where the other is expected is E0007. `f32` is observably lower-precision than `float`:
+Written with an `f32` or `f64` suffix. These are **strict fixed-width** types and stand outside the `int`/`float` widening above: both operands of an arithmetic operator must already be the same type. `f32 + float`, `f32 + int` and `f64 + float` are each E0044 and each need an explicit conversion. `f64` is a 64-bit float distinct from `float`, so assigning one where the other is expected is E0007. `f32` carries observably less precision than `float`:
 
 ```noeta
 x = 1.5f32
@@ -215,7 +220,7 @@ echo -1.5f32           // -1.5    (unary negation stays f32)
 
 ## The three string forms
 
-**`"..."` — interpolated.** `${expr}` embeds any expression — string interpolation; bare `{`/`}` are literal.
+**`"..."` — interpolated.** `${expr}` embeds any expression; bare `{` and `}` are literal.
 
 ```noeta
 name = "Niro"
@@ -226,7 +231,9 @@ echo "say \"hi\""            // say "hi"
 echo "esc \x1b[0m \u{1F600}" // an ASCII/control byte, and a Unicode scalar
 ```
 
-The escapes are `\n`, `\t`, `\r`, `\"`, `\\`, `\$` (a literal `$`, so a literal `${` is `\${`), `\xHH` — exactly two hex digits naming an ASCII scalar `0x00`–`0x7F` — and `\u{H…H}` — 1 to 6 hex digits naming any non-surrogate Unicode scalar up to `0x10FFFF`. Any other escaped character is that character verbatim, so a stray `\q` is just `q`. A malformed **numeric** escape is E0064, an invalid string escape, reported at the escape itself: `\x` without two hex digits or naming a byte above `0x7F`, `\u` without braces, an empty `\u{}`, or a `\u{…}` that is a surrogate or above `0x10FFFF`.
+The escapes are `\n`, `\t`, `\r`, `\"`, `\\`, `\$` (a literal `$`, so a literal `${` is `\${`), `\xHH` with exactly two hex digits naming an ASCII scalar `0x00`–`0x7F`, and `\u{H…H}` with 1 to 6 hex digits naming any non-surrogate Unicode scalar up to `0x10FFFF`. Any other escaped character is that character verbatim, so a stray `\q` is just `q`.
+
+A malformed **numeric** escape is E0064, an invalid string escape, reported at the escape itself. That covers `\x` without two hex digits or naming a byte above `0x7F`, `\u` without braces, an empty `\u{}`, and a `\u{…}` that is a surrogate or above `0x10FFFF`.
 
 **`'...'` — raw.** No interpolation; the only escapes are `\'` and `\\`.
 
@@ -236,7 +243,7 @@ echo 'tab\tnot-expanded'                // backslash-t literal
 echo 'quote: it\'s'                     // quote: it's
 ```
 
-**`` `...` `` — dedented template.** Multiline, interpolates like `"..."`, but strips the common leading indentation and the leading/trailing blank line — ideal for SQL, HTML, or email bodies.
+**`` `...` `` — dedented template.** Multiline, interpolating like `"..."`, and stripping the common leading indentation along with the leading and trailing blank line. It suits SQL, HTML, and email bodies.
 
 ```noeta
 name = "Ada"
@@ -265,14 +272,14 @@ String methods (`.upper()`, `.split(",")`, …) are covered in [Built-ins](Stand
 | Range | `a..b` (exclusive), `a..=b` (inclusive) |
 | Type test / narrow | `is T`, `.as<T>()` |
 
-**`~` concatenation** — joins two lists into a new list, or display-concatenates operands into a string:
+**`~` concatenation** joins two lists into a new list, or display-concatenates its operands into a string:
 
 ```noeta
 echo [1, 2] ~ [3, 4]              // [1, 2, 3, 4]
 echo "users/" ~ 42 ~ "/profile"  // users/42/profile
 ```
 
-**`|>` pipe** — threads the left value in as an *argument* of the right call, reading left-to-right. It takes the first parameter no [label](Functions-and-Closures#named-arguments) claimed, which by default is the first one:
+**`|>` pipe** threads the left value in as an *argument* of the right call, reading left to right. It fills the first parameter no [label](Functions-and-Closures#named-arguments) claimed, which by default is the first one:
 
 ```noeta
 fn inc(x: int): int { return x + 1 }
@@ -283,11 +290,11 @@ echo 5 |> add(10)         // add(5, 10)   -> 15
 echo 5 |> div(a: 100)     // div(100, 5)  -> 20  (`a` is named, so the pipe fills `b`)
 ```
 
-When the piped value is the *only* argument, the empty parentheses are optional — `5 |> inc` and `5 |> inc()` are the same call.
+When the piped value is the *only* argument, the empty parentheses are optional, and `5 |> inc` and `5 |> inc()` are the same call.
 
-**`??` coalesce** supplies a fallback for `none`/absent (short-circuiting — the fallback runs only when needed); **`??=`** is `x = x ?? y`. The `?` try operator and these are covered in [Error Handling](Error-Handling).
+**`??` coalesce** supplies a fallback for a `none` or absent value, and short-circuits, so the fallback runs only when needed. **`??=`** is `x = x ?? y`. [Error Handling](Error-Handling) covers these and the `?` try operator.
 
-**Ranges** eagerly build a `List<int>`. `..` binds looser than `+`/`-`, so `0..n-1` means `0..(n-1)`; an empty range is `[]`:
+**Ranges** eagerly build a `List<int>`. `..` binds looser than `+` and `-`, so `0..n-1` means `0..(n-1)`. An empty range is `[]`:
 
 ```noeta
 echo 0..5    // [0, 1, 2, 3, 4]
@@ -302,8 +309,8 @@ Tightest to loosest: postfix (call, `.`, `[i]`, try `?`) → unary `!`/`-` → `
 The consequences worth knowing:
 
 - Bitwise binds *tighter* than comparison, so `5 & 3 == 1` is `(5 & 3) == 1`.
-- `~` and `..` sit between bitwise and comparison: `1 + 2 ~ "x"` is `(1 + 2) ~ "x"` (→ `3x`), `"a" ~ "b" == "ab"` is `("a" ~ "b") == "ab"` (→ `true`), and `0..n-1` is `0..(n-1)`.
-- `is` is at the comparison tier: `a + b is int` is `(a + b) is int`, and `x is int == true` is `(x is int) == true`.
-- `??` sits alongside `||`, tighter only than the pipeline: `a ?? b |> f` is `(a ?? b) |> f`.
+- `~` and `..` sit between bitwise and comparison, so `1 + 2 ~ "x"` is `(1 + 2) ~ "x"` (giving `3x`), `"a" ~ "b" == "ab"` is `("a" ~ "b") == "ab"` (giving `true`), and `0..n-1` is `0..(n-1)`.
+- `is` is at the comparison tier, so `a + b is int` is `(a + b) is int` and `x is int == true` is `(x is int) == true`.
+- `??` sits alongside `||`, tighter only than the pipeline, so `a ?? b |> f` is `(a ?? b) |> f`.
 
 See also [Fixed-Width Integers & Bitwise](Fixed-Width-Integers) for the bitwise operators in depth.

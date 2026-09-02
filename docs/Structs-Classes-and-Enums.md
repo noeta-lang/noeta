@@ -1,6 +1,6 @@
 # Structs, Classes & Enums
 
-The language has two aggregate kinds and one sum kind. `struct` and `class` share the *same body grammar* — they differ only in **semantics**. `enum` models a closed set of alternatives.
+The language has two aggregate kinds and one sum kind. `struct` and `class` share the *same body grammar* and differ in **semantics**. `enum` models a closed set of alternatives.
 
 ## The value/reference distinction
 
@@ -13,7 +13,7 @@ The language has two aggregate kinds and one sum kind. `struct` and `class` shar
 | Requires for field-set | `mut` binding **and** `mut` field | `mut` field only |
 | `destruct` block | not allowed | allowed |
 
-The choice is about whether a value *is* its contents (a `Point` is its `x` and `y`) or has an *identity* that persists across mutation (an `Order` you keep updating).
+Choose by asking whether a value *is* its contents, the way a `Point` is its `x` and `y`, or has an *identity* that persists across mutation, the way an `Order` you keep updating does.
 
 ```noeta check
 enum Status { Open; Shipped }
@@ -50,9 +50,9 @@ echo snap.n          // 1
 
 ## Fields
 
-Fields are declared `name: T`, one per line (or `;`-separated). A **`class`**'s fields are **private by default**; a **`struct`**'s and an **`enum`** payload's are always public:
+Fields are declared `name: T`, one per line or `;`-separated. A **`class`**'s fields are **private by default**; a **`struct`**'s and an **`enum`** payload's are always public.
 
-- Reading or setting a non-`pub` field of a `class` from outside the type is E0035. A `struct` never raises it — its fields are public, and writing `pub` on one is refused (E0077): the word would restate what `struct` already said, and suggest the fields written without it are private. It is the field twin of the `pub`-in-a-`trait` refusal below.
+- Reading or setting a non-`pub` field of a `class` from outside the type is E0035. A `struct` never raises it, its fields being public, and writing `pub` on one is refused (E0077).
 - Assigning a non-`mut` field is E0033, in every kind.
 - A private field is readable inside *any* method of the declaring type, on *any* value of that type (`other.x`), not just `self`.
 
@@ -63,13 +63,13 @@ class Account {
 }
 ```
 
-A struct's fields are public because a value **is** its contents: structural `==` already compares them field by field, and copy-on-write means there is no shared instance whose invariant could be broken behind your back. Hiding them would be a promise the kind cannot keep. A class has an identity that outlives any one assignment, so it can keep an invariant, and default-private is what lets it.
+A struct's fields are public because a value **is** its contents. Structural `==` already compares them field by field, and copy-on-write means there is no shared instance whose invariant could be broken behind your back. A class has an identity that outlives any one assignment, so it can keep an invariant, and default-private is what lets it.
 
-Whether the *operations* are public is a separate question, answered the same way for every kind — see [Method visibility](#method-visibility) below.
+Whether the *operations* are public is a separate question, answered the same way for every kind. See [Method visibility](#method-visibility) below.
 
 ### Per-field defaults
 
-`name: T = expr` makes a field **optional** in a literal, filled at construction. Defaults are evaluated in the type's **definition (global) scope** — they resolve globals only, never `self`, siblings, or the call site. A heap default (like a list) is rebuilt on each construction.
+`name: T = expr` makes a field **optional** in a literal, filled at construction. Defaults are evaluated in the type's **definition (global) scope**, so they resolve globals only, never `self`, siblings, or the call site. A heap default such as a list is rebuilt on each construction.
 
 ```noeta
 struct Cfg {
@@ -82,7 +82,7 @@ cfg = Cfg { name: "svc" }   // retries = 3, tags = [1, 2]
 
 ## Constructing values
 
-The all-fields literal `T { f: v, … }` must set every non-defaulted field (a missing one is E0009).
+The all-fields literal `T { f: v, … }` must set every non-defaulted field. A missing one is E0009.
 
 ```noeta check
 p = Point { x: 1, y: 2 }
@@ -98,7 +98,7 @@ u = User { name, email }    // ≡ User { name: name, email: email }
 echo u                      // User {name: "Ada", email: "ada@x.io"}
 ```
 
-The **empty literal** `T {}` is valid iff every field has a default:
+The **empty literal** `T {}` is valid exactly when every field has a default:
 
 ```noeta
 struct Defaults {
@@ -109,7 +109,7 @@ d = Defaults {}         // ok — every field of Defaults has a default
 echo d.retries          // 3
 ```
 
-**Spread** `T { ...base, f: override }` fills every field you don't list explicitly from `base`. It is **position-independent**: an explicitly listed field wins whether it is written before or after the `...base`. The original is unchanged (structural update):
+**Spread** `T { ...base, f: override }` fills every field you do not list explicitly from `base`. It is **position-independent**, so an explicitly listed field wins whether it is written before or after the `...base`. The original is unchanged, this being a structural update:
 
 ```noeta
 struct Money { amount: int  currency: string }
@@ -123,7 +123,7 @@ echo a             // Money {amount: 100, currency: "USD"} — the original is u
 
 ## Methods and `self`
 
-Methods live in the type body. Member access is **explicit**: a field is read and written through `self.field` — a bare name inside a method is always a local (or an unknown name), never a field:
+Methods live in the type body. Member access is **explicit**: a field is read and written through `self.field`, and a bare name inside a method is always a local or an unknown name.
 
 ```noeta
 class Counter {
@@ -138,20 +138,20 @@ class Counter {
 ```
 
 > [!IMPORTANT]
-> A bare name (`n`) never touches the receiver: `n = 5` declares a local, and reading `n` without a local in scope is a compile-time unknown-name error with a hint (`use self.n`). Index-assign through a field works too: `self.cells[i] = v` desugars to `self.cells = self.cells.set(i, v)`.
+> A bare name (`n`) never touches the receiver. `n = 5` declares a local, and reading `n` without a local in scope is a compile-time unknown-name error with a hint (`use self.n`). Index-assign through a field works too: `self.cells[i] = v` desugars to `self.cells = self.cells.set(i, v)`.
 
-**Associated functions** take no receiver (constructors are the usual case) and are called on the bare type name; **methods** dispatch on a value:
+**Associated functions** take no receiver, constructors being the usual case, and are called on the bare type name. **Methods** dispatch on a value:
 
 ```noeta check
 c = Counter.new()   // static function
 c.set_then_read()   // method
 ```
 
-**A field holding a function is callable through the receiver**: `obj.f(args)` means `(obj.f)(args)` when `f` is a field of function type (see [Functions & Closures](Functions-and-Closures#calling-a-closure-valued-field)). If a method and a field share a name, the method wins in call position and the field in value position — `g = obj.f; g(x)` always reaches the field.
+**A field holding a function is callable through the receiver.** `obj.f(args)` means `(obj.f)(args)` when `f` is a field of function type (see [Functions & Closures](Functions-and-Closures#calling-a-closure-valued-field)). If a method and a field share a name, the method wins in call position and the field in value position, so `g = obj.f; g(x)` always reaches the field.
 
 ## `Self` — the type in hand
 
-Inside a type body, `Self` names the type it is the body of. Write it anywhere a type goes — a return, a parameter, a field, an enum payload, and at any depth (`List<Self>`, `?Self`):
+Inside a type body, `Self` names the type it is the body of. Write it anywhere a type goes: a return, a parameter, a field, an enum payload, and at any depth (`List<Self>`, `?Self`).
 
 ```noeta
 class Counter {
@@ -171,17 +171,17 @@ enum Tree {
 }
 ```
 
-`self` and `Self` are the two halves of the same idea and the capital is the whole difference: `self` is the **value** the method was called on, `Self` is its **type**. So `self.n` reads a field and `fn bump(): Self` declares what comes back.
+The capital is the whole difference between the two spellings. `self` is the **value** the method was called on, and `Self` is its **type**, which is why `self.n` reads a field and `fn bump(): Self` declares what comes back.
 
-Inside a generic type, `Self` is that type at its own instantiation — `Self` in `class Box<T>` is `Box<T>`, so a method returning `Self` keeps the element type its receiver had.
+Inside a generic type, `Self` is that type at its own instantiation. `Self` in `class Box<T>` is `Box<T>`, so a method returning `Self` keeps the element type its receiver had.
 
 Reflection and narrowing resolve it to the same type everything else does: `type_name::<Self>()` answers with the declaring type's name, and `v is Self` matches its values.
 
-Nothing may be *declared* `Self` — no struct, class, enum or trait may take the name, because inside any type body the spelling already means the enclosing type. In a trait declaration `Self` means the implementing type; see [Implementing a trait](Generics-and-Traits#implementing-a-trait).
+Nothing may be *declared* `Self`. No struct, class, enum or trait may take the name, because inside any type body the spelling already means the enclosing type. In a trait declaration `Self` means the implementing type; see [Implementing a trait](Generics-and-Traits#implementing-a-trait).
 
 ## Method visibility
 
-A method is **private by default** and `pub` puts it on the type's surface. This is one rule for `class`, `struct` and `enum` alike — unlike fields, whose default is per kind.
+A method is **private by default**, and `pub` puts it on the type's surface. This is one rule for `class`, `struct` and `enum` alike, where fields take their default per kind.
 
 ```noeta
 class Account {
@@ -195,11 +195,11 @@ echo a.charge()   // fine
 // a.fee()        // E0076: cannot call private method `fee` of `Account` from outside it
 ```
 
-- Calling a non-`pub` method from outside its type is E0076 — whether by `x.m(…)`, `T.m(…)`, either turbofish form, `obj(…)` through the `Callable` protocol, or by binding a handle (`f = T.m`).
+- Calling a non-`pub` method from outside its type is E0076, whether by `x.m(…)`, `T.m(…)`, either turbofish form, `obj(…)` through the `Callable` protocol, or by binding a handle (`f = T.m`).
 - A private method is reachable inside *any* method of the declaring type, on *any* value of that type (`other.m()`), exactly as a private field is.
-- A `@test`/`@doc` body sees its module's privates — dev tiers are white-box by design.
+- A `@test`/`@doc` body sees its module's privates, dev tiers being white-box by design.
 
-Fields and methods answer different questions, which is why they do not share a default. A struct's fields are public because a value *is* its contents; that says nothing about which operations belong to the type's API. A `Point` whose `x` and `y` are visible still benefits from keeping a helper internal, and the alternative — making struct methods public by default for symmetry with struct fields — would mean a struct could never have a private helper at all.
+Fields and methods answer different questions, which is why they do not share a default. A struct's fields are public because a value *is* its contents, and that says nothing about which operations belong to the type's API. A `Point` whose `x` and `y` are visible still benefits from keeping a helper internal.
 
 A method that implements a `trait` must be written `pub`:
 
@@ -213,13 +213,13 @@ class Dog {
 }
 ```
 
-A trait is an outward contract — anyone holding a `dyn Speaks` calls the method — so the implementation is on the public surface by construction. Omitting `pub` is E0015. It is required rather than implied so that a reader of an `impl` block can see what is callable without first knowing which names the trait declares, and so that adding a method to a trait cannot silently change the visibility of a method written elsewhere.
+A trait is an outward contract, since anyone holding a `dyn Speaks` calls the method, so the implementation is on the public surface by construction. Omitting `pub` is E0015. Writing it keeps an `impl` block readable on its own, without first knowing which names the trait declares.
 
-Inside a `trait`'s *own* declaration `pub` is refused (E0053): every method a trait declares is already its contract, and writing the word there would suggest the unmarked ones are private.
+Inside a `trait`'s *own* declaration `pub` is refused (E0053). Every method a trait declares is already its contract, and writing the word there would suggest the unmarked ones are private.
 
 ## Destructors (class only)
 
-A `class` may declare `destruct { … }`, which runs when the instance is dropped — at its **last use**, not at scope end (see [Memory Management](Memory-Management)). Locals drop in reverse declaration order. A container that owns a class (e.g. a generic `Box<T>` holding one) fires its destructor transitively.
+A `class` may declare `destruct { … }`, which runs when the instance is dropped, at its **last use** rather than at scope end (see [Memory Management](Memory-Management)). Locals drop in reverse declaration order. A container that owns a class, such as a generic `Box<T>` holding one, fires its destructor transitively.
 
 ```noeta
 class File {
@@ -230,7 +230,7 @@ class File {
 
 ## Enums
 
-An `enum` is a closed set of variants — plain, payload-carrying, or string-backed. Variants are `;`-separated.
+An `enum` is a closed set of variants: plain, payload-carrying, or string-backed. Variants are `;`-separated.
 
 ```noeta
 enum Status { Pending; Paid; Refunded }                 // plain
@@ -246,7 +246,7 @@ enum Direction: string {                                 // string-backed
 }
 ```
 
-A payload field may be **named** (`NegativePrice(index: int)`) or **positional** (`NegativePrice(int)`) — the name is documentation, since construction and `match` both bind by position. Either way the payload is a *type*, so it may be anything a type annotation may: an imported or fully-qualified name, generic arguments, `?T`, a tuple, a function type.
+A payload field may be **named** (`NegativePrice(index: int)`) or **positional** (`NegativePrice(int)`). The name is documentation, since construction and `match` both bind by position. Either way the payload is a *type*, so it may be anything a type annotation may: an imported or fully-qualified name, generic arguments, `?T`, a tuple, a function type.
 
 ```noeta
 use std.id.Uuid
@@ -265,7 +265,7 @@ echo match Event.Tagged(["a", "b"]) {
 }
 ```
 
-Construct with `Enum.Variant` (or `Enum.Variant(payload)`), compare with `==`, and destructure in a `match`:
+Construct with `Enum.Variant`, or `Enum.Variant(payload)`, compare with `==`, and destructure in a `match`:
 
 ```noeta
 enum OrderError { Empty; NegativePrice(index: int) }
@@ -277,7 +277,7 @@ echo match e {
 }
 ```
 
-Enums share the unified body grammar — they can hold methods and `impl Trait { }` blocks. An **instance method's `self` is the whole enum value** (reach the payload by matching); static functions are called on the type name:
+Enums share the unified body grammar, so they can hold methods and `impl Trait { }` blocks. An **instance method's `self` is the whole enum value**, and the payload is reached by matching. Static functions are called on the type name:
 
 ```noeta
 enum Level {
@@ -291,7 +291,7 @@ echo Level.High.rank()   // 2
 
 ### Converting a wire value to a case
 
-Every enum gets a pair: `Enum.try_from(v): ?Enum` (`none` on a miss) and `Enum.from(v): Enum` (panics on a miss) — the recoverable/aborting shape the [rest of the language uses](Error-Handling#aborting-and-recoverable-doors). Reach for `try_from` whenever the value came from outside the program; `from` when a bad value means the program itself is wrong.
+Every enum gets a pair: `Enum.try_from(v): ?Enum` gives `none` on a miss, and `Enum.from(v): Enum` panics on one. That is the recoverable and aborting shape the [rest of the language uses](Error-Handling#aborting-and-recoverable-doors). Reach for `try_from` whenever the value came from outside the program, and for `from` when a bad value means the program itself is wrong.
 
 The value is matched against each case's **backing first, then its name**. A backed enum's backing is what its JSON Schema advertises and what a real document carries, so that is what a wire-facing conversion reads:
 
@@ -306,17 +306,17 @@ echo Code.try_from(404)        // some(Code.Missing) — backings are typed, so 
 echo Plan.from("paid")         // Plan.Paid
 ```
 
-A **plain** enum has no backings, so its case names are what select — which is also exactly what its schema advertises. The argument type follows the backing: a `string`-backed or plain enum takes a `string`, an `int`-backed one takes `int | string`.
+A **plain** enum has no backings, so its case names are what select, which is also what its schema advertises. The argument type follows the backing: a `string`-backed or plain enum takes a `string`, and an `int`-backed one takes `int | string`.
 
-Payload-carrying variants are never selected: there is no payload to supply. Build those with [`construct("Enum.Variant", payload)`](Attributes-and-Reflection#constructing-an-enum-case).
+Payload-carrying variants are never selected, there being no payload to supply. Build those with [`construct("Enum.Variant", payload)`](Attributes-and-Reflection#constructing-an-enum-case).
 
-This pair stays available on an enum that also declares an [`impl From<Source>`](Error-Handling#converting-errors-at---impl-fromsource): reading a wire value and running a declared conversion are different operations, and a declared conversion carries its source in its name, so `Plan.from("free")` and `Plan.from(raw)` both mean what they say.
+This pair stays available on an enum that also declares an [`impl From<Source>`](Error-Handling#converting-errors-at---impl-fromsource). Reading a wire value and running a declared conversion are different operations, and a declared conversion carries its source in its name, so `Plan.from("free")` and `Plan.from(raw)` both mean what they say.
 
-To decode an enum sitting inside a larger document, derive [`Deserialize<Json>`](Derives#enum-typed-fields) on the enclosing type instead — the same backing-versus-name rule applies there, with path-carrying errors.
+To decode an enum sitting inside a larger document, derive [`Deserialize<Json>`](Derives#enum-typed-fields) on the enclosing type instead. The same backing-versus-name rule applies there, with path-carrying errors.
 
 ## Tuples
 
-Tuples are anonymous, positional, value-semantic aggregates. A literal needs **2 or more** elements — `(x)` is just a parenthesized expression, and there is no one- or zero-element form: `()` is a parse error (E0003) in every position, binding, argument, return value and annotation alike. The unit *type* is spelled `void`, and a `void` function returns with a bare `return;` or by falling off the end of its body.
+Tuples are anonymous, positional, value-semantic aggregates. A literal needs **2 or more** elements, since `(x)` is just a parenthesized expression. There is no one- or zero-element form: `()` is a parse error (E0003) in every position, binding, argument, return value and annotation alike. The unit *type* is spelled `void`, and a `void` function returns with a bare `return;` or by falling off the end of its body.
 
 ```noeta
 fn divmod(a: int, b: int): (int, int) { return (a / b, a % b) }
@@ -331,7 +331,7 @@ nested = ((1, 2), (3, 4))
 echo nested.0.1                 // 2  (nested projection)
 ```
 
-Their type is written positionally — `(int, string)` — and they are the idiom for [returning multiple values](Functions-and-Closures#multiple-return-via-tuples).
+Their type is written positionally, `(int, string)`, and they are the idiom for [returning multiple values](Functions-and-Closures#multiple-return-via-tuples).
 
 ## See also
 

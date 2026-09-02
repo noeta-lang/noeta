@@ -4,7 +4,7 @@ Named functions, default parameters, multiple return, closures, and the pipe ope
 
 ## Named functions
 
-`fn name(params): Ret { body }`. At this named boundary, **parameter types and the return type are mandatory** (a missing type is E0022). Bodies infer everything else.
+`fn name(params): Ret { body }`. At this named boundary, **parameter types and the return type are mandatory**, and a missing type is E0022. Bodies infer everything else.
 
 ```noeta
 fn add(a: int, b: int): int {
@@ -21,14 +21,14 @@ fn fib(n: int): int {
 
 ### Returning on every path
 
-A non-`void` function must produce its declared type on **every** path — reaching the end of the body without returning is `E0048`. The checker proves a body cannot reach its end from these shapes, nested to any depth:
+A non-`void` function must produce its declared type on **every** path, and reaching the end of the body without returning is `E0048`. The checker proves a body cannot reach its end from these shapes, nested to any depth:
 
 - a `return`, or a `panic(…)`;
 - an `if`/`else` where *both* blocks do;
 - a `while true { … }` with no `break` targeting it;
 - an **exhaustive** `match` whose every arm does.
 
-The `match` case matters because blocks never yield values in Noeta, so an arm that has to bail out early is written as a block with a `return` in it — which makes an all-returning `match` the ordinary way to write a fallible pipeline, with no unreachable trailing `return` to pad it out:
+The `match` case matters because blocks never yield values in Noeta. An arm that has to bail out early is written as a block with a `return` in it, which makes an all-returning `match` the ordinary way to write a fallible pipeline, with no unreachable trailing `return` to pad it out:
 
 ```noeta
 fn unwrap_or_zero(r: Result<int, string>): int {
@@ -39,11 +39,11 @@ fn unwrap_or_zero(r: Result<int, string>): int {
 }
 ```
 
-"Exhaustive" is the same judgment `E0011` reports on: a `_` (or bare-binding) arm, or an arm for every variant of an enum / `Result` / `Option`. A **guarded** arm (`pattern if cond`) proves nothing — the guard may be false at runtime — so a `match` that relies on one still needs a later irrefutable arm; likewise a `match` over an open domain (an `int` scrutinee, say) needs a `_`. Anything the checker cannot prove exhaustive leaves a path to the end of the body, and `E0048` still fires there.
+"Exhaustive" is the same judgment `E0011` reports on: a `_` or bare-binding arm, or an arm for every variant of an enum, `Result`, or `Option`. A **guarded** arm (`pattern if cond`) proves nothing, the guard being able to fail at runtime, so a `match` that relies on one still needs a later irrefutable arm. A `match` over an open domain, an `int` scrutinee say, needs a `_`. Anything the checker cannot prove exhaustive leaves a path to the end of the body, and `E0048` still fires there.
 
 ## Sealed functions & the `use (…)` capture clause
 
-A named function is **sealed**: its body sees its parameters and the program's *declarations* (other functions, types, imports) — never the surrounding **value bindings**. A top-level `items` does not leak into `fn place(items: …)`; inside the body, `items` means the parameter, always. To read a surrounding binding, import it explicitly with a capture clause between the parameter list and the return type:
+A named function is **sealed**. Its body sees its parameters and the program's *declarations*, meaning other functions, types, and imports, and never the surrounding **value bindings**. A top-level `items` does not leak into `fn place(items: …)`, and inside the body `items` means the parameter. To read a surrounding binding, import it explicitly with a capture clause between the parameter list and the return type:
 
 ```noeta
 tax_rate = 0.25
@@ -53,9 +53,11 @@ fn with_tax(price: float) use (tax_rate): float {
 echo with_tax(100.0)   // 125.0
 ```
 
-A capture is a **live view** of the named binding (a `mut` global mutated later is seen; writing through the capture follows the binding's own `mut` rules). The clause works on methods and nested `fn`s the same way — a nested `fn` importing an enclosing `mut` local is the explicit form of a closure counter. Without the clause, a reference to a top-level binding is an error with the fix spelled out (E0005: *add `use (name)` to the signature, or pass it as a parameter*), and a bare assignment to an unlisted name simply declares a fresh local.
+A capture is a **live view** of the named binding. A `mut` global mutated later is seen, and writing through the capture follows the binding's own `mut` rules. The clause works on methods and nested `fn`s the same way, so a nested `fn` importing an enclosing `mut` local is the explicit form of a closure counter.
 
-**No shadowing (E0059).** One name means one thing per scope stack — the rule in full lives in [Syntax Basics](Syntax-Basics#bindings-and-mutability). Sealing is what keeps it ergonomic here: named-fn params conflict with nothing because the surrounding bindings genuinely are not in scope, while an anonymous closure captures implicitly — so `fn(base) => …` under a visible `base` is rejected; rename one.
+Without the clause, a reference to a top-level binding is E0005 with the fix spelled out (*add `use (name)` to the signature, or pass it as a parameter*), and a bare assignment to an unlisted name declares a fresh local.
+
+**No shadowing (E0059).** One name means one thing per scope stack, and the rule in full lives in [Syntax Basics](Syntax-Basics#bindings-and-mutability). Sealing is what keeps it ergonomic here: named-fn params conflict with nothing because the surrounding bindings genuinely are not in scope. An anonymous closure captures implicitly, so `fn(base) => …` under a visible `base` is rejected; rename one.
 
 ## Default (optional) parameters
 
@@ -70,11 +72,11 @@ echo greet("Ada", "Hi")   // Hi, Ada!
 ```
 
 > [!NOTE]
-> A default is evaluated in the function's **sealed definition scope**: it sees statics and the fn's `use (…)` captures — exactly like the body — but *not* other arguments, `self`, or fields (naming another parameter is E0005). A default that reads a module-level binding therefore needs the binding in the capture clause: `fn f(x: int, step: int = base) use (base)`. A default widens the accepted arity to a range.
+> A default is evaluated in the function's **sealed definition scope**, so it sees statics and the fn's `use (…)` captures exactly as the body does, and not other arguments, `self`, or fields (naming another parameter is E0005). A default that reads a module-level binding therefore needs the binding in the capture clause: `fn f(x: int, step: int = base) use (base)`. A default widens the accepted arity to a range.
 
 ## Named arguments
 
-An argument may name the parameter it fills, `name: value`. Positional arguments come first; once an argument is named, every argument after it must be named too (`f(a: 1, 2)` is rejected — the labels have already claimed parameters out of order, so `2` has no position left to take). Named arguments themselves may appear in any order:
+An argument may name the parameter it fills, `name: value`. Positional arguments come first, and once an argument is named every argument after it must be named too. `f(a: 1, 2)` is rejected, the labels having already claimed parameters out of order, so `2` has no position left to take. Named arguments themselves may appear in any order:
 
 ```noeta
 fn sub(a: int, b: int): int { return a - b }
@@ -84,7 +86,7 @@ echo sub(a: 10, b: 1)    // 9  — labelled
 echo sub(b: 1, a: 10)    // 9  — labelled, any order
 ```
 
-Labels bind; they do not reorder evaluation. Arguments are evaluated in the order **written**, so a call's side effects never depend on how its parameters happen to be declared:
+Labels bind, and they do not reorder evaluation. Arguments are evaluated in the order **written**, so a call's side effects never depend on how its parameters happen to be declared:
 
 ```noeta
 fn sub(a: int, b: int): int { return a - b }
@@ -109,11 +111,11 @@ echo f(1, 5)       // 153 — `b` supplied positionally
 echo f(1, c: 9)    // 129 — `b` skipped, and still defaults
 ```
 
-The skipped parameter's default is evaluated by the callee in its own scope, exactly as when an argument list simply stops early — skipping one and omitting a trailing one are the same thing to the function being called.
+The skipped parameter's default is evaluated by the callee in its own scope, exactly as when an argument list simply stops early. Skipping one and omitting a trailing one are the same thing to the function being called.
 
 Named arguments work the same on methods and static functions (`m.f(1, c: 9)`, `M.mk(b: 5, a: 1)`), and through [the pipe operator](#the-pipe-operator).
 
-A label must name a parameter of the callee (an unknown one is E0061, with the closest match suggested), and no parameter may be filled twice — once positionally and again by name.
+A label must name a parameter of the callee, an unknown one being E0061 with the closest match suggested, and no parameter may be filled twice, once positionally and again by name.
 
 ### Where labels can be used
 
@@ -131,13 +133,13 @@ echo math.pow(exp: 3.0, base: 2.0)   // 8.0 — labelled, reordered
 
 Where a label **cannot** bind it is refused (E0061) rather than ignored:
 
-- A **function value** — a closure stored in a binding, field, or parameter. The closure literal had parameter names, but the `(int, int) -> int` type it flows through carries only types, so the call site cannot see them. No signature can fix this one.
-- A **built-in method** on a primitive or collection (`"s".replace`, `xs.map`), and any native signature that has not declared names. These resolve from the receiver's type rather than a named signature.
+- A **function value**, meaning a closure stored in a binding, field, or parameter. The closure literal had parameter names, but the `(int, int) -> int` type it flows through carries only types, so the call site cannot see them. No signature can fix this one.
+- A **built-in method** on a primitive or collection (`"s".replace`, `xs.map`), and any native signature that has not declared names. These resolve from the receiver's type rather than from a named signature.
 
-A label is always honored or refused, never silently ignored — so `math.pow(exp: 3.0, base: 2.0)` cannot quietly compute 3², and a label naming nothing at all (`"abc".replace(zzz: "a", "b")`) cannot pass unremarked.
+A label is always honored or refused, never silently ignored. So `math.pow(exp: 3.0, base: 2.0)` cannot quietly compute 3², and a label naming nothing at all (`"abc".replace(zzz: "a", "b")`) cannot pass unremarked.
 
 > [!NOTE]
-> A call that *skips* a defaulted parameter can only name parameters among the first 63; one that names a later parameter as well is rejected. Reordering and labelling are unaffected, at any arity, as is a call that simply supplies a prefix.
+> A call that *skips* a defaulted parameter can only name parameters among the first 63, and one that names a later parameter as well is rejected. Reordering and labelling are unaffected, as is a call that simply supplies a prefix.
 
 ## Multiple return via tuples
 
@@ -152,7 +154,7 @@ fn divmod(a: int, b: int): (int, int) {
 
 ## Closures
 
-A closure is `fn(params) => expr` (arrow) or `fn(params) { … }` (block, with `return`). Unlike named functions, a closure's parameter and return types are **optional** — they are inferred:
+A closure is `fn(params) => expr` in arrow form, or `fn(params) { … }` in block form with `return`. A closure's parameter and return types are **optional** and inferred, where a named function's are mandatory:
 
 ```noeta
 base     = 100
@@ -177,7 +179,7 @@ echo c()   // 2
 
 ## Nested functions
 
-A `fn` declared inside another function's body is **nested**: it is a local closure, callable only within the enclosing body, that captures enclosing locals as upvalues. Nested-function *names* are **hoisted** across their block — like top-level functions, siblings see each other regardless of declaration order — so forward references and mutual recursion just work:
+A `fn` declared inside another function's body is **nested**. It is a local closure, callable only within the enclosing body, capturing enclosing locals as upvalues. Nested-function *names* are **hoisted** across their block, so, as with top-level functions, siblings see each other regardless of declaration order and forward references and mutual recursion just work:
 
 ```noeta
 fn parity(n: int): bool {
@@ -194,7 +196,7 @@ fn parity(n: int): bool {
 echo parity(10)   // true
 ```
 
-Two mutually recursive nested functions may also import the *same* enclosing `mut` local with `use (…)` — they share the one live cell, not copies:
+Two mutually recursive nested functions may also import the *same* enclosing `mut` local with `use (…)`. They share the one live cell:
 
 ```noeta
 fn run(): int {
@@ -206,7 +208,7 @@ fn run(): int {
 }
 ```
 
-Only `fn` declarations are hoisted. A plain `let`/value local stays **strictly lexical**: referencing one declared textually later is E0005 (unknown name), not a forward capture.
+Only `fn` declarations are hoisted. A plain value local stays **strictly lexical**, so referencing one declared textually later is E0005, an unknown name, rather than a forward capture.
 
 ```noeta error
 fn run(): int {
@@ -218,22 +220,24 @@ fn run(): int {
 
 ## Function types
 
-Function types are first-class surface syntax — write them in annotations and signatures:
+Function types are first-class surface syntax, written in annotations and signatures:
 
 ```noeta
 apply: (int) -> int = fn(x) => x + 1
 fn run(f: (int) -> int, x: int): int { return f(x) }
 ```
 
-Collection methods are passable as values via **unbound method handles**: `list.len`, `string.upper`, `Stack.size` — each a callable taking the receiver as its first argument (`xss.map(list.len)`).
+Collection methods are passable as values via **unbound method handles**: `list.len`, `string.upper`, `Stack.size`. Each is a callable taking the receiver as its first argument, so `xss.map(list.len)` works.
 
-**Generic functions are values too.** With an expected function type in play — a `map` argument, an annotated binding — a generic function instantiates against the expectation and checks precisely; without one it stays the erased, `dyn`-parameter value, calls deferred per position. The full rules are in [Generics & Traits](Generics-and-Traits#generic-functions-as-values).
+**Generic functions are values too.** With an expected function type in play, a `map` argument or an annotated binding, a generic function instantiates against the expectation and checks precisely. Without one it stays the erased, `dyn`-parameter value, with calls deferred per position. The full rules are in [Generics & Traits](Generics-and-Traits#generic-functions-as-values).
 
-The prelude constructors `Ok`/`Err`/`some` — and `panic` — are first-class the same way: `results.map(Ok)` passes the genuine constructor, with a direct call's exact arity behavior and error text. (`assert` stays a special form, and a generic function that forwards `T` into a call-site-typed position — see [Generics & Traits](Generics-and-Traits) — must be called rather than passed.)
+The prelude names are first-class the same way. `Ok`, `Err`, `some` and `panic` pass as genuine constructors, with a direct call's exact arity behavior and error text, so `results.map(Ok)` builds `[Ok(1), Ok(2)]`. `assert` passes too, and a handle bound from it raises the same E0010 with the same message a direct call would.
+
+One shape needs the expectation. A generic function that forwards `T` into a call-site-typed position, such as one whose body calls `json.try_parse::<T>`, has to have its instantiation pinned by an expected function type (`g: (string) -> Result<U, JsonError> = decode`). Passing it where nothing pins the type is E0058, with the fix in the help.
 
 ## Calling a closure-valued field
 
-A function value stored in a **field** is called directly through its receiver — `obj.f(args)` means `(obj.f)(args)` when `f` is a field of function type (the field-access-then-call desugar). The call is arity/argument-checked against the field's declared type, exactly like a call through a `Fn`-typed local:
+A function value stored in a **field** is called directly through its receiver. `obj.f(args)` means `(obj.f)(args)` when `f` is a field of function type, this being the field-access-then-call desugar. The call is arity- and argument-checked against the field's declared type, exactly like a call through a `Fn`-typed local:
 
 ```noeta
 struct Counter {
@@ -243,11 +247,11 @@ c = Counter { step: fn(x: int) => x + 1 }
 echo c.step(41)      // 42 — load the field, call the value
 ```
 
-When a type declares **both** a method and a field of the same name, the method wins in call position (`obj.f(x)` dispatches the method) while the field wins in value position (`obj.f` reads the field) — bind it (`g = obj.f; g(x)`) to call the field. Parentheses are transparent, so `(obj.f)(x)` is the same call as `obj.f(x)`. On a `dyn` receiver the same order applies at runtime: the method table first, then the field. A field whose type is not a function is not callable — E0007, statically when the receiver's type is known.
+When a type declares **both** a method and a field of the same name, the method wins in call position, so `obj.f(x)` dispatches the method, and the field wins in value position, so `obj.f` reads the field. Bind it (`g = obj.f; g(x)`) to call the field. Parentheses are transparent, making `(obj.f)(x)` the same call as `obj.f(x)`. On a `dyn` receiver the same order applies at runtime, the method table first and then the field. A field whose type is not a function is not callable, which is E0007, reported statically when the receiver's type is known.
 
 ## The pipe operator
 
-`|>` threads the left value in as an **argument** of the right call — by default the first one. It turns nested calls into a left-to-right pipeline:
+`|>` threads the left value in as an **argument** of the right call, by default the first one. It turns nested calls into a left-to-right pipeline:
 
 ```noeta
 fn inc(x: int): int { return x + 1 }
@@ -263,7 +267,7 @@ echo [1, 2, 3, 4]
     .sum()                    // 60  (collection work chains as methods)
 ```
 
-A callee that receives nothing but the piped value needs no argument list — `5 |> inc` above is the whole call. Writing the empty parentheses is equivalent, so pick whichever reads better in the chain. The right-hand side is an ordinary expression either way: a method binds as `5 |> obj.m`, and so does anything that evaluates to a function, so `5 |> double` works for `double = fn(x: int) => x * 2`.
+A callee that receives nothing but the piped value needs no argument list, so `5 |> inc` above is the whole call. Writing the empty parentheses is equivalent, so pick whichever reads better in the chain. The right-hand side is an ordinary expression either way: a method binds as `5 |> obj.m`, and so does anything that evaluates to a function, so `5 |> double` works for `double = fn(x: int) => x * 2`.
 
 ### Piping into a parameter that isn't the first
 
@@ -290,11 +294,11 @@ echo 5 |> g(6, c: 9)     // 569 — `c` is named, so `a` and `b` are free: piped
 // sample:end
 ```
 
-Evaluation order is unchanged by any of this: the left operand runs first, then the right-hand side's arguments in the order written, however the binding permutes them. A method binds the same way, with the receiver staying the receiver — `10 |> box.scale(k: 4)` calls `box.scale(4, 10)`.
+Evaluation order is unchanged by any of this. The left operand runs first, then the right-hand side's arguments in the order written, however the binding permutes them. A method binds the same way, with the receiver staying the receiver, so `10 |> box.scale(k: 4)` calls `box.scale(4, 10)`.
 
-This needs a callee whose parameter names are visible ([where labels can be used](#where-labels-can-be-used)) — which includes the standard library, so `2.0 |> math.pow(exp: 3.0)` pipes into `base` and gives `8.0`.
+This needs a callee whose parameter names are visible ([where labels can be used](#where-labels-can-be-used)), which includes the standard library, so `2.0 |> math.pow(exp: 3.0)` pipes into `base` and gives `8.0`.
 
-Without a label there is no way to thread the value into a later parameter, and there is no placeholder syntax (`_` is not a piped-value hole). Use a closure when the target parameter has nothing to name it by:
+A label is the only way to thread the value into a later parameter, since there is no placeholder syntax and `_` is not a piped-value hole. Use a closure when the target parameter has nothing to name it by:
 
 ```noeta
 fn div(a: int, b: int): int { return a / b }

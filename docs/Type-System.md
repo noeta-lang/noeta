@@ -1,12 +1,12 @@
 # The Type System
 
-Noeta is **inferred-static**: types are checked at compile time, signatures are required at named boundaries, and bodies are inferred. `dyn` is the single explicit escape into dynamic typing. This page covers the surface — the type forms you write and the operations that move between them. You have met most of these forms on the preceding pages already; this page is the map that puts them in one place. For how the checker works internally, see [The Type Checker](Type-Checker-Internals).
+Noeta is **inferred-static**: types are checked at compile time, signatures are required at named boundaries, and bodies are inferred. `dyn` is the single explicit escape into dynamic typing. This page is the map of the surface, the type forms you write and the operations that move between them. For how the checker works internally, see [The Type Checker](Type-Checker-Internals).
 
 ## The shape of it
 
-- **Annotations are checked, then erased.** They are mandatory on a named function's parameters and return, and on fields; almost everywhere else they are optional and inferred.
-- **Inference is local.** Bindings and closures infer their types from their initializers and bodies; there is no whole-program type reconstruction.
-- A program with type errors is **rejected before it runs** — the type checker is a shared front-end upstream of both execution backends.
+- **Annotations are checked, then erased.** They are mandatory on a named function's parameters and return, and on fields. Almost everywhere else they are optional and inferred.
+- **Inference is local.** Bindings and closures infer their types from their initializers and bodies. There is no whole-program type reconstruction.
+- A program with type errors is **rejected before it runs**. The type checker is a shared front-end upstream of both execution backends.
 
 ```noeta
 fn add(a: int, b: int): int { return a + b }   // signature required
@@ -32,7 +32,7 @@ sq = fn(n) => n * n                             // inferred (int) -> int
 
 ## `number` — any numeric scalar
 
-`number` names the set every numeric type belongs to, so a function that genuinely accepts any of them says so in one word instead of a twelve-member union:
+`number` names the set every numeric type belongs to, so a function that accepts any of them says so in one word rather than as a twelve-member union:
 
 ```noeta
 fn scaled(x: number, by: number): number { return x }
@@ -44,9 +44,9 @@ echo scaled(2.0f32, 3i16)  // the strict fixed widths, mixed freely
 // sample:end
 ```
 
-It is a **union**, not a thirteenth scalar — `number` *is* `int | float | f32 | f64 | i8 | … | u64`, written short. So it behaves like any other union: a value of any member widens into it, `x is number` narrows out of a `dyn`, and the strict fixed-width rules are untouched (`number` does not make an `f32` and an `int` add together — each member keeps its own arithmetic).
+It is a **union**. `number` *is* `int | float | f32 | f64 | i8 | … | u64`, written short, and it behaves like any other union: a value of any member widens into it, `x is number` narrows out of a `dyn`, and the strict fixed-width rules are untouched. Each member keeps its own arithmetic, so an `f32` and an `int` still do not add together.
 
-A `number` **orders**, and that follows from the members rather than from the name: every numeric type compares against every other, so a union over any of them has an ordering and reaches every door that asks for one — `< <= > >=`, `.compare()`, `.sorted()`, `.min()`/`.max()`, and a `Comparable` bound.
+A `number` **orders**, and it does so because its members do. Every numeric type compares against every other, so a union over any of them has an ordering and reaches every door that asks for one: `< <= > >=`, `.compare()`, `.sorted()`, `.min()`/`.max()`, and a `Comparable` bound.
 
 ```noeta
 fn biggest<T: Comparable>(a: T, b: T): T { return if a < b then b else a }
@@ -61,22 +61,22 @@ echo (200u8).compare(200)    // Ordering.Equal
 // sample:end
 ```
 
-Comparison across members is by value, not by storage — a `200u8` and a `200` are equal, and a `300i16` sorts above both. Ordering is the one operation that crosses the members this way; arithmetic still keeps each member inside its own type.
+Comparison across members is by value rather than by storage, so a `200u8` and a `200` are equal and a `300i16` sorts above both. Ordering is the one operation that crosses the members this way; arithmetic still keeps each member inside its own type.
 
-A union orders when its members are **mutually comparable**, which is what `number` satisfies and what a mixed union like `int | string` does not: each member orders on its own, and no ordering exists between an `int` and a `string`, so the union has none to offer. Narrowing is how a mixed union reaches an ordering — inside `if x is int { … }` the value is an `int` and compares like one.
+A union orders when its members are **mutually comparable**, which is the property `number` has. In a mixed union like `int | string` each member orders on its own and no ordering exists between an `int` and a `string`, so the union has none to offer. Narrowing is how a mixed union reaches an ordering: inside `if x is int { … }` the value is an `int` and compares like one.
 
-Because it is a set rather than a storage class, it cannot be a `@packed` field or a map key: both need one concrete width to lay out or hash by.
+Because `number` is a set rather than a storage class, it cannot be a `@packed` field or a map key. Both of those need one concrete width to lay out or hash by.
 
 ## Optionals — `?T`
 
-There is no `null`. Absence is the value `none`; presence is `some(x)`. See [Error Handling](Error-Handling) for `?`/`??` and the full story.
+There is no `null`. Absence is the value `none` and presence is `some(x)`. See [Error Handling](Error-Handling) for `?`/`??` and the full story.
 
 ```noeta
 fn head(xs: List<int>): ?int { return xs.first() }
 echo head([]) ?? -1     // -1
 ```
 
-An optional is **its own reified type**, not a union of `T` and absence — `some(x)` really is a wrapper, and `echo` shows it as one. So `x is T` on a `?T` is *always false*: the value's runtime head constructor is `some`/`none`, never the payload's. The checker says so (**E0065**, a warning) and declines to narrow on such a test, so the unreachable branch does not go on type-checking as the payload. `Result<T, E>` behaves identically (`Ok`/`Err` are its head constructors).
+An optional is **its own reified type**: `some(x)` really is a wrapper, and `echo` shows it as one. So `x is T` on a `?T` is *always false*, because the value's runtime head constructor is `some` or `none` rather than the payload's. The checker says so (**E0065**, a warning) and declines to narrow on such a test, so the unreachable branch does not go on type-checking as the payload. `Result<T, E>` behaves identically, with `Ok` and `Err` as its head constructors.
 
 ```noeta check
 struct P { x: int }
@@ -91,7 +91,7 @@ fn f(p: ?P): int {
 echo f(some(P { x: 7 }))    // 7
 ```
 
-For mere presence, compare against the value: `p != none`. And `p is none` / `p is some` name *constructors*, not types — they are E0013, with the working spelling in the help.
+For mere presence, compare against the value with `p != none`. `p is none` and `p is some` name *constructors* rather than types, so both are E0013, with the working spelling in the help.
 
 ## Unions — `A | B`
 
@@ -107,14 +107,14 @@ fn parse(s: string): int | string {
 }
 ```
 
-- A member value **widens in** automatically: `int <: int | string`. A non-member is E0007.
-- A union is exhaustively matchable with **no `_`** — one `is T` arm per member (see [Control Flow & Pattern Matching](Control-Flow-and-Pattern-Matching)).
+- A member value **widens in** automatically, so `int <: int | string`. A non-member is E0007.
+- A union is exhaustively matchable with **no `_`**, one `is T` arm per member (see [Control Flow & Pattern Matching](Control-Flow-and-Pattern-Matching)).
 - Narrow back to a member with `.as<T>()` or a match arm.
-- `?A | B` parses as `(?A) | B` (the `?` binds tighter than `|`).
+- `?A | B` parses as `(?A) | B`, since `?` binds tighter than `|`.
 
 ## `dyn` — the open top
 
-`dyn` is the escape hatch: any value fits, and nothing is known statically. Unlike a union, `dyn` is *open* — no finite set of `is T` arms can exhaust it, so a `match` over `dyn` requires a `_` arm (E0011 without one).
+`dyn` is the escape hatch: any value fits, and nothing is known statically. `dyn` is *open*, so no finite set of `is T` arms can exhaust it and a `match` over `dyn` requires a `_` arm (E0011 without one).
 
 ```noeta
 d: dyn = 42
@@ -124,7 +124,7 @@ echo d is string       // false
 
 ## `never` — the bottom
 
-`never` is `dyn`'s exact opposite. Where every type widens *into* `dyn`, `never` widens into *every* type; where `dyn` is inhabited by every value, `never` is inhabited by none. It is the return type of a function that **does not return**:
+`never` is the bottom of the lattice: it widens into every type, and no value inhabits it. It is the return type of a function that **does not return**:
 
 ```noeta check
 use std.os
@@ -135,7 +135,7 @@ server.serve(8080, fetch)  // `server.serve(port, handler, host?): never` — th
 panic("unreachable")       // `panic(msg): never`
 ```
 
-Because `never` is a subtype of everything, a call to one of these type-checks in any position — there is no value to be wrong about — and nothing written after it can run.
+Because `never` is a subtype of everything, a call to one of these type-checks in any position, there being no value to be wrong about, and nothing written after it can run.
 
 You write it on your own functions the same way:
 
@@ -149,13 +149,15 @@ fn width(kind: string): int {
 }
 ```
 
-It is **declared, never inferred**. A function returns `never` because its signature says so, not because the checker proved its body loops forever — so divergence is a fact you can read off a signature, at the call site, without interprocedural analysis. That is what makes it useful to tooling: `noeta test` reads it to decide which top-level statements belong in the setup every test shares, which is why a top-level `server.serve(…)` never blocks a test run (see [Testing](Testing#what-runs-and-what-does-not)).
+It is **declared, never inferred**. A function returns `never` because its signature says so, rather than because the checker proved its body loops forever, so divergence is a fact you can read off a signature at the call site without interprocedural analysis.
 
-Two consequences follow from being uninhabited. `x is never` is always `false` — no value has the type. And `never` vanishes from a union: `int | never` *is* `int`, because the second arm contributes no values.
+That is what makes it useful to tooling. `noeta test` reads it to decide which top-level statements belong in the setup every test shares, which is why a top-level `server.serve(…)` never blocks a test run (see [Testing](Testing#what-runs-and-what-does-not)).
+
+Two consequences follow from being uninhabited. `x is never` is always `false`, since no value has the type. And `never` vanishes from a union, so `int | never` *is* `int`, the second arm contributing no values.
 
 ## Type tests and narrowing
 
-**`x is T`** is a plain `bool` head-constructor test — well-formed even on a concrete `x`. Generics don't affect dispatch (one compiled shape serves every instantiation), but values carry a reified type tag, so `x is List<int>` is element-precise — it really does test the element type, not just "is `x` a list."
+**`x is T`** is a plain `bool` head-constructor test, well-formed even on a concrete `x`. Generics do not affect dispatch, one compiled shape serving every instantiation, but values carry a reified type tag, so `x is List<int>` is element-precise and really does test the element type.
 
 ```noeta
 enum Color { Red; Green }
@@ -163,7 +165,9 @@ d: dyn = Color.Green
 echo d is Enum          // true
 ```
 
-**`.as<T>()`** is a *checked narrowing* of a `dyn` or union to `?T` — `some(x)` if the runtime head constructor is `T`, else `none`. Narrowing an already-concrete (non-dynamic) value is E0028, and so is narrowing **to** a fixed-width scalar (`i8`…`u64`, `f64`): a width is a property of storage, not of a value, so no value carries one and the narrow could never succeed — narrow to `int`/`float` and annotate the result. `f32` is a normal target (it is reified at runtime), as is a container like `List<i32>` (a packed element's width lives in the buffer's schema). See [Fixed-Width Ints](Fixed-Width-Integers).
+**`.as<T>()`** is a *checked narrowing* of a `dyn` or union to `?T`, giving `some(x)` when the runtime head constructor is `T` and `none` otherwise. Narrowing an already-concrete value is E0028.
+
+Narrowing **to** a fixed-width scalar (`i8`…`u64`, and `f64`) is E0028 as well. A width is a property of storage rather than of a value, so no value carries one and the narrow could never succeed. Narrow to `int` or `float` and annotate the result. `f32` is a normal target, being reified at runtime, as is a container like `List<i32>`, whose packed element width lives in the buffer's schema. See [Fixed-Width Ints](Fixed-Width-Integers).
 
 ```noeta
 struct Point { x: int  y: int }
@@ -179,11 +183,13 @@ echo kind(5)            // int
 
 An `is` test also **flow-narrows**: inside `if x is T { … }` the checker sees `x` as `T`.
 
-**These two are the answer whenever you can name the candidates**, and they beat reflection at it — they are checked at compile time and they narrow, which `type_of` does neither of. Reach for `type_of` and the `Type` ADT only when there *is* no candidate set to enumerate. See [Choosing a reflection surface](Attributes-and-Reflection#choosing-a-surface).
+**Use these two whenever you can name the candidates.** They are checked at compile time and they narrow, both of which `type_of` leaves to you. Reach for `type_of` and the `Type` ADT when there *is* no candidate set to enumerate. See [Choosing a reflection surface](Attributes-and-Reflection#choosing-a-surface).
 
 ### Trait-object tests are precise membership
 
-**`x is dyn Trait`** (and `.as<dyn Trait>()`) is a *precise membership test*: it is `true` iff the value's runtime nominal type has a **registered implementation** of the trait — a standalone `impl Trait for T`, an in-body `impl Trait { … }` block, a `@derive(Trait)`, or a native type's ABI-declared impl. The test is driven by the same registration data trait-method dispatch resolves through, so `x is dyn Trait` being `true` and "calling a `Trait` method on `x` works" can never disagree. Inside the `true` branch, `x` flow-narrows to `dyn Trait` and its trait methods dispatch — typed from the trait's declaration, `async` included (see [Trait objects](Generics-and-Traits#trait-objects)), so a narrowed receiver and a `dyn Trait` parameter type a call identically.
+**`x is dyn Trait`**, and `.as<dyn Trait>()` with it, is a *precise membership test*. It is `true` exactly when the value's runtime nominal type has a **registered implementation** of the trait: a standalone `impl Trait for T`, an in-body `impl Trait { … }` block, a `@derive(Trait)`, or a native type's ABI-declared impl.
+
+The test is driven by the same registration data trait-method dispatch resolves through, so `x is dyn Trait` being `true` and "calling a `Trait` method on `x` works" can never disagree. Inside the `true` branch, `x` flow-narrows to `dyn Trait` and its trait methods dispatch, typed from the trait's declaration and `async` included (see [Trait objects](Generics-and-Traits#trait-objects)), so a narrowed receiver and a `dyn Trait` parameter type a call identically.
 
 ```noeta
 trait Speaks { fn speak(): string }
@@ -202,19 +208,19 @@ echo voice(Silent { name: "Sam" }) // ...
 echo voice(42)                      // ...
 ```
 
-Two edges worth knowing:
+Three edges worth knowing:
 
-- **Non-nominal values never match.** Scalars, collections, and functions carry no nominal type, so they implement no *declared* trait. `42 is dyn Display` is `false` even though `echo 42` works — the built-in base types' protocol behavior is structural, not a registered `impl`, and only registered impls count. Use the head test (`x is int`) for built-ins.
-- **`Self::Name` projections stay permissive.** A `.as<Self::Item>()`-style associated-type target has no runtime head to test (the binding is per-impl, and the erased value carries no impl identity), so it still matches any value — unlike the precise trait-object target.
-- **Not every built-in trait has a `dyn` form.** A trait object is a value plus a method to call on it, so `dyn Clone`, `dyn Serialize`, `dyn Deserialize`, `dyn From` and `dyn To` name no type and are E0014 where they are written; the other seventeen built-ins, and every trait a program declares, do have one. The [built-in trait table](Generics-and-Traits#the-built-in-traits) says which is which.
+- **Only nominal values match.** Scalars, collections, and functions carry no nominal type, so they implement no *declared* trait and `42 is dyn Display` is `false` even though `echo 42` works. The built-in base types' protocol behavior is structural, and only registered impls count. Use the head test (`x is int`) for built-ins.
+- **`Self::Name` projections stay permissive.** A `.as<Self::Item>()`-style associated-type target has no runtime head to test, the binding being per-impl and the erased value carrying no impl identity, so it matches any value where the precise trait-object target would not.
+- **Five built-in traits have no `dyn` form.** A trait object is a value plus a method to call on it, so `dyn Clone`, `dyn Serialize`, `dyn Deserialize`, `dyn From` and `dyn To` name no type and are E0014 where they are written. The other seventeen built-ins, and every trait a program declares, do have one. The [built-in trait table](Generics-and-Traits#the-built-in-traits) says which is which.
 
-`dyn Trait` is a *declared* bound, never a value's own type, and the two reflection queries split on exactly that line: `type_of(x)` on a value held behind a `dyn Trait` binding reports the **concrete** type (`Type.Struct(Dog, [])`), because that is what the value is, while `params_of` on a `fn f(x: dyn Speaks)` reports `Type.DynTrait(Speaks)`, because that is what the signature says. Neither is the other's answer, and a framework injecting a service by its interface needs both.
+`dyn Trait` is a *declared* bound rather than a value's own type, and the two reflection queries split on exactly that line. `type_of(x)` on a value held behind a `dyn Trait` binding reports the **concrete** type (`Type.Struct(Dog, [])`), because that is what the value is. `params_of` on a `fn f(x: dyn Speaks)` reports `Type.DynTrait(Speaks)`, because that is what the signature says. A framework injecting a service by its interface needs both.
 
-It is also an ordinary type, so it instantiates a generic — `Box<dyn Speaks>` as readily as `List<dyn Speaks>`. Constructing the value in a position that states the wider type always works; reading a `Box<Dog>` you already have as a `Box<dyn Speaks>` depends on where `Box` puts its parameter. See [Trait objects as type arguments](Generics-and-Traits#trait-objects-as-type-arguments) for the rule and what E0007 says when it is refused.
+It is also an ordinary type, so it instantiates a generic, `Box<dyn Speaks>` as readily as `List<dyn Speaks>`. Constructing the value in a position that states the wider type always works; reading a `Box<Dog>` you already have as a `Box<dyn Speaks>` depends on where `Box` puts its parameter. See [Trait objects as type arguments](Generics-and-Traits#trait-objects-as-type-arguments) for the rule and what E0007 says when it is refused.
 
 ## Abstract kind-types
 
-`Struct`, `Class`, and `Enum` are supertypes of every declared type of that kind — useful for runtime kind tests against a `dyn`:
+`Struct`, `Class`, and `Enum` are supertypes of every declared type of that kind, which makes them useful for runtime kind tests against a `dyn`:
 
 ```noeta
 enum Color { Red; Green }
@@ -225,16 +231,14 @@ echo d is Struct            // false (it's an enum, not a struct)
 
 ## Where inference stops
 
-A value that the checker cannot pin down is an error at the boundary, not a silent `dyn`:
+A value the checker cannot pin down is an error at the boundary rather than a silent `dyn`:
 
-- An immutable, unannotated binding to a context-free literal (`[]`, `{}`, an ambiguous `Ok(x)`) is E0023 — annotate it or accumulate into a `mut`.
+- An immutable, unannotated binding to a context-free literal (`[]`, `{}`, an ambiguous `Ok(x)`) is E0023. Annotate it, or accumulate into a `mut`.
 - A missing parameter or return type on a named function is E0022.
-
-This is the "inferred-static" contract: no holes at named boundaries, inference in the interior.
 
 ## Stable bindings and explicit numeric conversion
 
-Two rules keep a binding's static type **trustworthy**: a `mut` binding's type is fixed at declaration (declare a union or `dyn` for a binding that must hold more), and numeric conversion is explicit at a boundary (`int` is not a subtype of `float`, though the two still promote inside an arithmetic expression). Both are covered in full in [Syntax Basics](Syntax-Basics#bindings-and-mutability) — see also its [numeric-conversion note](Syntax-Basics#number-literals).
+Two rules keep a binding's static type **trustworthy**. A `mut` binding's type is fixed at declaration, so declare a union or `dyn` for a binding that must hold more. And numeric conversion is explicit at a boundary, `int` being no subtype of `float`, though the two still promote inside an arithmetic expression. Both are covered in full in [Syntax Basics](Syntax-Basics#bindings-and-mutability); see also its [numeric-conversion note](Syntax-Basics#number-literals).
 
 ## See also
 
