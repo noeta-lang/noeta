@@ -830,10 +830,13 @@ fn no_section_runs_past_its_prose_budget() {
         let stem = path.file_stem().unwrap().to_string_lossy().to_string();
         let text = std::fs::read_to_string(&path).expect("read page");
 
-        let (mut heading, mut line_no, mut words, mut fenced) = (String::new(), 0usize, 0usize, false);
-        let mut flush = |heading: &str, line_no: usize, words: usize, out: &mut Vec<String>| {
+        let (mut heading, mut line_no, mut words, mut fenced) =
+            (String::new(), 0usize, 0usize, false);
+        let flush = |heading: &str, line_no: usize, words: usize, out: &mut Vec<String>| {
             if !heading.is_empty() && words > SECTION_PROSE_BUDGET {
-                out.push(format!("  {stem}.md:{line_no}: {words} words of prose under `{heading}`"));
+                out.push(format!(
+                    "  {stem}.md:{line_no}: {words} words of prose under `{heading}`"
+                ));
             }
         };
 
