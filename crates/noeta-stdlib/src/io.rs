@@ -1,4 +1,4 @@
-//! `std.io` — the program's standard output/error streams (CLI-completion slice 1).
+//! `std.io` — the program's standard output/error streams.
 //!
 //! Four functions that write a value's display form to one of the two **observable output** buffers
 //! the differential oracle compares:
@@ -78,7 +78,7 @@ pub fn io_ctx_dispatch<C: NativeCtx + ?Sized>(
     Ok(CtxOut::Out(NativeOut::Unit))
 }
 
-/// `std.io`'s **host-backed** functions (CLI-completion slice 2) — the stdin and terminal-ness
+/// `std.io`'s **host-backed** functions — the stdin and terminal-ness
 /// surface of the [`Console`] capability. Unlike the ctx functions above (which reach the backends'
 /// output buffers), these are plain host effects — a scripted fixture in the sandbox, real I/O on
 /// `RealHost` — so they marshal through the ordinary [`Host`] dispatch, exactly like `env`/`os`.
@@ -122,7 +122,7 @@ pub const IO_FNS: &[ExtFn] = &[
     },
 ];
 
-/// `std.io`'s host-backed dispatch (CLI-completion slice 2) — mirrors `env_dispatch`: it threads the
+/// `std.io`'s host-backed dispatch — mirrors `env_dispatch`: it threads the
 /// [`Host`] in and routes each name to a [`Console`] method. The ctx functions (`out`/`outln`/…) go
 /// through [`io_ctx_dispatch`] instead; the two name sets are disjoint, so the module's plain-then-ctx
 /// resolution reaches whichever table declares the call.

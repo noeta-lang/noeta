@@ -1,4 +1,4 @@
-//! The language-facing halves of streaming HTTP (http-streaming arc): `FrameStream`'s incremental
+//! The language-facing halves of streaming HTTP: `FrameStream`'s incremental
 //! read methods and `SseSink`'s write methods, plus the `server.sse` upgrade marker.
 //!
 //! Both handle types reach the `Network` capability by id, so their methods ride the executor and

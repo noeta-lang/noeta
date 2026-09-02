@@ -1,9 +1,9 @@
-//! The native-extension registry — the ABI type & trait vocabulary (P-NATIVE).
+//! The native-extension registry — the ABI type & trait vocabulary.
 //!
 //! An [`Extension`] declares its [`ExtModule`]s — each a set of [`ExtFn`] signatures plus one
 //! backend-agnostic `dispatch` function — and its [`ExtType`]s (first-class value types). Both
 //! backends route every module call and method through the same shared dispatch, so the
-//! differential oracle (`TreeWalkBackend` ≡ `VmBackend`) holds by construction.
+//! differential oracle (`IrRefBackend` ≡ `VmBackend`) holds by construction.
 //!
 //! ## The value-marshalling seam
 //!
@@ -54,11 +54,11 @@ pub enum NativeValue {
     Map(Vec<(String, NativeValue)>),
     /// Any value a dispatch function never inspects — carries the type name for error messages.
     Opaque(&'static str),
-    /// A registered extern-type value (extern-types X1), cloned into the seam via
+    /// A registered extern-type value, cloned into the seam via
     /// [`crate::ExternValue::clone_box`]. Extern arguments are never a hot path (their producers
     /// are host/IO-shaped), so by-value marshalling matches the rest of this view.
     Extern(crate::ExternBox),
-    /// A native-declared language **enum value** (native-extensibility S1) — the argument view of a
+    /// A native-declared language **enum value** — the argument view of a
     /// real `Value::Enum`, so a dispatch may receive a variant a user matched or a native call
     /// produced (`describe(color: Color)`). `enum_name` is the enum's **short** name (the runtime
     /// identity, matching how a value carries it), `variant` the case, and `fields` its positional
@@ -70,7 +70,7 @@ pub enum NativeValue {
         variant_index: u32,
         fields: Vec<NativeValue>,
     },
-    /// A native-declared language **class** instance (native-extensibility S2) — the argument view
+    /// A native-declared language **class** instance — the argument view
     /// of a real class `Object`, so a dispatch may receive a native class value a program
     /// constructed or a native call produced (`relabel(h: Handle, s)`). `class` is the class's
     /// **short** name (its runtime shape name); `fields` are its `(name, value)` pairs in slot
@@ -125,7 +125,7 @@ pub enum NativeOut {
     /// A homogeneous list (e.g. `env.keys()` → list of strings). The backend builds its native
     /// list; nested `NativeOut` keeps it general for later recursive modules.
     List(Vec<NativeOut>),
-    /// A homogeneous list of primitives as one **typed vector** (package-manager N3.4) — the
+    /// A homogeneous list of primitives as one **typed vector** — the
     /// result shape of a bulk *reduction* over a packed buffer (`vec.dot_all`/`length_all`: one
     /// `f32` per element). The backend converts the vector straight into its list in one pass;
     /// the boxed [`NativeOut::List`] form builds an enum per element first, which measured +80%
@@ -145,7 +145,7 @@ pub enum NativeOut {
         /// therefore in equality, assignment and identity: building a class as a struct would give
         /// a decoded value structural equality its declaration does not have.
         kind: FieldedKind,
-        /// Propagated from [`TypeRecipe::Fielded::has_validator`] (validation arc): when set, the
+        /// Propagated from [`TypeRecipe::Fielded::has_validator`]: when set, the
         /// backend re-enters the VM to run this type's `Validate::validate` on the built value,
         /// bottom-up. `false` short-circuits any re-entry (zero cost for a non-validated type).
         has_validator: bool,
@@ -165,10 +165,10 @@ pub enum NativeOut {
     /// `Result::Err(e)` — the failure arm of a `Result<T, E>`-shaped call-site-typed function. The
     /// boxed value is the error (typically a [`NativeOut::Extern`] carrying a path-rich error type).
     Err(Box<NativeOut>),
-    /// A registered extern-type value (extern-types X1) — `Uuid`, a `FileHandle`, … Each
+    /// A registered extern-type value — `Uuid`, a `FileHandle`, … Each
     /// backend wraps it in its single extern hosting variant.
     Extern(crate::ExternBox),
-    /// A native-declared language **enum value** (native-extensibility S1) — a REAL enum the
+    /// A native-declared language **enum value** — a REAL enum the
     /// backend materializes (a `Value::Enum` / interned enum shape), NOT a string shortcut, so a
     /// user `match` over it is exhaustive (E0011). `enum_name` is the enum's **short** name (the
     /// runtime identity a pattern's `type_name` compares against and both backends stamp on the
@@ -192,7 +192,7 @@ pub enum NativeOut {
         /// nothing.
         has_validator: bool,
     },
-    /// A native-declared **fielded-type** instance (native-extensibility S2, unified) — a REAL
+    /// A native-declared **fielded-type** instance — a REAL
     /// language `Object` the backend materializes with named fields, distinct from an anonymous
     /// value struct built by a call-site recipe ([`NativeOut::Fielded`]). `kind` selects the shape:
     /// [`FieldedKind::Class`] → a **class-kind** shape (reference identity, RC + cycle participation,
@@ -210,7 +210,7 @@ pub enum NativeOut {
         fields: Vec<(String, NativeOut)>,
         kind: FieldedKind,
     },
-    /// A native class **instance method's in-place mutation** (native-extensibility S3 / boundary 1):
+    /// A native class **instance method's in-place mutation**:
     /// the method returns an explicit **write-set** applied to its LIVE receiver, plus the value the
     /// method itself returns. Only meaningful returned from a [`ClassDispatch`]; the backend, at the
     /// class-method call site, applies each `(field, value)` in `writes` in place to the receiver's
@@ -229,7 +229,7 @@ pub enum NativeOut {
         writes: Vec<(String, NativeOut)>,
         ret: Box<NativeOut>,
     },
-    /// Async WORK instead of a value (extern-types X5): the backend tickets the descriptor on
+    /// Async WORK instead of a value: the backend tickets the descriptor on
     /// its executor (`spawn_ext`) and hands back a future — intercepted at the dispatch return,
     /// never reaching `materialize`. This is how an extension implements an async function
     /// without ever seeing the executor.
@@ -256,7 +256,7 @@ impl Clone for SpawnBox {
     fn clone(&self) -> SpawnBox {
         // Reaching this is a dispatch-author bug, not a user error: `NativeOut` derives `Clone`
         // for its VALUE variants, but a `Spawn` is one-shot WORK the backend tickets on the
-        // executor at the dispatch return. Name the fix rather than aborting opaquely (F4).
+        // executor at the dispatch return. Name the fix rather than aborting opaquely.
         unreachable!(
             "a NativeOut::Spawn is one-shot async work, not a value — it is ticketed on the \
              executor at the dispatch return and must never be cloned (return it directly from \
@@ -290,14 +290,14 @@ pub enum SigType {
     ///
     /// Meaningful in a *return* position only (a parameter of type `never` could never be supplied).
     /// Declaring it is not decoration: it is the fact the tier runners read to decide whether a
-    /// top-level `f(…)` is setup they may run, which they previously had to guess from statement
+    /// top-level `f(…)` is setup they may run, rather than guessing it from statement
     /// syntax. See [`crate::registry::SigType::Unit`]'s neighbours — `Unit` says "returns nothing",
     /// this says "does not return".
     Never,
     List(&'static SigType),
     Option(&'static SigType),
     Map(&'static SigType, &'static SigType),
-    /// A fallible result (http arc H6) — `http.client.get(url): Result<Response, HttpError>`. The
+    /// A fallible result — `http.client.get(url): Result<Response, HttpError>`. The
     /// checker maps it onto the language's first-class `Type::Result`, so `?` propagation and
     /// `From`-based error conversion work on it exactly as they do for a user-declared `Result`.
     ///
@@ -310,23 +310,23 @@ pub enum SigType {
     Future(&'static SigType),
     /// A named type — an extension type or a user-declared type.
     Named(&'static str),
-    /// A union of accepted types (crypto arc C1) — `crypto.sha256(data: string|bytes)`. The
+    /// A union of accepted types — `crypto.sha256(data: string|bytes)`. The
     /// checker maps it onto the language's declared-union `Type::union`, so a mismatched
     /// argument is a static error; the dispatch still validates the concrete kind it received.
     Union(&'static [SigType]),
-    /// A **trailing-optional** parameter (http arc H4) — `http.get(url, headers?)`. The wrapped
+    /// A **trailing-optional** parameter — `http.get(url, headers?)`. The wrapped
     /// type is what the argument must be *when present*; a call may omit it (and every parameter
     /// after it). The checker derives the required-argument count from the first `Optional`; the
     /// dispatch reads the slot with `args.get(i)` and supplies its own default when absent, so no
     /// backend change and no default-value machinery is needed. Convention: once a parameter is
     /// `Optional`, every following parameter is too.
     Optional(&'static SigType),
-    /// A function/closure parameter (higher-order-abi H1) — `task.map_bounded(items, n,
+    /// A function/closure parameter — `task.map_bounded(items, n,
     /// f: Fn([A]) -> Future<B>)`. The checker maps it onto the language's structural `Type::Fn`;
     /// the dispatch receives the closure as an opaque ctx slot and invokes it via
     /// [`crate::NativeCtx::call`], so `NativeValue` never grows a closure variant.
     Fn(&'static [SigType], &'static SigType),
-    /// A signature-level type variable (higher-order-abi H1) — `task.all(fs: List<Future<Var(0)>>)
+    /// A signature-level type variable — `task.all(fs: List<Future<Var(0)>>)
     /// -> List<Var(0)>`. The checker binds each variable at its first structural occurrence in the
     /// call's argument types and substitutes the bindings into the remaining parameters and the
     /// return, replacing the hand-written per-function checker arms the `Builtin` family needed.
@@ -334,7 +334,7 @@ pub enum SigType {
     /// (`Cell<T>.get() -> Var(0)` recovers `T`), then the call's arguments bind the rest.
     /// An unbound variable is a gradual hole (`Unknown`), never a wrong concrete type.
     Var(u8),
-    /// A **trait-bounded** type variable (p2p P2) — like [`SigType::Var`] for binding and
+    /// A **trait-bounded** type variable — like [`SigType::Var`] for binding and
     /// substitution, but the type bound to it must satisfy the named built-in trait or the call is
     /// a static error (E0025). `synced_signal(initial: BoundedVar(0, &["Mergeable", "Syncable"]), …)`
     /// is the motivating use: a synced value must both converge *and* know how to cross the wire,
@@ -342,18 +342,18 @@ pub enum SigType {
     /// must be satisfied, so the list is a conjunction (`T: Mergeable + Syncable`), matching what
     /// the surface `<T: A + B>` means. A single-element slice is the ordinary one-bound case.
     BoundedVar(u8, &'static [&'static str]),
-    /// A **generic nominal instantiation** (higher-order-abi H4) — a generic extern type in a
+    /// A **generic nominal instantiation** — a generic extern type in a
     /// signature position: `cell.new(v: Var(0)) -> Generic("Cell", &[Var(0)])` types as
     /// `Cell<T>` with `T` bound from the argument. The plain [`SigType::Named`] stays the
     /// monomorphic form. (Type arguments are a static-checker artifact — at runtime an extern
     /// value reflects as its bare nominal name, exactly as the reactive handles it generalizes
     /// reflected as `dyn`.)
     Generic(&'static str, &'static [SigType]),
-    /// A **trait associated-type projection** `Self::Name` (ExtBundle→ExtTrait convergence, slice 1b)
-    /// — the ABI form of the AST `TypeRef::AssocProjection`. A native trait method names
+    /// A **trait associated-type projection** `Self::Name` — the ABI form of the AST
+    /// `TypeRef::AssocProjection`. A native trait method names
     /// its element-relative return as `SigType::Assoc("Wide")`; the checker maps it onto the trait's
     /// [`ExtAssocType`] and, on a **concrete** receiver, resolves it through the same `trait_assoc`
-    /// table a `.noe` `trait`'s `Self::Name` uses (slice 1a) — the type the implementing type's
+    /// table a `.noe` `trait`'s `Self::Name` uses — the type the implementing type's
     /// [`AssocDerivation`] computes from its element. `List<Self::Name>` (`SigType::List(&Assoc)`) is
     /// the `ListElemWide` analog and nests through the concrete resolution. Under `dyn`/no binding it
     /// degrades to a gradual hole, never a wrong concrete type.
@@ -386,7 +386,7 @@ pub enum SigType {
 
 impl SigType {
     /// The count of leading **required** parameters in `params` — everything up to the first
-    /// [`SigType::Optional`] (http arc H4). All-required signatures return `params.len()`.
+    /// [`SigType::Optional`]. All-required signatures return `params.len()`.
     pub fn required_count(params: &[SigType]) -> usize {
         params
             .iter()
@@ -477,12 +477,11 @@ pub enum RetTy {
     SameAsArg(usize),
     /// `int` if every argument is concretely `int`, else `float` (`math.abs`/`min`/`max`).
     NumericPreserving,
-    // The element-relative returns (`Elem`/`ElemWide`/`ElemFloat`/`List<ElemWide>`/`List<ElemFloat>`)
-    // lived here until the ExtBundle→ExtTrait fold-in (slice 4). They were superseded by
-    // [`SigType::Assoc`] resolved through a trait's native-derived [`ExtAssocType`]: a kernel method's
-    // `dot` now returns `Concrete(Assoc("Wide"))`, `length` `Concrete(Assoc("Float"))`, and the bulk
-    // twins `Concrete(List(Assoc("Wide")))` / `Concrete(List(Assoc("Float")))` — one associated-type
-    // mechanism (slice 1b) instead of a second, bundle-only return vocabulary.
+    // An element-relative return is spelled [`SigType::Assoc`] and resolved through the trait's
+    // native-derived [`ExtAssocType`], rather than as a variant here: a kernel method's `dot`
+    // returns `Concrete(Assoc("Wide"))`, `length` `Concrete(Assoc("Float"))`, and the bulk twins
+    // `Concrete(List(Assoc("Wide")))` / `Concrete(List(Assoc("Float")))` — one associated-type
+    // mechanism rather than a second, trait-only return vocabulary.
     /// The result type is named at the call site by a turbofish (`json.parse::<T>(): T`). The
     /// concrete `T` arrives as a [`TypeRecipe`] the checker records at the call site and the backend
     /// threads into the [`ExtModule::typed_dispatch`] (call-site-typed construction). The
@@ -587,7 +586,7 @@ pub enum TypeRecipe {
         /// struct interns a struct shape. The checker knows this and the backend cannot re-derive
         /// it from the name alone, so it travels with the recipe.
         kind: FieldedKind,
-        /// Whether this type implements the `Validate` built-in trait (validation arc). When set,
+        /// Whether this type implements the `Validate` built-in trait. When set,
         /// a recipe door re-enters the backend to run `validate()` on the freshly-built value
         /// (bottom-up: after all fields are materialized and validated). Resolved by the checker's
         /// `type_to_recipe`; `false` means the materialize walk never re-enters for this node
@@ -784,7 +783,7 @@ pub enum FieldDefault {
     Dynamic,
 }
 
-/// One resolved **type-argument bundle** for a forwarded generic instantiation (poly-values F2b):
+/// One resolved **type-argument bundle** for a forwarded generic instantiation:
 /// what a generic function whose type parameter flows into a call-site-typed position needs at
 /// runtime about one concrete instantiation. Generics are erased, so a single compiled body serves
 /// every instantiation — the checker interns these bundles into a program-wide table, each
@@ -857,7 +856,7 @@ impl std::fmt::Display for TypeArgIndex {
 }
 
 /// How an instantiating call supplies one **hidden type-argument slot** of a forwarding generic
-/// function (poly-values F2b). Checker → lowering vocabulary only (lowering turns it into an
+/// function. Checker → lowering vocabulary only (lowering turns it into an
 /// ordinary prepended call argument), so it is not serialized.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HiddenArg {
@@ -911,7 +910,7 @@ pub struct ExtFn {
 }
 
 impl ExtFn {
-    /// Field defaults for additive evolution (N3.6), mirroring [`ExtModule::DEFAULTS`]: an
+    /// Field defaults for additive evolution, mirroring [`ExtModule::DEFAULTS`]: an
     /// out-of-tree table written as `ExtFn { name, params, ret, ..ExtFn::DEFAULTS }` keeps
     /// compiling when a future optional field (a doc string, a deprecation note, …) lands here.
     pub const DEFAULTS: ExtFn = ExtFn {
@@ -980,7 +979,7 @@ pub struct ExtModule {
     /// the scalar/`vec`/`quat` modules keep the cheap flat marshalling, so their hot path is
     /// untouched. The module declares its own need here so the backends stay data-driven.
     pub deep_marshal: bool,
-    /// The module's **higher-order** functions (higher-order-abi H0): signatures whose calls route
+    /// The module's **higher-order** functions: signatures whose calls route
     /// to [`ExtModule::ctx_dispatch`] with opaque slot arguments instead of marshalled values —
     /// for functions that take closures, drive the executor, or orchestrate futures. Same
     /// signature vocabulary as [`ExtModule::functions`]; a name appears in exactly one table.
@@ -995,11 +994,10 @@ pub struct ExtModule {
     /// features (DCE Axis B), retiring the hand-maintained `module_ring`/`fn_ring` tables the CLI
     /// carried. The string must equal the `noeta-aot-runtime` Cargo feature that turns the ring on.
     pub ring: Option<&'static str>,
-    // The module's method bundles lived here (`bundles: &[ExtBundle]`) until the ExtBundle→ExtTrait
-    // fold-in (slice 4). A kernel bundle is now a native [`ExtTrait`] registered through
-    // `Extension::traits()`; the `impl vec.Kernels for T {}` surface resolves the module-qualified
-    // spelling to that trait via the checker's `resolve_bundle_ref` + `Registry::find_trait_in_module`.
-    /// Per-function **documentation prose** (docs-browser arc, Arc 2): `(function_name, markdown)`
+    // A kernel bundle is a native [`ExtTrait`], registered through `Extension::traits()`. The
+    // `impl vec.Kernels for T {}` surface resolves the module-qualified spelling to that trait via
+    // the checker's `resolve_bundle_ref` + `Registry::find_trait_in_module`.
+    /// Per-function **documentation prose**: `(function_name, markdown)`
     /// pairs surfaced by the API-reference docs generator (`noeta doc`, the editor's docs browser,
     /// the MCP docs tools). Co-located with the module's registration; opt-in and sparse — a
     /// function absent from this table renders signature-only, like docs.rs. Keyed by name so one
@@ -1049,7 +1047,7 @@ fn no_dispatch(
     })
 }
 
-/// A type's method dispatch (extern-types X1): given the receiver, the method name, the host
+/// A type's method dispatch: given the receiver, the method name, the host
 /// seam, and the projected arguments, run the method and return a neutral result. ONE signature
 /// covers the whole {pure, mutable} × {host-free, effectful} matrix — a pure method simply does
 /// not mutate `recv` or touch `host` (`Uuid.version()`), an effectful one does both
@@ -1061,7 +1059,7 @@ pub type TypeDispatch = fn(
     args: &[NativeValue],
 ) -> Result<NativeOut, StdError>;
 
-/// A native **class**'s instance-method dispatch (native-extensibility S3 / Pass 2a) — the
+/// A native **class**'s instance-method dispatch — the
 /// [`ExtClass`] analogue of [`TypeDispatch`]. A native class value is a real language `Object` (a
 /// class-kind shape), **not** an [`crate::ExternValue`], so its receiver crosses as the whole
 /// instance marshalled to a [`NativeValue::Instance`] (class name + `(field, value)` pairs in slot
@@ -1085,7 +1083,7 @@ pub type FieldedDispatch = fn(
 pub type ClassDispatch = FieldedDispatch;
 
 /// The **neutral** spelling of the shared native instance-method dispatch signature, used by BOTH
-/// fielded types ([`ExtFielded`]) and enums ([`ExtEnum`], native-extensibility S1 / Slice B). It is
+/// fielded types ([`ExtFielded`]) and enums ([`ExtEnum`]). It is
 /// identical to [`FieldedDispatch`] — the whole point is **one** dispatch shape across kinds, so a
 /// native enum method routes through the exact same seam a native class/struct method does. The one
 /// representational difference is arg-IN: a fielded receiver crosses as a [`NativeValue::Instance`]
@@ -1095,7 +1093,7 @@ pub type ClassDispatch = FieldedDispatch;
 /// exactly as it is for a [`FieldedKind::Struct`].
 pub type NativeMethodDispatch = FieldedDispatch;
 
-/// A type's **higher-order** method dispatch (higher-order-abi H4): like [`TypeDispatch`], but
+/// A type's **higher-order** method dispatch: like [`TypeDispatch`], but
 /// the receiver and arguments arrive as opaque ctx slots and the body may re-enter the backend —
 /// call closures, reach per-run state, read/write the retained arena. What `Cell.update(f)` and
 /// the reactive handle methods need. The receiver slot is not consumed; downcast its plain data
@@ -1107,7 +1105,7 @@ pub type CtxTypeDispatch = fn(
     args: &[crate::Slot],
 ) -> Result<crate::CtxOut, crate::CtxError>;
 
-/// A type's **call-site-typed** method dispatch (http arc H8) — the [`TypedDispatch`] twin for
+/// A type's **call-site-typed** method dispatch — the [`TypedDispatch`] twin for
 /// extern-type methods: `resp.json::<User>()`. Like [`TypeDispatch`] plus the `recipe` the
 /// checker resolved from the turbofish, so the method can build a value of the caller-named type.
 ///
@@ -1126,12 +1124,12 @@ pub type TypedTypeDispatch = fn(
 /// [`crate::Retained`] id off the extern box.
 pub type ArenaGetter = (&'static str, fn(&dyn crate::ExternValue) -> crate::Retained);
 
-/// A first-class value type contributed by an extension (extern-types X1): a reserved type name,
+/// A first-class value type contributed by an extension: a reserved type name,
 /// its instance-method signatures, their shared dispatch, and the key capability the checker
 /// reads. The value behavior itself (equality, ordering, hash, display) lives on the
 /// [`crate::ExternValue`] impl the type's constructors box up.
 ///
-/// A **generic** extern type (`Cell<T>`, higher-order-abi H4) declares nothing extra here: its
+/// A **generic** extern type (`Cell<T>`) declares nothing extra here: its
 /// constructor's return names the instantiation ([`SigType::Generic`]) and its method signatures
 /// reference the receiver's type arguments as [`SigType::Var`] (`Var(0)` = first argument) — the
 /// checker seeds the variables from the receiver's static type. At runtime the value is tagged
@@ -1141,8 +1139,8 @@ pub struct ExtType {
     /// The **short display name** (`Uuid`) — what humans see in errors / `type_of` stringification.
     /// The type's *identity* (for lookup, equality, dispatch, `is`/`as`) is the **qualified** name
     /// [`ExtType::qualified`] = `"{namespace}.{name}"` (`std.id.Uuid`); two types with the same short
-    /// name under distinct namespaces are distinct identities. A user declaration of this short name
-    /// is no longer globally reserved — extern types are `use`-imported like user types.
+    /// name under distinct namespaces are distinct identities. A user may declare the same short
+    /// name — extern types are `use`-imported like user types.
     pub name: &'static str,
     /// The namespace this type lives under (`std.id`) — its qualified identity is `namespace.name`.
     /// Mirrors [`Extension::root`] for modules; the seam that lets a native `std.metrics.Counter`
@@ -1155,7 +1153,7 @@ pub struct ExtType {
     /// methods, [`crate::ExternValue::cmp_value`] is a total order over the kind, and
     /// [`crate::ExternValue::hash_value`] is stable and content-derived.
     pub key_capable: bool,
-    /// The type's **higher-order** method signatures (H4) — calls route to
+    /// The type's **higher-order** method signatures — calls route to
     /// [`ExtType::ctx_dispatch`] with slot arguments. Disjoint from `methods` by name.
     pub ctx_methods: &'static [ExtFn],
     pub ctx_dispatch: Option<CtxTypeDispatch>,
@@ -1171,7 +1169,7 @@ pub struct ExtType {
     /// to the fast path whenever the gate is open. The declaration is semantic, not an
     /// optimization hint: every tier (interpreter now, JIT later) may compile it.
     pub arena_getter: Option<ArenaGetter>,
-    /// The **built-in traits this type declares** (p2p P2) — the extern-type analogue of a user
+    /// The **built-in traits this type declares** — the extern-type analogue of a user
     /// type's `@derive`/`impl`. The checker seeds these into its trait-impl table so a
     /// built-in-trait bound is satisfied by this type. A name matching a native [`ExtTrait`]
     /// instead makes the type satisfy *that* trait (recorded by `seed_ext_traits`) — which is how
@@ -1183,7 +1181,7 @@ pub struct ExtType {
     /// type whose methods take a container argument (the metrics instruments' `*_with(_, attrs)`).
     /// Default `false` — most extern methods take scalars/handles.
     pub deep_marshal: bool,
-    /// The type's **call-site-typed** method signatures (http arc H8) — the turbofish surface
+    /// The type's **call-site-typed** method signatures — the turbofish surface
     /// `resp.json::<User>()`, the extern-type analogue of [`ExtModule::typed_functions`]. Each
     /// must declare a [`RetTy::TypeArg`] return (its result is named by the `::<T>`), and calls
     /// route to [`ExtType::typed_dispatch`] with the checker-resolved [`TypeRecipe`].
@@ -1194,7 +1192,7 @@ pub struct ExtType {
     pub typed_methods: &'static [ExtFn],
     /// The shared dispatch for [`ExtType::typed_methods`] (`None` when the table is empty).
     pub typed_dispatch: Option<TypedTypeDispatch>,
-    /// Per-method **documentation prose** (docs-browser Arc 2): `(method_name, markdown)` pairs, the
+    /// Per-method **documentation prose**: `(method_name, markdown)` pairs, the
     /// extern-type analogue of [`ExtModule::docs`]. Opt-in and sparse; keyed by name so it covers
     /// [`ExtType::methods`], [`ExtType::ctx_methods`], and [`ExtType::typed_methods`].
     pub docs: &'static [(&'static str, &'static str)],
@@ -1257,7 +1255,7 @@ pub trait NominalType {
     /// Whether `q` **is** this declaration's qualified identity — [`NominalType::qualified`]
     /// equality without building the `String`. Registry lookups run this per candidate per probe,
     /// and the checker probes per imported-type annotation/member on the per-keystroke LSP path, so
-    /// the comparison must not allocate (audit-3 Finding 12).
+    /// the comparison must not allocate.
     fn is_qualified(&self, q: &str) -> bool {
         qualified_matches(self.namespace(), self.name(), q)
     }
@@ -1320,9 +1318,9 @@ impl NominalType for ExtType {
     }
 }
 
-// --- Native-declared enums (native-extensibility S1) ---------------------------------------------
+// --- Native-declared enums ---------------------------------------------
 
-/// A first-class language **enum** contributed by an extension (native-extensibility S1): a real
+/// A first-class language **enum** contributed by an extension: a real
 /// enum whose variants a user `match`es exhaustively (E0011), whose values a native fn/method
 /// returns and receives as REAL enum values — not opaque handles ([`ExtType`]) and not string
 /// shortcuts. Seeded **eagerly** at prelude time (unlike the lazily-resolved [`ExtType`]) because
@@ -1348,13 +1346,13 @@ pub struct ExtEnum {
     /// checker enforces on the `.value()` accessor's type: a `String`-backed enum's `.value()` is
     /// `string`, an `Int`-backed one's is `int`, and a non-backed enum has no `.value()` at all.
     pub backing: EnumBacking,
-    /// Instance-method signatures (native-extensibility S1 / Slice B) — the [`ExtEnum`] twin of
+    /// Instance-method signatures — the [`ExtEnum`] twin of
     /// [`ExtFielded::methods`], same vocabulary as an [`ExtType`]'s `methods`. A call `color.name()`
     /// on a native enum value routes to [`ExtEnum::dispatch`]; the checker types the call off these
     /// signatures. Default empty (a data-only enum, the S1 shape). A method name is disjoint from the
     /// built-in `value()`/`to_json` accessors and from a variant's case name.
     pub methods: &'static [ExtFn],
-    /// The one shared instance-method dispatch (native-extensibility S1 / Slice B) — the [`ExtEnum`]
+    /// The one shared instance-method dispatch — the [`ExtEnum`]
     /// twin of [`ExtFielded::dispatch`], reusing the neutral [`NativeMethodDispatch`] signature so a
     /// native enum method dispatches through the **same** seam a fielded method does. Receives the
     /// enum value marshalled to a [`NativeValue::Variant`] (its case + payload) plus the host seam;
@@ -1363,7 +1361,7 @@ pub struct ExtEnum {
     /// unregistered-method misuse. An enum is an immutable value type: a dispatch returning
     /// [`NativeOut::InstanceUpdate`] is a runtime error (mirrors the [`FieldedKind::Struct`] guard).
     pub dispatch: NativeMethodDispatch,
-    /// The **traits this enum declares** (native-extensibility S3 / Slice C) — the [`ExtEnum`] twin
+    /// The **traits this enum declares** — the [`ExtEnum`] twin
     /// of [`ExtFielded::traits`] and [`ExtType::traits`]. A name matching a native [`ExtTrait`] makes
     /// the enum satisfy that trait: `seed_ext_traits` records it into
     /// `user_trait_impls[qualified][trait]`, so a native enum value coerces to `dyn Trait` and its
@@ -1371,8 +1369,7 @@ pub struct ExtEnum {
     /// built-in name (e.g. `"Comparable"`) is answered on the lookup by `Checker::has_builtin_trait`
     /// (`record_trait_impls` filters to built-in names). Default empty.
     pub traits: &'static [&'static str],
-    /// The **built-in directives** this enum carries (native type-declaration unification, Slice D) —
-    /// the [`ExtEnum`] twin of [`ExtFielded::directives`], the same crosscutting channel. The only
+    /// The **built-in directives** this enum carries — the [`ExtEnum`] twin of [`ExtFielded::directives`], the same crosscutting channel. The only
     /// directive legal on an enum is [`ExtTypeDirective::Semantic`] (marking its fieldless variants as
     /// role names → `semantic_enums`); [`Registry::new`] refuses a struct/class-only directive
     /// here. Default empty.
@@ -1464,7 +1461,7 @@ pub enum VariantValue {
     Int(i64),
 }
 
-// --- Native-declared fielded types: classes + structs (native-extensibility S2, unified) --------
+// --- Native-declared fielded types: classes + structs --------
 
 /// Whether a native [`ExtFielded`] type is a **class** (reference type) or a **struct** (value
 /// type) — the one load-bearing bit that distinguishes the two. A class and a struct are the same
@@ -1500,9 +1497,6 @@ pub enum FieldedKind {
 /// each variant into its table write, and [`Registry::new`] enforces which (kind, directive)
 /// pairs are legal at assembly (the native analogue of the AST placement gate E0054), since a native
 /// type bypasses the source-level site check.
-///
-/// (`@role` shipped in Slice D3 as [`ExtTypeDirective::Role`]; `@packed` in Slice E1 as
-/// [`ExtTypeDirective::Packed`].)
 #[derive(Debug, Clone, Copy)]
 pub enum ExtTypeDirective {
     /// `@validated` — bar bare literal / record-update construction of this type outside its own
@@ -1539,7 +1533,7 @@ pub enum ExtTypeDirective {
     /// [`Registry::native_roles`] projects the tags into the plain-data table that builder now accepts.
     Role(&'static [ExtRoleTag]),
     /// `@packed` — lay a `List` of this **value struct** out as one flat, contiguous raw-primitive
-    /// buffer (native-extensibility Slice E1, the native twin of a `.noe` `@packed struct`). Struct-only.
+    /// buffer (the native twin of a `.noe` `@packed struct`). Struct-only.
     /// Seeds the checker's `packed_structs` membership (and `column_structs` for
     /// [`PackedLayoutKind::Column`]) keyed on the type's **qualified** identity, so a source `List<Pt>`
     /// literal (`Pt` native) hits `note_packed_list` → `packed_layout` and packs flat on both backends,
@@ -1601,7 +1595,7 @@ pub enum AttrTarget {
     Param,
 }
 
-/// A first-class **fielded type** contributed by an extension (native-extensibility S2, unified): a
+/// A first-class **fielded type** contributed by an extension: a
 /// real language type with language-visible named fields the language reads, mutates (class only),
 /// and constructs. One struct with a [`FieldedKind`] discriminant covers both a reference **class**
 /// and a value **struct** — see [`FieldedKind`] for the semantic split. Unlike an [`ExtType`] (an
@@ -1634,20 +1628,20 @@ pub struct ExtFielded {
     /// name, type, visibility, and mutability; the checker seeds them into `symbols.records`
     /// (types), `symbols.private_fields` (visibility), and `symbols.mut_fields` (mutability).
     pub fields: &'static [ExtField],
-    /// Instance-method signatures (native-extensibility S3 / Pass 2a) — same vocabulary as an
+    /// Instance-method signatures — same vocabulary as an
     /// [`ExtType`]'s `methods`. A call `h.describe()` on a native fielded instance routes to
     /// [`ExtFielded::dispatch`]; the checker types the call off these signatures. Default empty (a
     /// fields-only type). Names are disjoint from the type's field names (a method wins over a
     /// field, the checker's rule).
     pub methods: &'static [ExtFn],
-    /// The one shared instance-method dispatch (native-extensibility S3 / Pass 2a) — the
+    /// The one shared instance-method dispatch — the
     /// [`ExtFielded`] twin of [`ExtType::dispatch`]. Receives the instance marshalled to a
     /// [`NativeValue::Instance`] plus the host seam; both backends route a fielded object's method
     /// call here (their `CallMethod` Object arm). A fields-only type never reaches it, so the
     /// default reports an unregistered-method misuse. A `Struct`-kind dispatch that returns
     /// [`NativeOut::InstanceUpdate`] is a runtime error (value types have no in-place mutation).
     pub dispatch: FieldedDispatch,
-    /// The **traits this type declares** (native-extensibility S3 / Pass 2b) — the [`ExtFielded`]
+    /// The **traits this type declares** — the [`ExtFielded`]
     /// twin of [`ExtType::traits`]. A name matching a native [`ExtTrait`] makes the type satisfy
     /// that trait: `seed_ext_traits` records it into `user_trait_impls[qualified][trait]`, so a
     /// native fielded value coerces to `dyn Trait` and its trait-method call dispatches to the
@@ -1657,8 +1651,7 @@ pub struct ExtFielded {
     /// [`FieldedKind`]. Defaults to [`FieldedKind::Class`] so pre-unification `ExtClass` fixtures
     /// keep their meaning; a struct sets it via [`ExtFielded::STRUCT_DEFAULTS`].
     pub kind: FieldedKind,
-    /// The **built-in directives** this type carries (native type-declaration unification, Slice D) —
-    /// the `.noe` `Decorators` twin, uniform across native fielded + enum kinds. `seed_ext_directives`
+    /// The **built-in directives** this type carries — the `.noe` `Decorators` twin, uniform across native fielded + enum kinds. `seed_ext_directives`
     /// translates each into its `Symbols` insert (e.g. [`ExtTypeDirective::Validated`] →
     /// `validated_types`); [`Registry::new`] rejects a directive illegal for this type's
     /// [`FieldedKind`] (`@semantic` is enum-only, so it is refused here). Default empty.
@@ -1735,7 +1728,7 @@ impl ExtFielded {
     };
 
     /// Whether this fielded struct is usable as a `#[...]` data attribute — it carries
-    /// [`ExtTypeDirective::Attribute`] (D2). Assembly guarantees such a type is `Struct`-kind
+    /// [`ExtTypeDirective::Attribute`]. Assembly guarantees such a type is `Struct`-kind
     /// (a class carrying `@attribute` is rejected at [`Registry::new`]), so a `true` here is a
     /// well-formed attribute whose fields are its construction contract. This is the fielded twin of
     /// an [`ExtAttribute`] existing, and the predicate `extension_attribute_types` reflects on so a
@@ -1756,9 +1749,9 @@ impl NominalType for ExtFielded {
     }
 }
 
-// --- Native-declared traits (native-extensibility S3) --------------------------------------------
+// --- Native-declared traits --------------------------------------------
 
-/// A first-class language **trait** contributed by an extension (native-extensibility S3). Two
+/// A first-class language **trait** contributed by an extension. Two
 /// capabilities in one declaration:
 ///
 /// - **A contract for user types (3a):** a program writes `impl NativeTrait for MyType { ... }`,
@@ -1792,41 +1785,37 @@ pub struct ExtTrait {
     /// ([`ExtTraitMethod::has_default`] `false`) must be present in an `impl` or it is E0015; a
     /// default-carrying one is optional for an implementor.
     pub methods: &'static [ExtTraitMethod],
-    /// The trait's **native-derived associated types** (ExtBundle→ExtTrait convergence, slice 1b) —
-    /// the native twin of a `.noe` `trait`'s `type Item;`. Each names an associated type and the
+    /// The trait's **native-derived associated types** — the native twin of a `.noe` `trait`'s
+    /// `type Item;`. Each names an associated type and the
     /// [`AssocDerivation`] that computes its concrete `Type` from the **implementing type's element**
     /// (rather than a per-impl `type Name = …` binding). `seed_ext_traits` reads this and, for every
     /// implementing native type, folds each derivation over the type's packed element into the same
-    /// `trait_assoc[(type, trait)]` table slice 1a populates — so a method naming `Self::Name`
-    /// ([`SigType::Assoc`]) resolves on a concrete receiver exactly as a `.noe` associated type does.
-    /// This is the mechanism that generalizes the bundle ABI's element-relative returns
-    /// (`RetTy::ElemWide`/`RetTy::ElemFloat`) to a first-class trait contract.
+    /// `trait_assoc[(type, trait)]` table a `.noe` associated type populates — so a method naming
+    /// `Self::Name` ([`SigType::Assoc`]) resolves on a concrete receiver exactly as a `.noe`
+    /// associated type does.
     pub assoc_types: &'static [ExtAssocType],
-    /// The trait's **native default-body dispatch** (ExtBundle→ExtTrait convergence, slice 2) — the
-    /// second capability a `ExtBundle` had that a trait lacked. When present, a method that
+    /// The trait's **native default-body dispatch**. When present, a method that
     /// [`ExtTraitMethod::has_default`] marks optional AND that the implementing type does **not**
     /// itself provide is answered by the **trait**, through this one shared [`TraitDispatch`]
-    /// (a [`CtxTypeDispatch`]: the receiver rides as ctx slot 0, exactly like `ExtBundle::ctx_dispatch`).
-    /// So a fully-defaulted native trait with a `dispatch` behaves like a bundle bind — an empty
+    /// (a [`CtxTypeDispatch`]: the receiver rides as ctx slot 0).
+    /// So a fully-defaulted native trait with a `dispatch` asks nothing of its implementor — an empty
     /// `impl X for T {}` (or a native type's `traits` advertisement) adopts every default body — while
     /// still permitting an override: a type that provides the method wins (source 1), the trait's
-    /// default answers only when it does not (source 2), and a `.noe`-bodied default hoists as before
-    /// (source 3). `None` leaves `has_default` meaning only "optional", the pre-slice-2 behavior.
-    /// The checker records a `(trait, method)` call-site route (`trait_call_sites`) and both backends
-    /// dispatch it through [`Registry::dispatch_trait_method`], the trait twin of `dispatch_bundle_method`.
+    /// default answers only when it does not (source 2), and a `.noe`-bodied default hoists as usual
+    /// (source 3). `None` leaves `has_default` meaning only "optional". The checker records a
+    /// `(trait, method)` call-site route (`trait_call_sites`) and both backends dispatch it through
+    /// [`Registry::dispatch_trait_method`].
     pub dispatch: Option<TraitDispatch>,
-    /// The trait's **structural `Self`-constraint** (ExtBundle→ExtTrait convergence, slice 3) — the
-    /// THIRD and last capability an `ExtBundle` had that a trait lacked. When present, the trait may
-    /// only be `impl`-ed for a `@packed` struct whose fields match this [`PackedConstraint`] — exactly
-    /// the shape check a bundle bind makes (`ExtBundle::constraint`), now first-class on a trait. The
+    /// The trait's **structural `Self`-constraint**. When present, the trait may only be `impl`-ed
+    /// for a `@packed` struct whose fields match this [`PackedConstraint`]. The
     /// SAME `PackedConstraint` type is reused deliberately (not a fresh marker-trait predicate): the
     /// constraint pins the implementing type's uniform *element*, which the trait's native-derived
-    /// associated types ([`ExtTrait::assoc_types`], slice 1b) then derive from — a built-in marker
+    /// associated types ([`ExtTrait::assoc_types`]) then derive from — a built-in marker
     /// would lose that element. The checker enforces it at the user `impl` site
     /// (`check_user_trait_impl` → the shared `check_packed_self_constraint`, E0015), the same core
     /// `check_bundle_binding` runs for a bundle; a native type advertising the trait via `traits` is
     /// the extension author's own declaration and is validated at assembly. `None` leaves the trait
-    /// shape-agnostic (implementable for any type), the pre-slice-3 behavior.
+    /// shape-agnostic — implementable for any type.
     pub self_constraint: Option<PackedConstraint>,
     /// The trait's **own documentation prose** (markdown), or empty. A trait is a contract a user
     /// writes an `impl` against, so the declaration-level prose is the part that matters most —
@@ -1841,13 +1830,12 @@ pub struct ExtTrait {
     pub docs: &'static [(&'static str, &'static str)],
 }
 
-/// A native trait's **default-body dispatch** ([`ExtTrait::dispatch`], slice 2): the same
-/// [`CtxTypeDispatch`] shape `ExtBundle::ctx_dispatch` uses — the receiver arrives as ctx slot 0,
-/// arguments after it, and the body may re-enter the backend. Re-homed onto the trait, keyed by
-/// `(trait, method)` instead of `(module, bundle, method)`.
+/// A native trait's **default-body dispatch** ([`ExtTrait::dispatch`]): a [`CtxTypeDispatch`] —
+/// the receiver arrives as ctx slot 0, arguments after it, and the body may re-enter the backend.
+/// Keyed by `(trait, method)`.
 pub type TraitDispatch = CtxTypeDispatch;
 
-/// One **native-derived associated type** on an [`ExtTrait`] (slice 1b): a name and the
+/// One **native-derived associated type** on an [`ExtTrait`]: a name and the
 /// [`AssocDerivation`] that computes its concrete `Type` from the implementing type's element. The
 /// derivation is a closed vocabulary the checker interprets — noeta-stdlib cannot see
 /// `noeta_types::Type` (the very reason the type tables live in `noeta-check`), so this mirrors the
@@ -1861,7 +1849,7 @@ pub struct ExtAssocType {
     pub derivation: AssocDerivation,
 }
 
-/// How a native associated type is **derived from the implementing type's element** (slice 1b) — the
+/// How a native associated type is **derived from the implementing type's element** — the
 /// closed vocabulary that expresses exactly what the bundle ABI's element-relative returns
 /// (`RetTy::Elem`/`RetTy::ElemWide`/`RetTy::ElemFloat`) did, now as a trait associated type.
 /// The checker interprets each against the bound `@packed` shape's uniform element kind; the ABI
@@ -1882,9 +1870,9 @@ pub enum AssocDerivation {
 /// One method in an [`ExtTrait`]: an ordinary [`ExtFn`] signature (the receiver is `self`, not in
 /// `params`) plus whether it carries a **default** — the ABI twin of the AST `TraitMethod { sig,
 /// has_default }`. A required method's implementor must provide it (E0015); a defaulted one is
-/// optional. When the trait carries a native [`ExtTrait::dispatch`] (slice 2), a defaulted method an
-/// implementor omits is answered by the **trait's own** default-body dispatch; without one it stays
-/// the pre-slice-2 behavior (the method routes to the receiver's own dispatch, native-extensibility S3).
+/// optional. When the trait carries a native [`ExtTrait::dispatch`], a defaulted method an
+/// implementor omits is answered by the **trait's own** default-body dispatch; without one the
+/// method routes to the receiver's own dispatch.
 #[derive(Debug, Clone, Copy)]
 pub struct ExtTraitMethod {
     /// The method's signature (name, parameter types, return) — same vocabulary as any [`ExtFn`].
@@ -1892,15 +1880,15 @@ pub struct ExtTraitMethod {
     /// Whether the method carries a default (optional for an implementor); `false` for a required
     /// method whose absence in an `impl` is E0015.
     pub has_default: bool,
-    /// Which receiver carries this method (ExtBundle→ExtTrait convergence, slice 4 — the fold-in).
+    /// Which receiver carries this method.
     /// Almost every trait method lives on `Self` ([`BundleReceiver::Element`], the [`Self::DEFAULTS`]),
     /// the receiver the contract binds. A [`BundleReceiver::Bulk`] method instead lives on `List<Self>`
-    /// (`xs.add_all(ys)`) — NOT a general trait capability, but the **surface marker** the migrated
-    /// kernel bundles' bulk `*_all` forms need: the checker's `bundle_method_call` reads it to type a
+    /// (`xs.add_all(ys)`) — NOT a general trait capability, but the **surface marker** the kernel
+    /// bundles' bulk `*_all` forms need: the checker's `bundle_method_call` reads it to type a
     /// method on a `List<T>` of an implementing `T`. Kept per-method (rather than a general trait
     /// notion) precisely because the `List<Self>` receiver is an accepted asymmetry, not a trait rule.
     ///
-    /// [`BundleReceiver::Static`] is the third case (static-trait-methods arc): **no** receiver, the
+    /// [`BundleReceiver::Static`] is the third case: **no** receiver, the
     /// native spelling of `static fn m(…)` in a `.noe` trait. It reaches the checker through the
     /// synthesized `TraitDecl`'s `FnDecl::is_static`, so a native trait's static method
     /// is licensed and enforced by exactly the rules a `.noe` one is.
@@ -1910,7 +1898,7 @@ pub struct ExtTraitMethod {
 impl ExtTraitMethod {
     /// Literal-shortening defaults (`..ExtTraitMethod::DEFAULTS`): a required, `Self`-receiver method,
     /// so a trait literal names only its `sig` (and `has_default` when it carries one) — the ordinary
-    /// trait method, with the [`BundleReceiver::Bulk`] marker reserved for the migrated kernel bundles.
+    /// trait method, with the [`BundleReceiver::Bulk`] marker reserved for the kernel bundles.
     pub const DEFAULTS: ExtTraitMethod = ExtTraitMethod {
         sig: ExtFn::DEFAULTS,
         has_default: false,
@@ -1942,7 +1930,7 @@ impl NominalType for ExtTrait {
     }
 }
 
-// --- Method bundles (kernel-methods K0) ----------------------------------------------------------
+// --- Method bundles ----------------------------------------------------------
 //
 // A **method bundle** is the nominal-binding half of the raw-buffer kernel story: N3.4 gave a
 // native function the *capability* to run over a packed list's contiguous bytes, but the surface
@@ -1952,7 +1940,7 @@ impl NominalType for ExtTrait {
 // validates the bundle's structural constraint against the type at the impl site (the shape check
 // moves from runtime dispatch to a compile-time diagnostic), and from the binding on, the type
 // (and `List<T>` for the bulk forms) carries the methods everywhere — typing, dispatch,
-// completion. See `plans/kernel-methods/README.md`.
+// completion.
 
 /// The static twin of the runtime [`crate::PackedView`] check a raw-buffer kernel performs: what
 /// a type binding to the bundle must look like, validated **at the impl site, at compile time**.
@@ -1969,8 +1957,7 @@ pub struct PackedConstraint {
     pub arity: ConstraintArity,
 }
 
-/// How a [`PackedConstraint`]'s field list is matched against a bound type (kernel-methods; extended
-/// by the array-ops integer/u8 vector shapes).
+/// How a [`PackedConstraint`]'s field list is matched against a bound type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConstraintArity {
     /// The bound type's fields must equal `fields` exactly — same count, same kinds, in order (a
@@ -1990,7 +1977,7 @@ pub enum ConstraintField {
     Float,
     F32,
     Bool,
-    /// A fixed-width integer field `i8..i64`/`u8..u64` (packed-widths arc) — the array-ops integer
+    /// A fixed-width integer field `i8..i64`/`u8..u64` — the array-ops integer
     /// (`IVec2`/`IVec3` at `i32`) and `Color` (`u8`) vector shapes. Mirrors
     /// [`crate::PackedField::IntN`] / `noeta_ast::reflect::PackedKind::IntN`.
     IntN {
@@ -2022,11 +2009,8 @@ pub enum ConstraintLayout {
     Column,
 }
 
-/// Which receiver carries a trait method — the per-method marker on [`ExtTraitMethod::receiver`]
-/// (ExtBundle→ExtTrait convergence, slice 4; the `Static` case is the static-trait-methods arc).
-/// `ExtBundle` and `BundleFn` were folded into [`ExtTrait`]/[`ExtTraitMethod`] in that slice; the
-/// [`Self::Bulk`] variant survives as the **surface adapter** the migrated kernel bundles' dual
-/// receiver needs.
+/// Which receiver carries a trait method — the per-method marker on [`ExtTraitMethod::receiver`].
+/// The [`Self::Bulk`] variant is the **surface adapter** the kernel bundles' dual receiver needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BundleReceiver {
     /// A method on a value of the implementing type itself (`v.dot(w)`) — the ordinary trait method.
@@ -2077,7 +2061,7 @@ pub struct ExtAttrField {
 /// through the one [`Registry::nominal_types`] stream as a [`NominalKind::Struct`] nominal exactly
 /// like any native fielded type: a consumer resolves `use std.test.{Skip}` / `use std.test` /
 /// `#[std.test.Skip]` through the same `classify_use`/`namespace_types` machinery, and the checker
-/// keys `symbols.attributes` on the [`ExtAttribute::qualified`] identity (D2). There is no global
+/// keys `symbols.attributes` on the [`ExtAttribute::qualified`] identity. There is no global
 /// attribute namespace — std's tier attributes live under `std.test` (`Skip`/`Name`/`Group`/`Data`/`Timeout`),
 /// `std.bench` (`Bench`), and `std.doc` (`Doc`), imported like any attribute.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -2156,17 +2140,17 @@ pub struct ExtTier {
     /// The knob attribute a `@<tier>(args)` block stamps onto its fns — one of the extension's
     /// [`Extension::attributes`] — or `None` for a knob-less tier (whose directive rejects args).
     pub config: Option<&'static str>,
-    /// The body language ID for a **text** or **expression** tier (text-tiers / expr-tiers arcs):
+    /// The body language ID for a **text** or **expression** tier:
     /// its `@<name> { … }` bodies are captured verbatim by the lexer and tagged with this language
     /// for editor injection and LSP hover (`doc` → `"markdown"`, a native `@json` → `"json"`).
     /// `None` for a code tier. Decoupled from the tier name.
     pub text: Option<&'static str>,
-    /// The value type an **expression** tier's blocks evaluate to (expr-tiers arc) — the extension
+    /// The value type an **expression** tier's blocks evaluate to — the extension
     /// counterpart of a program `@tier(…, expr: T)`. When set, `@<name> { … }` is an *expression*
     /// (verbatim text with `${…}` holes) that desugars to a call of [`Self::handler`]; `None` for a
     /// code or text tier. Mutually exclusive with `config`.
     pub expr: Option<&'static str>,
-    /// The **native handler** an expression tier's blocks desugar to (expr-tiers arc): the
+    /// The **native handler** an expression tier's blocks desugar to: the
     /// qualified module-function name called with `(statics: List<string>, holes: List<() -> dyn>)`
     /// yielding [`Self::expr`]. `None` unless `expr` is set (a program-declared expr tier names its
     /// handler on the `@tier` fn instead).
@@ -2533,20 +2517,20 @@ pub trait Extension: Sync {
     fn types(&self) -> &'static [ExtType] {
         &[]
     }
-    /// The extension's first-class **enums** (native-extensibility S1) — real language enums
+    /// The extension's first-class **enums** — real language enums
     /// (exhaustively matchable, returned/received as values). Default empty; seeded eagerly into
     /// the checker's symbol tables at prelude time by qualified identity.
     fn enums(&self) -> &'static [ExtEnum] {
         &[]
     }
-    /// The extension's first-class **classes** (native-extensibility S2) — real reference-type
+    /// The extension's first-class **classes** — real reference-type
     /// language classes (identity, destructor, fields, cycle participation). Default empty; seeded
     /// eagerly into the checker's symbol tables at prelude time by qualified identity. Every entry
     /// must be [`FieldedKind::Class`] (checked by [`Registry::new`]).
     fn classes(&self) -> &'static [ExtClass] {
         &[]
     }
-    /// The extension's first-class **structs** (native-extensibility, fielded unification) — real
+    /// The extension's first-class **structs** — real
     /// value-type language structs (structural equality, copy-on-assign, source-constructible,
     /// no identity/destructor). The value-semantics twin of [`Extension::classes`]; both hooks
     /// produce the shared [`ExtFielded`] type, distinguished by [`ExtFielded::kind`]. Default empty;
@@ -2555,13 +2539,13 @@ pub trait Extension: Sync {
     fn structs(&self) -> &'static [ExtStruct] {
         &[]
     }
-    /// The extension's first-class **traits** (native-extensibility S3) — real language traits that
+    /// The extension's first-class **traits** — real language traits that
     /// user types `impl`/bound on (3a) and that dispatch dynamically over native values (3b).
     /// Default empty; seeded eagerly into the checker's user-trait tables at prelude time.
     fn traits(&self) -> &'static [ExtTrait] {
         &[]
     }
-    /// The extension's CLI subcommands (higher-order-abi H6). Default empty.
+    /// The extension's CLI subcommands. Default empty.
     fn commands(&self) -> &'static [crate::ExtCommand] {
         &[]
     }
@@ -2650,11 +2634,11 @@ impl std::fmt::Debug for ExtCapability {
     }
 }
 
-// --- the runtime registry (package-manager Phase 3, N3.0) ---------------------------------------
+// --- the runtime registry ---------------------------------------
 //
 // The binary's **assembled** extension-unit list and the generic lookup layer over it. This
 // machinery grew up in `noeta-stdlib` around the dogfooded `std` units, but nothing in it is
-// std-specific — and Phase 3's assembly point (the composed-toolchain shim) must not reach through
+// std-specific — and the assembly point (the composed-toolchain shim) must not reach through
 // the dogfood crate to register its peers. So the mechanism lives here, in the ABI crate: the shim
 // (or any host binary) calls [`install`] with the full unit list; `noeta-stdlib::registry` remains
 // a facade that lazily installs the std units so the many existing call sites never observe an
@@ -2675,7 +2659,7 @@ use std::sync::OnceLock;
 /// The process-global [`install`]/[`install_default`] seed a single **default** registry that the
 /// free-function facade below reads — the path every existing call site (backends, checker, LSP)
 /// uses. A host that wants a *different* extension set per session builds its own `Registry` and
-/// threads it explicitly (server-hmr F2 / the embed API).
+/// threads it explicitly.
 pub struct Registry {
     units: Vec<&'static (dyn Extension + Sync)>,
 }
@@ -2723,12 +2707,12 @@ pub enum UseKind {
     MemberFn { module: String, func: String },
     /// A registered extension type (`use std.id.Uuid`) — qualified identity.
     ExternType(String),
-    /// A registered native **enum** (`use std.http.SameSite`, native-extensibility S1) — qualified
+    /// A registered native **enum** (`use std.http.SameSite`) — qualified
     /// identity. Bound like an [`UseKind::ExternType`]: the checker maps the local name to the
     /// qualified identity (so annotations/patterns resolve); the backends bind no runtime value
     /// (a native enum's values arrive from native calls, not a source-level type handle).
     ExtEnum(String),
-    /// A registered native **class** (`use res.Handle`, native-extensibility S2) — qualified
+    /// A registered native **class** (`use res.Handle`) — qualified
     /// identity. Bound like an [`UseKind::ExternType`] in the checker (the local name maps to the
     /// qualified identity so annotations/construction resolve); the backends bind a **constructible**
     /// class-kind type handle under the imported short name so `Handle { ... }` builds a real class.
@@ -2739,7 +2723,7 @@ pub enum UseKind {
     /// struct-kind type handle so `Point { .. }` builds a real value struct (structural equality,
     /// copy-on-assign) rather than a reference class.
     ExtStruct(String),
-    /// A registered native **trait** (`use fx.Widget`, native-extensibility S3) — qualified
+    /// A registered native **trait** (`use fx.Widget`) — qualified
     /// identity. The checker maps the local (imported short) name to the qualified identity and
     /// seeds the user-trait tables under the short name, so `impl Widget for T`, `T: Widget`
     /// bounds, and `dyn Widget` resolve; the backends bind no runtime value (a native trait is a
@@ -2959,8 +2943,8 @@ impl Registry {
 
     /// Every native declaration's lightweight identity projection — extern types, enums, fielded
     /// types (classes + structs), and traits — as one allocation-free [`Nominal`] stream. The single
-    /// source `namespace_types` / `classify_use` / `resolve_namespace_child` walk, replacing the four
-    /// structurally identical per-kind loops each used to run. A fielded type projects as
+    /// source `namespace_types` / `classify_use` / `resolve_namespace_child` walk. A fielded type
+    /// projects as
     /// [`NominalKind::Class`] or [`NominalKind::Struct`] off its [`ExtFielded::kind`].
     pub fn nominal_types(&self) -> impl Iterator<Item = Nominal> + '_ {
         self.units.iter().flat_map(|e| {
@@ -3115,7 +3099,7 @@ impl Registry {
             .find(|f| f.name == func)
     }
 
-    /// Find a registered **higher-order** function's signature (higher-order-abi H0).
+    /// Find a registered **higher-order** function's signature.
     pub fn find_ctx_function(&self, module: &str, func: &str) -> Option<&'static ExtFn> {
         self.find_module(module)?
             .ctx_functions
@@ -3157,14 +3141,14 @@ impl Registry {
         }
     }
 
-    /// Every extension-contributed CLI subcommand (higher-order-abi H6).
+    /// Every extension-contributed CLI subcommand.
     pub fn commands(&self) -> impl Iterator<Item = &'static crate::ExtCommand> + '_ {
         self.units.iter().flat_map(|e| e.commands())
     }
 
     /// Resolve a native trait that a **module-qualified** binding names — `impl vec.Kernels for T {}`
-    /// (ExtBundle→ExtTrait convergence, slice 4, the fold-in). This is the **surface adapter** for the
-    /// migrated kernel bundles: the checker resolves the module alias (`vec`) to its qualified module
+    /// This is the **surface adapter** for the
+    /// kernel bundles: the checker resolves the module alias (`vec`) to its qualified module
     /// (`std.vec`) and calls this with `(qualified_module, name)`; the kernel trait is registered with
     /// its `namespace` equal to that qualified module, so its qualified identity is
     /// `qualified_module.name` (`std.vec.Kernels`) — the same string [`Registry::find_trait_qualified`]
@@ -3180,8 +3164,7 @@ impl Registry {
             .find(|t| t.name == name && t.namespace == qualified_module)
     }
 
-    /// Route a **trait default-body** method call to the trait's shared ctx dispatch
-    /// (ExtBundle→ExtTrait convergence, slice 2) — the trait twin of the retired `dispatch_bundle_method`.
+    /// Route a **trait default-body** method call to the trait's shared ctx dispatch.
     /// The checker resolved this call span to a `(trait, method)` route because the method is defaulted,
     /// the trait carries a native [`ExtTrait::dispatch`], and the implementing type provides no override.
     /// `trait_q` is the trait's **qualified identity** (`fx.Gadget`); the receiver rides as slot 0.
@@ -3235,8 +3218,8 @@ impl Registry {
             .map(|u| u.root())
     }
 
-    /// Resolve an extension tier **scoped to a set of provider namespace roots** (per-package naming
-    /// arc, the tier counterpart of [`Registry::find_ext_directive_scoped`]): the `exported` tier
+    /// Resolve an extension tier **scoped to a set of provider namespace roots** (the tier
+    /// counterpart of [`Registry::find_ext_directive_scoped`]): the `exported` tier
     /// declared by a unit whose [`Extension::root`] is one of `provider_roots`. This is how a
     /// `@name { … }` block resolves to the specific provider a using package's `[directives]` binding named
     /// — so two providers exporting the same tier name (e.g. `std` and `criterion` both shipping
@@ -3322,8 +3305,8 @@ impl Registry {
         self.ext_directives().find(|d| d.name == name)
     }
 
-    /// Resolve an extension directive **scoped to a set of provider namespace roots** (per-package
-    /// naming arc): the `exported` directive declared by a unit whose [`Extension::root`] is one of
+    /// Resolve an extension directive **scoped to a set of provider namespace roots**: the
+    /// `exported` directive declared by a unit whose [`Extension::root`] is one of
     /// `provider_roots`. This is how a `@name` resolves to the specific provider a using package's
     /// `[directives]` binding named, rather than the first global match — so two packages exporting
     /// the same directive name never shadow each other. `provider_roots` empty → no match.
@@ -3372,7 +3355,7 @@ impl Registry {
             })
     }
 
-    /// Find a registered extern type by its short display name (extern-types X1) — first match in
+    /// Find a registered extern type by its short display name — first match in
     /// registration order. This is the *checker-side* bridge from a signature's bare
     /// [`SigType::Named`] name and the E0049 reservation set; **runtime identity paths must use**
     /// [`Registry::find_type_qualified`] with the value's
@@ -3401,7 +3384,7 @@ impl Registry {
             .or_else(|| self.find_type(name))
     }
 
-    /// Every registered native enum (native-extensibility S1), across all units — what
+    /// Every registered native enum, across all units — what
     /// `Checker::seed_ext_enums` walks to pre-populate the enum symbol tables at prelude time.
     pub fn enums(&self) -> impl Iterator<Item = &'static ExtEnum> + '_ {
         self.units.iter().flat_map(|e| e.enums())
@@ -3434,7 +3417,7 @@ impl Registry {
             .or_else(|| self.find_enum(name))
     }
 
-    /// Every registered native class (native-extensibility S2), across all units — what
+    /// Every registered native class, across all units — what
     /// `Checker::seed_ext_classes` walks to pre-populate the record symbol tables at prelude time.
     pub fn classes(&self) -> impl Iterator<Item = &'static ExtClass> + '_ {
         self.units.iter().flat_map(|e| e.classes())
@@ -3480,7 +3463,7 @@ impl Registry {
             .flat_map(|e| e.classes().iter().chain(e.structs().iter()))
     }
 
-    /// The **native `@role` table** (native type-declaration unification, Slice D3) — the plain-data
+    /// The **native `@role` table** — the plain-data
     /// projection `noeta_ast::reflect::build` merges to surface native roles. Each entry is a
     /// role-bearing native `@attribute` struct's **qualified identity** (`cfg.Route`, the identity a
     /// linked attribute application is qualified to) paired with its `(enum_name, variant)` role tags.
@@ -3531,7 +3514,7 @@ impl Registry {
             .or_else(|| self.fielded().find(|t| t.name == name))
     }
 
-    /// Find a native fielded type's instance-method signature (native-extensibility S3 / Pass 2a) —
+    /// Find a native fielded type's instance-method signature —
     /// the [`ExtFielded`] twin of [`Registry::find_type_method`]. `name` is the runtime shape name
     /// (the **short** name a fielded object carries) or a qualified identity. What both backends'
     /// `CallMethod` Object arm consults to decide a native fielded method call routes to
@@ -3543,7 +3526,7 @@ impl Registry {
             .find(|m| m.name == method)
     }
 
-    /// Find a native **enum**'s instance-method signature (native-extensibility S1 / Slice B) — the
+    /// Find a native **enum**'s instance-method signature — the
     /// [`ExtEnum`] twin of [`Registry::find_class_method`]. `name` is the runtime shape name (the
     /// **short** name a native enum value carries) or a qualified identity. What both backends' enum
     /// method-call arm consults to decide a native enum method call routes to [`ExtEnum::dispatch`],
@@ -3556,7 +3539,7 @@ impl Registry {
             .find(|m| m.name == method)
     }
 
-    /// Every registered native trait (native-extensibility S3), across all units — what
+    /// Every registered native trait, across all units — what
     /// `Checker::seed_ext_traits` walks to pre-populate the user-trait tables at prelude time, and
     /// what `Checker::has_builtin_trait` matches an [`ExtType::traits`] / [`ExtFielded::traits`] /
     /// [`ExtEnum::traits`] name against.
@@ -3596,7 +3579,7 @@ impl Registry {
             .find(|m| m.name == method)
     }
 
-    /// Find a registered extern type's **higher-order** method signature (higher-order-abi H4).
+    /// Find a registered extern type's **higher-order** method signature.
     pub fn find_type_ctx_method(&self, type_name: &str, method: &str) -> Option<&'static ExtFn> {
         self.resolve_type(type_name)?
             .ctx_methods
@@ -3612,7 +3595,7 @@ impl Registry {
             .or_else(|| self.find_type_ctx_method(type_name, method))
     }
 
-    /// Find a registered extern type's **call-site-typed** method signature (http arc H8) — the
+    /// Find a registered extern type's **call-site-typed** method signature — the
     /// `resp.json::<T>()` turbofish surface, the [`Registry::find_typed_function`] twin. The single
     /// predicate that decides whether a turbofish method call is a native typed call or an
     /// ordinary (erased) generic-method instantiation.
@@ -3623,7 +3606,7 @@ impl Registry {
             .find(|m| m.name == method)
     }
 
-    /// Route a **call-site-typed** method call to its type's typed dispatch (http arc H8).
+    /// Route a **call-site-typed** method call to its type's typed dispatch.
     pub fn dispatch_typed_method(
         &self,
         recv: &mut dyn crate::ExternValue,
@@ -3653,7 +3636,7 @@ impl Registry {
         result
     }
 
-    /// Route a **higher-order** method call to its type's ctx dispatch (higher-order-abi H4).
+    /// Route a **higher-order** method call to its type's ctx dispatch.
     pub fn dispatch_ctx_method(
         &self,
         type_name: &str,
@@ -3721,7 +3704,7 @@ impl Registry {
         }
     }
 
-    // ----- debug-mode author-contract verification (audit-2 F4) ---------------------------------
+    // ----- debug-mode author-contract verification ---------------------------------
     //
     // Contracts the ABI documents but the types cannot enforce, checked where a wrong extension
     // would otherwise corrupt quietly: at the dispatch return, the one seam every produced value
@@ -3755,14 +3738,14 @@ impl Registry {
                     self.debug_verify_out(owner, func, value);
                 }
             }
-            // A native enum result (native-extensibility S1): recurse into its payload for any
+            // A native enum result: recurse into its payload for any
             // nested extern values, exactly like the `Struct`/`List` arms.
             O::Variant { fields, .. } => {
                 for value in fields {
                     self.debug_verify_out(owner, func, value);
                 }
             }
-            // A native class instance (native-extensibility S2): recurse into each field for any
+            // A native class instance: recurse into each field for any
             // nested extern values (the native-state handle field is one), like the `Struct` arm.
             O::Instance { fields, .. } => {
                 for (_, value) in fields {
@@ -3885,18 +3868,15 @@ pub fn set_default_provider(provider: fn() -> Vec<&'static (dyn Extension + Sync
 /// assumes a single-registry process** (cross-cutting audit finding 5). The front-end crates
 /// (checker, loader, IR lowering, bytecode compiler, salsa db) fall back to this when no
 /// per-session registry was threaded in — they consume the registry as *data* and deliberately do
-/// not link the crate that declares the units (audit-6 finding 2), so the units reach this registry
+/// not link the crate that declares the units, so the units reach this registry
 /// from outside: an assembling binary installs its exact set at entry
 /// (`noeta_cli::run_cli`, `noeta-runner`, `noeta-embed`), and otherwise the
 /// `DEFAULT_PROVIDER` registered by the unit-declaring crate is installed lazily, here.
 ///
 /// That fallback is what makes seeding **structural rather than remembered** (within the linkage
-/// scope noted on `DEFAULT_PROVIDER`). It used to be neither:
-/// this function panicked unless something had already seeded, which an assembling binary does but a
-/// *test* binary does not — so a crate's tests passed only when some sibling test happened to run
-/// first through the lazily-seeding `noeta-stdlib` facade. Different scheduling, different set of
-/// panics; CI eventually drew the short straw across four crates at once. Linking the unit-declaring
-/// crate now suffices, which every such test binary already does.
+/// scope noted on `DEFAULT_PROVIDER`): linking the unit-declaring crate suffices, which every test
+/// binary needing the registry already does, so nothing depends on some sibling test having seeded
+/// first.
 ///
 /// Panics only if nothing installed *and* no provider was registered — i.e. no unit-declaring crate
 /// is linked at all. That is the genuine assembly error the panic was written for, and it stays
@@ -4137,7 +4117,7 @@ fn native_fn_path_resolves(units: &[&'static (dyn Extension + Sync)], path: &str
     })
 }
 
-/// Assembly-time check for one native `@role` tag (Slice D3): its `enum_name` must resolve to a
+/// Assembly-time check for one native `@role` tag: its `enum_name` must resolve to a
 /// `@semantic` enum — the built-in `Semantic` prelude enum, or a native enum (across every unit)
 /// whose **qualified identity** matches and that carries [`ExtTypeDirective::Semantic`] — and its
 /// named `variant` must exist on that enum and be **fieldless**. The native analogue of the checker's
@@ -4198,7 +4178,7 @@ fn check_role_tag(
     }
 }
 
-/// Whether `ty` can be a field of a native `@packed` struct (Slice E1, the native twin of the
+/// Whether `ty` can be a field of a native `@packed` struct (the native twin of the
 /// checker's [`is_packable_type`](https://docs.rs/noeta-check) / E0038). The packable set is the
 /// primitives [`SigType`] can spell — `Int`/`Float`/`F32`/`Bool` — plus a [`SigType::Named`] that
 /// resolves to another `@packed` struct in the assembled `units` (so a nested packed field flattens
@@ -4297,7 +4277,7 @@ fn validate(units: &[&'static (dyn Extension + Sync)]) -> Result<(), String> {
             }
         }
     }
-    // Native-enum identities (native-extensibility S1) — the same qualified-identity uniqueness and
+    // Native-enum identities — the same qualified-identity uniqueness and
     // namespace-under-root rules extern types get, since native enums are keyed identically.
     let mut enums: Vec<((&str, &str), &str)> = units
         .iter()
@@ -4366,7 +4346,7 @@ fn validate(units: &[&'static (dyn Extension + Sync)]) -> Result<(), String> {
                 ));
             }
         }
-        // An attribute is a namespaced nominal too (D2b) — same namespace-under-root rule, so a
+        // An attribute is a namespaced nominal too — same namespace-under-root rule, so a
         // forgotten `namespace:` (defaulting to nothing) or a cross-root claim is caught at assembly
         // rather than silently squatting a reserved namespace.
         for a in unit.attributes() {
@@ -4407,7 +4387,7 @@ fn validate(units: &[&'static (dyn Extension + Sync)]) -> Result<(), String> {
                 ));
             }
         }
-        // Built-in-directive site validity (native type-declaration unification, Slice D): a native
+        // Built-in-directive site validity: a native
         // type seeds its directives straight into `Symbols`, bypassing the AST placement gate (E0054),
         // so the (kind, directive) legality the source-level gate enforces is enforced here instead.
         // `@semantic` is enum-only; `@validated` is struct-or-class-only. A mis-placed directive would
@@ -4434,7 +4414,7 @@ fn validate(units: &[&'static (dyn Extension + Sync)]) -> Result<(), String> {
                         unit.name()
                     ));
                 }
-                // `@role` (Slice D3): struct-only, and a *facet* of `@attribute` — the native analogue
+                // `@role`: struct-only, and a *facet* of `@attribute` — the native analogue
                 // of the checker's E0031 role rules. A role rides on what the attribute attaches to, so
                 // the same type must carry `@attribute`; each tag must name a fieldless variant of a
                 // `@semantic` enum (a native one, or the built-in `Semantic`). A native type bypasses
@@ -4467,7 +4447,7 @@ fn validate(units: &[&'static (dyn Extension + Sync)]) -> Result<(), String> {
                         check_role_tag(units, tag, t, unit.name())?;
                     }
                 }
-                // `@packed` (Slice E1): struct-only, and every field must be packable — the native
+                // `@packed`: struct-only, and every field must be packable — the native
                 // analogue of the checker's E0038. A class is a reference type (heap identity, no flat
                 // list layout), so `@packed` on it refuses to assemble; a field that cannot lay out flat
                 // (`string`/`List`/class/enum/`dyn`, or a `Named` that is not itself a `@packed` struct)
@@ -4659,11 +4639,10 @@ fn validate(units: &[&'static (dyn Extension + Sync)]) -> Result<(), String> {
             }
         }
     }
-    // A native trait's structural `Self`-constraint (slice 3) with `Uniform` arity reads only
+    // A native trait's structural `Self`-constraint with `Uniform` arity reads only
     // `fields[0]` (every field of the bound type must equal it) — declaring more than one kind is an
     // author bug that would silently ignore the rest, so refuse it here where every assembly path
-    // passes. This was the `ExtBundle::constraint` guard until the ExtBundle→ExtTrait fold-in (slice 4)
-    // re-homed the constraint onto the trait; the migrated kernel traits are its live users.
+    // passes. The kernel traits are its live users.
     for tr in units.iter().flat_map(|e| e.traits()) {
         if let Some(c) = &tr.self_constraint
             && let ConstraintArity::Uniform { .. } = c.arity
@@ -4677,8 +4656,8 @@ fn validate(units: &[&'static (dyn Extension + Sync)]) -> Result<(), String> {
             ));
         }
     }
-    // Author contracts the ABI states in prose but the types cannot enforce (audit-2 F4). Each of
-    // these misuses used to compile clean and fail deep at first call — a runtime "unknown name",
+    // Author contracts the ABI states in prose but the types cannot enforce. Each of
+    // these misuses would otherwise compile clean and fail deep at first call — a runtime "unknown name",
     // a routing miss, or silent checker/dispatch disagreement. Assembly is the one point every
     // path (CLI, composed shim, embed session, lazy default) passes through, so they refuse here,
     // naming the offending declaration.
@@ -4800,7 +4779,7 @@ fn validate(units: &[&'static (dyn Extension + Sync)]) -> Result<(), String> {
                     ));
                 }
             }
-            // The call-site-typed table mirrors the module side's rules (http arc H8): a dispatch
+            // The call-site-typed table mirrors the module side's rules: a dispatch
             // is required, and every entry must name its result through the turbofish — a
             // `Concrete` return would make the `::<T>` meaningless.
             if !t.typed_methods.is_empty() && t.typed_dispatch.is_none() {
@@ -5351,15 +5330,15 @@ pub fn commands() -> impl Iterator<Item = &'static crate::ExtCommand> {
 }
 
 /// Resolve a native trait a module-qualified binding names (`impl vec.Kernels for T {}`) through the
-/// process-global default registry — the surface adapter for the migrated kernel bundles (slice 4). See
+/// process-global default registry — the surface adapter for the kernel bundles. See
 /// [`Registry::find_trait_in_module`].
 pub fn find_trait_in_module(qualified_module: &str, name: &str) -> Option<&'static ExtTrait> {
     default_registry().and_then(|r| r.find_trait_in_module(qualified_module, name))
 }
 
-/// Route a trait default-body method call through the process-global default registry (slice 2). Since
-/// the ExtBundle→ExtTrait fold-in (slice 4) this is also the route the migrated kernel bundles take:
-/// the checker records a `(trait, method)` site and the backends dispatch here.
+/// Route a trait default-body method call through the process-global default registry. The kernel
+/// bundles take this route too: the checker records a `(trait, method)` site and the backends
+/// dispatch here.
 pub fn dispatch_trait_method(
     trait_q: &str,
     method: &str,
@@ -5407,7 +5386,7 @@ pub fn find_ext_attribute(name: &str) -> Option<&'static ExtAttribute> {
     default_registry().and_then(|r| r.find_ext_attribute(name))
 }
 
-/// Every registered native **fielded** `@attribute` struct (D2) — the fielded twin of
+/// Every registered native **fielded** `@attribute` struct — the fielded twin of
 /// [`ext_attributes`]. `extension_attribute_types` reflects on these alongside the data-only
 /// [`ExtAttribute`]s, so a native fielded `@attribute` (`Route { path: string }`) lands in the same
 /// reflection manifest and `attributes_of::<Route>()` materializes its instance through the one
@@ -5579,7 +5558,7 @@ mod runtime_registry_tests {
     static B_DUP_NAME: Unit = Unit("a.core", "b", &[]);
     static B_DUP_MODULE: Unit = Unit("b.core", "a", &[M_MATH]);
 
-    // --- kernel method traits (ExtBundle→ExtTrait fold-in, slice 4) ---
+    // --- kernel method traits ---
     const VEC3_CONSTRAINT: PackedConstraint = PackedConstraint {
         fields: &[
             ConstraintField::F32,
@@ -5589,8 +5568,8 @@ mod runtime_registry_tests {
         layout: ConstraintLayout::Any,
         arity: ConstraintArity::Exact,
     };
-    /// A migrated kernel bundle, now a native [`ExtTrait`]: a fully-defaulted trait carrying a
-    /// `self_constraint`, native-derived `assoc_types`, and a `dispatch` — the shape the fold-in gives
+    /// A kernel bundle as a native [`ExtTrait`]: a fully-defaulted trait carrying a
+    /// `self_constraint`, native-derived `assoc_types`, and a `dispatch` — the shape of
     /// `vec.Kernels`. Its `namespace` equals the qualified module (`g.vec`) so the module-qualified
     /// `impl g.vec.Kernels` spelling resolves through `find_trait_in_module`.
     const KERNELS: ExtTrait = ExtTrait {
@@ -5641,7 +5620,7 @@ mod runtime_registry_tests {
 
     #[test]
     fn kernel_trait_method_table_carries_receiver_markers() {
-        // The dual receiver survives as the per-method `receiver` marker (slice 4): an element method
+        // The dual receiver survives as the per-method `receiver` marker: an element method
         // on `Self`, a bulk `*_all` on `List<Self>`. All methods are defaulted (answered by dispatch).
         let dot = KERNELS
             .methods
@@ -5795,9 +5774,8 @@ mod runtime_registry_tests {
         );
     }
 
-    // (The duplicate-bundle-name and duplicate-method-name-in-a-bundle install checks were retired in
-    // the ExtBundle→ExtTrait fold-in (slice 4): a bundle is now an `ExtTrait`, and trait/method
-    // uniqueness is covered by the general native-declaration validation.)
+    // (A bundle is an `ExtTrait`, so trait and method uniqueness is covered by the general
+    // native-declaration validation.)
 
     #[test]
     fn duplicate_unit_name_is_rejected() {
@@ -5883,7 +5861,7 @@ mod runtime_registry_tests {
     #[test]
     fn a_type_namespace_outside_the_units_root_is_rejected() {
         // `ExtType::DEFAULTS` fills `namespace: "std"`; a third-party unit that forgets the field
-        // would silently squat std. Assembly refuses it (the publish lint's rule, moved to where
+        // would silently squat std. Assembly refuses it (the publish lint's rule, enforced where
         // every path hits it).
         const T_SQUATTER: ExtType = ExtType {
             name: "Widget",
@@ -5945,8 +5923,8 @@ mod runtime_registry_tests {
 
     #[test]
     fn a_duplicate_tier_name_is_rejected_only_among_std_units() {
-        // Tier-name uniqueness is enforced only among **std-root** units (per-package naming arc,
-        // mirroring the command axis). A dependency's tier reaches a using package through a
+        // Tier-name uniqueness is enforced only among **std-root** units (mirroring the command
+        // axis). A dependency's tier reaches a using package through a
         // `[directives]` binding that fixes a distinct local name (resolved scoped to the provider), so two
         // dependency packages exporting the same tier name coexist — the binding resolves the
         // collision (`crit = "criterion:bench"`). Two **std** units doing it would be an ambient
@@ -6143,7 +6121,7 @@ mod runtime_registry_tests {
         validate(&[&A, &A2]).expect("shared roots across distinctly-named units are valid");
     }
 
-    // --- native built-in-directive site validity (Slice D) ---
+    // --- native built-in-directive site validity ---
     //
     // A native type seeds its `@semantic`/`@validated` directive straight into `Symbols`, bypassing
     // the source-level placement gate (E0054), so the (kind, directive) legality is enforced at
@@ -6248,7 +6226,7 @@ mod runtime_registry_tests {
         );
     }
 
-    // --- native @packed site validity + packable-field rule (Slice E1) ---
+    // --- native @packed site validity + packable-field rule ---
     //
     // `@packed` is struct-only, and every field must be packable — the native analogue of the checker's
     // E0038. A native type bypasses the source gate, so `validate` enforces both at assembly.
@@ -6402,7 +6380,7 @@ mod runtime_registry_tests {
         );
     }
 
-    // --- native @role coupling (Slice D3) ---
+    // --- native @role coupling ---
     //
     // `@role` is a facet of `@attribute`: struct-only, on a type that also carries `@attribute`, each
     // tag naming a fieldless variant of a `@semantic` enum. A native type bypasses the source gate, so
@@ -6570,7 +6548,7 @@ mod runtime_registry_tests {
         );
     }
 
-    // --- author-contract checks (audit-2 F4) ---
+    // --- author-contract checks ---
 
     #[test]
     fn an_arena_getter_outside_the_ctx_methods_is_rejected() {
@@ -7547,10 +7525,9 @@ mod runtime_registry_tests {
 
 #[cfg(test)]
 mod elem_retty {
-    //! The scalar-unification ABI additions. The element-relative *return* variants
-    //! (`RetTy::Elem`/`ElemWide`/`ElemFloat`) were removed in the ExtBundle→ExtTrait fold-in (slice 4),
-    //! superseded by `SigType::Assoc` resolved through a trait's native-derived `ExtAssocType`; what
-    //! remains crate-owned is the `AnyNumeric` constraint field, pinned here.
+    //! The scalar-unification ABI additions. An element-relative *return* is spelled
+    //! `SigType::Assoc` and resolved through a trait's native-derived `ExtAssocType`; what remains
+    //! crate-owned is the `AnyNumeric` constraint field, pinned here.
 
     use super::*;
 
@@ -7571,7 +7548,7 @@ mod elem_retty {
 
     #[test]
     fn an_associated_type_return_renders_as_self_projection() {
-        // A migrated kernel `dot(dyn): Self::Wide` renders end-to-end through `SigType::Assoc` — the
+        // A kernel `dot(dyn): Self::Wide` renders end-to-end through `SigType::Assoc` — the
         // signature surface the folded-in `vec.Kernels` now exposes (was `ElemWide`).
         let f = ExtFn {
             param_names: &[],

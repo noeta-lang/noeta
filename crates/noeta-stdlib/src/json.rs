@@ -59,7 +59,7 @@ pub fn parse(text: &str) -> Result<Json, String> {
     Ok(convert(value))
 }
 
-// --- the one JSON error story (error-machinery arc) ----------------------------------------------
+// --- the one JSON error story ----------------------------------------------
 
 /// What went wrong in a JSON decode — the kind axis of a [`JsonError`]. An enum (not a magic
 /// string): the surface `kind()` accessor renders [`JsonErrorKind::label`], and every interior
@@ -76,8 +76,8 @@ pub enum JsonErrorKind {
     MissingField,
     /// `json.decode_typed(name, …)` was handed a type name with no registered decode recipe.
     UnknownType,
-    /// A well-formed, shape-correct value whose type rejected it in its `Validate::validate`
-    /// (validation arc): the invariant, not the JSON shape, failed. Carries the validator's own
+    /// A well-formed, shape-correct value whose type rejected it in its `Validate::validate`:
+    /// the invariant, not the JSON shape, failed. Carries the validator's own
     /// message as the detail and the path to the failing value.
     Validation,
     /// A value of the right JSON *kind* for a target enum that names none of its variants
@@ -244,7 +244,7 @@ impl JsonError {
         }
     }
 
-    /// A validation failure at `path` (validation arc): a shape-correct value whose type's
+    /// A validation failure at `path`: a shape-correct value whose type's
     /// `Validate::validate` rejected it. `message` is the validator's own error message (a
     /// `string`-typed validator's bare string, or an `Error`-typed validator's `message()`), which
     /// becomes the detail so the composed message reads `items[2]: <validator message>`.
@@ -394,7 +394,7 @@ fn to_native(json: &Json) -> NativeOut {
 /// Append one member segment (`.field`, or the bare name at the root) to a path, returning the
 /// length to truncate back to after the child walk — the pop of the push. Public so a backend's
 /// `materialize_recipe` reconstructs the **same** path while re-walking a decoded tree to run
-/// `Validate::validate` (validation arc), keeping the two path stories byte-identical.
+/// `Validate::validate`, keeping the two path stories byte-identical.
 pub fn push_member(path: &mut String, name: &str) -> usize {
     let mark = path.len();
     if !path.is_empty() {
@@ -546,7 +546,7 @@ fn decode(json: &Json, recipe: &TypeRecipe, path: &mut String) -> Result<NativeO
                     name: name.clone(),
                     fields: slots,
                     // Carried through so the backend builds the kind the declaration is, rather
-                    // than assuming the value kind every recipe used to be.
+                    // than assuming one kind for every recipe.
                     kind: *kind,
                     has_validator: *has_validator,
                 })
@@ -1121,7 +1121,7 @@ mod tests {
         assert!(parse_typed("[1, 2, 3]", &recipe).is_err());
     }
 
-    // --- the path-carrying `JsonError` (error-machinery arc) ------------------------------------
+    // --- the path-carrying `JsonError` ------------------------------------
 
     /// `Order { items: List<Item { price: float }> }` — the nested recipe the path tests decode.
     fn order_recipe() -> TypeRecipe {

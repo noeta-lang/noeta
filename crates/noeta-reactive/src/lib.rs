@@ -39,7 +39,7 @@
 //! makes value glitch-freedom automatic: because a dirty `computed` is pulled fresh on read, a diamond
 //! (`A → B`, `A → C`, `B & C → D`) recomputes its sink `D` exactly once with consistent inputs.
 //!
-//! # Ownership & disposal (reactivity S4)
+//! # Ownership & disposal
 //!
 //! Disposal severs every graph edge of a node so no dangling subscription can fire, and frees its
 //! slot. There are three disposal paths:
@@ -186,7 +186,7 @@ struct Inner<V> {
     /// subscribe. A stack (not a single slot) because reading a dirty `computed` inside another
     /// node's body recomputes it, nesting a frame.
     computing: Vec<NodeId>,
-    /// How many live `Computed` nodes are currently dirty (H5): maintained on every clean↔dirty
+    /// How many live `Computed` nodes are currently dirty: maintained on every clean↔dirty
     /// transition so a client can gate a memo-read fast path on "no memo anywhere is stale"
     /// without scanning.
     dirty_computeds: usize,
@@ -198,7 +198,7 @@ struct Inner<V> {
     /// Effects dirtied since the last flush, awaiting a run. Drained (and sorted for determinism) per
     /// flush round.
     queue: Vec<NodeId>,
-    /// Cells (`V`s) of owner-tree children disposed during a rerun/disposal (reactivity S4b), awaiting
+    /// Cells (`V`s) of owner-tree children disposed during a rerun/disposal, awaiting
     /// release by the client. The core is value-generic and cannot release an externally-refcounted
     /// value itself, so it collects the `content`/`body` of each auto-disposed descendant here; the
     /// client drains this after every [`read`](ReactiveGraph::read)/[`flush`](ReactiveGraph::flush)
@@ -213,7 +213,7 @@ struct Inner<V> {
     ///
     /// [`is_flushing`]: ReactiveGraph::is_flushing
     flushing: bool,
-    /// Change observation (server-hmr L1, the flush-subscriber hook): while `observed` is true,
+    /// Change observation (the flush-subscriber hook): while `observed` is true,
     /// every value-bearing change lands in `changed` — a `set`/`touch` records the origin node and
     /// the dirty walk records each `Computed` it transitions clean→dirty (the transitive "this
     /// value can no longer be trusted" set; an *already*-dirty computed re-dirtied records
@@ -244,7 +244,7 @@ impl<V> Inner<V> {
         self.nodes[source.index()].subscribers.push(subscriber);
     }
 
-    /// Adopt a freshly-created node under the currently-computing node (reactivity S4b). At top level
+    /// Adopt a freshly-created node under the currently-computing node. At top level
     /// (no body running) the node is a root and keeps `owner: None`. Called for `signal`/`computed`/
     /// `effect` created through the language surface; a foreign source
     /// ([`ReactiveGraph::signal_root`]) never adopts — it owns its own lifetime.
@@ -293,7 +293,7 @@ impl<V> Inner<V> {
         self.free.push(node);
     }
 
-    /// Dispose the whole owner subtree rooted at `node` **excluding `node` itself** (reactivity S4b):
+    /// Dispose the whole owner subtree rooted at `node` **excluding `node` itself**:
     /// every owned descendant, depth-first and in reverse creation order (children created last are
     /// torn down first — the SolidJS teardown order). Each disposed descendant's `content`/`body`
     /// cells land in [`Inner::reclaimed`] for the client to release; its graph edges are severed so no
@@ -371,9 +371,9 @@ impl<V> Inner<V> {
     /// transitively-affected node once, so a diamond enqueues its sink effect a single time.
     fn mark_dirty_subscribers(&mut self, node: NodeId) {
         // An explicit worklist over indexed reads (no subscriber-vec clone, no recursion): the
-        // visit ORDER differs from the old depth-first recursion, but the visited SET is
-        // identical (the dirty/queued guards dedupe), and the flush sorts each round — so
-        // effect execution order is unchanged. Alloc-free via the reused scratch.
+        // visited SET is exact (the dirty/queued guards dedupe), and the flush sorts each
+        // round — so effect execution order does not depend on this walk's visit order.
+        // Alloc-free via the reused scratch.
         let mut work = std::mem::take(&mut self.dirty_scratch);
         work.clear();
         work.push(node);
@@ -470,9 +470,8 @@ impl<V: Clone> ReactiveGraph<V> {
         }
     }
 
-    /// Create a `signal` holding `initial`, **owned** by the currently-computing node if any
-    /// (reactivity S4b). Reading it subscribes the current computing node; setting it dirties
-    /// dependents.
+    /// Create a `signal` holding `initial`, **owned** by the currently-computing node if any.
+    /// Reading it subscribes the current computing node; setting it dirties dependents.
     pub fn signal(&self, initial: V) -> NodeId {
         let mut inner = self.inner.borrow_mut();
         let mut node = Node::placeholder();
@@ -500,7 +499,7 @@ impl<V: Clone> ReactiveGraph<V> {
     /// Create a lazy `computed` from `body` (a closure value the backend knows how to run), its memo
     /// cell seeded with `memo` (so an owner-tree teardown can reclaim it even if the computed is never
     /// read). It is created dirty and computes on first [`read`](Self::read), owned by the
-    /// currently-computing node if any (reactivity S4b).
+    /// currently-computing node if any.
     pub fn computed(&self, body: V, memo: V) -> NodeId {
         let mut inner = self.inner.borrow_mut();
         let mut node = Node::placeholder();
@@ -624,8 +623,8 @@ impl<V: Clone> ReactiveGraph<V> {
 
     /// Signal that `node`'s value changed **without replacing its stored `V`** — dirtying and
     /// queuing exactly as [`set`](Self::set) does. For a client whose `V` is a stable *handle* to
-    /// externally-stored content (the higher-order-abi extension stores arena-cell ids and
-    /// updates the cell in place, H5): the handle never changes, only the content behind it.
+    /// externally-stored content (the extension stores arena-cell ids and updates the cell in
+    /// place): the handle never changes, only the content behind it.
     pub fn touch(&self, node: NodeId) {
         let mut inner = self.inner.borrow_mut();
         debug_assert!(inner.nodes[node.index()].live, "touch of a disposed node");
@@ -723,7 +722,7 @@ impl<V: Clone> ReactiveGraph<V> {
             return;
         }
         // Detach from the owner's child list, so a later rerun/disposal of the owner does not try to
-        // dispose this (now dead, possibly reused) slot — the owner-tree S4b invariant.
+        // dispose this (now dead, possibly reused) slot — the owner-tree invariant.
         if let Some(owner) = inner.nodes[node.index()].owner
             && inner.nodes[owner.index()].live
         {
@@ -780,7 +779,7 @@ impl<V: Clone> ReactiveGraph<V> {
 
     /// Drain the cells of owner-tree children disposed since the last drain into `out` (appending —
     /// the caller owns the buffer so a hot loop reuses its allocation). Each is a `content`/`body`
-    /// `V` of an auto-disposed descendant (reactivity S4b): the client releases every one, so a body
+    /// `V` of an auto-disposed descendant: the client releases every one, so a body
     /// that creates-then-drops reactive nodes each run reclaims their backing cells rather than
     /// leaking them until program end. Call after every [`read`](Self::read)/[`flush`](Self::flush)
     /// and after a [`dispose`](Self::dispose). Order is disposal order (deterministic).
@@ -801,12 +800,12 @@ impl<V: Clone> ReactiveGraph<V> {
     }
 
     /// Whether some node is currently (re)computing — a dependency read right now would record an
-    /// edge (H5): a client's inlined-read fast path must be OFF while this is true.
+    /// edge: a client's inlined-read fast path must be OFF while this is true.
     pub fn tracking(&self) -> bool {
         !self.inner.borrow().computing.is_empty()
     }
 
-    /// How many live `Computed` nodes are dirty (H5): a client's memo-read fast path must be OFF
+    /// How many live `Computed` nodes are dirty: a client's memo-read fast path must be OFF
     /// while any memo is stale.
     pub fn dirty_computed_count(&self) -> usize {
         self.inner.borrow().dirty_computeds
@@ -832,13 +831,13 @@ impl<V: Clone> ReactiveGraph<V> {
     }
 
     /// Whether `node` is a live (not disposed) slot — the guard a *held* id needs before reading
-    /// through it (a diff subscriber can outlive a node a hot swap disposed, server-hmr L1).
+    /// through it (a diff subscriber can outlive a node a hot swap disposed).
     pub fn is_live(&self, node: NodeId) -> bool {
         self.inner.borrow().nodes[node.index()].live
     }
 
     /// How many effects are queued for the next flush — the "will this flush do anything?"
-    /// pre-check the opt-in flush telemetry gates its span on (server-hmr L4), so a no-op flush
+    /// pre-check the opt-in flush telemetry gates its span on, so a no-op flush
     /// (a `set` with no subscribers) emits nothing.
     pub fn pending_effects(&self) -> usize {
         self.inner.borrow().queue.len()
@@ -1443,7 +1442,7 @@ mod tests {
 
     #[test]
     fn owner_tree_disposes_prior_children_on_rerun() {
-        // The S4b owner tree: a parent effect that creates a *child* effect on every run must dispose
+        // The owner tree: a parent effect that creates a *child* effect on every run must dispose
         // last run's child before this run's — so children do not accumulate, and a change the old
         // child subscribed to reruns only the single live child, not N stale copies.
         let child_runs = Rc::new(Cell::new(0));

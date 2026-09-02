@@ -67,7 +67,7 @@ pub fn apply_binary_wide(
         return apply_binary(op, left, right);
     };
     let (a, b) = (*a, *b);
-    // `>>` on a fixed-width value (W5): `a` is the value, `b` the shift count (same `0..=63` domain as
+    // `>>` on a fixed-width value: `a` is the value, `b` the shift count (same `0..=63` domain as
     // Tier B `int` shifts). Arithmetic (sign-filling) on a signed width, logical (zero-filling) on an
     // unsigned one — they differ only for `u64` with bit 63 set. A right shift never grows the value
     // past the width, so no mask is needed.
@@ -111,7 +111,7 @@ pub fn apply_binary_wide(
     }
 }
 
-/// Bitwise/shift operators on `int` (P-BITS Tier B) — the tree-walker twin of the VM's `bitwise`;
+/// Bitwise/shift operators on `int` — the tree-walker twin of the VM's `bitwise`;
 /// identical semantics and error text so the differential agrees by construction. Integer-only
 /// (checker-enforced, E0043); `>>` is arithmetic (sign-extending); the shift amount must be in
 /// `0..=63` or the program panics deterministically.
@@ -153,7 +153,7 @@ pub fn apply_unary(op: UnaryOp, value: &Value) -> Result<Value, OpError> {
         (UnaryOp::Neg, Value::Float(f)) => Ok(Value::Float(-f)),
         (UnaryOp::Neg, Value::F32(f)) => Ok(Value::F32(-f)),
         (UnaryOp::Not, Value::Bool(b)) => Ok(Value::Bool(!b)),
-        // `!` on an `int` is bitwise complement (P-BITS Tier B2), like Rust: `!x == -(x+1)`. A
+        // `!` on an `int` is bitwise complement, like Rust: `!x == -(x+1)`. A
         // fixed-width operand is erased to its i64 word here and reduced back into its declared
         // width by the `MaskWidth` lowering emits after the op, exactly as unary `-` and `+ - *` are.
         (UnaryOp::Not, Value::Int(i)) => Ok(Value::Int(!i)),
@@ -182,7 +182,7 @@ fn arithmetic(op: BinaryOp, left: &Value, right: &Value) -> Result<Value, OpErro
         };
     }
 
-    // Numeric widening lattice `int < f32 < float` (P-PACK Phase 3): the result takes the higher
+    // Numeric widening lattice `int < f32 < float`: the result takes the higher
     // rank. A `float` operand promotes the computation to f64; otherwise (the operands are `int`/`f32`
     // with at least one `f32`, the int+int case having returned above) it computes at f32.
     let rank = |v: &Value| match v {
@@ -220,7 +220,7 @@ fn arithmetic(op: BinaryOp, left: &Value, right: &Value) -> Result<Value, OpErro
 fn compare(op: BinaryOp, left: &Value, right: &Value) -> Result<Value, OpError> {
     // **One comparator** — `crate::compare_primitive`, the same function a set's canonical order,
     // `.compare()`, `sorted` and the extremum reductions read. Mirrors the VM's `compare`; see it
-    // for what a second hand-rolled ladder here used to leave out.
+    // for what a second hand-rolled ladder here would leave out.
     let ordering = match crate::compare_primitive(left, right) {
         Some(ordering) => Some(ordering),
         // Two numbers with no ordering between them is NaN, where every comparison is false rather
@@ -253,17 +253,17 @@ pub(crate) fn values_equal(left: &Value, right: &Value) -> bool {
         (Value::Float(a), Value::Float(b)) => a == b,
         (Value::Int(a), Value::Float(b)) => (*a as f64) == *b,
         (Value::Float(a), Value::Int(b)) => *a == (*b as f64),
-        // `f32` equality, including cross-type numeric `==` (compared as the lossless f64 widening,
-        // P-PACK Phase 3) so `1.0f32 == 1.0` / `1.0f32 == 1` behave like the int/float cross-arms.
+        // `f32` equality, including cross-type numeric `==` (compared as the lossless f64
+        // widening) so `1.0f32 == 1.0` / `1.0f32 == 1` behave like the int/float cross-arms.
         (Value::F32(a), Value::F32(b)) => a == b,
         (Value::F32(_), Value::Int(_) | Value::Float(_))
         | (Value::Int(_) | Value::Float(_), Value::F32(_)) => as_f64(left) == as_f64(right),
         (Value::Str(a), Value::Str(b)) => a == b,
-        // Two byte buffers are equal iff their contents match (P-PACK 4.4).
+        // Two byte buffers are equal iff their contents match.
         (Value::Bytes(a), Value::Bytes(b)) => a == b,
         (Value::Bool(a), Value::Bool(b)) => a == b,
         (Value::List(a), Value::List(b)) => a.elements_eq(b),
-        // Tuples compare structurally element-wise (value semantics, object-model slice 4) —
+        // Tuples compare structurally element-wise (value semantics) —
         // matching the VM's `values_equal`.
         (Value::Tuple(a), Value::Tuple(b)) => a == b,
         // Sets are canonical (sorted, de-duplicated), so structural vector equality is set
@@ -271,7 +271,7 @@ pub(crate) fn values_equal(left: &Value, right: &Value) -> bool {
         (Value::Set(a, _), Value::Set(b, _)) => a == b,
         (Value::Map(a, _), Value::Map(b, _)) => a == b,
         (Value::Enum(a), Value::Enum(b)) => a == b,
-        // Object `==` is kind-dependent (object-model slice 2): a value `struct` compares
+        // Object `==` is kind-dependent: a value `struct` compares
         // **structurally** (the `ObjectValue` `PartialEq`), while a reference `class` defaults to
         // **identity** (same `Rc` allocation). A class's structural opt-in is `impl Equatable`,
         // dispatched in `apply_binary_op` *before* this fallback, so a class reaching here has no
@@ -283,7 +283,7 @@ pub(crate) fn values_equal(left: &Value, right: &Value) -> bool {
                 Rc::ptr_eq(a, b)
             }
         }
-        // Extern-type values compare through their contract (extern-types X1), matching the
+        // Extern-type values compare through their contract, matching the
         // VM's `values_equal` rung by construction.
         (Value::Extern(a), Value::Extern(b)) => a.borrow().eq_value(&**b.borrow()),
         (Value::Unit, Value::Unit) => true,
@@ -291,7 +291,7 @@ pub(crate) fn values_equal(left: &Value, right: &Value) -> bool {
     }
 }
 
-/// Reference identity for `===`/`!==` (object-model slice 2): two objects are identical iff they
+/// Reference identity for `===`/`!==`: two objects are identical iff they
 /// are the **same `Rc` allocation**. For non-object operands `===` has no reference to ask about,
 /// so it falls back to [`values_equal`] — keeping the operator total and agreeing with the VM,
 /// while the checker restricts `===` to reference (class) operands (E0034). Independent of
@@ -314,7 +314,7 @@ fn as_f64(value: &Value) -> Option<f64> {
     }
 }
 
-/// Numeric coercion to `f32`, for the f32 arithmetic path (`int`/`f32` operands, P-PACK Phase 3).
+/// Numeric coercion to `f32`, for the f32 arithmetic path (`int`/`f32` operands).
 fn as_f32(value: &Value) -> Option<f32> {
     match value {
         Value::Int(i) => Some(*i as f32),
@@ -485,7 +485,7 @@ mod tests {
                 .code,
             DiagnosticCode::TypeMismatch
         );
-        // `!` on an `int` is bitwise complement (P-BITS Tier B2): `!1 == -2`, `!0 == -1`.
+        // `!` on an `int` is bitwise complement: `!1 == -2`, `!0 == -1`.
         assert_eq!(apply_unary(UnaryOp::Not, &int(1)), Ok(int(-2)));
         assert_eq!(apply_unary(UnaryOp::Not, &int(0)), Ok(int(-1)));
         // `!` on a non-int/non-bool is still a type error.

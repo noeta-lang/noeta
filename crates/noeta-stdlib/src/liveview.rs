@@ -1,4 +1,4 @@
-//! The bundled LiveView client shim (server-hmr L2) — the browser half of the view/diff push
+//! The bundled LiveView client shim — the browser half of the view/diff push
 //! protocol ([`crate::reactive::view_ctx_method_dispatch`]).
 //!
 //! Deliberately **not** a component framework: a ~50-line patch-applier. The server renders the
@@ -18,7 +18,7 @@
 //! - The socket path defaults to `/ws`; set `window.NOETA_LIVE_PATH` before the script to change.
 //! - On close it reconnects (1s backoff); the server sends a fresh snapshot on every connect, so
 //!   recovery is total-state, never replayed patches.
-//! - HMR events (server-hmr L3) ride the same socket: `reload` (a hot swap landed — the server
+//! - HMR events ride the same socket: `reload` (a hot swap landed — the server
 //!   pushes it and closes; the page reloads into fresh markup over the preserved signal state)
 //!   and `error` (a rejected edit under `--watch` — rendered diagnostics in a full-screen
 //!   overlay, cleared by the next good frame). Unknown frame types are ignored, so an older

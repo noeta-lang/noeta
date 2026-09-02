@@ -1,7 +1,7 @@
 //! `std.cell` — a shared, mutable, identity-carrying box: `cell.new(v)` yields a `Cell<T>` whose
-//! `get`/`set`/`update` read and replace the held value. The **Class-3 proving client**
-//! (higher-order-abi H4): the first extension that owns language values *across* dispatches, and
-//! deliberately the smallest possible one — reactive (H5) is this shape plus a dependency graph.
+//! `get`/`set`/`update` read and replace the held value. The **Class-3 proving client**: the
+//! first extension that owns language values *across* dispatches, and
+//! deliberately the smallest possible one — reactive is this shape plus a dependency graph.
 //!
 //! The structural rule on display: the extern box ([`CellBox`]) carries only a plain [`Retained`]
 //! id — the **value** lives in the backend's retained arena, where the refcount discipline, the

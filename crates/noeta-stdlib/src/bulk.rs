@@ -1,7 +1,7 @@
-//! Element-wise **array-programming** ops over a numeric `List<T>` (array-ops arc).
+//! Element-wise **array-programming** ops over a numeric `List<T>`.
 //!
-//! The packed-widths arc made a bare `List<i32>`/`List<f32>`/… a compact flat byte buffer, and the
-//! packed-reductions arc folded that buffer. This module is the element-wise sibling: `+`/`-`/`*` on
+//! A bare `List<i32>`/`List<f32>`/… is a compact flat byte buffer, and [`crate::reductions`] folds
+//! that buffer. This module is the element-wise sibling: `+`/`-`/`*` on
 //! two same-type lists, a list × scalar `scale`, and the unary maps `abs`/`neg`/`clamp` — each
 //! producing a **new** buffer of the operand's element type (numpy-style, no broadcasting).
 //!
@@ -95,9 +95,9 @@ pub fn length_mismatch(op: ElemBinOp) -> StdError {
 // --- Packed byte-buffer kernels (the fast path: two contiguous native-width buffers) ---
 //
 // Each kernel below is one generic `fn f<S: Elem>` body monomorphized once per element width — the
-// `chunks_exact` + [`Elem::read_le`] loop is the same tight, bounds-check-free shape the per-width
-// macros had, so LLVM still autovectorizes each mono. Integer wrap and the float IEEE/`min`/`max`
-// policy live in the [`Elem`] impl, so a body is width-agnostic yet byte-identical to the old macros.
+// `chunks_exact` + [`Elem::read_le`] loop is a tight, bounds-check-free shape, so LLVM
+// autovectorizes each mono. Integer wrap and the float IEEE/`min`/`max` policy live in the
+// [`Elem`] impl, so a body is width-agnostic.
 // The `match field` dispatch that follows each body only *selects* the monomorphization (and carries
 // the element-typed scalar arguments for `scale`/`clamp`).
 
@@ -171,7 +171,7 @@ pub fn zip_num_packed(
 
 /// Scale a packed buffer by a scalar factor `k` (already the element type) into a fresh buffer.
 /// Integers wrap at the width ([`Elem::mul`]); floats multiply IEEE. The dispatch arm narrows the
-/// laundered `i64`/`f64` factor to `S` with an `as` cast, exactly the old per-width macros' `$k as $ty`.
+/// laundered `i64`/`f64` factor to `S` with an `as` cast.
 fn scale_buf<S: Elem>(a: &[u8], k: S) -> Vec<u8> {
     let mut out = Vec::with_capacity(a.len());
     for c in a.chunks_exact(S::BYTES) {

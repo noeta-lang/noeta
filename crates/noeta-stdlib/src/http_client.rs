@@ -1,4 +1,4 @@
-//! The configured HTTP **client** (http arc H7) — `std.http.client`'s `Client` extern type.
+//! The configured HTTP **client** — `std.http.client`'s `Client` extern type.
 //!
 //! The free verbs (`client.get(url)`) are the one-shot door: no base URL, no shared headers, no
 //! deadline. A `Client` is the *configured* door — the thing every other ecosystem calls a client
@@ -83,7 +83,7 @@ impl PartialEq for HttpClient {
 
 impl Eq for HttpClient {}
 
-/// How a [`HttpClient`] retries (http arc H9).
+/// How a [`HttpClient`] retries.
 ///
 /// Two things are retried: a **transport** failure the seam classified as transient
 /// ([`crate::NetErrorKind::retryable`] — timeout, dns, connect), and a **status** in
@@ -313,7 +313,7 @@ impl HttpClient {
         jar.store(url, &cookie.to_header(), now_ms)
     }
 
-    /// Perform `request` through the host, applying this client's retry policy (http arc H9).
+    /// Perform `request` through the host, applying this client's retry policy.
     ///
     /// Waiting between attempts goes through the **Clock** capability's `delay`, not a thread sleep
     /// written here: under the sandbox that advances the logical clock without blocking, so a

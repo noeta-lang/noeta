@@ -1,4 +1,4 @@
-//! The extern-type value contract (extern-types X1) — the uniform behavior seam a registered
+//! The extern-type value contract — the uniform behavior seam a registered
 //! native type implements ONCE, hosted by both backends.
 //!
 //! An [`crate::registry::ExtType`] names the type and carries its method signatures + dispatch;

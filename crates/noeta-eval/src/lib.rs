@@ -7,17 +7,15 @@
 //! `noeta run` executes on the bytecode VM via `noeta-runner`). It interprets the same
 //! RC-annotated Core IR the VM compiles from, behind the [`Backend`] trait, returning a
 //! *structured* [`RunResult`] — never writing stdout or exiting — so the two backends' results
-//! can be asserted byte-identical. The M0 AST tree-walker this crate began as was retired in the
-//! memory-management migration (it fired destructors only at teardown, so it could not reproduce
-//! last-use destruction); only the crate's *name history* survives in old comments.
+//! can be asserted byte-identical.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::{Rc, Weak};
 
 use noeta_ast::reflect::TypeRepr;
-// The trailing-expression desugar + its sentinel live in `noeta_ast::desugar` (audit-3
-// finding 10), shared with the VM session so the two backends agree by construction (the
+// The trailing-expression desugar + its sentinel live in `noeta_ast::desugar`,
+// shared with the VM session so the two backends agree by construction (the
 // `session_parity` differential gates).
 use noeta_ast::desugar::{REPL_VALUE, rewrite_trailing_expr};
 use noeta_ast::{BinaryOp, ForPattern, Pattern, Program, RenderHint, TypeRef, UnaryOp};
@@ -38,23 +36,18 @@ pub use leak::{live_count, live_peak, reset_peak, set_safepoint_threshold};
 pub use value::{IterState, ListRepr, Value};
 use value::{PackedList, PackedSchema, PackedSlot, SlotKind};
 
-// The `Backend`/`RunResult` seam moved into its own crate in M1 so the tree-walker and the
-// bytecode VM are siblings (neither depends on the other). Re-exported here so existing
-// `noeta_eval::{Backend, RunResult}` users keep working.
+// The `Backend`/`RunResult` seam lives in its own crate so this backend and the bytecode VM are
+// siblings (neither depends on the other). Re-exported here so `noeta_eval::{Backend, RunResult}`
+// paths keep working.
 pub use noeta_backend::{Backend, RunResult};
 
 /// The Core-IR **reference interpreter**, exposed as a [`Backend`] — the differential oracle's
-/// non-VM half. (Named `IrRefBackend` in its M0 life; the AST walk was retired in the RC
-/// migration and the old name kept misleading readers into treating this as a production path,
-/// so it now says what it is. A deprecated alias keeps the old spelling compiling.)
+/// non-VM half.
 #[derive(Debug, Clone)]
 pub struct IrRefBackend {}
 
-/// The pre-RC-migration name of [`IrRefBackend`], kept as a compiling alias.
-#[deprecated(
-    note = "renamed to IrRefBackend: the AST tree-walk was retired in the RC migration; \
-            this backend interprets the Core IR"
-)]
+/// A deprecated alias for [`IrRefBackend`].
+#[deprecated(note = "renamed to IrRefBackend: this backend interprets the Core IR")]
 pub type TreeWalkBackend = IrRefBackend;
 
 impl IrRefBackend {
@@ -62,9 +55,8 @@ impl IrRefBackend {
         IrRefBackend {}
     }
 
-    // The AST-walk entry points (`run_with_host`, `run_with_sites`, `run_with_host_sites`) were
-    // retired in migration Phase 7; production execution is the bytecode VM (`noeta-runner`).
-    // The plain [`Backend::run`] path remains for the perf benches and property tests (it lowers
+    // Production execution is the bytecode VM (`noeta-runner`). The plain [`Backend::run`] path
+    // remains for the perf benches and property tests (it lowers
     // to Core IR like everything else — there is no AST walk left), and
     // `Interpreter::run_with_sites` stays as the shared executor the IR interpreter reuses.
 }
@@ -77,11 +69,10 @@ impl Default for IrRefBackend {
 
 impl Backend for IrRefBackend {
     /// Execute a program through the canonical **Core-IR interpreter** — the same lowering the
-    /// conformance reference runs. (The AST tree-walker this crate began as was retired:
-    /// it was neither a production path nor the differential oracle — the oracle is VM-vs-IR — so it
-    /// was pure duplication. Lowering is total over the parsed language, so this never fails.)
+    /// conformance reference runs. Lowering is total over the parsed language, so this never
+    /// fails.
     fn run(&self, program: &Program) -> RunResult {
-        // The reference backend is an assembling driver in its own right (audit-6 F2): the checker
+        // The reference backend is an assembling driver in its own right: the checker
         // and lowering resolve std names against the process-default registry. Idempotent.
         noeta_stdlib::registry::default_seeded();
         // Apply the same IR passes the production paths do (`lang run` in `noeta-cli`, the conformance
@@ -90,8 +81,8 @@ impl Backend for IrRefBackend {
         // accumulator each step — O(n²) instead of the O(n) in-place path the real run takes. A single
         // `check_all` yields both the `type_of` sites and the relevance, so the checker runs once.
         let checked = noeta_check::check_all(program);
-        // Lower with the checker's site maps: packed-list literals stream into a flat buffer
-        // (P-PACK 2.5) and `list[i].field` reads fuse to `Rvalue::IndexField` (P-PACK 2.5+). Both are
+        // Lower with the checker's site maps: packed-list literals stream into a flat buffer,
+        // and `list[i].field` reads fuse to `Rvalue::IndexField`. Both are
         // carried inline on the IR, so `run_ir` needs no map.
         let ir = noeta_ir::lower_with_sites(program, noeta_ir::lowering_sites!(checked.sites))
             .expect("Core-IR lowering is total over the parsed language");
@@ -171,8 +162,8 @@ impl Session {
     /// display form is returned in `value` so the REPL can echo it (`1 + 2` → `3`).
     ///
     /// Execution goes through the **Core-IR interpreter** — the same canonical path as `lang run`
-    /// and the conformance reference — so the REPL inherits last-use destruction and in-place reuse
-    /// rather than the superseded AST-walk semantics. The batch is lowered, the precise-RC drop and
+    /// and the conformance reference — so the REPL inherits last-use destruction and in-place
+    /// reuse. The batch is lowered, the precise-RC drop and
     /// reuse passes are run (exactly as the bytecode pipeline does), and the top-level statements
     /// execute in the **persistent** global scope with a fresh per-batch temporary frame, so
     /// bindings, `fn`/`type`/`enum`/`class` declarations, and id continuity survive across entries.
@@ -278,9 +269,9 @@ impl Session {
         ));
         // The types the **language and its extensions** declare (prelude enums, extension attribute
         // shapes, native enums) need no re-seeding here: `build` walks this entry's AST only and
-        // `accumulate` purges a redeclared name's records, which is exactly why they used to have to
-        // be re-embedded after every entry — the whole-program path and the REPL otherwise told
-        // different stories about `variants_of("Ordering")` (3 there, 0 here). Resolved lazily
+        // `accumulate` purges a redeclared name's records, so re-embedding them per entry would be
+        // the alternative — and the whole-program path and the REPL would then tell different
+        // stories about `variants_of("Ordering")`. Resolved lazily
         // through the shared `ReflectionInfo` lookups, they cannot be purged and cannot diverge, and
         // a user's own `enum Ordering` still shadows (the program's tables answer first).
         let flow = self.interp.run_ir_batch(&ir);
@@ -365,11 +356,8 @@ pub enum Builtin {
     /// `panic(msg)` — abort with an unrecoverable runtime diagnostic and nonzero exit.
     Panic,
     /// `assert(cond)` / `assert(cond, msg)` — abort (a `Panic` diagnostic) when `cond` is false.
-    /// The assertion primitive `@test` blocks rest on (object-model slice 6).
+    /// The assertion primitive `@test` blocks rest on.
     Assert,
-    // (The whole orchestration family — `task` at higher-order-abi H0/H2, `http.serve` at H3,
-    // `signal`/`computed`/`effect` at H5 — migrated onto the registry's `NativeCtx` dispatch,
-    // `noeta-stdlib/src/{task,serve,reactive}.rs`.)
 }
 
 impl Builtin {
@@ -390,15 +378,15 @@ impl Builtin {
     /// The prelude functions registered in every program's global scope. `none` is a
     /// prelude *value* (not a function), so it is bound separately in [`Interpreter::new`].
     const PRELUDE: &'static [Builtin] = &[
-        // `Len`/`Map`/`Filter`/`Sum` left the prelude (prelude-redesign P1.2): the collection
+        // `Len`/`Map`/`Filter`/`Sum` left the prelude: the collection
         // METHOD forms route to the same impls; `list.len`-style handles cover value use.
         Builtin::MakeOk,
         Builtin::MakeErr,
         Builtin::MakeSome,
         Builtin::Panic,
         Builtin::Assert,
-        // `Signal`/`Computed`/`Effect` left the prelude (P2a) for `use std.reactive`, and
-        // `Sleep`/`All`/`Race`/`MapBounded` (P2b) for `use std.task` — all bound by
+        // `Signal`/`Computed`/`Effect` left the prelude for `use std.reactive`, and
+        // `Sleep`/`All`/`Race`/`MapBounded` for `use std.task` — all bound by
         // `declare_use` as first-class builtin values when imported.
     ];
 }
@@ -413,14 +401,14 @@ impl Builtin {
 pub struct EnumDef {
     name: String,
     variants: Vec<VariantInfo>,
-    /// `@derive(Comparable)` without a hand-written `compare` (derive-soundness S3): `< <= > >=`
+    /// `@derive(Comparable)` without a hand-written `compare`: `< <= > >=`
     /// order by variant declaration index, then payload fields — the enum twin of
     /// [`TypeDef::derives_comparable`].
     derives_comparable: bool,
     /// `@derive(Serialize<Json>)` without a hand-written `to_json` — gates the synthesized
     /// `.to_json()` (the variant rendering `json.stringify` produces).
     derives_tojson: bool,
-    /// Inherent + `impl`-block methods (the unified body, object-model slice 3), compiled to
+    /// Inherent + `impl`-block methods (the unified body), compiled to
     /// closures capturing the definition (global) scope — exactly like a struct/class's `methods`.
     /// An instance call `value.m(...)` and an associated call `Enum.f(...)` both resolve here; the
     /// distinction (a value receiver vs. a bare type-name receiver) is made at the call site.
@@ -578,15 +566,15 @@ pub struct TypeDef {
     /// with the instance's fields and `self` bound into its scope. Shared so an `ObjectValue` can
     /// reach it.
     pub(crate) destructor: Option<Rc<noeta_ir::Func>>,
-    /// Whether this came from a `struct X {...}` struct (vs. a `class`). Cosmetic in M0.
+    /// Whether this came from a `struct X {...}` struct (vs. a `class`). Cosmetic.
     is_struct: bool,
-    /// Whether `==` on this type is **structural** (field-wise) rather than **reference identity**
-    /// (object-model slice 2): true for a value `struct`/opaque, or a `class` that is `Equatable`
+    /// Whether `==` on this type is **structural** (field-wise) rather than **reference identity**:
+    /// true for a value `struct`/opaque, or a `class` that is `Equatable`
     /// (derives it or hand-`impl`s `eq`); false only for a plain `class` (`==` → identity). Mirrors
     /// the VM `Shape::structural_eq`, computed from the same inputs so both backends agree — even on
     /// a *nested* class field, where the method-dispatch path is unavailable.
     structural_eq: bool,
-    /// Whether values of this type may **key a `Map` / member a `Set`** (P-PKEY): a key-capable
+    /// Whether values of this type may **key a `Map` / member a `Set`**: a key-capable
     /// `@packed` struct. A `Cell` because capability settles by fixpoint — a later declaration
     /// can complete a forward-referenced nested chain, and the interpreter re-stamps every
     /// settled type's (`Rc`-shared) def then. Mirrors the VM's `Shape::key_capable`, computed
@@ -599,12 +587,12 @@ pub struct TypeDef {
     /// synthesizes a structural JSON serializer.
     derives_tojson: bool,
     /// An *opaque* stub introduced by a `use` import: its real field set is unknown until
-    /// module loading lands (M1), so its all-fields literal accepts whatever fields are
+    /// module loading lands, so its all-fields literal accepts whatever fields are
     /// given (no unknown-field or full-init checks) and `..` spread copies the whole base.
     opaque: bool,
     /// Each field carrying a default (`x: T = expr`), as a parameterless [`noeta_ir::Thunk`] run in
-    /// the type's **definition (global) scope** when a literal omits the field (object-model
-    /// slice 5). Keyed by field name; only defaulted fields appear. Empty for an all-mandatory type
+    /// the type's **definition (global) scope** when a literal omits the field. Keyed by field
+    /// name; only defaulted fields appear. Empty for an all-mandatory type
     /// and for opaque imports. Mirrors the VM's `(type, field) → default thunk` table, so a missing
     /// field is filled identically in both backends.
     field_defaults: Vec<(String, noeta_ir::Thunk)>,
@@ -653,7 +641,7 @@ struct FieldSpec {
 /// A struct or class instance: its type and the values of its fields. A value `struct` is
 /// effectively immutable (a `..` structural update or `x.f = v` produces a new object via the
 /// copy-on-write path); a reference `class` mutates **in place** through the `RefCell`, so the
-/// change is visible through every alias sharing the `Rc` (object-model slice 2b). The `RefCell`
+/// change is visible through every alias sharing the `Rc`. The `RefCell`
 /// is what lets a *shared* (`strong_count > 1`) class instance be mutated at all — a bare
 /// `Rc<BTreeMap>` cannot. Borrows are always released promptly (snapshot-then-release) so a method
 /// or destructor that re-enters and mutates the same instance never hits a borrow conflict.
@@ -661,17 +649,17 @@ pub struct ObjectValue {
     pub(crate) def: Rc<TypeDef>,
     /// The field values in **slot order**, parallel to `def.fields` (`slots[i]` is the value of
     /// `def.fields[i]`). This mirrors the VM's `Payload::Object { shape, slots }` — the layout
-    /// groundwork P-PACK Phase 1 needs — replacing the former name-keyed `BTreeMap`: a `Vec` index
+    /// groundwork the packed layouts need: a `Vec` index
     /// is a cache-friendly array slot, not a tree node, and the slot↔name map lives once on the
     /// shared `def`, not per instance. An opaque `use`-import is constructed with a per-literal `def`
     /// whose fields are the literal's keys in sorted order (matching the VM's opaque shape), so even
     /// dynamic-field imports fit the uniform slot model.
     pub(crate) slots: RefCell<Vec<Value>>,
-    /// A monotonic per-run **creation sequence** (object-model slice 2c): the instance's allocation
+    /// A monotonic per-run **creation sequence**: the instance's allocation
     /// age. The cycle reaper finalizes reclaimed members in reverse-creation order (newest-first) by
     /// this key, matching the VM's `ObjHeader::seq` so cyclic `destruct` order agrees across backends.
     seq: u64,
-    /// The checker-resolved reflected type (runtime type-argument reflection, R2), `Some` only for a
+    /// The checker-resolved reflected type (runtime type-argument reflection), `Some` only for a
     /// **generic** instantiation (`Box<int>` → `Struct("Box", [Int])`) so `type_of` recovers the type
     /// arguments after a `dyn` launder; `None` for a non-generic type (recovered head-only from the
     /// shape) and every non-literal-constructed instance. Invisible to value semantics — `PartialEq`
@@ -687,7 +675,7 @@ pub struct ObjectValue {
 }
 
 thread_local! {
-    /// Monotonic object-creation counter for [`ObjectValue::seq`] (object-model slice 2c).
+    /// Monotonic object-creation counter for [`ObjectValue::seq`].
     static OBJECT_SEQ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
@@ -699,7 +687,7 @@ impl ObjectValue {
         ObjectValue::new_reflected(def, slots, None)
     }
 
-    /// As [`ObjectValue::new`], but carrying the reflected type tag (R2). Used only at object-literal
+    /// As [`ObjectValue::new`], but carrying the reflected type tag. Used only at object-literal
     /// construction for a generic instantiation; every other construction path uses [`ObjectValue::new`]
     /// (untagged → head-only reflection).
     fn new_reflected(
@@ -865,7 +853,7 @@ impl Closure {
     /// `Closure` construction goes through here so the live count is exact. Capturing a scope is the
     /// one way the tree-walker can tie a reference cycle (`scope → vars → closure → captured → scope`,
     /// e.g. a self-recursive nested `fn`), which `Rc` alone cannot reclaim — so the captured scope is
-    /// recorded as a cycle-collection candidate (Phase 6.3, [`register_captured_scope`]).
+    /// recorded as a cycle-collection candidate ([`register_captured_scope`]).
     fn new(
         params: Vec<String>,
         defaults: Vec<Option<noeta_ir::Thunk>>,
@@ -884,8 +872,8 @@ impl Closure {
         }
     }
 
-    /// How many leading [`Self::params`] are **type-argument slots** rather than value parameters
-    /// (poly-values F2b) — the eval twin of the VM's `Chunk::hidden`, read straight off the lowered
+    /// How many leading [`Self::params`] are **type-argument slots** rather than value parameters —
+    /// the eval twin of the VM's `Chunk::hidden`, read straight off the lowered
     /// `Func` so the two backends cannot disagree about the layout. Zero for every ordinary
     /// callable.
     fn hidden(&self) -> usize {
@@ -922,7 +910,7 @@ fn register_captured_scope(scope: &Rc<Scope>) {
 
 thread_local! {
     /// Every reference-`class` instance whose `mut` field has been **assigned in place** this run,
-    /// held weakly (object-model slice 2c). A class cycle (`a.next = b; b.next = a`) can only be
+    /// held weakly. A class cycle (`a.next = b; b.next = a`) can only be
     /// *closed* by such an in-place field assignment — construction cannot reference a
     /// not-yet-created object — so the cycle members are a subset of these. The exit reaper
     /// ([`Interpreter::reap_object_cycles`]) walks it after global teardown: any survivor is reachable
@@ -1074,7 +1062,7 @@ impl Scope {
 
     fn lookup(&self, name: &str) -> Option<Value> {
         if let Some(binding) = self.vars.borrow().get(name) {
-            // The drop audit (Phase 3.x) flags a read of a binding whose value was dropped here and
+            // The drop audit flags a read of a binding whose value was dropped here and
             // not since rebound — a use-after-drop, i.e. a static death that preceded this real use.
             drop_audit::on_read(self as *const Scope as usize, name);
             return Some(binding.value.clone());
@@ -1121,8 +1109,8 @@ impl Scope {
         }
     }
 
-    /// Reassign an existing binding **ignoring** its mutability — used for a field-set `x.f = v`
-    /// (object-model slice 2b′), where the checker has already enforced the kind-aware `mut` rule (a
+    /// Reassign an existing binding **ignoring** its mutability — used for a field-set `x.f = v`,
+    /// where the checker has already enforced the kind-aware `mut` rule (a
     /// `struct` field-set on an immutable binding is a static E0006; a `class` field-set mutates the
     /// shared instance in place, and the rebind merely restores `x` to that same instance).
     fn assign_force(&self, name: &str, value: Value) -> AssignOutcome {
@@ -1171,7 +1159,7 @@ impl Scope {
 
     /// **Plainly** release the value of the nearest binding for `name` — replace it with `Unit`,
     /// dropping the old value's `Rc` with **no** `destruct` block (that is `destroy_value`'s job,
-    /// reserved for globals until Phase 4). This is the IR `DropVar` operation (Phase 3): it
+    /// reserved for globals). This is the IR `DropVar` operation: it
     /// reclaims a function-local's value at its last use instead of at scope teardown. Searches
     /// outward like [`Scope::assign`]; a no-op if `name` is not bound (the drop pass only targets
     /// function-locals, never globals or captures, so the nearest binding is the intended local).
@@ -1272,7 +1260,7 @@ struct Task {
     /// re-entering a mid-execution state machine re-runs its current segment (infinite recursion).
     /// The tree-walker mirror of the VM's flag.
     polling: bool,
-    /// The task's **saved task-local context** (native-otel T5a): a snapshot of the spawner's
+    /// The task's **saved task-local context**: a snapshot of the spawner's
     /// `ctx_current` at `spawn`, swapped in around each poll of this task's step — the tree-walker
     /// mirror of the VM's field.
     context: Vec<u64>,
@@ -1283,7 +1271,7 @@ struct Task {
     holds: Vec<usize>,
 }
 
-/// One traced future (native-otel T5c) — the tree-walker mirror of the VM's entry. `future` is a
+/// One traced future — the tree-walker mirror of the VM's entry. `future` is a
 /// cloned [`Value::Future`] (the `Rc` keeps it alive; identity = `Rc::ptr_eq`); `context` is the
 /// stack its polls run under; `span` is ended when it completes.
 struct TracedFuture {
@@ -1307,7 +1295,7 @@ fn traced_same(a: &Value, b: &Value) -> bool {
 /// Mirrors the VM's `Channel`; both backends run the identical FIFO + block-on-full/empty logic, so
 /// the differential holds by construction.
 struct Channel {
-    /// Each queued message also carries the sender's trace context (native-otel T5d, `None` when
+    /// Each queued message also carries the sender's trace context (`None` when
     /// telemetry is off or no span was active) — the automatic-propagation envelope, mirroring the
     /// VM's `Channel::Local`.
     buffer: std::collections::VecDeque<(Value, Option<noeta_stdlib::TraceContext>)>,
@@ -1369,11 +1357,11 @@ struct Interpreter {
     /// distinguished `ErrorKind::Exit` unwinds. Not a diagnostic — the run halts cleanly
     /// (stdout kept, nothing reported) and the run's exit code is this value.
     requested_exit: Option<i32>,
-    /// Every declared `@packed` struct's field-type names (P-PKEY,
-    /// `noeta_ast::packed_named_fields`) — the input to the key-capability fixpoint below.
+    /// Every declared `@packed` struct's field-type names
+    /// (`noeta_ast::packed_named_fields`) — the input to the key-capability fixpoint below.
     /// Accumulated across declarations (a session declares incrementally).
     packed_fields: std::collections::HashMap<String, Vec<Option<String>>>,
-    /// The **key-capable** packed structs (P-PKEY, `noeta_ast::key_capable_packed`): types whose
+    /// The **key-capable** packed structs (`noeta_ast::key_capable_packed`): types whose
     /// values may key a `Map` / member a `Set`. Recomputed whenever a packed struct declares, and
     /// consulted at key-*use* time — which necessarily follows every involved declaration, so a
     /// forward-referenced nested chain is settled before it can be observed. Mirrors the VM's
@@ -1381,7 +1369,7 @@ struct Interpreter {
     key_capable_packed: std::collections::HashSet<String>,
     scope: Rc<Scope>,
     /// The root (global) scope, held so a field-default thunk can be run in the type's **definition
-    /// scope** (object-model slice 5) — types are top-level, so their defaults resolve globals only,
+    /// scope** — types are top-level, so their defaults resolve globals only,
     /// never the construction site's locals. A clone of the scope `scope` is initialized to.
     globals: Rc<Scope>,
     /// All host-coupled effects (filesystem, seeded PRNG, logical clock) behind the M2.1
@@ -1410,13 +1398,13 @@ struct Interpreter {
     /// Whether each `scopes` slot is a closed tombstone (Track A.7). Parallel to `scopes`; the only extra
     /// state a stable-index scope stack needs. Mirrors the VM's `scope_closed`.
     scope_closed: Vec<bool>,
-    /// The **current strand's task-local context** (native-otel T5a): an opaque `u64` stack
+    /// The **current strand's task-local context**: an opaque `u64` stack
     /// extensions read through `NativeCtx::context_*` (telemetry's active-span stack is the first
     /// client). Belongs to whichever strand is executing — the main strand (root) by default; the
     /// scheduler swaps a task's saved context in around each poll of its step, and a `spawn`
     /// snapshots it into the child. The tree-walker mirror of the VM's `ctx_current`.
     ctx_current: Vec<u64>,
-    /// **Traced futures** (native-otel T5c) — the future-completion hook, the tree-walker mirror
+    /// **Traced futures** — the future-completion hook, the tree-walker mirror
     /// of the VM's table. Entries are `Value` clones (`Rc`-owned, so teardown is automatic when
     /// the interpreter drops); almost always empty (the `poll_once` fast path is `is_empty()`).
     traced_futures: Vec<TracedFuture>,
@@ -1427,13 +1415,13 @@ struct Interpreter {
     /// round — a channel op that unblocks a sibling is progress even when no task *completes*.
     channels: Vec<Channel>,
     channel_progress: u64,
-    /// The extensions' retained-value arena (higher-order-abi H4) — the tree-walker twin of the
+    /// The extensions' retained-value arena — the tree-walker twin of the
     /// VM's `ext_arena`. Entries are `Rc` clones, so ownership is automatic (dropping the
     /// interpreter drops whatever the program never released, mirroring the VM's teardown
     /// release); freed indices are reused via `ext_arena_free`.
     ext_arena: Vec<Option<Value>>,
     ext_arena_free: Vec<u32>,
-    /// Per-run extension Rust state (`NativeCtx::state`, H4), keyed by the extension's own key.
+    /// Per-run extension Rust state (`NativeCtx::state`), keyed by the extension's own key.
     ext_state: Vec<(&'static str, noeta_stdlib::ExtState)>,
     /// The shared reflection artifact (attribute manifest + type registry), built from the program
     /// by the *same* `noeta_ast::reflect::build` the VM uses — so `attributes_of` materializes
@@ -1473,7 +1461,7 @@ struct Interpreter {
     /// The concrete static type the checker resolved for each `type_of(value)` site (keyed by the
     /// `Expr::TypeOf` span), harvested via `noeta_check::resolve_type_of_sites` from the *same*
     /// program the VM harvests — so both backends bake identical full-fidelity `Type` constants
-    /// (`type_of` fidelity A, P2.3). A site absent here uses the runtime head-constructor path.
+    /// (`type_of` fidelity A). A site absent here uses the runtime head-constructor path.
     type_of_sites: std::collections::HashMap<noeta_span::Span, noeta_ast::reflect::TypeRepr>,
     /// The `@derive(Deserialize<Json>)` decode registry (L2.2 DI), keyed by type name — the
     /// tree-walker twin of the VM's `deserialize_recipes`. Lifted from the checker's sites at
@@ -1481,12 +1469,12 @@ struct Interpreter {
     /// name up here to decode a JSON body into that type. Empty on every run with no such derive.
     deserialize_recipes: std::collections::HashMap<String, noeta_stdlib::TypeRecipe>,
     /// Every `@packed` struct's flat layout by (qualified) type name (native type-declaration
-    /// unification, Slice E2), lifted from the checker's sites at `run_ir` start. The from-scratch
+    /// unification), lifted from the checker's sites at `run_ir` start. The from-scratch
     /// producer [`NativeCtx::make_packed`](crate::native_ctx) resolves a produced `List<packed>`'s
     /// element schema by name here — the tree-walker twin of the VM's interned `packed_schemas`
     /// by-name scan. Empty on the checkerless REPL session path (no `@packed` layout is known there).
     packed_type_layouts: std::collections::HashMap<String, noeta_ast::reflect::PackedLayout>,
-    /// The program-wide **type-argument table** (poly-values F2b) — the concrete instantiations of
+    /// The program-wide **type-argument table** — the concrete instantiations of
     /// forwarding generics, lifted from the IR `Program` at `run_ir` start. A dynamic
     /// call-site-typed site resolves its per-instantiation recipe/name through the hidden slot's
     /// index into this table; identical to the VM's copy by construction.
@@ -1512,8 +1500,8 @@ struct Interpreter {
     /// aborts do not overwrite it), so unwinding and swallowed destructor aborts can never leave a
     /// stale trace.
     abort_trace: Vec<noeta_backend::TraceFrame>,
-    /// The extension **registry** this interpreter resolves native names against (instance-registry
-    /// IR3) — the tree-walker twin of the VM's `registry` field. `None` (the default on every
+    /// The extension **registry** this interpreter resolves native names against — the
+    /// tree-walker twin of the VM's `registry` field. `None` (the default on every
     /// ordinary run) falls back to the process-global default registry through [`Interpreter::reg`],
     /// so the differential is unchanged; an embedding host that assembled its own extension set
     /// threads its `Registry` in, and both backends then resolve the same names by construction.
@@ -1521,8 +1509,8 @@ struct Interpreter {
 }
 
 impl Interpreter {
-    /// The extension registry this interpreter resolves native names against (instance-registry
-    /// IR3) — the tree-walker twin of `Vm::reg`. Falls back to the process-global default when
+    /// The extension registry this interpreter resolves native names against — the tree-walker
+    /// twin of `Vm::reg`. Falls back to the process-global default when
     /// unset, keeping every ordinary run (and the differential) unchanged. Returns `&'static`.
     fn reg(&self) -> &'static noeta_stdlib::registry::Registry {
         self.registry
@@ -1533,7 +1521,7 @@ impl Interpreter {
         Interpreter::with_host(Box::new(noeta_stdlib::SandboxHost::new()))
     }
 
-    /// Build an interpreter against a caller-provided [`noeta_stdlib::Host`] (M2.3), keeping the
+    /// Build an interpreter against a caller-provided [`noeta_stdlib::Host`], keeping the
     /// default deterministic executor. `new` uses the deterministic sandbox (what the differential
     /// needs); the CLI/REPL pass a real host here.
     fn with_host(host: Box<dyn noeta_stdlib::Host>) -> Interpreter {
@@ -1646,7 +1634,7 @@ impl Interpreter {
         }
     }
 
-    /// Reap reference cycles the tree-walker tied through closure capture (Phase 6.3) — the eval
+    /// Reap reference cycles the tree-walker tied through closure capture — the eval
     /// analogue of the VM's backup mark-sweep. Run **once at clean exit, after [`destroy_globals`]**:
     /// at that point every legitimately-live binding has been torn down, so any captured scope still
     /// alive is reachable only through a `scope ↔ closure` capture cycle that `Rc` cannot break.
@@ -1676,8 +1664,8 @@ impl Interpreter {
         }
     }
 
-    /// Reap reference-`class` cycles the program tied through `mut` fields (object-model slice 2c —
-    /// `a.next = b; b.next = a`), which refcounting alone cannot reclaim. Run once at clean exit,
+    /// Reap reference-`class` cycles the program tied through `mut` fields
+    /// (`a.next = b; b.next = a`), which refcounting alone cannot reclaim. Run once at clean exit,
     /// **after** global teardown and the scope reaper: any object in [`MUTATED_OBJECTS`] still live is
     /// reachable only through such a cycle. Done in two passes so it is robust to objects sharing a
     /// cycle: first **drain every survivor's fields** (breaking every cycle at once, leaving acyclic
@@ -1726,7 +1714,7 @@ impl Interpreter {
     }
 
     /// Fire the destructors of the current scope's live values as a **panic/abort unwinds through
-    /// it** (spec §6, Phase 4.2c-ii). Drains the scope in reverse-construction order and runs each
+    /// it** (spec §6). Drains the scope in reverse-construction order and runs each
     /// `destruct` at its last reference — the same `drain_reverse` + `destroy_value` as global
     /// teardown, but applied to a function/block scope the abort is abandoning. Called at every
     /// scope boundary on `Unwind::Abort`, so as the abort climbs the call stack each frame's locals
@@ -1744,7 +1732,7 @@ impl Interpreter {
     /// positional (enum), or iteration (list/set/map) order, each recursively firing its own
     /// `destruct` at *its* last reference. A non-aggregate, or an aliased aggregate (refcount > 1),
     /// simply lets its `Rc` drop here — memory is reclaimed, no destructor fires (deferred to the
-    /// final reference, §2). Closure-captured values are out of §4 scope (Phase 6 owns capture).
+    /// final reference, §2). Closure-captured values are out of §4 scope.
     /// Register one producer hold on channel `cid` (isolates I.4c): a spawned task/isolate captured a
     /// `Sender` for it. The tree-walker mirror of the VM's `add_producer_hold`.
     pub(crate) fn add_producer_hold(&mut self, cid: usize) {
@@ -1778,7 +1766,7 @@ impl Interpreter {
             Value::List(ListRepr::Boxed { items, .. })
             | Value::Set(items, _)
             | Value::Tuple(items) => self.destroy_sequence(items),
-            // A packed list (P-PACK 2.3) holds only primitive words — no heap elements, no
+            // A packed list holds only primitive words — no heap elements, no
             // destructors — so its `Rc<Vec<u64>>` simply drops here, reclaiming the buffer.
             Value::List(ListRepr::Packed(_)) => {}
             Value::Map(entries, _) => self.destroy_map(entries),
@@ -2116,8 +2104,8 @@ impl Interpreter {
                 scope.declare(name.clone(), element, false);
                 Ok(())
             }
-            // `for (a, b, …) in …` destructures each iterated **tuple** element positionally
-            // (object-model slice 4b). An element of the wrong kind/arity is a runtime error.
+            // `for (a, b, …) in …` destructures each iterated **tuple** element positionally.
+            // An element of the wrong kind/arity is a runtime error.
             ForPattern::Tuple { names, .. } => match &element {
                 Value::Tuple(items) if items.len() == names.len() => {
                     for ((name, _), item) in names.iter().zip(items.iter()) {
@@ -2151,7 +2139,7 @@ impl Interpreter {
         // member import (`use std.math.sqrt`) binds each member to a `(module, func)` module-function
         // value; other imports (and unrecognized `std` names) fall back to the opaque-stub binding.
         // Classification is `Registry::classify_use` — the ONE source of truth the checker, IDE,
-        // and bytecode compiler consume (this used to be a third hand-rolled copy of the rules).
+        // and bytecode compiler consume, rather than a third hand-rolled copy of the rules.
         let reg = self.reg();
         for imported in names {
             use noeta_stdlib::registry::UseKind;
@@ -2161,7 +2149,7 @@ impl Interpreter {
                 // last segment.
                 UseKind::Module(qualified) => Value::NativeModule(qualified),
                 UseKind::MemberFn { module, func } => Value::ModuleFn(module, func),
-                // A native enum (`use shade.Hue`, native-extensibility S1b): bind the imported short
+                // A native enum (`use shade.Hue`): bind the imported short
                 // name to a real `EnumType`, so `Hue.Red` / `Hue.Labeled(x)` construct exactly like a
                 // `.noe` enum's `EnumType`. Variants (and hence their declaration indices) come from
                 // the registry keyed by qualified identity — the same source the bytecode compiler
@@ -2171,8 +2159,8 @@ impl Interpreter {
                 UseKind::ExtEnum(qualified) if native_type_value(reg, &qualified).is_some() => {
                     native_type_value(reg, &qualified).expect("guard checked it resolves")
                 }
-                // A native **fielded type** (`use geo.Handle` / `use geo.Point`, native-extensibility
-                // S2 + fielded unification): bind the imported short name to a **constructible**
+                // A native **fielded type** (`use geo.Handle` / `use geo.Point`): bind the
+                // imported short name to a **constructible**
                 // `TypeDef` — fields in registry order, non-opaque — so `Handle { … }` / `Point { … }`
                 // constructs a real `Object` exactly like a `.noe` class/struct. The `FieldedKind`
                 // selects the semantics: a class is a reference type (`is_struct = false`,
@@ -2783,7 +2771,7 @@ impl Interpreter {
 
         // Declared struct/class: build the slot vector directly in `def.fields` order. `..base`
         // fills unnamed slots first; named initializers override; any slot still empty is filled
-        // from its per-field default (slice 5), and a slot with neither is the full-initialization
+        // from its per-field default, and a slot with neither is the full-initialization
         // violation (E0009). The unknown-field and missing-field checks mirror the type checker.
         let mut slots: Vec<Option<Value>> = vec![None; def.fields.len()];
 
@@ -2859,7 +2847,7 @@ impl Interpreter {
     /// into nested packed structs. The schema's field order follows `def.fields` (the slot/
     /// materialization order); each field's kind is read from the layout by name. Returns `None` if a
     /// The packed field kinds of a `@packed` struct named `name`, in declared order — the element
-    /// bundle methods' width source (scalar-unification slice 3). Resolved from the recorded per-type
+    /// bundle methods' width source. Resolved from the recorded per-type
     /// field type names (`packed_fields`), so it covers every declared `@packed` struct, not only those
     /// materialized into a packed list. `None` if `name` is not a `@packed` struct or any field is not
     /// a simple numeric/`bool` primitive (such a type never binds a `vec` bundle).
@@ -2873,7 +2861,7 @@ impl Interpreter {
 
     /// The **constructible `TypeDef`** for a `@packed` element type named `name` — the scope binding
     /// for a source struct (bound by its unqualified name), or a registry-built def for a native
-    /// `@packed` struct (native type-declaration unification, Slice E2). A native struct's **qualified**
+    /// `@packed` struct (native type-declaration unification). A native struct's **qualified**
     /// layout name (`geo.Pt`) is never scope-bound — a `use geo.Pt` binds only the short name `Pt` — so
     /// packed-schema resolution for a native element (a `List<Pt>` literal, or the from-scratch
     /// `make_packed` producer) falls through to the registry, building the same value-`TypeDef` a
@@ -2944,7 +2932,7 @@ impl Interpreter {
 
         // Scope for a source struct (bound by its unqualified name); the registry for a native
         // `@packed` struct, whose **qualified** layout name is never scope-bound (an import binds only
-        // its short name). Registry-awareness lets the from-scratch producer (`make_packed`, Slice E2)
+        // its short name). Registry-awareness lets the from-scratch producer (`make_packed`)
         // — and a native `List<Pt>` literal — resolve a native element's schema and pack it flat.
         let def = self.packed_type_def(&layout.type_name)?;
         if def.fields.len() != layout.fields.len() {
@@ -3095,8 +3083,8 @@ impl Interpreter {
         self.bind_inner(mut_decl, false, name, name_span, value)
     }
 
-    /// As [`Self::bind`], but for the reassignment wrapping a field-set `x.f = v` (object-model
-    /// slice 2b′): the immutable-binding check is skipped, because the checker already enforced the
+    /// As [`Self::bind`], but for the reassignment wrapping a field-set `x.f = v`: the
+    /// immutable-binding check is skipped, because the checker already enforced the
     /// kind-aware `mut` rule statically — a `struct` field-set on an immutable `x` is a static
     /// E0006, and a `class` field-set mutates in place (this rebind restores `x` to that instance).
     fn bind_field_assign(&mut self, name: &str, name_span: Span, value: Value) -> Eval<()> {
@@ -3150,7 +3138,7 @@ impl Interpreter {
 
     /// `?` for the Core-IR interpreter: like [`eval_try`](Self::eval_try), but on the **error** path
     /// it first runs `on_error` — the drop pass's statically-computed reclamation of the frame locals
-    /// this early return abandons (Phase 4.2c) — so a `?` propagation destroys them exactly as an
+    /// this early return abandons — so a `?` propagation destroys them exactly as an
     /// explicit `return` would, before the value unwinds to the caller.
     fn eval_try_ir(
         &mut self,
@@ -3164,9 +3152,9 @@ impl Interpreter {
                 // An `Err` propagating out of TOP-LEVEL code (`call_sites` empty — no enclosing
                 // activation) has nowhere to go: no caller to hand it to, and no declared return type
                 // the checker could have rejected the `?` against (E0012 covers every declared
-                // return). Unwinding here used to end the program *quietly at exit 0* — a
-                // `client.get(url)?` transport failure was completely invisible and CI went green on
-                // a broken program. Abort with the error's own message instead (E0069); the abort
+                // return). Unwinding here would end the program *quietly at exit 0*, leaving a
+                // `client.get(url)?` transport failure invisible. Abort with the error's own
+                // message instead (E0069); the abort
                 // teardown reclaims what `on_error` would have dropped, exactly as `panic` does. The
                 // VM's `Op::TryUnwrap` mirrors this on its outermost bottom frame, so the
                 // differential holds. `none` is untouched: an absence reaching the top is not a
@@ -3208,7 +3196,7 @@ impl Interpreter {
     /// on the call. Only a user method or associated function can be masked; the built-in and
     /// native paths declare no defaults, so a mask never reaches them.
     ///
-    /// `type_args` is the method's own type-argument channel (poly-values F2b / Axis A) — the
+    /// `type_args` is the method's own type-argument channel — the
     /// atoms filling a forwarding generic method's leading hidden slots, empty for every other
     /// call. A call carrying either channel must reach the user-method path, because only that
     /// path can honour them; the built-in and native receivers below neither declare hidden slots
@@ -3286,7 +3274,7 @@ impl Interpreter {
             if (name == "try_from" || name == "from") && def.method(name).is_none() {
                 return self.enum_from_string(&Rc::clone(def), name, args, span);
             }
-            // An associated function `Enum.f(...)` (the unified body, object-model slice 3): resolved
+            // An associated function `Enum.f(...)` (the unified body): resolved
             // when the name is a method rather than a variant. Variant construction still wins for a
             // variant name (uppercase by convention, so the two never collide).
             if def.variant(name).is_none()
@@ -3329,7 +3317,7 @@ impl Interpreter {
             if let Some(method) = object.def.methods.get(name) {
                 return self.call_method_on(&Rc::clone(object), &Rc::clone(method), args, span);
             }
-            // A native class's instance method (native-extensibility S3 / Pass 2a): no hoisted
+            // A native class's instance method: no hoisted
             // `.noe` method by this name, but the object's shape names a registered native class
             // that declares it — route to the class's native `dispatch` (the Object-arm twin of the
             // extern-method seam). A user class always resolves through the method table above, so
@@ -3371,7 +3359,7 @@ impl Interpreter {
                 )),
             };
         }
-        // `status.label()` — an enum instance method (the unified body, object-model slice 3). The
+        // `status.label()` — an enum instance method (the unified body). The
         // enum value carries no method table of its own (a bare name/variant/data triple), so the
         // `EnumDef` is resolved from the definition (global) scope by the enum's name. An unknown
         // method falls through to the built-in paths below (e.g. the primitive `compare`).
@@ -3381,7 +3369,7 @@ impl Interpreter {
         {
             return self.call_enum_method(receiver.clone(), &Rc::clone(method), args, span);
         }
-        // `color.value()` on a native **backed** enum (native-extensibility S1): a native enum has
+        // `color.value()` on a native **backed** enum: a native enum has
         // no `EnumType` in scope, so its backing constant is resolved from the registry by the
         // value's (short) enum name + variant. The checker types this as the backing scalar.
         if let Value::Enum(e) = &receiver
@@ -3407,7 +3395,7 @@ impl Interpreter {
         {
             return Ok(Value::Str(value_to_json(&receiver)));
         }
-        // A **native enum**'s instance method (native-extensibility S1 / Slice B): no `.noe`
+        // A **native enum**'s instance method: no `.noe`
         // `EnumDef` method by this name and not the built-in `value()`/`to_json` accessor, but the
         // value's (short) enum name resolves to a registered native enum that declares it — route to
         // the enum's native `dispatch`. The enum twin of the Object arm's `find_class_method` →
@@ -3505,7 +3493,7 @@ impl Interpreter {
                 noeta_stdlib::Dispatch::Unknown => {}
             }
         }
-        // Bit-manipulation methods on `int` (P-BITS Tier B4) — the popcount-class intrinsics,
+        // Bit-manipulation methods on `int` — the popcount-class intrinsics,
         // delegating to the shared `int_method` so the backends agree by construction. `rotate_*`
         // take an `int` amount; the rest take none.
         if let Value::Int(recv) = &receiver
@@ -3556,7 +3544,7 @@ impl Interpreter {
                 },
             );
         }
-        // Cross-domain numeric conversions (S0): `int→float/f32`, `float/f32→int`, `float↔f32`. The
+        // Cross-domain numeric conversions: `int→float/f32`, `float/f32→int`, `float↔f32`. The
         // `IntMethod` branch above already handled `int→int` (`to_i32`…) and returned; an integer
         // receiver reaches here only for the two float destinations (`to_float`/`to_f32`), a
         // `float`/`f32` receiver for any. Delegates to the shared `num_convert` so both backends agree.
@@ -3577,7 +3565,7 @@ impl Interpreter {
             && let Some(method) = noeta_stdlib::ListMethod::from_name(name)
         {
             let items = repr.to_rc_vec();
-            // The source list's reflected element type (R1) — carried onto a `to_set` result so a
+            // The source list's reflected element type — carried onto a `to_set` result so a
             // `Set<T>` recovers its element type (sets have no literal of their own).
             let list_reflect = repr.reflect();
             return self.call_list_method(method, &items, list_reflect, name, &args, span);
@@ -3588,7 +3576,7 @@ impl Interpreter {
         {
             return self.call_set_method(method, items, name, &args, span);
         }
-        // Extern-type methods (extern-types X1): every registry-contributed type routes through
+        // Extern-type methods: every registry-contributed type routes through
         // its registered `ExtType`'s one shared dispatch. Mirrors the VM's `call_extern_method`.
         if let Value::Extern(cell) = &receiver {
             let cell = Rc::clone(cell);
@@ -3645,9 +3633,6 @@ impl Interpreter {
                 _ => {}
             }
         }
-        // (The reactive handle methods lived here until higher-order-abi H5 — `Signal`/
-        // `Computed`/`Effect` are registry extern types now, dispatched through the ctx
-        // seam like any other. Mirrors the VM.)
         // Iterator methods (next/collect) — the shared `IterMethod` enum, like the file handle above.
         if let Value::Iter(state) = &receiver
             && let Some(method) = noeta_stdlib::IterMethod::from_name(name)
@@ -3677,7 +3662,7 @@ impl Interpreter {
         {
             return self.call_map_method(method, entries, name, &args, span);
         }
-        // `list.to_bytes()` — serialize a `List<@packed>` to its raw flat buffer (P-PACK 4.4). A
+        // `list.to_bytes()` — serialize a `List<@packed>` to its raw flat buffer. A
         // boxed list has no canonical serialized form, so it is a type error (surfaced, not silent).
         if name == "to_bytes"
             && let Value::List(repr) = &receiver
@@ -3692,12 +3677,11 @@ impl Interpreter {
                 )),
             };
         }
-        // Buffer-direct list reductions (packed-reductions arc): `sum`/`product`/`min`/`max` on a
+        // Buffer-direct list reductions: `sum`/`product`/`min`/`max` on a
         // numeric list, `any`/`all`/`count` on a `List<bool>`. A packed scalar list folds its raw
         // byte buffer in a tight kernel; a boxed list folds element-wise — one shared body in
         // `noeta-stdlib`, so both representations and both backends agree. `sum` intercepts here
-        // (superseding the old materializing `Builtin::Sum`) so the packed fast path and the
-        // width-wrapping result type apply.
+        // so the packed fast path and the width-wrapping result type apply.
         if let Value::List(repr) = &receiver
             && args.is_empty()
             && (noeta_stdlib::NumReduce::from_name(name).is_some()
@@ -3706,7 +3690,7 @@ impl Interpreter {
             let repr = repr.clone();
             return self.call_list_reduction(&repr, name, span);
         }
-        // `checked_sum()` (array-ops arc): the opt-in overflow-reporting reduction, beside the folds.
+        // `checked_sum()`: the opt-in overflow-reporting reduction, beside the folds.
         if let Value::List(repr) = &receiver
             && name == "checked_sum"
             && args.is_empty()
@@ -3714,7 +3698,7 @@ impl Interpreter {
             let repr = repr.clone();
             return self.call_list_checked_sum(&repr, span);
         }
-        // Element-wise array-programming methods (array-ops arc): `scale`/`abs`/`neg`/`clamp` produce
+        // Element-wise array-programming methods: `scale`/`abs`/`neg`/`clamp` produce
         // a new list; one shared kernel with the operators, so packed and boxed paths agree.
         if let Value::List(repr) = &receiver
             && noeta_stdlib::is_bulk_method(name)
@@ -3722,7 +3706,7 @@ impl Interpreter {
             let repr = repr.clone();
             return self.call_list_bulk_method(&repr, name, &args, span);
         }
-        // Eager collection methods that reuse the prelude builtin impls (prelude-redesign P1):
+        // Eager collection methods that reuse the prelude builtin impls:
         // `xs.map(f)` / `xs.filter(f)` on a list. Routed through `call_builtin` with the receiver as
         // the first argument, so the method form and the (legacy) free-function form `map(xs, f)`
         // share exactly one implementation. A user object's own `map`/`filter` method wins — it is
@@ -3756,7 +3740,7 @@ impl Interpreter {
             };
         }
         let arity_ok = args.is_empty();
-        // `len()` is the length of a collection (P1.3 — `count` is iterator-only, a consuming
+        // `len()` is the length of a collection (`count` is iterator-only, a consuming
         // terminal; a collection `count` is an unknown method like any other).
         let result = match (name, &receiver) {
             ("len", Value::List(items)) if arity_ok => Some(Value::Int(items.len() as i64)),
@@ -3764,7 +3748,7 @@ impl Interpreter {
             ("len", Value::Map(entries, _)) if arity_ok => Some(Value::Int(entries.len() as i64)),
             ("len", Value::Str(s)) if arity_ok => Some(Value::Int(s.chars().count() as i64)),
             ("len", Value::Bytes(b)) if arity_ok => Some(Value::Int(b.len() as i64)),
-            // Lowercase hex rendering of a `bytes` buffer (crypto arc C1) — the shared helper,
+            // Lowercase hex rendering of a `bytes` buffer — the shared helper,
             // so both backends print digests identically.
             ("to_hex", Value::Bytes(b)) if arity_ok => {
                 Some(Value::Str(noeta_stdlib::bytes_to_hex(b)))
@@ -3773,8 +3757,8 @@ impl Interpreter {
             ("decode", Value::Bytes(b)) if arity_ok => Some(optional_to_value(
                 noeta_stdlib::bytes_decode_utf8(b).map(Value::Str),
             )),
-            // `.enumerate()` yields a list of `(index, value)` **tuples** (object-model slice 4b —
-            // tuples are the positional-pair type), destructured by a `for (i, x) in …` pattern.
+            // `.enumerate()` yields a list of `(index, value)` **tuples**
+            // (tuples are the positional-pair type), destructured by a `for (i, x) in …` pattern.
             ("enumerate", Value::List(items)) if arity_ok => {
                 let pairs = items
                     .to_rc_vec()
@@ -3854,7 +3838,7 @@ impl Interpreter {
         Ok((args, plan.supplied))
     }
 
-    /// `invoke(recv, name, args)` / `invoke(name, args)` — fallible by-name dispatch (P2.6). Reuses
+    /// `invoke(recv, name, args)` / `invoke(name, args)` — fallible by-name dispatch. Reuses
     /// the same name-keyed method tables as `call_method` (or, receiver-less, the global scope), but
     /// **pre-checks** name resolution and arity so a miss is a runtime `Result.Err` rather than a
     /// recorded diagnostic. A panic *inside* the invoked body still aborts (the `?` propagation
@@ -4257,22 +4241,14 @@ impl Interpreter {
         args: &[Value],
         span: Span,
     ) -> Eval<Value> {
-        // A virtual-module function (`reactive.signal(...)`, prelude-redesign P2) is a builtin —
-        // it needs the executor/reactive graph the plain registry seam cannot reach — so a
-        // qualified call intercepts here, ahead of registry dispatch, exactly like `fs.*_async`.
-        // Per-**function**, not per-module (higher-order-abi H0): a module migrates onto the ctx
-        // seam name by name (`task.sleep` is registered, `task.all` still virtual), so unmatched
-        // names fall through to the registry arms and the shared unknown-function error below.
-        // (The virtual-module intercept died with higher-order-abi H5: `task` migrated at H0/H2,
-        // `http.serve` at H3, and `reactive` — the last virtual module — at H5. Every std module
-        // now dispatches through the registry arms below. Mirrors the VM.)
+        // Every std module dispatches through the registry arms below. Mirrors the VM.
         // A function registered in the native-extension registry dispatches through the shared
         // seam: project arguments onto `NativeValue`, run the one shared dispatch body (host
         // threaded in), and materialize the `NativeOut` result (the result shape supplied from the
-        // function's `RetTy`). Routing is per-function so a partially-migrated module (`vec`, whose
-        // bulk `*_all` kernels stay per-backend) falls through for its unmigrated functions.
+        // function's `RetTy`). Routing is per-function: a name the registry does not carry falls
+        // through to the arms below.
         let name = module;
-        // Bound once (instance-registry IR3): `reg` is `&'static`, so it outlives the `&mut self`
+        // Bound once: `reg` is `&'static`, so it outlives the `&mut self`
         // host borrow below and every native lookup routes through this interpreter's registry.
         let reg = self.reg();
         if let Some(sig) = reg.find_function(name, func) {
@@ -4285,7 +4261,7 @@ impl Interpreter {
                 args.iter().map(|a| marshal_native_arg(a, reg)).collect()
             };
             return match reg.dispatch(name, func, &mut *self.host, &nargs) {
-                // Async WORK (extern-types X5): ticket the descriptor on the executor and hand
+                // Async WORK: ticket the descriptor on the executor and hand
                 // back the leaf async-IO future — mirrors the VM.
                 Ok(noeta_stdlib::NativeOut::Spawn(spawn)) => {
                     let id = self.executor.spawn_ext(&mut *self.host, spawn.0);
@@ -4295,12 +4271,11 @@ impl Interpreter {
                 Err(error) => Err(self.std_dispatch_error(error, span)),
             };
         }
-        // A registered **higher-order** function (higher-order-abi H0) dispatches through the
+        // A registered **higher-order** function dispatches through the
         // `NativeCtx` seam: opaque slots + backend re-entry instead of marshalled values. Checked
         // after the plain table — plain functions vastly outnumber ctx ones, and the two name
         // sets are disjoint, so order is behavior-neutral and keeps the common path lean.
-        // (The last per-backend intercept — `vec`'s bulk `*_all` kernels — died with the N3.4
-        // raw-buffer seam: they are ordinary ctx functions now, reached right here.)
+        // `vec`'s bulk `*_all` kernels are ordinary ctx functions, reached right here.
         if reg.find_ctx_function(module, func).is_some() {
             return self.call_ctx_function(module, func, args, span);
         }
@@ -4308,7 +4283,7 @@ impl Interpreter {
         Err(self.runtime_error(std_error_code(error.kind), span, error.message))
     }
 
-    /// Dispatch a method on an extern-type receiver (extern-types X1) through its registered
+    /// Dispatch a method on an extern-type receiver through its registered
     /// [`noeta_stdlib::ExtType`]'s shared dispatch — project the arguments, run the one shared
     /// body (host threaded in, receiver borrowed mutably), materialize the result. Mirrors the
     /// VM's `call_extern_method`, so the two backends agree by construction.
@@ -4319,11 +4294,11 @@ impl Interpreter {
         args: &[Value],
         span: Span,
     ) -> Eval<Value> {
-        // A type's **higher-order** methods (higher-order-abi H4) route through the ctx seam —
+        // A type's **higher-order** methods route through the ctx seam —
         // they call closures back and reach the retained arena, which the plain by-value
         // dispatch below cannot. Name sets are disjoint, so routing is per-method.
         let identity = cell.borrow().type_identity();
-        // Bound once (IR3): `&'static`, so it survives the `&mut self` host borrow below.
+        // Bound once: `&'static`, so it survives the `&mut self` host borrow below.
         let reg = self.reg();
         if reg.find_type_ctx_method(identity, name).is_some() {
             let recv = Value::Extern(Rc::clone(cell));
@@ -4344,8 +4319,8 @@ impl Interpreter {
         // FileHandle discipline).
         let result = reg.dispatch_method(&mut **cell.borrow_mut(), name, &mut *self.host, &nargs);
         match result {
-            // Async WORK from an extern-type method (e.g. `Process.wait_async`, process-signals
-            // arc): ticket the descriptor on the executor and hand back the async-IO future —
+            // Async WORK from an extern-type method (e.g. `Process.wait_async`): ticket the
+            // descriptor on the executor and hand back the async-IO future —
             // mirrors the module-function path in `call_std_function` and the VM.
             Ok(noeta_stdlib::NativeOut::Spawn(spawn)) => {
                 let id = self.executor.spawn_ext(&mut *self.host, spawn.0);
@@ -4356,7 +4331,7 @@ impl Interpreter {
         }
     }
 
-    /// Dispatch a **native class**'s instance method (native-extensibility S3 / Pass 2a) — the
+    /// Dispatch a **native class**'s instance method — the
     /// [`ExtClass`] analogue of [`Self::call_extern_method`]. The receiver is a class-kind object;
     /// it crosses to the native `dispatch` as the whole instance marshalled to a
     /// [`NativeValue::Instance`] (its fields by name), the same shape a class value takes arg-IN, so
@@ -4369,7 +4344,7 @@ impl Interpreter {
         args: Vec<Value>,
         span: Span,
     ) -> Eval<Value> {
-        // Bound once (IR3): `&'static`, so it survives the `&mut self` host borrow below.
+        // Bound once: `&'static`, so it survives the `&mut self` host borrow below.
         let reg = self.reg();
         // Resolve over BOTH classes and structs (fielded unification) — a value-struct method
         // dispatches through the same seam; only in-place mutation (`InstanceUpdate`) is class-only.
@@ -4453,7 +4428,7 @@ impl Interpreter {
         }
     }
 
-    /// Dispatch a **native enum**'s instance method (native-extensibility S1 / Slice B) — the
+    /// Dispatch a **native enum**'s instance method — the
     /// [`ExtEnum`] analogue of [`Self::call_native_class_method`], reusing the shared
     /// [`NativeMethodDispatch`] seam. The receiver is an enum value; it crosses to the native
     /// `dispatch` as a [`NativeValue::Variant`] (its case + declaration index + positional payload),
@@ -4468,7 +4443,7 @@ impl Interpreter {
         args: Vec<Value>,
         span: Span,
     ) -> Eval<Value> {
-        // Bound once (IR3): `&'static`, so it survives the `&mut self` host borrow below.
+        // Bound once: `&'static`, so it survives the `&mut self` host borrow below.
         let reg = self.reg();
         let en = match recv {
             Value::Enum(e) => reg.resolve_enum(&e.enum_name),
@@ -4828,7 +4803,7 @@ impl Interpreter {
                         noeta_stdlib::MapKey::Extern(e) => {
                             Value::Extern(Rc::new(RefCell::new(e.clone())))
                         }
-                        // P-PKEY: rebuild the packed struct value from the content snapshot.
+                        // Rebuild the packed struct value from the content snapshot.
                         noeta_stdlib::MapKey::Packed(p) => {
                             self.packed_key_value(&p.type_name, &p.fields)
                         }
@@ -4891,7 +4866,7 @@ impl Interpreter {
     }
 
     /// Read a map-key argument (string or key-capable extern), raising the shared map-key error
-    /// Rebuild a packed key's struct value (P-PKEY) — the `keys()` direction, mirroring the
+    /// Rebuild a packed key's struct value — the `keys()` direction, mirroring the
     /// VM's `packed_key_value`. The key's content snapshot carries the field values; the
     /// `TypeDef` comes from the global scope by name (types are top-level, and a key of type
     /// `T` implies `T` is declared).
@@ -5130,8 +5105,8 @@ impl Interpreter {
             let rendered = self.call_method(value.clone(), "to_string", Vec::new(), span)?;
             return Ok(rendered.display());
         }
-        // An enum value with an `impl Display { to_string }` renders through it too (object-model
-        // slice 3) — resolved through the `EnumDef` in scope, since the value carries no table.
+        // An enum value with an `impl Display { to_string }` renders through it too — resolved
+        // through the `EnumDef` in scope, since the value carries no table.
         if let Value::Enum(e) = value
             && let Some(Value::EnumType(def)) = self.scope.lookup(&e.enum_name)
             && def.method("to_string").is_some()
@@ -5142,7 +5117,7 @@ impl Interpreter {
         Ok(value.display())
     }
 
-    /// Positional tuple projection `receiver.N` (object-model slice 4), shared by both eval
+    /// Positional tuple projection `receiver.N`, shared by both eval
     /// backends. The index is in range by construction (the checker verified it against the tuple's
     /// arity); a non-tuple receiver or an out-of-range index is a runtime error for robustness.
     fn tuple_index(&mut self, receiver: Value, index: u32, span: Span) -> Eval<Value> {
@@ -5195,7 +5170,7 @@ impl Interpreter {
                 Ok(items.get(i as usize).expect("bounds checked above"))
             }
             // `m[k]` on a map looks the value up by its key — a string, or a key-capable
-            // extern value (extern-types X4); a missing key is `E0018`.
+            // extern value; a missing key is `E0018`.
             Value::Map(entries, _) => {
                 let Some(key) = value_map_key(&index) else {
                     return Err(self.runtime_error(
@@ -5264,7 +5239,7 @@ impl Interpreter {
     /// — nothing else has defaulted parameters — so every other callee ignores it, and a mask
     /// reaching one is a lowering bug rather than a user error.
     /// `type_args` is the call's own type-argument channel — the atoms filling a forwarding
-    /// generic's leading hidden slots (poly-values F2b), empty for every other call.
+    /// generic's leading hidden slots, empty for every other call.
     fn call_masked(
         &mut self,
         callee: Value,
@@ -5325,7 +5300,7 @@ impl Interpreter {
                 // the validated way to populate it. Deliberately method-only — a closure-valued
                 // FIELD named `call` does not make the object invocable (that is member-call
                 // territory: `obj.call(args)` reaches it) — so both backends gate identically.
-                // An **extern** value participates in the protocol too (http arc H10): a
+                // An **extern** value participates in the protocol too: a
                 // registered `call` method makes it invocable, routed through ordinary extern
                 // method dispatch. Mirrors the VM, so both backends gate identically. (The
                 // field-vs-method rule described above governs the `Value::Object` arm below.)
@@ -5458,7 +5433,7 @@ impl Interpreter {
     }
 
     /// Call an instance method: `self` binds to the whole object; fields are NOT in scope
-    /// (member access is explicit — prelude-redesign EX.1). Parameters bind after `self`.
+    /// (member access is explicit). Parameters bind after `self`.
     fn call_method_on(
         &mut self,
         object: &Rc<ObjectValue>,
@@ -5512,7 +5487,7 @@ impl Interpreter {
         catch_return(result)
     }
 
-    /// Call an enum instance method (object-model slice 3): `self` binds to the whole enum value
+    /// Call an enum instance method: `self` binds to the whole enum value
     /// (there is no implicit per-field scope — an enum's variants carry different data, so a method
     /// reaches its payload by `match`ing on `self`). Otherwise identical to [`Self::call_method_on`]:
     /// parameters bind after `self`, omitted trailing ones take their defaults in the captured scope.
@@ -5577,7 +5552,7 @@ impl Interpreter {
         result
     }
 
-    /// Run a field's default-value thunk (object-model slice 5) to its value, in the type's
+    /// Run a field's default-value thunk to its value, in the type's
     /// **definition scope** — a fresh child of the global scope, so the default resolves globals
     /// only and never sees the construction site's locals, `self`, or sibling fields. Mirrors
     /// [`Self::eval_default`] for parameters, but rooted at `globals` (types are always top-level)
@@ -5715,10 +5690,9 @@ impl Interpreter {
                     };
                     Err(self.runtime_error(DiagnosticCode::Panic, span, message))
                 }
-            } // (The whole `Builtin` orchestration family — `task` at higher-order-abi H0/H2,
-              // `http.serve` at H3, `signal`/`computed`/`effect` at H5 — migrated to the
-              // registry's `NativeCtx` dispatch: `noeta-stdlib/src/{task,serve,reactive}.rs`;
-              // the drive loops there are shared with the VM.)
+            } // (`task`, `http.serve` and `signal`/`computed`/`effect` dispatch through the
+              // registry's `NativeCtx` seam: `noeta-stdlib/src/{task,serve,reactive}.rs`; the
+              // drive loops there are shared with the VM.)
         }
     }
 
@@ -5728,7 +5702,7 @@ impl Interpreter {
     /// returns the raw completion value (ready) or the pending sentinel (`None`). A non-future passes
     /// through as ready (totality for the uncheck­ed property test).
     ///
-    /// The thin outer layer is the **traced-future hook** (native-otel T5c), the VM's mirrored:
+    /// The thin outer layer is the **traced-future hook**, the VM's mirrored:
     /// a future registered via `NativeCtx::trace_future` polls under its own saved context and,
     /// on completion or abort, has its telemetry span ended here.
     fn poll_once(&mut self, future: &Value, span: Span) -> Eval<Option<Value>> {
@@ -5770,7 +5744,7 @@ impl Interpreter {
         polled
     }
 
-    /// The sender's trace context to ride an outbound channel message (native-otel T5d) — the
+    /// The sender's trace context to ride an outbound channel message — the
     /// VM's helper, mirrored: `None` (one bool test) when telemetry is off or no span is active.
     fn outbound_trace_context(&mut self) -> Option<noeta_stdlib::TraceContext> {
         if !self.host.tel_enabled() {
@@ -5780,7 +5754,7 @@ impl Interpreter {
         Some(self.host.tel_span_context(top))
     }
 
-    /// Seed the receiving strand's context from a dequeued message's (native-otel T5d) — the VM's
+    /// Seed the receiving strand's context from a dequeued message's — the VM's
     /// helper, mirrored: only when the strand is at top level (empty, or exactly one remote seed,
     /// which is replaced and released); real active spans are never hijacked.
     fn seed_context_from_message(&mut self, context: Option<noeta_stdlib::TraceContext>) {
@@ -5840,7 +5814,7 @@ impl Interpreter {
                 let id = *id;
                 match self.executor.poll_ext(id) {
                     // Ready → materialize the descriptor's `NativeOut` exactly like a
-                    // synchronous dispatch result (extern-types X5); an IO failure aborts
+                    // synchronous dispatch result; an IO failure aborts
                     // (E0021) at the `.await`, matching the synchronous `fs.*`.
                     Some(Ok(out)) => Ok(Some(materialize_native(out))),
                     Some(Err(error)) => {
@@ -5874,7 +5848,7 @@ impl Interpreter {
                     // message enters the one queue either way.
                     SendAction::DeliverBuffered | SendAction::Deposit => {
                         let value = (**value).clone();
-                        // The sender's trace context rides the message (T5d) — the VM's envelope,
+                        // The sender's trace context rides the message — the VM's envelope,
                         // mirrored.
                         let context = self.outbound_trace_context();
                         self.channels[id.index()].buffer.push_back((value, context));
@@ -5907,7 +5881,7 @@ impl Interpreter {
                             .buffer
                             .pop_front()
                             .expect("non-empty");
-                        // Seed the receiving strand from the message's context (T5d).
+                        // Seed the receiving strand from the message's context.
                         self.seed_context_from_message(context);
                         self.channel_progress += 1;
                         Ok(Some(builtin_enum("Option", "some", vec![value])))
@@ -5942,7 +5916,7 @@ impl Interpreter {
                 if task.result.is_none() && !task.cancelled && !task.polling {
                     let future = task.future.clone();
                     self.scopes[si][ti].polling = true;
-                    // Swap the task's own context in for the duration of its poll (T5a) — the
+                    // Swap the task's own context in for the duration of its poll — the
                     // VM's swap discipline, mirrored: paired swaps nest across re-entrant rounds,
                     // and the `polling` guard keeps each task's pair balanced.
                     let ctx = std::mem::take(&mut self.scopes[si][ti].context);
@@ -6172,7 +6146,7 @@ impl Interpreter {
         }
     }
 
-    /// Buffer-direct list reductions (packed-reductions arc): `sum`/`product`/`min`/`max` (numeric)
+    /// Buffer-direct list reductions: `sum`/`product`/`min`/`max` (numeric)
     /// and `any`/`all`/`count` (`List<bool>`). A packed scalar list folds its raw byte buffer through
     /// the shared kernel; a boxed (or packed-struct) list folds its scalar elements — one body in
     /// `noeta-stdlib`, so the packed and boxed paths and the two backends all agree. `sum`/`product`
@@ -6565,7 +6539,7 @@ impl Interpreter {
                 };
             }
         }
-        // Operator-trait dispatch on an enum value (object-model slice 3): identical to the object
+        // Operator-trait dispatch on an enum value: identical to the object
         // path, but the method table is reached through the `EnumDef` resolved from the definition
         // (global) scope by the enum's name (the value itself carries no table). An enum's in-body
         // `impl` blocks are uniform with a class's — no per-kind restriction — so `impl Add`,
@@ -6646,7 +6620,7 @@ impl Interpreter {
                 )),
             };
         }
-        // Element-wise array-programming ops (array-ops arc): `+`/`-`/`*` on two lists of the same
+        // Element-wise array-programming ops: `+`/`-`/`*` on two lists of the same
         // numeric element type fold element-wise into a new list (`~` is concat, so the operator is
         // free). Packed operands fold their buffers, boxed operands their scalars — one shared
         // `noeta-stdlib` kernel, so both representations and both backends agree; ints wrap at width.
@@ -6662,7 +6636,7 @@ impl Interpreter {
         }
     }
 
-    /// Element-wise `+`/`-`/`*` over two numeric lists (array-ops arc). A length mismatch is a runtime
+    /// Element-wise `+`/`-`/`*` over two numeric lists. A length mismatch is a runtime
     /// error (E0007). Two packed scalar buffers of the same field fold directly (the result shares the
     /// operand's packed schema); otherwise both sides materialize to scalars and fold — the boxed
     /// fallback, matching the packed path for a given list type.
@@ -6701,7 +6675,7 @@ impl Interpreter {
         Ok(Value::list(out.into_iter().map(scalar_to_value).collect()))
     }
 
-    /// The bulk array-programming **methods** (array-ops arc): `scale(s)`, `abs()`, `neg()`,
+    /// The bulk array-programming **methods**: `scale(s)`, `abs()`, `neg()`,
     /// `clamp(lo, hi)` — each producing a new list of the operand's numeric element type. A packed
     /// list folds its buffer; a boxed list its scalars — the shared `noeta-stdlib` kernel, so the two
     /// representations (and both backends) agree.
@@ -6770,7 +6744,7 @@ impl Interpreter {
         Ok(Value::list(out.into_iter().map(scalar_to_value).collect()))
     }
 
-    /// `checked_sum()` (array-ops arc): the opt-in overflow-reporting sum — `none` on integer
+    /// `checked_sum()`: the opt-in overflow-reporting sum — `none` on integer
     /// overflow, `some(total)` otherwise. A packed buffer folds directly; a boxed list its scalars.
     fn call_list_checked_sum(&mut self, list: &ListRepr, span: Span) -> Eval<Value> {
         let folded = match list {
@@ -6875,7 +6849,7 @@ fn cow_concat(left: Value, right: Value) -> Value {
         (Value::List(a), Value::List(b)) => {
             // The in-place fast path consumes the left list's unique `Rc`. A boxed list hands its
             // `Rc` straight through (preserving the O(1)-amortized extend when uniquely owned); a
-            // packed list (P-PACK 2.3) has no specialized concat yet, so it materializes to a fresh,
+            // packed list has no specialized concat yet, so it materializes to a fresh,
             // uniquely-owned boxed vector — correct, just not flat. Either way the result is boxed.
             let mut a = match a {
                 ListRepr::Boxed { items: rc, .. } => rc,
@@ -6896,7 +6870,7 @@ fn cow_concat(left: Value, right: Value) -> Value {
 }
 
 /// Read a numeric receiver (`int`/erased `IntN`, `float`, or `f32`) as the shared
-/// [`noeta_stdlib::NumScalar`] for the conversion tower (S0); `None` for any non-numeric value.
+/// [`noeta_stdlib::NumScalar`] for the conversion tower; `None` for any non-numeric value.
 fn numeric_scalar(value: &Value) -> Option<noeta_stdlib::NumScalar> {
     match value {
         Value::Int(i) => Some(noeta_stdlib::NumScalar::Int(*i)),
@@ -6938,7 +6912,7 @@ fn builtin_enum(enum_name: &str, variant: &str, data: Vec<Value>) -> Value {
     }))
 }
 
-/// The `Err` payload of a `Result::Err` value (validation arc): `Some(payload)` when `value` is
+/// The `Err` payload of a `Result::Err` value: `Some(payload)` when `value` is
 /// `Result::Err(e)`, else `None` (an `Ok`, or any non-`Result`). Used by `materialize_recipe` to
 /// read a `Validate::validate` result.
 pub(crate) fn result_err_payload(value: &Value) -> Option<Value> {
@@ -6952,7 +6926,7 @@ pub(crate) fn result_err_payload(value: &Value) -> Option<Value> {
 }
 
 /// Wrap a path-carrying [`noeta_stdlib::json::JsonError`] as an extern `Value` — the `Err` payload
-/// of a validation-rejecting recipe door (validation arc).
+/// of a validation-rejecting recipe door.
 pub(crate) fn json_error_value(error: noeta_stdlib::json::JsonError) -> Value {
     Value::Extern(Rc::new(RefCell::new(noeta_stdlib::ExternBox::new(error))))
 }
@@ -7215,10 +7189,10 @@ fn plan_variant_payload(
 /// Generics are erased at runtime, so a container's element/argument types collapse to `Dyn`.
 /// Mirrors the VM's `vm_type_repr` exactly so both backends reflect identical `Type` values.
 /// Map a bare-scalar element's checker [`PackedKind`](noeta_ast::reflect::PackedKind) to the eval
-/// [`SlotKind`] (packed-widths bare-scalar arc). A scalar element is a single primitive — a nested
+/// [`SlotKind`]. A scalar element is a single primitive — a nested
 /// `Struct` is not a scalar, so it returns `None` (the caller stays boxed) defensively.
 /// Parse a `@packed` field's declared type name into the seam's [`noeta_stdlib::PackedField`] kind
-/// (scalar-unification slice 3) — the width source for the element bundle methods, keyed off the
+/// — the width source for the element bundle methods, keyed off the
 /// per-type field-name index. Only the numeric primitives (and `bool`) are recognised; anything else
 /// (a nested struct name, a generic) yields `None`, which bars the type from a `vec` bundle.
 fn parse_packed_field(name: &str) -> Option<noeta_stdlib::PackedField> {
@@ -7281,7 +7255,7 @@ fn eval_type_repr(value: &Value) -> noeta_ast::reflect::TypeRepr {
         Value::Str(_) => TypeRepr::Str,
         Value::Bytes(_) => TypeRepr::Bytes,
         Value::Unit => TypeRepr::Unit,
-        // A list carrying a reflected type tag (R1 — a tagged literal, preserved through pure
+        // A list carrying a reflected type tag (a tagged literal, preserved through pure
         // aliasing) reports that precise element type; an untagged/packed list falls back to the
         // head-only `List(Dyn)`. Mirrors the VM's `vm_type_repr` tag consultation.
         // A bare-scalar packed list (`List<i32>`/`List<f32>`) recovers its element width from its
@@ -7293,13 +7267,13 @@ fn eval_type_repr(value: &Value) -> noeta_ast::reflect::TypeRepr {
             .unwrap_or_else(|| TypeRepr::List(dyn_())),
         // A tuple has no reflection descriptor (like a union) — it erases to the dynamic top.
         Value::Tuple(_) => TypeRepr::Dyn,
-        // A set carrying a reflected type tag (R1) reports its precise `Set(T)` type (carried from
+        // A set carrying a reflected type tag reports its precise `Set(T)` type (carried from
         // the source list through `to_set`); an untagged/derived set falls back to head-only.
         Value::Set(_, reflect) => reflect
             .as_ref()
             .map(|r| (**r).clone())
             .unwrap_or_else(|| TypeRepr::Set(dyn_())),
-        // A map carrying a reflected type tag (R1) reports its precise `Map(K, V)` type; an
+        // A map carrying a reflected type tag reports its precise `Map(K, V)` type; an
         // untagged/derived map falls back to the head-only `Map(dyn, dyn)`. Mirrors `vm_type_repr`.
         Value::Map(_, reflect) => reflect
             .as_ref()
@@ -7321,7 +7295,7 @@ fn eval_type_repr(value: &Value) -> noeta_ast::reflect::TypeRepr {
                 other => TypeRepr::Enum(other.to_string(), Vec::new()),
             },
         },
-        // A generic struct/class instance carrying a reflected type tag (R2) reports its precise type
+        // A generic struct/class instance carrying a reflected type tag reports its precise type
         // (with type arguments); a non-generic/untagged instance falls back to the head-only shape name
         // with empty args. Mirrors `vm_type_repr`'s node-tag consultation.
         Value::Object(o) if o.def.is_struct => o
@@ -7698,10 +7672,10 @@ fn runtime_matches(
         // checker), so narrowing to one stays the permissive dynamic top — deliberately, and now
         // UNLIKE the precise `dyn Trait` above: a projection names a concrete per-impl type, not a
         // trait, and reconstructing that binding at runtime would need impl identity the erased
-        // value no longer carries. Matches the VM's `NarrowTarget::Dyn` (slice 1a).
+        // value no longer carries. Matches the VM's `NarrowTarget::Dyn`.
         TypeRef::AssocProjection { .. } => true,
-        // A tuple target matches any tuple value — head-constructor only, arity/elements erased
-        // (object-model slice 4), exactly like `List` ignoring its element type.
+        // A tuple target matches any tuple value — head-constructor only, arity/elements erased,
+        // exactly like `List` ignoring its element type.
         TypeRef::Tuple { .. } => matches!(value, Value::Tuple(_)),
         // A function type is erased to a head-constructor "is callable" test (params/return dropped),
         // matching the VM's `NarrowTarget::Fn` (type_name `"function"`).
@@ -7773,7 +7747,7 @@ fn runtime_matches(
                     _ => false,
                 },
             };
-            // A parametrized target (`x is List<int>`, R3) additionally checks its type arguments
+            // A parametrized target (`x is List<int>`) additionally checks its type arguments
             // against the value's reflected tag; a bare name stays head-only (the widening `x is List`
             // and the untagged fallback). An untagged value's `eval_type_repr` yields `dyn` arguments,
             // so the check passes head-only — mirroring the VM's `NarrowTarget::Generic` by construction.
@@ -7791,14 +7765,14 @@ fn runtime_matches(
 }
 
 /// Extract the owned [`noeta_stdlib::MapKey`] a map operation keys by: a string, a key-capable
-/// extern value (a boxed snapshot — extern-types X4), or a key-capable `@packed` struct (a
-/// content snapshot — P-PKEY, gated by the interpreter's `key_capable_packed` fixpoint, the same
+/// extern value (a boxed snapshot), or a key-capable `@packed` struct (a
+/// content snapshot, gated by the interpreter's `key_capable_packed` fixpoint, the same
 /// shared computation the VM bakes into `Shape::key_capable`). `None` for anything else; the
 /// caller raises the shared map-key error. Mirrors the VM's key extraction.
 pub(crate) fn value_map_key(value: &Value) -> Option<noeta_stdlib::MapKey> {
     match value {
         Value::Str(s) => Some(noeta_stdlib::MapKey::from(s.as_str())),
-        // P-PKEY S4: ints key maps (`float` stays excluded — NaN).
+        // Ints key maps (`float` stays excluded — NaN).
         Value::Int(i) => Some(noeta_stdlib::MapKey::Int(*i)),
         Value::Extern(e) if noeta_stdlib::map_key::extern_key_capable(&**e.borrow()) => {
             Some(noeta_stdlib::MapKey::Extern(e.borrow().clone()))
@@ -7811,7 +7785,7 @@ pub(crate) fn value_map_key(value: &Value) -> Option<noeta_stdlib::MapKey> {
     }
 }
 
-/// The [`value_map_key`] field walk (P-PKEY): the object's slots in declaration order as plain
+/// The [`value_map_key`] field walk: the object's slots in declaration order as plain
 /// [`noeta_stdlib::PackedKeyField`] data. `None` on a slot the capability contract excludes —
 /// defensive (a key-capable type's slots are ints/bools/nested-capable by construction), so the
 /// caller falls back to the ordinary key error rather than corrupting a map. Mirrors
@@ -7837,7 +7811,7 @@ fn packed_key_fields(object: &ObjectValue) -> Option<Vec<noeta_stdlib::PackedKey
 
 /// Project a tree-walker `Value` onto the native-extension registry's argument view. One of the
 /// two functions (with [`materialize_native`]) that form the backend's half of the value seam;
-/// every migrated module call goes through these rather than a per-function `read_*`. The
+/// every module call goes through these rather than a per-function `read_*`. The
 /// scalar/host modules use only the scalar and string shapes; richer shapes are added as the
 /// modules that need them migrate. Mirrors the VM-side projection.
 fn marshal_native_arg(
@@ -7855,7 +7829,7 @@ fn marshal_native_arg(
         // An extern-type argument crosses by value (`clone_box`); extern producers are host/IO
         // shaped, never a hot path. Mirrors the VM-side projection.
         Value::Extern(e) => NativeValue::Extern(e.borrow().clone()),
-        // A class instance crossing INTO a dispatch (native-extensibility S2): the full instance
+        // A class instance crossing INTO a dispatch: the full instance
         // (class name + `(field, value)` pairs in slot order, each marshalled), so a native fn can
         // receive a native class value a program constructed. Mirrors the VM's projection. This arm
         // is UNCHANGED (`!is_struct && !opaque`) so a user `.noe` class marshals here exactly as
@@ -7913,7 +7887,7 @@ fn marshal_native_arg(
                 None => NativeValue::Opaque(value.type_name()),
             }
         }
-        // A native enum value crossing INTO a dispatch (native-extensibility S1): the full variant
+        // A native enum value crossing INTO a dispatch: the full variant
         // (name + case + declaration index + payload), so a native fn receives a real variant, not
         // the lossy `Opaque` the fallback would give. Mirrors the VM's projection.
         Value::Enum(e) => NativeValue::Variant {
@@ -7927,10 +7901,10 @@ fn marshal_native_arg(
 }
 
 /// Project a primitive tree-walker value onto a [`noeta_stdlib::Scalar`], or `None` if not primitive.
-/// Lift a numeric reduction result (packed-reductions arc) into a tree-walker `Value`. An integer
+/// Lift a numeric reduction result into a tree-walker `Value`. An integer
 /// (`int`/`IntN`, erased) becomes `Value::Int`; the float widths keep their runtime tag.
 /// The narrow integer element width (`signed`, `bits < 64`) of a list, or `None` for a boxed / wide /
-/// non-integer list — for masking a narrow-typed iterator reduction (array-ops arc).
+/// non-integer list — for masking a narrow-typed iterator reduction.
 fn list_narrow_bits(v: &Value) -> Option<(bool, u8)> {
     if let Value::List(ListRepr::Packed(p)) = v {
         let view = p.seam_view();
@@ -7945,7 +7919,7 @@ fn list_narrow_bits(v: &Value) -> Option<(bool, u8)> {
 }
 
 /// Trace an iterator's narrow integer element width back through the **width-preserving** adapters
-/// (`take`/`drop`/`chain`/`filter`) to its backing list (array-ops arc), so `xs.iter().take(k).sum()`
+/// (`take`/`drop`/`chain`/`filter`) to its backing list, so `xs.iter().take(k).sum()`
 /// wraps at the same width `xs.sum()` does. `map`/`enumerate`/`zip` change the element type, so they
 /// stop the trace (the fold then stays at 64 bits — the element is already a full `int`).
 fn iter_narrow_bits(v: &Value) -> Option<(bool, u8)> {
@@ -7963,7 +7937,7 @@ fn iter_narrow_bits(v: &Value) -> Option<(bool, u8)> {
     }
 }
 
-/// Map an arithmetic operator to its element-wise list op (array-ops arc): `+`/`-`/`*` fold two
+/// Map an arithmetic operator to its element-wise list op: `+`/`-`/`*` fold two
 /// lists element-wise; `/`/`%` (and every non-arithmetic operator) have no list form (`None`).
 fn elem_bin_op(op: BinaryOp) -> Option<noeta_stdlib::ElemBinOp> {
     Some(match op {
@@ -8031,7 +8005,7 @@ fn materialize_ext(
 }
 
 /// Lift a native-extension [`noeta_stdlib::NativeOut`] result back into a tree-walker `Value`.
-/// Build a native-declared **fielded-type** instance (native-extensibility S2, unified) as a REAL
+/// Build a native-declared **fielded-type** instance as a REAL
 /// `Object`: a `Class` gets a class `TypeDef` (identity `==`, `is_struct = false`), a `Struct` a
 /// value `TypeDef` (structural `==`, value semantics). Fields are in declared slot order, already
 /// materialized. The one place both the ordinary [`NativeOut::Instance`] materialization AND the
@@ -8112,7 +8086,7 @@ pub(crate) fn materialize_native(out: noeta_stdlib::NativeOut) -> Value {
                 .map(|(k, v)| (noeta_stdlib::MapKey::from(k), materialize_native(v)))
                 .collect(),
         )),
-        // An extern-type value: host the box in the shared cell (extern-types X1).
+        // An extern-type value: host the box in the shared cell.
         NativeOut::Extern(e) => Value::Extern(Rc::new(RefCell::new(e))),
         // Object results carry no shape, so they are built by `materialize_ext` (which has the
         // function's `RetTy` + arguments) and never reach here.
@@ -8120,12 +8094,12 @@ pub(crate) fn materialize_native(out: noeta_stdlib::NativeOut) -> Value {
             unreachable!("object results are materialized by `materialize_ext`")
         }
         // Option results from ordinary dispatch (`id.parse`, extern-type methods like
-        // `timestamp_ms` — extern-types X2).
+        // `timestamp_ms`).
         NativeOut::None => builtin_enum("Option", "none", Vec::new()),
         NativeOut::Some(inner) => builtin_enum("Option", "some", vec![materialize_native(*inner)]),
         NativeOut::Ok(inner) => builtin_enum("Result", "Ok", vec![materialize_native(*inner)]),
         NativeOut::Err(inner) => builtin_enum("Result", "Err", vec![materialize_native(*inner)]),
-        // A native-declared enum value (native-extensibility S1): a REAL `EnumValue` carrying the
+        // A native-declared enum value: a REAL `EnumValue` carrying the
         // enum's short name + variant + declaration index, so a `match` over it is exhaustive and it
         // is differential-identical to the VM's interned enum shape. The payload materializes
         // recursively (a payload-carrying variant nests).
@@ -8147,7 +8121,7 @@ pub(crate) fn materialize_native(out: noeta_stdlib::NativeOut) -> Value {
             unsigned: Rc::from(&[][..]),
             reflect: None,
         })),
-        // A native-declared **fielded-type** instance (native-extensibility S2, unified): a REAL
+        // A native-declared **fielded-type** instance: a REAL
         // `Object` whose `TypeDef` kind comes from the carried `FieldedKind`. A `Class` gets a class
         // `TypeDef` (`structural_eq = false` → `==` is identity, `is_struct = false`; aliases + cycle
         // participation; its extern-handle field's `Drop` is the destructor). A `Struct` gets a value
@@ -8173,7 +8147,7 @@ pub(crate) fn materialize_native(out: noeta_stdlib::NativeOut) -> Value {
         NativeOut::InstanceUpdate { ret, .. } => materialize_native(*ret),
         // The typed `json.parse::<T>` results that name their own types are built by the typed-call
         // path (`materialize_recipe`, which has the interpreter's type registry), not here; async
-        // work is ticketed at the dispatch return (extern-types X5), never materialized.
+        // work is ticketed at the dispatch return, never materialized.
         NativeOut::Fielded { .. } | NativeOut::Spawn(_) => {
             unreachable!("recipe/spawn results never reach materialize_native")
         }
@@ -8403,10 +8377,10 @@ pub(crate) fn value_to_native_deep(value: &Value) -> noeta_stdlib::NativeValue {
         Value::F32(f) => NativeValue::Scalar(Scalar::F32(*f)),
         Value::Str(s) => NativeValue::Str(s.clone()),
         // A byte buffer crosses as ITSELF (`NativeValue::Bytes`), exactly as the shallow
-        // [`marshal_native_arg`] projects it. It used to marshal to the human summary
-        // `"<N bytes>"` — the display form standing in for the value — so a `bytes` argument to any
-        // `deep_marshal` consumer (`http.client.post(url, body)`, a SQL bind parameter) silently
-        // arrived as that 9-byte ASCII text instead of the buffer. JSON's lack of a byte type is the
+        // [`marshal_native_arg`] projects it. Marshalling it to the human summary `"<N bytes>"`
+        // would put the display form on the wire in place of the value, so a `bytes` argument to any
+        // `deep_marshal` consumer (`http.client.post(url, body)`, a SQL bind parameter) would arrive
+        // as that ASCII text instead of the buffer. JSON's lack of a byte type is the
         // *serializer's* problem, not the projection's: `json_text::stringify` renders the buffer as
         // an array of its byte values.
         Value::Bytes(b) => NativeValue::Bytes((**b).clone()),
@@ -8503,10 +8477,10 @@ pub(crate) fn compare_primitive(left: &Value, right: &Value) -> Option<std::cmp:
         // `false < true` — bool is checker-declared `Comparable`, so derived structural compare
         // and `.compare()` order it. Mirrors the VM's `compare_primitive`.
         (Value::Bool(a), Value::Bool(b)) => Some(a.cmp(b)),
-        // Extern-type values order through their contract (extern-types X1) — a total order per
+        // Extern-type values order through their contract — a total order per
         // key-capable kind; `None` for unordered kinds. Mirrors the VM's `compare_primitive`.
         (Value::Extern(a), Value::Extern(b)) => a.borrow().cmp_value(&**b.borrow()),
-        // P-PKEY: two key-capable `@packed` structs order by content — type name, then field-wise
+        // Two key-capable `@packed` structs order by content — type name, then field-wise
         // slot order, a `u64` slot read unsigned (the `TypeDef` says which). The order every
         // order-observing surface shows; `MapKey::Packed`'s own `Ord` is the identity order and
         // stays on the erased word. Mirrors the VM's `packed_primitive_cmp`.
@@ -8557,7 +8531,7 @@ fn set_order(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
         return None;
     }
     // Primitives, externs, and key-capable `@packed` structs order through `compare_primitive`
-    // first — preserving P-PKEY's content order exactly (including its cross-type by-name order
+    // first — preserving the packed-key content order exactly (including its cross-type by-name order
     // over capable packed structs); any other value kind (a plain struct, an enum) falls back to
     // the total structural ordering. Mirrors the VM's `set_order`.
     compare_primitive(a, b).or_else(|| compare_field(a, b))
@@ -8738,7 +8712,7 @@ fn match_pattern(
         // nothing — the narrowed value is referred to by the scrutinee's own name.
         Pattern::IsType { ty, .. } => runtime_matches(value, ty, reflection).then(Vec::new),
         // A tuple pattern `(p, q, …)` matches a tuple of the same arity, destructuring each position
-        // against its sub-pattern (object-model slice 4b); refutable on kind, arity, and elements.
+        // against its sub-pattern; refutable on kind, arity, and elements.
         Pattern::Tuple { elements, .. } => {
             let Value::Tuple(items) = value else {
                 return None;
@@ -8827,7 +8801,7 @@ mod tests {
         // A top-level `fn` captures the global scope, which holds the function — a would-be `Rc`
         // cycle. `destroy_globals` drains the global bindings at program end, dropping the closure
         // and breaking the cycle, so the tree-walker *does* reclaim it: residency returns to
-        // baseline. (Capture cycles rooted below the global scope are the residual Phase 6 closes;
+        // baseline. (Capture cycles rooted below the global scope are closed by the cycle collector;
         // the corpus-wide oracle measures whether any remain.)
         let before = live_count();
         run("fn f(): int { return 1; } echo f();");
@@ -8864,7 +8838,7 @@ mod tests {
         // The copy-on-write `~=` fast path may mutate in place only when uniquely owned. An alias
         // taken before the appends must still observe the original list; an explicit `acc = acc ~ acc`
         // must double (the self-reference guard sends it to the copy path, never vacating a slot the
-        // RHS reads). Locks the P-COW correctness invariant at the crate level.
+        // RHS reads). Locks the copy-on-write correctness invariant at the crate level.
         let out = run(
             "mut acc = [1, 2];\nb = acc;\nacc ~= [3];\nacc ~= [4];\necho acc;\necho b;\nmut twice = [5];\ntwice = twice ~ twice;\necho twice;\n",
         );
@@ -8874,7 +8848,7 @@ mod tests {
 
     #[test]
     fn operator_trait_overloads_plus() {
-        // `a + b` on a class implementing `Add` dispatches to its `add` method (M1.8); the VM
+        // `a + b` on a class implementing `Add` dispatches to its `add` method; the VM
         // reproduces this identically (see noeta-vm), guarded by the differential oracle.
         let out = run(
             "class Money {\n  amount: int\n  currency: string\n  pub fn new(a: int, c: string): Money { return Money { amount: a, currency: c }; }\n  impl Add {\n    pub fn add(other: Money): Money { return Money { amount: self.amount + other.amount, currency: self.currency }; }\n  }\n}\na = Money.new(5, \"USD\");\nb = Money.new(3, \"USD\");\nt = a + b;\necho t.amount;\necho t.currency;\n",
@@ -8907,7 +8881,7 @@ mod tests {
 
     #[test]
     fn enum_body_methods_and_impls_dispatch() {
-        // Object-model slice 3: an enum's unified body on the tree-walker. An instance method takes
+        // An enum's unified body on the tree-walker. An instance method takes
         // the whole value as `self`; an associated function is called on the bare type name; `${}`
         // routes to `impl Display`; `==` routes to `impl Equatable`. The VM reproduces this (see
         // noeta-vm), guarded by the differential oracle.
@@ -9122,7 +9096,7 @@ mod tests {
 
     #[test]
     fn tuple_destructuring_binding() {
-        // Object-model slice 4b: `(a, b, …) = expr` unpacks a tuple positionally on the tree-walker.
+        // `(a, b, …) = expr` unpacks a tuple positionally on the tree-walker.
         assert_eq!(
             run("(a, b) = (1, \"two\");\n(x, y, z) = (3, 4, 5);\necho a ~ \" \" ~ b;\necho x ~ \" \" ~ y ~ \" \" ~ z;").stdout,
             "1 two\n3 4 5\n"
@@ -9268,8 +9242,7 @@ mod tests {
 
     #[test]
     fn functions_can_call_other_functions() {
-        // Forward references through the shared global scope work; true self-recursion
-        // is exercised once `if` (control flow) lands in Slice 3.
+        // Forward references through the shared global scope work.
         assert_eq!(
             run("fn dbl(n: int): int { return n * 2; } fn quad(n: int): int { return dbl(dbl(n)); } echo quad(3);")
                 .stdout,

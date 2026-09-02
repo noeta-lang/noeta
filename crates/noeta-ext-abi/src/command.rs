@@ -1,8 +1,7 @@
-//! Extension **CLI commands** (higher-order-abi H6): the seam that lets an extension contribute
+//! Extension **CLI commands**: the seam that lets an extension contribute
 //! a `noeta <name>` subcommand — the `cargo clippy` model, in-process for compiled-in extensions
-//! (a PATH/binary model can join at the package-manager milestone). `noeta serve` is the proving
-//! client: it was a hardcoded variant of the CLI's closed `Command` enum purely because no such
-//! seam existed.
+//! (a PATH/binary model can join later). `noeta serve` is the proving client: without this seam it
+//! would be a hardcoded variant of the CLI's closed `Command` enum.
 //!
 //! The capability is deliberately **narrow**: a command drives a program run ([`CommandCtx`] =
 //! load + check + run a file on the real host, optionally with a synthesized trailing entry
@@ -18,7 +17,7 @@ pub enum ArgKind {
     Path,
     /// An optional integer flag with a default (`--port 8080`).
     Int { default: i64 },
-    /// An optional string flag with a default (`--host 0.0.0.0`, server-hmr S0).
+    /// An optional string flag with a default (`--host 0.0.0.0`).
     Str { default: &'static str },
     /// A boolean `--flag` (para-extraction: `noeta migrate --status`). Always parsed: present is
     /// `true`, absent `false` — read it with [`ParsedArgs::bool`].
@@ -163,8 +162,8 @@ impl ParsedArgs {
     // The panicking accessors below are the ergonomic form for a command body reading its OWN
     // declared args (the CLI parses every declared arg, defaults included, before `run`). Asking
     // for an undeclared name is an author bug, not user input — `#[track_caller]` points the
-    // panic at the command body's line and the message names the missing declaration, instead of
-    // the bare `Option::expect` that used to abort the CLI opaquely (audit-2 F4).
+    // panic at the command body's line and the message names the missing declaration, rather than
+    // a bare `Option::expect` aborting the CLI opaquely.
 
     /// The declared [`ArgKind::Str`] argument `name` (defaulted by the CLI when absent).
     /// Panics when `name` was never declared as a string arg — declare it in the command's
@@ -219,7 +218,7 @@ impl ParsedArgs {
 pub enum EntryArg {
     /// An integer literal (`http.serve(8080, …)`).
     Int(i64),
-    /// A string literal (`http.serve(8080, fetch, "127.0.0.1")`, server-hmr S0).
+    /// A string literal (`http.serve(8080, fetch, "127.0.0.1")`).
     Str(String),
     /// A top-level identifier the loaded program defines (`fetch`) — a missing one surfaces as
     /// an ordinary check error against the program, exactly as if the user wrote the call.
@@ -267,18 +266,17 @@ pub trait CommandCtx {
         None
     }
 
-    /// Serve `file` across `workers` worker isolates on `host:port` (server-hmr S1 multi-core).
+    /// Serve `file` across `workers` worker isolates on `host:port`.
     /// The driver binds the listener once and gives each worker a cloned fd; the kernel
     /// load-balances connections. Default: fall back to a single-worker
     /// [`run_file`](CommandCtx::run_file) — a driver that has not implemented multi-core still
     /// serves, just on one core. Returns the process exit code.
     ///
     /// `entry` is **the command's own call**, the same [`EntryCall`] value it would hand
-    /// [`run_file`](CommandCtx::run_file) for one worker (audit-10). It is passed rather than
-    /// rebuilt because it used to be rebuilt: `std`'s `serve` declared the call, the ABI default
-    /// here declared a second copy of it, and the CLI's multi-core path a third — under a comment
-    /// asserting all of them were "built the same way". They were, until a signature change reached
-    /// one and not the others. Now the declaration is one expression and every path runs *that*.
+    /// [`run_file`](CommandCtx::run_file) for one worker. It is passed rather than rebuilt so the
+    /// serve entry call is declared once: `std`'s `serve`, this default, and the CLI's multi-core
+    /// path would otherwise each hold a copy, and a signature change that reaches one and not the
+    /// others is silent.
     ///
     /// `host`/`port` stay separate because they are not the call: they are the address the **driver**
     /// binds once, before any worker exists.
@@ -308,7 +306,7 @@ pub struct ExtCommand {
 }
 
 impl ExtCommand {
-    /// Field defaults for additive evolution (N3.6), mirroring `ExtModule::DEFAULTS`: write
+    /// Field defaults for additive evolution, mirroring `ExtModule::DEFAULTS`: write
     /// `ExtCommand { name, about, run, ..ExtCommand::DEFAULTS }` and a future optional field
     /// lands here once instead of in every registration. (`run` has no meaningful default — the
     /// placeholder exits with an error — so always name it explicitly.)

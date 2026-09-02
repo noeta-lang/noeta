@@ -1,4 +1,4 @@
-//! The reference interpreter's [`NativeCtx`] implementation (higher-order-abi H0) — the
+//! The reference interpreter's [`NativeCtx`] implementation — the
 //! tree-walker twin of the VM's `native_ctx.rs`. Same per-call slot-table shape; here the values
 //! are `Rc`-backed clones, so ownership is automatic and the table exists for representation
 //! parity (a shared dispatch addresses slots identically in both backends — that is what makes
@@ -381,7 +381,7 @@ impl NativeCtx for EvalCtx<'_> {
         }
     }
 
-    // ----- Class 3 (H4): the interpreter twins of the VM's arena/state fields; entries are
+    // ----- Class 3: the interpreter twins of the VM's arena/state fields; entries are
     // `Rc` clones, so ownership is automatic. -----
 
     fn state(
@@ -515,7 +515,7 @@ impl NativeCtx for EvalCtx<'_> {
         Ok(())
     }
 
-    // ----- The raw-buffer ABI (package-manager N3.4): the tree-walker twins. -----
+    // ----- The raw-buffer ABI: the tree-walker twins. -----
 
     fn with_packed(
         &mut self,
@@ -656,7 +656,7 @@ impl NativeCtx for EvalCtx<'_> {
         &mut self,
         slot: Slot,
     ) -> CtxResult<Option<Vec<noeta_stdlib::PackedField>>> {
-        // The element bundle methods' width source (scalar-unification slice 3), the tree-walker twin
+        // The element bundle methods' width source, the tree-walker twin
         // of the VM's `packed_schemas` scan: the interpreter records every `@packed` struct's field
         // type names, so the value's own `def` name recovers the exact kinds a single struct value's
         // boxed scalars erase.
@@ -684,7 +684,7 @@ impl NativeCtx for EvalCtx<'_> {
     }
 }
 
-// task-local context (native-otel T5a): thin views over `Interpreter::ctx_current`.
+// task-local context: thin views over `Interpreter::ctx_current`.
 impl noeta_stdlib::TaskContext for EvalCtx<'_> {
     fn top(&mut self) -> Option<u64> {
         self.interp.ctx_current.last().copied()
@@ -728,7 +728,7 @@ impl noeta_stdlib::FutureTracing for EvalCtx<'_> {
 impl noeta_stdlib::HotReload for EvalCtx<'_> {}
 
 impl Interpreter {
-    /// Call a registered extern type's **higher-order method** (higher-order-abi H4) — the
+    /// Call a registered extern type's **higher-order method** — the
     /// tree-walker twin of the VM's `call_ctx_type_method`. The receiver rides as slot 0.
     pub(crate) fn call_ctx_type_method(
         &mut self,
@@ -738,8 +738,8 @@ impl Interpreter {
         args: &[Value],
         span: Span,
     ) -> Eval<Value> {
-        // Bound before the closures so they capture the registry, not `self` (instance-registry
-        // IR3) — the tree-walker twin of the VM's binding. The `static_dispatch_ctx_method` fast
+        // Bound before the closures so they capture the registry, not `self` — the tree-walker
+        // twin of the VM's binding. The `static_dispatch_ctx_method` fast
         // path stays on the global; only the dyn-table fallback consults `reg`.
         let reg = self.reg();
         self.ctx_receiver_call(
@@ -763,8 +763,8 @@ impl Interpreter {
         )
     }
 
-    /// Call a **trait** method (a native default body, slice 2; or a kernel-trait method since the
-    /// ExtBundle→ExtTrait fold-in, slice 4) — the tree-walker twin of the VM's `call_trait_method`:
+    /// Call a **trait** method (a native default body, or a kernel-trait method) — the
+    /// tree-walker twin of the VM's `call_trait_method`:
     /// the compiler baked the `(trait, method)` route, receiver rides as slot 0. `trait_q` is the
     /// trait's qualified identity.
     pub(crate) fn call_trait_method(
@@ -775,7 +775,7 @@ impl Interpreter {
         args: &[Value],
         span: Span,
     ) -> Eval<Value> {
-        // Bound before the closures so they capture the registry, not `self` (IR3).
+        // Bound before the closures so they capture the registry, not `self`.
         let reg = self.reg();
         self.ctx_receiver_call(
             recv,
@@ -852,7 +852,7 @@ impl Interpreter {
         }
     }
 
-    /// Call a registered **higher-order** native function (higher-order-abi H0) — the tree-walker
+    /// Call a registered **higher-order** native function — the tree-walker
     /// twin of the VM's `call_ctx_function`. The dispatch body is shared, so the backends agree
     /// by construction.
     pub(crate) fn call_ctx_function(
@@ -862,7 +862,7 @@ impl Interpreter {
         args: &[Value],
         span: Span,
     ) -> Eval<Value> {
-        // Bound before `ctx` takes `&mut self` (IR3): `reg` is `&'static`, so it survives the
+        // Bound before `ctx` takes `&mut self`: `reg` is `&'static`, so it survives the
         // borrow and the fallback dispatch routes through this interpreter's registry.
         let reg = self.reg();
         let mut ctx = EvalCtx::new(self, args, span);

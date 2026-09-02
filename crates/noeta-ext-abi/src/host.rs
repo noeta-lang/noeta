@@ -1,4 +1,4 @@
-//! The host-capability seam (M2.1) — the trait side.
+//! The host-capability seam — the trait side.
 //!
 //! Real host IO (filesystem, environment, args, wall-clock, network) is non-deterministic and
 //! would break the differential oracle. So every host-coupled effect both backends perform is
@@ -21,15 +21,15 @@ use crate::{ErrorKind, StdError};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReadSource {
     /// The entire file content, already in memory. The handle streams over it with no further host
-    /// calls — deterministic, and byte-identical to the pre-P-LAZY snapshot behavior. The sandbox
-    /// always uses this (its files are small in-memory fixtures).
+    /// calls, which is deterministic. The sandbox always uses this (its files are small in-memory
+    /// fixtures).
     Snapshot(String),
     /// A host-side lazy reader identified by this id; the handle pulls more bytes via
     /// [`FileReader::fs_read_more`] as the cursor consumes them. Real-host only.
     Lazy(u64),
 }
 
-/// **Read-handle backing** (P-LAZY): how an opened file's bytes are delivered. `fs.open(path, "r")`
+/// **Read-handle backing**: how an opened file's bytes are delivered. `fs.open(path, "r")`
 /// calls `fs_open_read` to learn whether they arrive as a deterministic whole-file
 /// [`ReadSource::Snapshot`] (the sandbox) or a [`ReadSource::Lazy`] reader the handle pulls from via
 /// `fs_read_more` (the real host, so a large file is never buffered whole). `fs_read_more` is only
@@ -52,15 +52,15 @@ pub trait FileSystem: FileReader {
     fn fs_write(&mut self, path: &str, content: &str) -> Result<(), StdError>;
     fn fs_append(&mut self, path: &str, content: &str) -> Result<(), StdError>;
     fn fs_read(&self, path: &str) -> Result<String, StdError>;
-    /// Write raw bytes (P-PACK 4.4 `fs.write_bytes`) — the binary counterpart of `fs_write`.
+    /// Write raw bytes (`fs.write_bytes`) — the binary counterpart of `fs_write`.
     fn fs_write_bytes(&mut self, path: &str, data: &[u8]) -> Result<(), StdError>;
-    /// Read raw bytes (P-PACK 4.4 `fs.read_bytes`) — the binary counterpart of `fs_read`.
+    /// Read raw bytes (`fs.read_bytes`) — the binary counterpart of `fs_read`.
     fn fs_read_bytes(&self, path: &str) -> Result<Vec<u8>, StdError>;
     fn fs_exists(&self, path: &str) -> bool;
     fn fs_remove(&mut self, path: &str) -> Result<bool, StdError>;
     fn fs_list(&self) -> Result<Vec<String>, StdError>;
 
-    // Directory hierarchy (M2.5). `fs_list_dir` returns a directory's immediate children (sorted);
+    // Directory hierarchy. `fs_list_dir` returns a directory's immediate children (sorted);
     // `fs_mkdir` creates a directory and its ancestors; `fs_is_dir` reports whether a path is one.
     fn fs_list_dir(&self, dir: &str) -> Result<Vec<String>, StdError>;
     fn fs_mkdir(&mut self, path: &str) -> Result<(), StdError>;
@@ -77,7 +77,7 @@ pub trait Rng {
 /// **Monotonic clock** capability — `monotonic` reads-then-advances; `sleep` advances the logical
 /// clock; `delay` elapses real time.
 ///
-/// `clock_unix_ms` is the wall-time view (id-entropy U1): real `SystemTime` on the real host; on the
+/// `clock_unix_ms` is the wall-time view: real `SystemTime` on the real host; on the
 /// sandbox a **derived read** of the logical clock against the fixed sandbox epoch. It deliberately
 /// does NOT advance the counter — a derived reading (a v7 UUID) must not perturb the user's
 /// observable `monotonic` stream — but it advances under `sleep` like everything else, so
@@ -110,7 +110,7 @@ pub trait Clock {
     fn clock_unix_ms(&mut self) -> u64;
 }
 
-/// **Entropy** capability (id-entropy U1) — raw random bits, distinct from [`Rng`] on purpose.
+/// **Entropy** capability — raw random bits, distinct from [`Rng`] on purpose.
 /// [`Rng`] is the *user-facing seeded* stream (`random.seed` rewinds it; every draw is observable
 /// through `random.int`/`random.float`), so entropy consumers (UUID v4/v7) must not share it:
 /// generating an id would perturb the user's `random` sequence, and `random.seed(42)` would rewind
@@ -120,7 +120,7 @@ pub trait Entropy {
     fn entropy_u64(&mut self) -> u64;
 }
 
-/// **Sequential ids** capability (id-entropy U2) — the counter behind `id.next_id()`: 1, 2, 3, ….
+/// **Sequential ids** capability — the counter behind `id.next_id()`: 1, 2, 3, ….
 /// Host-owned so both backends share one dispatch (`next_id` agreement is by-construction, like
 /// every registry module) and so REPL continuity rides the session's host. Deterministic on every
 /// host — sequential ids are an ordering device, not entropy.
@@ -128,7 +128,7 @@ pub trait Ids {
     fn id_next(&mut self) -> u64;
 }
 
-/// **Network** capability (http arc H1) — outbound HTTP. The sandbox answers every request with a
+/// **Network** capability — outbound HTTP. The sandbox answers every request with a
 /// deterministic pure responder (a pure function of the request, so the differential holds
 /// regardless of URL); the real host performs it over the network. A transport failure (DNS,
 /// connection, TLS) is a classified [`crate::NetError`]; an HTTP error *status* is an ordinary
@@ -151,7 +151,7 @@ pub trait Network {
         request: crate::NetRequest,
     ) -> Result<crate::NetResponse, crate::NetError>;
 
-    /// Build the async work descriptor for `request` (http arc H3, the `http.*_async` surface).
+    /// Build the async work descriptor for `request` (the `http.*_async` surface).
     /// The dispatch tickets the returned descriptor on the executor. The default is a
     /// [`crate::net::NetFetchIo`] with no real body — it resolves through [`Self::net_fetch`] at
     /// spawn (deterministic in the sandbox; serial-but-correct on any host). `RealHost` overrides
@@ -161,7 +161,7 @@ pub trait Network {
         Box::new(crate::net::NetFetchIo { request })
     }
 
-    // --- Inbound: the server side (http-server S1). The exact inverse of the outbound side above:
+    // --- Inbound: the server side. The exact inverse of the outbound side above:
     // the world initiates a connection and the program's handler responds. Determinism is the
     // mirror image of the pure responder — the sandbox drives a *pure, finite request script*
     // (`net_accept_next` pops it, then `None`), so a served program terminates in-oracle; the real
@@ -205,7 +205,7 @@ pub trait Network {
         })
     }
 
-    // --- Websocket hijack (server-hmr L0): an accepted connection upgrades from
+    // --- Websocket hijack: an accepted connection upgrades from
     // one-reply-and-close to a persistent bidirectional TEXT-message stream — the transport under
     // LiveView's diff-push and the HMR client events. Determinism mirrors the request script: the
     // sandbox drives a fixed per-connection client conversation and records sends; the real host
@@ -293,7 +293,7 @@ pub trait Network {
         Box::new(crate::net::WsCloseIo { conn })
     }
 
-    // --- Streaming bodies (http-streaming arc). The outbound half reads a response body
+    // --- Streaming bodies. The outbound half reads a response body
     // *incrementally* instead of buffering it whole; the inbound half serves an event stream
     // instead of one reply-and-close. Determinism follows the same discipline as everything above:
     // the sandbox decodes a **pure, finite scripted body** (a function of the request, like
@@ -414,7 +414,7 @@ pub trait Network {
     }
 }
 
-/// **Host introspection** capability (M2.2). `env_keys` is sorted. The sandbox presents a fixed
+/// **Host introspection** capability. `env_keys` is sorted. The sandbox presents a fixed
 /// fixture; a real host reads the real environment/args.
 ///
 /// `env_set` (stdlib-gaps) writes into the **program's view** of the environment, not the real
@@ -436,7 +436,7 @@ pub enum Stream {
     Stderr,
 }
 
-/// **Console** capability (CLI-completion slice 2) — the program's standard input and terminal-ness.
+/// **Console** capability — the program's standard input and terminal-ness.
 /// A host effect (fixture in the sandbox, real I/O on `RealHost`), so the backend differential stays
 /// deterministic — the mirror of [`Env`]: program *output* is batch-captured and compared, but stdin
 /// and TTY-ness are ambient effects that belong on a capability, not in the compared buffers.
@@ -520,7 +520,7 @@ pub trait Os {
         Box::new(crate::os::ExecIo { command, args })
     }
 
-    // --- Process lifecycle (process-handle arc): spawn-and-hold, unlike the run-to-completion
+    // --- Process lifecycle: spawn-and-hold, unlike the run-to-completion
     // `os_exec`. `os_spawn` starts a child and returns an opaque handle id; the program then
     // controls it through the [`crate::os::Process`] extern type, whose methods route back here by
     // id — the listener/reader-registry model, not `FileHandle`'s self-contained state. The
@@ -576,7 +576,7 @@ pub trait Os {
         Box::new(crate::os::ProcWaitIo { handle })
     }
 
-    // --- Streaming (process-streaming arc): read a child's stdout line-by-line *while it runs*,
+    // --- Streaming: read a child's stdout line-by-line *while it runs*,
     // and feed its stdin — unlike `wait`, which only hands back the fully-captured output at exit.
     // The real host keeps draining both pipes on background threads (so a chatty child never
     // deadlocks), and `read_line` consumes the stdout buffer through a per-handle cursor; the
@@ -645,7 +645,7 @@ pub trait Os {
     fn os_proc_close_stdin(&mut self, handle: u64) -> Result<(), StdError>;
 }
 
-/// **Peer-to-peer sync** capability (p2p P1) — the local-first stack's transport seam (§9.15). A
+/// **Peer-to-peer sync** capability — the local-first stack's transport seam (§9.15). A
 /// program `publish`es a message to a **topic** and `poll`s a topic for a message another peer
 /// published; the messages are opaque bytes (p2panda, the eventual real backer, is deliberately
 /// data-type-agnostic — CRDT state serializes to bytes and rides this seam in a later slice).
@@ -653,7 +653,7 @@ pub trait Os {
 /// Determinism is the mirror of [`Network`]'s inbound side: the sandbox is a **deterministic
 /// in-process broker** — `publish` enqueues to a per-topic FIFO, `poll` dequeues, `None` once a
 /// topic drains — so a program that publishes then receives terminates in-oracle and both backends
-/// agree. A real host would replace the broker with the p2panda gossip network (P3), non-
+/// agree. A real host would replace the broker with the p2panda gossip network, non-
 /// deterministic and CLI-only; until then it uses the same in-process broker (single-node loopback,
 /// no real transport — cross-node/cross-isolate delivery is a later slice, like the HTTP server's
 /// multi-core story).
@@ -669,12 +669,12 @@ pub trait P2p {
     fn p2p_poll(&mut self, topic: &str) -> Result<Option<Vec<u8>>, StdError>;
 
     /// Subscribe to `topic`, returning a subscription id whose cursor starts at the beginning of
-    /// the topic log (p2p P2). Unlike the topic-level [`Self::p2p_poll`] (one implicit reader),
+    /// the topic log. Unlike the topic-level [`Self::p2p_poll`] (one implicit reader),
     /// each subscription has an **independent** cursor — genuine broadcast, so several replicas on
     /// one topic each receive every message. A `synced_signal` holds one for its topic.
     ///
     /// Fallible: the sandbox broker never errors (`Ok` always), but a real transport can fail to
-    /// join a topic overlay (p2p P3), and that must reach the program rather than be swallowed.
+    /// join a topic overlay, and that must reach the program rather than be swallowed.
     fn p2p_subscribe(&mut self, topic: &str) -> Result<u64, StdError>;
 
     /// The next message for subscription `sub` (advancing only its cursor), or `None` once it has
@@ -682,7 +682,7 @@ pub trait P2p {
     /// and durable subscriptions (both deliver bytes; the id namespace is one).
     fn p2p_poll_sub(&mut self, sub: u64) -> Result<Option<Vec<u8>>, StdError>;
 
-    // --- Durable variants (p2p P3.2): eventual-consistency delivery ---------------------------
+    // --- Durable variants: eventual-consistency delivery ---------------------------
     //
     // `synced_signal` uses these so replicas **converge even after being offline** — a peer that
     // joins or reconnects later still receives everything published to the topic, not just what
@@ -703,7 +703,7 @@ pub trait P2p {
         self.p2p_subscribe(topic)
     }
 
-    // --- Encrypted groups (p2p P3.4b): end-to-end-encrypted synced_signal ---------------------
+    // --- Encrypted groups: end-to-end-encrypted synced_signal ---------------------
     //
     // An encrypted `synced_signal(initial, topic, members)` routes through these instead of the
     // plaintext durable methods. The **default** is a transparent pass-through to the durable
@@ -747,7 +747,7 @@ pub trait P2p {
         Ok(())
     }
 
-    // --- Identity & status (p2p P3.3) ---------------------------------------------------------
+    // --- Identity & status ---------------------------------------------------------
     //
     // Both are meaningful only once there is a *real* network with a persistent identity to have
     // and a network to be offline from — so the sandbox/loopback broker keeps the trivial defaults
@@ -755,12 +755,12 @@ pub trait P2p {
     // under `ring-p2p` overrides them from its live p2panda node.
 
     /// This node's stable identity — the hex-encoded Ed25519 public key it signs operations with,
-    /// persisted across restarts (p2p P3.3). `None` on the loopback broker, which has no identity.
+    /// persisted across restarts. `None` on the loopback broker, which has no identity.
     fn p2p_identity(&mut self) -> Result<Option<String>, StdError> {
         Ok(None)
     }
 
-    /// The synchronization state of `topic` from this node's point of view (p2p P3.3): whether it
+    /// The synchronization state of `topic` from this node's point of view: whether it
     /// has caught up with peers ([`SyncStatus::Synced`]), is actively syncing, or has no live peer
     /// ([`SyncStatus::Offline`]). Default [`SyncStatus::Synced`] — the loopback broker is a single
     /// node with nothing to lag behind.
@@ -769,7 +769,7 @@ pub trait P2p {
     }
 }
 
-/// Configuration for **real** peer networking on a host (para-namespace follow-on F2b). A host that
+/// Configuration for **real** peer networking on a host. A host that
 /// permits a live transport (`RealHost` — real IO, nondeterminism) carries one; the deterministic
 /// sandbox and the WASI/browser hosts do not. It holds only the *policy* the extension needs, not any
 /// transport: the p2panda node itself lives in the `para.p2p` extension, never in a host.
@@ -792,14 +792,12 @@ pub struct RealP2pConfig {
     pub data_dir: Option<std::path::PathBuf>,
 }
 
-/// Whether a host permits **real** peer networking (para-namespace arc → F2b). `P2p` used to be a
-/// mandatory arm of the [`Host`] union; the p2p/local-first stack left `std` for the non-default
-/// `para` package, and F2b moved the transport *impl* out of every host into the `para.p2p`
-/// extension. So a host no longer provides `P2p` at all — it only declares, through this seam,
-/// whether real networking is allowed and with what config. A real host returns `Some`; the
-/// deterministic sandbox and the minimal hosts keep the default `None`, which the extension reads as
-/// "use the loopback broker" (oracle-safe). The `P2p` impls now live entirely on the extension side
-/// (the loopback [`crate::P2pBroker`] here, the real node in the out-of-tree para-p2p package).
+/// Whether a host permits **real** peer networking. The p2p transport belongs to the `para.p2p`
+/// extension rather than to the [`Host`] union, so a host declares only, through this seam, whether
+/// real networking is allowed and with what config. A real host returns `Some`; the deterministic
+/// sandbox and the minimal hosts keep the default `None`, which the extension reads as "use the
+/// loopback broker" (oracle-safe). Every [`crate::host::P2p`] impl lives on the extension side —
+/// the loopback [`crate::P2pBroker`] here, the real node in the out-of-tree para-p2p package.
 pub trait P2pProvider {
     /// The real-networking config for this host, or `None` (the default) to use the deterministic
     /// loopback broker. Only a real host overrides it.
@@ -842,7 +840,7 @@ pub trait Cancellable {
     }
 }
 
-/// A `synced_signal`'s convergence state relative to its peers (p2p P3.3). Meaningless on the
+/// A `synced_signal`'s convergence state relative to its peers. Meaningless on the
 /// deterministic loopback broker (always [`SyncStatus::Synced`]); real once a network can be
 /// partitioned — a live p2panda node reports it from its log-sync session lifecycle, letting a
 /// program render "working offline" / "syncing…" / "up to date".

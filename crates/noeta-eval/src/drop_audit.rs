@@ -1,4 +1,4 @@
-//! Use-after-drop audit (memory-management migration, Phase 3.x): the runtime half of the
+//! Use-after-drop audit (memory-management migration): the runtime half of the
 //! **static-≤-dynamic last-use property** — a machine check that no *computed* death (an inserted
 //! [`noeta_ir::Stmt::DropVar`]) ever precedes the *real* dynamic last use of its binding.
 //!

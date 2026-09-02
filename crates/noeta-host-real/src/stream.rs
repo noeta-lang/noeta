@@ -1,4 +1,4 @@
-//! Streaming HTTP bodies on the real host (http-streaming arc): a genuinely incremental reqwest
+//! Streaming HTTP bodies on the real host: a genuinely incremental reqwest
 //! body reader, and a `text/event-stream` writer over the served connection.
 //!
 //! The **read** side has one structural constraint worth stating, because it dictates the design.

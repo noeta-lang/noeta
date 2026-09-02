@@ -1,5 +1,5 @@
-//! `std.crypto` — content digests and keyed digests (crypto arc C2), plus the bcrypt password
-//! helpers (C4). The math is RustCrypto's (`sha1`/`sha2`/`md-5`/`hmac`) and the `bcrypt` crate —
+//! `std.crypto` — content digests and keyed digests, plus the bcrypt password
+//! helpers. The math is RustCrypto's (`sha1`/`sha2`/`md-5`/`hmac`) and the `bcrypt` crate —
 //! we never hand-roll primitives. Everything here is pure: effectful inputs (the bcrypt salt)
 //! arrive as arguments, drawn from the Host `Entropy` capability by the registry dispatch.
 //!
@@ -40,7 +40,7 @@ pub fn hmac_sha512(key: &[u8], data: &[u8]) -> Vec<u8> {
     mac.finalize().into_bytes().to_vec()
 }
 
-/// Verify an HMAC-SHA256 tag in constant time (crypto arc C7). `bytes ==` short-circuits on the
+/// Verify an HMAC-SHA256 tag in constant time. `bytes ==` short-circuits on the
 /// first differing byte — fine for content digests, a timing oracle for auth tags — so tag
 /// comparison gets a purpose-named function on the `hmac` crate's own constant-time
 /// `Mac::verify_slice`. A truncated, tampered, or wrong-key tag is `false`, never an error.
@@ -66,7 +66,7 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.ct_eq(b).into()
 }
 
-/// bcrypt password hash (crypto arc C4). The 16-byte salt arrives as an ARGUMENT — drawn from
+/// bcrypt password hash. The 16-byte salt arrives as an ARGUMENT — drawn from
 /// the Host `Entropy` capability by the registry dispatch, never self-generated — so the sandbox
 /// stays deterministic (exact-string pinnable) and the real host gets OS entropy. The result is
 /// the standard `$2b$…` modular-crypt string, self-describing for `bcrypt_verify`.
@@ -103,7 +103,7 @@ pub const HASHER_TYPE_NAME: &str = "Hasher";
 /// `Hasher`'s qualified runtime identity — the [`crate::id::TYPE_IDENTITY`] twin.
 pub const HASHER_TYPE_IDENTITY: &str = "std.crypto.Hasher";
 
-/// An incremental digest (crypto arc C3) — ONE extern type over an algorithm enum, so adding an
+/// An incremental digest — ONE extern type over an algorithm enum, so adding an
 /// algorithm never adds a type. The third extern-seam client, and the first in the
 /// **mutable + host-free** corner of the {pure, mutable} × {host-free, effectful} matrix:
 /// `update` mutates the receiver through the shared cell (reference semantics, like

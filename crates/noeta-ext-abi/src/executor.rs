@@ -17,10 +17,10 @@
 use crate::{Host, StdError};
 use std::collections::{BTreeSet, HashMap};
 
-/// Async work a registry dispatch returns instead of a value (extern-types X5):
+/// Async work a registry dispatch returns instead of a value:
 /// `NativeOut::Spawn(Box<dyn ExternIo>)`. The backend tickets the descriptor on its executor and
 /// hands back a future — extensions provide values and WORK; core owns time, scheduling, and
-/// determinism. Plain `Send` data + two bodies, the split the old closed `IoRequest` enum had.
+/// determinism. Plain `Send` data plus two bodies.
 pub trait ExternIo: Send + std::fmt::Debug {
     /// The deterministic body: run synchronously against the Host. The sandbox executor runs
     /// this **at spawn** (ready on the first poll — in-oracle, differential-identical), and the
@@ -57,8 +57,7 @@ impl std::fmt::Debug for RealBody {
     }
 }
 
-/// The `fs.*_async` work descriptors (Track A.4c/A.10, migrated onto the open seam in
-/// extern-types X5): plain data, built by `fs_dispatch`. The sandbox body streams through the
+/// The `fs.*_async` work descriptors: plain data, built by `fs_dispatch`. The sandbox body streams through the
 /// Host (the VFS); the real body is a blocking closure over `std::fs` on the runtime's blocking
 /// pool — exactly what `tokio::fs` is underneath, so real concurrency and error text are
 /// unchanged from the deleted `run_io_real`.
@@ -72,11 +71,11 @@ pub enum FsIo {
     Write(String, String),
     /// `fs.append_async(path, content)` → unit.
     Append(String, String),
-    /// `fs.exists_async(path)` → bool (extern-types X6).
+    /// `fs.exists_async(path)` → bool.
     Exists(String),
-    /// `fs.remove_async(path)` → whether anything was removed (extern-types X6).
+    /// `fs.remove_async(path)` → whether anything was removed.
     Remove(String),
-    /// `fs.list_async()` / `fs.list_async(dir)` → the listing (extern-types X6).
+    /// `fs.list_async()` / `fs.list_async(dir)` → the listing.
     List(Option<String>),
     /// `fs.mkdir_async(path)` → unit; creates the directory and any missing ancestors (A.10 residue).
     Mkdir(String),
@@ -116,7 +115,7 @@ impl ExternIo for FsIo {
     }
 
     fn run_real(&mut self) -> Option<RealBody> {
-        // The metadata twins (X6) deliberately have NO real body: the real executor's None
+        // The metadata twins deliberately have NO real body: the real executor's None
         // fallback runs `run_sync` against the RealHost at spawn — exact sync semantics by
         // construction (these are cheap point ops), and the degradation path every extension
         // gets for free stays exercised. Content IO below keeps its concurrent bodies.
@@ -322,7 +321,7 @@ pub trait Executor {
     /// time to the deadline; the real executor *sleeps* real time until it, or drives a pending read.
     fn advance(&mut self) -> Option<u64>;
 
-    /// Begin an async work descriptor (extern-types X5 — `fs.*_async` and any extension's
+    /// Begin an async work descriptor (`fs.*_async` and any extension's
     /// async function), returning a ticket id to poll via [`Self::poll_ext`]. The sandbox
     /// executor runs `run_sync` through `host` **at spawn** and caches the outcome, so it is
     /// ready on the first poll (deterministic, in-oracle); the real executor runs the

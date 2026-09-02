@@ -1,19 +1,18 @@
 //! The `Scalar` element trait — one source of truth for per-element-type numeric behaviour.
 //!
 //! The numeric kernels (list reductions in [`crate::reductions`], list element-wise ops in
-//! [`crate::bulk`], and the vector bundles that were `ivec`/`vec3`/`color`) used to each re-express
-//! the same handful of operations per width via local macros: `read_le`/`chunks_exact`/wrapping
-//! arithmetic, ten near-identical copies apiece. That duplication *was* the coverage gap — adding a
-//! width meant editing every file, so nobody did, and whole widths (f64, i8/i16/i64/u16/u32/u64)
-//! never reached the vector surface at all.
+//! [`crate::bulk`], and the vector bundles) would otherwise each re-express the same handful of
+//! operations per width via local macros: `read_le`/`chunks_exact`/wrapping arithmetic, ten
+//! near-identical copies apiece. That duplication is a coverage gap, because adding a width means
+//! editing every file, and a width nobody edits in reaches no surface at all.
 //!
-//! This trait collapses that to a single impl per numeric type. Each consumer becomes a thin generic
+//! This trait is a single impl per numeric type instead. Each consumer becomes a thin generic
 //! `fn f<S: Scalar>(..)` body that the compiler monomorphizes once per width — the loops stay
-//! `chunks_exact`-shaped so LLVM autovectorizes each monomorphization, exactly as the hand-rolled
-//! macros did (this is *not* explicit `std::simd`). Adding a width becomes one trait impl that lights
+//! `chunks_exact`-shaped so LLVM autovectorizes each monomorphization (this is *not* explicit
+//! `std::simd`). Adding a width becomes one trait impl that lights
 //! up every surface at once; "which types are covered" becomes "which types implement `Scalar`".
 //!
-//! ## Settled semantics (the arc conventions)
+//! ## Settled semantics
 //! - **Default arithmetic wraps** for integers (matches scalar `+`, the reductions and element-wise
 //!   ops) and is **IEEE** for floats. [`Scalar::sat_add`]/[`Scalar::sat_sub`] are the opt-in
 //!   saturating mode — meaningful for integers, `== add`/`sub` for floats.
@@ -24,10 +23,8 @@
 //! - Signed vs unsigned differ in `read_le` extension, `min`/`max`, saturation bounds and `neg` —
 //!   all captured in the impl, invisible to the generic bodies.
 //!
-//! ## Additions beyond the arc's sketch
-//! The plan's trait sketch omitted three members that a real consumer (the reductions migration in
-//! this same slice) cannot do without; they are noted here and in the arc so the later slices treat
-//! them as part of the contract:
+//! ## Three members the consumers need
+//! Three members exist for the generic bodies rather than for the arithmetic itself:
 //! - [`Scalar::ZERO`] / [`Scalar::ONE`] — the additive / multiplicative identities. `sum`/`product`
 //!   accumulate in `S` (wrapping), and an *empty* list must fold to the identity (`0` / `1`); you
 //!   cannot seed a generic accumulator without them.
@@ -106,7 +103,7 @@ pub trait Scalar: Copy {
     fn float_mul(a: Self::Float, b: Self::Float) -> Self::Float;
 
     /// Promote a **widened accumulator** ([`Self::Wide`]) to a float ([`Self::Float`]) — the missing
-    /// rung `length` needs (scalar-unification slice 3): a vector length is `sqrt` of the *widened*
+    /// rung `length` needs: a vector length is `sqrt` of the *widened*
     /// dot accumulator, but [`Self::to_float`] promotes a bare element, not a `Wide`. Integers widen
     /// `i64`/`u64` → `f64`; `f32`/`f64` are already their own `Wide == Float`.
     fn wide_to_float(w: Self::Wide) -> Self::Float;

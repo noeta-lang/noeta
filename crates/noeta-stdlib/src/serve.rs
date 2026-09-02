@@ -1,10 +1,10 @@
-//! `http.serve` — the bundled server's accept→dispatch→reply loop (higher-order-abi H3), the
+//! `http.serve` — the bundled server's accept→dispatch→reply loop, the
 //! third and largest client of the **ctx** dispatch seam. One shared body replaces the
 //! per-backend `Builtin::Serve` arms; the loop is line-for-line the drive loop both backends
-//! duplicated (http-server S3/S3b), so the sandbox interleaving stays deterministic and identical
+//! duplicated, so the sandbox interleaving stays deterministic and identical
 //! by construction.
 //!
-//! **Concurrent (S3b):** each accepted connection's `handler(request)` is a task in a
+//! **Concurrent:** each accepted connection's `handler(request)` is a task in a
 //! server-owned in-flight set the loop reaps; a slow (async) handler yields at its awaits while
 //! the next connection is accepted and other handlers advance — the cooperative Tier-1 model (the
 //! accept future is polled alongside the handler futures each round, never drive-to-completion).
@@ -23,7 +23,7 @@ use noeta_ext_abi::{
 
 use crate::net::{REQUEST_TYPE_NAME, Request, request_header, request_path};
 
-/// The process-wide graceful-shutdown flag (server-hmr S0). Every `http.serve` loop in the
+/// The process-wide graceful-shutdown flag. Every `http.serve` loop in the
 /// process polls it each iteration and begins draining when it is set. Deliberately process-wide:
 /// a SIGINT drains *every* serving isolate at once (the multi-core broadcast S1 wants exactly
 /// this), and it is only ever set by the CLI's signal handler — the sandbox/differential never
@@ -65,7 +65,7 @@ fn take_serve_banner() -> Option<String> {
 
 pub(crate) const REQUEST_SIG: SigType = SigType::Named(REQUEST_TYPE_NAME);
 
-/// The websocket session handle's type name (server-hmr L0).
+/// The websocket session handle's type name.
 pub const SOCKET_TYPE_NAME: &str = "Socket";
 
 /// `Socket`'s qualified runtime identity — what [`noeta_ext_abi::ExternValue::type_identity`]
@@ -79,7 +79,7 @@ pub const HTTP_CTX_FNS: &[ExtFn] = &[
     // `serve(port, handler, host?) -> void` — bind an inbound listener and run the accept loop,
     // calling `handler(request)` per connection. The handler's declared return is `dyn`: a sync
     // handler yields the `Response`, an async one a `Future<Response>` — both reaped identically.
-    // The optional trailing `host` (server-hmr S0) is the bind address, default `0.0.0.0` (the
+    // The optional trailing `host` is the bind address, default `0.0.0.0` (the
     // `noeta serve --host` seam threads it here).
     ExtFn {
         param_names: &["port", "handler", "host"],
@@ -101,7 +101,7 @@ pub const HTTP_CTX_FNS: &[ExtFn] = &[
         // without changing what a program *does*.
         ret: RetTy::Concrete(SigType::Never),
     },
-    // `websocket(handler) -> Response` (server-hmr L0) — the connection-hijack response: returned
+    // `websocket(handler) -> Response` — the connection-hijack response: returned
     // from a `fetch` handler, it upgrades the request's connection to a websocket and runs
     // `handler(socket)` as its session (the serve loop reaps it like any handler; the session
     // ends when the handler returns, closing the stream). Declared `Response` so a routing
@@ -112,7 +112,7 @@ pub const HTTP_CTX_FNS: &[ExtFn] = &[
         params: &[SigType::Fn(&[SOCKET_SIG], &SigType::Dyn)],
         ret: RetTy::Concrete(SigType::Named(crate::net::RESPONSE_TYPE_NAME)),
     },
-    // `sse(handler) -> Response` (http-streaming arc) — the websocket upgrade's exact twin for
+    // `sse(handler) -> Response` — the websocket upgrade's exact twin for
     // server-sent events: returned from a `fetch` handler, it answers the request with a
     // `text/event-stream` response held open, and runs `handler(sink)` as its session (the serve
     // loop reaps it like any handler; the stream closes when the handler returns).
@@ -128,7 +128,7 @@ pub const HTTP_CTX_FNS: &[ExtFn] = &[
         params: &[SigType::Fn(&[crate::registry::SSE_SINK_SIG], &SigType::Dyn)],
         ret: RetTy::Concrete(SigType::Named(crate::net::RESPONSE_TYPE_NAME)),
     },
-    // `liveview_js() -> string` (server-hmr L2) — the bundled browser client for the view/diff
+    // `liveview_js() -> string` — the bundled browser client for the view/diff
     // push protocol ([`crate::liveview::LIVEVIEW_JS`]); a handler serves it as
     // `application/javascript`. Pure, so it is sandbox-deterministic like any string.
     ExtFn {
@@ -139,7 +139,7 @@ pub const HTTP_CTX_FNS: &[ExtFn] = &[
     },
 ];
 
-/// `Socket`'s ctx methods (server-hmr L0): `send` writes a text frame (driven to completion — a
+/// `Socket`'s ctx methods: `send` writes a text frame (driven to completion — a
 /// frame write is quick, like a reply); `recv` returns a `Future<?string>` the session awaits
 /// (`none` = the peer closed); `close` ends the stream early.
 pub const SOCKET_CTX_METHODS: &[ExtFn] = &[
@@ -185,7 +185,7 @@ pub const SOCKET_CTX_METHODS: &[ExtFn] = &[
     },
 ];
 
-/// The `noeta serve` CLI subcommand (higher-order-abi H6) — the ergonomic entry point over an
+/// The `noeta serve` CLI subcommand — the ergonomic entry point over an
 /// explicit `server.serve(...)` call: run the file's top-level setup, then synthesize and run
 /// `server.serve(<port>, fetch)`. The program supplies `fetch` and `use std.http.server` (binding
 /// the local `server`); a missing one surfaces as an ordinary check error. Single worker,
@@ -224,9 +224,8 @@ pub const SERVE_COMMAND: ExtCommand = ExtCommand {
         let host = args.str("host").to_string();
         let parallel = args.int("parallel").max(1);
         // **The** serve entry call — one declaration, read by both the single-worker path and the
-        // multi-core fleet (audit-10). It used to be written three times: here, in the ABI's
-        // default `serve_parallel`, and by hand in the CLI, under a comment asserting the copies
-        // were "built the same way"; changing this call's shape was two edits in two crates.
+        // multi-core fleet, so its shape changes in one place rather than in three across two
+        // crates.
         let entry = EntryCall {
             // Qualified: the entry call binds `server` itself, so a serve program need not
             // import a module it never names (its handler signature uses `Request`/`Response`).
@@ -238,7 +237,7 @@ pub const SERVE_COMMAND: ExtCommand = ExtCommand {
                 EntryArg::Str(host.clone()),
             ],
         };
-        // Multi-core (server-hmr S1): the driver binds the listener once and runs the serve
+        // Multi-core: the driver binds the listener once and runs the serve
         // program in N worker isolates sharing `try_clone`d fds. Delegated to the CLI because it
         // owns real-host/thread construction; the single-worker path stays the plain run below.
         // Both run the same `entry`.
@@ -256,8 +255,8 @@ pub const SERVE_COMMAND: ExtCommand = ExtCommand {
 };
 
 /// One accepted connection's handler in flight: where to reply, the handler future the loop reaps,
-/// the SERVER span it runs under (T4; `None` when tracing is off), and its **task-local context**
-/// (T5b) — seeded with that span and swapped in around every call/poll of the handler, so its spans
+/// the SERVER span it runs under (`None` when tracing is off), and its **task-local context** —
+/// seeded with that span and swapped in around every call/poll of the handler, so its spans
 /// nest under its own request and interleaved handlers stay isolated.
 struct InFlight {
     conn: u64,
@@ -268,7 +267,7 @@ struct InFlight {
     /// arrival time + method/route needed to record the duration histogram and balance the
     /// active-requests counter at completion.
     metrics: Option<ServerMetrics>,
-    /// The request's `Sec-WebSocket-Key`, captured at accept (server-hmr L0) — consumed if the
+    /// The request's `Sec-WebSocket-Key`, captured at accept — consumed if the
     /// handler upgrades. `None` for an ordinary request; an upgrade without a key is a 400.
     ws_key: Option<String>,
     /// Which **session** this entry is running, if any — the second life an entry takes on after a
@@ -277,8 +276,8 @@ struct InFlight {
     session: Option<Session>,
 }
 
-/// The kind of persistent stream an upgraded connection is running (server-hmr L0,
-/// http-streaming arc). Both are "the handler returned a marker, so this connection is no longer
+/// The kind of persistent stream an upgraded connection is running. Both are "the handler
+/// returned a marker, so this connection is no longer
 /// one-reply-and-close", and they differ only in how a frame is written and how the stream ends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Session {
@@ -288,14 +287,14 @@ enum Session {
     Sse,
 }
 
-/// Per-request metrics auto-instrumentation state (M3). Captured at accept, consumed at completion.
+/// Per-request metrics auto-instrumentation state. Captured at accept, consumed at completion.
 struct ServerMetrics {
     start_ms: u64,
     method: String,
     route: String,
 }
 
-/// The two instrument handles the server auto-instrumentation records into (M3), created once per
+/// The two instrument handles the server auto-instrumentation records into, created once per
 /// `serve` when metrics are enabled: the request-duration histogram and the active-requests
 /// up/down counter. `None` when metrics are off — the whole per-request metrics path short-circuits.
 struct ServerInstruments {
@@ -303,7 +302,7 @@ struct ServerInstruments {
     active: InstrumentId,
 }
 
-/// The upgrade marker a `fetch` handler returns via `server.websocket(handler)` (server-hmr L0).
+/// The upgrade marker a `fetch` handler returns via `server.websocket(handler)`.
 /// Language-typed `Response` (so routing handlers keep one signature); the serve loop's reap
 /// recognizes the concrete Rust type and hijacks the connection instead of replying. The session
 /// handler rides in the retained arena until the loop takes it.
@@ -339,7 +338,7 @@ impl noeta_ext_abi::ExternValue for WsUpgrade {
     }
 }
 
-/// The websocket session handle (server-hmr L0): a plain conn id; every method reaches the
+/// The websocket session handle: a plain conn id; every method reaches the
 /// `Network` capability's hijack seam. Reference semantics — copies alias the connection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Socket {
@@ -373,7 +372,7 @@ impl noeta_ext_abi::ExternValue for Socket {
     }
 }
 
-/// `Socket`'s ctx-method dispatch (server-hmr L0).
+/// `Socket`'s ctx-method dispatch.
 pub fn socket_ctx_method_dispatch(
     method: &str,
     ctx: &mut dyn NativeCtx,
@@ -478,7 +477,7 @@ pub fn http_ctx_dispatch(
     match func {
         "serve" => {
             // `serve(port, handler)` or `serve(port, handler, host)` — the trailing host is
-            // optional (server-hmr S0).
+            // optional.
             if args.len() != 2 && args.len() != 3 {
                 return Err(arity_error("http.serve", 2, args.len()).into());
             }
@@ -493,7 +492,7 @@ pub fn http_ctx_dispatch(
                 .into());
             };
             let handler = args[1];
-            // The optional bind address (server-hmr S0): `0.0.0.0` unless a third argument names
+            // The optional bind address: `0.0.0.0` unless a third argument names
             // one (the `noeta serve --host` seam threads it as a trailing string).
             let host = match args.get(2) {
                 Some(&slot) => match ctx.view(slot)? {
@@ -510,9 +509,9 @@ pub fn http_ctx_dispatch(
             };
             let addr = format!("{host}:{port}");
             let listener = ctx.host().net_listen(&addr)?;
-            // Only now is the claim true. The CLI used to print this before running the program at
-            // all, so a bind clash or a type error announced the server first and explained the
-            // failure second — `listening on …` followed by `cannot bind …`.
+            // Only now is the claim true. Printing it before the program runs would announce the
+            // server first and explain the failure second — `listening on …` followed by
+            // `cannot bind …`.
             if let Some(banner) = take_serve_banner() {
                 ctx.write_stderr(&format!("{banner}\n"));
                 ctx.flush_output();
@@ -520,7 +519,7 @@ pub fn http_ctx_dispatch(
             // Auto-instrumentation gate: only wrap requests in a SERVER span when telemetry is
             // actually configured, so an unconfigured `noeta serve` does zero span work per request.
             let tracing = ctx.host().tel_enabled();
-            // The metrics twin (M3): each request records `http.server.request.duration` and
+            // The metrics twin: each request records `http.server.request.duration` and
             // balances `http.server.active_requests`. Gated on metrics being enabled; the two
             // instruments are created once (get-or-create) up front.
             let instruments = ctx.host().tel_metrics_enabled().then(|| ServerInstruments {
@@ -537,7 +536,7 @@ pub fn http_ctx_dispatch(
             });
             // Each in-flight handler carries the SERVER span it runs under (`None` when tracing is
             // off), ended when the handler replies so the span's duration is the request's — plus
-            // its own **task-local context** seeded with that span (T5b): handler futures are polled
+            // its own **task-local context** seeded with that span: handler futures are polled
             // *manually* here (they are not scheduler tasks), so the loop swaps each handler's
             // context in around its call/polls, mirroring the scheduler's own per-task discipline.
             // A handler's `with_span`s then nest under its request's SERVER span, its `spawn`ed
@@ -545,11 +544,11 @@ pub fn http_ctx_dispatch(
             let mut in_flight: Vec<InFlight> = Vec::new();
             let mut accept_future: Option<Slot> = None;
             let mut closing = false;
-            // The swap generation as of the last iteration (server-hmr L3); a change means a hot
+            // The swap generation as of the last iteration; a change means a hot
             // swap landed inside `advance_tasks` and live ws clients must be told to reload.
             let mut hot_gen = ctx.hot_reload().swap_count();
             loop {
-                // Graceful drain (server-hmr S0): a SIGINT sets the process shutdown flag; stop
+                // Graceful drain: a SIGINT sets the process shutdown flag; stop
                 // accepting, cancel the pending accept so the loop isn't blocked waiting for a
                 // connection that will never come, and let in-flight handlers finish below.
                 if !closing && shutdown_requested() {
@@ -588,7 +587,7 @@ pub fn http_ctx_dispatch(
                                         (true, Some(i)) => Some(start_server_span(ctx, i)),
                                         _ => None,
                                     };
-                                    // Start the request's metrics (M3): +1 active_requests, and the
+                                    // Start the request's metrics: +1 active_requests, and the
                                     // arrival time for the duration histogram at completion.
                                     let metrics = match (&instruments, &inputs) {
                                         (Some(inst), Some(i)) => {
@@ -649,7 +648,7 @@ pub fn http_ctx_dispatch(
                         let e = &in_flight[k];
                         (e.conn, e.fut, e.span)
                     };
-                    // Poll this handler under its own context (T5b): the swap pair mirrors the
+                    // Poll this handler under its own context: the swap pair mirrors the
                     // scheduler's per-task discipline, so a resumed handler sees exactly the scope
                     // it suspended with — never a sibling's.
                     let handler_ctx = std::mem::take(&mut in_flight[k].context);
@@ -658,7 +657,7 @@ pub fn http_ctx_dispatch(
                     in_flight[k].context = ctx.task_context().swap(prior);
                     let done = match polled {
                         Ok(Some(value)) if in_flight[k].session.is_some() => {
-                            // A finished session (server-hmr L0, http-streaming arc): the handler
+                            // A finished session: the handler
                             // returned (its value is discarded — a session "responds" by sending
                             // frames); close the stream by its kind. Nothing to reply.
                             ctx.free(value);
@@ -683,7 +682,7 @@ pub fn http_ctx_dispatch(
                             });
                             ctx.free(value);
                             if let Some(sse) = sse {
-                                // The event-stream hijack (http-streaming arc): write the
+                                // The event-stream hijack: write the
                                 // `text/event-stream` head, then run `handler(sink)` as this
                                 // entry's SECOND life — a session reaped exactly like a websocket's.
                                 //
@@ -728,7 +727,7 @@ pub fn http_ctx_dispatch(
                                 }
                             } else if let Some(upgrade) = upgrade {
                                 match in_flight[k].ws_key.take() {
-                                    // The hijack (server-hmr L0): 101-handshake the connection,
+                                    // The hijack: 101-handshake the connection,
                                     // then run `handler(socket)` as this entry's SECOND life — a
                                     // websocket session reaped like any handler future.
                                     Some(key) => {
@@ -850,8 +849,8 @@ pub fn http_ctx_dispatch(
                     return Ok(CtxOut::Out(NativeOut::Unit));
                 }
                 // Let a handler's own `concurrent` tasks advance, then the clock if stalled.
-                // (No external-wake term — matching the migrated arms: a serve loop stalled with
-                // no accept, no handler progress, and no timer is a genuine deadlock.)
+                // (No external-wake term: a serve loop stalled with no accept, no handler
+                // progress, and no timer is a genuine deadlock.)
                 progressed |= ctx.advance_tasks()?;
                 // A hot swap applies inside `advance_tasks`; deliver its events this iteration.
                 progressed |= hot_broadcast(ctx, &in_flight, &mut hot_gen)?;
@@ -863,7 +862,7 @@ pub fn http_ctx_dispatch(
                 }
             }
         }
-        // `server.websocket(handler)` (server-hmr L0): retain the session handler and hand back
+        // `server.websocket(handler)`: retain the session handler and hand back
         // the upgrade marker; the serve loop's reap performs the hijack.
         "websocket" => {
             ctx_arity(func, args, 1)?;
@@ -872,7 +871,7 @@ pub fn http_ctx_dispatch(
                 noeta_ext_abi::ExternBox::new(WsUpgrade { handler }),
             )))
         }
-        // `server.sse(handler)` (http-streaming arc): retain the session handler and hand back the
+        // `server.sse(handler)`: retain the session handler and hand back the
         // upgrade marker; the serve loop's reap performs the switch to `text/event-stream`. The
         // `websocket` arm's exact twin.
         "sse" => {
@@ -882,7 +881,7 @@ pub fn http_ctx_dispatch(
                 noeta_ext_abi::ExternBox::new(crate::http_stream::SseUpgrade { handler }),
             )))
         }
-        // `server.liveview_js()` (server-hmr L2): the bundled client shim source.
+        // `server.liveview_js()`: the bundled client shim source.
         "liveview_js" => {
             ctx_arity(func, args, 0)?;
             Ok(CtxOut::Out(NativeOut::Str(
@@ -921,7 +920,7 @@ fn ws_close(ctx: &mut dyn NativeCtx, conn: u64) -> CtxResult<()> {
     Ok(())
 }
 
-/// Send one text frame on a websocket, loop-side (the HMR broadcast path, server-hmr L3) — the
+/// Send one text frame on a websocket, loop-side (the HMR broadcast path) — the
 /// same driven leaf `Socket.send` uses, without a Socket value in hand.
 fn ws_send_text(ctx: &mut dyn NativeCtx, conn: u64, text: &str) -> CtxResult<()> {
     let io = ctx.host().net_ws_send(conn, text.to_string());
@@ -931,7 +930,7 @@ fn ws_send_text(ctx: &mut dyn NativeCtx, conn: u64, text: &str) -> CtxResult<()>
     Ok(())
 }
 
-/// Push the hot-reload events to every live websocket session (server-hmr L3), once per serve-loop
+/// Push the hot-reload events to every live websocket session, once per serve-loop
 /// iteration. A landed swap pushes `{"type":"reload"}` and **closes** each socket: a session is
 /// old code with old bindings — the client reloads the page and its reconnect lands in a fresh
 /// session compiled from the new version, whose snapshot carries the (preserved) signal state.
@@ -967,7 +966,7 @@ fn hot_broadcast(
     Ok(progressed)
 }
 
-/// The request's `Sec-WebSocket-Key` header, if it carries one (server-hmr L0) — captured at
+/// The request's `Sec-WebSocket-Key` header, if it carries one — captured at
 /// accept so an upgrading handler's connection can be handshaken at reap time, after the request
 /// value itself is gone.
 fn request_ws_key(ctx: &mut dyn NativeCtx, request: Slot) -> CtxResult<Option<String>> {
@@ -1014,7 +1013,7 @@ fn start_server_span(ctx: &mut dyn NativeCtx, inputs: &ServerSpanInputs) -> Span
     span
 }
 
-/// Start a request's auto-metrics (M3): increment `http.server.active_requests` (+1, keyed by
+/// Start a request's auto-metrics: increment `http.server.active_requests` (+1, keyed by
 /// method + route) and capture the arrival time for the duration histogram at completion.
 fn start_server_metrics(
     ctx: &mut dyn NativeCtx,

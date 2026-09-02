@@ -1,9 +1,9 @@
-//! The layered standard library (M1.10).
+//! The layered standard library.
 //!
 //! Ring 1 is the always-present core surface bound to the language's primitive types.
 //! Where a Ring 1 operation is expressible over data that is represented *identically*
 //! in both runtimes, its semantics live here once and both backends call into it — so
-//! the differential oracle (`TreeWalkBackend` ≡ `VmBackend`) holds by construction, not
+//! the differential oracle (`IrRefBackend` ≡ `VmBackend`) holds by construction, not
 //! merely by test. Strings are the first such surface: both the M0 tree-walker
 //! (`Value::Str(String)`) and the M1 VM (`Payload::Str(String)`) store them as a Rust
 //! `String`, so every string method's behavior, arity, and argument typing is defined
@@ -12,7 +12,7 @@
 //! Collection methods (list/map) manipulate backend-specific value representations and
 //! so cannot live here wholesale; they are implemented per backend with the differential
 //! as the guard. Determinism is a hard requirement throughout (no wall clock, no
-//! hash-order, seeded PRNG) — see `plans/m1/slice-10-stdlib.md`.
+//! hash-order, seeded PRNG).
 //!
 //! Ring 2 native modules (`json`, `math`, `fs`, …) are imported with `use std.{name}` and
 //! dispatched as `name.func(args)` through the native-extension [`registry`]: each module declares
@@ -22,7 +22,7 @@
 //!
 //! The native-extension **ABI** — the [`registry`] contract, the [`Host`] capability seam, the
 //! neutral marshalling ([`NativeValue`]/[`NativeOut`]), and the Ring 1 primitives — lives in the
-//! lean [`noeta_ext_abi`] crate (P-NATIVE) so a third-party extension does not drag core's batteries
+//! lean [`noeta_ext_abi`] crate so a third-party extension does not drag core's batteries
 //! (crypto/uuid/json). `noeta-stdlib` re-exports it (`pub use noeta_ext_abi::*`) and layers the
 //! concrete `std` modules on top: the `core`/`std` relationship. Every existing `noeta_stdlib::`
 //! path keeps resolving.

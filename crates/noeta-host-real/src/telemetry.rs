@@ -1,8 +1,8 @@
 //! RealHost's OTLP/HTTP-JSON span exporter (native OTEL) — behind the `telemetry` feature.
 //!
 //! Deliberately **hand-rolled over the `reqwest` + `serde_json` already compiled**, so a telemetry
-//! build adds no protobuf/gRPC tree (no `opentelemetry-otlp`, no `tonic`/`prost`) — the bundle
-//! decision recorded in `plans/native-otel/README.md`. Configuration comes from the standard
+//! build adds no protobuf/gRPC tree (no `opentelemetry-otlp`, no `tonic`/`prost`). Configuration
+//! comes from the standard
 //! `OTEL_EXPORTER_OTLP_*` / `OTEL_SERVICE_NAME` env vars; with no endpoint set the exporter is
 //! absent and spans are dropped (the null sink), so an un-configured program pays ~nothing.
 //!

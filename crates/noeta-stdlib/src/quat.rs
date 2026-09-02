@@ -1,4 +1,4 @@
-//! The `quat` module's pure quaternion math (P-PACK Phase 4 follow-on), over `[f32; 4]`.
+//! The `quat` module's pure quaternion math, over `[f32; 4]`.
 //!
 //! A "Quat" in the surface is any struct with exactly four `f32` fields, ordered `(x, y, z, w)` —
 //! `x`/`y`/`z` the vector (imaginary) part and `w` the scalar (real) part, matching glm/Unity. As with

@@ -7,7 +7,7 @@
 pub use noeta_ext_abi::map_key::{ExternKeyRef, MapKey, PackedKeyField, packed_names};
 
 /// Whether an extern value may key a map / member a set — its registered
-/// [`crate::registry::ExtType::key_capable`] flag (extern-types X4). The runtime gate both
+/// [`crate::registry::ExtType::key_capable`] flag. The runtime gate both
 /// backends consult; string keys never reach it (they short-circuit earlier).
 pub fn extern_key_capable(value: &dyn crate::ExternValue) -> bool {
     crate::registry::find_type_qualified(value.type_identity()).is_some_and(|t| t.key_capable)

@@ -191,7 +191,7 @@ pub trait Tracing {
     /// about spans it holds live).
     fn tel_span_context(&mut self, span: SpanId) -> TraceContext;
 
-    /// Intern a **remote** [`TraceContext`] as a local [`SpanId`]-shaped handle (native-otel T5d).
+    /// Intern a **remote** [`TraceContext`] as a local [`SpanId`]-shaped handle.
     /// A span handle is per-host, so a context arriving from another isolate (or riding a channel
     /// message) cannot be a live span here — this mints a pseudo-handle whose
     /// [`Self::tel_span_context`] returns exactly the interned context, letting remote parents
@@ -293,7 +293,7 @@ impl MetricValue {
     }
 }
 
-/// OTel aggregation temporality. This arc emits **cumulative** only (delta is deferred); the enum is
+/// OTel aggregation temporality. Noeta emits **cumulative** only (delta is deferred); the enum is
 /// carried across the seam so the exporter reads it rather than hard-coding the number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Temporality {
@@ -704,7 +704,7 @@ fn attr_set_key(attrs: &[(CompactString, AttrValue)]) -> String {
     s
 }
 
-/// Live-span bookkeeping for hosts with **no exporter** (the WASI and browser hosts — P-WASM):
+/// Live-span bookkeeping for hosts with **no exporter** (the WASI and browser hosts):
 /// spans mint real W3C ids from caller-supplied entropy, live contexts serve parenting and
 /// propagation, remote contexts intern as pseudo-handles, and an ended span is handed back for
 /// the caller to drop (the null sink) — so `tel_span_context` on it yields the fresh zero

@@ -1,4 +1,4 @@
-//! `std.datetime` — calendar/timezone datetime (the Ring 3 datetime arc), backed by `jiff`.
+//! `std.datetime` — calendar/timezone datetime, backed by `jiff`.
 //!
 //! The lightweight `time` module (monotonic/sleep/`unix_ms`) stays always-on in `CoreExtension`;
 //! this is the heavy, DST-correct calendar layer, gated behind the default-on `ring-datetime`
@@ -149,7 +149,7 @@ fn dt_error(message: impl Into<String>) -> StdError {
 }
 
 // --- Argument helpers ---------------------------------------------------------------------------
-// The shared guards come from `noeta_ext_abi::args` (audit-2 F8); `want_extern` is the
+// The shared guards come from `noeta_ext_abi::args`; `want_extern` is the
 // datetime-specific extractor (a typed extern downcast) and stays local.
 use noeta_ext_abi::args::{want_arity, want_int, want_str};
 
@@ -639,7 +639,7 @@ const DURATION_METHODS: &[ExtFn] = &[ExtFn {
     ret: Concrete(Str),
 }];
 
-/// Prose for the datetime extern types (docs-browser Arc 2 A3), keyed by method name.
+/// Prose for the datetime extern types, keyed by method name.
 const INSTANT_DOCS: &[(&str, &str)] = &[
     (
         "add",
@@ -688,7 +688,7 @@ const DURATION_METHOD_DOCS: &[(&str, &str)] = &[(
     "The ISO-8601 duration string (`PT1H30M`, `P2DT3H`).",
 )];
 
-/// Prose for `std.datetime` (docs-browser Arc 2 A3), keyed by function name.
+/// Prose for `std.datetime`, keyed by function name.
 const DATETIME_DOCS: &[(&str, &str)] = &[
     ("now", "The current wall-clock time as an `Instant`."),
     (

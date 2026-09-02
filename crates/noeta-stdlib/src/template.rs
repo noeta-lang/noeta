@@ -1,4 +1,4 @@
-//! The `std.template` module — a **native expression-tier handler** (expr-tiers arc), the dogfood
+//! The `std.template` module — a **native expression-tier handler**, the dogfood
 //! of the extension expression-tier surface. std declares the `@json` tier through `ExtTier`
 //! (`crate::tiers`): body language `json`, value type `string`, handler `std.template.render`. A
 //! `@json { … ${s} … }` block desugars — like any expression tier — to `render(statics, holes)`,

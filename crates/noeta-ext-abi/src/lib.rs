@@ -1,11 +1,11 @@
-//! The native-extension ABI (P-NATIVE): the contract a crate implements to register native
+//! The native-extension ABI: the contract a crate implements to register native
 //! modules and first-class types into the language, plus the dep-free primitives both backends
 //! and the front-end share.
 //!
 //! Split out of `noeta-stdlib` so the contract does not drag core's batteries (crypto/UUID/JSON):
 //! a third-party extension — and internal mid-end crates like `noeta-ir` — depend on this lean
 //! crate, while `noeta-stdlib` re-exports it (`pub use noeta_ext_abi::*`) and adds the concrete
-//! `std` modules on top (the `core`/`std` relationship). See `plans/native-abi/README.md`.
+//! `std` modules on top (the `core`/`std` relationship).
 
 /// The extension **ABI version** — bumped on any change to the registration/dispatch contract
 /// (`Extension`, `ExtModule`/`ExtType`/`ExtFn` shapes, `NativeValue`/`NativeOut` marshalling,
@@ -13,7 +13,7 @@
 /// from source against the exact toolchain (the composed build's `[patch]` unification), so an
 /// ABI break is a compile error and this constant is *recorded*, not yet *checked* — it exists
 /// so the future dynamically-loaded-extension path has a handshake to refuse a mismatch with,
-/// instead of undefined behavior through a stale `TypeId`/layout (audit-2 F10).
+/// instead of undefined behavior through a stale `TypeId`/layout.
 ///
 /// **Bump it freely.** "Any change" means any change — an added registration field, a new capability
 /// method with a default, a new `ExtType`, not only something that stops existing code compiling.
@@ -86,7 +86,7 @@
 /// Deliberately not a `current_span() -> ?Span`: that would hand a caller `.end()` on a span it
 /// never opened — see the `std.tracing` module header.
 ///
-/// **10** — the enum-construction arc: [`registry::TypeRecipe`] gained an `Enum` form (with
+/// **10** — [`registry::TypeRecipe`] gained an `Enum` form (with
 /// [`registry::VariantRecipe`]/[`registry::VariantTag`]), so an enum-typed field decodes from the
 /// wire values its own JSON Schema advertises, and [`registry::NativeOut::Variant`] gained the
 /// required `has_validator` field that makes a decoded case honor the same `Validate` door contract a
@@ -120,7 +120,7 @@
 /// method; the default body is now a plain forward to `run_file`. The break is the point: the
 /// serve entry call was declared three times — in `SERVE_COMMAND`, in this trait's default, and
 /// in the CLI's multi-core path — so its signature was three edits in two crates, and the copies
-/// were kept in step by a comment (audit-10). One declaration, passed down.
+/// were kept in step by a comment. One declaration, passed down.
 ///
 /// **14** — [`host::RealP2pConfig`] gained `data_dir`, an exact directory for the `para.p2p` node's
 /// persistent identity and store, beside the `app_id` that could name only an app namespace. A host
@@ -140,7 +140,7 @@
 ///
 /// **15** — [`registry::ExtTrait`], [`registry::ExtEnum`] and [`registry::ExtFielded`] each gained a
 /// `doc` (the declaration's own prose) and a `docs` (its per-member table, the field
-/// [`registry::ExtModule`] and [`registry::ExtType`] have carried since the docs-browser arc). A
+/// [`registry::ExtModule`] and [`registry::ExtType`] already carry). A
 /// source break only for a literal that named every field rather than spreading `..DEFAULTS`; add
 /// nothing and the defaults are empty. The point of the addition is that until it existed a native
 /// trait had nowhere to say what an implementor promises, and the API reference walked
@@ -339,7 +339,7 @@ pub use net::{
 };
 pub use os::{ExecIo, ExecResult, Process};
 pub use p2p::{P2pBackend, P2pBroker, P2pReceiveIo};
-// The streaming-body surface (http-streaming arc). Deliberately NOT a glob: the module's own
+// The streaming-body surface. Deliberately NOT a glob: the module's own
 // `Stream`-adjacent names would collide with `host::Stream` (the stdin/stdout/stderr enum), and
 // the type here is `FrameStream` precisely so the two never have to be disambiguated.
 pub use registry::{
@@ -366,8 +366,8 @@ pub use stream::{
 // channel, exported beside it for the same reason: the checker builds one out of a static type and
 // both backends hand it to one shared kernel.
 pub use width_doors::ElemWidth;
-// The Ring 1 bodies moved to `ring1` (audit-2 F8); the glob keeps every existing path
-// (`noeta_ext_abi::Arg`, `noeta_stdlib::string_method`, ...) compiling unchanged. The shared
+// The Ring 1 bodies live in `ring1`; the glob keeps every path
+// (`noeta_ext_abi::Arg`, `noeta_stdlib::string_method`, ...) importable from the crate root. The shared
 // argument guards stay namespaced (`noeta_ext_abi::args::want_str`) — dispatch modules import
 // them explicitly, so a module-local extractor never shadows silently.
 pub use ring1::*;
@@ -399,11 +399,10 @@ pub enum ErrorKind {
     UnknownName,
     /// A Ring 2 IO operation failed (e.g. reading a path absent from the sandbox).
     Io,
-    /// An unrecoverable runtime condition a dispatch raises deliberately (higher-order-abi H2) —
-    /// an async deadlock, an empty `race`. Maps onto the language's panic diagnostic, exactly as
-    /// the hand-written `Builtin` arms it replaces reported.
+    /// An unrecoverable runtime condition a dispatch raises deliberately —
+    /// an async deadlock, an empty `race`. Maps onto the language's panic diagnostic.
     Panic,
-    /// A native-driven callback fixpoint failed to converge (higher-order-abi H5) — the reactive
+    /// A native-driven callback fixpoint failed to converge — the reactive
     /// flush's runaway guard (an effect that keeps changing a signal it depends on). Maps onto
     /// the language's reactive-cycle diagnostic (E0045).
     ReactiveCycle,
@@ -488,7 +487,7 @@ pub fn slice_bounds_error(start: i64, end: i64, len: usize) -> StdError {
     }
 }
 
-/// The `vec` module's scalar Vec3 function names (P-PACK Phase 4.1), in surface order. A "Vec3" is
+/// The `vec` module's scalar Vec3 function names, in surface order. A "Vec3" is
 /// any `@packed`-or-plain struct value with exactly three `f32` fields; structural, so a user names
 /// the type. `dot`/`length` return an `f32`; the rest return a Vec3 of the same shape as the input.
 pub const VEC_SCALAR_FUNCTIONS: &[&str] = &[
@@ -517,8 +516,8 @@ pub fn no_function_error(module: &str, func: &str) -> StdError {
 }
 
 /// Build a deliberate panic (→ the language's panic diagnostic) with a message the dispatch
-/// renders in full — deadlocks, an empty `race`, and the other unrecoverable conditions the
-/// migrated `Builtin` arms reported as panics (higher-order-abi H2).
+/// renders in full — deadlocks, an empty `race`, and the other unrecoverable conditions a
+/// dispatch reports as panics.
 pub fn panic_error(message: impl Into<String>) -> StdError {
     StdError {
         kind: ErrorKind::Panic,
@@ -537,7 +536,7 @@ pub fn interrupted_error(operation: &str) -> StdError {
 }
 
 /// Build the canonical "no such method on an extern type" error (→ `E0005`), the type-shaped
-/// sibling of [`no_function_error`] (extern-types X2).
+/// sibling of [`no_function_error`].
 pub fn no_method_error(type_name: &str, method: &str) -> StdError {
     StdError {
         kind: ErrorKind::UnknownName,

@@ -33,7 +33,7 @@ pub struct RealExecutor {
     /// deterministically picks the earliest — though "deterministic" here still races real time.
     timers: BTreeSet<u64>,
     /// Every in-flight IO task, tagged with its ticket id — a `JoinSet` so `advance` can wait
-    /// for WHICHEVER completes first (any-of semantics, server-hmr L0b: a long-lived leaf like a
+    /// for WHICHEVER completes first (any-of semantics: a long-lived leaf like a
     /// websocket recv must not be starved behind a pending accept, nor vice versa).
     tasks: tokio::task::JoinSet<(u64, Result<NativeOut, StdError>)>,
     /// Work harvested by `advance` (or resolved synchronously at spawn — the `run_sync`
@@ -41,7 +41,7 @@ pub struct RealExecutor {
     resolved: HashMap<u64, Result<NativeOut, StdError>>,
     /// Monotonic ticket source for `io`/`resolved`.
     next_io_id: u64,
-    /// An optional **external wake** (server-hmr L3): when set, a blocked `advance` also returns
+    /// An optional **external wake**: when set, a blocked `advance` also returns
     /// on `notify_one()` from another thread — how the hot-reload watcher makes an *idle* server
     /// (blocked awaiting its accept) apply a deposited swap immediately instead of at the next
     /// request. A wake with nothing harvested still reports progress, so the caller's scheduler
@@ -62,9 +62,8 @@ impl RealExecutor {
     /// Build a real executor with its own `current_thread` runtime (time driver enabled). Fails only
     /// if the OS refuses to create the runtime.
     pub fn new() -> std::io::Result<RealExecutor> {
-        // `enable_all` (was time-only): a `RealBody::Async` may be a reqwest/hyper future needing
-        // the IO driver (http arc H3); timers still need the time driver. Blocking bodies and the
-        // timer sleeps are unaffected.
+        // `enable_all`: a `RealBody::Async` may be a reqwest/hyper future needing the IO
+        // driver, and the timer sleeps need the time driver.
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
@@ -75,7 +74,7 @@ impl RealExecutor {
             tasks: tokio::task::JoinSet::new(),
             resolved: HashMap::new(),
             next_io_id: 0,
-            // Self-arm the process-wide shutdown wake (server-hmr S0) so a SIGINT can rouse a
+            // Self-arm the process-wide shutdown wake so a SIGINT can rouse a
             // blocked serve loop. A driver with its own out-of-band source (the hot-reload
             // watcher) overrides this via `set_wake`.
             wake: Some(crate::shutdown_notify()),
@@ -109,8 +108,8 @@ impl Executor for RealExecutor {
     }
 
     fn advance(&mut self) -> Option<u64> {
-        // Harvest everything that already completed (completion order). ANY-OF semantics
-        // (server-hmr L0b): a stall must end when *any* pending IO finishes — blocking on one
+        // Harvest everything that already completed (completion order). ANY-OF semantics:
+        // a stall must end when *any* pending IO finishes — blocking on one
         // specific handle deadlocked a server whose accept was pending while a websocket recv
         // completed (the recv's result sat unharvested; the loop never woke).
         let mut harvested = false;
@@ -252,7 +251,7 @@ impl Executor for RealExecutor {
     }
 }
 
-/// Wait for the next completed task, an external wake (server-hmr L3), or this run's cancellation
+/// Wait for the next completed task, an external wake, or this run's cancellation
 /// (interruptible-io) — a woken wait returns `None`, indistinguishable from a timeout, which the
 /// caller reports as plain progress so its scheduler loop runs a tick (and, on a cancellation, polls
 /// the flag at the top of that round).
@@ -427,7 +426,7 @@ mod tests {
         // program hangs past 20 s, and unwedging the FIFO at 900 ms ends the run at 903 ms.
         //
         // Interrupting host IO for real therefore needs the leaf to *return* (an `Interrupted`
-        // outcome), not merely to be abandoned. See `plans/interruptible-host-io.md`.
+        // outcome), not merely to be abandoned.
         //
         // The sequence is the worker's: spawn the leaf, block in `advance` (which is where the
         // descriptor's body actually *starts* — `spawn_ext` only queues an async task, so a body
