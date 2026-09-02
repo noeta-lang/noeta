@@ -69,6 +69,12 @@ for d in attributes_of::<Doc>() { echo "${d.target}: ${d.value.text.trim()}" }
 // --tier doc → "add: Adds two ints." then "Users.list: List every user."
 ```
 
+### Extracting to stdout — `noeta doc`
+
+```text
+noeta doc [OPTIONS] [PATH]
+```
+
 Extract every `@doc` block to stdout, from the file named **and its sibling modules**:
 
 ```console
@@ -84,10 +90,6 @@ $ noeta doc adder.noe
 - Each block is **dedented**, dropping leading and trailing blank lines and stripping common indentation.
 - Each block is prefixed with an HTML-comment source header, `<!-- file:line -->`, plus `· symbol` for an attached block. That is valid Markdown and renders to nothing.
 - A file with no `@doc` blocks prints a notice on stderr and exits `0`.
-
-```text
-noeta doc [OPTIONS] [PATH]
-```
 
 `PATH` (default `.`) is a file or a **directory**. A directory extracts every `.noe` beneath it. A file extracts that file and its sibling modules, because a `@doc` block belongs to the file it sits in, and linking merges declarations without the blocks beside them. This is the same workspace `--out` documents, so the two halves of `noeta doc` agree on what "the docs" means. A file that does not parse contributes nothing rather than failing the run.
 

@@ -53,18 +53,18 @@ added `para` to …/hello-cli/noeta.toml
   use para.cli
 ```
 
-No version is written by hand. With no source given, `noeta add` asks the registry what the package's current version is and writes a caret requirement for it, so the command in a tutorial does not go stale when the package ships a minor. A **prerelease** or a **yanked** release is never picked that way; to depend on one deliberately, say the version yourself with `--version`. The last line lists the module paths the new dependency binds, ready to paste into a `use`.
+No version is written by hand: with no source given, `noeta add` asks the registry for the package's current version and writes a caret requirement for it, so a tutorial's command does not go stale when the package ships a minor. A **prerelease** or a **yanked** release is never picked that way; depend on one deliberately with `--version`. The last line lists the module paths the new dependency binds.
 
-The first argument (`para`) is the **import root**, the name you write after `use`. `--package` is the **registry identity**. Keeping them separate lets several packages of one scope sit under one import root. Shorter still, `noeta add para/cli` reads the identity as the positional and derives the import root from its second half, which would bind the package under `cli` and make the import `use cli.…`. We want `para` here, so we name it. The manifest now contains:
+The first argument (`para`) is the **import root** you write after `use`; `--package` is the **registry identity**. Keeping them separate lets several packages of one scope sit under one import root. `noeta add para/cli` would instead read the identity as the positional and derive the import root from its second half, binding the package under `cli`. We want `para` here, so we name it. The manifest now contains:
 
 ```toml
 [dependencies]
 para = { version = "^0.4", package = "para/cli" }
 ```
 
-`noeta add` then resolves the dependency and writes `noeta.lock`, pinning the release's tag, commit sha, content hash and language edition, plus the identity that signed it (the CI workflow the release's certificate names). Every later build verifies against those pins. `noeta add` and `noeta update` also compare the commits a new pin brings in against the old one, and call out a release that introduces a committer new to that repository.
+`noeta add` then resolves the dependency and writes `noeta.lock`, pinning the release's tag, commit sha, content hash, language edition and signing identity (the CI workflow the release's certificate names). Every later build verifies against those pins. `noeta add` and `noeta update` also call out a new pin whose commits introduce a committer new to that repository.
 
-The other source forms are covered in [the Manifest](Manifest): a local `{ path = "…" }` tree, a git repo pinned to a `{ git = "…", tag = "…" }` release or tracking a `branch`, and binding several packages of one scope under a single key (a **scope array**). Mix them freely during development. A *published* package may depend only via the registry.
+The other source forms are covered in [the Manifest](Manifest): a local `{ path = "…" }` tree, a git repo pinned to a `{ git = "…", tag = "…" }` release or tracking a `branch`, and a **scope array** binding several packages of one scope under one key. Mix them freely during development, though a *published* package may depend only via the registry.
 
 ## 4 · `[trust]` — when a package is native or adds commands
 
