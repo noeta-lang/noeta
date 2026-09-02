@@ -7,7 +7,7 @@ use super::*;
 use crate::stdlib::DeriveApply;
 
 impl Checker {
-    // ----- traits: impl coherence and derive validation (M1.8) -----
+    // ----- traits: impl coherence and derive validation -----
 
     /// Validate an in-body `impl Trait { ... }` block: the trait must be a known built-in, and the
     /// block must provide the trait's required method with the right arity. The impl's method
@@ -40,7 +40,7 @@ impl Checker {
     ) {
         // A method that implements a trait is part of the type's **public** surface, necessarily:
         // a trait is an outward contract, and anyone holding a `dyn Trait` — or a `<T: Trait>`
-        // generic body — calls it. So it must SAY so (method-visibility arc). Required explicitly
+        // generic body — calls it. So it must SAY so. Required explicitly
         // rather than implied, on the same ground the rest of the language reads: a declaration
         // says what it means, and a reader of the `impl` block should not have to know which names
         // the trait happens to declare to know which of these methods are callable from outside.
@@ -65,7 +65,7 @@ impl Checker {
                 m.name
             ));
         }
-        // A user-defined trait (L1, UT2): validate conformance against its declared contract —
+        // A user-defined trait: validate conformance against its declared contract —
         // instantiated at the impl's type arguments when the trait is generic (`impl
         // Cache<string>` checks `fn get(k: string): …`) — then return before the built-in
         // resolution below (which would otherwise report E0014).
@@ -115,7 +115,7 @@ impl Checker {
             );
         }
         let Some(t) = BuiltinTrait::from_name(trait_name) else {
-            // A dotted path in an in-body impl is a method-bundle reference (kernel-methods K1)
+            // A dotted path in an in-body impl is a method-bundle reference
             // used in the wrong position — bundles bind through the standalone form only.
             if trait_name.contains('.') {
                 self.error(
@@ -310,7 +310,7 @@ impl Checker {
         }
         // `Validate`'s `validate` must return `Result<void, E>` where `E` is a plain `string` or any
         // `Error`-implementing type — the shape both the `?`-conversion path and the recipe-seam
-        // auto-enforcement (validation arc slice 2) rely on. (Presence + arity 0 were checked
+        // auto-enforcement rely on. (Presence + arity 0 were checked
         // above; here we pin the return.)
         if t == BuiltinTrait::Validate
             && let Some(m) = methods.iter().find(|m| m.name == "validate")
@@ -362,7 +362,7 @@ impl Checker {
     /// the other half of coherence — is enforced separately, together with the target's `@derive`s
     /// and in-body impls, in [`Self::check_coherence`] (E0027).
     pub(crate) fn check_standalone_impl(&mut self, decl: &ImplDecl, env: &mut Env) {
-        // A dotted trait path is a method-bundle binding (kernel-methods K1) with its own
+        // A dotted trait path is a method-bundle binding with its own
         // validation — bundle resolution, packed-target + constraint checks, conflict rules. But a
         // cross-package **user trait** is *also* dotted once qualified (`para.aether.Store`), so a
         // known user trait is never a bundle — check that first, or a dependency's standalone
@@ -374,7 +374,7 @@ impl Checker {
                 .contains_key(decl.trait_name.as_str())
         {
             self.check_bundle_impl(decl);
-            // Override bodies are now permitted (ExtBundle→ExtTrait fold-in, slice 4): a kernel binding
+            // Override bodies are now permitted (ExtBundle→ExtTrait fold-in): a kernel binding
             // may provide a method to override the trait's native default, so its bodies are checked
             // like any standalone-impl body (was forbidden — "empty body required" — under the bundle).
             self.check_standalone_impl_bodies(decl, env);
@@ -584,7 +584,7 @@ impl Checker {
         self.coloring.type_params = saved_params;
     }
 
-    /// Validate that an `impl` of a user trait provides its contract (L1, UT2): every **required**
+    /// Validate that an `impl` of a user trait provides its contract: every **required**
     /// (non-default) trait method must be present, and every method the impl provides — required or
     /// an override of a defaulted one — must match the trait's arity, its `async`-ness, and (when
     /// both sides annotate them) its parameter and return types. Default methods may be *omitted*
@@ -598,8 +598,8 @@ impl Checker {
         methods: &[FnDecl],
         assoc_bindings: &[(String, noeta_ast::TypeRef)],
     ) {
-        // A **native-derived** associated type (slice 1b) is **auto-supplied** at the user impl site
-        // (slice 4): it is computed from the implementing type's element, not written per-impl, so the
+        // A **native-derived** associated type is **auto-supplied** at the user impl site: it is
+        // computed from the implementing type's element, not written per-impl, so the
         // coherence "must bind" check below treats it as if defaulted. Fold each derivation over the
         // target's `@packed` element into `trait_assoc[(target, trait)]` — so `Self::Name` in a native
         // trait method resolves for this concrete `T` exactly as an advertised native type's does — and
@@ -624,7 +624,7 @@ impl Checker {
                 .trait_assoc
                 .insert((target.to_string(), decl.name.to_string()), map);
         }
-        // Associated-type coherence (slice 1a): every associated type WITHOUT a default must be bound
+        // Associated-type coherence: every associated type WITHOUT a default must be bound
         // by this impl. A defaulted associated type — or a native-derived one (auto-supplied above) —
         // may be omitted.
         for a in &decl.assoc_types {
@@ -697,7 +697,7 @@ impl Checker {
                 ));
             }
             // `static` is a contract term in exactly the sense `async` is, and it is checked in
-            // exactly the same place (static-trait-methods arc). A trait that declares `static fn m`
+            // exactly the same place. A trait that declares `static fn m`
             // promises **every** implementation answers `m` without a receiver, which is what lets a
             // generic body under a `<T: Trait>` bound write `T.m(…)` without consulting a single
             // implementor. An implementation whose body reaches for `self` breaks that promise, so
@@ -737,7 +737,7 @@ impl Checker {
                 continue;
             }
             for (i, (tp, ip)) in tm.sig.params.iter().zip(&m.params).enumerate() {
-                // Resolve a `Self::Name` on either side against this impl's binding (slice 1a) so the
+                // Resolve a `Self::Name` on either side against this impl's binding so the
                 // contract compares concrete types (`int` vs `int`), not two opaque projections.
                 let want = self.assoc_resolved_type(&tp.ty, target, decl.name.as_str());
                 let got = self.assoc_resolved_type(&ip.ty, target, decl.name.as_str());
@@ -767,7 +767,7 @@ impl Checker {
                 );
             }
         }
-        // Native structural `Self`-constraint (ExtBundle→ExtTrait convergence, slice 3): the third
+        // Native structural `Self`-constraint (ExtBundle→ExtTrait convergence): the third
         // capability a bundle had that a trait lacked. When this trait is a **native** trait carrying a
         // [`noeta_ext_abi::ExtTrait::self_constraint`], the implementing type must be a `@packed` struct
         // matching its [`noeta_ext_abi::PackedConstraint`] — the SAME shape check (and E0015 diagnostic)
@@ -786,14 +786,14 @@ impl Checker {
 
     /// Two signature types conform if either side is unannotated (`Unknown`) or `dyn` — those defer
     /// — or they are equal. Deliberately structural-equality, not subtyping: a trait method's
-    /// contract is its exact signature (UT2).
+    /// contract is its exact signature.
     fn sig_types_compatible(want: &Type, got: &Type) -> bool {
         matches!(want, Type::Unknown | Type::Dyn)
             || matches!(got, Type::Unknown | Type::Dyn)
             || want == got
     }
 
-    /// Resolve an associated type on an implementor (slice 1a): the concrete `Type` that `type_name`'s
+    /// Resolve an associated type on an implementor: the concrete `Type` that `type_name`'s
     /// `impl trait_name` bound `assoc` to (its default when the impl omitted it), or `None` when there
     /// is no such binding. Reads `trait_assoc`, the collect-time table — the trait analogue of a
     /// bundle's element resolution.
@@ -811,7 +811,7 @@ impl Checker {
     }
 
     /// The concrete `Type` of a signature annotation, projecting a top-level `Self::Name` through the
-    /// implementor's binding (slice 1a). A projection with no resolvable binding — or under `dyn`, or
+    /// implementor's binding. A projection with no resolvable binding — or under `dyn`, or
     /// nested inside a composite — degrades to `Type::Unknown` (a gradual hole that defers), so a
     /// conformance comparison never falsely rejects on an unresolved projection.
     ///
@@ -843,10 +843,10 @@ impl Checker {
         )
     }
 
-    /// Validate a user-defined `trait` declaration (L1, UT1). The declaration was registered in
+    /// Validate a user-defined `trait` declaration. The declaration was registered in
     /// pass 1; here we reject a name that collides with a built-in trait, a declared type, or an
     /// earlier `trait` of the same name, plus duplicated method signatures within the body. Default
-    /// method bodies are accepted syntactically but not yet type-checked (UT5).
+    /// method bodies are accepted syntactically but not yet type-checked.
     pub(crate) fn check_trait_decl(&mut self, decl: &noeta_ast::TraitDecl, env: &mut Env) {
         // A user trait may not shadow a built-in trait name — an `impl`/bound naming it would be
         // ambiguous against the closed built-in set.
@@ -929,7 +929,7 @@ impl Checker {
             ));
         }
         // A trait accepts `#[...]` data attributes only; the `@`-directives are type-only and do
-        // not apply to a trait (UT6). That is checked by the shared placement walk, which reaches
+        // not apply to a trait. That is checked by the shared placement walk, which reaches
         // a trait through `Stmt::decorated` like every other decorated declaration — this used to
         // call it a second time, which would now report each misplacement twice.
         // Duplicate method signatures within the trait body.
@@ -945,7 +945,7 @@ impl Checker {
                     ),
                 );
             }
-            // `pub` on a trait's own method DECLARATION (method-visibility arc). Every method a
+            // `pub` on a trait's own method DECLARATION. Every method a
             // trait declares is the contract itself, so `pub` restates what `trait` already said —
             // and it would suggest, wrongly, that the unmarked ones are private. Refused rather
             // than accepted-and-ignored, for the same reason `static` is refused where the body
@@ -1056,7 +1056,7 @@ impl Checker {
         self.coloring.type_params = saved_params;
     }
 
-    /// Validate a method-bundle binding `impl <module>.<Bundle> for T {}` (kernel-methods K1).
+    /// Validate a method-bundle binding `impl <module>.<Bundle> for T {}`.
     /// The binding itself was recorded during collect (so method typing sees it regardless of
     /// statement order); this reports every impl-site violation: an unresolvable path, a
     /// non-empty body (the methods are native), a target that isn't a locally-declared `@packed`
@@ -1089,7 +1089,7 @@ impl Checker {
             );
             return;
         };
-        // The empty-body requirement was relaxed in the fold-in (slice 4): a kernel binding may now
+        // The empty-body requirement was relaxed in the fold-in: a kernel binding may now
         // carry an override body (checked by `check_standalone_impl_bodies` at the caller). The methods
         // are still native defaults — an empty `impl vec.Kernels for T {}` adopts every one.
         self.check_bundle_binding(
@@ -1121,7 +1121,7 @@ impl Checker {
         trait_name: &str,
         bundle: &'static noeta_ext_abi::ExtTrait,
     ) {
-        // The structural `Self`-constraint now lives on the trait (slice 3, `ExtTrait::self_constraint`)
+        // The structural `Self`-constraint now lives on the trait (`ExtTrait::self_constraint`)
         // — the same `PackedConstraint` the `ExtBundle` carried, checked by the same core with the same
         // E0015 diagnostics. Every kernel trait declares one; a trait without one binds any type.
         if let Some(constraint) = &bundle.self_constraint
@@ -1216,7 +1216,7 @@ impl Checker {
     /// The **packed-`Self` shape check** shared by the two structural constraints in the
     /// ExtBundle→ExtTrait convergence: a bundle's [`noeta_ext_abi::ExtBundle::constraint`]
     /// ([`Self::check_bundle_binding`]) and a native trait's [`noeta_ext_abi::ExtTrait::self_constraint`]
-    /// (slice 3, [`Self::check_user_trait_impl`]). Extracted verbatim from the bundle path so both
+    /// ([`Self::check_user_trait_impl`]). Extracted verbatim from the bundle path so both
     /// spellings enforce the *same* rule with the *same* E0015 diagnostics: the target must be a
     /// locally-declared `@packed` struct ([`Self::packed_layout`]), its fields must satisfy the
     /// [`noeta_ext_abi::PackedConstraint`] ([`constraint_mismatch`]), and on success its flat layout is
@@ -2352,7 +2352,7 @@ impl Checker {
 
     /// The seeded core of [`Self::check_generic_call`]: `seed` holds type-parameter bindings that
     /// **win** over anything the arguments would derive — the receiver's type arguments for an
-    /// instance method call, or (poly-values F2) the EXPLICIT turbofish instantiations of
+    /// instance method call, or the EXPLICIT turbofish instantiations of
     /// `f::<T, ...>(args)`, which is what makes "explicit args win; a conflicting argument is the
     /// ordinary assignability error against the substituted parameter" true by construction
     /// (binding uses first-wins `or_insert`).
@@ -2466,7 +2466,7 @@ impl Checker {
             }
         }
         self.enforce_type_param_bounds(name, &generic.params, &subst, &tps, span);
-        // A call of a **forwarding** generic (poly-values F2b, composite slots D2a) must supply
+        // A call of a **forwarding** generic (composite slots D2a) must supply
         // its hidden type-argument slots: substitute the call's instantiation into each slot
         // TEMPLATE and resolve the result into a table entry (concrete — the whole composite is
         // interned statically, so the runtime never constructs a recipe) or a pass-through of the
@@ -2482,7 +2482,7 @@ impl Checker {
         // carry each type parameter's per-instantiation render hints, so a door in the callee's body
         // can write a `u64` as the number it is rather than the negative word it is erased to.
         if let Some((call_span, key, spelling)) = hidden_site
-            // A poisoned callee (diverging slot set, D2a) already carries the one clear error at
+            // A poisoned callee (diverging slot set) already carries the one clear error at
             // its declaration; resolving its partial slots here would only cascade noise.
             && !self.symbols.forwarding_poisoned.contains(key.as_str())
         {
@@ -2662,7 +2662,7 @@ impl Checker {
                 if self.in_scope_param_satisfies(concrete, bound, subst, tps) {
                     continue;
                 }
-                // A user-defined trait bound (L1, UT3): satisfied iff `concrete` has a recorded
+                // A user-defined trait bound: satisfied iff `concrete` has a recorded
                 // `impl` of it — and, for an INSTANTIATED bound (`T: Keyed<int>`), an impl at that
                 // instantiation. A bound argument may mention a sibling parameter (`<K, T:
                 // Keyed<K>>`), so the call's own substitution applies first; a parameter the
@@ -2790,7 +2790,7 @@ impl Checker {
             if !self.has_builtin_trait(n, t) {
                 return false;
             }
-            // A **generic** derive is conditional (derive-soundness S4): `Box<T>` deriving
+            // A **generic** derive is conditional: `Box<T>` deriving
             // `Comparable` is satisfied only when the *instantiated* field types are orderable
             // (`Box<int>` yes, `Box<List<int>>` no) — the instantiation-site twin of the E0050
             // declaration check, which deferred parameter-typed fields to here. The predicates
@@ -2875,7 +2875,7 @@ impl Checker {
         Some(apply_subst(&ty, &subst))
     }
 
-    /// Whether `ty` implements the user trait named `bound` (L1, UT3) — and, when `want` is
+    /// Whether `ty` implements the user trait named `bound` — and, when `want` is
     /// non-empty, at that demanded instantiation (`T: Keyed<int>` is satisfied only by an `impl
     /// Keyed<int>`; an empty `want` is a bare bound, any instantiation). Only a named user type
     /// can — via a recorded in-body or standalone `impl` (`user_trait_impls`). A

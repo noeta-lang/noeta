@@ -447,7 +447,7 @@ impl Pretty for FnDecl {
         indent(out, level);
         // A `@tier(…)` declaration rides on its runner/handler fn — render it so structural
         // comparisons (e.g. the formatter's safety gate) see it: dropping the directive is a
-        // program change. The `expr:` field (expr-tiers arc) is part of that identity.
+        // program change. The `expr:` field is part of that identity.
         let tier = match &self.tier {
             Some(t) => {
                 let config = match &t.config {
@@ -582,7 +582,7 @@ impl Pretty for EnumDecl {
                 expr_child(out, level + 1, "variant-value", &v.name, value);
             }
         }
-        // An enum body may carry methods (the unified body, object-model slice 3); print them like a
+        // An enum body may carry methods (the unified body); print them like a
         // class's so a method-bearing enum is visible in the AST snapshot. A variant-only enum prints
         // exactly as before (no trailing methods).
         for method in &self.methods {
@@ -709,7 +709,7 @@ fn decorators_str(d: &crate::Decorators) -> String {
 
 /// One `struct`/`class` field, for the S-expression dump.
 ///
-/// A trailing `=` marks a field carrying a default (slice 5) — the expression itself is not inlined
+/// A trailing `=` marks a field carrying a default — the expression itself is not inlined
 /// (it can be multi-line); it is rendered as a `(field-default …)` child of the declaration, so the
 /// gate still compares it.
 ///

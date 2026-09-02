@@ -110,7 +110,7 @@ impl Checker {
                 // A bare parameter of an enclosing generic is not erased after all: one of the two
                 // per-instantiation channels carries its name (the receiver's reflected type tag
                 // inside a generic type's instance method — generic constructor reflection, Gap B —
-                // or the enclosing fn's hidden type-argument slot, poly-values F2b). Recorded as a
+                // or the enclosing fn's hidden type-argument slot). Recorded as a
                 // site rather than folded to a constant: one compiled body serves every
                 // instantiation, so there is no constant to fold to.
                 //

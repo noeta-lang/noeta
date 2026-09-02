@@ -74,7 +74,7 @@ pub struct Sites {
     pub variant_pattern_sites: HashMap<Span, (Option<String>, String)>,
     /// The packed-`List` construction-site map (see [`resolve_packed_list_sites`]).
     pub packed_list_sites: HashMap<Span, noeta_ast::reflect::PackedLayout>,
-    /// `from_bytes::<T>` spans whose packed element type `T` implements `Validate` (validation arc):
+    /// `from_bytes::<T>` spans whose packed element type `T` implements `Validate`:
     /// lowering sets `Rvalue::FromBytes.validate`, so both backends run `validate()` on each decoded
     /// element (aborting at `[i]` on the first rejection — the abort door, consistent with a shape
     /// error). A pure function of the program.
@@ -94,7 +94,7 @@ pub struct Sites {
     /// [`noeta_ext_abi::TypeRecipe`] the lowering bakes into `Rvalue::TypedModuleCall`. A pure function of the
     /// program, like the other site maps.
     pub typed_module_call_sites: HashMap<Span, noeta_ext_abi::TypeRecipe>,
-    /// Call-site-typed **extern-method** recipes (`resp.json::<T>`, http arc H8): the turbofish `T`
+    /// Call-site-typed **extern-method** recipes (`resp.json::<T>`): the turbofish `T`
     /// resolved into a [`noeta_ext_abi::TypeRecipe`] the lowering bakes into
     /// `Rvalue::TypedMethodCall`. The extern-type twin of [`Sites::typed_module_call_sites`] —
     /// presence here is exactly what distinguishes a *native typed* method call from an ordinary
@@ -115,7 +115,7 @@ pub struct Sites {
     /// `RunResult`, so the eval reference may ignore it and stay boxed.
     pub map_packed_sites: HashMap<Span, noeta_ast::reflect::PackedLayout>,
     /// Every `@packed` struct **bound to a `vec` method bundle** (`impl vec.Kernels for T {}`), by its
-    /// flat [`PackedLayout`] (scalar-unification slice 3). The compiler interns each into the module's
+    /// flat [`PackedLayout`]. The compiler interns each into the module's
     /// `packed_schemas` so the VM has the element width for the bundle's *element* methods even when the
     /// type never appears in a `List<T>` (a single struct value erases its field widths to boxed
     /// scalars; the interned schema recovers them, matching the tree-walker's per-type field index).
@@ -133,7 +133,7 @@ pub struct Sites {
     /// layouts. A pure function of the program.
     pub packed_type_layouts: Vec<noeta_ast::reflect::PackedLayout>,
     /// Member-access spans (`list[i].field`) lowering fuses into a single `Rvalue::IndexField`, so a
-    /// packed list element's field is read without materializing the element (P-PACK 2.5+). A pure
+    /// packed list element's field is read without materializing the element. A pure
     /// function of the program, like the other site maps; the fusion is invisible to `RunResult`.
     pub index_field_sites: HashSet<Span>,
     /// Call spans whose arguments need rebinding: for each parameter position, the index of the
@@ -303,7 +303,7 @@ pub struct Sites {
     /// other site maps.
     pub field_call_sites: HashSet<Span>,
     /// **Generic-method turbofish** spans reached through the `TypedModuleCall` surface (generic
-    /// methods, D3): a `recv.m::<T>(args)` with a single type argument and a bare-identifier
+    /// methods): a `recv.m::<T>(args)` with a single type argument and a bare-identifier
     /// receiver parses as [`noeta_ast::Expr::TypedModuleCall`] (the atom that also spells
     /// `json.parse::<T>(s)`), but when the receiver is a value or a user type — not an imported
     /// native module — it is a generic **method** call. The checker records the span here so
@@ -313,7 +313,7 @@ pub struct Sites {
     pub member_method_call_sites: HashSet<Span>,
     /// Trait method call sites → the statically resolved route `(trait qualified identity, method)`.
     /// Recorded (a) when a call resolves to a native trait's *defaulted* method answered by the trait's
-    /// native default-body dispatch (slice 2), and (b) — since the ExtBundle→ExtTrait fold-in (slice 4)
+    /// native default-body dispatch, and (b) — since the ExtBundle→ExtTrait fold-in
     /// — for **every kernel-trait method** (`impl vec.Kernels for T {}`): the bundle runtime route was
     /// unified onto the trait route, so lowering bakes it into an [`Rvalue::TraitMethod`] dispatched
     /// through the trait's ctx dispatch with the receiver as slot 0. `dyn` receivers are the documented
@@ -350,7 +350,7 @@ pub struct Sites {
     /// Absent for a target declaring a single conversion, which keeps the plain `from` its call
     /// site already names.
     pub from_call_sites: HashMap<Span, String>,
-    /// The program-wide **type-argument table** (poly-values F2b): every concrete instantiation a
+    /// The program-wide **type-argument table**: every concrete instantiation a
     /// call of a forwarding generic fn resolved, interned by structural equality. Lowering embeds
     /// it into the IR `Program` (and the VM `Module`), and a hidden call argument indexes it at
     /// runtime. A pure function of the program, like the other site maps.
@@ -474,14 +474,14 @@ pub struct Sites {
     ///
     /// [`Coloring::self_type_params`]: crate::Coloring::self_type_params
     pub self_render_fns: HashMap<String, u32>,
-    /// **Forwarding-fn-as-value** sites (poly-deferrals D2c): `Expr::Ident` spans where a
+    /// **Forwarding-fn-as-value** sites: `Expr::Ident` spans where a
     /// forwarding generic fn is used as a VALUE with its instantiation pinned by the expected
     /// type → `(fn name, adopted arity)`. Lowering wraps the reference in a synthesized closure
     /// whose body calls the fn — the closure's inner call span is this same ident span, which
     /// keys the resolved hidden atoms in [`Sites::hidden_arg_sites`], so the hidden slots are
     /// bound into the value (a partial application over the type-argument slots).
     pub fn_value_sites: HashMap<Span, (String, u32)>,
-    /// Per-binding destructor-relevance (Phase 3.2b) — the input the drop-insertion pass reads to
+    /// Per-binding destructor-relevance — the input the drop-insertion pass reads to
     /// mark each `DropVar`'s `relevant` bit. A pure function of the program, like `type_of_sites`,
     /// so both backends derive identical annotations.
     pub destructor_relevance: DestructorRelevance,
@@ -779,7 +779,7 @@ pub fn intern_type_arg_entry(
 pub(crate) struct SiteMaps {
     /// Each `type_of(value)` site (keyed by the `Expr::TypeOf` span) whose operand has a **concrete**
     /// static type, mapped to the precise [`TypeRepr`] the backends bake as a constant (`type_of`
-    /// full fidelity, P2.3). A `dyn`/union/un-inferred operand is absent here — those fall back to
+    /// full fidelity). A `dyn`/union/un-inferred operand is absent here — those fall back to
     /// the runtime head-constructor path. Both backends harvest this map via [`resolve_type_of_sites`]
     /// on the same program, so they emit identical `Type` values by construction.
     pub(crate) type_of_sites: HashMap<Span, noeta_ast::reflect::TypeRepr>,
@@ -811,7 +811,7 @@ pub(crate) struct SiteMaps {
     pub(crate) inferred_object_types: HashMap<Span, String>,
     /// See [`Sites::variant_pattern_sites`].
     pub(crate) variant_pattern_sites: HashMap<Span, (Option<String>, String)>,
-    /// List-construction sites whose element type is a `@packed` struct (P-PACK Phase 2), keyed by the
+    /// List-construction sites whose element type is a `@packed` struct, keyed by the
     /// constructing expression's span → the element's flat [`PackedLayout`]. Both backends consult this
     /// via [`resolve_packed_list_sites`] to lay out a `List<packed>` as one contiguous raw-primitive
     /// buffer instead of N boxed objects. A pure function of the program, like `type_of_sites`, so the
@@ -828,7 +828,7 @@ pub(crate) struct SiteMaps {
     /// span → the turbofish `T` resolved into a [`noeta_ext_abi::TypeRecipe`]. Both backends harvest
     /// this on the same program, so the lowering bakes identical recipes into `Rvalue::TypedModuleCall`.
     pub(crate) typed_module_call_sites: HashMap<Span, noeta_ext_abi::TypeRecipe>,
-    /// Call-site-typed **extern-method** recipes (`resp.json::<T>`, http arc H8): the turbofish `T`
+    /// Call-site-typed **extern-method** recipes (`resp.json::<T>`): the turbofish `T`
     /// resolved into a [`noeta_ext_abi::TypeRecipe`] the lowering bakes into
     /// `Rvalue::TypedMethodCall`. The extern-type twin of `typed_module_call_sites` —
     /// presence here is exactly what distinguishes a *native typed* method call from an ordinary
@@ -844,12 +844,12 @@ pub(crate) struct SiteMaps {
     /// `map` builtin consults this to build a flat result instead of N boxed objects; like the other
     /// site maps it is a pure function of the program, invisible to `RunResult`.
     pub(crate) map_packed_sites: HashMap<Span, noeta_ast::reflect::PackedLayout>,
-    /// `@packed` structs bound to a `vec` bundle (scalar-unification slice 3) — see [`Sites`].
+    /// `@packed` structs bound to a `vec` bundle — see [`Sites`].
     pub(crate) bundle_schema_layouts: Vec<noeta_ast::reflect::PackedLayout>,
     /// Member-access spans (`list[i].field`) the checker proved fusable: the index receiver is a
     /// built-in `List` and the field resolves on its element type. Lowering reads this (via
     /// [`Checked::index_field_sites`]) to emit a single [`Rvalue::IndexField`] that reads a packed
-    /// element's field without materializing the element (P-PACK 2.5+). A pure function of the
+    /// element's field without materializing the element. A pure function of the
     /// program, invisible to `RunResult`, so both backends fuse the same sites by construction.
     pub(crate) index_field_sites: HashSet<Span>,
     /// Call spans whose arguments need rebinding: for each parameter position, the index of the
@@ -906,7 +906,7 @@ pub(crate) struct SiteMaps {
     pub(crate) type_param_assoc_sites: HashMap<Span, String>,
     /// Field-call sites (`obj.f(args)` where `f` is a field) — see [`Sites::field_call_sites`].
     pub(crate) field_call_sites: HashSet<Span>,
-    /// Generic-method turbofish spans reached via the `TypedModuleCall` surface (D3) — see
+    /// Generic-method turbofish spans reached via the `TypedModuleCall` surface — see
     /// [`Sites::member_method_call_sites`].
     pub(crate) member_method_call_sites: HashSet<Span>,
     /// Bare float-literal spans adapted into an `f32` context (P-NUM-SYM) — lowering reads this (via
@@ -921,7 +921,7 @@ pub(crate) struct SiteMaps {
     pub(crate) try_conversion_sites: HashMap<Span, (String, String, Spelling)>,
     /// Explicit `Target.from(x)` conversion-selection sites — see [`Sites::from_call_sites`].
     pub(crate) from_call_sites: HashMap<Span, String>,
-    /// The type-argument table (poly-values F2b) — see [`Sites::type_arg_table`].
+    /// The type-argument table — see [`Sites::type_arg_table`].
     pub(crate) type_arg_table: Vec<noeta_ext_abi::TypeArgInfo>,
     /// The type-argument table's reflection projection — see [`Sites::type_arg_reprs`].
     pub(crate) type_arg_reprs: Vec<Option<noeta_ast::reflect::TypeRepr>>,
@@ -1005,7 +1005,7 @@ impl SiteMaps {
 }
 
 /// Which bindings hold a value whose drop could run a `destruct` block — the **destructor-relevance**
-/// the checker exports for the Phase-3 drop-insertion pass (memory-management migration). Sound and
+/// the checker exports for the Phase-3 drop-insertion pass. Sound and
 /// **conservative**: a binding absent here is provably non-relevant (its type reaches no destructor);
 /// a binding present here *may* be relevant, so its drop keeps the runtime destructor check. Two
 /// keyings because the Core IR identifies the two binding kinds differently: a local by its binding
@@ -1020,7 +1020,7 @@ pub struct DestructorRelevance {
     /// **Type names** whose value, when destroyed, could run *some* `destruct` block — its own or a
     /// transitively-owned field / variant-payload / collection element (the [`Checker::compute_relevance`]
     /// fixpoint). This is the *per-type* projection of the same reachability the per-binding sets use;
-    /// the backends consume it as the **container-before-contained field-walk gate** (Phase 4.3, spec
+    /// the backends consume it as the **container-before-contained field-walk gate** (spec
     /// §4): an object/enum whose name is absent here owns no destructor anywhere in its subtree, so it
     /// frees on the plain-release fast path with no recursive destructor walk. (The drop-insertion pass
     /// uses only `locals`/`params`; `passes_relevance` drops this field.) Includes every type with its

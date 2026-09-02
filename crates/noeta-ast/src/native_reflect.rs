@@ -194,7 +194,7 @@ fn resolve_param_record(target: &str) -> Option<ParamRecord> {
 /// no AST declaration. The registry declaration is the single source (the old hardcoded
 /// `builtin_attribute_shape` fallback is gone).
 ///
-/// A native **fielded** `@attribute` (D2) — a real `ExtFielded` carrying `ExtTypeDirective::Attribute`
+/// A native **fielded** `@attribute` — a real `ExtFielded` carrying `ExtTypeDirective::Attribute`
 /// — is an attribute to every consumer, so its shape reaches the same lookup through
 /// [`fielded_type_info`]. Without that, `attribute_shape` found no `TypeInfo` for the fielded
 /// attribute and `attributes_of::<Route>()` materialized an empty instance.
@@ -202,11 +202,11 @@ fn attribute_type_info(attr: &noeta_ext_abi::registry::ExtAttribute) -> TypeInfo
     use noeta_ext_abi::registry as ext;
     TypeInfo {
         // The **qualified** identity (`std.test.Skip`) — the manifest shape `attributes_of`
-        // matches must key on the same FQN the loader rewrites applications to (D2b).
+        // matches must key on the same FQN the loader rewrites applications to.
         name: attr.qualified(),
         kind: TypeKind::Struct,
         fields: attr.fields.iter().map(|f| f.name.to_string()).collect(),
-        // The field's declared type as a reflection `TypeRepr` (struct-reflection arc), so
+        // The field's declared type as a reflection `TypeRepr`, so
         // `field_specs_of` reports a data-only native attribute's field types precisely.
         field_types: attr
             .fields
@@ -367,7 +367,7 @@ fn sig_type_to_repr(sig: &noeta_ext_abi::registry::SigType) -> TypeRepr {
         SigType::Optional(inner) => sig_type_to_repr(inner),
         // A signature-level type variable has no declaration-site type — a permissive hole.
         SigType::Var(_) | SigType::BoundedVar(_, _) => TypeRepr::Dyn,
-        // A trait associated-type projection (`Self::Wide`, slice 1b) is resolved per-implementor by
+        // A trait associated-type projection (`Self::Wide`) is resolved per-implementor by
         // the checker, not at the declaration site — a permissive hole in a reflected signature.
         SigType::Assoc(_) => TypeRepr::Dyn,
         // `Self` is likewise receiver-relative: a reflected signature has no receiver to resolve it

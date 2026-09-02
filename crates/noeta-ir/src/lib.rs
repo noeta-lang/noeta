@@ -64,7 +64,7 @@ pub struct Program {
     pub top: Block,
     /// The number of distinct [`Temp`]s used anywhere in `top` (the top-level frame size).
     pub temp_count: u32,
-    /// The program-wide **type-argument table** (poly-values F2b): the concrete instantiations of
+    /// The program-wide **type-argument table**: the concrete instantiations of
     /// forwarding generics, indexed by the hidden call arguments. Both backends resolve dynamic
     /// call-site-typed sites (`json.try_parse::<T>` with a forwarded `T`) through this one table,
     /// so they agree by construction. Empty for programs without forwarding.
@@ -228,7 +228,7 @@ pub enum Const {
     Bool(bool),
     Int(i64),
     Float(f64),
-    /// A 32-bit float literal (`1.0f32`, P-PACK Phase 3).
+    /// A 32-bit float literal (`1.0f32`).
     F32(f32),
     Str(String),
 }
@@ -355,7 +355,7 @@ pub enum Rvalue {
         reuse: bool,
         span: Span,
     },
-    /// A **sign-dependent** fixed-width integer op (Tier W3): `/ % < <= > >=` on two same-width
+    /// A **sign-dependent** fixed-width integer op: `/ % < <= > >=` on two same-width
     /// `IntN`. Unlike `+ - *` (sign-agnostic — a plain [`Rvalue::Binary`] + [`Rvalue::MaskWidth`]
     /// suffices), division, remainder and ordering read the erased-i64 operands as signed or unsigned
     /// per `signed` (unsigned `u64` differs from signed once bit 63 is set), so the operation itself
@@ -370,7 +370,7 @@ pub enum Rvalue {
         bits: u8,
         span: Span,
     },
-    /// A bit-manipulation intrinsic applied **within a fixed width** (Tier W5): `count_ones`/
+    /// A bit-manipulation intrinsic applied **within a fixed width**: `count_ones`/
     /// `leading_zeros`/`rotate_*`/`reverse_bits`/… on an `IntN` receiver, which must act on the low
     /// `bits` bits rather than the full erased i64 (`(1u8).leading_zeros() == 7`). Emitted (in place of
     /// a generic `Method`) when the checker marks a call site as an `IntN`-receiver intrinsic; both
@@ -389,7 +389,7 @@ pub enum Rvalue {
         callee: Atom,
         args: Vec<Atom>,
         /// The **type arguments** this call supplies to a forwarding generic's leading
-        /// [`Func::hidden`] slots (poly-values F2b), in slot order — empty for the overwhelming
+        /// [`Func::hidden`] slots, in slot order — empty for the overwhelming
         /// majority of calls, which forward nothing.
         ///
         /// A separate channel from `args` on purpose. Each atom is either an interned index into
@@ -417,7 +417,7 @@ pub enum Rvalue {
     /// user-defined) without reconstructing the receiver.
     ///
     /// `reuse` is the **in-place-reuse token** for a collection **method self-update** (`m = m.set(k,v)`
-    /// / the `m[k] = v` desugaring): set by the reuse-analysis pass ([`noeta_ir_passes`], Phase 5) only
+    /// / the `m[k] = v` desugaring): set by the reuse-analysis pass ([`noeta_ir_passes`]) only
     /// on a whitelisted update method whose `receiver` is the very binding the result is reassigned to
     /// (and whose args do not mention it), so the old collection is dead after this call and its backing
     /// buffer may be mutated in place. Each backend gates the actual reuse on the runtime receiver kind
@@ -432,7 +432,7 @@ pub enum Rvalue {
         reuse: bool,
         /// The checker-resolved reflected type when this "method call" is actually a **generic
         /// enum-variant construction** (`Tree.Leaf(5)` : `Tree<int>`, runtime type-argument
-        /// reflection, R2b.2) — baked from the construction-site map so `type_of` recovers the enum's
+        /// reflection) — baked from the construction-site map so `type_of` recovers the enum's
         /// type arguments after a `dyn` launder. `None` for an ordinary method call (the common case)
         /// and for a non-generic enum. Invisible to value semantics.
         reflect: Option<noeta_ast::reflect::TypeRepr>,
@@ -512,8 +512,8 @@ pub enum Rvalue {
     /// A **trait** method call with a baked-in route: `receiver.name(args)` where the checker
     /// statically resolved the call to a native trait's shared ctx dispatch. Two producers: (a) a
     /// native trait's *defaulted* method with a trait-level dispatch and no overriding implementor
-    /// ([`noeta_ext_abi::ExtTrait::dispatch`], slice 2); (b) — since the ExtBundle→ExtTrait fold-in
-    /// (slice 4) — every kernel-trait method (`impl vec.Kernels for T {}`), whose bundle runtime route
+    /// ([`noeta_ext_abi::ExtTrait::dispatch`]); (b) — since the ExtBundle→ExtTrait fold-in — every
+    /// kernel-trait method (`impl vec.Kernels for T {}`), whose bundle runtime route
     /// was unified onto this one. Dispatch goes straight to the registered trait's shared ctx dispatch
     /// with the receiver as slot 0, no runtime discovery (which is what makes an empty list receiver
     /// work for the bulk kernels). `trait_name` is the trait's qualified identity (`"std.vec.Kernels"`).
@@ -551,7 +551,7 @@ pub enum Rvalue {
         method: String,
         span: Span,
     },
-    /// In-place field assignment: `receiver.name = value` (Phase 5.2). Evaluates to the updated
+    /// In-place field assignment: `receiver.name = value`. Evaluates to the updated
     /// object. Both backends set the field **in place when the object is uniquely owned** (the
     /// reuse pass's `reuse` token, gated on the runtime refcount `== 1`) and **copy-first when
     /// shared**, so value semantics hold for any aliased observer — like the collection/struct
@@ -572,7 +572,7 @@ pub enum Rvalue {
         index: Atom,
         span: Span,
     },
-    /// Fused indexed field read `list[index].field` (P-PACK 2.5+). Emitted by lowering only when the
+    /// Fused indexed field read `list[index].field`. Emitted by lowering only when the
     /// checker proves `receiver` is a built-in `List` (its span recorded in `index_field_sites`), so
     /// the backends can read a single packed-element field **without materializing the whole element**
     /// — the scalar-access win the flat `List<packed>` layout otherwise leaves on the table. A packed
@@ -587,7 +587,7 @@ pub enum Rvalue {
         span: Span,
     },
     /// A list literal `[a, b, c]`. `reflect` is the checker-resolved element type (runtime
-    /// type-argument reflection, R1), baked from the construction-site map so `type_of` recovers the
+    /// type-argument reflection), baked from the construction-site map so `type_of` recovers the
     /// list's element type even after the value is laundered through `dyn`; `None` when the checker
     /// carried no type (the boxed/REPL path, or a genuinely unknowable element type) — the value stays
     /// untagged and reflects head-only. Invisible to value semantics — the backends stash it beside the
@@ -615,8 +615,7 @@ pub enum Rvalue {
     /// mismatch — never for a checker-validated `@packed` type) the list demotes to boxed and the
     /// value is pushed as-is, so the flat form is only ever an exact optimization.
     PackedListPush { list: Atom, value: Atom, span: Span },
-    /// A tuple literal `(a, b, c)` — a fixed-arity, value-semantic positional aggregate
-    /// (object-model slice 4).
+    /// A tuple literal `(a, b, c)` — a fixed-arity, value-semantic positional aggregate.
     Tuple { items: Vec<Atom>, span: Span },
     /// Tuple projection `receiver.N` — positional access by a constant index.
     TupleIndex {
@@ -625,7 +624,7 @@ pub enum Rvalue {
         span: Span,
     },
     /// A map literal `{k: v, ...}`. `reflect` is the checker-resolved `Map(K, V)` type (runtime
-    /// type-argument reflection, R1), baked from the construction-site map so `type_of` recovers the
+    /// type-argument reflection), baked from the construction-site map so `type_of` recovers the
     /// map's key/value types after a `dyn` launder; `None` on the boxed/REPL path. Invisible to value
     /// semantics — carried beside the value, exactly like [`Rvalue::List`]'s tag.
     Map {
@@ -644,7 +643,7 @@ pub enum Rvalue {
     /// spread's span are retained so construction diagnostics point exactly where the
     /// tree-walker's do.
     ///
-    /// `reuse` is the **in-place-reuse token** the reuse-analysis pass ([`noeta_ir_passes`], Phase 5):
+    /// `reuse` is the **in-place-reuse token** the reuse-analysis pass ([`noeta_ir_passes`]):
     /// `true` marks a *self-update* (`acc = Type { ...acc, f: v }`) where the `spread` base is the
     /// very binding the result is reassigned to, so the base is dead after this construction and its
     /// allocation may be reused. Both backends consume the same token — the VM via an in-place
@@ -658,7 +657,7 @@ pub enum Rvalue {
         fields: Vec<ObjectFieldInit>,
         spread: Option<(Atom, Span)>,
         reuse: bool,
-        /// The checker-resolved reflected type (runtime type-argument reflection, R2) — `Some` only
+        /// The checker-resolved reflected type (runtime type-argument reflection) — `Some` only
         /// for a **generic** instantiation (`Box<int>` → `Struct("Box", [Int])`), so `type_of`
         /// recovers the type arguments after a `dyn` launder; `None` for a non-generic type (whose
         /// head-only shape name already recovers it) and on the boxed/REPL path. Invisible to value
@@ -674,7 +673,7 @@ pub enum Rvalue {
     /// `Err`/`none` from the enclosing function. `on_error` is the statically-computed list of
     /// owned frame locals (name + destructor-relevance, innermost-scope-first reverse-construction
     /// order) to drop on the **error** path before propagating — the drop pass fills it so a `?`
-    /// early-return reclaims abandoned values exactly as an explicit `return` does (Phase 4.2c).
+    /// early-return reclaims abandoned values exactly as an explicit `return` does.
     /// The propagated operand is excluded (it is moved out).
     Try {
         operand: Atom,
@@ -828,7 +827,7 @@ pub enum Rvalue {
         span: Span,
     },
     /// `type_name::<T>()` where `T` is a **forwarded type parameter of the enclosing top-level
-    /// generic fn** (poly-values F2b): the instantiation's qualified name, read out of
+    /// generic fn**: the instantiation's qualified name, read out of
     /// [`Program::type_args`] at the index the hidden slot holds.
     ///
     /// The fn-side twin of [`Rvalue::TypeArgName`] — same answer, different channel. A generic
@@ -883,14 +882,14 @@ pub enum Rvalue {
         func: String,
         args: Vec<Atom>,
         recipe: Option<noeta_ext_abi::TypeRecipe>,
-        /// A **per-instantiation** recipe source (poly-values F2b): the enclosing forwarding fn's
+        /// A **per-instantiation** recipe source: the enclosing forwarding fn's
         /// hidden slot holding the instantiation's index into [`Program::type_args`]. `Some` iff
         /// the turbofish was a forwarded type parameter; then `recipe` is `None` and the backend
         /// resolves the table entry's recipe at runtime.
         dynamic: Option<Atom>,
         span: Span,
     },
-    /// A **call-site-typed** native extern-METHOD call (http arc H8) — `resp.json::<T>()`, the
+    /// A **call-site-typed** native extern-METHOD call — `resp.json::<T>()`, the
     /// [`Rvalue::TypedModuleCall`] twin. The receiver's own runtime identity selects the type (as
     /// every extern method call does), so no type name is carried; `method` names the entry in
     /// that type's `typed_methods` table.
@@ -913,7 +912,7 @@ pub enum Rvalue {
     /// registry). Recoverable end to end — a malformed body **or** an unknown type name yields
     /// `Result.Err(message)`, a successful decode `Result.Ok(value)`.
     DecodeTyped { name: Atom, text: Atom, span: Span },
-    /// A **native module function as a first-class value** (expr-tiers arc) — the same value a
+    /// A **native module function as a first-class value** — the same value a
     /// `use std.math.sqrt` binding holds (`Const::ModuleFn`), but produced from a compiler
     /// [`noeta_ast::Expr::NativeFnRef`] rather than a user import. The expression-tier desugar
     /// emits this as a native handler's call callee, so the handler call lowers through the
@@ -971,7 +970,7 @@ pub enum ReflectArgs {
     Bytes {
         blob: Atom,
         layout: Option<noeta_ast::reflect::PackedLayout>,
-        /// Whether element type `T` implements `Validate` (validation arc): when set, the backend
+        /// Whether element type `T` implements `Validate`: when set, the backend
         /// runs `validate()` on each decoded element and aborts at `[i]` on the first rejection —
         /// the abort door, consistent with a shape mismatch.
         validate: bool,
@@ -1128,7 +1127,7 @@ pub enum Stmt {
     /// optimization (those land in a later phase).
     Drop(Temp),
     /// Release a **source variable's** value now, at its last use, rather than at scope/teardown
-    /// (memory-management migration, Phase 3). Inserted by the drop-insertion pass
+    /// (memory-management migration). Inserted by the drop-insertion pass
     /// ([`noeta_ir_passes`]) at a binding's death point — only for function-local bindings, never a
     /// top-level global (those stay teardown-reclaimed) and never an immediately-reassigned binding
     /// (its displaced value is released by the reassignment itself). `name` resolves through the
@@ -1138,7 +1137,7 @@ pub enum Stmt {
     /// reclamation, the peak-residency win) and fires **no** destructor — destructor firing stays
     /// globals-only until Phase 4, which flips local drops to the destructor-running release.
     ///
-    /// `relevant` is the **destructor-relevance** annotation (Phase 3.2b): `true` if dropping this
+    /// `relevant` is the **destructor-relevance** annotation: `true` if dropping this
     /// binding's value could run *some* `destruct` block (its type transitively reaches one),
     /// `false` if it provably cannot. Both backends ignore it in Phase 3 (every drop is a plain
     /// release); Phase 4 reads it to skip the destructor-firing check for a `false` drop. Computed
@@ -1267,7 +1266,7 @@ pub struct Func {
     pub captures: Option<Vec<String>>,
     pub params: Vec<String>,
     /// How many of the leading [`Self::params`] are **type-argument slots** rather than value
-    /// parameters (poly-values F2b): a forwarding generic's `$ty0`, `$ty1`, … .
+    /// parameters: a forwarding generic's `$ty0`, `$ty1`, … .
     ///
     /// The slots are still parameters — the body names them and register allocation places them
     /// like any other — but they are supplied through their **own channel**, the call node's
@@ -1318,7 +1317,7 @@ pub enum Decl {
     /// destruction path, unchanged in this phase.)
     Class(ClassDef),
     /// `enum Name { variants; methods; impl Trait { … } }`. Variants/derives are read from the
-    /// surface `decl`; methods are lowered to IR (object-model slice 3).
+    /// surface `decl`; methods are lowered to IR.
     Enum(EnumDef),
     /// `struct Name { fields; methods }` — the value kind. Like [`Decl::Class`] but with no
     /// `destruct`; fields/derives are read from the surface `decl`, methods are lowered to IR.
@@ -1339,7 +1338,7 @@ pub struct ClassDef {
     pub decl: Rc<noeta_ast::ClassDecl>,
     pub methods: Vec<(String, Rc<Func>)>,
     /// Each field declared with a default (`x: T = expr`), lowered to a parameterless value
-    /// [`Thunk`] (object-model slice 5). A construction that omits the field fills it by running
+    /// [`Thunk`]. A construction that omits the field fills it by running
     /// this thunk in the type's **definition scope** (globals — empty upvalues, exactly the
     /// parameter-default protocol), so a default never sees `self` or sibling fields. Keyed by field
     /// name; only defaulted fields appear (a mandatory field is absent). Empty for the common case.
@@ -1368,7 +1367,7 @@ pub struct StructDef {
 }
 
 /// A lowered enum: the surface declaration (for variants, derives, and name) paired with its
-/// methods lowered to IR funcs (object-model slice 3). Mirrors [`StructDef`] — an enum has no
+/// methods lowered to IR funcs. Mirrors [`StructDef`] — an enum has no
 /// `destruct` block. An enum method takes the whole enum value as `self` and has no implicit field
 /// scope (variants differ), so its body typically `match`es on `self`.
 #[derive(Debug, Clone)]

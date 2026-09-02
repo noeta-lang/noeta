@@ -748,7 +748,7 @@ fn map_keys_without_a_runtime_key_form_are_rejected_statically() {
     assert_eq!(codes(src), ["E0007"]);
     let src = "struct P { x: int }\nfn f(m: Map<P, int>): int { return m.len() }\necho 1\n";
     assert_eq!(codes(src), ["E0007"]);
-    // String and int-family keys are key-capable (P-PKEY S4).
+    // String and int-family keys are key-capable.
     let src = "m = { \"a\": 1 }\necho m.len()\n";
     assert!(codes(src).is_empty());
     let src = "fn f(m: Map<int, string>): int { return m.len() }\necho 1\n";
@@ -1000,7 +1000,7 @@ fn mandatory_attribute_field_is_still_required() {
 #[test]
 fn builtin_skip_reason_is_optional() {
     // The built-in `Skip` attribute's `reason` defaults to `""`, so both `#[Skip]` and
-    // `#[Skip("…")]` construct it (slice 6i). A `@test` fn is stripped on a normal check, so this
+    // `#[Skip("…")]` construct it. A `@test` fn is stripped on a normal check, so this
     // exercises the construction gate via an ordinary declaration. `Skip` lives under `std.test`
     // (D2b — no global attribute namespace), so it is imported like any attribute.
     let src = "use std.test.{Skip}\n#[Skip]\nstruct A { id: int }\n#[Skip(\"flaky\")]\nstruct B { id: int }\n";
@@ -1520,7 +1520,7 @@ fn closure_expectation_propagates_param_and_return_types() {
     );
 }
 
-// ----- signature requirement + return checking (S2) -----
+// ----- signature requirement + return checking -----
 
 #[test]
 fn unannotated_parameter_requires_a_signature() {
@@ -1561,7 +1561,7 @@ fn a_nested_fn_return_does_not_clobber_the_enclosing_one() {
     assert!(codes(src).is_empty());
 }
 
-// ----- stdlib type knowledge (S3a) -----
+// ----- stdlib type knowledge -----
 //
 // Each of these only fails (E0007) if the method/prelude/module/index/user-method result is typed
 // concretely; if it were `Unknown` the return-type check would be suppressed. So they double as a
@@ -1637,7 +1637,7 @@ fn none_in_match_pattern_position_stays_legal() {
 
 #[test]
 fn prelude_functions_are_typed() {
-    // `len`/`sum` left the prelude (P1.2) — they are collection methods now, typed as such.
+    // `len`/`sum` left the prelude — they are collection methods now, typed as such.
     assert!(codes("fn f(): int { return [1, 2, 3].len(); }\n").is_empty()); // len -> int
     assert_eq!(codes("fn f(): string { return [1].len(); }\n"), ["E0007"]);
     assert!(codes("fn f(): int { return [1, 2].sum(); }\n").is_empty()); // sum(List<int>) -> int
@@ -1678,7 +1678,7 @@ fn user_method_returns_are_typed() {
     assert_eq!(codes(src), ["E0007"]); // label() -> string, not int
 }
 
-// ----- strict checks now possible with stdlib types (S3b) -----
+// ----- strict checks now possible with stdlib types -----
 
 #[test]
 fn heterogeneous_list_literal_is_rejected() {
@@ -1747,7 +1747,7 @@ fn generic_method_arguments_are_not_false_positives() {
     assert!(codes(src).is_empty());
 }
 
-// ----- list concatenation via `~` (L1) -----
+// ----- list concatenation via `~` -----
 
 #[test]
 fn concat_of_two_lists_is_a_list() {
@@ -1767,7 +1767,7 @@ fn concat_result_flows_through_a_signature() {
     assert_eq!(codes("fn f(): string { return [1] ~ [2]; }\n"), ["E0007"]);
 }
 
-// ----- E0023 cannot-infer endpoint (S3c.4) -----
+// ----- E0023 cannot-infer endpoint -----
 
 #[test]
 fn immutable_context_free_literal_binding_is_e0023() {
@@ -1825,7 +1825,7 @@ fn e0023_does_not_fire_in_expression_position_or_on_typed_values() {
     assert!(codes("xs = [1, 2, 3];\nm = {\"a\": 1};\n").is_empty());
 }
 
-// ----- assignment updates the declaring scope; accumulators infer (L3) -----
+// ----- assignment updates the declaring scope; accumulators infer -----
 
 #[test]
 fn accumulator_element_type_infers_and_persists_past_the_loop() {
@@ -1861,7 +1861,7 @@ fn a_resolved_mut_binding_rejects_an_incompatible_reassignment() {
     assert!(codes(ok).is_empty());
 }
 
-// ----- list spread `[...xs, x]` (L2, desugars to `~`) -----
+// ----- list spread `[...xs, x]` (desugars to `~`) -----
 
 #[test]
 fn list_spread_types_as_the_unified_list() {
@@ -1917,7 +1917,7 @@ fn spreading_a_non_list_is_rejected() {
     assert!(codes("fn f(xs: List<int>): List<int> { return [...xs]; }\n").is_empty());
 }
 
-// ----- optional binding annotations (S3c.2) -----
+// ----- optional binding annotations -----
 
 #[test]
 fn annotated_binding_checks_its_value_against_the_annotation() {
@@ -1949,7 +1949,7 @@ fn annotated_binding_type_flows_to_later_uses() {
     );
 }
 
-// ----- contextual propagation + map inference (S3c.1) -----
+// ----- contextual propagation + map inference -----
 
 #[test]
 fn option_constructors_check_their_payload_against_the_expectation() {
@@ -2366,7 +2366,7 @@ fn closure_default_may_reference_a_captured_variable() {
     assert!(codes(src).is_empty());
 }
 
-/// Parse `text` and return the checker's per-binding destructor-relevance (Phase 3.2b).
+/// Parse `text` and return the checker's per-binding destructor-relevance.
 fn relevance(text: &str) -> super::DestructorRelevance {
     seed_std();
     let source = Source::new(SourceId::FIRST, "test.noe", text);
@@ -2889,7 +2889,7 @@ fn match_that_is_not_provably_exhaustive_still_falls_through_e0048() {
     );
 }
 
-// --- SessionChecker (session-checker C0/C1): per-entry checking against an accumulated session ---
+// --- SessionChecker: per-entry checking against an accumulated session ---
 
 /// Parse one entry with its own `SourceId` (as the REPL/console assigns them) and check it against
 /// `session`, returning this entry's diagnostic codes.
@@ -3681,7 +3681,7 @@ fn the_misplacement_noun_is_derived_from_the_site() {
     }
 }
 
-// ----- the body-coverage ledger (body-coverage arc) -----
+// ----- the body-coverage ledger -----
 
 /// A program exercising **one of every** [`BodyKind`], so the two tests below are talking about a
 /// program that actually contains all six.
@@ -3819,7 +3819,7 @@ fn erased_width_display_warns_for_u64_alone() {
     );
 }
 
-// ----- E0063: unanswerable width `is` test (packed-widths slice 2) -----
+// ----- E0063: unanswerable width `is` test -----
 //
 // A bare-scalar `x is iN` / `x is f64` is the one test the *runtime* cannot answer: an erased width
 // carries no tag on a scalar, so the shared matcher reaches no head and always says `false`. Where

@@ -1,4 +1,4 @@
-//! **Type-param forwarding pre-pass** (poly-values F2b, extended by poly-deferrals D2a): which
+//! **Type-param forwarding pre-pass** (extended by poly-deferrals D2a): which
 //! generic functions and methods forward a type parameter into a **call-site-typed position** — a
 //! native turbofish (`json.try_parse::<T>`), a reflection manifest query (`attributes_of::<T>`),
 //! the type's own name (`type_name::<T>()`), a **narrow** to it (`v.as<T>()` / `v is T`), the
@@ -14,7 +14,7 @@
 //!
 //! A slot is identified by its **type template** over the enclosing fn's type parameters — the
 //! bare parameter (`T`) or a composite mentioning it (`List<T>`, `Map<string, T>`, `?T`,
-//! `Result<T, E>`). The composite case (D2a) is what makes `json.try_parse::<List<T>>` legal
+//! `Result<T, E>`). The composite case is what makes `json.try_parse::<List<T>>` legal
 //! inside a generic body: the CALL SITE substitutes its concrete instantiation into the template
 //! (`T = Order` → `List<Order>`) and interns that whole concrete type into the program-wide
 //! `TypeArgInfo` table — statically, so the runtime never constructs a recipe. A call that
@@ -36,7 +36,7 @@
 //! form, `invoke`), all of which bind positionally, and a call through one of those supplies
 //! nothing and aborts.
 //!
-//! A nested `fn` forwards the ENCLOSING body's parameters (D2b): it is walked with the enclosing
+//! A nested `fn` forwards the ENCLOSING body's parameters: it is walked with the enclosing
 //! scope minus any names its own declaration shadows, and the slot it reads is the enclosing
 //! function's (captured like any local by closure conversion). Transitive forwarding is recognized
 //! through an EXPLICIT turbofish only (`g::<T>(x)`) — forwarding via argument inference alone is
@@ -728,7 +728,7 @@ fn walk_stmt(stmt: &Stmt, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
                 walk_stmt(s, cx, mark);
             }
         }
-        // A nested `fn` runs within the enclosing generic's type scope (D2b): forwarded sites
+        // A nested `fn` runs within the enclosing generic's type scope: forwarded sites
         // inside it consume the ENCLOSING fn's slots (the hidden slot is captured like any local
         // by closure conversion), so its body is walked with the enclosing parameters — minus any
         // the nested declaration's own type parameters shadow (those have no call-site channel;
@@ -783,7 +783,7 @@ fn walk_expr(expr: &Expr, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
     }
     match expr {
         // THE recipe consumer: a native call-site-typed turbofish whose type mentions an enclosing
-        // parameter — the bare `T` or a composite (`List<T>`, D2a). The whole turbofish type is
+        // parameter — the bare `T` or a composite (`List<T>`). The whole turbofish type is
         // the slot template.
         Expr::TypedModuleCall { ty, args, .. } => {
             let t = cx.to_type(ty);

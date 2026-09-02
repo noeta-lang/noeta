@@ -30,7 +30,7 @@ impl Checker {
 
     /// Type a `match`. `value_used` is `true` when the match stands in value position (its result
     /// is consumed — a binding RHS, an argument, an operand, a `return`), and `false` only when it
-    /// is the whole of an expression statement (its value discarded). Block-bodied arms (aether F1)
+    /// is the whole of an expression statement (its value discarded). Block-bodied arms
     /// produce no value — blocks are statement sequences in Noeta — so in value position they are a
     /// hard error (E0055) rather than silently contributing `unit`; in statement position they are
     /// the intended side-effect form.
@@ -157,7 +157,7 @@ impl Checker {
                     Some(exp) => self.check(e, exp, env),
                     None => self.synth(e, env),
                 },
-                // A statement-block arm (aether F1): check its statements in the arm scope; the
+                // A statement-block arm: check its statements in the arm scope; the
                 // arm's value is `unit`. In value position that is a silent value loss — blocks
                 // never produce values — so reject it (E0055).
                 noeta_ast::ClosureBody::Block(stmts) => {
@@ -688,7 +688,7 @@ impl Checker {
                 }
             }
             // A tuple pattern `(p, q, …)` binds each sub-pattern against the corresponding tuple
-            // element type (object-model slice 4b); a non-tuple/gradual scrutinee binds `dyn`.
+            // element type; a non-tuple/gradual scrutinee binds `dyn`.
             Pattern::Tuple { elements, .. } => {
                 for (i, sub) in elements.iter().enumerate() {
                     let pty = match ty {
@@ -717,7 +717,7 @@ impl Checker {
             // Substitute the enum's type arguments into the variant's declared payload types, so a
             // pattern on a generic enum binds the *instantiated* payload: `match t { Tree.Leaf(n) => … }`
             // where `t: Tree<int>` types `n` as `int`, not the abstract parameter `T`. Mirrors the
-            // construction-side inference (R2b.1); the two are the same generic type-argument flow.
+            // construction-side inference; the two are the same generic type-argument flow.
             Type::Named(n, args) => self
                 .symbols
                 .enums
@@ -761,7 +761,7 @@ impl Checker {
     /// itself for a user/prelude enum, or, for a **native** enum imported `use pkg.TheEnum`, the
     /// qualified identity its local short name aliases to. A native enum is seeded under its
     /// qualified name alone (S1's two-identity model), so source-level construction
-    /// (`TheEnum.Variant`, native-extensibility S1b) follows the import alias — the same
+    /// (`TheEnum.Variant`) follows the import alias — the same
     /// `extern_types` channel a native fn's *return* type resolves through — to find it and yield a
     /// construction result keyed by that qualified identity (so it unifies with a native signature).
     /// A direct hit wins, so a user enum of the same short name shadows the import. `None` when the

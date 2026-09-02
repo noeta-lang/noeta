@@ -278,7 +278,7 @@ impl Checker {
         self.check_coherence(&c.decorators.derives, &c.impls, &standalone);
         self.check_attrs(&c.decorators.attrs, TargetKind::Class);
         // Inside the class's own methods/destructor its private fields are accessible — on `self`
-        // and on any same-type value (the type-scoped privacy rule, object-model slice 2d).
+        // and on any same-type value (the type-scoped privacy rule).
         let saved_type = self.coloring.current_type.replace(c.name.to_string());
         for block in &c.impls {
             self.check_impl(block);
@@ -390,7 +390,7 @@ impl Checker {
     pub(crate) fn check_type_param_bounds(&mut self, params: &[TypeParam]) {
         for p in params {
             for bound in &p.bounds {
-                // A bound may name a built-in trait or a user-defined one (L1, UT3).
+                // A bound may name a built-in trait or a user-defined one.
                 if let Some(decl) = self.symbols.user_traits.get(bound.name.as_str()) {
                     let arity = decl.type_params.len();
                     if !bound.args.is_empty() && bound.args.len() != arity {
@@ -472,7 +472,7 @@ impl Checker {
                 self.check_type_ref(ret);
             }
             TypeRef::Optional { inner, .. } => self.check_type_ref(inner),
-            // `Self::Name` — an associated-type projection (slice 1a). It names no nominal type to
+            // `Self::Name` — an associated-type projection. It names no nominal type to
             // resolve here; the checker projects it per-impl at each typing site (an unbound name
             // degrades to a gradual hole rather than an E0013), so there is nothing to reject.
             TypeRef::AssocProjection { .. } => {}
@@ -528,7 +528,7 @@ impl Checker {
                     // A module-qualified type rooted at a retained user import (`use geometry.vec`
                     // then `vec.Vec2` in an *isolated* check — REPL/session, a docs fragment): the
                     // linker resolves the dotted head in a full link, and an unlinked fragment
-                    // tolerates it exactly like other unresolved external names (F1). Root-only —
+                    // tolerates it exactly like other unresolved external names. Root-only —
                     // std namespace members keep their exact-key resolution and stay strict.
                     && !name
                         .as_str()
@@ -660,7 +660,7 @@ impl Checker {
     }
 
     /// Check-time key-capability of a **named** type in `Map<K, _>` key / `Set<T>` element
-    /// position (P-PKEY S3/S4): `Some(true)` for `string`, the integer family (S4 — `int` and
+    /// position: `Some(true)` for `string`, the integer family (S4 — `int` and
     /// every fixed-width `{i,u}N`, erased to the same word), a key-capable extern, or a
     /// key-capable `@packed` struct (all fields int/`{i,u}N`/bool or nested such structs — no
     /// floats); `Some(false)` for `float`/`f32` (the NaN footgun), `bool` in MAP position
@@ -718,7 +718,7 @@ impl Checker {
         }
         if self.symbols.records.contains_key(key_name) || self.symbols.enums.contains_key(key_name)
         {
-            // A set additionally admits any **value kind** (derive-soundness follow-up F2): a
+            // A set additionally admits any **value kind**: a
             // non-packed struct or an enum orders structurally (`set_order`), so `Set<P>`/`Set<Dir>`
             // are fine whether or not the type declares `Comparable`. That is deliberate and is the
             // line `ElemReq::Ordered` draws: a set's buffer is how it gets membership and

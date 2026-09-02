@@ -785,7 +785,7 @@ pub struct TypeInfo {
     pub field_optional: Vec<bool>,
     /// Whether each field is **publicly settable**, parallel to `fields` (empty for enums). A value
     /// `struct`'s fields are always public; a reference `class`'s default private with a per-field
-    /// `pub` opt-in (object-model slice 2d) — so this is the checker's `symbols.private_fields`
+    /// `pub` opt-in — so this is the checker's `symbols.private_fields`
     /// inverted, and a native fielded type's registry `ExtField::is_public`.
     ///
     /// Reflection carries it because the reflective construction door needs it. The checker enforces
@@ -794,7 +794,7 @@ pub struct TypeInfo {
     /// reflection minting a value the declaration forbids. Read by [`plan_construct`] /
     /// [`plan_construct_named`], which refuse a private field by name.
     pub field_public: Vec<bool>,
-    /// Each field's **literal default** (object-model slice 6i), parallel to `fields`: `Some` when
+    /// Each field's **literal default**, parallel to `fields`: `Some` when
     /// the field declared `name: T = <literal>`, `None` for a mandatory field or a non-literal
     /// default. Used to fill an omitted optional field when materializing an attribute instance, so
     /// `attributes_of` reports the declared default rather than a placeholder.
@@ -834,7 +834,7 @@ pub struct VariantInfo {
 /// agree without any cross-backend coordination — the property the differential oracle depends on.
 ///
 /// `native_roles` is the plain-data projection of any **native** `@role`-bearing `@attribute` structs
-/// (native type-declaration unification, Slice D3): `(attribute FQN, [(enum, variant)])` pairs a caller
+/// (native type-declaration unification): `(attribute FQN, [(enum, variant)])` pairs a caller
 /// assembles from the registry via [`crate`]-external `Registry::native_roles`. This crate cannot see
 /// the extension registry, so a native role reaches the join as this table. Merged into the same
 /// `role_of` the `.noe` `@role` tags populate, keyed by the **qualified** attribute identity a linked
@@ -952,7 +952,7 @@ pub fn build(
                 );
                 push_params(&mut manifest, &mut params, decl.name.to_string(), decl);
             }
-            // A trait carries `#[...]` data attributes keyed by its name (UT6), like a type —
+            // A trait carries `#[...]` data attributes keyed by its name, like a type —
             // surfaced via `attributes_of` (and inheriting a role transitively when annotated with a
             // role-bearing attribute). It is not a data type, so it adds no `TypeInfo`; its abstract
             // method signatures are not scanned (route/metadata attributes live on the concrete
@@ -990,7 +990,7 @@ pub fn build(
                     push_attrs(&mut manifest, &target, variant.name_span, &variant.attrs);
                 }
                 // An enum method's attributes are keyed by its qualified `Enum.method` name, the same
-                // convention class/struct methods use (object-model slice 3).
+                // convention class/struct methods use.
                 for method in &decl.methods {
                     let target = method_target(decl.name.as_str(), method, &from_keys);
                     push_attrs(&mut manifest, &target, method.name_span, &method.attrs);
@@ -1062,7 +1062,7 @@ pub fn build(
             _ => {}
         }
     }
-    // Native `@role`-bearing attributes (Slice D3): merge the registry-assembled tags into
+    // Native `@role`-bearing attributes: merge the registry-assembled tags into
     // `role_tags` keyed by the attribute's qualified identity — the identity a linked native
     // attribute application carries in the manifest — so the join below treats a native role-bearing
     // attribute exactly like a `.noe` one. Empty for the pure `.noe` path (byte-identical result).
@@ -1442,7 +1442,7 @@ fn field_public(kind: TypeKind, fields: &[FieldDecl]) -> Vec<bool> {
     }
 }
 
-/// Compute each field's literal default (object-model slice 6i), parallel to the field list: `Some`
+/// Compute each field's literal default, parallel to the field list: `Some`
 /// for a `name: T = <literal>` field whose default folds to a constant, `None` otherwise. Used to
 /// populate [`TypeInfo::field_defaults`].
 fn field_defaults(fields: &[FieldDecl]) -> Vec<Option<AttrValue>> {
@@ -2143,20 +2143,20 @@ pub fn plan_invoke_named(
 /// `Type.*` constructors users match on.
 ///
 /// At runtime fidelity (B) generics are erased, so a container's element types are [`TypeRepr::Dyn`]
-/// (`type_of([1])` is `List(Dyn)`); the compile-time full-fidelity path (P2.3) builds a precise
+/// (`type_of([1])` is `List(Dyn)`); the compile-time full-fidelity path builds a precise
 /// `TypeRepr` from the checker's inferred type and reuses the same construction.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum TypeRepr {
     Int,
     Float,
-    /// The 32-bit float scalar `f32` (P-PACK Phase 3; variant name `F32`).
+    /// The 32-bit float scalar `f32` (variant name `F32`).
     F32,
-    /// The explicit 64-bit float `f64` (packed-widths arc; variant name `F64`). A runtime *scalar*
+    /// The explicit 64-bit float `f64` (variant name `F64`). A runtime *scalar*
     /// `f64` is bit-identical to `float` and reflects as `Float`; this variant appears where the
     /// width is physically reified — a packed list element or a declared-type reflection — so
     /// `List<f64>` is distinguishable from `List<float>` while their equal elements stay `==`.
     F64,
-    /// A fixed-width integer `i8..i64`/`u8..u64` (packed-widths arc; variant name `IntN`). Like
+    /// A fixed-width integer `i8..i64`/`u8..u64` (variant name `IntN`). Like
     /// [`TypeRepr::F64`], a runtime *scalar* is erased to `Int` (Tier W) and reflects as `Int`; this
     /// variant carries the width where it is reified — a packed list element or a declared type — so
     /// `List<i32>` is distinguishable from `List<int>` while equal elements stay `==`.
@@ -2169,7 +2169,7 @@ pub enum TypeRepr {
     Bool,
     /// The `string` scalar (variant name `String`, mirroring the lattice).
     Str,
-    /// The `bytes` scalar — a raw byte buffer (P-PACK 4.4; variant name `Bytes`).
+    /// The `bytes` scalar — a raw byte buffer (variant name `Bytes`).
     Bytes,
     Unit,
     Dyn,
@@ -2230,7 +2230,7 @@ pub fn missing_type_arg_message(type_name: &str, param: &str) -> String {
 /// The runtime abort message for a call that reaches a **forwarding generic** without supplying
 /// its type arguments — shared by both backends so the two cannot word it differently.
 ///
-/// A forwarding generic (poly-values F2b) declares leading type-argument slots, and a checked call
+/// A forwarding generic declares leading type-argument slots, and a checked call
 /// by name always fills them from the call node's own type-argument channel. The entry points that
 /// cannot are the ones with no static callee type for the checker to resolve against: a `dyn`
 /// receiver, a method/bound handle, `invoke`, or a first-class value of the function. Those bind
@@ -2331,7 +2331,7 @@ impl TypeRepr {
             .unwrap_or(noeta_ext_abi::NO_TYPE_ARG)
     }
 
-    /// This type's **type arguments** (runtime type-argument reflection, R3), in order: a container's
+    /// This type's **type arguments** (runtime type-argument reflection), in order: a container's
     /// element/key/value types, a generic nominal type's arguments. Empty for a scalar or a
     /// non-generic nominal. Used to compare a narrow target's arguments against a value's reflected tag.
     pub fn type_args(&self) -> Vec<&TypeRepr> {
@@ -2460,7 +2460,7 @@ pub enum AdtFields {
     ParamsAndRet,
     /// `(name: string)` — a trait object's trait name.
     Name,
-    /// `(bits: int, signed: bool)` — a fixed-width integer's width descriptor (packed-widths arc).
+    /// `(bits: int, signed: bool)` — a fixed-width integer's width descriptor.
     IntWidth,
 }
 
@@ -2721,7 +2721,7 @@ impl TypeRepr {
 }
 
 /// Project a surface [`TypeRef`] onto a reflection [`TypeRepr`], **without kind information** (runtime
-/// type-argument reflection, R3): a declared `struct`/`class`/`enum` maps to [`TypeRepr::Named`]
+/// type-argument reflection): a declared `struct`/`class`/`enum` maps to [`TypeRepr::Named`]
 /// (the R3 matcher keys on the name, not the kind, so `Named("Box")` matches a value tagged
 /// `Struct("Box")`). Built-in scalars/collections map to their lattice variant; a `?T` is `Option<T>`.
 /// Used to turn a narrow target (`x is List<int>`) into the shape compared against a value's tag.
@@ -2735,7 +2735,7 @@ impl TypeRepr {
 /// nested `TypeRef` reprs for the structural one.
 ///
 /// A **declared** `f64`/`iN`/`uN` keeps its width here (`TypeRepr::F64`/`TypeRepr::IntN`), the
-/// physically-meaningful reflection for a type annotation and a narrow target (packed-widths arc).
+/// physically-meaningful reflection for a type annotation and a narrow target.
 /// A runtime *scalar value* of one of these still erases to `Float`/`Int` (no boxing site to stamp
 /// a width tag on), so `type_of` of a scalar reports the lattice variant — the deliberate split
 /// between declared-type reflection (width-carrying) and value reflection (width-erased). Both
@@ -2805,7 +2805,7 @@ pub fn typeref_to_repr(ty: &TypeRef) -> TypeRepr {
 }
 
 /// The reflection of a surface type already in **element position** — a narrow target's type
-/// argument, e.g. the `i32` of `x is List<i32>` (packed-widths arc). A fixed width keeps its width so
+/// argument, e.g. the `i32` of `x is List<i32>`. A fixed width keeps its width so
 /// the target matches a value's width-carrying tag; nominals stay kind-agnostic.
 pub fn typeref_to_repr_arg(ty: &TypeRef) -> TypeRepr {
     typeref_repr_with(
@@ -2864,7 +2864,7 @@ fn typeref_repr_with(ty: &TypeRef, nominal: &NominalResolver<'_>, top: bool) -> 
         TypeRef::DynTrait { trait_name, .. } => TypeRepr::DynTrait(trait_name.to_string()),
         TypeRef::Tuple { .. } => TypeRepr::Dyn,
         // A `Self::Name` projection is not statically a concrete type here (resolution is per-impl at
-        // the checker); reflect it as the dynamic top, like a tuple (slice 1a).
+        // the checker); reflect it as the dynamic top, like a tuple.
         TypeRef::AssocProjection { .. } => TypeRepr::Dyn,
         TypeRef::Fn { params, ret, .. } => {
             TypeRepr::Fn(params.iter().map(recur).collect(), Box::new(recur(ret)))
@@ -2964,7 +2964,7 @@ pub const ROLE_BINDING: &str = "RoleBinding";
 /// `attributes_of` returns, via [`ReflectionInfo::param_attributes_for`].
 pub const PARAM_INFO: &str = "ParamInfo";
 
-/// The built-in **test-metadata attributes** (object-model slice 6h) — prelude `@attribute` structs
+/// The built-in **test-metadata attributes** — prelude `@attribute` structs
 /// the test runner reads off a `@test`/`@bench` fn: `#[Skip]` (zero fields, mark as skipped),
 /// `#[Name("…")]` (display name), `#[Group("…")]` (category for `--group` filtering), `#[Data([…])]`
 /// (parameterized rows), and `#[Timeout(seconds)]` (raise or disable this test's per-test deadline).
@@ -3008,12 +3008,12 @@ pub const TIER_ATTR_DOC: &str = "std.doc.Doc";
 /// outside this process (a cache, a live handle, a memo), so there is nothing to send.
 pub const JSON_ATTR_TRANSIENT: &str = "std.json.Transient";
 
-/// The prelude struct a declared tier's runner receives its roots as (tier-providers T2):
+/// The prelude struct a declared tier's runner receives its roots as:
 /// `TierRoot { name: string, run: () -> void }` — one per activated fn. The checker registers it
 /// as a prelude type; dispatch constructs instances in the synthesized runner-call fragment.
 pub const TIER_ROOT: &str = "TierRoot";
 
-/// The prelude struct a declared **text** tier's runner receives its roots as (text-tiers arc):
+/// The prelude struct a declared **text** tier's runner receives its roots as:
 /// `TierText { target: string, text: string }` — one per activated verbatim body. `target` is the
 /// adjacency-resolved declaration name (`""` for a module/section block); `text` is the body with
 /// the `\{`/`\}`/`\\` escapes undone. The checker registers it as a prelude type; dispatch
@@ -3575,7 +3575,7 @@ fn push_attrs(
     }
 }
 
-/// The flat memory layout of a `@packed` struct value (P-PACK Phase 2): its fields in declared (slot)
+/// The flat memory layout of a `@packed` struct value: its fields in declared (slot)
 /// order, each a primitive — one machine word, pre-Phase-3 — or a nested packed struct laid out
 /// recursively. It fully describes how to **pack** a boxed value into a raw word buffer and
 /// **unpack** one back (the field names + kinds let a backend rebuild the nested objects without
@@ -3585,7 +3585,7 @@ fn push_attrs(
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct PackedLayout {
     /// The packed struct's type name — the nominal type of a materialized element. **Empty** marks a
-    /// *bare-scalar* layout (packed-widths bare-scalar arc): a `List<i32>`/`List<u8>`/`List<f32>` whose
+    /// *bare-scalar* layout: a `List<i32>`/`List<u8>`/`List<f32>` whose
     /// element is a single sub-8-byte numeric with no struct wrapper. A scalar layout has exactly one
     /// (unnamed) field and materializes to a bare `Value` (`int`/`f32`), not a `Value::Object` — user
     /// types always have a non-empty name, so the emptiness is an unambiguous marker. Use
@@ -3594,7 +3594,7 @@ pub struct PackedLayout {
     /// The fields in declared (slot) order. A scalar layout ([`Self::is_scalar`]) holds exactly one.
     pub fields: Vec<PackedField>,
     /// Whether lists of this element are stored **column-major** — the `@packed(Layout.Column)`
-    /// attribute (P-SIMD C2). A performance-only property (see `noeta_object::PackedSchema::column`);
+    /// attribute. A performance-only property (see `noeta_object::PackedSchema::column`);
     /// carried here so the compiler can thread it into the runtime schema both backends read.
     pub column: bool,
 }
@@ -3611,13 +3611,13 @@ pub struct PackedField {
 pub enum PackedKind {
     Int,
     Float,
-    /// A 32-bit float field (P-PACK Phase 3). One word like the other primitives in slice 3.2a; slice
+    /// A 32-bit float field. One word like the other primitives in slice 3.2a; slice
     /// 3.2b narrows it to a 4-byte slot.
     F32,
-    /// An explicit 64-bit float field `f64` (packed-widths arc) — 8 bytes, storage-identical to
+    /// An explicit 64-bit float field `f64` — 8 bytes, storage-identical to
     /// `Float` but a distinct kind so packed reflection reports `f64`.
     F64,
-    /// A fixed-width integer field (packed-widths arc): `bits/8` bytes, `signed` deciding read-back
+    /// A fixed-width integer field: `bits/8` bytes, `signed` deciding read-back
     /// extension. The compiled/runtime counterparts (`noeta_bytecode::PackedFieldDef::IntN`,
     /// `noeta_object::PackedKind::IntN`) carry the same pair.
     IntN {
@@ -3632,7 +3632,7 @@ pub enum PackedKind {
 }
 
 impl PackedLayout {
-    /// A **bare-scalar** element layout (packed-widths bare-scalar arc): a single unnamed field of
+    /// A **bare-scalar** element layout: a single unnamed field of
     /// `kind`, no struct wrapper, so a `List<i32>`/`List<u8>`/`List<f32>` stores its elements as a flat
     /// `byte_width`-per-element buffer that materializes back to a bare `int`/`f32` (not a
     /// `Value::Object`). Row/column is moot for one field, so it is always row-major.

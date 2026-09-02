@@ -42,7 +42,7 @@ pub(crate) const PRELUDE_TYPES: &[&str] = &[
     "FieldSpec",
     // The variant-schema element `variants_of()` returns (`{ name, payload: List<FieldSpec>, backing }`).
     "VariantSpec",
-    // The roots-list element a declared tier's runner receives (tier-providers T2).
+    // The roots-list element a declared tier's runner receives.
     "TierRoot",
     // The lazy-iterator type (Track I): a writable annotation now that `iter()`/adapters and
     // generator returns produce `Iterator<T>` values.
@@ -421,7 +421,7 @@ pub(crate) fn mentions_param(ty: &Type, params: &ParamSet) -> bool {
 
 /// The type parameters of `params` that `ty` mentions (bare or nested), in first-appearance
 /// order, deduplicated. The forwarding call-site resolution uses it to name the exact parameter a
-/// slot template needs but the call left open (D2a).
+/// slot template needs but the call left open.
 pub(crate) fn params_mentioned(ty: &Type, params: &ParamSet) -> Vec<ParamRef> {
     walk_params_mentioned(ty, Some(params))
 }
@@ -607,12 +607,12 @@ pub(crate) fn int_literal_value(expr: &Expr) -> Option<i128> {
 /// explicit `@derive`/`impl`, handled in [`Checker::satisfies`].)
 ///
 /// Fixed-width integers (Tier W) satisfy `Equatable`/`Display` here — equality and (small-value)
-/// display are correct on the erased `int` word. Fixed-width arithmetic (`+ - *`, W2) and now
-/// ordering/`/`/`%` (W3) are enabled: `+ - *` are sign-agnostic (masking the result suffices), while
+/// display are correct on the erased `int` word. Fixed-width arithmetic (`+ - *`) and now
+/// ordering/`/`/`%` are enabled: `+ - *` are sign-agnostic (masking the result suffices), while
 /// `Div`/`Comparable` need the operand width+signedness, which lowering carries on the op
 /// (`Rvalue::WideInt`) — so the erased op is never subtly wrong.
 /// If `lt` and `rt` are the **same** fixed-width integer type, its `(signed, bits)`. Fixed-width
-/// arithmetic (W2) and ordering (W3) both require identical operand types — no implicit widening —
+/// arithmetic and ordering both require identical operand types — no implicit widening —
 /// so this gates them and yields the width lowering records for masking / the sign-aware op.
 pub(crate) fn same_width_intn(lt: &Type, rt: &Type) -> Option<(bool, u8)> {
     match (lt, rt) {
@@ -1007,8 +1007,8 @@ pub(crate) fn field_type(
 /// an explicit `self.field` resolves through [`Checker::synth_member`] to the field's declared type
 /// (a concrete field keeps it precisely, e.g. `List<u64>`; a generic field erases to `dyn` via the
 /// same parameter substitution as bare field access). Structs/classes bind this exactly as enums do.
-/// Compare a `@packed` struct's resolved layout against a bundle's declared constraint
-/// (kernel-methods K1) — the compile-time twin of the runtime `PackedView` check a raw-buffer
+/// Compare a `@packed` struct's resolved layout against a bundle's declared constraint — the
+/// compile-time twin of the runtime `PackedView` check a raw-buffer
 /// kernel performs. `None` = satisfied; `Some(message)` names exactly what disagrees.
 pub(crate) fn constraint_mismatch(
     layout: &noeta_ast::reflect::PackedLayout,

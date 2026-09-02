@@ -140,7 +140,7 @@ impl DirectiveRegistry {
 
     /// Resolve `@name` against only the **globally-scoped** halves — built-in directives and tiers
     /// (extension or program-declared). Extension *directives* are deliberately excluded: they resolve
-    /// **per-package** (per-package naming arc), which needs the using package's binding table and so
+    /// **per-package**, which needs the using package's binding table and so
     /// is done in the checker, not here. `None` means "not a built-in or tier" — the caller then tries
     /// the per-package directive resolution.
     pub fn lookup_builtin_or_tier(&self, name: &str) -> Option<DirectiveKind<'_>> {
@@ -246,7 +246,7 @@ impl Checker {
     /// syntax error no extension could make legal. Deciding here is what opens the name-space,
     /// and it also folds the old parser-level errors into the one placement check: `@tier` on a
     /// type is now a misplacement like any other, rather than a separate `UnexpectedToken`.
-    /// Resolve an extension `@name` **for the package that wrote it** (per-package naming arc): the
+    /// Resolve an extension `@name` **for the package that wrote it**: the
     /// span's package (via [`Self::package_at`]) → its `[directives]` binding for `name` → the
     /// provider's [`ExtDirective`](noeta_ext_abi::registry::ExtDirective), matched by the provider's
     /// namespace root + exported name. A *manifested* package that binds no such name yields `None`
@@ -276,7 +276,7 @@ impl Checker {
         self.reg().find_ext_directive(name)
     }
 
-    /// Resolve a `@name` **tier** block for the package that wrote it (per-package naming arc), the
+    /// Resolve a `@name` **tier** block for the package that wrote it, the
     /// tier counterpart of [`Self::resolve_ext_directive_at`]: the span's package → its `[directives]`
     /// binding (rename/provider) → the concrete tier, else the ambient std/program-declared tier of
     /// that bare name. The same [`crate::tiers::TierRegistry::resolve_at`] activation drives, so the

@@ -81,7 +81,7 @@ pub enum Stmt {
         span: Span,
     },
     /// A **tuple-destructuring** binding: `(a, b, …) = expr;` — evaluates `expr` once and binds each
-    /// name to the corresponding tuple position (object-model slice 4b). ≥2 targets (a single
+    /// name to the corresponding tuple position. ≥2 targets (a single
     /// `(x) = …` is just `x = …`). Lowered to a temp + per-position `.N` projections.
     Destructure {
         mut_decl: bool,
@@ -153,7 +153,7 @@ pub enum Stmt {
     Continue { span: Span },
     /// A bare expression used for its effect: `expr;`.
     Expr { expr: Expr, span: Span },
-    /// A **dev-tier block** `@<tier> { items }` (object-model slice 6): co-located
+    /// A **dev-tier block** `@<tier> { items }`: co-located
     /// developer-tooling content (a `@test { … }` block of test `fn`s, etc.) the build includes
     /// only when the tier is **active** and strips otherwise. `tier` names the directive (`test`);
     /// `items` are its contained declarations/statements. The tier-strip front-end pass resolves
@@ -170,7 +170,7 @@ pub enum Stmt {
         /// runner reads `iterations`); unknown args are inert.
         args: Vec<AttrArg>,
         items: Vec<Stmt>,
-        /// The **verbatim body** of a `@doc { … }` *text* tier (object-model slice 6f): the raw
+        /// The **verbatim body** of a `@doc { … }` *text* tier: the raw
         /// source between the braces, captured un-parsed, with the `\{ \} \\` escapes undone
         /// (text-tiers S1). `Some` only for a text-tier block (whose `items` are then empty);
         /// `None` for a code tier (`@test`/`@bench`/`@debug`), whose body is the parsed `items`.
@@ -280,7 +280,7 @@ pub struct Decorators {
     /// the compiler-built manifest, and gated by the checker (each must name a struct marked
     /// `@attribute`, and its arguments must construct it).
     pub attrs: Vec<Attribute>,
-    /// The `@attribute` opt-in directive (P2.5): `None` ⇒ an ordinary declaration; `Some(kinds)` ⇒
+    /// The `@attribute` opt-in directive: `None` ⇒ an ordinary declaration; `Some(kinds)` ⇒
     /// usable as a `#[Name(…)]` attribute. The `kinds` are the placement restriction from
     /// `@attribute(Method, Function, …)` — empty (bare `@attribute`) ⇒ attaches anywhere. Attributes
     /// are **structs only**; the same directive on a class/enum/trait is a checker error.
@@ -297,11 +297,11 @@ pub struct Decorators {
     /// implicitly semantic. `Some` on a struct/class/trait is always a misplacement (`E0054`),
     /// carried so the checker can point at it.
     pub semantic: Option<Span>,
-    /// The `@packed` layout directive (P-PACK): `Some` marks a value `struct` for an unboxed,
+    /// The `@packed` layout directive: `Some` marks a value `struct` for an unboxed,
     /// contiguous flat layout. A misplacement on a class/enum/trait is `E0054`; on a struct, every
     /// field must be a primitive or another packed struct (`E0038`, a distinct fault).
     pub packed: Option<PackedDirective>,
-    /// The `@validated` directive (validation arc): `Some(span)` marks this type so that literal
+    /// The `@validated` directive: `Some(span)` marks this type so that literal
     /// construction (`T { ... }`, incl. a record-update spread) from OUTSIDE its own `impl`/methods
     /// is a compile error (`E0060`), forcing construction through a validating constructor.
     /// Construction inside the type's own methods stays legal, and the recipe doors are exempt (they
@@ -1149,7 +1149,7 @@ pub fn key_capable_packed(
 
 /// A generic type parameter on a declaration: a name and its trait **bounds** (`<T: Comparable>`,
 /// `<T: Comparable + Display>`, `<T: Keyed<int>>`). Bounds name built-in or user traits — the
-/// checker validates them and (S4.2) enforces them where the generic is instantiated; an empty
+/// checker validates them and enforces them where the generic is instantiated; an empty
 /// `bounds` is an unbounded `<T>`. Erased at runtime exactly like the parameter it constrains.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypeParam {
@@ -1183,14 +1183,14 @@ pub struct ImplBlock {
     /// per-implementor; empty for the common non-generic trait.
     pub trait_args: Vec<TypeRef>,
     pub methods: Vec<FnDecl>,
-    /// The `type Name = Concrete;` associated-type bindings this impl provides (slice 1a). Each names
+    /// The `type Name = Concrete;` associated-type bindings this impl provides. Each names
     /// an associated type declared by the trait and pins it to a concrete type, resolving `Self::Name`
     /// in the trait's method signatures for this implementor.
     pub assoc_bindings: Vec<(String, TypeRef)>,
     pub span: Span,
 }
 
-/// A user-defined trait declaration (L1): `trait Name<T> { fn sig(...): R  fn other(...) { default } }`.
+/// A user-defined trait declaration: `trait Name<T> { fn sig(...): R  fn other(...) { default } }`.
 /// The named contract a type implements via `impl Name for Type { ... }` (or an in-body `impl Name`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct TraitDecl {
@@ -1202,7 +1202,7 @@ pub struct TraitDecl {
     pub type_params: Vec<TypeParam>,
     /// The trait's method contract, in source order.
     pub methods: Vec<TraitMethod>,
-    /// The trait's **associated types** (ExtBundle→ExtTrait convergence, slice 1a): each `type Name;`
+    /// The trait's **associated types** (ExtBundle→ExtTrait convergence): each `type Name;`
     /// (a required associated type an implementor must bind) or `type Name = Default;` (a bindable
     /// default), in source order. Referenced from a method signature as `Self::Name`
     /// ([`TypeRef::AssocProjection`]); resolved per-impl by the checker, never a lattice type.
@@ -1225,7 +1225,7 @@ pub struct TraitMethod {
     pub has_default: bool,
 }
 
-/// One associated type declared in a trait body (slice 1a): `type Name;` (required — every impl
+/// One associated type declared in a trait body: `type Name;` (required — every impl
 /// must bind it) or `type Name = Default;` (a bindable default an impl may omit). A method
 /// signature refers to it as `Self::Name` ([`TypeRef::AssocProjection`]); the checker resolves that
 /// projection per-impl from the impl's binding, so an associated type never enters the type lattice.
@@ -1256,7 +1256,7 @@ pub struct ImplDecl {
     /// a non-empty body is parsed but only validated for arity in pass 1 (runtime dispatch of
     /// standalone-impl methods is a later slice).
     pub methods: Vec<FnDecl>,
-    /// The `type Name = Concrete;` associated-type bindings (slice 1a); see [`ImplBlock::assoc_bindings`].
+    /// The `type Name = Concrete;` associated-type bindings; see [`ImplBlock::assoc_bindings`].
     pub assoc_bindings: Vec<(String, TypeRef)>,
     pub span: Span,
 }
@@ -1314,7 +1314,7 @@ pub struct FieldDecl {
     /// for a mandatory field (the common case). Allowed on `struct` and `class` fields, never on
     /// enum-variant fields.
     pub default: Option<Expr>,
-    /// Leading `#[...]` data attributes on the field/property (attribute-system pass 2, P2.4b).
+    /// Leading `#[...]` data attributes on the field/property (attribute-system pass 2).
     /// Captured in the reflection manifest like a type's or method's attributes; `@derive` is not
     /// permitted here. Empty for the common unannotated field.
     pub attrs: Vec<Attribute>,
@@ -1363,7 +1363,7 @@ pub struct VariantDecl {
     pub fields: Vec<Param>,
     /// The backing value (`= "pending"`) for a backed enum's variant.
     pub backed_value: Option<Expr>,
-    /// Leading `#[...]` data attributes on the variant (attribute-system pass 2, P2.4c). Captured in
+    /// Leading `#[...]` data attributes on the variant (attribute-system pass 2). Captured in
     /// the reflection manifest like a field's or method's attributes; `@derive` is not permitted
     /// here. Empty for the common unannotated variant.
     pub attrs: Vec<Attribute>,
@@ -1418,9 +1418,9 @@ pub struct FnDecl {
     /// the enclosing class's, not its own; only free functions carry their own here.
     pub type_params: Vec<TypeParam>,
     pub params: Vec<Param>,
-    /// The declared return type, if any. Checked by the M1 type checker (M1.7).
+    /// The declared return type, if any. Checked by the M1 type checker.
     pub ret: Option<TypeRef>,
-    /// Leading `#[...]` data attributes on the function or method (attribute-system pass 2, P2.4).
+    /// Leading `#[...]` data attributes on the function or method (attribute-system pass 2).
     /// Captured in the reflection manifest like a type's attributes; `@derive` is *not* permitted
     /// here (it is codegen for types only). Empty for the common unannotated function.
     pub attrs: Vec<Attribute>,
@@ -1456,7 +1456,7 @@ pub struct FnDecl {
     /// a promise.
     pub is_static: bool,
     /// The `@tier(name, config: Type)` directive when this fn **declares a dev-tier** and is its
-    /// runner (tier-providers T2). A package exporting such a fn makes `@<name> { … }` blocks
+    /// runner. A package exporting such a fn makes `@<name> { … }` blocks
     /// available to consumers; the runner is invoked with the activated roots. `None` for an
     /// ordinary fn (the overwhelmingly common case).
     pub tier: Option<TierDecl>,
@@ -1471,7 +1471,7 @@ pub struct FnDecl {
 }
 
 /// A `@tier(name[, config: Type])` directive on a runner `fn` — the declaration that brings a
-/// dev-tier into existence (tier-providers T2). `name` is the tier consumers write as
+/// dev-tier into existence. `name` is the tier consumers write as
 /// `@<name> { … }`; `config`, when present, names an `@attribute` struct whose fields are the
 /// tier's knobs (the directive args a `@<name>(…)` block stamps onto its fns, exactly the
 /// `Bench { iterations }` model). The decorated fn is the tier's **runner**: it receives the
@@ -1567,7 +1567,7 @@ pub enum TypeRef {
         args: Vec<TypeRef>,
         span: Span,
     },
-    /// A **trait object** `dyn Trait` (L1 user traits, UT4): a value of any type that `impl`s
+    /// A **trait object** `dyn Trait` (L1 user traits): a value of any type that `impl`s
     /// `trait_name`, dispatched dynamically on its runtime type. The typed counterpart of the bare
     /// `dyn` top type — method calls resolve against the trait's declared signatures.
     DynTrait { trait_name: Name, span: Span },
@@ -1590,7 +1590,7 @@ pub enum TypeRef {
         ret: Box<TypeRef>,
         span: Span,
     },
-    /// A projection through an associated type on the receiver: `Self::Name` (slice 1a). Legal only
+    /// A projection through an associated type on the receiver: `Self::Name`. Legal only
     /// in a trait/impl method signature; the checker resolves it per-impl to the impl's binding for
     /// `Name` (a concrete receiver bakes it at collect; a `dyn` receiver has no static impl, so it
     /// degrades to `Type::Unknown`). It never becomes a persistent lattice type.
@@ -2106,7 +2106,7 @@ pub enum Expr {
     Int { value: i64, span: Span },
     /// A floating-point literal.
     Float { value: f64, span: Span },
-    /// A 32-bit float literal (`1.0f32`, P-PACK Phase 3) — a distinct primitive from `Float`.
+    /// A 32-bit float literal (`1.0f32`) — a distinct primitive from `Float`.
     F32 { value: f32, span: Span },
     /// A 64-bit float literal with the explicit `f64` suffix (`1.0f64`, P-NUM-SYM). Bit-identical to
     /// `Float` at runtime — the value is a plain 64-bit float; the suffix only pins its static type
@@ -2167,11 +2167,11 @@ pub enum Expr {
     /// A list literal: `[a, b, c]`.
     List { items: Vec<Expr>, span: Span },
     /// A tuple literal: `(a, b, c)` — a fixed-arity, heterogeneous, value-semantic positional
-    /// aggregate (object-model slice 4). Always ≥2 items (`(x)` is a parenthesized expression, `()`
+    /// aggregate. Always ≥2 items (`(x)` is a parenthesized expression, `()`
     /// is `unit`).
     Tuple { items: Vec<Expr>, span: Span },
     /// Tuple projection: `receiver.0` / `receiver.1` — positional access by a constant index. A
-    /// numeric `.N` is distinct from a named `.field` member access (object-model slice 4).
+    /// numeric `.N` is distinct from a named `.field` member access.
     TupleIndex {
         receiver: Box<Expr>,
         index: u32,
@@ -2306,7 +2306,7 @@ pub enum Expr {
         span: Span,
     },
     /// An **explicitly instantiated call of a user generic function** — the general turbofish
-    /// `f::<T, ...>(args)` (poly-values F2). `name` is the callee (a bare identifier; the method
+    /// `f::<T, ...>(args)`. `name` is the callee (a bare identifier; the method
     /// form is [`Expr::TypedMethodCall`]); `type_args` are the explicit instantiations, bound to
     /// the function's declared type parameters in order (arity-checked, E0058). Explicit
     /// arguments WIN over
@@ -2363,7 +2363,7 @@ pub enum Expr {
         ty: TypeRef,
         span: Span,
     },
-    /// In-place field assignment: `receiver.field = value` (Phase 5.2). The parser produces this
+    /// In-place field assignment: `receiver.field = value`. The parser produces this
     /// only as the value of the `x.field = v` reassignment desugar, where `receiver` is the bare
     /// binding `x`; it evaluates to the (value-semantically) updated object, which the surrounding
     /// `Stmt::Binding` stores back into `x`. The checker requires `field` to be a `mut` field of a
@@ -2376,7 +2376,7 @@ pub enum Expr {
         value: Box<Expr>,
         span: Span,
     },
-    /// An **expression-tier block** `@sql { select ${id} }` (expr-tiers arc): verbatim
+    /// An **expression-tier block** `@sql { select ${id} }`: verbatim
     /// foreign-language text with `${…}` holes, evaluating to a typed value. `statics` are the
     /// literal segments (always `holes.len() + 1`, empty where holes touch, `\{ \} \\ \$` escapes
     /// undone); `holes` are the hole expressions, parsed in the enclosing scope with absolute
@@ -2444,7 +2444,7 @@ pub struct MatchArm {
     /// ever true.
     pub guard: Option<Expr>,
     /// The arm's body: a value expression (`pattern => expr`, the common form) or a statement
-    /// block (`pattern => { stmts }`, aether F1) whose value is `unit` — side-effectful arms
+    /// block (`pattern => { stmts }`) whose value is `unit` — side-effectful arms
     /// without an artificial expression. `{ … }` parses as an EXPRESSION first (map/set literals
     /// keep their meaning); only a brace body that is not an expression is a block. Reuses
     /// [`ClosureBody`] purely as a shape — a `return` inside a block arm returns from the
@@ -2483,7 +2483,7 @@ pub enum ClosureBody {
     Block(Vec<Stmt>),
 }
 
-/// A `match` pattern. Exhaustiveness is unchecked in M0 (it is a checker concern, M1).
+/// A `match` pattern. Exhaustiveness is unchecked in M0 (it is a checker concern).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Pattern {
     /// `_` — matches anything, binds nothing.
@@ -2522,7 +2522,7 @@ pub enum Pattern {
         ty: TypeRef,
         span: Span,
     },
-    /// `(p, q, …)` — a tuple pattern (object-model slice 4b): matches a tuple of the same arity,
+    /// `(p, q, …)` — a tuple pattern: matches a tuple of the same arity,
     /// destructuring each position against the corresponding sub-pattern (which binds recursively).
     /// ≥2 elements (a `(p)` is just `p`).
     Tuple {
@@ -2917,7 +2917,7 @@ pub enum UnaryOp {
     Neg,
     /// Logical negation, `!x`.
     Not,
-    /// List spread, `...xs`. Produced only by the list-literal desugar (L2) to wrap a spread
+    /// List spread, `...xs`. Produced only by the list-literal desugar to wrap a spread
     /// operand so the checker can require it to be a list; at runtime it is the identity (the
     /// operand's value is passed straight through to the surrounding `~` concatenation).
     Spread,

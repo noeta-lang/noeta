@@ -1609,7 +1609,7 @@ fn desugar_match_await(
 }
 
 /// The statements that assign a match arm body's value to the result cell `mr`. An expression arm
-/// yields its value (`$mr = expr`); a statement-block arm (aether F1) runs its statements in the same
+/// yields its value (`$mr = expr`); a statement-block arm runs its statements in the same
 /// frame and yields unit (`stmts…; $mr = unit`).
 fn arm_body_to_result(mr: &str, body: ClosureBody, span: Span) -> Vec<AstStmt> {
     match body {

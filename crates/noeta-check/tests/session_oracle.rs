@@ -1,4 +1,4 @@
-//! The session-checker oracle (session-checker C4): per-entry [`SessionChecker::check_entry`]
+//! The session-checker oracle: per-entry [`SessionChecker::check_entry`]
 //! diagnostics must agree with a **whole-program re-check of the accumulated clean source**,
 //! restricted to the new entry's own `SourceId`.
 //!
@@ -19,7 +19,7 @@ use noeta_span::{Source, SourceId, Span};
 /// Run `entries` through a session AND the accumulated-source oracle, asserting the per-entry
 /// `(code, span)` diagnostics agree at every step.
 fn assert_session_matches_oracle(entries: &[&str]) {
-    // This oracle is its own assembling driver (audit-6 F2): seed the std units first.
+    // This oracle is its own assembling driver: seed the std units first.
     noeta_stdlib::registry::default_seeded();
     let mut session = SessionChecker::new();
     let mut accumulated: Vec<noeta_ast::Stmt> = Vec::new();

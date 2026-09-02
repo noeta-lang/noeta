@@ -95,7 +95,7 @@ impl Checker {
                 }
             }
             BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem => {
-                // Element-wise **array-programming** ops (array-ops arc): `+`/`-`/`*` on two lists of
+                // Element-wise **array-programming** ops: `+`/`-`/`*` on two lists of
                 // the SAME numeric element type → a list of that type (element-wise, wrapping for
                 // ints; a length mismatch is a runtime error). No broadcasting, no coercion — a
                 // differing element type is E0007 (`List<i32> + List<int>`), exactly what the runtime
@@ -128,8 +128,8 @@ impl Checker {
                     return Type::Unknown;
                 }
                 // Fixed-width integers (Tier W): `+ - * / %` on two same-width `IntN` yield that
-                // width — `+ - *` mask the result (W2, sign-agnostic), `/ %` use the width-carrying
-                // sign-aware op (W3). Mixed-width or `IntN` mixed with `int`/`float` needs an explicit
+                // width — `+ - *` mask the result (sign-agnostic), `/ %` use the width-carrying
+                // sign-aware op. Mixed-width or `IntN` mixed with `int`/`float` needs an explicit
                 // conversion (no implicit widening) → E0044. Intercept before the generic numeric
                 // path, whose widening lattice does not model `IntN`.
                 if matches!(lt, Type::IntN { .. }) || matches!(rt, Type::IntN { .. }) {
@@ -164,7 +164,7 @@ impl Checker {
             // or `impl`s it, or a type parameter bounded by it. A concrete type that does not is
             // `E0007` (the runtime's "cannot compare"); an unbounded type parameter is `E0025`.
             BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
-                // Fixed-width ordering (Tier W3) is sign-dependent (unsigned `u64` ordering differs
+                // Fixed-width ordering is sign-dependent (unsigned `u64` ordering differs
                 // from signed past bit 63), so it consults the operand width the way W2's arithmetic
                 // does — same-width `IntN` only; mixed → E0044. Intercept before the generic
                 // `Comparable` path (which the width-carrying `WideInt` op then implements).
@@ -244,7 +244,7 @@ impl Checker {
             }
             // Shifts `<< >>` are asymmetric: the left operand is the value (it sets the result type),
             // the right is a count (any integer — its width is irrelevant). On a fixed-width value
-            // (W5) `<<` masks the result into the width (sign-agnostic, like `+ - *`), and `>>` is
+            // `<<` masks the result into the width (sign-agnostic, like `+ - *`), and `>>` is
             // sign-dependent — **arithmetic** (sign-fill) on a signed width, **logical** (zero-fill)
             // on an unsigned one — so it lowers to the width-carrying `WideInt`.
             BinaryOp::Shl | BinaryOp::Shr => {

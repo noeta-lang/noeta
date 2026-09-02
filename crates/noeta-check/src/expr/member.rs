@@ -1,5 +1,5 @@
 //! **Member access typing**: field get/set with privacy (E0033/private-field reporting),
-//! bundle-method dispatch (kernel-methods K2), namespace-group resolution, and the full
+//! bundle-method dispatch, namespace-group resolution, and the full
 //! `synth_member` receiver dispatch. All `Checker` methods moved verbatim out of the crate root.
 
 use crate::expr::calls::closed_to_new_methods;
@@ -21,7 +21,7 @@ pub(crate) struct TraitCall {
 }
 
 impl Checker {
-    /// Type-check a field assignment `x.f = v` (Phase 5.2): the receiver must be a class instance,
+    /// Type-check a field assignment `x.f = v`: the receiver must be a class instance,
     /// the field must be declared `mut` (else E0033), and the value must be assignable to the
     /// field's declared type (else E0007). The result is the receiver's own type — the surrounding
     /// `Stmt::Binding` reassigns `x` to a value of the same type. A `dyn`/hole receiver defers to
@@ -48,11 +48,11 @@ impl Checker {
             .help("only a `mut` field of a class instance can be assigned with `x.f = v`");
             return recv;
         };
-        // A private field is assignable only inside its declaring type's own methods (slice 2d).
+        // A private field is assignable only inside its declaring type's own methods.
         if !self.field_visible(&name, field) {
             self.report_private_field(&name, field, FieldAccess::Assign, field_span);
         }
-        // Asymmetric `mut` rule (object-model slice 2b′): a value `struct` field-set is desugared to
+        // Asymmetric `mut` rule: a value `struct` field-set is desugared to
         // a rebind of the receiver (`x = T { ...x, f: v }`), so the receiver binding must be `mut`
         // (E0006); a reference `class` field-set mutates the shared instance in place, needing no
         // `mut` binding. (The field itself must still be declared `mut` — E0033, checked below.)
@@ -145,7 +145,7 @@ impl Checker {
 
     /// The return type of a method call `recv.name(...)`: a built-in method, a user-declared
     /// method, or — when the receiver defers to runtime (`dyn`/hole) — the deferred type itself.
-    /// Type a method-bundle method call (kernel-methods K2): an `Element` method on a bound
+    /// Type a method-bundle method call: an `Element` method on a bound
     /// `@packed` type, or a `Bulk` method on a `List<T>` of one. On a hit: checks arity and
     /// argument types against the bundle's declared signature (nominal — the shape requirement
     /// was already verified at the impl site), records the call-site route for lowering, and
@@ -173,7 +173,7 @@ impl Checker {
         // Resolve the bound kernel **trait** + method (the surface adapter reads `bundle_impls`, the
         // typing index; the identity is the one `ExtTrait`). `trait_q` is the trait's qualified identity
         // (`std.vec.Kernels`) — the runtime dispatch key — and `assoc_types` resolves `Self::Wide` /
-        // `Self::Float` returns from the bound element (ExtBundle→ExtTrait fold-in, slice 4).
+        // `Self::Float` returns from the bound element (ExtBundle→ExtTrait fold-in).
         let (trait_q, method, assoc_types) = bindings.iter().find_map(|b| {
             b.bundle
                 .methods
@@ -233,7 +233,7 @@ impl Checker {
         ))
     }
 
-    /// Type a **trait default-body** method call (ExtBundle→ExtTrait convergence, slice 2): a method
+    /// Type a **trait default-body** method call (ExtBundle→ExtTrait convergence): a method
     /// on a concrete receiver whose type implements a **native** trait, where the method is that
     /// trait's *defaulted* method, the trait carries a native default-body dispatch
     /// ([`noeta_ext_abi::ExtTrait::dispatch`]), and the receiver's type provides **no override**. On a
@@ -328,7 +328,7 @@ impl Checker {
     }
 
     /// Resolve a method call on an in-scope **type parameter** through its user-trait bounds
-    /// (S4.3c, typed): the first bound whose trait declares `name` types the call, its signature
+    /// (typed): the first bound whose trait declares `name` types the call, its signature
     /// substituted at the bound's instantiation — under `<T: Keyed<int>>`, `x.key()` is `int` and
     /// `x.same(other)` demands an `int`. A bare bound on a generic trait substitutes its
     /// parameters permissively (`dyn`), and the contract's `Self` — the implementing type —
@@ -395,7 +395,7 @@ impl Checker {
         None
     }
 
-    /// Resolve a method call on a **trait object** (`dyn Trait`, UT4) against the trait's declared
+    /// Resolve a method call on a **trait object** (`dyn Trait`) against the trait's declared
     /// contract — the `dyn` twin of [`Self::type_param_trait_method`], and deliberately its mirror
     /// image so the two receivers can never disagree about the same method. Returns `(parameter
     /// types, required count, return type)`; `None` when `tr` names no known trait or the trait
@@ -503,7 +503,7 @@ impl Checker {
 
     pub(crate) fn method_call_return(&self, recv: &Type, name: &str) -> Type {
         // A native (fielded/extern) method whose return is a trait associated-type projection
-        // `Self::Name` / `List<Self::Name>` (slice 1b): resolve it against `trait_assoc` at this
+        // `Self::Name` / `List<Self::Name>`: resolve it against `trait_assoc` at this
         // concrete receiver — the type the implementing type's `AssocDerivation` computed at seed
         // time. Checked BEFORE `method_return` (whose `sig_to_type` would erase the projection to a
         // hole); an unresolved projection degrades to that same gradual hole.
@@ -541,7 +541,7 @@ impl Checker {
         {
             return sig.ret.clone();
         }
-        // A method call on a trait object (L1 user traits, UT4) resolves against the trait's declared
+        // A method call on a trait object (L1 user traits) resolves against the trait's declared
         // signatures — dispatched dynamically at runtime, but statically typed by the contract.
         if let Type::DynTrait(tr) = recv
             && let Some(call) = self.dyn_trait_method(tr, name)
@@ -566,7 +566,7 @@ impl Checker {
         Type::Unknown
     }
 
-    /// Resolve a native method's associated-type return `Self::Name` (slice 1b) against `trait_assoc`
+    /// Resolve a native method's associated-type return `Self::Name` against `trait_assoc`
     /// at a concrete receiver. Returns the concrete `Type` the implementing type's [`AssocDerivation`]
     /// computed (`seed_ext_traits` folded it into `trait_assoc[(type, trait)]`), wrapped in `List<_>`
     /// for the `List<Self::Name>` form. `Some(Type::Unknown)` when the method IS an associated-type
@@ -591,7 +591,7 @@ impl Checker {
     }
 
     /// The concrete `Type` bound to associated type `assoc` for `type_name` by ANY trait it
-    /// implements (slice 1b) — the native-trait analogue of [`Self::resolve_assoc`], which needs the
+    /// implements — the native-trait analogue of [`Self::resolve_assoc`], which needs the
     /// trait named. A native method's `Self::Name` return carries no trait context, but the assoc
     /// name is unique to the (one) native trait declaring it, so the first `trait_assoc[(type_name,
     /// _)]` entry binding `assoc` is the answer.
@@ -603,15 +603,15 @@ impl Checker {
             .map(|(_, map)| map[assoc].clone())
     }
 
-    /// Whether field `field` of type `type_name` is accessible at the current checking context
-    /// (object-model slice 2d): a public field always is; a private one (a `class` field not
+    /// Whether field `field` of type `type_name` is accessible at the current checking context: a
+    /// public field always is; a private one (a `class` field not
     /// declared `pub`) only inside the declaring type's own methods/destructor ([`Self::current_type`]).
     pub(crate) fn field_visible(&self, type_name: &str, field: &str) -> bool {
         let Some(decl) = self.private_field_decl(type_name, field) else {
             return true; // public
         };
         // White-box for dev-tier (`@test`/…) fn bodies: co-located tooling sees its OWN package's
-        // privates (slice 6d), so a private field is visible there regardless of `current_type`.
+        // privates, so a private field is visible there regardless of `current_type`.
         self.white_box_over(decl) || self.coloring.current_type.as_deref() == Some(type_name)
     }
 
@@ -816,8 +816,8 @@ impl Checker {
         env: &mut Env,
     ) -> Type {
         // `Type.Variant` (a nullary enum constructor like `Status.Paid`) reads as the enum type. For a
-        // generic enum a payload-free variant pins no parameter, so its arguments infer to `dyn`
-        // (R2b) — keeping the arity consistent with a payload variant of the same enum.
+        // generic enum a payload-free variant pins no parameter, so its arguments infer to `dyn` —
+        // keeping the arity consistent with a payload variant of the same enum.
         //
         // A **payload-carrying** variant in value position is not that, and used to fall through
         // here as if it were: `Shape.Circle` where `Circle(int)` typed as `Shape` and then died in
@@ -936,7 +936,7 @@ impl Checker {
         if let Type::Named(n, recv_args) = &recv
             && let Some(ty) = self.record_field_type(n, name, recv_args)
         {
-            // A private field is readable only inside its declaring type's own methods (slice 2d).
+            // A private field is readable only inside its declaring type's own methods.
             if !self.field_visible(n, name) {
                 self.report_private_field(n, name, FieldAccess::Read, name_span);
             }

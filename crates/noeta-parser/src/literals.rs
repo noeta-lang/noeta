@@ -525,8 +525,8 @@ pub(crate) fn parse_float_literal(text: &str) -> f64 {
     cleaned.parse().unwrap_or(0.0)
 }
 
-/// Parse an `f32` literal's source text into an `f32`, stripping the `f32` suffix and `_` separators
-/// (P-PACK Phase 3). The lexer's `F32Lit` regex guarantees the `f32` suffix and a well-formed numeric
+/// Parse an `f32` literal's source text into an `f32`, stripping the `f32` suffix and `_`
+/// separators. The lexer's `F32Lit` regex guarantees the `f32` suffix and a well-formed numeric
 /// body, so `f32::from_str` always succeeds.
 pub(crate) fn parse_f32_literal(text: &str) -> f32 {
     let body = text.strip_suffix("f32").unwrap_or(text);
@@ -577,8 +577,8 @@ pub(crate) fn parse_intn_literal(text: &str) -> Option<(u64, bool, u8)> {
     None
 }
 
-/// Split an **expression-tier block**'s verbatim body into statics and `${…}` holes
-/// (expr-tiers arc), producing an [`Expr::TierExpr`]. The contract is string interpolation's,
+/// Split an **expression-tier block**'s verbatim body into statics and `${…}` holes, producing an
+/// [`Expr::TierExpr`]. The contract is string interpolation's,
 /// adapted to a text body: `${expr}` opens a hole (nested braces tracked by [`find_hole_end`],
 /// the expression sub-parsed by [`parse_hole`] with absolute spans); the text escapes are the
 /// text-tier set `\{ \} \\` (which the lexer's brace balance already honors) **plus `\$`** for a

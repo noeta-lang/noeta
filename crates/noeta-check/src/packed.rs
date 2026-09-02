@@ -1,4 +1,4 @@
-//! Fixed-width integers (Tier W) and packed layout (P-PACK) checking — an `impl Checker` split
+//! Fixed-width integers (Tier W) and packed layout checking — an `impl Checker` split
 //! out of the crate root purely to shrink `lib.rs`. Two cohesive concerns kept together because
 //! both are about the unboxed-primitive surface: `IntN` literal range-checking + width-aware
 //! arithmetic/comparison/bitwise synthesis (`E0044`), and `@packed` struct layout computation +
@@ -79,7 +79,7 @@ impl Checker {
         ty
     }
 
-    /// Type a fixed-width `+ - * / %` (Tier W2/W3). Both operands must be the **same** `IntN`; the
+    /// Type a fixed-width `+ - * / %`. Both operands must be the **same** `IntN`; the
     /// result is that type and its span is recorded in `width_sites` so lowering wraps the op into the
     /// width (`+ - *` via a `MaskWidth` on the plain result — sign-agnostic; `/ %` via the sign-aware
     /// `WideInt`, which masks internally). Mixed-width, or `IntN` with `int`/`float`, needs an explicit
@@ -110,7 +110,7 @@ impl Checker {
         concrete.clone()
     }
 
-    /// Type a fixed-width ordering comparison `< <= > >=` (Tier W3). Both operands must be the
+    /// Type a fixed-width ordering comparison `< <= > >=`. Both operands must be the
     /// **same** `IntN`; the operand width is recorded in `width_sites` so lowering emits the
     /// sign-aware `WideInt` (unsigned ordering differs from signed past bit 63). The result is always
     /// `bool` (the caller sets it). Mixed-width, or `IntN` with `int`/`float`, needs an explicit
@@ -172,7 +172,7 @@ impl Checker {
         self.report_intn_mismatch(op, lt, rt, "comparison", span);
     }
 
-    /// Type a fixed-width symmetric bitwise op `& | ^` (Tier W5). Both operands must be the **same**
+    /// Type a fixed-width symmetric bitwise op `& | ^`. Both operands must be the **same**
     /// `IntN` and the result is that type; unlike shifts and arithmetic, the erased `& | ^` of two
     /// correctly-extended words is already correctly extended, so **no mask** (and no `width_sites`
     /// entry) is needed. Mixed-width or `IntN`+`int` → E0044; a `dyn`/hole defers. Only called with
@@ -902,8 +902,8 @@ impl Checker {
         })
     }
 
-    /// Record a list-construction site at `span` if its element type `elem` is a packed struct
-    /// (P-PACK Phase 2) — the span both backends key on to pick the flat raw-buffer representation.
+    /// Record a list-construction site at `span` if its element type `elem` is a packed struct —
+    /// the span both backends key on to pick the flat raw-buffer representation.
     pub(crate) fn note_packed_list(&mut self, elem: &Type, span: Span) {
         if let Some(layout) = self.packed_list_layout(elem) {
             self.sites.packed_list_sites.insert(span, layout);
@@ -913,13 +913,13 @@ impl Checker {
     /// Record the resolved `TypeRepr` at a collection/object construction site (runtime type-arg
     /// reflection, slice A — see [`Checked::construction_sites`]). A hole/`dyn`-top type is skipped, so
     /// the value stays untagged and `type_of`/`is` fall back to the head-only runtime classification.
-    /// A **non-generic nominal** type (a `struct`/`class`/`enum` with no type arguments, R2) is also
+    /// A **non-generic nominal** type (a `struct`/`class`/`enum` with no type arguments) is also
     /// skipped: its head-only runtime classification already recovers the type in full (the shape name
     /// with empty args), so tagging it would add per-instance overhead for no fidelity gain. Only a
     /// generic instantiation (`Box<int>` → `Struct("Box", [Int])`) and the collections (whose element
     /// types are always erased at runtime) carry a tag.
     pub(crate) fn note_construction(&mut self, ty: &Type, span: Span) {
-        // Erase any in-scope generic type **parameter** to `dyn` first (R2): a literal inside a generic
+        // Erase any in-scope generic type **parameter** to `dyn` first: a literal inside a generic
         // constructor (`Holder { item: x }` where `x: T`) has type `Holder<T>`, and the concrete `T` is
         // not known at the literal's site — only at the call. Recording it as `Holder<T>` would present
         // the *parameter name* as if it were a concrete type; erasing to `Holder<dyn>` is the honest
@@ -1245,7 +1245,7 @@ impl Checker {
         }
     }
 
-    /// Validate a `@packed` struct's all-primitive field constraint (P-PACK, `E0038`). A no-op for an
+    /// Validate a `@packed` struct's all-primitive field constraint (`E0038`). A no-op for an
     /// ordinary (non-packed) struct. Runs after `collect`, so a field naming a packed struct declared
     /// later resolves.
     pub(crate) fn check_packed_struct(&mut self, r: &StructDecl) {
@@ -1272,7 +1272,7 @@ impl Checker {
 }
 
 /// The [`PackedKind`] a **bare scalar** list element packs to, or `None` if `ty` is not a compaction
-/// candidate (packed-widths bare-scalar arc). Only fixed-width numerics **narrower than 8 bytes**
+/// candidate. Only fixed-width numerics **narrower than 8 bytes**
 /// qualify — `i8 u8 i16 u16 i32 u32` (widths 1/2/4) and `f32` (4). A `i64`/`u64`/`f64` element is
 /// already 8 bytes when boxed, so packing it buys **zero** storage and only adds materialization cost;
 /// the width is still reified through slice 1's construction tag, so no reflection fidelity is lost.

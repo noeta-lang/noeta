@@ -25,7 +25,7 @@ fn render_checks(src: &str) -> String {
 
 #[test]
 fn checker_diagnostic_gallery() {
-    // This test is its own assembling driver (audit-6 F2): seed the std units first.
+    // This test is its own assembling driver: seed the std units first.
     noeta_stdlib::registry::default_seeded();
     // One representative program per checker diagnostic. E0013 has a gallery of its own below,
     // because what it says about a *nearly* correct name is the whole point of it.

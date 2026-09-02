@@ -4,7 +4,7 @@
 //! methods are `Checker` methods moved verbatim out of the crate root purely to shrink `lib.rs`.
 
 use super::*;
-// The shared element-derivation abstraction (slice 1b): `AssocDerivation::apply` folds a native
+// The shared element-derivation abstraction: `AssocDerivation::apply` folds a native
 // trait's derivation over an implementing type's element into a concrete `Type` for `trait_assoc`.
 use crate::stdlib::DeriveApply;
 
@@ -29,7 +29,7 @@ impl Checker {
         self.seed_ext_directives();
     }
 
-    /// Seed every installed extension's declared **native classes** (native-extensibility S2) into
+    /// Seed every installed extension's declared **native classes** into
     /// the checker's symbol tables, keyed by **qualified identity** (`res.Handle`) — so a native
     /// class is indistinguishable from a `.noe` class to every downstream consumer (field typing,
     /// visibility E0035, mutability E0033, construction, reference-type semantics). Runs eagerly at
@@ -116,7 +116,7 @@ impl Checker {
         }
     }
 
-    /// Seed the **imported** native traits (native-extensibility S3) into the user-trait tables —
+    /// Seed the **imported** native traits into the user-trait tables —
     /// the trait analogue of `seed_ext_classes`, but run at **collect time** (import-aware), not at
     /// prelude, and keyed by the imported **short** name.
     ///
@@ -147,10 +147,10 @@ impl Checker {
             local: String,
             decl: noeta_ast::TraitDecl,
             impls: Vec<String>,
-            /// The trait's native-derived associated types (slice 1b): `(name, derivation)` per
+            /// The trait's native-derived associated types: `(name, derivation)` per
             /// `ExtAssocType`, applied over each implementing type's element into `trait_assoc`.
             assoc: Vec<(&'static str, noeta_ext_abi::AssocDerivation)>,
-            /// The trait's structural `Self`-constraint (slice 3): recorded into
+            /// The trait's structural `Self`-constraint: recorded into
             /// `native_trait_self_constraints` when this native trait wins the `user_traits` slot,
             /// then enforced at the user `impl` site.
             self_constraint: Option<noeta_ext_abi::PackedConstraint>,
@@ -166,7 +166,7 @@ impl Checker {
             .filter_map(|(local, qualified)| {
                 // A **dotted** local (`vec.Kernels`) is a module-namespace projection of a kernel
                 // trait, NOT a short-name type import (`Packable`). Kernel traits are the migrated
-                // bundle surface (ExtBundle→ExtTrait fold-in, slice 4): they bind ONLY through the
+                // bundle surface (ExtBundle→ExtTrait fold-in): they bind ONLY through the
                 // module-qualified `impl vec.Kernels for T {}` spelling, resolved via
                 // `resolve_bundle_ref`/`bundle_impls`, and must NOT be seeded as short-name
                 // `user_traits` (that would make the collect bundle-binding loop skip them, and route
@@ -205,7 +205,7 @@ impl Checker {
                     .map(|en| en.qualified());
                 let impls: Vec<String> =
                     type_impls.chain(fielded_impls).chain(enum_impls).collect();
-                // The trait's native-derived associated types (slice 1b) — snapshot name + derivation
+                // The trait's native-derived associated types — snapshot name + derivation
                 // under the registry borrow, applied per-impl below.
                 let assoc: Vec<(&'static str, noeta_ext_abi::AssocDerivation)> = tr
                     .assoc_types
@@ -243,7 +243,7 @@ impl Checker {
             if native_won {
                 self.symbols.native_traits.insert(local.clone());
             }
-            // The trait's structural `Self`-constraint (slice 3) is recorded ONLY when the native
+            // The trait's structural `Self`-constraint is recorded ONLY when the native
             // trait actually occupies the slot — a same-named user `trait` shadows it and carries no
             // such constraint, so recording it under a shadow would enforce a phantom shape.
             if native_won && let Some(constraint) = self_constraint {
@@ -262,7 +262,7 @@ impl Checker {
                 );
             }
             for ty in impls {
-                // Native-derived associated types (slice 1b): fold each `AssocDerivation` over this
+                // Native-derived associated types: fold each `AssocDerivation` over this
                 // implementing type's uniform `@packed` element into `trait_assoc[(type, trait)]` —
                 // the SAME table slice 1a's `.noe` `type Name = …` bindings land in, so a native
                 // trait method's `Self::Name` resolves on a concrete receiver unchanged. Computed
@@ -296,7 +296,7 @@ impl Checker {
         }
     }
 
-    /// Seed every installed extension's declared **native enums** (native-extensibility S1) into the
+    /// Seed every installed extension's declared **native enums** into the
     /// checker's symbol tables, keyed by **qualified identity** (`std.http.SameSite`) — so a native
     /// enum is indistinguishable from a `.noe` enum to every downstream consumer (exhaustiveness
     /// E0011, variant-pattern binding, `is`/construction typing). Runs eagerly at prelude time
@@ -395,7 +395,7 @@ impl Checker {
                         }
                     }
                     noeta_ext_abi::ExtTypeDirective::Semantic => {}
-                    // `@role` (Slice D3) seeds **no** `Symbols` table: a native role is surfaced purely
+                    // `@role` seeds **no** `Symbols` table: a native role is surfaced purely
                     // by `reflect::build` joining the tags (projected via `Registry::native_roles`)
                     // against in-program attribute applications, not by a checker membership write.
                     // `Registry::validate` enforces its couplings at assembly.
@@ -606,7 +606,7 @@ impl Checker {
         );
     }
 
-    /// Register the prelude `TierRoot` struct (tier-providers T2) — the element type of the roots
+    /// Register the prelude `TierRoot` struct — the element type of the roots
     /// list a declared tier's runner receives: `fn runner(roots: List<TierRoot>): void`. One root
     /// per activated fn: its `name` (for the runner's report) and `run`, the fn itself as a
     /// first-class `() -> void` value (in-process reflected-handle dispatch — the runner calls
@@ -615,7 +615,7 @@ impl Checker {
     /// type, so a user declaration shadows it.
     pub(crate) fn register_tier_prelude(&mut self) {
         self.register_prelude_struct(noeta_ast::reflect::TIER_ROOT);
-        // Its text-tier counterpart (text-tiers arc): one `TierText` per activated verbatim body.
+        // Its text-tier counterpart: one `TierText` per activated verbatim body.
         self.register_prelude_struct(noeta_ast::reflect::TIER_TEXT);
     }
 
@@ -768,7 +768,7 @@ fn synth_trait_decl(
             }
         })
         .collect();
-    // Native associated types (ExtBundle→ExtTrait convergence, slice 1b): faithfully carry each
+    // Native associated types (ExtBundle→ExtTrait convergence): faithfully carry each
     // `ExtAssocType`'s name into the `TraitDecl` so a native trait is indistinguishable from a `.noe`
     // one to the coherence machinery. Their concrete values are **derived** (not per-impl `type Name
     // = …` bindings), so the synthesized decl carries no default `TypeRef`; `seed_ext_traits` folds
