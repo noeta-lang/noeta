@@ -109,14 +109,16 @@ echo @greet { hello ${name}! }     // " hello world! "
 
 `@greet { hello ${name}! }` desugars to `render(["hello ", "! "], [fn() => name])`, an ordinary call, which is where the guarantees come from:
 
-- **Holes are real expressions.** They parse with the full grammar, close over the enclosing scope, and type-check against the handler's declared hole type `U`, so a mismatched `${…}` is an ordinary type error pointing *inside* the block. `${…}` follows string interpolation's contract exactly: the same `\$` escape for a literal `$`, and the text escapes `\{ \} \\` from text tiers apply too.
-- **Statics always number holes + 1** (empty where holes touch), so the handler can interleave deterministically.
-- **Holes are thunks.** Each desugars to a zero-param closure, so *whether and when* a hole evaluates is the handler's choice: call each once for an eager DSL, skip unused fragments, or wrap them in `computed`s for a reactive template.
-- **The block's type is the handler's return type**, which must match the declared `expr:` (E0051 otherwise, like any broken tier declaration).
+| Guarantee | What it means |
+|---|---|
+| **Holes are real expressions** | They parse with the full grammar, close over the enclosing scope, and type-check against the handler's declared hole type `U`, so a mismatched `${…}` is an ordinary type error pointing *inside* the block. `${…}` follows string interpolation's contract exactly: the same `\$` escape for a literal `$`, and the text escapes `\{ \} \\` from text tiers apply too. |
+| **Statics always number holes + 1** | Empty where holes touch, so the handler can interleave deterministically. |
+| **Holes are thunks** | Each desugars to a zero-param closure, so *whether and when* a hole evaluates is the handler's choice: call each once for an eager DSL, skip unused fragments, or wrap them in `computed`s for a reactive template. |
+| **The block's type is the handler's return type** | It must match the declared `expr:`, and is E0051 otherwise, like any broken tier declaration. |
 
 `text: "<lang>"` is optional on an expression tier and worth setting, because the language ID drives editor highlighting of the body. An expression tier has no runner semantics: its blocks never activate or strip, and `noeta <tier>` rejects it. **E0052** covers the two ways a block lands in the wrong position: an expression tier in statement position, with its value silently discarded, and a non-`expr:` tier in expression position.
 
-Because the declaration is ordinary code, a **pure-Noeta package** can ship `@sql`, `@json` or `@html` as parsed, checked, typed embedded languages, with no native code and no compiler plugin. A consumer binds it in `[directives]` (`sql = "para/db"`) and writes blocks, with no import: the binding alone is what pulls the handler into the program, exactly as it is for a native provider's tier. See `examples/sql_tier.noe` for a small end-to-end DSL.
+A **pure-Noeta package** can therefore ship `@sql`, `@json` or `@html` as parsed, checked, typed embedded languages, with no native code and no compiler plugin. A consumer binds it in `[directives]` (`sql = "para/db"`) and writes blocks with no import, the binding alone pulling the handler into the program, exactly as for a native provider's tier. `examples/sql_tier.noe` is a small end-to-end DSL.
 
 ### Native (Rust-package) expression tiers
 
@@ -140,6 +142,8 @@ A tier's `text:` **is** the body's language, declared once and picked up by ever
 **Highlighting is extension-provided (VS Code / TextMate).** A package ships a TextMate injection grammar that colors its body as the foreign language, contributed with `injectTo: ["source.noeta"]`. It attaches by textual match (`injectionSelector: L:source.noeta`), so it needs no change to Noeta's own grammar, which is what lets an extension provide it. `${…}` holes are scoped back to `source.noeta` and highlight as ordinary Noeta inside the foreign text, the same split the compiler makes between foreign-language statics and checked Noeta holes. See `editors/sql-tier.tmLanguage.json` in the [para-db repo](https://github.com/noeta-lang/para-db) for the shape.
 
 For tiers that ship no grammar of their own, the VS Code extension **generates** a per-project injection grammar: on activation and on `.noe` change it scans the workspace's `@tier(…, text: "lang")` declarations and regenerates `syntaxes/generated-tiers.tmLanguage.json`, so a project-declared tier highlights without any hand-written grammar.
+
+#### tree-sitter overlays
 
 **tree-sitter** highlighting of third-party tiers needs a per-project generated grammar, because a *static* grammar cannot read the declaration set to know which `@name` opens a verbatim body. The static grammar ships the `@doc` → markdown injection as its fallback.
 

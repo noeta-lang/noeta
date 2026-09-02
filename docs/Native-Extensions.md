@@ -17,12 +17,9 @@ Everything the toolchain knows about a native module arrives through this one re
 
 ## The seam
 
-The registry vocabulary (`noeta-ext-abi`, `registry.rs`; the concrete `std` registration and dispatch router are in `noeta-stdlib`) is built on a **neutral value-marshalling** layer:
+The registry vocabulary lives in `noeta-ext-abi`'s `registry` module, and the concrete `std` registration and dispatch router in `noeta-stdlib`. Values cross the seam through a **neutral marshalling** layer: `NativeValue` is the argument view (`Scalar`, `Str`, `Bytes`, `Object { fields }`, `List`, and so on) and `NativeOut` the result view, including the bulk `Scalars(ScalarVec)` form, one typed vector for a whole reduction result.
 
-- `NativeValue` — the argument view: `Scalar`, `Str`, `Bytes`, `Object { fields }`, `List`, and so on.
-- `NativeOut` — the result view, including the bulk `Scalars(ScalarVec)` form (one typed vector for a whole reduction result, the `Bytes` idea applied to primitive lists).
-
-Two per-backend functions carry the conversion, each written once: `marshal_native_arg(&Value) -> NativeValue` and `materialize_native(NativeOut, …) -> Value`. A module function is then a `DispatchFn = fn(&mut dyn Host, &[NativeValue]) -> Result<NativeOut, StdError>`, **shared across both backends** so the differential holds by construction. The `Host` capability (see below) is threaded through so `fs`/`time`/`random`/`env`/`args` work the same way, and pure modules ignore it.
+Conversion is per backend and written once there, so a module function is a `DispatchFn = fn(&mut dyn Host, &[NativeValue]) -> Result<NativeOut, StdError>` **shared across both backends**, and the differential holds by construction. The `Host` capability (see below) is threaded through so `fs`/`time`/`random`/`env`/`args` work the same way, and pure modules ignore it.
 
 Registration is declarative:
 
@@ -38,15 +35,19 @@ trait Extension {
 }
 ```
 
-The registry is an assembled list of extension units. Core's `std` is several in-tree `Extension` units sharing the `"std"` root: `CoreExtension` (always-on) plus one per capability with a separable identity (`HttpExtension`, `CryptoExtension`, `IdExtension`, and the `vec`/`quat` `VecExtension`). Every lookup (`find_module`, `find_type`, `commands`) iterates the whole registry filtered by root, so the split is invisible to resolution, and a third-party package registers as another unit under its own root.
+### Roots and registry units
+
+Every lookup is filtered by root, so the split of a root into several units is invisible to resolution. Core's `std` is several in-tree `Extension` units sharing the `"std"` root: `CoreExtension` (always-on) plus one per capability with a separable identity (`HttpExtension`, `CryptoExtension`, `IdExtension`, and the `vec`/`quat` `VecExtension`). A third-party package registers as another unit under its own root.
 
 The `para` namespace is a first-party root outside `std`. The p2p and local-first stack (`ParaP2pExtension`, root `para`) ships as the non-default `para/p2p` package at github.com/noeta-lang/para-p2p, alongside the pure-Noeta `para.html` liveview package.
 
-Each `ExtModule` declares its `ring: Option<&str>`, the single source of truth for which Cargo feature gates its heavy native dependencies in a tailored `noeta build --native`. `std.http.client` names `ring-http-client`, the ~3 MB reqwest and TLS tree; `None` means always-on core. The footprint scan reads the ring off the registry.
+### Signatures and rings
 
 `params` and `ret` use `SigType`, a small signature vocabulary (`noeta-stdlib` cannot see the checker's `Type`). `noeta-check` maps each `SigType` to a real `Type`, so the registry is the single source of truth that *both* the checker and both backends read.
 
 A parameter wrapped in `SigType::Optional(&…)` is **trailing-optional** (`client.get(url, headers?)`). The checker derives the required-argument count from the first `Optional`, and the dispatch reads the slot with `args.get(i)`, supplying its own default when the call omits it.
+
+Each `ExtModule` declares its `ring: Option<&str>`, the single source of truth for which Cargo feature gates its heavy native dependencies in a tailored `noeta build --native`. `std.http.client` names `ring-http-client`, the reqwest and TLS tree; `None` means always-on core. The footprint scan reads the ring off the registry.
 
 ## What an extension declares
 
@@ -89,17 +90,25 @@ Effects reach the world only through the `Host`. Constructing an effectful value
 
 An **`ExtClass`** is a real language **`class`**: a *reference type* with **identity** (two bindings alias the same instance, and `==` compares identity rather than structure), **language-visible fields** the program reads, mutates and constructs, full participation in the **RC and cycle collector**, and a **destructor** that runs native cleanup on collection. It shares the qualified-identity family of an `ExtType` (`namespace.name`, `use pkg.TheClass` to project and re-root, coexisting with a same-short-named user class), and adds fields and construction.
 
-The representation is a real language `Object` with a **class-kind shape**, so identity, reference (aliasing) semantics, RC and cycle participation come from the object model unchanged, and the extension adds no backend collector code.
+The value is an ordinary language object carrying a class-kind shape, so identity, aliasing, RC and cycle participation come from the object model and the extension adds no backend collector code.
 
-An `ExtClass` declares its `name`, `namespace`, and `fields` (`ExtField { name, ty, is_public, is_mut }`), and the checker seeds them exactly like a `.noe` class: `records` (field types), `private_fields` (a non-`pub` field read or set from outside is E0035), `mut_fields` (a non-`mut` field assignment is E0033), and `type_kinds = Class` (reference `==`).
+An `ExtClass` declares its `name`, `namespace`, and `fields` (`ExtField { name, ty, is_public, is_mut }`), which the checker seeds exactly like a `.noe` class's:
 
-A value is produced natively by returning `NativeOut::Instance { class, fields }`, the class-kind twin of `NativeOut::Struct` (a *value* struct with no identity), and crosses into a dispatch as `NativeValue::Instance`. A pure-data class is also **source-constructible** (`Point { x: 1, y: 2 }`) once imported, exactly like a `.noe` class.
+| `ExtField` | What the checker enforces |
+|---|---|
+| `ty` | the field's declared type |
+| `is_public` | a non-`pub` field read or set from outside the class is E0035 |
+| `is_mut` | an assignment to a non-`mut` field is E0033 |
 
-**Native state and destructor.** A class that wraps a Rust resource holds it in a **field typed as an extern handle**, an `ExtType` whose `ExternValue` has a Rust `Drop`. When the object is collected, by a last-reference release or by a destructor-free cycle reclamation, the field's box is dropped and its `Drop` runs the cleanup. That is deterministic and needs no new machinery, because the heap free always drops the payload.
+A value is produced natively by returning `NativeOut::Instance { class, fields }` and crosses into a dispatch as `NativeValue::Instance`. A pure-data class is also **source-constructible** (`Point { x: 1, y: 2 }`) once imported, exactly like a `.noe` class.
+
+**`ExtStruct` is the value-type twin** (`Extension::structs()`): the same `name`, `namespace` and `fields` declaration, produced as `NativeOut::Struct`, with structural equality, copy-on-assign, no identity and no destructor. Both hooks produce the shared `ExtFielded` type, distinguished by its `FieldedKind`.
+
+### Native state and destructors
+
+A class that wraps a Rust resource holds it in a **field typed as an extern handle**, an `ExtType` whose `ExternValue` has a Rust `Drop`. When the object is collected, by a last-reference release or by a destructor-free cycle reclamation, the field's box is dropped and its `Drop` runs the cleanup. The heap free always drops the payload, so that is deterministic and needs no new machinery.
 
 A destructor is self-contained RAII, the discipline `FileHandle` uses. There is no *host-coupled* finalizer: values die in release paths that carry no host, teardown cascades included. A buffered type therefore keeps an explicit `close()`.
-
-**`ExtStruct` is the value-type twin** (`Extension::structs()`): the same `name`, `namespace` and `fields` declaration, with structural equality, copy-on-assign, no identity and no destructor. Both hooks produce the shared `ExtFielded` type, distinguished by its `FieldedKind`.
 
 ## Native enums: `ExtEnum`
 
@@ -143,15 +152,21 @@ Hot accessors can be **declared**. `ExtType::arena_getter` marks a method as a g
 
 ## Cross-extension capabilities: the capability-broker seam
 
-When one extension needs a service *another extension provides*, it reaches it through the **capability broker**, which turns that service into a trait contract discovered by type. The motivating case is `para.synced`'s CRDT-backed signal: it *is* a node in the same reactive graph as core `std.reactive`, so it must reach that engine to create its node, subscribe a reader, and wake dependents. That engine lives in another crate's per-run `ExtState`.
+When one extension needs a service *another extension provides*, it reaches it through the **capability broker**, which turns that service into a trait contract discovered by type. The motivating case is `para.synced`'s CRDT-backed signal: it *is* a node in the same reactive graph as core `std.reactive`, so it must reach that engine, living in another crate's per-run `ExtState`, to create its node, subscribe a reader, and wake dependents.
 
-- **Contract.** The capability is an object-safe trait in its own small crate, `noeta-reactive-abi`'s `ReactiveSource` (`create_source` / `read_source` / `wake`). Both provider and consumer depend on that crate and on nothing of each other. New capabilities are new such crates, and `noeta-ext-abi` never names one.
-- **Provide.** The provider declares an `ExtCapability` on its `Extension::capabilities()`: the trait's `TypeId`, the `ExtState` key that backs it, and a `build` thunk that wraps the state as the trait object. `CoreExtension` declares the `ReactiveSource` provider, backed by the same `"std.reactive"` slot its own dispatches use, so reaching the engine either way is the same cell.
-- **Consume.** `capability::<dyn ReactiveSource>(ctx)` returns `Some(cap)` when some installed extension provides it, and `None` otherwise, which answers "is that engine even loaded?". The handle **owns a clone of the backing `ExtState`**, so it coexists with `&mut dyn NativeCtx`: each method takes `ctx` and borrows the engine only for its own work, releasing before any re-entry (the flush runs user effects, which re-enter reactive). Recovery is unsafe-free, since the provider boxes a `Box<dyn Trait>` (a sized fat pointer) erased as `Box<dyn Any>`, and the consumer downcasts back to exactly that.
+| Side | What it writes |
+|---|---|
+| Contract | an object-safe trait in its own small crate, `noeta-reactive-abi`'s `ReactiveSource` (`create_source` / `read_source` / `wake`). Both sides depend on that crate and on nothing of each other. |
+| Provide | an `ExtCapability` on `Extension::capabilities()`: the trait's `TypeId`, the `ExtState` key backing it, and a `build` thunk wrapping that state as the trait object. |
+| Consume | `capability::<dyn ReactiveSource>(ctx)`, which answers `Some(cap)` when some installed extension provides it and `None` otherwise, so "is that engine even loaded?" is a question a dispatch can ask. |
+
+`CoreExtension` declares the `ReactiveSource` provider, backed by the same `"std.reactive"` slot its own dispatches use, so reaching the engine either way is the same cell. New capabilities are new such crates, and `noeta-ext-abi` never names one.
+
+A capability handle coexists with `&mut dyn NativeCtx`: each method takes `ctx` and borrows the engine only for its own work, releasing before any re-entry, which the flush needs because it runs user effects that re-enter reactive.
 
 A new collaboration, including one between an out-of-tree package and core, is a trait crate plus a declaration, with no ABI edit and neither side naming the other's types. The by-type lookup is sound because `TypeId` is consistent within one linked program, and the composed toolchain builds everything under one lockfile.
 
-**Backend-service sub-traits.** Three concerns belong to the *scheduler's own* state rather than to an extension's: the task-local tracing context, the future-completion tracing hook, and the hot-reload channel. Each is a small trait in `noeta-ext-abi` (`TaskContext`, `FutureTracing`, `HotReload`) reached through `ctx.task_context()`, `ctx.future_tracing()` and `ctx.hot_reload()`, where the backend returns `self`. There is no `ExtState`, no `TypeId` lookup and no owned handle, just one virtual indirection on a cold path. A backend service reaching its own hot scheduler fields would otherwise sit behind the shareable `Rc<RefCell<…>>` the broker requires.
+**Backend-service sub-traits.** Three concerns belong to the *scheduler's own* state rather than to an extension's: the task-local tracing context, the future-completion tracing hook, and the hot-reload channel. Each is a small trait in `noeta-ext-abi` (`TaskContext`, `FutureTracing`, `HotReload`) reached through `ctx.task_context()`, `ctx.future_tracing()` and `ctx.hot_reload()`, where the backend returns `self`. There is no `ExtState`, no `TypeId` lookup and no owned handle.
 
 ## Raw buffers: `with_packed` and the bulk-kernel ABI
 
@@ -181,13 +196,26 @@ d  = xs.dot_all(ys)                 // Bulk: methods on List<Px>
 v2 = v.normalize()                  // Element: methods on Px itself
 ```
 
-`vec.Kernels` binds the whole vector-math set. `add`/`sub`/`scale`/`min`/`max`/`abs` work lane by lane, and `dot`/`length`/`normalize`/`cross`/`distance`/`lerp`/`clamp`/`reflect` work across a value's components. Only the lane ops carry a bulk `*_all` twin on `List<Self>`, the form that streams one lane op over a packed buffer in a single pass; the rest read a whole value at a time.
+`vec.Kernels` binds the whole vector-math set:
+
+| Methods | Element form, on a value | Bulk `*_all` form, on `List<Self>` |
+|---|---|---|
+| `add` `sub` `scale` `min` `max` `abs` | lane by lane, returning `Self` | one pass over the packed buffer, returning `List<Self>` |
+| `dot` `length` | across the components, returning `Self::Wide` / `Self::Float` | `List<Self::Wide>` / `List<Self::Float>`, one result per element |
+| `cross` `lerp` `clamp` `reflect` `normalize` | across the components, returning `Self` | none |
+| `distance` | across the components, returning `Self::Float` | none |
+
+A bulk form exists to stream one operation over a whole packed buffer in a single pass. The last two rows read a whole value at a time, so `xs.map(fn(v) => v.normalize())` costs what a `*_all` would and there is nothing to add.
 
 Two narrowings apply, each by what the operation means rather than by width: `cross` needs exactly three components, and `normalize` and `reflect` need a float element. `distance` and `lerp` compute in `Self::Float` and convert back, so an unsigned difference cannot wrap and an integer interpolation keeps its fraction until the closing round, which is nearest, half away from zero, saturating at the element's bounds. The lane ops instead wrap the way `+` does on the same integers.
+
+### Associated types come from the element
 
 `impl vec.Kernels for Px {}` is an empty binding, yet `dot` returns `Self::Wide` and `length` returns `Self::Float`, types *derived* from the implementing type's packed element rather than written by the author. An `f32` element makes both `f32`. An `i8` element widens `dot` to `int`, so a cross-lane sum cannot silently wrap, and promotes `length` to `float`. The derivations are a closed set, `Element`, `Widen` and `FloatPromote`, and every native associated type names one.
 
 In a trait written in `.noe`, where the implementor writes the binding, a [type parameter](Generics-and-Traits) is the mechanism instead. Declaring an associated type in source is refused, with the type parameter named as the fix.
+
+### What the binding buys
 
 `@derive(vec.Kernels)` binds identically. A bundle is `impl`-ed or derived, never both, and the checker dedups and flags a double binding.
 
@@ -199,7 +227,9 @@ Dispatch is **call-site-resolved**. The checker bakes the `(module, trait)` rout
 
 `std.vec` declares `Kernels` and `SatKernels`. A third-party bundle over the consumer's own packed type is proven through toolchain composition in the CLI e2e.
 
-`ExtTrait` is also the general native-trait seam. A program `impl`s a plain native trait for its own types and binds on it (`fn f<T: NativeTrait>(x: T)`) exactly as for a `.noe` trait, an incomplete impl is E0015, and a native value laundered through `dyn NativeTrait` dispatches to its native method with no new runtime plumbing. Most native traits declare `self_constraint: None` and are shape-agnostic; `self_constraint` is what a kernel bundle adds on top.
+### `ExtTrait` is the general native-trait seam
+
+A program `impl`s a plain native trait for its own types and binds on it (`fn f<T: NativeTrait>(x: T)`) exactly as for a `.noe` trait, an incomplete impl is E0015, and a native value laundered through `dyn NativeTrait` dispatches to its native method with no new runtime plumbing. Most native traits declare `self_constraint: None` and are shape-agnostic; `self_constraint` is what a kernel bundle adds on top.
 
 ## Composition: how a package's native code reaches the toolchain
 
@@ -223,8 +253,6 @@ An `ArgSpec` covers required and defaulted positionals, `--flag` booleans, strin
 
 All host-coupled effects go through one `Host` trait: the filesystem, the clock, the PRNG, `env` and `args`, the console (`std.io`'s stdin, tty and prompt seam), the operating system (`os`, covering subprocess exec, spawn and lifecycle control, and system introspection), entropy, ids, the network, and the three telemetry signals. Each is its own capability trait, and `Host` is blanket-implemented for any type that implements them all.
 
-One **policy** seam rides alongside. A host declares through `P2pProvider::real_p2p() -> Option<RealP2pConfig>` whether **real** peer networking is permitted here, and with what app-id: `RealHost` returns `Some`, and the deterministic hosts `None`. It hands out no transport: no host implements `P2p` at all, because the transport lives in the `para.p2p` extension.
-
 Two implementations exist:
 
 | Host | What it is |
@@ -232,15 +260,15 @@ Two implementations exist:
 | `SandboxHost` | Deterministic in-memory VFS, logical clock, seeded RNG, a pure network responder, and a scripted exec command set. What the differential always runs. |
 | `RealHost` | Real disk, real env, real subprocesses, per-isolate tokio, and a real reqwest client. What `noeta run` uses, never differential-tested. |
 
-Because the p2p stack lives in the non-default `para` package, `P2p` is not an arm of `Host`: the whole transport is a capability an *extension* provides, and it belongs to `para.p2p`. The extension owns one `P2pBackend` (`Arc<Mutex<dyn P2p + Send>>`) in per-run ctx state (`ExtState`), created on first use from the host's `real_p2p()` policy.
+The network follows that split: `RealHost` overrides `net_spawn` to hand the executor a genuine `RealBody::Async` reqwest future while the sandbox resolves at spawn, and `os.exec_async` uses a `RealBody::Blocking` subprocess body.
 
-That policy picks one of two backends: the **real p2panda node**, shipped with the package, when the host permits real networking *and* the extension is built with its `ring-p2p` feature, and the deterministic **loopback broker** (`noeta_ext_abi::P2pBroker`, dep-free) otherwise. Both implement `P2p`, and the surface reaches either through one `with_p2p` seam.
+### Peer networking is an extension capability
+
+The whole peer transport is a capability the `para.p2p` *extension* provides, since that package is not a default dependency, so no host implements `P2p` and it is not an arm of `Host`. What a host declares instead is one **policy**, `P2pProvider::real_p2p() -> Option<RealP2pConfig>`, saying whether **real** peer networking is permitted here and with what app-id. `RealHost` returns `Some`, and the deterministic hosts `None`.
+
+The extension owns one `P2pBackend` (`Arc<Mutex<dyn P2p + Send>>`) in per-run ctx state (`ExtState`), created on first use from that policy. The policy picks one of two backends, both implementing `P2p` behind one `with_p2p` seam: the **real p2panda node**, shipped with the package, when the host permits real networking *and* the extension is built with its `ring-p2p` feature, and the deterministic **loopback broker** (`noeta_ext_abi::P2pBroker`, dep-free) otherwise. It is the same simulate-deterministically, deploy-real split as the async executor and the isolate scheduler.
 
 So `noeta-host-real` links no p2panda, and the entire iroh and QUIC tree travels with the out-of-tree package. A non-`para` `--native` binary is ~4 MB, a `para` one ~27 MB.
-
-The wrinkle the seam solves is that the async `p2p.receive` leaf is `Send` while `ExtState` is not, so the backend lives behind a `Send` `Arc<Mutex<…>>` that the receive descriptor captures at spawn. That is the ABI that lets an extension own an async-reachable host capability. It is the same simulate-deterministically, deploy-real split as the async executor and the isolate scheduler.
-
-The network follows the same split: `RealHost` overrides `net_spawn` to hand the executor a genuine `RealBody::Async` reqwest future while the sandbox resolves at spawn, and `os.exec_async` uses a `RealBody::Blocking` subprocess body.
 
 ## Call-site-typed functions: `module.func::<T>(args)`
 
@@ -271,7 +299,9 @@ ExtModule {
 }
 ```
 
-**The recipe contract.** The grammar `module.func::<T>(args)` is an atom (`Expr::TypedModuleCall`). The checker resolves `T` into a neutral `TypeRecipe` (scalar, unit, option, list, string-keyed map, or declared-order struct), records it at the call site, and a shared lowering bakes it into a `TypedModuleCall` IR node that the VM transcribes to `Op::TypedModuleCall`. An enum, a class and an unconstrained generic have no recipe, and naming one at the call is a compile-time error.
+### The recipe contract
+
+The checker resolves the turbofish `T` into a neutral **`TypeRecipe`**, one of a scalar, unit, option, list, string-keyed map, or declared-order struct, and records it at the call site. An enum, a class and an unconstrained generic have no recipe, and naming one at the call is a compile-time error.
 
 A struct's fields arrive as `FieldRecipe`s: name, recipe, and a `FieldDefault` saying what an *omitted* field means, either required or a literal default baked in as JSON text. That is how a decode fills a defaulted field without re-entering the program.
 
@@ -284,7 +314,7 @@ fn build_typed_dispatch(func: &str, host: &mut dyn Host, args: &[NativeValue], r
 
 The dispatch returns a `NativeOut` tree **already carrying its declared wrapper**: `NativeOut::Ok` or `Err` for a `Result` shape, `NativeOut::Some` or `None` for `Option`, and a plain value tree for `Plain`. A `Plain` door signals an unrecoverable failure with `Err(StdError)`, a runtime abort, while a recoverable door leaves the `Err` channel alone and returns its `Err` arm *inside* the `NativeOut`.
 
-The backend materializes that one tree with no per-function wrapping logic, the reference interpreter through its real registered type and the VM through a fresh same-name shape (method dispatch is name-keyed), so the two agree by construction. `json.parse::<T>` and `try_parse::<T>` are registered exactly this way, and nothing about them is special-cased in the checker or either backend.
+Both backends materialize that one tree with no per-function wrapping logic, so they agree by construction. `json.parse::<T>` and `try_parse::<T>` are registered exactly this way, and nothing about them is special-cased in the checker or either backend.
 
 ### Call-site-typed **methods**
 
@@ -342,7 +372,21 @@ struct PetStore {
 }
 ```
 
-**A hook generates from the declaration's *shape* as well as its name.** `DirectiveCtx::fields` is the decorated declaration's members as `(name, declared type spelling)` pairs, in declaration order: a `struct`'s or `class`'s fields; an `enum`'s **variants**, each with its payload spelling as declared (`"(index: int)"` for a named payload, `"(T)"` for a positional one, and the empty string for a variant that carries none); and empty for a `Function`, `Method` or `Trait` site, which declares no typed members.
+**A directive runs at compile time.** `@` is the language's codegen half and `#[…]` is the runtime-readable half (see [Attributes and Reflection](Attributes-and-Reflection)), so `attributes_of::<T>()` does not see a directive. An extension that wants runtime-visible metadata declares an attribute, and one that wants to consume a resource *dynamically* returns an invocable value.
+
+**Placement and the argument contract are checked before the hook runs**, so a hook need not defend against a directive that sat somewhere it does not belong, or was called with arguments it never declared. Reading the filesystem is authorized by the package's `[trust]` grant; beyond that, a hook must be a pure function of its `DirectiveCtx` and the files it reports.
+
+Failures are reported as **E0062**, blamed on the directive rather than on a generated line, with the position inside the generated source carried in the message.
+
+### What the hook sees: `ctx.fields` and `ctx.target`
+
+A hook generates from the declaration's *shape* as well as its name. `DirectiveCtx::fields` is the decorated declaration's members as `(name, declared type spelling)` pairs, in declaration order:
+
+| Site | What `fields` holds |
+|---|---|
+| `struct`, `class` | its fields |
+| `enum` | its **variants**, each with its payload spelling as declared: `"(index: int)"` for a named payload, `"(T)"` for a positional one, and the empty string for a variant that carries none |
+| `Function`, `Method`, `Trait` | empty, since none of them declares typed members |
 
 A validation directive can therefore emit one check per field, a persistence directive one column accessor per field, and a serializer the round-trip pair:
 
@@ -356,31 +400,29 @@ fn expand_columns(ctx: &DirectiveCtx) -> Result<Expansion, ExpansionError> {
 }
 ```
 
-A spelling is the **declared surface** one, at full fidelity: `List<int>` arrives as `"List<int>"` and never as `"List"`, and `?User` as `"?User"` and never as `"Option<User>"`, because a hook writes source and source is written in the surface language. The one adjustment is that a namespace-qualified identity renders as its short name (`std.id.Uuid` becomes `Uuid`), since the linker qualifies an imported type before a hook runs and generated code spelling that identity would name something the consumer's file cannot resolve. An unannotated member reports `dyn`.
+A spelling is the **declared surface** one, at full fidelity: `List<int>` arrives as `"List<int>"` and never as `"List"`, and `?User` as `"?User"` and never as `"Option<User>"`, because a hook writes source and source is written in the surface language. An unannotated member reports `dyn`. The one adjustment is that a namespace-qualified identity renders as its short name (`std.id.Uuid` becomes `Uuid`), since generated code spelling the qualified identity would name something the consumer's file cannot resolve.
 
-That derivation is the one the checker hands `ExtDerive::validate`, so a recipe and an expansion hook in one extension always see the same declaration the same way. A hook sees the decorated declaration and nothing of the surrounding program. Its fields live in the same source text the memoized link is keyed on, so editing a field re-runs the expansion exactly as editing the directive's arguments does.
+That derivation is the one the checker hands `ExtDerive::validate`, so a recipe and an expansion hook in one extension always see the same declaration the same way. A hook sees the decorated declaration and nothing of the surrounding program, and editing a field re-runs the expansion exactly as editing the directive's arguments does.
 
-**A directive runs at compile time.** `@` is the language's codegen half and `#[…]` is the runtime-readable half (see [Attributes and Reflection](Attributes-and-Reflection)), so `attributes_of::<T>()` does not see a directive. An extension that wants runtime-visible metadata declares an attribute, and one that wants to consume a resource *dynamically* returns an invocable value.
+**`ctx.target` is a bare identifier.** The decorated declaration's name arrives unqualified even when its file is a package module carrying a qualified module path, because that is the only spelling in scope where the generated members land. A hook can put it straight into a constructor's return type or a struct literal (`fn new(api: Api): {target} { return {target} { … } }`).
+
+### The generated source
 
 **The output is Noeta source.** It goes through the real grammar, so generated code earns the same diagnostics as hand-written code and the result stays inspectable. What you may emit follows from where the directive attached: members of the decorated declaration, exactly as `@derive` synthesizes methods onto a type. `sites` already answers the question of output scope.
 
 **Each expansion becomes a real source file**, registered in the program's source map under a name that says what caused it (`PetStore ⟨@openapi "petstore.yaml"⟩`), so generated members have true spans and a fault inside a generated method points at that method. Those sources are what [`noeta expand`](The-CLI#noeta-expand) prints, so a hook can be debugged against its real output, and that output diffed in CI, without provoking an error first.
 
-**Declare every file you read, on the error path too.** `Expansion::reads` (and `ExpansionError::reads`) is the hook's incrementality contract. The compiler cannot discover these by parsing, and it does not simply hand you the file named in your arguments, because a spec routinely pulls in others (an OpenAPI `$ref` into a sibling document) and only the hook knows which.
+### Declare every file the hook reads, on the error path too
+
+`Expansion::reads` (and `ExpansionError::reads`) is the hook's incrementality contract. The compiler cannot discover these by parsing, and it does not simply hand you the file named in your arguments, because a spec routinely pulls in others (an OpenAPI `$ref` into a sibling document) and only the hook knows which.
 
 Report every file opened, *including ones that turned out to be missing*, since their appearing later is a change too, and *including when the hook then fails*: the reads survive the `Err`, so a spec that is missing today re-runs the expansion the moment it is written. A hook that under-reports will serve stale members until something unrelated invalidates it. Under `--watch` (`test`, `run`, `serve`), the reported reads are watched alongside the `.noe` sources, so editing or creating a spec re-runs the generation, and the editor's incremental engine treats a change to one as a full re-check.
-
-**`ctx.target` is a bare identifier.** The decorated declaration's name arrives unqualified even when its file is a package module carrying a qualified module path, because that is the only spelling in scope where the generated members land. A hook can put it straight into a constructor's return type or a struct literal (`fn new(api: Api): {target} { return {target} { … } }`).
-
-**Placement and the argument contract are checked before the hook runs**, so a hook need not defend against a directive that sat somewhere it does not belong, or was called with arguments it never declared. Reading the filesystem is authorized by the package's `[trust]` grant; beyond that, a hook must be a pure function of its `DirectiveCtx` and the files it reports.
-
-Failures are reported as **E0062**, blamed on the directive rather than on a generated line, with the position inside the generated source carried in the message.
 
 ## Derive recipes (`ExtDerive`)
 
 An extension can register **derive recipes**. `Extension::derives()` returns `ExtDerive { name, methods, validate }` entries, and `@derive(<Name>)` on a type synthesizes each declared method as a forward into the extension's registered module function, `fn <name>(a1: dyn, …): dyn { return <handler>(self, a1, …) }`, resolved like an expression tier's native handler and needing no user import.
 
-The handler does its real work natively, typically by reflecting over the value. The optional `validate` hook rejects unsuitable type shapes at check time (E0050), reading the deriving type's name and its `(field name, declared type spelling)` pairs, the same shape, from the same derivation, that an expanding directive gets as [`DirectiveCtx::fields`](#directives-that-generate-code-extdirectiveexpand).
+The handler does its real work natively, typically by reflecting over the value. The optional `validate` hook rejects unsuitable type shapes at check time (E0050), reading the deriving type's name and its `(field name, declared type spelling)` pairs, the same shape, from the same derivation, that an expanding directive gets as [`DirectiveCtx::fields`](#what-the-hook-sees-ctxfields-and-ctxtarget).
 
 std's own `Inspect` (`inspect()` becomes `json.stringify(self)`) is the reference example. Names resolve after built-in traits and the program's user traits, so a recipe can never shadow either.
 

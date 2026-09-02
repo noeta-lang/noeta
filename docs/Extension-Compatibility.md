@@ -13,16 +13,18 @@ The short version:
 
 A package's native entry crate depends on **`noeta-ext-abi`** and nothing else of the toolchain. The crate is deliberately lean, its only dependencies being `compact_str`, `equivalent` and `hashbrown`, none of core's batteries, and it contains the whole registration and dispatch contract:
 
-- **The `Extension` trait**, the unit of registration. Two methods are required (`name`, `modules`) and everything else is defaulted, so a modules-only extension stays source-compatible as declaration surfaces are added: `root` (namespace root, defaults to the name), `types`, `enums`, `classes`, `structs`, `traits`, `commands`, `tiers`, `tier_runners`, `attributes`, `directives`, `derives`, `body_formatters`, and `capabilities`.
-- **The `NOETA_EXTENSIONS` symbol convention.** The entry crate exports `pub static NOETA_EXTENSIONS: &[&(dyn Extension + Sync)]`, the slice the composed toolchain aggregates.
-- **The registration vocabulary.** `ExtModule` and `ExtFn` with `SigType`/`RetTy` signatures (including `SigType::Optional` trailing-optionals, `SigType::Fn` callables, and `SigType::Generic` with `Var` type variables), and the call-site-typed surface (`typed_functions`/`typed_methods`, `TypeArgWrap`, `TypeRecipe`/`FieldRecipe`).
-- **The marshalling layer.** `NativeValue` in, `NativeOut` out, including the bulk `NativeOut::Scalars(ScalarVec)` form and the class and struct twins `Instance`/`Struct`, plus `StdError`/`ErrorKind` and the canonical error builders (`arity_error`, `type_error`, …) that keep both backends' diagnostics identical.
-- **The type-declaration surfaces.** `ExtType` with the `ExternValue`/`ExternBox` value contract and `MapKey`; `ExtClass`/`ExtStruct` with `ExtField`; `ExtEnum` with `ExtVariant`; `ExtTrait` with `ExtTraitMethod`, associated types, and the structural `PackedConstraint` used by kernel bundles.
-- **CLI commands.** `ExtCommand { name, about, args, run }` with typed `ArgSpec`s, driven through a narrow `CommandCtx`.
-- **Compile-time codegen.** `ExtDirective` (the `expand` hook) and `ExtDerive` recipes.
-- **The higher-order seam.** `NativeCtx` with opaque `Slot`s (`call`/`call_method`/`spawn_io`/`timer`/`poll`/`drive`, scheduler advancement, and the `render`/`bytes_of` value reads), per-run `ExtState`, the retained arena (`Retained`), the raw packed-buffer capabilities (`PackedView`, `with_packed`/`with_packed_mut`/`make_packed_like`), and the `TaskContext`/`FutureTracing`/`HotReload` sub-traits.
-- **The capability broker.** `ExtCapability` on the provider side and `capability::<dyn Trait>(ctx)` on the consumer side, for cross-extension collaboration without either side naming the other's types.
-- **The `Host` capability seam.** The trait an effectful dispatch receives, its per-capability traits (filesystem, clock, RNG, env and args, console, OS, entropy, ids, network, telemetry), the `real_p2p()` policy, and the async `ExternIo`/`Executor`/`RealBody` seam.
+| Surface | What it covers |
+|---|---|
+| **The `Extension` trait**, the unit of registration | Two methods are required (`name`, `modules`) and everything else is defaulted, so a modules-only extension stays source-compatible as declaration surfaces are added: `root` (namespace root, defaults to the name), `types`, `enums`, `classes`, `structs`, `traits`, `commands`, `tiers`, `tier_runners`, `attributes`, `directives`, `derives`, `body_formatters`, and `capabilities`. |
+| **The `NOETA_EXTENSIONS` symbol convention** | The entry crate exports `pub static NOETA_EXTENSIONS: &[&(dyn Extension + Sync)]`, the slice the composed toolchain aggregates. |
+| **The registration vocabulary** | `ExtModule` and `ExtFn` with `SigType`/`RetTy` signatures (including `SigType::Optional` trailing-optionals, `SigType::Fn` callables, and `SigType::Generic` with `Var` type variables), and the call-site-typed surface (`typed_functions`/`typed_methods`, `TypeArgWrap`, `TypeRecipe`/`FieldRecipe`). |
+| **The marshalling layer** | `NativeValue` in, `NativeOut` out, including the bulk `NativeOut::Scalars(ScalarVec)` form and the class and struct twins `Instance`/`Struct`, plus `StdError`/`ErrorKind` and the canonical error builders (`arity_error`, `type_error`, …) that keep both backends' diagnostics identical. |
+| **The type-declaration surfaces** | `ExtType` with the `ExternValue`/`ExternBox` value contract and `MapKey`; `ExtClass`/`ExtStruct` with `ExtField`; `ExtEnum` with `ExtVariant`; `ExtTrait` with `ExtTraitMethod`, associated types, and the structural `PackedConstraint` used by kernel bundles. |
+| **CLI commands** | `ExtCommand { name, about, args, run }` with typed `ArgSpec`s, driven through a narrow `CommandCtx`. |
+| **Compile-time codegen** | `ExtDirective` (the `expand` hook) and `ExtDerive` recipes. |
+| **The higher-order seam** | `NativeCtx` with opaque `Slot`s (`call`/`call_method`/`spawn_io`/`timer`/`poll`/`drive`, scheduler advancement, and the `render`/`bytes_of` value reads), per-run `ExtState`, the retained arena (`Retained`), the raw packed-buffer capabilities (`PackedView`, `with_packed`/`with_packed_mut`/`make_packed_like`), and the `TaskContext`/`FutureTracing`/`HotReload` sub-traits. |
+| **The capability broker** | `ExtCapability` on the provider side and `capability::<dyn Trait>(ctx)` on the consumer side, for cross-extension collaboration without either side naming the other's types. |
+| **The `Host` capability seam** | The trait an effectful dispatch receives, its per-capability traits (filesystem, clock, RNG, env and args, console, OS, entropy, ids, network, telemetry), the `real_p2p()` policy, and the async `ExternIo`/`Executor`/`RealBody` seam. |
 
 Two conventions are part of the promise. **Additive evolution is done with `..DEFAULTS`** rather than `#[non_exhaustive]`: registration literals spell only what they use (`ExtModule { name, functions, dispatch, ..ExtModule::DEFAULTS }`), so a new optional field lands without breaking existing registrations.
 
@@ -82,14 +84,18 @@ A git pin on the toolchain repository also works, and is what a package reaching
 noeta-ext-abi = { git = "https://github.com/noeta-lang/noeta", tag = "v0.8.0" }
 ```
 
-That pin governs **only the package's own repository**: `cargo test` in your CI, and your local builds. When a *consumer* depends on your package, toolchain composition builds your crate again, from source, inside the consumer's composed shim, and resolves every toolchain crate to **the consumer's own toolchain version** rather than your tag:
+That pin governs **only the package's own repository**: `cargo test` in your CI, and your local builds. When a *consumer* depends on your package, toolchain composition builds your crate again, from source, inside the consumer's composed shim, and a `[patch]` section resolves every toolchain crate to **the consumer's own toolchain version** rather than your tag:
 
-- With a **workspace (local-path) toolchain**, the composer injects a `[patch]` section keyed on the canonical toolchain repository URL that rewrites *every* `crates/*` member to the consumer's exact toolchain source. The key is this build's `repository`, overridable with `NOETA_TOOLCHAIN_REPO`, and it must equal the URL your `Cargo.toml` declares. Your git pin is overridden wholesale.
-- With a **released (git-tag) toolchain**, the shim's own dependencies use the running binary's version tag, and the composer injects the same `[patch]` section, redirecting every toolchain crate to a cached checkout of the **binary's own release tag**, regardless of the tag your package pins. A package pinned at an older tag (say `v0.2.0`) still composes under a newer binary (say `v0.2.1`), with your pin overridden to the consumer's toolchain exactly as in the workspace case. That is the whole one-toolchain-wins guarantee: without it, your pin and the shim's tag would be two different sources, two compiled copies of `noeta-ext-abi`, and a type error instead of a build.
+| The consumer's toolchain | What your dependency resolves to |
+|---|---|
+| a **workspace (local-path)** one | the consumer's exact toolchain source, every `crates/*` member of it. Your git pin is overridden wholesale. |
+| a **released (git-tag)** one | a cached checkout of the running binary's own release tag, regardless of the tag your package pins. A package pinned at an older tag still composes under a newer binary. |
 
-The composer emits **two** patch tables, one keyed on the toolchain repository URL and one on `crates-io`, because a package may name the contract crate either way. A version requirement is patched exactly like a git pin. Without that, a published-crate requirement would resolve the real published crate, which is a *second* copy of the ABI, and your `dyn Extension` would not match the shim's.
+Without that, your pin and the shim's would be two different sources, two compiled copies of `noeta-ext-abi`, and a type error instead of a build. The composer emits **two** patch tables, one keyed on the toolchain repository URL and one on `crates-io`, because a package may name the contract crate either way, and a version requirement is patched exactly like a git pin. [Writing a Native Package](Writing-Native-Packages#out-of-tree-packages-need-exactly-one-copy-of-the-toolchain) covers the patching itself.
 
-Either way the whole graph resolves to **one copy** of each toolchain crate, which Rust type identity requires, and that copy is the consumer's. Three consequences follow:
+Either way the whole graph resolves to **one copy** of each toolchain crate, which Rust type identity requires, and that copy is the consumer's. Three consequences follow.
+
+### What that leaves you responsible for
 
 - **The effective compatibility contract is the `noeta-ext-abi` API across versions.** Your package will be compiled against toolchain releases you have never seen. What protects you is source-level compatibility of the ABI crates, rather than your pin.
 - **The manifest's `toolchain` key is your declared floor.** `toolchain = ">=0.2"` in `noeta.toml` tells the resolver the minimum `noeta` your package works with, enforced at resolve time with a clear "run `noeta upgrade`" message instead of a compile error deep inside a native build. It is a courtesy floor rather than the contract itself, so declare the oldest release you actually test against. See [Manifest](Manifest) for the exact requirement grammar, and for the caret footgun: prefer `">=0.2"` over a bare `"0.2"`.

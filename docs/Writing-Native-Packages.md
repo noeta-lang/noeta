@@ -70,14 +70,20 @@ Reaching past the contract means git-depending instead, since the internal crate
 noeta-loader = { git = "https://github.com/…/noeta", tag = "vX" }
 ```
 
-The subtlety is a Rust one. A type's identity includes *which compiled copy of the crate* it came from, so if `noeta-ext-abi` is compiled twice, once for the shim and once for the git entry crate, its `Extension` trait exists **twice** as two unrelated types. The shim's `units.extend_from_slice(ext0::NOETA_EXTENSIONS)` then stops type-checking, because a `dyn Extension` from one copy does not satisfy the other. The whole graph must resolve `noeta-ext-abi` to **one** source. Two cases arise:
+### How the composer keeps one copy
 
-- **The consumer runs a released (git-tag) toolchain.** The shim pins the toolchain by the binary's own release tag, and the composer injects a **`[patch]`** on the canonical repo URL that rewrites every `crates/*` member to a cached checkout of that same tag. The package's pin collapses onto the consumer's toolchain *whatever tag the package declares*, so a package pinned at an older release still composes under a newer binary, and the pin governs only the package's own repository CI.
-- **The consumer runs a workspace (local-path) toolchain**, which is the development norm and the case while iterating on the toolchain itself. Here the shim's `noeta-ext-abi` is a *path* and the package's is *git*, which is two sources. The composer closes this by injecting a **`[patch]`** into the shim that rewrites every `crates/*` member of the noeta repo to the consumer's exact path, so the package's git-deps and their transitive `workspace = true` deps all collapse onto the one local copy. The patch key is the toolchain's own `repository`, overridable with **`NOETA_TOOLCHAIN_REPO`** for a fork, a private mirror, or a local `file://` clone, and it must equal the URL the package's `Cargo.toml` declares. Cargo fetches the git source before applying the patch, so the toolchain repo must be reachable, which is fine for a public repo.
+The subtlety is a Rust one. A type's identity includes *which compiled copy of the crate* it came from, so if `noeta-ext-abi` is compiled twice, once for the shim and once for your entry crate, its `Extension` trait exists **twice** as two unrelated types, and the shim stops type-checking because a `dyn Extension` from one copy does not satisfy the other. The whole graph must resolve `noeta-ext-abi` to **one** source, and the composer closes that by injecting a **`[patch]`** into the shim:
 
-Both cases describe a **git** dependency, and the composer emits a matching `[patch."<repo url>"]`. A **crates.io** dependency needs its own table, so the composer emits `[patch.crates-io]` alongside it with the same redirects. Without that, a published-crate requirement would resolve the real published crate, leaving two compiled copies and a `dyn Extension` that does not match. Whichever form you write, the graph collapses onto the consumer's one toolchain.
+| The consumer runs… | What every `crates/*` member is rewritten to |
+|---|---|
+| a **released (git-tag)** toolchain | a cached checkout of the binary's own release tag, which the shim also pins. The package's pin collapses onto it *whatever tag the package declares*, so a package pinned at an older release still composes under a newer binary. |
+| a **workspace (local-path)** toolchain, the development norm | the consumer's exact path, so the package's git-deps and their transitive `workspace = true` deps all collapse onto the one local copy. |
 
-So an out-of-tree package, the `para` family and any third-party one alike, depends on the contract crate by version and lets composition redirect it, and a package that git-depends an internal crate is served by the same machinery. In-tree packages keep a path dep and never touch any of this.
+The patch key is the toolchain's own `repository`, overridable with **`NOETA_TOOLCHAIN_REPO`** for a fork, a private mirror, or a local `file://` clone, and it must equal the URL the package's `Cargo.toml` declares. Cargo fetches the git source before applying the patch, so the toolchain repo must be reachable.
+
+That table describes a **git** dependency, matched by a `[patch."<repo url>"]`. A **crates.io** dependency needs its own table, so the composer emits `[patch.crates-io]` alongside it with the same redirects; without it, a published-crate requirement would resolve the real published crate, leaving two compiled copies and a `dyn Extension` that does not match.
+
+Whichever form you write, the graph collapses onto the consumer's one toolchain. The `para` family and any third-party package alike name the contract crate by version and let composition redirect it, and a package that git-depends an internal crate is served by the same machinery. In-tree packages keep a path dep and never touch any of this.
 
 ## Where heavy dependencies belong
 
