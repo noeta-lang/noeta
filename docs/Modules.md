@@ -60,12 +60,14 @@ The walk stops at three kinds of directory, none of which hold your package's so
 | your own, `local/hello` | `[package] root` | `src/deep/nested.noe` | `hello.deep.nested` |
 | your own, `local/hello` | `[package] root` | `src/hello.noe` | `hello` |
 | `geometry = { path = "../geometry" }` | the key | `src/vec.noe` | `geometry.vec` |
+| `para = { package = "para/api" }` | the key | `middleware.noe` | `para.middleware` |
+| `para = [{ package = "para/api" }]` | key + root segment | `middleware.noe` | `para.api.middleware` |
 | `para = [{ package = "para/db" }]` | key + root segment | `query.noe` | `para.db.query` |
 | `para = [{ package = "para/db" }]` | key + root segment | `db.noe` | `para.db` |
 
-**Renaming the key renames the import path.** A dependency's modules derive under the prefix *you* wrote, so keying `para/cli` as `mycli` gives you `mycli.cli.run`, and nothing inside the package can override that. A package's internal file names are still its public API surface, and the *root* they hang under is the consumer's to choose.
+**Renaming the key renames the import path.** A dependency's modules derive under the prefix *you* wrote, so keying `para/cli` as `mycli` gives you `mycli.cli.run`, and nothing inside the package can override that.
 
-**A plain key derives one segment shallower than a scope array.** `para = { package = "para/api" }` makes `middleware.noe` into `para.middleware`, while the array form `para = [{ package = "para/api" }]` makes it `para.api.middleware`, because the array form adds the package's own root segment. Use the array form when several packages of one scope must sit side by side under one root, which is how the first-party `para/*` packages are published. See [the Manifest](Manifest#dependencies--what-the-package-builds-against).
+**A plain key derives one segment shallower than a scope array**, because the array form adds the package's own root segment. Use the array form when several packages of one scope must sit side by side under one root, which is how the first-party `para/*` packages are published. See [the Manifest](Manifest#dependencies--what-the-package-builds-against).
 
 ### Importing your own package's modules
 
@@ -163,7 +165,7 @@ echo customer.name                          // Ada
 
 ## Qualified references
 
-A declaration can also be referenced by a **module-qualified name** at any use site: a struct literal, an annotation, a call, an enum construction or pattern, even a first-class function value. Importing a whole module binds its last segment as a navigable handle, and once a module is in scope its spelled-out fully-qualified name works too:
+A declaration can also be referenced by a **module-qualified name** at any use site. Importing a whole module binds its last segment as a navigable handle, and a module in scope also answers to its spelled-out fully-qualified name:
 
 ```noeta check
 use geometry.vec;                              // the whole module: binds `vec`
@@ -180,23 +182,23 @@ r = match s {
 }
 ```
 
-A whole-module import follows the usual aliasing (`use geometry.vec as gv` → `gv.Vec2`) and merges only `pub` declarations. In `use a.b`, an item `b` exported by module `a` wins over a module named `a.b`.
+A whole-module import aliases as usual (`use geometry.vec as gv` → `gv.Vec2`) and merges only `pub` declarations. In `use a.b`, an item `b` exported by module `a` wins over a module named `a.b`.
 
-**Qualified references require an import.** A file's dependency set stays fully readable from its `use` block, so a spelled-out FQN with no import is a targeted error carrying the exact line to add:
+**Qualified references require an import.** A file's dependency set stays readable from its `use` block, so a spelled-out FQN with no import is an error naming the line to add:
 
 ```text
 [E0019] qualified reference `geometry.vec.Vec2` requires an import — add `use geometry.vec`
 ```
 
-Referencing a non-`pub` declaration by qualified name reports `` `secret` is private to module `geometry.vec` ``.
+A non-`pub` declaration referenced by qualified name reports `` `secret` is private to module `geometry.vec` ``.
 
 **A handle means what its own file imported.** A `use` binds *in one file*, and that holds across packages: a library that writes `use std.http.url` calls `std.http.url` even when the application also depends on a package whose native extension registers a module `url` of its own.
 
-The linker binds every imported unit's handle under its module's qualified identity, so the two files never see each other's handles and a leaf name is never the thing two files compete for. The same is true of an alias (`use std.http.url as codec`), which is honored at run time exactly as the checker reads it.
+An alias (`use std.http.url as codec`) is honored at run time as the checker reads it.
 
-That holds for an imported **type** too, and there the binding and the identity are deliberately two different things. `use std.http.Framing as F` makes `F` the name your file writes, while a value of it still carries `Framing`, the name a native-returned value stamps and the one a pattern compares against. So `F.Sse` builds, matches, and equals the very same variant a file that imported it unaliased builds, and neither file has to know how the other spelled it.
+That holds for an imported **type** too: `use std.http.Framing as F` makes `F` the name your file writes, while a value of it still carries `Framing`, the name a native-returned value stamps and a pattern compares against. `F.Sse` therefore equals the very same variant a file that imported it unaliased builds.
 
-**One name, one meaning.** A value binding may not reuse the local name a `use` binds, so `use geometry.vec` followed by `vec = Holder { … }` is a collision (E0020): rename the binding, or alias the import (`use geometry.vec as gv`). A dotted chain's root is therefore either the module handle or a local, never both. (The same rule governs binders generally, see [no shadowing, E0059](Functions-and-Closures#sealed-functions--the-use--capture-clause).) Type positions are a separate namespace, so a dotted *type* head like `vec.Vec2` never competes with value bindings at all.
+**One name, one meaning.** A value binding may not reuse the local name a `use` binds, so `use geometry.vec` followed by `vec = Holder { … }` is a collision (E0020): rename the binding, or alias the import. (The same rule governs binders generally: [no shadowing, E0059](Functions-and-Closures#sealed-functions--the-use--capture-clause).) Type positions are a separate namespace, so a dotted *type* head like `vec.Vec2` never competes with a value binding.
 
 ## Aliasing an import — `as`
 

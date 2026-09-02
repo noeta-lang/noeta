@@ -408,17 +408,21 @@ noeta serve [OPTIONS] <FILE>
 | `--host <HOST>` | The bind address. `127.0.0.1` serves local-only. | `0.0.0.0` (all interfaces) |
 | `--parallel <N>` | Number of worker isolates to serve across. | `1` |
 
-`fetch` need only *be* a handler. Any top-level binding of that shape serves, so an app that already has a router hands it over directly with `fetch = app.route`. Hot reload works either way, since the swap follows the definitions the handler reaches rather than the name it was bound under.
+`fetch` need only *be* a handler. Any top-level binding of that shape serves, so an app that already has a router hands it over directly with `fetch = app.route`. Hot reload follows the definitions the handler reaches rather than the name it was bound under, so either spelling reloads.
 
 **Ctrl-C** drains gracefully. The server stops accepting, finishes the requests already in flight, closes the listener, and exits. A second Ctrl-C forces an immediate stop.
 
 `noeta serve` accepts plain HTTP and presents no certificate, so terminate TLS upstream in a reverse proxy such as nginx, Caddy or a cloud load balancer. Bind to loopback with `--host 127.0.0.1` when a proxy on the same host is the only thing that should reach it. That applies to inbound connections only: your program's outbound calls speak TLS through `std.http`'s rustls-backed client, so `http.get("https://…")` works with no proxy involved.
 
-`--parallel N` serves across N worker isolates for multi-core throughput. The listener is bound once and each worker inherits a cloned handle to it, so the kernel load-balances connections across cores. All workers share the process and drain together on Ctrl-C.
+The same unchanged `fetch` program also deploys to the edge as a `wasi:http` component. See [WebAssembly & the Edge](WebAssembly-and-the-Edge).
 
-`--parallel --watch` hot-reloads across the whole fleet: a swap broadcasts to every worker's live session, so all cores serve the new code without a restart.
+### `--parallel` — serving across worker isolates
+
+`--parallel N` serves across N worker isolates for multi-core throughput. The listener is bound once and each worker inherits a cloned handle to it, so the kernel load-balances connections across cores. All workers share the process, drain together on Ctrl-C, and take a hot-reload swap together, so all cores serve the new code without a restart.
 
 Reactive and LiveView state is per-worker, since signals and WebSocket subscribers live in the worker that handled the connection. An app whose source of truth is a database serves on every worker, each opening its own connection and draining its own change notifications. An app whose truth is an in-memory signal wants a single worker until its session state is shared.
+
+### `--watch` — rerunning on save
 
 `--watch` works on any command, including `noeta run --watch` and `noeta test --watch`. A file watcher restarts the command on change, and the startup cache puts a restart at a few milliseconds.
 
@@ -428,24 +432,24 @@ The filter is project-wide. Editing an imported module narrows to the entry test
 
 Some edits degrade to a full rerun, with the reason printed: a signature or layout change, a changed top-level statement (fixtures live there), a new or deleted module, a manifest change, and red code. The closure is static, so code reached only through dynamic dispatch is matched best-effort, with method calls on untyped receivers over-approximating by name. Run without the filter occasionally if you lean on reflection-driven dispatch.
 
-`noeta serve --watch` upgrades from restarts to **in-process hot reload**. On each save of the entry file the watcher re-links the project with the same load the boot did, type-checks the whole program, diffs the entry against the running version, and swaps the changed definitions into the live server.
+### Hot reload — `noeta serve --watch`
+
+`noeta serve --watch` upgrades from restarts to **in-process hot reload**. On each save of the entry file the watcher re-links the project with the same load the boot did, type-checks the whole program, diffs the entry against the running version, and swaps the changed definitions into the live server. It re-links rather than re-reading the one file because a module's path derives from its file: inside a package the entry's `fn fetch` is bound as `pkg.main.fetch`, and a fragment carrying the unqualified name would install beside the running handler.
 
 The type-check is transactional. Red code anywhere in the project never swaps: the old version keeps serving, and the diagnostics go to the terminal and to connected LiveView clients as an error overlay.
 
-The watcher re-links rather than re-reading the one file because a module's path derives from its file. Inside a package the entry's `fn fetch` is bound as `pkg.main.fetch`, and a fragment carrying the unqualified name would install beside the running handler.
-
-The state rule is the language behavior to know:
+State across a swap:
 
 - **Reactive state survives edits.** An unchanged `signal(...)`, `cell` or `synced_signal` binding keeps its value across the swap, and effects are disposed and re-created by the new version.
 - **Plain state re-initializes.** Ordinary top-level bindings are re-run from the new source. State that must survive belongs in a signal.
 
+A change the live process cannot absorb, such as a type-layout or signature change or an edit to another project file, falls back to a full restart automatically, with the reason printed (`[hot] restart needed: the layout of type \`P\` changed`). In-flight requests finish on the code they started on either way, and a worker busy with a long request delays a swap rather than missing it.
+
+### LiveView clients during a reload
+
 Connected LiveView clients, running the bundled `server.liveview_js()` shim, are told over their own websocket. A landed swap pushes `{"type":"reload"}` and closes the socket; the page reloads and its fresh session snapshots the preserved signal state, so the browser view carries the same counter through the edit. A rejected edit pushes `{"type":"error",…}`, which the shim renders as a full-screen diagnostics overlay, cleared by the next good frame. Swaps apply immediately even when the server is idle, because the watcher wakes the blocked executor.
 
-A change the live process cannot absorb, such as a type-layout or signature change or an edit to another project file, falls back to a full restart automatically, with the reason printed (`[hot] restart needed: the layout of type \`P\` changed`). After a restart an open browser page reconnects and re-syncs state, and keeps its old markup until refreshed, since the reload push needs a live server to send it.
-
-**Memory during an edit marathon.** A swap is broadcast to every worker through one queue, and its payload is released once the last worker has installed it, leaving about a hundred bytes of ordering bookkeeping per save. A worker busy with a long request delays that release rather than missing the edit. In-flight requests finish on the code they started on, and the rest is reclaimed when the process exits. The [architecture pages](Architecture-and-Pipeline) cover what is retained and why.
-
-The same unchanged `fetch` program also deploys to the edge as a `wasi:http` component. See [WebAssembly & the Edge](WebAssembly-and-the-Edge).
+After a full restart an open page reconnects and re-syncs state, and keeps its old markup until refreshed, since the reload push needs a live server to send it.
 
 ---
 
@@ -661,23 +665,23 @@ noeta add [KEY] (--path <DIR> | --git <URL> --tag <TAG> | --version <REQ>) [--pa
 
 Adds a dependency to the nearest `noeta.toml` through a format-preserving edit that keeps comments and ordering, then resolves the graph so `noeta.lock` reflects it. After resolving, the **committer signal** flags a newly-pulled release whose history introduces committers new to that repo.
 
-The import-root `KEY` may be omitted where it can be derived, from `--package`'s package half or from a `--path` dependency's own `[package]` name. A key that differs from the package's declared root is a deliberate rename and is warned about, since imports then read `use <key>.…`. A key that would capture a built-in import root (`std`, `noeta`, `core`) is refused.
+| Argument | Meaning |
+|---|---|
+| `KEY` | The import root, the name you write after `use`. Derivable from `--package`'s package half, or from a `--path` dependency's own `[package]` name. A key that renames the package's declared root is warned about; one that would capture a built-in root (`std`, `noeta`, `core`) is refused. |
+| `--path <DIR>` | A local source tree, relative to the manifest. |
+| `--git <URL> --tag <TAG>` | A git repository pinned to a tag. |
+| `--version <REQ>` | A registry SemVer requirement, written verbatim: `--version "^0.2"` means exactly `^0.2`. |
+| `--package <company/pkg>` | The registry identity, meaning on each source form what [the manifest reference](Manifest#dependencies--what-the-package-builds-against) says it means. |
 
-**A registry dependency needs no source.** Given a package identity and none of `--path`, `--git` or `--version`, `add` asks the registry that serves that scope for the package's current version and writes a caret requirement for it, so `noeta add para/cli` against a 0.2.0 package writes `{ version = "^0.2", package = "para/cli" }`.
+Give exactly one source, or none. The identity may be the positional argument or `--package`: a `/` cannot occur in an import-root key, so `noeta add para/cli` is unambiguous and derives the key, here `cli`, where `noeta add para --package para/cli` names the key itself.
 
-The identity may be the positional argument or `--package`. A `/` cannot occur in an import-root key, so `noeta add para/cli` is unambiguous and derives the key, here `cli`. Use `--package` alongside an explicit key: `noeta add para --package para/cli`.
+**A registry dependency needs no source.** Given a package identity and none of `--path`, `--git` or `--version`, `add` asks the registry that serves that scope for the package's current version and writes a caret requirement for it, so `noeta add para/cli` against a 0.2.0 package writes `{ version = "^0.2", package = "para/cli" }`. The form is `^<major>.<minor>`, or `^0.0.<patch>` in the `0.0.x` range where SemVer lets every patch break. Auto-selection lands on a released, unyanked version, so depend on a prerelease or a yanked release deliberately, with `--version`. A lookup that cannot be answered, whether the registry is unreachable, the package does not exist, or only prereleases do, reports why and leaves the manifest untouched.
 
-Auto-selection lands on a released, unyanked version. Depend on a prerelease or a yanked release deliberately, with `--version`. The requirement written is `^<major>.<minor>`, or `^0.0.<patch>` in the `0.0.x` range where SemVer lets every patch break, which is the form the manifests in this documentation use and what the lookup's own version resolves back to. A lookup that cannot be answered, whether the registry is unreachable, the package does not exist, or only prereleases do, reports why and leaves the manifest untouched.
+`--package` is checked from both sides. On a `--version` dependency it is the identity resolution needs, and the release it resolves to is checked against it, so a served tree that is not the package it was published as never installs. On `--path` and `--git` it is a claim about the tree the source points at, verified against that package's own `[package] name`: before anything is written for `--path`, so a wrong identity leaves the manifest untouched, and once the repo is fetched for `--git`.
 
-To state the version yourself, give exactly one source: `--path`, `--git` with `--tag`, or `--version`. `--version "^0.2"` means exactly `^0.2`.
+#### Widening a key into a scope array
 
-`--package` applies to every source form, meaning on each what [the manifest reference](Manifest#dependencies--what-the-package-builds-against) says it means. For `--version` it is the registry identity resolution needs, and the release it resolves to is checked against it, so a served tree that is not the package it was published as never installs. For `--path` and `--git` it is a checked claim about the tree the source points at, written into the entry and verified against that package's own `[package] name`.
-
-The two claims are checked at different moments. A `--path` claim is checked before anything is written, so a wrong identity leaves the manifest untouched. A `--git` claim is checked once the repo is fetched, during the resolve.
-
-Adding under a key that is **already in the manifest widens it into a [scope array](Manifest#dependencies--what-the-package-builds-against)**. The existing value and the new one become the first two members of `key = [ … ]`, and a key that is already an array gains a member. Only that one entry is rewritten and the existing member's text is reused verbatim, so member formatting and trailing comments survive.
-
-That is how `noeta add para --package para/aether` followed by `noeta add para --package para/db` binds both packages under one `para` root, which is the form a family published to be addressed as `scope.package.module` needs. Re-adding the identical source is refused, since an array with two equal members would resolve one package twice under one root.
+Adding under a key that is **already in the manifest widens it into a [scope array](Manifest#dependencies--what-the-package-builds-against)**, so `noeta add para --package para/aether` followed by `noeta add para --package para/db` binds both packages under one `para` root. The existing value and the new one become the first two members of `key = [ … ]`, and a key that is already an array gains a member. Only that one entry is rewritten and the existing member's text is reused verbatim, so member formatting and trailing comments survive. Re-adding the identical source is refused, since an array with two equal members would resolve one package twice under one root.
 
 ### `noeta update`
 
@@ -715,7 +719,7 @@ noeta publish --docs-only
 
 Publishes the package in the current directory's `noeta.toml` to the registry. It resolves `--tag`, which defaults to `v<version>`, to its commit SHA, pins that into the index entry, and **signs an attestation** binding *name + version → commit*, so consumers can verify the release independently of trusting the registry.
 
-The release's documentation artifact and its `README.md` ride along by default, and a failure in either degrades to a warning rather than blocking the publish. `--no-docs` and `--no-readme` skip them.
+The release's documentation artifact and its `README.md` ride along by default, and a failure in either warns rather than blocking the publish. `--no-docs` and `--no-readme` skip them.
 
 How it signs. An explicit flag wins, then the environment decides:
 
@@ -727,11 +731,11 @@ How it signs. An explicit flag wins, then the environment decides:
 | A key file exists (`NOETA_SIGNING_KEY` or `./noeta-signing.key`) | **Key-based** Ed25519, recorded as `[signed]`. |
 | None of the above | `[UNSIGNED]`. The release resolves, and consumers have nothing to verify it against. |
 
-`--docs-only` regenerates the release's documentation artifact through the same pipeline a publish runs, which for a native package is the composed-toolchain build and its API-reference extraction, and re-uploads it for a version already in the index. It takes no `--git`, publishes no new version, and carries no provenance; the upload needs the scope's publish token (`NOETA_REGISTRY_TOKEN`) and nothing else. Docs belong to a release, so it refuses when the manifest's version is unpublished. Use it to fix a shelf release whose stored docs are wrong or empty without bumping the version.
+`--docs-only` regenerates the release's documentation artifact through the same pipeline a publish runs, which for a native package is the composed-toolchain build and its API-reference extraction, and re-uploads it for a version already in the index. It takes no `--git`, publishes no new version, and carries no provenance; the upload needs only the scope's publish token (`NOETA_REGISTRY_TOKEN`). Docs belong to a release, so it refuses when the manifest's version is unpublished. It is how a shelf release whose stored docs are wrong or empty is fixed without a version bump.
 
 A published version is **immutable**, and re-publishing the same version with different coordinates is rejected.
 
-Two manifests are rejected at publish. A package with `path` or `git` dependencies is refused because consumers could not resolve them, so depend through the registry. A non-empty [`[patch]` table](Manifest#patch--dev-time-path-overrides) is refused because a patch is a local development-time override that must not travel with a release.
+Two manifests are rejected at publish: one with `path` or `git` dependencies, which consumers could not resolve, so depend through the registry; and one with a non-empty [`[patch]` table](Manifest#patch--dev-time-path-overrides), which is a local development-time override that must not travel with a release.
 
 Publishing to the hosted registry needs `NOETA_REGISTRY_TOKEN`, bound by [`noeta claim`](#noeta-claim). The target index is the one the package's scope routes to, exactly as resolution picks it: a `[registries]` mapping for the scope wins, so a private scope stays off the public registry, then `NOETA_REGISTRY_URL`, then `NOETA_REGISTRY_DIR`'s file-backed local index for offline development and tests, else the built-in hosted registry at `registry.noeta.dev`.
 

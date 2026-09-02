@@ -18,15 +18,15 @@ A manifest with no `[package]` at all describes a **bare script**, which builds 
 
 | Key | Required | Value | Notes |
 |-----|----------|-------|-------|
-| `name` | **yes** | `"company/package"` | Two registry names joined by a single `/`. |
-| `root` | no | `"app"` | The segment this package's modules derive under. Defaults to the `package` half. |
+| `name` | **yes** | `"company/package"` | Two registry names joined by a single `/`. Each half is letters, digits and `_`, with `-` allowed between them. |
+| `root` | no | `"app"` | The segment this package's modules derive under. Must lex as one identifier. Defaults to the `package` half. |
 | `version` | **yes** | SemVer string | A concrete version like `"1.2.0"`, not a range. |
 | `edition` | no | `"2026"` | The language edition. Defaults to the current edition when omitted. |
-| `toolchain` | no | SemVer requirement | The minimum `noeta` this package works with, e.g. `">=0.2"`. |
+| `toolchain` | no | SemVer requirement | The minimum `noeta` this package works with, e.g. `">=0.2"`. Enforced at resolve time, for your own package and for every dependency. |
 | `native` | no | relative directory | Points at this package's native Rust entry crate. See [Native Extensions](Native-Extensions). |
-| `license` | no | SPDX expression | Recorded with the release and bound into its [transparency-log](Package-Provenance) leaf. |
-| `keywords` | no | array of tags | Discovery tags the registry indexes by. |
-| `description` | no | one-line string | The blurb package search shows. |
+| `license` | no | SPDX expression | Checked for SPDX *shape* only: letters, digits and `` .+()- `` up to 120 characters. Recorded with the release and bound into its [transparency-log](Package-Provenance) leaf. |
+| `keywords` | no | array of tags | Up to **5** discovery tags the registry indexes by, each 1–20 characters of lowercase `a–z`, `0–9` and `-`, starting with a letter or digit. Stored deduplicated and sorted. |
+| `description` | no | one-line string | The blurb package search shows: one line, up to 200 characters. |
 
 ```toml
 [package]
@@ -39,23 +39,27 @@ keywords = ["image", "simd"]                 # optional: up to 5 discovery tags
 description = "Fast image effects for Noeta" # optional: one-line search blurb
 ```
 
-**`name`** is a global identity `company/package`, what a registry indexes and a git coordinate resolves to. Each half is a **registry name**: letters, digits and `_`, with `-` allowed between them. It is a coordinate rather than something spelled in source, so it may look like one. `noeta-lang/my-toolkit` is a legal identity, and the `company` half is the scope a forge already knows you by.
+**`name`** is a global identity `company/package`, what a registry indexes and a git coordinate resolves to. It is a coordinate rather than something spelled in source, so it may look like one. `noeta-lang/my-toolkit` is a legal identity, and the `company` half is the scope a forge already knows you by.
 
-**`root`** is the segment this package's own modules derive under, and unlike the identity it is spelled in source. With `root = "app"`, `src/models.noe` is the module `app.models` and the package's own files import it as `use app.models`. It must therefore lex as one identifier.
+**`root`** is the segment this package's own modules derive under, and unlike the identity it is spelled in source. With `root = "app"`, `src/models.noe` is the module `app.models` and the package's own files import it as `use app.models`.
 
 The two keys are separate so that each can be what it is: rename the package and no import changes, and give the package a hyphenated name and its imports stay legal. **Omit `root` and the `package` half is used instead**, which then has to lex as an identifier. A hyphenated identity without a `root` is a manifest error saying exactly that. See [importing your own package's modules](Modules#importing-your-own-packages-modules).
 
-**`toolchain`** declares the minimum `noeta` version the package works with, as a SemVer requirement the running binary's version must satisfy (`toolchain = ">=0.2"`). It is enforced at resolve time, for your own package and for every dependency, so a consumer on an older toolchain gets "requires noeta >=0.2 … run `noeta upgrade`" instead of a compile error deep inside a native build. Omit it and the package makes no claim.
+### `toolchain` — the minimum version a package works with
+
+`toolchain` is a SemVer requirement the running binary's version must satisfy, so a consumer on an older toolchain gets "requires noeta >=0.2 … run `noeta upgrade`" instead of a compile error deep inside a native build. Omit it and the package makes no claim.
 
 The key is a courtesy floor; the compatibility contract itself is the extension ABI. Declare the oldest toolchain you test against, typically the release current when you publish.
 
-The value is a full SemVer requirement, and range (`">=0.2, <0.4"`), tilde, exact and wildcard forms all work. Prefer `>=`: a bare `"0.2"` means caret (`>=0.2.0, <0.3.0`), which imposes an upper bound and would refuse noeta 0.3. A pre-release binary such as `0.3.0-rc.1` matches as its release triple `0.3.0`, so release candidates resolve.
+Range (`">=0.2, <0.4"`), tilde, exact and wildcard forms all work. Prefer `>=`: a bare `"0.2"` means caret (`>=0.2.0, <0.3.0`), which imposes an upper bound and would refuse noeta 0.3. A pre-release binary such as `0.3.0-rc.1` matches as its release triple `0.3.0`, so release candidates resolve.
 
-**`license`** is checked for SPDX shape only, meaning letters, digits and `` .+()- `` up to 120 characters, rather than validated as real SPDX. The claim is the publisher's, since the registry never reads your source, and the SHA-pinned tree's `LICENSE` file is the ground truth. It is part of the immutable release record and bound into the transparency log, so a registry cannot equivocate about what a release declared.
+### `license`, `keywords` and `description` — what the registry shows
 
-**`keywords`** are a set of up to **5** tags, each 1–20 characters of lowercase `a–z`, `0–9` and `-`, starting with a letter or digit. They are stored deduplicated and sorted, so the order you write them, and any repeats, make no difference. One canonical form per tag is what lets a registry group everything tagged `aether` into one listing instead of scattering it across `Aether`, `aether_` and `AEther`. Keywords are discovery metadata and stay out of the transparency-log leaf, where `license` sits, since tampering with one mis-files a package in a listing.
+All three are the publisher's claims, since the registry never reads your source.
 
-**`description`** is a single-line blurb of up to 200 characters, with no line breaks, shown next to your package in search results and on its registry page. Like `keywords` it is discovery metadata, indexed for search and left out of the transparency log. A package without one is still searchable by name and keyword, and has no one-line summary in the results.
+**`license`** is part of the immutable release record and bound into the transparency log, so a registry cannot equivocate about what a release declared. The SHA-pinned tree's `LICENSE` file is the ground truth.
+
+**`keywords`** and **`description`** are discovery metadata, indexed for search and left out of the transparency-log leaf, since tampering with one mis-files a package in a listing. Keywords are stored deduplicated and sorted, so the order you write them, and any repeats, make no difference. One canonical form per tag is what lets a registry group everything tagged `aether` into one listing instead of scattering it across `Aether`, `aether_` and `AEther`. A package with no description is still searchable by name and keyword, and has no one-line summary in the results.
 
 ## `[dependencies]` — what the package builds against
 
@@ -89,23 +93,25 @@ A dependency table names **exactly one** of `path`, `git`, or `version`.
 
 A registry dependency needs a resolvable `package = "company/package"`. That key is also what lets the registry identity differ from the import-root key, as Cargo's `foo = { package = "real" }` does. The bare-string shorthand `dep = "^1.0"` leaves it unset and errors at resolve time.
 
-**`package` on a `path` or `git` dependency is a checked claim.** On a `version` dependency the identity selects the package, since it is what the index is queried for. A `path` or `git` source has already selected its tree, so there the key records which package that source holds, and the resolver verifies it against that package's own `[package] name`.
+### `package` — a checked claim
 
-A claim that disagrees is a manifest error naming both identities and the path. Nothing is inferred from a claim, so a wrong one fails the build rather than redirecting it. A dependency that names no `package` is the ordinary spelling and is unaffected. A dependency directory with no `[package]` table is refused separately, since a path or git dependency's identity and namespace root both come from that table.
+The `package` key means something different on each source form. On a `version` dependency the identity **selects** the package, since it is what the index is queried for. A `path` or `git` source has already selected its tree, so there the key **records** which package that source holds, and the resolver verifies it against that package's own `[package] name`.
 
-The claim earns its place on a scope-array member, described below, where the path alone cannot say which package of the scope you meant.
+A path or git claim that disagrees is a manifest error naming both identities and the path. Nothing is inferred from a claim, so a wrong one fails the build rather than redirecting it. A dependency that names no `package` is the ordinary spelling and is unaffected. A dependency directory with no `[package]` table is refused separately, since a path or git dependency's identity and namespace root both come from that table.
 
-**On a `version` dependency the same key is checked from the other side.** There the identity is the selector: the resolver asked the index for `acme/codec`, and the tree that came back declares itself something else.
-
-That is a supply-chain event rather than a manifest mistake, whether a mis-published release whose coordinates name a commit holding a different package, a corrupted store, or a mirror serving someone else's tree. It is refused as a trust failure naming the release that was selected, the coordinates it was fetched from, and what the tree there says. When `noeta.lock` already pinned that release, the message says the tree changed under the pin.
+On a `version` dependency the check runs from the other side: the resolver asked the index for `acme/codec`, and the tree that came back declares itself something else. That is a supply-chain event rather than a manifest mistake, whether a mis-published release whose coordinates name a commit holding a different package, a corrupted store, or a mirror serving someone else's tree. It is refused as a trust failure naming the release that was selected, the coordinates it was fetched from, and what the tree there says. When `noeta.lock` already pinned that release, the message says the tree changed under the pin.
 
 The version is held to the same rule, because a release is the `(identity, version, commit)` triple a publish attestation signs. A tree declaring a version the index never served is refused rather than pinned in your lockfile. A `[patch]`ed identity is exempt, since it never reached the index; its local tree is checked against the identity it overrides.
 
-**The key is the prefix its modules derive under.** A dependency's module paths are derived from where its files sit, under the key you wrote (see [Modules](Modules#where-a-modules-path-comes-from)). So `codec = { … }` puts a `parse.noe` at `codec.parse`, and renaming the key renames every import path, with nothing inside the package able to override it.
+### The key is the prefix its modules derive under
 
-**A dependency's own internal imports are rewritten to match.** A package's files import each other by its `[package] root`, writing `use codec.parse` inside a package whose root is `codec`, which is what they derive under when the package is built on its own. A consumer's build rewrites that leading segment to whatever prefix the package derives under here. The key is therefore free to be anything, and the package's author never writes it. If you are writing a package, see [importing your own package's modules](Modules#importing-your-own-packages-modules).
+A dependency's module paths are derived from where its files sit, under the key you wrote (see [Modules](Modules#where-a-modules-path-comes-from)). So `codec = { … }` puts a `parse.noe` at `codec.parse`, and renaming the key renames every import path, with nothing inside the package able to override it.
 
-**Scope dependencies.** An array value binds several packages that share one `company` scope under a single import root:
+A dependency's own internal imports are rewritten to match. A package's files import each other by its `[package] root`, writing `use codec.parse` inside a package whose root is `codec`, which is what they derive under when the package is built on its own. A consumer's build rewrites that leading segment to whatever prefix the package derives under here. The key is therefore free to be anything, and the package's author never writes it. If you are writing a package, see [importing your own package's modules](Modules#importing-your-own-packages-modules).
+
+### Scope dependencies — several packages under one root
+
+An array value binds several packages that share one `company` scope under a single import root:
 
 ```toml
 [dependencies]
@@ -115,7 +121,7 @@ acme = [
 ]
 ```
 
-Members may be any source form, mixed freely. Naming `package` pays off on a member sourced from a `path` or `git`: the members of a scope are siblings, and a bare `{ path = "../.." }` beside `{ path = "../../../para-api" }` says nothing about which package of the scope each one is. Write the identity and the manifest says which is which, checked so it stays true:
+Members may be any source form, mixed freely. Naming `package` earns its place on a member sourced from a `path` or `git`: the members of a scope are siblings, and a bare `{ path = "../.." }` beside `{ path = "../../../para-api" }` says nothing about which package of the scope each one is. Write the identity and the manifest says which is which, checked so it stays true:
 
 ```toml
 [dependencies]
@@ -127,9 +133,9 @@ para = [
 
 You do not have to write one by hand: [`noeta add`](The-CLI#noeta-add) under a key that already exists widens that entry into this form, keeping the existing member's text verbatim.
 
-A scope array's members each get the package's own root segment appended to the key, so their modules derive **one segment deeper** than under a plain key. `acme/codec`'s `parse.noe` is `acme.codec.parse` here, where `codec = { package = "acme/codec" }` would make it `codec.parse`. That extra segment is the difference between the two forms, and it is why a family published to be addressed as `scope.package.module`, as the first-party `para/*` set is, is bound with the array form.
+A scope array's members each get the package's own root segment appended to the key, so their modules derive **one segment deeper** than under a plain key. `acme/codec`'s `parse.noe` is `acme.codec.parse` here, where `codec = { package = "acme/codec" }` would make it `codec.parse`. That extra segment is why a family published to be addressed as `scope.package.module`, as the first-party `para/*` set is, is bound with the array form.
 
-The relation runs one way. Several packages may share one root, and **one package may not be bound under two roots**. A package has one identity and its modules derive under one prefix, so a second key would have to be dropped, leaving `use <that key>.…` to fail later as "no module". Two keys naming one identity are refused at resolve time, naming both.
+Several packages may share one root, and **one package may not be bound under two roots**. A package has one identity and its modules derive under one prefix, so a second key would have to be dropped, leaving `use <that key>.…` to fail later as "no module". Two keys naming one identity are refused at resolve time, naming both.
 
 ## `[patch]` — dev-time path overrides
 
@@ -181,7 +187,7 @@ db      = "para/db:migrate"      # `noeta db`, renamed from para/db's `migrate`
 
 ### `[trust.commands]` — contributed subcommands
 
-A dependency that ships CLI commands, as `ExtCommand`s described in [Native Extensions](Native-Extensions#extension-commands), contributes them one binding at a time. Each entry binds one command: the key is the name you will type (`noeta <local>`), and the value is the providing package, optionally followed by `:` and the name that package exported it under.
+A dependency that ships CLI commands as `ExtCommand`s (see [Native Extensions](Native-Extensions#extension-commands)) contributes them one binding at a time. The key is the name you will type (`noeta <local>`); the value is the providing package, optionally followed by `:` and the name that package exported it under.
 
 ```toml
 [trust.commands]
@@ -189,26 +195,20 @@ migrate = "para/db"              # `noeta migrate`, with no rename, so the expor
 db      = "para/db:migrate"      # `noeta db`, which para/db exported as `migrate`
 ```
 
-The binding is the grant. One entry both authorizes the provider to contribute this one command and fixes the name it appears under, so a package is named once, and only a command with an entry is registered.
+The binding is the grant: one entry authorizes the provider to contribute this one command and fixes the name it appears under, and only a command with an entry is registered. Two packages exporting the same command name coexist under different keys, since the local name is yours. The first `:` splits the identity from the exported name, since a package identity always contains a `/` and never a `:`, so the exported half may contain any character, including a space (`remote-add = "acme/tools:remote add"`).
 
-Because the local name is yours, two packages exporting the same command name coexist: bind one of them under a different key. The first `:` splits the identity from the exported name, since a package identity always contains a `/` and never a `:`. The exported half may therefore contain any character, including a space (`remote-add = "acme/tools:remote add"`).
-
-**A binding may take over one of `std`'s commands.** `test`, `bench`, `doc`, and `serve` are contributed through this same mechanism, registered by default because `std` ships with the toolchain, so binding a package under one of those names replaces it:
+**A binding may take over one of `std`'s commands.** `test`, `bench`, `doc`, and `serve` are contributed through this same mechanism and registered by default, so binding a package under one of those names replaces it:
 
 ```toml
 [trust.commands]
 test = "thirdparty/ExcellentTesting"   # `noeta test` is now theirs: their flags, their --help
 ```
 
-The replacement owns the verb completely, so its own arguments and exit codes apply, and `noeta test --json` means whatever the new provider says it means.
+The replacement owns the verb completely: its own arguments and exit codes apply, and `noeta test --json` means whatever the new provider says it means. The **core toolchain verbs** are reserved: `run`, `build`, `check`, `fmt` and their siblings are the compiler, and a binding whose key names one is refused with exit `2`.
 
-The **core toolchain verbs** are reserved. `run`, `build`, `check`, `fmt` and their siblings are the compiler, and a binding whose key names one is refused with exit `2`.
+This table is **root-only** and keyed by full package **identity**, because a capability grant is the top-level project's to make; a dependency's own `[trust.commands]` is not read. [`[directives]`](#directives--where-each-name-comes-from) is per-package and keyed by the using package's own dependency keys; binding `test` there changes what the `@test` directive means at compile time, where binding it here changes which command runs.
 
-Note the difference from [`[directives]`](#directives--where-each-name-comes-from). Binding `test` there changes what the `@test` directive means at compile time, and therefore what `noeta check` verifies; binding it here changes which command runs. A framework that runs your existing `@test` blocks its own way needs only this table.
-
-The two tables differ in scope as well. `[directives]` is per-package and may be keyed by the using package's own dependency keys. This table is **root-only** and keyed by full package **identity**, because a capability grant is the top-level project's to make. A dependency's own `[trust.commands]` is not read.
-
-A bare `commands = ["company/package"]` array, granting every command a package ships at once, is refused with a message naming this table as its replacement.
+A bare `commands = ["company/package"]` array, granting every command at once, is refused with a message naming this table as its replacement.
 
 ### `[trust.advisories]` — per-tier advisory policy
 
