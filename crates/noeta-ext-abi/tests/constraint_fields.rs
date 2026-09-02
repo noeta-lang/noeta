@@ -642,7 +642,7 @@ const TABLE: &[Row] = &[
             ),
         ),
     ),
-    // `assoc_types` (ExtBundle→ExtTrait convergence, slice 1b): the trait's native-derived associated
+    // `assoc_types`: the trait's native-derived associated
     // types. States a RULE — each `Self::Name` a method returns resolves, on a concrete receiver, to
     // the type the implementing type's `AssocDerivation` computes. `seed_ext_traits` reads it and
     // folds every derivation into `trait_assoc[(type, trait)]`; no shipped extension declares a native
@@ -680,7 +680,7 @@ const TABLE: &[Row] = &[
             ),
         ),
     ),
-    // `dispatch` (ExtBundle→ExtTrait convergence, slice 2): the trait's native default-body dispatch.
+    // `dispatch`: the trait's native default-body dispatch.
     // States a RULE — a defaulted method an implementor omits is answered by the TRAIT itself, through
     // this shared ctx dispatch (receiver as slot 0), rather than the receiver's own dispatch. Both
     // backends route it via `Registry::dispatch_trait_method`; no shipped extension declares a native
@@ -696,7 +696,7 @@ const TABLE: &[Row] = &[
             ),
         ),
     ),
-    // `self_constraint` (ExtBundle→ExtTrait convergence, slice 3): the trait's structural `Self`-shape
+    // `self_constraint`: the trait's structural `Self`-shape
     // constraint — the third capability a bundle had that a trait lacked. States a RULE: a native trait
     // carrying one may only be `impl`-ed for a `@packed` struct whose fields match the
     // `PackedConstraint`, or the impl is E0015 — the SAME shape check (shared `check_packed_self_constraint`)
@@ -737,7 +737,7 @@ const TABLE: &[Row] = &[
         "has_default",
         Data(Anchor(CHECK_PRELUDE, "fn synth_trait_decl(")),
     ),
-    // `receiver` (ExtBundle→ExtTrait fold-in, slice 4; `Static` from the static-trait-methods arc):
+    // `receiver`:
     // which receiver carries a trait method — `Self` (Element), `List<Self>` (Bulk, the accepted
     // dual-receiver asymmetry), or NONE (Static, the native spelling of a `.noe` trait's `static fn`).
     // States a RULE about which receiver a method is reachable on: `bundle_method_call` reads it to
@@ -759,7 +759,7 @@ const TABLE: &[Row] = &[
         ),
     ),
     // --- PackedConstraint (a kernel trait's structural `Self`-constraint, `ExtTrait::self_constraint`)
-    // Since the ExtBundle→ExtTrait fold-in (slice 4) the constraint lives on the trait, not a bundle;
+    // The constraint lives on the trait, not a bundle;
     // it is validated at the `impl vec.Kernels for T {}` site by the same `constraint_mismatch` core.
     Row(
         "PackedConstraint",

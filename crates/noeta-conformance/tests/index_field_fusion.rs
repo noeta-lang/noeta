@@ -1,4 +1,4 @@
-//! P-PACK 2.5+ — proof that a `list[i].field` read actually *fuses* into a single `Rvalue::IndexField`
+//! Proof that a `list[i].field` read actually *fuses* into a single `Rvalue::IndexField`
 //! when the checker marks it, rather than silently falling back to the unfused `Index` + `Field` pair.
 //!
 //! The conformance corpus + differential already prove the fused op is *correct* (it reads exactly

@@ -64,8 +64,8 @@ impl Checker {
                 // One shared classifier decides what every `use` target binds — so the checker, the
                 // compiler, and the eval reference never diverge on whether a name is a module, a
                 // namespace group, a member function, a type, or an error (the check/run divergence
-                // this closes). `UnknownUnderRoot` stays lenient in this slice (except the existing
-                // member-function-miss diagnostic); slice 2 tightens it to a hard E0019.
+                // this closes). A known extension root is fully enumerable, so a `use` target that
+                // names nothing under it is a hard `E0019`.
                 let kind = self.reg().classify_use(path, &name.name);
                 // Every `use` binds its local name **in this file**, so a later binding of the same
                 // name there is E0059 — and a binding of that name in some *other* module of the

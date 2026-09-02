@@ -400,7 +400,7 @@ pub enum TokenKind {
     /// `@`, introducing a codegen directive (`@derive(...)`).
     #[token("@")]
     At,
-    /// The **verbatim body** of a `@doc { … }` text tier (object-model slice 6f): the raw source
+    /// The **verbatim body** of a `@doc { … }` text tier: the raw source
     /// between the braces, captured without tokenizing it (so arbitrary prose/markdown never
     /// produces lex errors). Never produced by `logos` — it is synthesized by [`lex`] when it sees a
     /// `@doc {`; the literal pattern here is an unmatchable sentinel (NUL bytes never occur in
@@ -891,7 +891,7 @@ pub struct Lexed {
 }
 
 /// The set of tier names whose `@<name> { … }` bodies are **verbatim text** rather than code
-/// (text tiers, object-model slice 6f generalized by the text-tiers arc). The lexer captures a
+/// (text tiers). The lexer captures a
 /// member's body as one [`TokenKind::DocText`] token instead of tokenizing it, so arbitrary
 /// prose/markup never produces lex errors.
 ///
@@ -1021,7 +1021,7 @@ fn lex_pass(source: &Source, collect_trivia: bool, text_tiers: &TextTiers) -> Le
                 }
             }
             Ok(TokenKind::LBrace) if opens_text_block(text, &tokens, text_tiers) => {
-                // A text-tier `@<name> {` (object-model slice 6f, generalized): capture the
+                // A text-tier `@<name> {`: capture the
                 // brace-delimited body **verbatim** as one `DocText` token instead of tokenizing
                 // it, so arbitrary prose/markup never produces lex errors. Emit `{`, the raw body,
                 // and `}`, then advance the lexer past the whole span. The body's braces must
@@ -2449,7 +2449,7 @@ mod tests {
 
     #[test]
     fn doc_block_body_is_captured_verbatim() {
-        // `@doc { … }` (object-model slice 6f): the body is captured as one `DocText` token instead
+        // `@doc { … }`: the body is captured as one `DocText` token instead
         // of being tokenized, so arbitrary prose — `#`, `*`, `"` quotes, `$`, even a balanced code
         // snippet `{ … }` — produces no lex errors. The tokens are `@ doc { <DocText> }`.
         let (source, lexed) =

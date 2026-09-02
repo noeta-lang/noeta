@@ -1,4 +1,4 @@
-// Browser-engine smoke test (P-WASM W2.1): instantiate the wasm32-unknown-unknown cdylib the way
+// Browser-engine smoke test: instantiate the wasm32-unknown-unknown cdylib the way
 // the playground's Web Worker does — the plain WebAssembly API, no bundler, no wasm-bindgen — and
 // drive check/run/fmt through the hand-rolled ABI. Run by the CI wasm job (and by hand):
 //

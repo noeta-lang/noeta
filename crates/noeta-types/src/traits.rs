@@ -105,7 +105,7 @@ pub enum BuiltinTrait {
     /// the one method is the whole point), and `via:` does not delegate it. Beyond presence +
     /// arity, the checker pins the return shape to
     /// `Result<void, string | Error>` (E0015 otherwise), so both the `?`-conversion path and the
-    /// recipe-seam auto-enforcement (validation arc slice 2) can rely on it. When a
+    /// recipe-seam auto-enforcement can rely on it. When a
     /// `Validate`-implementing struct is materialized by a recipe door (`json.parse::<T>` /
     /// `try_parse` / `decode_typed`), its `validate` runs automatically bottom-up on the built
     /// value; a rejection aborts or is threaded into the door's error channel.

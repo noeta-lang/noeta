@@ -202,7 +202,7 @@ const KIT_CTX_FNS: &[ExtFn] = &[
 ];
 
 /// Little-endian bytes of an `int` (i64) field — the packing the VM/tree-walker use for an `int`
-/// packed field (P-PACK 3.2b).
+/// packed field.
 fn push_i64(buf: &mut Vec<u8>, n: i64) {
     buf.extend_from_slice(&n.to_le_bytes());
 }

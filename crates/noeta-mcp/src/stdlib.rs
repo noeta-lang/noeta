@@ -54,9 +54,8 @@ pub struct ModuleApi {
 /// This used to be `BundleApi`, and listed only traits carrying a structural constraint — the
 /// kernel "bundles". That filter made every ordinary native trait invisible to an agent:
 /// `para.crdt.Mergeable`, whose required `merge` is the entire contract a CRDT type signs, was in
-/// no MCP answer at all. A bundle is not a different thing from a trait — the ExtBundle→ExtTrait
-/// fold-in unified them in the ABI — it is a trait that additionally constrains `Self`'s shape,
-/// which is what [`TraitApi::constraint`] being an `Option` says.
+/// no MCP answer at all. A bundle is a trait that additionally constrains `Self`'s shape, which is
+/// what [`TraitApi::constraint`] being an `Option` says.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct TraitApi {
     /// The trait's surface name, e.g. `Kernels`, `Mergeable`.

@@ -50,7 +50,7 @@ noeta-stdlib = { workspace = true }
 noeta-fmt = { workspace = true }
 # For the `Setter` trait — the salsa-generated `set_text` on `SourceProgram` needs it in scope.
 salsa = { workspace = true }
-# The language-guide corpus (docs-browser slice 2): `docs/*.md` embedded at build time, so the docs
+# The language-guide corpus: `docs/*.md` embedded at build time, so the docs
 # browser serves the guides with no repo beside the binary — the one canonical loader both `noeta
 # lsp` and `noeta mcp` read (the MCP `docs_*` tools delegate here).
 include_dir = { workspace = true }

@@ -1,13 +1,11 @@
-//! **Native trait structural `Self`-constraint** (ExtBundle→ExtTrait convergence, slice 3): a native
-//! trait carries a `PackedConstraint` on its implementing type — the THIRD and last capability an
-//! `ExtBundle` had that a trait lacked (after associated types in 1a/1b and native default bodies in
-//! 2). A bundle only binds a `@packed` struct whose fields match its constraint; slice 3 gives a
-//! trait that same shape check as a first-class `Self`-constraint, enforced at the user `impl` site by
-//! the SAME `check_packed_self_constraint` core the bundle path runs.
+//! **Native trait structural `Self`-constraint**: a native trait carries a `PackedConstraint` on
+//! its implementing type. It binds a `@packed` struct only when that struct's fields match the
+//! constraint, enforced at the user `impl` site by
+//! `check_packed_self_constraint`.
 //!
 //! The design deliberately reuses `PackedConstraint` (not a fresh marker-trait predicate) because the
 //! constraint pins the implementing type's uniform **element**, which the trait's native-derived
-//! associated types (slice 1b) then derive from. This fixture proves the two agree on that element:
+//! associated types then derive from. This fixture proves the two agree on that element:
 //!
 //! The fixture: a native trait `Lanes` carries `self_constraint = AnyNumeric + Uniform { min: 2 }`
 //! (a uniform numeric vector of ≥2 fields) AND `type Wide` (`Widen`), with a method `sum(): Self::Wide`.
@@ -287,7 +285,7 @@ fn check_diagnostics(program: &str) -> Vec<String> {
 /// advertises `Lanes`, whose `self_constraint` its uniform `int` element satisfies; the SAME element
 /// feeds `type Wide` (`Widen → int`). `v.sum()` is used where an `int` is required, so the program
 /// checks clean ONLY IF `Self::Wide` resolved to `int` — and both backends must build identical
-/// output. A self-constraint on the trait does not disturb the assoc resolution slice 1b established.
+/// output. A self-constraint on the trait does not disturb the assoc uses.
 #[test]
 fn a_self_constrained_native_trait_still_resolves_its_associated_type() {
     const PROGRAM: &str = r#"

@@ -1,6 +1,6 @@
 # noeta-wasm-serve
 
-The edge-serve component (P-WASM W4): unchanged `http.serve` programs running on `wasmtime serve`-class platforms as a `wasi:http/incoming-handler` component.
+The edge-serve component: unchanged `http.serve` programs running on `wasmtime serve`-class platforms as a `wasi:http/incoming-handler` component.
 
 - **Takes in:** an inbound HTTP request, invoked per request by the host platform.
 - **Emits:** an HTTP response, by running the embedded program on a `WasiHost` armed with a one-request inbound script.

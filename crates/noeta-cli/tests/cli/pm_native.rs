@@ -412,7 +412,7 @@ fn fx_info_run(_ctx: &mut dyn CommandCtx, _args: &ParsedArgs) -> u8 {
 // A third-party METHOD BUNDLE: the consumer's own @packed pixel type opts in
 // with `impl fx.Pixels for Px {}` and gains `ps.brighten(delta)` — same COW raw-buffer kernel as
 // `fx.brighten_all`, in method position, statically routed through the composed toolchain.
-// Since the ExtBundle→ExtTrait fold-in a method bundle is a native `ExtTrait`, namespaced
+// A method bundle is a native `ExtTrait`, namespaced
 // to the qualified module (`imgfx.fx`) so `impl fx.Pixels for Px {}` resolves through the surface
 // adapter (`resolve_bundle_ref` → `find_trait_in_module`).
 const PIXELS_BUNDLE: ExtTrait = ExtTrait {

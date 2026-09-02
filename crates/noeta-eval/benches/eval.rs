@@ -69,8 +69,8 @@ fn struct_fields_src(n: usize) -> String {
 
 /// A `List<packed>` workload: build an `n`-element list literal of a `Vec3`, then index every
 /// element and sum its three fields. When the element type is `@packed` the list is stored as one
-/// flat raw-primitive buffer (P-PACK 2.3); the plain-`struct` variant stores `n` boxed objects. Each
-/// `data[i].field` read **fuses** to a single field decode (P-PACK 2.5+) — the packed list reads one
+/// flat raw-primitive buffer; the plain-`struct` variant stores `n` boxed objects. Each
+/// `data[i].field` read **fuses** to a single field decode — the packed list reads one
 /// word with no element object materialized, so this measures the scalar-access win the flat layout
 /// otherwise left on the table (2.3/2.4 were ~10% *slower* here than boxed; with fusion the gap is
 /// largely closed on eval and the VM flips to a win — see `crates/noeta-vm/benches/vm.rs`). The peak

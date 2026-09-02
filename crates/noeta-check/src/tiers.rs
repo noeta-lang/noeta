@@ -2696,7 +2696,7 @@ mod tests {
     }
 
     /// The white-box relaxation is **scoped**: ordinary same-module code (not a dev-tier fn) still
-    /// cannot read a private field — it is an E0035, exactly as before slice 6d.
+    /// cannot read a private field — it is an E0035.
     #[test]
     fn ordinary_fn_cannot_read_private_field() {
         let program = parse_program(

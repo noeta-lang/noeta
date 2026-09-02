@@ -349,8 +349,7 @@ pub enum Type {
     /// that the vector holds **≥2 distinct, non-`dyn`, non-`Union` members** (flattened, deduped;
     /// a `dyn` member absorbs the whole thing; a singleton collapses to the bare member).
     Union(Vec<Type>),
-    /// A **tuple** `(A, B, …)` — a fixed-arity, heterogeneous, positional value type (object-model
-    /// slice 4). Always ≥2 elements (a 1-tuple is unrepresentable in the surface — `(T)` is a
+    /// A **tuple** `(A, B, …)` — a fixed-arity, heterogeneous, positional value type. Always ≥2 elements (a 1-tuple is unrepresentable in the surface — `(T)` is a
     /// parenthesized type — and `()` is `unit`). Subtyping is element-wise covariant.
     Tuple(Vec<Type>),
     /// A **trait object** `dyn Trait` (L1 user traits, UT4): the abstract supertype of every type
@@ -904,7 +903,7 @@ impl Type {
             TypeRef::DynTrait { trait_name, .. } => Type::DynTrait(trait_name.to_string()),
             // `Self::Name` with no resolution context (a `dyn` receiver, or any site lacking the
             // impl's binding map) degrades to a gradual hole — the associated type never enters the
-            // lattice (slice 1a). A concrete receiver's projection is baked at collect *before* this
+            // lattice. A concrete receiver's projection is baked at collect *before* this
             // conversion, so it never reaches here as a projection.
             TypeRef::AssocProjection { .. } => Type::Unknown,
             TypeRef::Named { name, args, .. } => {

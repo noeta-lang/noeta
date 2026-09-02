@@ -333,7 +333,7 @@ const TABLE: &[Row] = &[
         "name",
         Unqualified(
             "`Self::Name` resolves per-impl at the checker, from the impl's binding — never \
-             through the module map (slice 1a)",
+             through the module map",
         ),
     ),
     // ---- StrPart --------------------------------------------------------------------------

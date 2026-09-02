@@ -1,7 +1,6 @@
-//! **Native-derived trait associated types** (ExtBundle→ExtTrait convergence, slice 1b): a native
-//! trait declares an associated type whose concrete `Type` is *derived from the implementing type's
-//! element* — the `AssocDerivation` mechanism that generalizes the bundle ABI's element-relative
-//! returns (`RetTy::ElemWide`/`ElemFloat`) into a first-class trait contract.
+//! **Native-derived trait associated types**: a native trait declares an associated type whose
+//! concrete `Type` is *derived from the implementing type's element* — the `AssocDerivation`
+//! mechanism that carries element-relative returns as a first-class trait contract.
 //!
 //! The fixture: a native trait `Reduce` declares `type Wide` (`Widen`), `type Mag` (`FloatPromote`),
 //! and methods `sum(): Self::Wide`, `length(): Self::Mag`, `widen_all(): List<Self::Wide>`. A native
@@ -10,7 +9,7 @@
 //! "Reduce")]` — `Wide → int` (widen of i64 is identity), `Mag → float` (int promotes to f64). A
 //! concrete `v.length()` then resolves `Self::Mag` to `float`, `v.sum()` to `int`, and
 //! `v.widen_all()` to `List<int>` — through the SAME `trait_assoc` table a `.noe` `type Item = …`
-//! binding uses (slice 1a).
+//! binding uses.
 //!
 //! **The load-bearing property** is that the derived type is the RESOLVED type, not a `dyn` hole: the
 //! differential test uses each result in a type-constrained position (a `float`/`int`/`List<int>`
@@ -87,7 +86,7 @@ const REDUCE: ExtTrait = ExtTrait {
         },
     ],
     dispatch: None,
-    // No structural `Self`-constraint (slice 3): `Reduce` binds any implementing type; the
+    // No structural `Self`-constraint: `Reduce` binds any implementing type; the
     // constraint path is exercised by `ext_self_constraint_seam.rs`.
     self_constraint: None,
     ..ExtTrait::DEFAULTS

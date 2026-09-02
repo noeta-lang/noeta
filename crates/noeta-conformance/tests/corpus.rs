@@ -228,7 +228,7 @@ fn both_front_ends_run_the_same_corpus_programs() {
     });
 }
 
-/// The bundle gate (P-AOT L1.0 + L1.3): every module the VM compiles must survive a
+/// The bundle gate: every module the VM compiles must survive a
 /// serialize→deserialize→serialize round-trip byte-for-byte (structural), *and* the decoded module
 /// must run byte-identically to the source-compiled one on the sandbox (execution) — the two
 /// preconditions for shipping a `.noeb` bundle instead of source.

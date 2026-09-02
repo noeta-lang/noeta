@@ -14,7 +14,7 @@ noeta-ast = { workspace = true }
 noeta-diagnostics = { workspace = true }
 noeta-backend = { workspace = true }
 noeta-bytecode = { workspace = true }
-# Optional (native-size slice 2): the compiler is only needed to turn *source* into bytecode at
+# Optional: the compiler is only needed to turn *source* into bytecode at
 # runtime — the REPL/debug-console/hot-reload machinery (`compile`, `SessionCompiler`, hotswap
 # `SwapPlan`). A shipped `--native`/AOT binary runs a *pre-compiled* stapled bundle and never
 # compiles, so it builds `noeta-vm` without `compile` and sheds noeta-compiler → noeta-check →
@@ -42,7 +42,7 @@ noeta-jit = { workspace = true, optional = true }
 noeta-jit-abi = { workspace = true, optional = true }
 
 [features]
-# Default-on (native-size slice 2). Turns *source → bytecode* compilation on inside the VM: the
+# Default-on. Turns *source → bytecode* compilation on inside the VM: the
 # `compile` convenience, the debug-console/REPL `SessionCompiler`, and hot-reload (`SwapPlan`,
 # `install_fragment`). Pulls noeta-compiler (→ noeta-check, noeta-ir). A run-only artifact — the AOT
 # runtime staticlib — builds with `default-features = false` and omits this, so the whole compiler
@@ -53,7 +53,7 @@ compile = ["dep:noeta-compiler"]
 # and the interpreter/sandbox/differential are byte-identical — the same gating the real-thread
 # isolates use. `noeta-conformance` turns it on to run the `--jit-differential` oracle.
 jit = ["dep:noeta-jit", "dep:noeta-jit-abi", "jit-rt"]
-# P-AOT L3.4 A2: run pre-compiled native bodies WITHOUT the Cranelift compiler. An ahead-of-time
+# Run pre-compiled native bodies WITHOUT the Cranelift compiler. An ahead-of-time
 # binary binds a static dispatch table and never JIT-compiles (`run_module_aot` runs with
 # `self.jit == None`), so it needs only the runtime support — the `noeta_jit_*` helpers (exported
 # under their canonical C names), the per-proto dispatch tables, and the AOT dispatch binding — not

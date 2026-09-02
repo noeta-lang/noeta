@@ -1,9 +1,7 @@
-//! **Native trait default bodies** (ExtBundle→ExtTrait convergence, slice 2): an extension declares
-//! a real language **trait** whose method carries `has_default: true` AND a trait-level default-body
-//! `dispatch` (a [`CtxTypeDispatch`], the receiver as slot 0 — the same shape [`ExtBundle`] uses). A
-//! type that does not itself provide the method adopts the **trait's** native body; a type that does
-//! provide it overrides. This is the second capability a bundle had that a trait lacked, re-homed onto
-//! the trait — a fully-defaulted native trait now behaves like a bundle bind while still permitting an
+//! **Native trait default bodies**: an extension declares a real language **trait** whose method
+//! carries `has_default: true` AND a trait-level default-body `dispatch` (a [`CtxTypeDispatch`],
+//! the receiver as slot 0). A type that does not itself provide the method adopts the **trait's**
+//! native body; a type that does provide it overrides. A fully-defaulted native trait still permits an
 //! override, strictly more capable than the must-be-empty bundle.
 //!
 //! The differential oracle cannot reach this (std declares no native trait with a default dispatch), so
@@ -17,7 +15,7 @@
 //!   adopts the same native default — the bundle-bind analogue made a trait.
 //! - **Source (1) — override:** a native `Chip2` that DECLARES `tag` wins over the trait default.
 //! - **Source (3) — `.noe` default hoist intact:** a `.noe` trait's default body still hoists onto an
-//!   empty impl, unchanged by slice 2.
+//!   empty impl.
 //!
 //! Integration test (own process) because the fixture installs into the process-global default
 //! registry once — the single-registry path the CLI uses.
@@ -405,7 +403,7 @@ impl Gadget for Ov {
 o = Ov { n: 1 }
 echo o.tag()
 
-// Source (3): a `.noe` trait's default body still hoists onto an empty impl (unchanged by slice 2).
+// Source (3): a `.noe` trait's default body still hoists onto an empty impl.
 trait Widget2 {
     fn label(): string {
         return "w2:${self.n}"

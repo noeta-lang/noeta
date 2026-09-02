@@ -137,9 +137,9 @@ const WIDGET: ExtTrait = ExtTrait {
     // No associated types (the native-derived assoc path is exercised by `ext_assoc_seam.rs`).
     assoc_types: &[],
     // No native default-body dispatch — `describe` is required (has_default: false); the trait-default
-    // path (slice 2) is exercised by `ext_trait_default_seam.rs`.
+    // path is exercised by `ext_trait_default_seam.rs`.
     dispatch: None,
-    // No structural `Self`-constraint (slice 3) — exercised by `ext_self_constraint_seam.rs`.
+    // No structural `Self`-constraint — exercised by `ext_self_constraint_seam.rs`.
     self_constraint: None,
     ..ExtTrait::DEFAULTS
 };

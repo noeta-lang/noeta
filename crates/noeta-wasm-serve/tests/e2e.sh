@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The wasi:http serve e2e (P-WASM W4): `noeta build --serve` a real handler program, run the
+# The wasi:http serve e2e: `noeta build --serve` a real handler program, run the
 # component under `wasmtime serve`, and assert a live HTTP round trip. Run by the CI `wasm` job
 # (and by hand from the workspace root — needs the wasm32-wasip2 target and wasmtime on PATH).
 set -euo pipefail

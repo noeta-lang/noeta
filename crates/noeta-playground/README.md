@@ -1,6 +1,6 @@
 # noeta-playground
 
-The in-browser toolchain (P-WASM W2.1) — the engine behind the noeta.dev playground.
+The in-browser toolchain — the engine behind the noeta.dev playground.
 
 - **Takes in:** `.noe` source text as a UTF-8 string, across a hand-rolled `(ptr, len)` wasm ABI (see `abi.rs`; no `wasm-bindgen`).
 - **Emits:** JSON strings — [`check_source`] (diagnostics), [`run_source`] (stdout/exit code/diagnostics/traceback), and `fmt_source` (canonical formatting) — plus IDE operations (`hover_source`, `complete_source`, `definition_source`, `signature_source`) and a debug session (`debug_source`).

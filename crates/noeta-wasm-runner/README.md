@@ -1,6 +1,6 @@
 # noeta-wasm-runner
 
-The wasm runner (P-WASM W1.1/W1.2): a `wasm32-wasip1` binary that runs a `.noeb` bundle on the bytecode VM.
+The wasm runner: a `wasm32-wasip1` binary that runs a `.noeb` bundle on the bytecode VM.
 
 - **Takes in:** either an embedded bundle stapled into the binary's own data section (`noeta build --wasm`), or a WASI-preopened `.noeb` file passed on argv (`wasmtime --dir . noeta-wasm-runner.wasm app.noeb`).
 - **Emits:** the wasm analogue of a `noeta build --exe` artifact — VM on embedded bytecode, no compiler, no source.

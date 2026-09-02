@@ -57,7 +57,7 @@ pub struct Shape {
     /// never wrongly ordered.
     pub variant_index: Option<u32>,
     /// Whether `==` on this type is **structural** (field-wise) rather than **reference identity**
-    /// (object-model slice 2). True for every value kind (`struct`/`enum`/opaque) and for a
+    /// True for every value kind (`struct`/`enum`/opaque) and for a
     /// reference `class` that is `Equatable` (derives it or hand-`impl`s `eq`); false only for a
     /// plain `class` with no `Equatable`, whose `==` falls back to identity (*same instance*). A
     /// derived property of the named type — deliberately **excluded from equality/hashing** below
@@ -305,7 +305,7 @@ impl PackedSchema {
 pub enum PackedKind {
     Int,
     Float,
-    /// A 32-bit float field (P-PACK Phase 3) — **4 bytes** (slice 3.2b), half an `int`/`float`.
+    /// A 32-bit float field — **4 bytes**, half an `int`/`float`.
     F32,
     /// An explicit 64-bit float field `f64` (packed-widths arc) — **8 bytes**, storage-identical to
     /// `Float` but a distinct kind so packed reflection can report `f64` rather than `float`.

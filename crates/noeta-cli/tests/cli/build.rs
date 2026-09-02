@@ -513,7 +513,7 @@ fn aot_runtime_does_not_link_the_compiler_frontend() {
         assert!(
             !tree.contains(forbidden),
             "the AOT runtime must not link `{}` — a run-only artifact carries no compiler front-end \
-             (native-size slice 2). Graph:\n{tree}",
+            . Graph:\n{tree}",
             forbidden.trim_end_matches(" v")
         );
     }

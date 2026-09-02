@@ -124,10 +124,10 @@ fn int_list(n: usize) -> String {
     s
 }
 
-/// A `List<packed>` workload (P-PACK 2.4): build an `n`-element list literal of a `Vec3`, then index
+/// A `List<packed>` workload: build an `n`-element list literal of a `Vec3`, then index
 /// every element and sum its three fields. With `@packed` the VM stores the list as one flat
 /// raw-primitive buffer; the plain-`struct` variant stores `n` boxed objects. Each `data[i].field`
-/// read **fuses** to a single `Op::IndexField` (P-PACK 2.5+): the packed list decodes one word with
+/// read **fuses** to a single `Op::IndexField`: the packed list decodes one word with
 /// no element object materialized. This was the scalar-access cost the flat layout otherwise paid —
 /// 2.4 was ~1.55× *slower* here than boxed; fusion eliminated that, making packed scalar access ~3–4%
 /// *faster* than boxed (and the boxed path itself ~7–10% faster, from one op replacing index+load).
@@ -153,7 +153,7 @@ fn packed_list_src(n: usize, packed: bool) -> String {
     )
 }
 
-/// A `List<packed>` **producer** workload (P-PACK 2.6): build the list, run it through a selection
+/// A `List<packed>` **producer** workload: build the list, run it through a selection
 /// producer (`op` over `data`), then index + sum a field over the result. With `@packed` the VM keeps
 /// the result flat — copying the kept elements' words — instead of allocating `n` boxed objects; the
 /// plain-`struct` variant materializes a boxed result. The producer + downstream scalar read are timed
@@ -183,7 +183,7 @@ fn packed_producer_src(n: usize, packed: bool, op: &str) -> String {
     )
 }
 
-/// A serialization workload (P-PACK 4.4): build an `n`-element packed `List<Vec3<f32>>` and serialize
+/// A serialization workload: build an `n`-element packed `List<Vec3<f32>>` and serialize
 /// it, either as raw `bytes` (`.to_bytes()` — an O(n) copy of the flat buffer) or as JSON
 /// (`json.stringify` — per-element formatting + a growing string). Timed side by side: the binary
 /// path is ~7× faster end-to-end (192µs vs 1.47ms at n=1k, 782µs vs 5.66ms at n=4k) — and the
@@ -214,7 +214,7 @@ fn serialize_src(n: usize, binary: bool) -> String {
 /// autovectorized loop over them (`noeta_stdlib::vec3::add_buffers`); the plain-`struct` variant misses
 /// the packed fast path and takes the scalar fallback (materialize each element, add, rebuild). The
 /// two are timed side by side: the flat-buffer kernel is ~1.8–2× faster (383µs vs 733µs at n=1k,
-/// 1.52ms vs 3.10ms at n=4k, with the P-PACK 4.3 byte-direct kernel) — it avoids the N element
+/// 1.52ms vs 3.10ms at n=4k, with the byte-direct kernel) — it avoids the N element
 /// materializations and runs an autovectorizable `f32` loop over contiguous data.
 fn vec_add_all_src(n: usize, packed: bool) -> String {
     let kw = if packed { "@packed struct" } else { "struct" };

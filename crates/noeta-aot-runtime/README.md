@@ -1,6 +1,6 @@
 # noeta-aot-runtime
 
-The **AOT runtime** (P-AOT L3.2b(3)): the static library a `noeta build --native` program links against to become a self-contained native executable.
+The **AOT runtime**: the static library a `noeta build --native` program links against to become a self-contained native executable.
 
 - **Takes in:** a stapled bundle (a compiled `Module` appended to the linked binary, the L2 mechanism) plus a linker-resolved `noeta_aot_dispatch` table of native prototype bodies.
 - **Emits:** a C-ABI `main` entry (`libnoeta_aot.a`) that decodes the bundle, binds the dispatch table into the VM's per-prototype entry tables, and runs — eligible prototypes dispatch straight to native code, the rest interpret.

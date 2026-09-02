@@ -1,6 +1,6 @@
 # noeta-bundle
 
-The `.noeb` bundle container (P-AOT L1.1): a versioned envelope around a serialized `noeta_bytecode::Module`, so a compiled program can be shipped and run without its `.noe` source.
+The `.noeb` bundle container: a versioned envelope around a serialized `noeta_bytecode::Module`, so a compiled program can be shipped and run without its `.noe` source.
 
 - **Takes in:** a `Module` (from `noeta-bytecode`).
 - **Emits:** the `.noeb` byte format (`write`/`read`), plus [`staple`]/[`extract_stapled`]/[`stapled_len`] for appending a bundle onto a copy of the runtime binary to make a single self-contained executable.

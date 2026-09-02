@@ -6,7 +6,7 @@
 //! found by reading, not by a failing test, because the conformance corpus **structurally cannot
 //! reach** the code: the corpus runs programs against the *std* extension, and std declares these
 //! fields either trivially or not at all. `Inspect` is std's only `ExtDerive` and its `validate` is
-//! `None`; both shipped `ExtBundle`s declare `ConstraintLayout::Any`. So "the corpus is green" says
+//! `None`; the shipped constrained traits declare `ConstraintLayout::Any`. So "the corpus is green" says
 //! exactly nothing about the enforcement written for those fields — the gap that let the argument
 //! contract's diagnostics ship untested.
 //!
@@ -325,8 +325,7 @@ const FX_TRAITS: &[ExtTrait] = &[
         self_constraint: None,
         ..ExtTrait::DEFAULTS
     },
-    // A **native trait carrying a structural `Self`-constraint** (ExtBundle→ExtTrait convergence,
-    // slice 3) — the field under test. `Packable` may only be `impl`-ed for a `@packed` struct that
+    // A **native trait carrying a structural `Self`-constraint** — the field under test. `Packable` may only be `impl`-ed for a `@packed` struct that
     // is a **uniform numeric vector of ≥2 fields** (`AnyNumeric` + `Uniform { min: 2 }`), exactly the
     // shape a bundle bind requires. No shipped extension declares a native trait with a
     // self-constraint, so the checker's `check_packed_self_constraint` arm has never run for a trait
@@ -354,7 +353,7 @@ const FX_TRAITS: &[ExtTrait] = &[
         }),
         ..ExtTrait::DEFAULTS
     },
-    // The two migrated **kernel traits** (ExtBundle→ExtTrait fold-in, slice 4), namespaced to the
+    // The two migrated **kernel traits**, namespaced to the
     // qualified module `fx.kern` so `impl kern.Cols`/`impl kern.Num` resolve through the surface
     // adapter. `Cols` exercises `PackedConstraint.layout` (Column); `Num` exercises `AnyNumeric` +
     // the element-relative associated-type returns (`Self::Wide`/`Self::Float`/`Self::Elem`).
@@ -561,7 +560,7 @@ fn a_native_trait_incomplete_impl_is_rejected() {
     );
 }
 
-// --- ExtTrait.self_constraint (ExtBundle→ExtTrait convergence, slice 3) ---------------------------
+// --- ExtTrait.self_constraint ---------------------------
 
 /// `ExtTrait.self_constraint` states the RULE a native trait's structural `Self`-shape enforces on an
 /// implementor: the trait may only be `impl`-ed for a `@packed` struct whose fields match the

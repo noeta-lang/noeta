@@ -9,7 +9,7 @@ rust-version.workspace = true
 # carry a stability promise (docs/Extension-Compatibility.md).
 publish = false
 
-# P-AOT L3.2b(3): the runtime an ahead-of-time-compiled program links against. Built as a **static
+# The runtime an ahead-of-time-compiled program links against. Built as a **static
 # library** (a single relocatable archive) so `noeta build --native` can `cc`-link a program's AOT
 # object against it into a self-contained native executable. It provides the C-ABI `main` entry, the
 # exported `noeta_jit_*` helper symbols the native bodies call (via noeta-vm's `aot` feature), and the
@@ -39,7 +39,7 @@ doctest = false
 # so the linked-in native bodies resolve their helper calls against this archive.
 # Direct path (not workspace inheritance) so we can set `default-features = false` — an inherited
 # workspace dep may not override the root's default-features. Dropping noeta-vm's default `compile`
-# feature (native-size slice 2) is the point: this runtime runs a *pre-compiled* stapled bundle and
+# feature is the point: this runtime runs a *pre-compiled* stapled bundle and
 # never compiles source, so the whole compiler front end (noeta-compiler → noeta-check → noeta-ir) is
 # shed from a shipped `--native` binary — ~1 MB, and no type-checker/compiler as reachable surface in
 # a run-only artifact.

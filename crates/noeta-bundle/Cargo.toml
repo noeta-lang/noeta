@@ -14,7 +14,7 @@ noeta-bytecode = { workspace = true }
 miniz_oxide = { workspace = true }
 
 [dev-dependencies]
-# The wasm-staple tests (P-WASM W1.2) build synthetic runner modules and re-validate the patched
+# The wasm-staple tests build synthetic runner modules and re-validate the patched
 # output with a full IR parse. The patcher itself is a dependency-free section-level rewrite, so
 # walrus never rides a consumer — the wasm runner links this crate with zero extra weight.
 walrus = { workspace = true }

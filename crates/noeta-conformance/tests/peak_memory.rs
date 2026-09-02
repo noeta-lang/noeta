@@ -115,7 +115,7 @@ fn eval_runner(program: noeta_ast::Program) -> impl FnOnce() -> noeta_backend::R
 
 /// Build an `n`-element packed/boxed `Vec3` list, run it through a flat-preserving **producer**
 /// (`reverse`/`slice`/`filter`), hold the *result* (sum a field over it), and keep the input alive
-/// too. With `@packed` and a producer that stays flat (P-PACK 2.6, VM) both the input and the result
+/// too. With `@packed` and a producer that stays flat both the input and the result
 /// are flat `Vec<u64>` buffers; if the producer silently demoted, the result would balloon to `n`
 /// boxed objects and the residency would jump toward the boxed figure — which the test's ratio guard
 /// then catches. `op` is a `.noe` expression over `data` producing the result list.
@@ -154,7 +154,7 @@ fn packed_producers_keep_the_list_flat() {
         ("slice", "data.slice(0, data.len())"),
         ("filter", "data.filter(fn(v) => v.x > 0.0)"),
         ("set", "data.set(0, Vec3 { x: 9.0, y: 9.0, z: 9.0 })"),
-        // `map` to a packed struct keeps the result flat too (P-PACK 2.6 category B): each mapped
+        // `map` to a packed struct keeps the result flat too: each mapped
         // element is packed straight into the buffer, so only one input + one output element are live
         // at a time and the held result is a flat buffer. (Method form since P1.2 — the free
         // `map`/`filter` left the prelude; the methods route to the same builtin impls.)
@@ -194,7 +194,7 @@ fn packed_producers_keep_the_list_flat() {
 }
 
 /// Build + hold an `n`-element list of `Vec3` whose fields are `f32` (4 bytes each) or `float`
-/// (f64, 8 bytes), then sum a field. With the VM's byte-addressed packed buffer (P-PACK 3.2b) the
+/// (f64, 8 bytes), then sum a field. With the VM's byte-addressed packed buffer the
 /// f32 list is ~half the float list's residency — the density win of the narrowed slot.
 fn vec3_typed_src(n: usize, f32_fields: bool) -> String {
     let ty = if f32_fields { "f32" } else { "float" };
@@ -266,7 +266,7 @@ fn packed_bool_field_is_one_byte() {
 #[test]
 fn packed_f32_list_is_roughly_half_of_float() {
     let _serial = serial();
-    // Byte-addressed narrowing (P-PACK 3.2b VM + the eval follow-up): an f32 `Vec3` is 12 bytes/
+    // Byte-addressed narrowing: an f32 `Vec3` is 12 bytes/
     // element, a float `Vec3` is 24 — so the held f32 packed list saves the narrowed bytes vs the
     // float one. Both backends are byte-addressed now, so both are measured.
     const N: usize = 4_000;
@@ -286,7 +286,7 @@ fn packed_f32_list_is_roughly_half_of_float() {
     assert_eq!(r_c.stdout, "4000\n");
     assert_eq!(r_d.stdout, "4000\n");
 
-    println!("\nP-PACK 3.2b f32 narrowing, List<Vec3> n={N}");
+    println!("\nf32 narrowing, List<Vec3> n={N}");
     println!(
         "  vm    f32 {:>8.1} KiB  float {:>8.1} KiB  (saved {:.1} KiB)",
         kib(vm_f32_peak),
