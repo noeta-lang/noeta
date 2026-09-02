@@ -299,7 +299,7 @@ pub enum Type {
     },
     Bool,
     String,
-    /// A raw immutable byte buffer (`bytes`) — the binary-serialization surface (P-PACK 4.4). Produced
+    /// A raw immutable byte buffer (`bytes`) — the binary-serialization surface. Produced
     /// by `to_bytes`/`fs.read_bytes`, consumed by `from_bytes::<T>`/`fs.write_bytes`; no literal form.
     Bytes,
     List(Box<Type>),
@@ -1492,7 +1492,7 @@ mod tests {
             &Type::List(Box::new(Type::Dyn)),
             &Type::List(Box::new(Type::Int))
         ));
-        // fn(dyn) -> int  <:  fn(int) -> dyn  (params contravariant, return covariant).
+        // Fn(dyn) -> int  <:  fn(int) -> dyn  (params contravariant, return covariant).
         let sub = Type::Fn {
             params: vec![Type::Dyn],
             ret: Box::new(Type::Int),

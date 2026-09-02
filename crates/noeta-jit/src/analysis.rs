@@ -175,7 +175,7 @@ pub(crate) fn heap_in_map(chunk: &noeta_bytecode::Chunk, heap_aware: bool) -> Ve
     }
 }
 
-/// Whether the register-effect model covers this prototype (P-JSSA S5's residency permission):
+/// Whether the register-effect model covers this prototype (the residency permission):
 /// either every op is modeled by [`reg_effect`], or the prototype is call-free/non-OSR
 /// (`!heap_aware`), where the pc-0 entry guard's all-immediate invariant holds without any
 /// modeling — every register write is then refcount-free by construction, and unmodeled ops are
@@ -188,7 +188,7 @@ pub(crate) fn proto_modeled(chunk: &noeta_bytecode::Chunk, heap_aware: bool) -> 
             .all(|op| reg_effect(op, &chunk.consts).is_some())
 }
 
-/// The forward **slot-hazard** fixpoint (P-JSSA S5): `map[pc * nreg + r]` = may register `r`'s
+/// The forward **slot-hazard** fixpoint: `map[pc * nreg + r]` = may register `r`'s
 /// window slot be **out of sync with its variable in a heap-relevant way** at the start of `pc`?
 /// With heap values SSA-resident, a def releases the old value *from the variable* and writes no
 /// slot — so a slot can hold a released (dangling) pointer, or fail to hold the heap reference
@@ -300,7 +300,7 @@ pub(crate) fn heap_at_fixpoint(
         .map(|op| reg_effect(op, &chunk.consts))
         .collect::<Option<_>>()?;
 
-    // in[pc * nreg + r]: may register `r` hold a heap value at the start of op `pc`. Seed:
+    // In[pc * nreg + r]: may register `r` hold a heap value at the start of op `pc`. Seed:
     // all-immediate — locals are `unit`-initialized, and the parameters are **claimed**
     // immediate too (T1b): the pc-0 entry guard has always bailed on a heap argument before the
     // body runs, and every mid-frame entry verifies the claim (below), so a parameter register
@@ -324,9 +324,9 @@ pub(crate) fn heap_at_fixpoint(
     while changed {
         changed = false;
         for pc in 0..n {
-            // out = transfer(in[pc], effects[pc]).
+            // Out = transfer(in[pc], effects[pc]).
             let mut out = inset[pc * nreg..pc * nreg + nreg].to_vec();
-            // P-JCT C3 guard strengthening: a supported `Binary`'s native continuation proved
+            // Guard strengthening: a supported `Binary`'s native continuation proved
             // **both** operands immediate — every emitted path (typed, asymmetric-guarded,
             // generic dispatch) bails unless both operands are small ints or both floats — and a
             // `CondBranch`'s continuation proved its scrutinee a bool (a non-bool bails for
@@ -364,7 +364,7 @@ pub(crate) fn heap_at_fixpoint(
     Some(inset)
 }
 
-/// A register's statically-known **immediate kind** (P-JSSA T1 typed promotion). Where the kind
+/// A register's statically-known **immediate kind** (typed promotion). Where the kind
 /// analysis ([`kind_in_map`]) proves a register `Int`/`Bool`/`Float` at a pc, the codegen skips
 /// the NaN-box tag checks and (for `Int`/`Bool`) works on a second, **raw** SSA variable holding
 /// the unboxed value — the box/unbox chain the egraph cannot fold through loop-header block
@@ -478,7 +478,7 @@ pub(crate) fn kind_in_map(chunk: &noeta_bytecode::Chunk) -> Vec<Kind> {
                 | Op::Stringify { dst, .. } => out[*dst as usize] = Kind::Imm,
                 Op::Binary { op, dst, a, b, .. } => {
                     let (ka, kb) = (out[*a as usize], out[*b as usize]);
-                    // P-JCT C3 guard strengthening: the asymmetric emitter path (T1b) *guards*
+                    // Guard strengthening: the asymmetric emitter path (T1b) *guards*
                     // its statically-unknown side, so on every native continuation that operand
                     // held the typed side's kind — claim it downstream (the emitter's matching
                     // `def_raw` keeps the raw variable current; mid-frame entries re-verify).
@@ -521,7 +521,7 @@ pub(crate) fn kind_in_map(chunk: &noeta_bytecode::Chunk) -> Vec<Kind> {
                         | BinaryOp::Rem => match (ka, kb) {
                             (Kind::Int, Kind::Int) => Kind::Int,
                             (Kind::Float, Kind::Float) => Kind::Float,
-                            // P-JCT C3: the asymmetric path bails before storing anything that
+                            // The asymmetric path bails before storing anything that
                             // isn't a fitting int/float — the same contract that makes the
                             // (Int, Int) claim sound. Without this, `a*3 + x%2`'s outer `+`
                             // compiled the full generic two-sided dispatch.
@@ -545,7 +545,7 @@ pub(crate) fn kind_in_map(chunk: &noeta_bytecode::Chunk) -> Vec<Kind> {
                     }
                 }
                 Op::MaskWidth { dst, .. } => out[*dst as usize] = Kind::Int,
-                // P-JCT C3: a `CondBranch`'s continuation (either successor) proved the
+                // A `CondBranch`'s continuation (either successor) proved the
                 // scrutinee a bool — a non-bool bails for E0007 before branching. The emitter
                 // defines the raw 0/1 form before the branch, on both claimed and generic paths.
                 Op::CondBranch { reg, .. } => out[*reg as usize] = Kind::Bool,
@@ -568,7 +568,7 @@ pub(crate) fn kind_in_map(chunk: &noeta_bytecode::Chunk) -> Vec<Kind> {
     inset
 }
 
-/// The forward **must-slot-written** fixpoint (P-JSSA S4.1): `map[pc * nreg + r]` = has register
+/// The forward **must-slot-written** fixpoint: `map[pc * nreg + r]` = has register
 /// `r`'s window *slot* been written on **every** path from a fresh pc-0 entry to the start of op
 /// `pc`? Under the fast call convention the callee's window is reserved without initialization,
 /// so `normalize_frame` may keep a slot's contents only where this map proves a real store
@@ -622,7 +622,7 @@ pub(crate) fn must_slot_written_map(
     written
 }
 
-/// Whether a prototype is eligible for the **fast call convention** (P-JSSA S4.1/S5): entered
+/// Whether a prototype is eligible for the **fast call convention**: entered
 /// with its window reserved **uninitialized** and its arguments as machine arguments, so every
 /// native exit must make the window fully tier-0-valid (`Codegen::normalize_frame`). With S5's
 /// universal residency the requirements reduce to:

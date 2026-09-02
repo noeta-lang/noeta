@@ -891,9 +891,9 @@ impl SessionCompiler {
         // same lowering the IR interpreter consumes, so both backends execute one program (Phase
         // 2). With the checker's site maps when the install brought any (`lowering_sites!` is THE
         // one projection): the `List<packed>` map streams packed-list literals into a flat buffer
-        // (P-PACK 2.5; the resolved layout rides on the IR rvalue, so the bytecode compiler reads
+        // (the resolved layout rides on the IR rvalue, so the bytecode compiler reads
         // it from there at `PackedListNew` and needs no separate span map of its own), and the
-        // index-field set fuses `list[i].field` reads into `Rvalue::IndexField` (P-PACK 2.5+). A
+        // index-field set fuses `list[i].field` reads into `Rvalue::IndexField`. A
         // checkerless install lowers with the all-empty set — the same call, not a second path.
         let opts = || noeta_ir::LowerOptions {
             real_isolates,
@@ -1063,7 +1063,7 @@ impl SessionCompiler {
         // `packed_schemas` / `map_packed` — MergeByContent, three sources, all deduplicated by
         // `intern_packed_schema` (a layout already interned adds nothing and keeps its index).
         if let Some(bundle) = sites.as_deref() {
-            // (1) Each packed `map(...)` result layout (P-PACK 2.6 category B), paired with the
+            // (1) Each packed `map(...)` result layout (category B), paired with the
             // call span the VM's `map` builtin keys on. Spans already paired are skipped — an
             // accumulated bundle re-delivers every earlier entry's sites — and the newcomers are
             // sorted by span before interning, so schema order is deterministic regardless of
@@ -1291,7 +1291,7 @@ struct VariantSlots {
 struct ModuleCompiler {
     protos: Vec<Chunk>,
     shapes: Vec<Shape>,
-    /// The packed-list element layouts (P-PACK 2.4), interned by [`Self::intern_packed_schema`] and
+    /// The packed-list element layouts, interned by [`Self::intern_packed_schema`] and
     /// referenced by index from [`Op::MakePackedList`].
     packed_schemas: Vec<noeta_bytecode::PackedSchemaDef>,
     methods: Vec<MethodEntry>,
@@ -2275,7 +2275,7 @@ impl ModuleCompiler {
     }
 
     /// Intern a packed-list element layout from the checker's [`PackedLayout`], returning its index
-    /// in [`Self::packed_schemas`]. The layout is self-describing (P-PACK 2.1), so the element's
+    /// in [`Self::packed_schemas`]. The layout is self-describing, so the element's
     /// `Shape` is built straight from it — and `intern_shape` dedups it to the *same* entry
     /// `MakeStruct` uses for that type, so a materialized element is shape-identical to a constructed
     /// one. Nested packed structs are interned first (a lower index than their parent), giving the VM
@@ -4359,7 +4359,7 @@ impl<'m> FnCompiler<'m> {
             Rvalue::List { items, reflect, .. } => {
                 // A boxed list: each element is consumed (retained into the list) and the temporary
                 // released. A `List<packed>` literal never reaches here — lowering streams it into
-                // `PackedListNew` + `PackedListPush` instead (P-PACK 2.5).
+                // `PackedListNew` + `PackedListPush` instead.
                 // The checker-resolved element type, interned into the module table so the VM can
                 // stamp it onto the built list for `type_of`. `None` → the list stays untagged.
                 let reflect = reflect.as_ref().map(|r| self.module.intern_type_repr(r));
@@ -4378,7 +4378,7 @@ impl<'m> FnCompiler<'m> {
             }
             Rvalue::PackedListNew { layout, .. } => {
                 // Allocate the empty flat buffer that the following `PackedListPush` chain fills
-                // (P-PACK 2.5 streaming construction); intern the element schema from the layout the
+                // (streaming construction); intern the element schema from the layout the
                 // IR carries (so it dedups to the same shape `MakeStruct` uses for the element type).
                 let schema = self.module.intern_packed_schema(layout);
                 self.code.push(Op::PackedListNew { dst, schema });
@@ -5905,7 +5905,7 @@ impl<'m> FnCompiler<'m> {
                     mismatch()
                 };
 
-                // Deserialize a `bytes` buffer into a flat `List<T>` (P-PACK 4.4). Intern element T's
+                // Deserialize a `bytes` buffer into a flat `List<T>`. Intern element T's
                 // schema from the layout the checker recorded (the same channel list literals use). A
                 // `None` layout means T was not packable — the checker already emitted E0038, so this
                 // program never runs; load unit to keep the register defined.
@@ -7009,7 +7009,7 @@ mod tests {
             format!("echo match load::<{ty}>(\"{{}}\") {{ Ok(v) => \"ok\", Err(e) => \"err\", }}\n")
         };
 
-        // v1: Order first, then User → table [Order, User].
+        // V1: Order first, then User → table [Order, User].
         let (p1, s1) = parse_and_check(&format!("{decls}{}{}", call("Order"), call("User")));
         let mut session = SessionCompiler::new();
         let m1 = session.extend_checked(&p1, &s1).expect("v1 compiles");
@@ -7017,7 +7017,7 @@ mod tests {
         let reprs_v1 = m1.type_arg_reprs.clone();
         assert_eq!(reprs_v1.len(), m1.type_args.len(), "parallel tables");
 
-        // v2 — the edited file, re-checked WHOLE from scratch: User first, then Order, then a new
+        // V2 — the edited file, re-checked WHOLE from scratch: User first, then Order, then a new
         // Item. Its own table is [User, Order, Item], numbered from zero in its own order.
         let (p2, s2) = parse_and_check(&format!(
             "{decls}{}{}{}",

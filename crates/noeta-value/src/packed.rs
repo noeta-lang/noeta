@@ -30,8 +30,8 @@ fn packed_kind_to_repr(kind: &PackedKind) -> TypeRepr {
 }
 
 impl Value {
-    /// A flat `List<packed>` value (refcount 1, P-PACK 2.4): `bytes` holds the elements packed as raw
-    /// primitive bytes (`schema.byte_size` bytes each — an `f32` field is 4 bytes, P-PACK 3.2b),
+    /// A flat `List<packed>` value (refcount 1): `bytes` holds the elements packed as raw
+    /// primitive bytes (`schema.byte_size` bytes each — an `f32` field is 4 bytes),
     /// interpreted through `schema`. A leaf — it owns no child `Value`s (only primitive bytes), so
     /// freeing it just drops the buffer. The elements are materialized on demand (index, iterate,
     /// demote), so the layout is invisible to `RunResult`.
@@ -39,13 +39,13 @@ impl Value {
         heap::alloc(Payload::PackedList { schema, bytes })
     }
 
-    /// Whether this is a flat packed list (the `List<packed>` representation, P-PACK 2.4).
+    /// Whether this is a flat packed list (the `List<packed>` representation).
     pub fn is_packed_list(self) -> bool {
         self.is_pointer() && heap::with_payload(self, |p| matches!(p, Payload::PackedList { .. }))
     }
 
     /// Pack this value (a value-struct instance) onto the end of `out` per `schema` — each primitive
-    /// field as its little-endian bytes (`int`/`float`/`bool` 8, `f32` 4; P-PACK 3.2b), recursing into
+    /// field as its little-endian bytes (`int`/`float`/`bool` 8, `f32` 4), recursing into
     /// nested packed structs. Returns `false` on any shape mismatch (a non-object, wrong field count,
     /// or a field whose runtime kind disagrees) so the caller can fall back to a boxed list — the flat
     /// form is only ever used when exactly correct.
@@ -94,7 +94,7 @@ impl Value {
     }
 
     /// Pack `element` (a value-struct instance) onto the end of this packed list's buffer **in
-    /// place** (P-PACK 2.5 streaming construction). The caller must guarantee a uniquely-owned packed
+    /// place** (streaming construction). The caller must guarantee a uniquely-owned packed
     /// list (`refcount == 1`) — true for the streaming accumulator, which is never aliased. The
     /// element's primitives are *copied* into the buffer (not retained), so the caller still owns the
     /// element value and must release it. Returns `false` without modifying the buffer if `element`
@@ -163,7 +163,7 @@ impl Value {
         unpack_element(schema, &elem, 0).0
     }
 
-    /// Read a single field of the packed element at `index` (P-PACK 2.5+ fused `list[i].field`),
+    /// Read a single field of the packed element at `index` (fused `list[i].field`),
     /// decoding only that field's word(s) — a primitive materializes directly, a nested packed struct
     /// is unpacked from its inline sub-range. Returns the owned field value (refcount 1), or `None`
     /// if `index` is out of range or `field` is not in the element schema (the checker only fuses
@@ -206,7 +206,7 @@ impl Value {
         })
     }
 
-    /// The raw flat byte buffer of a packed list (`to_bytes`, P-PACK 4.4), regardless of element
+    /// The raw flat byte buffer of a packed list (`to_bytes`), regardless of element
     /// schema; `None` for a boxed list (which has no canonical serialized form).
     pub fn packed_bytes(self) -> Option<Vec<u8>> {
         if !self.is_packed_list() {
@@ -262,7 +262,7 @@ impl Value {
     }
 
     /// Build a new flat packed list from selected element `indices` of this one, copying each
-    /// selected element's word-block verbatim — no per-element materialization (P-PACK 2.6). The
+    /// selected element's word-block verbatim — no per-element materialization. The
     /// schema is shared (an `Rc` clone). This keeps a `List<packed>` *flat* through the selection
     /// producers (`reverse`/`slice`/`filter`) instead of demoting to N boxed objects. A packed list
     /// is a GC leaf, so the new buffer owns no child references; the caller owns the result (rc 1).
@@ -288,7 +288,7 @@ impl Value {
         Value::packed_list(schema, buf)
     }
 
-    /// Build a new flat packed list with element `index` replaced by `element` (P-PACK 2.6 flat
+    /// Build a new flat packed list with element `index` replaced by `element` (flat
     /// `set`). The element's primitives are copied into a fresh buffer; the caller still owns
     /// `element`. Returns `None` (so the caller demotes) if `element` does not pack into the schema.
     pub fn packed_set(self, index: usize, element: Value) -> Option<Value> {
@@ -310,7 +310,7 @@ impl Value {
         Some(Value::packed_list(schema, buf))
     }
 
-    /// Overwrite element `index` of this packed list **in place** with `element` (P-PACK 2.6 reuse
+    /// Overwrite element `index` of this packed list **in place** with `element` (reuse
     /// path for `acc = acc.set(i, v)`). The caller must guarantee a uniquely-owned packed list
     /// (`refcount == 1`). `element`'s primitives are copied into the buffer (no retain); the caller
     /// still owns `element`. Returns `false` (buffer untouched) if `element` does not pack, so the
@@ -341,8 +341,8 @@ impl Value {
         })
     }
 
-    /// Concatenate two packed lists of the **same layout** into a new flat packed list (P-PACK 2.6
-    /// `a ~ b`), copying both word buffers. Returns `None` (so the caller demotes) unless both are
+    /// Concatenate two packed lists of the **same layout** into a new flat packed list
+    /// (`a ~ b`), copying both word buffers. Returns `None` (so the caller demotes) unless both are
     /// packed and share an element shape. Both operands are borrowed (the caller still owns them).
     pub fn packed_concat(self, other: Value) -> Option<Value> {
         if !self.is_packed_list() || !other.is_packed_list() {
@@ -368,7 +368,7 @@ impl Value {
         Some(Value::packed_list(schema, buf))
     }
 
-    /// Append `other`'s elements to this packed list **in place** (P-PACK 2.6 reuse path for
+    /// Append `other`'s elements to this packed list **in place** (reuse path for
     /// `acc = acc ~ xs`). The caller must guarantee a uniquely-owned packed list (`refcount == 1`).
     /// `other` is borrowed (its words copied). Returns `false` (buffer untouched) unless `other` is a
     /// packed list of the same layout, so the caller can fall back to the copy path.
@@ -503,7 +503,7 @@ fn pack_scalar(value: Value, kind: &PackedKind, out: &mut Vec<u8>) -> bool {
 
 /// Decode one packed field at byte `offset` into an owned [`Value`] — the per-field counterpart of
 /// [`unpack_element`], used by [`Value::packed_field`] to read a single field without materializing
-/// the whole element (P-PACK 3.2b byte-addressed).
+/// the whole element (byte-addressed).
 fn decode_packed_field(kind: &PackedKind, bytes: &[u8], offset: usize) -> Value {
     match kind {
         PackedKind::Int => Value::int(read_u64(bytes, offset) as i64),

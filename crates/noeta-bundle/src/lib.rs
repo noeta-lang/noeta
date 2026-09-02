@@ -1,4 +1,4 @@
-//! The `.noeb` bundle container (P-AOT L1.1): a versioned envelope around a serialized
+//! The `.noeb` bundle container: a versioned envelope around a serialized
 //! [`noeta_bytecode::Module`], so a compiled program can be shipped and run **without its `.noe`
 //! source**. This crate owns the artifact *format* — magic, versioning, and (later) the
 //! obfuscation/encryption transforms — and is deliberately isolated from the core mid-end crates so
@@ -18,7 +18,7 @@
 //! policy is that **artifacts are pinned to the runtime that built them**: [`read`] rejects a
 //! `rt_ver` mismatch with a clear error rather than risk decoding a stale layout.
 //!
-//! ## Obfuscation (P-AOT L1.4)
+//! ## Obfuscation
 //!
 //! The default payload is **obfuscated, not plaintext**: the postcard module is deflate-compressed
 //! (a size win that also defeats `strings`/`grep`) and then XOR-scrambled with a fixed-seed
@@ -27,11 +27,11 @@
 //! transform is fully reversible from this open-source runtime, and the module is recoverable from
 //! process memory at run time. It raises the bar against casual inspection, nothing more. Access
 //! control / encrypt-at-rest is deliberately **not** provided here — that is application *policy*,
-//! the developer's to build on the crypto/network primitives the language ships (`plans/aot`).
+//! the developer's to build on the crypto/network primitives the language ships.
 //! `FLAG_ENCRYPTED` (bit 1) stays a reserved header bit for forward-compat; a reader rejects any
 //! bundle that sets it.
 //!
-//! ## Stapled executables (P-AOT L2)
+//! ## Stapled executables
 //!
 //! A `.noeb` can also be **appended to a copy of the runtime binary** to make a single
 //! self-contained executable (`noeta build --exe`). The layout is the runtime image, then the
@@ -352,7 +352,7 @@ pub const MODULE_LAYOUT_DIGEST: &str =
 /// mismatch is the signal to rebuild the bundle.
 pub const RUNTIME_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// `flags` bit 0: the payload is obfuscated (deflate-compressed + scrambled, P-AOT L1.4). Set on
+/// `flags` bit 0: the payload is obfuscated (deflate-compressed + scrambled). Set on
 /// every bundle [`write`] emits.
 pub const FLAG_COMPRESSED: u8 = 1 << 0;
 /// `flags` bit 1: reserved for a future encrypted payload. Access control / encrypt-at-rest is
@@ -360,7 +360,7 @@ pub const FLAG_COMPRESSED: u8 = 1 << 0;
 /// writer sets this and a reader rejects any bundle that does.
 pub const FLAG_ENCRYPTED: u8 = 1 << 1;
 
-/// The fixed seed for the obfuscation keystream (P-AOT L1.4). Not a secret — obfuscation only; it
+/// The fixed seed for the obfuscation keystream. Not a secret — obfuscation only; it
 /// lives in this open-source runtime. Chosen arbitrarily (no significance to the value).
 const SCRAMBLE_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
 
@@ -423,7 +423,7 @@ pub fn write(module: &Module) -> Vec<u8> {
 
 /// Parse and validate a `.noeb` bundle back into a [`Module`], or explain why it cannot be loaded.
 pub fn read(bytes: &[u8]) -> Result<Module, BundleError> {
-    // magic(4) + fmt_ver(1) + flags(1) + rt_len(1) = 7-byte minimum header.
+    // Magic(4) + fmt_ver(1) + flags(1) + rt_len(1) = 7-byte minimum header.
     if bytes.len() < 7 {
         return Err(BundleError::Truncated);
     }
@@ -463,7 +463,7 @@ pub fn read(bytes: &[u8]) -> Result<Module, BundleError> {
     Module::decode(&encoded).map_err(|_| BundleError::Decode)
 }
 
-/// Deflate-compress then scramble a raw module payload (P-AOT L1.4).
+/// Deflate-compress then scramble a raw module payload.
 fn obfuscate(encoded: &[u8]) -> Vec<u8> {
     let mut compressed = miniz_oxide::deflate::compress_to_vec(encoded, 8);
     scramble(&mut compressed);
@@ -516,7 +516,7 @@ pub fn is_bundle(bytes: &[u8]) -> bool {
     bytes.len() >= 4 && &bytes[0..4] == MAGIC
 }
 
-/// The sentinel closing a stapled-executable trailer (P-AOT L2). Placed at the very end of a
+/// The sentinel closing a stapled-executable trailer. Placed at the very end of a
 /// `noeta build --exe` artifact so startup can detect an embedded bundle by reading the tail alone.
 pub const EXE_MAGIC: &[u8; 8] = b"NOEBEXE\0";
 
@@ -525,7 +525,7 @@ pub const EXE_MAGIC: &[u8; 8] = b"NOEBEXE\0";
 pub const TRAILER_LEN: usize = 16;
 
 /// Append `bundle` (the bytes from [`write`]) to a copy of the runtime image `runtime`, producing a
-/// self-contained executable (P-AOT L2). The bundle sits between the untouched runtime image and a
+/// self-contained executable. The bundle sits between the untouched runtime image and a
 /// locating trailer, so the OS still sees a valid executable while startup can recover the bundle.
 pub fn staple(runtime: &[u8], bundle: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(runtime.len() + bundle.len() + TRAILER_LEN);
@@ -561,7 +561,7 @@ pub fn extract_stapled(image: &[u8]) -> Option<&[u8]> {
         .map(|start| &body[start..])
 }
 
-// Wasm stapling (P-WASM W1.2) — the `noeta build --wasm` analogue of [`staple`]: instead of a
+// Wasm stapling — the `noeta build --wasm` analogue of [`staple`]: instead of a
 // tail trailer (a wasm guest cannot read its own binary), the bundle is injected into the wasm
 // runner's data section and a compiled-in slot is patched to point at it. The patcher is a
 // dependency-free section-level rewrite, so it compiles everywhere this crate does (the runner
@@ -569,7 +569,7 @@ pub fn extract_stapled(image: &[u8]) -> Option<&[u8]> {
 mod wasm;
 pub use wasm::{WasmStapleError, staple_wasm};
 
-/// The 16-byte marker the wasm runner's bundle slot starts with (P-WASM W1.2) — the
+/// The 16-byte marker the wasm runner's bundle slot starts with — the
 /// patcher↔runner contract. Slot layout: `magic, ptr: u32 LE, len: u32 LE`; the runner keeps
 /// exactly one copy in its data section (the slot initializer), and `staple_wasm` refuses to
 /// patch zero or several occurrences.

@@ -1357,7 +1357,7 @@ fn trial_deletion_reclaims_cycles_and_acyclic_garbage() {
 
 #[test]
 fn mm_peak_residency_baseline() {
-    // The pre-migration peak-residency snapshot for `plans/memory-management/phase-0-benchmarks`.
+    // A peak-residency snapshot for the memory meter.
     // Prints under `--nocapture`; asserts the meter reflects each program's footprint shape.
 
     // Allocation churn: each short-lived struct dies before the next is built ⇒ a small,
@@ -2694,21 +2694,15 @@ fn closure_default_reads_a_captured_cell() {
     assert_eq!(r.exit_code, 0);
 }
 
-/// The **line-count ratchet** on `lib.rs` (audit-1 finding 1). The 2025 split
-/// (`plans/code-quality/split-vm-lib.md`) took lib.rs 7,733 -> 5,729 lines, but nothing held the
-/// line: five later arcs (tier-1 glue, JIT engine mgmt, hot-swap, isolate workers, the
-/// `run_module_*` family) each defaulted their code into lib.rs and it regrew to 10,685. The
-/// 2026 re-split moved those into `hooks`/`backend`/`tier1`/`lifecycle`/`dispatch`/`hotswap`/
-/// `calls`/`tests`, leaving lib.rs at ~580 lines (crate docs, module decls + re-exports, the
-/// `Vm` struct + its grouped sub-structs, `Frame`/`RetTransform`/`Abort`, constants). The budget
-/// is that figure plus ~10% headroom for doc growth: a NEW SUBSYSTEM BELONGS IN ITS OWN MODULE,
-/// not here — if this fires, move the addition out rather than raising the budget.
+/// The **line-count ratchet** on `lib.rs`. Every subsystem lands in its own module:
+/// `hooks`/`backend`/`tier1`/`lifecycle`/`dispatch`/`hotswap`/`calls`/`tests`. What stays here is
+/// crate docs, module decls + re-exports, the `Vm` struct + its grouped sub-structs,
+/// `Frame`/`RetTransform`/`Abort`, and constants. A NEW SUBSYSTEM BELONGS IN ITS OWN MODULE: if
+/// this fires, move the addition out rather than raising the budget.
 ///
-/// The sub-structs have since been drifting out to the modules that own them, which is the same
-/// rule applied one level down and is what keeps the headroom from being spent on them: `SchedState`
-/// lives in `scheduler`, and `IsolateState` in `lifecycle` beside `IsolateSlot`/`IsolateOutcome`/
-/// `run_isolate_worker` (isolate-cancel — two more worker fields were what tipped the ratchet, and
-/// moving the struct was the fix the message asks for).
+/// The sub-structs drift out to the modules that own them, which is the same rule one level
+/// down: `SchedState` lives in `scheduler`, and `IsolateState` in `lifecycle` beside
+/// `IsolateSlot`/`IsolateOutcome`/`run_isolate_worker`.
 #[test]
 fn lib_rs_stays_decomposed() {
     const BUDGET: usize = 640;
@@ -2716,8 +2710,8 @@ fn lib_rs_stays_decomposed() {
     assert!(
         lines <= BUDGET,
         "src/lib.rs is {lines} lines (budget {BUDGET}). The god-file is regrowing — land new \
-         subsystems in their own module (see the module map at the top of lib.rs and \
-         plans/audit/audit-1-vm-runtime.md finding 1) instead of raising the budget."
+         subsystems in their own module (see the module map at the top of lib.rs) instead of \
+         raising the budget."
     );
 }
 

@@ -41,7 +41,7 @@ fn nanbox_layout_matches_the_value_encoding() {
 }
 
 /// Build a packed byte buffer from a sequence of `int` field values (each an 8-byte LE word) —
-/// the byte-addressed form of the old `Vec<u64>` literals (P-PACK 3.2b).
+/// the byte-addressed form of the old `Vec<u64>` literals.
 fn ibytes(vals: &[i64]) -> Vec<u8> {
     vals.iter()
         .flat_map(|v| (*v as u64).to_le_bytes())
@@ -77,7 +77,7 @@ fn tuple_display_type_name_and_projection() {
 
 #[test]
 fn packed_list_round_trips_and_frees() {
-    // P-PACK 2.4: a flat `List<packed>` packs elements into raw words and materializes them on
+    // A flat `List<packed>` packs elements into raw words and materializes them on
     // demand. Exercise construct → len → packed_get → realize → equality → display → free so
     // miri checks the materialize/free paths for use-after-free or double-free.
     let shape = noeta_object::intern_shape(Shape::object(
@@ -140,7 +140,7 @@ fn packed_list_round_trips_and_frees() {
 
 #[test]
 fn packed_push_streams_in_place_and_frees() {
-    // P-PACK 2.5: streaming construction — start from an empty packed list and `packed_push` each
+    // Streaming construction — start from an empty packed list and `packed_push` each
     // element in place (the in-place path the VM uses). `packed_push` reads the element through
     // the heap while mutating the list through the heap (two distinct objects), so this exercises
     // that nested `with_payload_mut`/`with_payload` access for use-after-free under miri, and
@@ -482,7 +482,7 @@ fn promotion_preserves_dag_sharing() {
         "the shared subgraph is promoted once, not twice"
     );
     assert!(a.is_shared());
-    // region holds: the tuple + the single shared `P` (deduped) = 2 objects.
+    // Region holds: the tuple + the single shared `P` (deduped) = 2 objects.
     assert_eq!(region.len(), 2);
 
     pair.release();
@@ -581,7 +581,7 @@ fn f32_is_immediate_and_round_trips() {
     assert_eq!(v.type_name(), "f32");
     assert_eq!(v.display(), "1.5");
 
-    // f32 precision is observable: 0.1 + 0.2 at f32 is exactly 0.3 (f64 would be 0.30000…04).
+    // F32 precision is observable: 0.1 + 0.2 at f32 is exactly 0.3 (f64 would be 0.30000…04).
     assert_eq!(Value::f32(0.1 + 0.2_f32).display(), "0.3");
     // Bit patterns round-trip exactly, including the awkward ones.
     for f in [0.0f32, -0.0, 1.0, -2.5, f32::MAX, f32::MIN, f32::EPSILON] {
@@ -593,7 +593,7 @@ fn f32_is_immediate_and_round_trips() {
 
 #[test]
 fn packed_f32_byte_layout_round_trips() {
-    // P-PACK 3.2b: an `f32` packed field is 4 bytes, an `int` 8 — a mixed `{f32, int}` element is
+    // An `f32` packed field is 4 bytes, an `int` 8 — a mixed `{f32, int}` element is
     // 12 bytes, exercising unaligned byte offsets (the int starts at byte 4). Pack two, then read
     // each field back: the f32 keeps f32 precision and the int its full value. Checked under miri.
     let shape = noeta_object::intern_shape(Shape::object(
@@ -637,7 +637,7 @@ fn packed_f32_byte_layout_round_trips() {
 
 #[test]
 fn packed_field_reads_one_field_without_materializing() {
-    // P-PACK 2.5+: the fused `list[i].field` read decodes a single field's word, returning an
+    // The fused `list[i].field` read decodes a single field's word, returning an
     // owned primitive (or `None` for an out-of-range index / unknown field). Exercised under miri
     // to confirm the targeted slice read borrows the buffer correctly and leaks nothing.
     let shape = noeta_object::intern_shape(Shape::object(
@@ -667,7 +667,7 @@ fn packed_field_reads_one_field_without_materializing() {
 
 #[test]
 fn packed_select_keeps_the_list_flat() {
-    // P-PACK 2.6: `packed_select` rebuilds a flat buffer from chosen element word-blocks (the
+    // `packed_select` rebuilds a flat buffer from chosen element word-blocks (the
     // selection producers reverse/slice/filter). The result is still a packed list (no demote) and
     // owns no child refs, so it frees cleanly — checked under miri.
     let shape = noeta_object::intern_shape(Shape::object(
@@ -705,7 +705,7 @@ fn packed_select_keeps_the_list_flat() {
 
 #[test]
 fn packed_set_and_concat_keep_the_list_flat() {
-    // P-PACK 2.6: `set`/`~` on a packed list stay flat. `packed_set` (copy) and
+    // `set`/`~` on a packed list stay flat. `packed_set` (copy) and
     // `packed_set_in_place` (sole-owner overwrite) replace one element's words; `packed_concat`
     // (copy) and `packed_extend_in_place` (sole-owner append) join same-layout buffers. All
     // results are still packed lists owning no child refs — checked under miri.
@@ -1078,7 +1078,7 @@ fn structural_compare_orders_objects_lexicographically() {
     let v19 = Value::object(shape, vec![Value::int(1), Value::int(9)]);
     let v20 = Value::object(shape, vec![Value::int(2), Value::int(0)]);
     let v19b = Value::object(shape, vec![Value::int(1), Value::int(9)]);
-    // major dominates; equal major falls to minor; equal objects compare Equal.
+    // Major dominates; equal major falls to minor; equal objects compare Equal.
     assert_eq!(structural_compare(v19, v20), Some(Ordering::Less));
     assert_eq!(structural_compare(v20, v19), Some(Ordering::Greater));
     assert_eq!(structural_compare(v19, v19b), Some(Ordering::Equal));
@@ -1127,7 +1127,7 @@ fn live_count_tracks_alloc_and_free() {
     let before = live_count();
     let s = Value::string("x");
     let list = Value::list(vec![Value::string("a"), Value::string("b")]);
-    // string + (list + its two element strings) = 4 live objects.
+    // String + (list + its two element strings) = 4 live objects.
     assert_eq!(live_count(), before + 4);
     assert!(s.dec_ref());
     s.free();
@@ -1229,7 +1229,7 @@ fn iterator_adapters_free_without_leaking() {
     i2.release(); // `chained` is now the sole owner of i1, i2
     let taken = Value::iter_take(chained, 2); // retains chained
     chained.release();
-    // take(2) over chain([a, b], [c]) yields "a", "b".
+    // Take(2) over chain([a, b], [c]) yields "a", "b".
     let collected = taken.iter_collect();
     assert_eq!(collected.list_len(), Some(2));
     collected.release();
@@ -1481,8 +1481,7 @@ fn lib_rs_stays_decomposed() {
     assert!(
         lines <= BUDGET,
         "src/lib.rs is {lines} lines (budget {BUDGET}). The god-file is regrowing — land new \
-         method clusters in their own module (packed/iter/conc/display, see \
-         plans/audit/audit-1-vm-runtime.md finding 8) instead of raising the budget."
+         method clusters in their own module (packed/iter/conc/display) instead of raising the budget."
     );
 }
 

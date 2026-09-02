@@ -454,7 +454,7 @@ pub(crate) struct SessionState {
     /// One shared `&'static Shape` per shape-table entry — cloned into every value of that shape,
     /// so equal-built aggregates point at one shape (identity is a pointer comparison).
     shapes: Vec<&'static Shape>,
-    /// One shared `Rc<PackedSchema>` per compiled packed-list layout (P-PACK 2.4), resolved at load
+    /// One shared `Rc<PackedSchema>` per compiled packed-list layout, resolved at load
     /// from [`Module::packed_schemas`] against `shapes` — so `Op::MakePackedList` packs/materializes
     /// elements that share shape identity with directly-constructed instances.
     packed_schemas: Vec<&'static noeta_object::PackedSchema>,
@@ -533,7 +533,7 @@ struct Vm<'m> {
     /// The session-persistent runtime — see [`SessionState`]. Everything else on `Vm` is
     /// per-entry scratch or module-derived tables.
     persist: SessionState,
-    /// `map(...)` call span → the result element's `Rc<PackedSchema>` (P-PACK 2.6 category B), resolved
+    /// `map(...)` call span → the result element's `Rc<PackedSchema>` (category B), resolved
     /// at load from [`Module::map_packed_sites`]. The `map` builtin looks up its call span here to build
     /// a flat result instead of N boxed objects.
     map_packed: HashMap<Span, &'static noeta_object::PackedSchema>,

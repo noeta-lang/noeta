@@ -1,4 +1,4 @@
-//! The edge-serve component (P-WASM W4): unchanged `http.serve` programs running on
+//! The edge-serve component: unchanged `http.serve` programs running on
 //! `wasmtime serve`-class platforms as a `wasi:http/incoming-handler` component.
 //!
 //! The inversion that makes this a zero-VM-change slice: a wasi:http component is invoked **per
@@ -92,7 +92,7 @@ pub fn serve_once(request: NetRequest) -> NetResponse {
     let Some(bundle) = stapled_bundle() else {
         return failure(
             "this is the generic noeta-wasm-serve component with no program stapled in: \
-             build your app with `noeta build --serve app.noe` (see plans/wasm/, W4)",
+             build your app with `noeta build --serve app.noe`",
         );
     };
     MODULE.with(|cell| {
@@ -125,7 +125,7 @@ pub fn serve_bundle(bundle: &[u8], request: NetRequest) -> NetResponse {
     if bundle.is_empty() {
         return failure(
             "this is the generic noeta-wasm-serve component with no program stapled in: \
-             build your app with `noeta build --serve app.noe` (see plans/wasm/, W4)",
+             build your app with `noeta build --serve app.noe`",
         );
     }
     match noeta_bundle::read(bundle) {

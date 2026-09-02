@@ -1,4 +1,4 @@
-//! The stapled-bundle slot (P-WASM W1.2) — the runner side of `noeta build --wasm`.
+//! The stapled-bundle slot — the runner side of `noeta build --wasm`.
 //!
 //! A single-artifact build injects the program's `.noeb` into this binary's wasm data section
 //! (`noeta_bundle::staple_wasm`): it appends the bundle as a new active data segment placed at

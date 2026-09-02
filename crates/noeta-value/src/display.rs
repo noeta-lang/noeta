@@ -44,7 +44,7 @@ impl Value {
     }
 
     pub fn display(self) -> String {
-        // A packed list (P-PACK 2.4) has no specialized display: materialize a temporary boxed list,
+        // A packed list has no specialized display: materialize a temporary boxed list,
         // render it (identically to the boxed equivalent), and release the temporary.
         if self.is_packed_list() {
             let boxed = self.realize_list();

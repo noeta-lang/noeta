@@ -26,7 +26,7 @@ pub fn apply_binary(op: BinaryOp, left: Value, right: Value) -> Result<Value, Op
         // display-based concatenation (each side stringified), so `1 ~ true` stays `"1true"`.
         BinaryOp::Concat => {
             if left.is_list() && right.is_list() {
-                // Two packed lists of the same layout stay flat (P-PACK 2.6): concatenate the word
+                // Two packed lists of the same layout stay flat: concatenate the word
                 // buffers directly instead of materializing N boxed elements. Any other pairing
                 // (boxed operand, or differing layouts) falls through to the demoting copy below.
                 if let Some(flat) = left.packed_concat(right) {
@@ -524,7 +524,7 @@ fn values_equal(left: Value, right: Value) -> bool {
     if let (Some(a), Some(b)) = (left.as_string(), right.as_string()) {
         return a == b;
     }
-    // Two byte buffers are equal iff their contents match (P-PACK 4.4).
+    // Two byte buffers are equal iff their contents match.
     if left.is_bytes() && right.is_bytes() {
         return left.bytes_data() == right.bytes_data();
     }
@@ -561,7 +561,7 @@ fn values_equal(left: Value, right: Value) -> bool {
     }
     // Lists compare structurally element-wise (same length, equal positions), matching the
     // tree-walker's `Value::List` equality. (Without this arm two equal lists fell through to
-    // `false` — a latent bug the P-PACK 2.3 differential surfaced, since no prior corpus case
+    // `false` — a latent bug the differential surfaced, since no prior corpus case
     // compared two equal list literals.)
     if left.is_list() && right.is_list() {
         // Demote each side to an owned boxed list (a packed list materializes to objects), compare

@@ -1,4 +1,4 @@
-//! The wasm runner (P-WASM W1.1/W1.2): a `wasm32-wasip1` binary that runs a `.noeb` bundle on
+//! The wasm runner: a `wasm32-wasip1` binary that runs a `.noeb` bundle on
 //! the bytecode VM.
 //!
 //! This is the wasm analogue of a `noeta build --exe` artifact — VM on embedded bytecode, no

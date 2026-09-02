@@ -1059,7 +1059,7 @@ pub(crate) fn run_one_test(
     }
 
     // `@test`/`@bench` compile a *separate* module per case (a different granularity than the
-    // whole-file startup cache), so they don't participate in it — see `plans/startup-cache`. They
+    // whole-file startup cache), so they don't participate in it. They
     // have no program pass-through args; a test sees the real process argv.
     match execute_real_host(
         &program,

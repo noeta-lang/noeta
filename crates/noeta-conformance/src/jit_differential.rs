@@ -48,7 +48,7 @@ pub enum Arm {
     Plain,
     /// The cancellable shape: a never-set flag on the forced-JIT run, so every loop header polls.
     CancelPoll,
-    /// The ahead-of-time shape (P-AOT L3.1): inline caches off, null call sites, no cancellation
+    /// The ahead-of-time shape: inline caches off, null call sites, no cancellation
     /// poll — the codegen a `--native` artifact carries, finalized to pages instead of an object
     /// file. The IC-off path is the always-correct helper slow path, so the result must be
     /// byte-identical; that identity is the entire basis on which `noeta build --native` ships.
