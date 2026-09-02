@@ -66,6 +66,26 @@ This project is developed primarily by coding agents, so the test suite is the t
 
 Rationale is welcome where it helps a reader *use* the thing — explaining that acronyms are words because `HTTPSURLParser` has no readable boundaries is what makes the rule stick. It is not welcome as a defense of a decision against alternatives nobody proposed.
 
+### How a page reads
+
+Write what a thing **is** and how to use it. A reader arrives with a task, so the page owes them the shape of the answer and a sample they can copy, before it owes them anything else.
+
+The patterns below are banned because each one costs a reader time without paying it back. Most of them are ways of sounding considered rather than being clear.
+
+**Say what it is, not what it isn't.** "A union orders when every member orders" beats "ordering is not defined unless the members order". Negative definition makes a reader reconstruct the positive case themselves. This extends to the "not X, but Y" frame, to arguing against a design nobody proposed, and to trailing justification clauses that restate the rule as a moral.
+
+**Do not announce a point before making it.** A paragraph that opens by declaring its own thesis, or a sentence that promises candour before delivering content, wastes the reader's first line. Start with the content.
+
+**Keep the prose plain.** No em dashes. No colon-then-payload for emphasis. No punchy fragments. No sentence under six words carrying a whole thought. No triads or four-item lists where two items or a table would do. No paragraph whose sentences all land at the same length. No metaphor verb standing in for description: a flag does not *cut through* anything, and a number does not *move the needle*.
+
+**Drop the intensifiers.** `genuinely`, `quietly`, `only ever`, `nobody talks about`. They add emphasis a technical page cannot cash.
+
+**One idea per paragraph, and stop.** A paragraph that restates its predecessor in other words should be deleted, not rephrased. Paired antithetical clauses ("keep what works, drop what doesn't") and mirrored "which … and which" contrasts are two sentences pretending to be one.
+
+**Claim only what you can point at.** A page must not assert what a reader's codebase looks like or where their project is heading.
+
+Reference pages want tables. A method, its signature and one example belong in a row, and the prose around them should shrink to the rules a table cannot hold.
+
 `cargo test -p noeta-cli --test docs_style` enforces the mechanical half (the phrasings and labels above, in `docs/` and in the CLI's user-facing help). It is a lint over a small set of high-precision patterns, not a proof — the judgment half is yours, and a wiki page written as a changelog will pass it.
 
 > [!NOTE]
