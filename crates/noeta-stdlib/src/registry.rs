@@ -7523,28 +7523,28 @@ const CRYPTO_MODULES: &[ExtModule] = &[ExtModule {
     ..ExtModule::DEFAULTS
 }];
 
-/// [`HttpExtension`]'s modules — the outbound client (its own ring) and inbound server (P0.3b split).
+/// [`HttpExtension`]'s modules — the outbound client (its own ring) and the inbound server.
 const HTTP_MODULES: &[ExtModule] = &[
     ExtModule {
-        // The outbound client (package-manager P0.3b): `get`/`post`/…/`_async`. Its reqwest/TLS tree
-        // is the ~5 MB `ring-http-client` payload, so isolating it from the server lets a
+        // The outbound client: `get`/`post`/…/`_async`. Its reqwest/TLS tree is the
+        // `ring-http-client` payload, so isolating it from the server lets a
         // server-only program shed it. `http_dispatch` is shared with the server module (the two
         // function-name sets are disjoint, so one func-name router serves both).
         name: "http.client",
         functions: HTTP_CLIENT_FNS,
         dispatch: http_dispatch,
         // The optional `headers` argument is a `Map` — needs the deep marshalling that surfaces
-        // it as `NativeValue::Map` (http arc H5). url/body strings project fine either way.
+        // it as `NativeValue::Map`. url/body strings project fine either way.
         deep_marshal: true,
-        // The reqwest/TLS tree (~3 MB) rides behind this ring — a tailored AOT archive links it only
-        // when the program can reach a client function (package-manager P1.0). Single source of truth
+        // The reqwest/TLS tree rides behind this ring — a tailored AOT archive links it only
+        // when the program can reach a client function. Single source of truth
         // for the module→ring map the footprint scan reads.
         ring: Some("ring-http-client"),
         docs: HTTP_CLIENT_DOCS,
         ..ExtModule::DEFAULTS
     },
     ExtModule {
-        // Signed-cookie sessions (session arc S2/S3). Registered in this unit rather than its own
+        // Signed-cookie sessions. Registered in this unit rather than its own
         // because `open`/`attach` name `Request` and `Response`; the module is still `std.session`,
         // since a session is a concept above HTTP and the codec half has no HTTP in it at all.
         //
@@ -7560,8 +7560,8 @@ const HTTP_MODULES: &[ExtModule] = &[
         ..ExtModule::DEFAULTS
     },
     ExtModule {
-        // The inbound server (package-manager P0.3b): the pure `response` builder + the `serve`
-        // accept→dispatch→reply loop. `serve` (higher-order-abi H3) is a higher-order orchestrator
+        // The inbound server: the pure `response` builder + the `serve`
+        // accept→dispatch→reply loop. `serve` is a higher-order orchestrator
         // (closure handler, many futures in flight), so it lives in the ctx table. No reqwest.
         name: "http.server",
         functions: HTTP_SERVER_FNS,
@@ -7570,7 +7570,7 @@ const HTTP_MODULES: &[ExtModule] = &[
         ctx_functions: crate::serve::HTTP_CTX_FNS,
         ctx_dispatch: Some(crate::serve::http_ctx_dispatch),
         // The inbound serve loop rides tokio (already linked for `fs`) — no separable native dep, so
-        // no ring. A `use std.http.server` program links no reqwest, precisely (P0.3b split).
+        // no ring. A `use std.http.server` program links no reqwest, precisely.
         ring: None,
         docs: HTTP_SERVER_DOCS,
         ..ExtModule::DEFAULTS

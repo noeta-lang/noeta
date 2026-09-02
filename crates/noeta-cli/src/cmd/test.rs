@@ -143,23 +143,21 @@ impl Bound {
     }
 }
 
-/// `noeta test [PATH]` — discover `@test` blocks (object-model slice 6) and run each as an isolated
-/// test. Tests run concurrently (one fresh isolate per test) and, by default, **all** of them run
-/// even after a failure; `--fail-fast` stops at the first failure. A test fails when its fn aborts —
-/// a false `assert`/`panic` (or any runtime error) — and passes when it returns normally. The
-/// program's own top-level "main" effects are not run: `noeta test` runs the tests, not the file.
+/// `noeta test [PATH]` — discover `@test` blocks and run each as an isolated test. Tests run
+/// concurrently (one fresh isolate per test) and, by default, **all** of them run even after a
+/// failure; `--fail-fast` stops at the first failure. A test fails when its fn aborts — a false
+/// `assert`/`panic` (or any runtime error) — and passes when it returns normally. The program's own
+/// top-level "main" effects are not run: `noeta test` runs the tests, not the file.
 ///
 /// `PATH` (default `.`) is a file or a **directory**, mirroring `noeta check`. A directory is walked
 /// recursively and every `.noe` file is run as its own entry, because that is the only way a
 /// project's tests all run: the linker merges a sibling module's *reachable declarations* into an
-/// entry, never its `@test` blocks, so `noeta test src/main.noe` on a two-module project reported
-/// "4 passed" while a whole module's tests silently never ran — and a directory argument used to be
-/// a raw `Is a directory (os error 21)`, so there was no spelling that did run them.
+/// entry, never its `@test` blocks, so naming one module's file runs that module's tests and no
+/// others.
 ///
-/// The flags arrive as the `TestOpts` the verb already parsed them into, rather than as eight
-/// positional parameters. The runner funnelled them into a `TestOptions` on its first line anyway,
-/// so the flat list was a third spelling of one record — and every new knob had to be threaded
-/// through all three.
+/// The flags arrive as the `TestOpts` the verb already parsed them into, rather than as separate
+/// parameters: the runner needs them as a `TestOptions` record anyway, so one record travels the
+/// whole path and a new knob is added in one place.
 pub(crate) fn cmd_test(path: &std::path::Path, flags: &crate::tier_runner::TestOpts) -> u8 {
     let opts = TestOptions {
         fail_fast: flags.fail_fast,
@@ -363,8 +361,8 @@ fn run_file_tests(file: &std::path::Path, opts: &TestOptions, label: Option<&str
         .cloned()
         .collect();
 
-    // The `--group` filter (object-model slice 6h): keep only tests tagged `#[Group("<g>")]`.
-    // `--name` (ide-ui U3) then narrows to the named fn(s) — the editor's run-one-test seam.
+    // The `--group` filter: keep only tests tagged `#[Group("<g>")]`.
+    // `--name` then narrows to the named fn(s) — the editor's run-one-test seam.
     let selected: Vec<&TierFn> = match group {
         Some(g) => activated
             .tests

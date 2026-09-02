@@ -1,4 +1,4 @@
-//! The browser host (P-WASM W3.0) — the fourth `Host`: the real world as a browser tab sees it.
+//! The browser host — the `Host` for the playground: the real world as a browser tab sees it.
 //!
 //! Where the playground's default `SandboxHost` is the deterministic conformance world, this
 //! host backs the real-world capabilities with **wasm imports the embedding worker supplies**
@@ -10,9 +10,9 @@
 //! - **Outbound HTTP** ← `js_net_fetch` — a synchronous XMLHttpRequest. Legal precisely because
 //!   the engine only ever runs in a **Web Worker** (sync XHR is banned on the main thread, not
 //!   in workers), which is what lets the synchronous [`Network::net_fetch`] leaf work without
-//!   a VM seam change. Concurrent `*_async` fan-out degrades serial-but-correct, exactly as on
-//!   any host whose executor resolves at spawn; genuine overlap is a later slice (JSPI or a
-//!   pump), recorded in `plans/wasm/`.
+//!   a VM seam change. Under the synchronous entry point concurrent `*_async` fan-out degrades
+//!   serial-but-correct, exactly as on any host whose executor resolves at spawn; genuine overlap
+//!   needs the JSPI entry point and [`crate::BrowserExecutor`], which `net_spawn` below feeds.
 //!
 //! Everything a tab cannot provide keeps the deterministic/in-memory shape: the fs is a fresh
 //! [`Vfs`], the user-facing PRNG stays seeded and `monotonic` logical (the RealHost rules), env
@@ -44,7 +44,7 @@ pub(crate) mod imports {
         pub fn js_entropy_u64() -> u64;
         pub fn js_now_ms() -> f64;
         pub fn js_net_fetch(ptr: *const u8, len: usize) -> *mut u8;
-        // The JSPI pump (W3.1). `js_fetch_start` begins a fetch in JS and returns a ticket
+        // The JSPI pump. `js_fetch_start` begins a fetch in JS and returns a ticket
         // WITHOUT suspending; `js_fetch_take` polls it (null pointer = still pending);
         // `js_wait` is the one SUSPENDING import — it parks the whole wasm stack on
         // `Promise.race([any pending ticket settles, optional timeout])`, letting the browser
@@ -352,7 +352,7 @@ impl Os for BrowserHost {
         )))
     }
 
-    // --- Process supervision (the process-streaming arc): a browser tab / WASI guest has no
+    // --- Process supervision: a browser tab / WASI guest has no
     // subprocesses, so the whole family is the same honest error as `os_exec` — and since
     // `os_spawn` never succeeds, no handle can exist for the query leaves. ---
 
@@ -451,7 +451,7 @@ pub(crate) fn request_json(request: &NetRequest) -> String {
 }
 
 /// Raise the embedder's reply JSON (`{status, headers, body}` or `{error}`) back into a
-/// [`NetResponse`]. Shared by the synchronous leaf and the JSPI future (W3.1).
+/// [`NetResponse`]. Shared by the synchronous leaf and the JSPI future.
 pub(crate) fn parse_reply(reply: &str, url: &str) -> Result<NetResponse, NetError> {
     let parsed: serde_json::Value = serde_json::from_str(reply).map_err(|e| {
         NetError::new(
@@ -500,7 +500,7 @@ impl Network for BrowserHost {
     }
 
     fn net_spawn(&self, request: NetRequest) -> Box<dyn noeta_stdlib::ExternIo> {
-        // The JSPI seam (W3.1): hand the executor a descriptor whose real body is a plain Rust
+        // The JSPI seam: hand the executor a descriptor whose real body is a plain Rust
         // future over a JS fetch ticket — `BrowserExecutor` starts it without suspending, so
         // `all([get_async(..), ..])` genuinely overlaps. Under the synchronous entry point the
         // sandbox executor takes the `run_sync` body instead (serial-but-correct, unchanged).
@@ -528,8 +528,8 @@ impl Network for BrowserHost {
     }
 }
 
-// The playground's browser host no longer bakes in the loopback broker (para-namespace follow-on
-// F2) — the `para.p2p` extension owns it — so it keeps the default `P2pProvider` (`as_p2p` → `None`).
+// The `para.p2p` extension owns the loopback broker, so the playground's browser host keeps the
+// default `P2pProvider` (`as_p2p` → `None`).
 impl noeta_stdlib::host::P2pProvider for BrowserHost {}
 
 // The playground runs on the browser's single thread and has no blocking leaf at all — every effect

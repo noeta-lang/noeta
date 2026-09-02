@@ -162,14 +162,14 @@ pub enum DiagnosticCode {
     /// `enum`, tuples, scalars) have no identity to ask about — compare them with `==`. A `dyn`
     /// operand defers (it may hold a class at runtime).
     InvalidIdentityCompare,
-    /// A **private** field is accessed from outside its declaring type (object-model slice 2d):
-    /// read `x.f`, write `x.f = v`, or set in a literal `T { f: v }`. A reference `class`'s fields
+    /// A **private** field is accessed from outside its declaring type: read `x.f`,
+    /// write `x.f = v`, or set in a literal `T { f: v }`. A reference `class`'s fields
     /// default private (visible only inside the class's own methods); expose one with `pub`, or go
     /// through a method/constructor. (A value `struct`'s fields are always public, so this never
     /// fires for a struct.)
     PrivateField,
-    /// A **private** method is called — or bound as a handle — from outside its declaring type
-    /// (method-visibility arc). A method of a `struct`, `class`, or `enum` is private by default,
+    /// A **private** method is called — or bound as a handle — from outside its declaring
+    /// type. A method of a `struct`, `class`, or `enum` is private by default,
     /// exactly like a `class`'s fields: the type's operations are its own until it says otherwise.
     /// Expose one with `pub fn`, or reach it through a method that is already public.
     ///
@@ -186,8 +186,7 @@ pub enum DiagnosticCode {
     ///
     /// One code for the whole name-space, because the author's question is the same in every
     /// position — block, adjacency, or decorator — and so is the fix: the name is wrong, here is
-    /// the nearest one that is not. It was previously `UnknownTier`, which could only be right in
-    /// the block position and mislabelled an extension's directive as a "dev-tier" everywhere else.
+    /// the nearest one that is not.
     ///
     /// Surfaced rather than silently ignored, so a misspelled tier's content is not invisibly
     /// dropped.
@@ -233,18 +232,18 @@ pub enum DiagnosticCode {
     /// also an untyped integer literal coerced into a fixed-width context that does not fit it
     /// (`x: u8 = 300`). The value simply does not fit the type's range.
     FixedWidthOutOfRange,
-    /// A reactive update did not converge (reactivity S4): an `effect` keeps changing a signal it
+    /// A reactive update did not converge: an `effect` keeps changing a signal it
     /// depends on, so a `signal.set`/`.update` flush would re-run it without end. The scheduler bounds
     /// each flush at [`noeta_reactive::MAX_FLUSH_STEPS`] effect runs and aborts here rather than
     /// looping forever. This is a runtime error (the program is well-formed; the *update graph* has a
     /// self-reinforcing cycle), analogous to a non-terminating loop being surfaced instead of hung on.
     ReactiveCycle,
-    /// A declaration binds a reserved prelude name (`Ok`/`Err`/`some`/`none`/`panic`/`assert`) —
-    /// prelude-redesign P3. Reserving the (small) remaining prelude closes the backend divergence a
-    /// shadowing binding used to cause (the tree-walker pre-declares prelude names as immutable
-    /// globals; the VM resolved a shadow as a fresh local).
+    /// A declaration binds a reserved prelude name (`Ok`/`Err`/`some`/`none`/`panic`/`assert`).
+    /// Reserving the (small) remaining prelude closes a backend divergence: a shadowing binding
+    /// resolves differently depending on whether the backend pre-declares prelude names as
+    /// immutable globals or takes the shadow as a fresh local.
     ReservedName,
-    /// A method called through the wrong receiver kind (prelude-redesign EX.2): an instance method
+    /// A method called through the wrong receiver kind: an instance method
     /// (its body references `self`) called associated-style (`Type.m(...)`), or an associated
     /// function (never touches `self`) called on a value (`x.new(...)`). The distinction is DERIVED
     /// from the body — zero runtime cost — and enforced statically.
@@ -254,7 +253,7 @@ pub enum DiagnosticCode {
     /// a `void` function may fall through; any other declared type must be produced on every path, or
     /// the caller binds the promised type to a `unit` value. Enforced statically at the definition.
     MissingReturn,
-    /// A declaration binds a **reserved native type name** (extern-types X1) — a registered
+    /// A declaration binds a **reserved native type name** — a registered
     /// extern type (`Uuid`) or a checker-native type (`FileHandle`, `Iterator`, `Future`,
     /// `Sender`, `Receiver`, `Signal`, `Computed`, `Effect`). Shadowing one would make the
     /// name's method tables ambiguous, so it is rejected statically.
@@ -264,12 +263,12 @@ pub enum DiagnosticCode {
     /// `Serialize` over a function-typed field. The derive would type-check and then fail at the
     /// first runtime comparison/serialization, so it is rejected statically at the declaration.
     UnderivableTrait,
-    /// A `@tier(name, config: Type)` declaration is invalid (tier-providers T2): the name collides
+    /// A `@tier(name, config: Type)` declaration is invalid: the name collides
     /// with a built-in tier or another declaration, the `config` does not name an `@attribute`
     /// struct, or the runner's signature is not `fn(roots: List<TierRoot>): void`. Rejected at the
     /// declaration so a broken tier never reaches a consumer's `@<name> { … }` block.
     InvalidTierDeclaration,
-    /// An expression-tier block is misused (expr-tiers arc): a `@<name> { … }` block in expression
+    /// An expression-tier block is misused: a `@<name> { … }` block in expression
     /// position names a tier that is not declared `expr:` (`x = @doc { … }` — its blocks are not
     /// values), or an expression tier's block stands in statement position (its value would be
     /// silently discarded — assign or return it).
@@ -334,7 +333,7 @@ pub enum DiagnosticCode {
     /// binding, so silent shadowing is never needed and only obscures which meaning a name has.
     ShadowedBinding,
     /// A `@validated` struct/class is literally constructed (`T { ... }`, or a record-update
-    /// `T { ...base, f: v }`) from OUTSIDE its own `impl`/methods (validation arc). A `@validated`
+    /// `T { ...base, f: v }`) from OUTSIDE its own `impl`/methods. A `@validated`
     /// type may only be built through its own constructor functions — which run `validate()` and
     /// return `Result<T, E>` — so an outside literal (which would bypass the invariant) is rejected.
     /// Construction inside the type's own methods stays legal, and the recipe doors (`json.parse`,
@@ -465,23 +464,21 @@ pub enum DiagnosticCode {
     /// still run.
     DroppedTierSetup,
     /// A module's `namespace` declaration disagrees with the path **derived from where the file
-    /// sits** (namespace-derivation arc).
+    /// sits**.
     ///
     /// A module's path is the package's import prefix plus the file's path relative to the package
     /// root, so the declaration is redundant — and a declaration that says something *else* is a
-    /// second, contradictory answer to "what is this module called". Before derivation the
-    /// declaration simply won, which let a file at `helpers/uri.noe` call itself
-    /// `Totally.Unrelated`, and made a package's *internal* file names its public API. The fix is
+    /// second, contradictory answer to "what is this module called". The fix is
     /// always the same: delete the declaration (the derived path is the module's path), or move the
     /// file to where the declaration says it lives.
     ModulePathMismatch,
-    /// Two files derive the **same** module path (namespace-derivation arc).
+    /// Two files derive the **same** module path.
     ///
-    /// One path is one module. When two files claimed one namespace the second file's exports
-    /// silently vanished, and the failure surfaced far away, at the *importing* file, as "module X
-    /// has no export y". This names both files instead.
+    /// One path is one module. Unreported, one file's exports would silently lose to the other's,
+    /// and the failure would surface far away, at the *importing* file, as "module X has no export
+    /// y". This names both files instead.
     ModulePathCollision,
-    /// A file or directory name is not a legal module-path segment (namespace-derivation arc).
+    /// A file or directory name is not a legal module-path segment.
     ///
     /// The module path is derived from the path on disk, so every directory name and file stem in it
     /// has to be spellable in a `use`. `my-utils.noe` is not: `use pkg.my-utils.…` does not parse.

@@ -1,5 +1,4 @@
-//! The WASI host (P-WASM W1.0) — the third [`noeta_stdlib::Host`], for the `wasm32-wasip1`
-//! runner.
+//! The WASI host — the [`noeta_stdlib::Host`] for the `wasm32-wasip1` runner.
 //!
 //! Where `SandboxHost` is the deterministic in-memory world and `RealHost` is the CLI's
 //! tokio-backed real host, `WasiHost` is **real-but-synchronous**: it gives a program the world
@@ -9,10 +8,10 @@
 //! identically on native targets, which is how its unit tests run; nothing here is
 //! `cfg(target_family = "wasm")`-gated.
 //!
-//! Like `RealHost`, it is **never differential-tested** — the wasm oracle (W1.3) runs the *same
+//! Like `RealHost`, it is **never differential-tested** — the wasm oracle runs the *same
 //! runner binary* on `SandboxHost` instead. Capabilities WASI p1 cannot provide are honest
-//! runtime errors, not stubs that lie: outbound/inbound HTTP arrives with the `wasi:http`
-//! component build (P-WASM W4), and process spawning does not exist on this target at all.
+//! runtime errors, not stubs that lie: outbound/inbound HTTP comes with the `wasi:http`
+//! component build, and process spawning does not exist on this target at all.
 //!
 //! The deterministic-vs-real split mirrors `RealHost` exactly: the user-facing PRNG and the
 //! monotonic clock stay seeded/logical (`random.seed(n)` must make `random.*` a pure function of
@@ -50,11 +49,11 @@ pub struct WasiHost {
     /// The program's `env.set` writes: an overlay consulted before the real environment, which
     /// is never mutated (same rule as `RealHost`, and WASI environs are immutable anyway).
     env_overlay: HashMap<String, String>,
-    /// The one-request inbound script (P-WASM W4): armed by [`WasiHost::with_inbound`] for a
+    /// The one-request inbound script: armed by [`WasiHost::with_inbound`] for a
     /// `wasi:http` handler invocation. `None` on the plain runner, where serving stays an honest
     /// error pointing at the serve build.
     inbound: Option<Inbound>,
-    /// The outbound HTTP hook (P-WASM W4 follow-up): the platform's client, injected by the
+    /// The outbound HTTP hook: the platform's client, injected by the
     /// embedding — the serve component passes the `wasi:http/outgoing-handler` dance here.
     /// `None` on the plain wasip1 runner, where outbound stays an honest error (wasip1 has no
     /// sockets to offer).
@@ -62,7 +61,7 @@ pub struct WasiHost {
     /// Telemetry state: in-flight spans are tracked (so `tel_span_context` and parenting stay
     /// correct for explicit `std.tracing` use) but there is no exporter — every signal reports
     /// disabled and ended spans drop at the null sink. An OTLP path needs outbound HTTP, so it
-    /// arrives with the `wasi:http` build (W4) if ever.
+    /// would have to ride on the `wasi:http` build.
     tel: WasiTelemetry,
 }
 
@@ -98,7 +97,7 @@ impl WasiHost {
         self
     }
 
-    /// Arm the one-request inbound script (P-WASM W4): the `wasi:http` handler model inverted
+    /// Arm the one-request inbound script: the `wasi:http` handler model inverted
     /// onto the accept-loop `Network` capability, exactly the deterministic sandbox's shape — a
     /// served program accepts this request, replies, sees `None` on the next accept, and its
     /// `http.serve` loop returns. The reply lands in the returned [`ReplySlot`] (the host itself
@@ -453,7 +452,7 @@ impl Os for WasiHost {
         )))
     }
 
-    // --- Process supervision (the process-streaming arc): a browser tab / WASI guest has no
+    // --- Process supervision: a browser tab / WASI guest has no
     // subprocesses, so the whole family is the same honest error as `os_exec` — and since
     // `os_spawn` never succeeds, no handle can exist for the query leaves. ---
 
@@ -585,8 +584,8 @@ impl Network for WasiHost {
     }
 }
 
-// WasiHost no longer bakes in the loopback broker (para-namespace follow-on F2) — the `para.p2p`
-// extension owns it in per-run ctx state — so it keeps the default `P2pProvider` (`as_p2p` → `None`).
+// The `para.p2p` extension owns the loopback broker in per-run ctx state, so `WasiHost` keeps the
+// default `P2pProvider` (`as_p2p` → `None`).
 impl noeta_stdlib::host::P2pProvider for WasiHost {}
 
 // WASI's file reads are synchronous and bounded, and the module has no threads to cancel from, so
@@ -859,6 +858,6 @@ mod tests {
         host.tel_release_remote(seed);
         assert!(!host.tel_is_remote(seed));
     }
-    // (The p2p loopback-broker round-trip test moved to `noeta-ext-abi`'s `p2p.rs` when P2p left the
-    // Host union — F2b: `WasiHost` no longer implements `P2p`; the broker owns those semantics.)
+    // (The p2p loopback-broker round-trip test lives in `noeta-ext-abi`'s `p2p.rs`: `P2p` is not a
+    // `Host` arm and `WasiHost` does not implement it — the broker owns those semantics.)
 }

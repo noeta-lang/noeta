@@ -55,7 +55,7 @@ pub fn run_source(text: &str) -> String {
     run_with(text, Box::new(noeta_stdlib::SandboxHost::new()))
 }
 
-/// [`run_source`] on the [`BrowserHost`] (W3.0): real entropy, wall clock, and outbound HTTP
+/// [`run_source`] on the [`BrowserHost`]: real entropy, wall clock, and outbound HTTP
 /// through the embedder's `noeta_host` imports — the playground's "real host" mode. Serial
 /// async (the sandbox executor resolves at spawn); the JSPI embedder uses
 /// [`run_source_browser_async`] instead.
@@ -67,7 +67,7 @@ pub fn run_source_browser(text: &str) -> String {
     )
 }
 
-/// [`run_source_browser`] under the JSPI pump (W3.1): the [`BrowserExecutor`] puts async work
+/// [`run_source_browser`] under the JSPI pump: the [`BrowserExecutor`] puts async work
 /// genuinely in flight (overlapping fetches, real-time `sleep`), suspending the wasm stack on
 /// its one suspending import while the browser event loop runs. Only callable from an embedder
 /// that wrapped the imports with `WebAssembly.Suspending` and this entry with
