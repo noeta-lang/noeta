@@ -169,7 +169,7 @@ publish_cooldown = "24h"
 # Each `noeta <subcommand>` a dependency may contribute, under the name you choose for it:
 [trust.commands]
 migrate = "para/db"              # `noeta migrate`
-undo    = "para/db:rollback"     # `noeta undo`, renamed from para/db's `rollback`
+db      = "para/db:migrate"      # `noeta db`, renamed from para/db's `migrate`
 ```
 
 | Key | Value | Default |
@@ -186,7 +186,7 @@ A dependency that ships CLI commands, as `ExtCommand`s described in [Native Exte
 ```toml
 [trust.commands]
 migrate = "para/db"              # `noeta migrate`, with no rename, so the exported name is `migrate`
-undo    = "para/db:rollback"     # `noeta undo`, which para/db exported as `rollback`
+db      = "para/db:migrate"      # `noeta db`, which para/db exported as `migrate`
 ```
 
 The binding is the grant. One entry both authorizes the provider to contribute this one command and fixes the name it appears under, so a package is named once, and only a command with an entry is registered.

@@ -89,7 +89,7 @@ A dependency can add subcommands to the toolchain, on the `cargo clippy` model. 
 ```toml
 [trust.commands]
 migrate = "para/db"           # `noeta migrate` applies this project's schema migrations
-undo    = "para/db:rollback"  # the key is the name you type, so this is `noeta undo`
+db      = "para/db:migrate"   # the key is the name you type, so this is `noeta db`
 ```
 
 The binding is the grant. One entry both authorizes the package to contribute the command and fixes the name it appears under, so two packages exporting the same name coexist. [`noeta audit`](#noeta-audit) reports every command grant in the tree.
