@@ -601,28 +601,36 @@ impl Type {
         }
     }
 
-    /// Whether this type mentions a **trait object** ([`Type::DynTrait`]) anywhere — at the top
-    /// level or nested inside a container / union / tuple / function type / generic argument.
+    /// Whether this type is **abstract**: no runtime value has it as its own type, so a position
+    /// carrying it can only ever have been *stated*. The three are a trait object ([`Type::DynTrait`],
+    /// whose values are concrete implementors), the open top ([`Type::Dyn`]) and an abstract kind
+    /// ([`Type::Kind`], whose values are concrete members).
+    ///
+    /// The same three the subtyping walk gates as widenings, and for the same reason: a value never
+    /// arrives at one by synthesis, only by being read at it.
+    pub fn is_abstract(&self) -> bool {
+        matches!(self, Type::Dyn | Type::DynTrait(_) | Type::Kind(_))
+    }
+
+    /// Whether this type states an **abstract component** below its own head — an abstract generic
+    /// argument, container element, tuple slot, parameter or return.
     ///
     /// The lattice question behind "does this position state something no value can synthesize".
-    /// A trait object is abstract: no runtime value *has* the type `dyn Speak` — every one is a
-    /// concrete implementor — so a type mentioning one can only ever be **stated**, by an
-    /// annotation, a declared parameter, return or field. Wherever that matters (a construction
-    /// deciding whether the position's type arguments lead inference, or follow it) this is the
-    /// test, so the "abstract, hence stated" rule has one spelling.
-    pub fn contains_trait_object(&self) -> bool {
+    /// A construction reads it to decide whether the position's type arguments lead inference or
+    /// follow it: `Box<dyn Speak>` and `Box<dyn>` both name an instantiation no field value can
+    /// ever produce, so the position states `T` and the fields widen into it.
+    ///
+    /// The head itself is excluded, which is what keeps a bare `dyn` expectation an *open* position
+    /// with nothing to read rather than a statement about somebody's type argument.
+    pub fn contains_abstract_arg(&self) -> bool {
+        fn here(t: &Type) -> bool {
+            t.is_abstract() || t.contains_abstract_arg()
+        }
         match self {
-            Type::DynTrait(_) => true,
-            Type::List(t) | Type::Set(t) | Type::Option(t) => t.contains_trait_object(),
-            Type::Map(k, v) | Type::Result(k, v) => {
-                k.contains_trait_object() || v.contains_trait_object()
-            }
-            Type::Named(_, args) | Type::Union(args) | Type::Tuple(args) => {
-                args.iter().any(Type::contains_trait_object)
-            }
-            Type::Fn { params, ret } => {
-                params.iter().any(Type::contains_trait_object) || ret.contains_trait_object()
-            }
+            Type::List(t) | Type::Set(t) | Type::Option(t) => here(t),
+            Type::Map(k, v) | Type::Result(k, v) => here(k) || here(v),
+            Type::Named(_, args) | Type::Union(args) | Type::Tuple(args) => args.iter().any(here),
+            Type::Fn { params, ret } => params.iter().any(here) || here(ret),
             _ => false,
         }
     }
@@ -644,9 +652,9 @@ impl Type {
     /// - An **inference hole** ([`Type::Unknown`]) is compatible in *both* directions, so an
     ///   un-inferred *interior* operand never produces a false positive (the deliberate residual
     ///   tolerance; holes are removed at typed boundaries, not here).
-    /// - [`Type::Dyn`] is the **top**: every type widens into it (`T <: dyn`). It does *not* widen
-    ///   the other way — `dyn <: T` is false (narrowing out of `dyn` is the explicit, checked
-    ///   `x.as<T>()`, never implicit).
+    /// - [`Type::Dyn`] is the **top**: every type widens into it (`T <: dyn`) wherever the position
+    ///   admits a widening at all. It does *not* widen the other way — `dyn <: T` is false
+    ///   (narrowing out of `dyn` is the explicit, checked `x.as<T>()`, never implicit).
     /// - Containers are covariant in their element types; function types are contravariant in
     ///   parameters and covariant in the return (the standard arrow rule).
     /// - Everything else holds only by identity.
@@ -664,31 +672,31 @@ impl Type {
         Type::subtype_at(sub, sup, rules, true)
     }
 
-    /// The walk, carrying whether a **trait object may be formed at this position**.
+    /// The walk, carrying whether a value may be **read at a wider type in this position**.
     ///
-    /// `Named(n) <: DynTrait(t)` is a widening — a concrete implementor is *read as* the trait — so
-    /// it is sound exactly where reading at a wider type is: a covariant position. Every position
-    /// is covariant (a container element, a tuple slot, a function's return) except a generic
-    /// argument of a declared type, where whether a widened view can be written back through is a
-    /// property of that declaration; [`NominalRules::covariant_arg`] answers it, and the flag turns
-    /// off for the descent when the answer is no.
+    /// Three relations read a value as something other than its own type, and all three are the same
+    /// step: `T <: dyn` (the open top), `Named(n) <: DynTrait(t)` (a concrete implementor read as
+    /// the trait) and `Named(n) <: Kind(k)` (read as an abstract kind). Each is sound exactly where
+    /// reading at a wider type is: a covariant position. Every position is covariant (a container
+    /// element, a tuple slot, a function's return) except a generic argument of a declared type,
+    /// where whether a widened view can be written back through is a property of that declaration;
+    /// [`NominalRules::covariant_arg`] answers it, and the flag turns off for the descent when the
+    /// answer is no.
     ///
-    /// `false` reproduces the walk exactly as it is without the rule, which is what makes the rule
-    /// purely additive: nothing this function accepted before is refused because of the flag, and
-    /// [`NoRegistry`] (whose `implements_trait` is always `false`) is unaffected either way.
-    fn subtype_at(
-        sub: &Type,
-        sup: &Type,
-        rules: &impl NominalRules,
-        trait_objects_ok: bool,
-    ) -> bool {
+    /// The flag governs the open `dyn` and a `dyn Trait` alike, because the store that would corrupt
+    /// the original is the same store either way: a `Box<Dog>` reads as a `Box<dyn>` in exactly the
+    /// positions it reads as a `Box<dyn Speak>`. Identity is not a widening, so `dyn <: dyn` holds
+    /// everywhere, as do the two gradual escapes (an inference hole on either side, and an
+    /// unspecified `dyn` *argument* flowing into a concrete instantiation).
+    fn subtype_at(sub: &Type, sup: &Type, rules: &impl NominalRules, widening_ok: bool) -> bool {
         use Type::*;
         // Inference holes: bidirectionally compatible (no false positives on missing info).
         if sub.is_gradual() || sup.is_gradual() {
             return true;
         }
-        // `dyn` is the top type: everything widens into it.
-        if matches!(sup, Dyn) {
+        // `dyn` is the top type: everything widens into it, where the position admits a widening.
+        // `dyn <: dyn` is identity rather than a widening, so it holds in an invariant position too.
+        if matches!(sup, Dyn) && (widening_ok || matches!(sub, Dyn)) {
             return true;
         }
         // `never` is the bottom type: it widens into everything. Checked before the arms below so a
@@ -705,14 +713,14 @@ impl Type {
         if let DynTrait(tr) = sup {
             return match sub {
                 DynTrait(a) => a == tr,
-                Named(n, _) if trait_objects_ok => rules.implements_trait(n, tr),
+                Named(n, _) if widening_ok => rules.implements_trait(n, tr),
                 other => other.defers_to_runtime(),
             };
         }
-        // Every position reached from here is a **read** position of the same value, so a trait
-        // object may be formed in it exactly when one could be formed here. The single exception is
-        // a declared type's generic argument, which asks the registry for itself below.
-        let rec = |a: &Type, b: &Type| Type::subtype_at(a, b, rules, trait_objects_ok);
+        // Every position reached from here is a **read** position of the same value, so a widening
+        // may be formed in it exactly when one could be formed here. The single exception is a
+        // declared type's generic argument, which asks the registry for itself below.
+        let rec = |a: &Type, b: &Type| Type::subtype_at(a, b, rules, widening_ok);
         match (sub, sup) {
             // Narrowing out of `dyn` is never implicit (only via a checked `.as<T>()`).
             (Dyn, _) => false,
@@ -744,16 +752,18 @@ impl Type {
                     && ap.iter().zip(bp).all(|(a, b)| rec(b, a)) // contravariant params
                     && rec(ar, br) // covariant return
             }
-            // A named type is covariant in its arguments (`Box<int> <: Box<dyn>`); the name must
-            // match. An **empty** argument list on either side means "arguments unspecified" (a
-            // literal or partially-erased instance) and is compatible with any instantiation of the
-            // same name; only when both sides carry arguments are arity + covariance checked. A `dyn`
-            // *argument* on either side is the per-argument analogue of that escape — an unspecified
-            // element flows gradually into a concrete instantiation (`Tree<dyn> <: Tree<int>`), which
-            // is how a nullary/partial generic constructor (`Tree.Empty` : `Tree<dyn>`) reaches a
-            // concrete parameter.
+            // A named type is covariant in its arguments (`Box<int> <: Box<dyn>`) where the
+            // declaration allows; the name must match. An **empty** argument list on either side
+            // means "arguments unspecified" (a literal or partially-erased instance) and is
+            // compatible with any instantiation of the same name; only when both sides carry
+            // arguments are arity + variance checked. A `dyn` argument on the SUB side is the
+            // per-argument analogue of that escape — an unspecified element flows gradually into a
+            // concrete instantiation (`Tree<dyn> <: Tree<int>`), which is how a nullary/partial
+            // generic constructor (`Tree.Empty` : `Tree<dyn>`) reaches a concrete parameter.
             //
-            // Whether a *widening* argument step is sound is the declaration's business, not the
+            // A `dyn` on the SUP side is the opposite direction and gets no escape of its own: it is
+            // the widening `Tree<int> <: Tree<dyn>`, which the descent decides like every other.
+            // Whether a widening argument step is sound is the declaration's business, not the
             // lattice's: reading a `C<Sub>` as a `C<Sup>` is safe only if nothing can write a `Sup`
             // back through the widened view, which depends on where `C` puts its parameter.
             // [`NominalRules::covariant_arg`] carries that answer down into the descent.
@@ -764,18 +774,18 @@ impl Type {
                         || (aa.len() == ba.len()
                             && aa.iter().zip(ba).enumerate().all(|(i, (a, b))| {
                                 matches!(a, Dyn)
-                                    || matches!(b, Dyn)
                                     || Type::subtype_at(
                                         a,
                                         b,
                                         rules,
-                                        trait_objects_ok && rules.covariant_arg(an, i),
+                                        widening_ok && rules.covariant_arg(an, i),
                                     )
                             })))
             }
             // A `Named(n)` is a member of an abstract kind when the registry says so — a rule the
-            // pure lattice defers to [`NominalRules`] (`Named(n) <: Enum` iff `n` is an enum).
-            (Named(n, _), Kind(k)) => rules.is_of_kind(n, *k),
+            // pure lattice defers to [`NominalRules`] (`Named(n) <: Enum` iff `n` is an enum), and a
+            // widening like the two above, so it is gated by the position for the same reason.
+            (Named(n, _), Kind(k)) => widening_ok && rules.is_of_kind(n, *k),
             // Two type parameters relate only by IDENTITY — the same declaration, whatever either
             // is spelled. `ParamRef`'s `PartialEq` compares the id alone, so this is `sub == sup`;
             // it is written out rather than left to the catch-all because "a parameter is a

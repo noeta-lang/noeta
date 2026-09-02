@@ -6,6 +6,10 @@
 //! is computed once per declared type and consulted by [`Type::subtype_with`] through
 //! [`noeta_types::NominalRules::covariant_arg`] at every generic-argument position it descends into.
 //!
+//! One rule covers every wider argument a program can write. `C<Dog>` reads as a `C<dyn Speak>`, as
+//! a `C<dyn>` and as a `C<Struct>` in exactly the same declarations, because the store that would
+//! corrupt the original is the same store whichever of the three the reader named.
+//!
 //! Three occurrences make a parameter unsafe to widen, and each is a different mechanism:
 //!
 //! - A **`mut` field of a reference `class`**. A widened view of a class *is* the original — class
@@ -320,13 +324,17 @@ impl Checker {
             .and_then(Option::as_ref)
     }
 
-    /// The help line for a refused **trait-object widening of a generic instantiation** — the case
-    /// where `C<Sub>` would have been readable as `C<Sup>` had `C` not written `T` into a position
-    /// a widened view can reach.
+    /// The help line for a refused **widening of a generic instantiation** — the case where
+    /// `C<Sub>` would have been readable as `C<Sup>` had `C` not written `T` into a position a
+    /// widened view can reach.
+    ///
+    /// The wider argument is a trait object (`C<dyn Speak>`), the open top (`C<dyn>`) or an abstract
+    /// kind (`C<Struct>`); all three are the same widening, refused for the same occurrence, so all
+    /// three name it.
     ///
     /// `None` for every other mismatch, so an ordinary `E0007` is unchanged. Naming the occurrence
     /// is the point: the two types differ by one argument the reader can see is related, and
-    /// without the cause the message reads as though trait objects simply do not work here.
+    /// without the cause the message reads as though the wider type simply does not work here.
     pub(crate) fn variance_refusal_help(&self, actual: &Type, expected: &Type) -> Option<String> {
         let (Type::Named(an, aa), Type::Named(bn, ba)) = (actual, expected) else {
             return None;
@@ -335,9 +343,17 @@ impl Checker {
             return None;
         }
         let (i, sup) = aa.iter().zip(ba).enumerate().find_map(|(i, (a, b))| {
-            let Type::DynTrait(tr) = b else { return None };
-            let Type::Named(sub, _) = a else { return None };
-            (self.implements_trait(sub, tr) && !self.covariant_arg(an, i)).then_some((i, b))
+            let widens = match b {
+                // The open top takes any argument that is not already open: `dyn <: dyn` is
+                // identity, and a gradual hole is no claim at all.
+                Type::Dyn => !a.is_gradual() && !matches!(a, Type::Dyn | Type::Never),
+                Type::DynTrait(tr) => {
+                    matches!(a, Type::Named(sub, _) if self.implements_trait(sub, tr))
+                }
+                Type::Kind(k) => matches!(a, Type::Named(sub, _) if self.is_of_kind(sub, *k)),
+                _ => false,
+            };
+            (widens && !self.covariant_arg(an, i)).then_some((i, b))
         })?;
         let cause = self.invariance_cause(an, i)?;
         let short = |t: &Type| t.to_string();

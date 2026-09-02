@@ -787,3 +787,71 @@ fn a_dynamic_construction_reports_its_unknown_field_as_a_value() {
         .success()
         .stdout(predicate::str::contains("`Point` has no field `z`"));
 }
+
+
+/// **The open `dyn` is the same widening, and says the same thing.**
+///
+/// `Slot<Dog>` reads as a `Slot<dyn>` in exactly the declarations it reads as a `Slot<dyn Speak>`,
+/// so a reader who writes the shorter spelling gets the occurrence named too. The two targets
+/// disagreeing about one program is what this pins: the corpus can pin the code and the span, and
+/// only a CLI test can pin the sentence.
+#[test]
+fn a_refused_bare_dyn_widening_names_the_occurrence() {
+    let file = temp_program(
+        "check_variance_bare_dyn",
+        "trait Speak { fn speak(): string }\n\
+         struct Dog { impl Speak { pub fn speak(): string { return \"woof\" } } }\n\
+         class Slot<T> { pub mut v: T }\n\
+         fn widen(s: Slot<Dog>): string {\n\
+         wide: Slot<dyn> = s\n\
+         return \"unreachable\"\n\
+         }\n",
+    );
+    lang()
+        .arg("check")
+        .arg(&file)
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("E0007"))
+        .stderr(predicate::str::contains(
+            "`Slot` stores it in the `mut` field `v`",
+        ))
+        .stderr(predicate::str::contains("cannot be read as a `Slot<dyn>`"))
+        .stderr(predicate::str::contains(
+            "a literal checked against `Slot<dyn>` instantiates its type argument at `dyn` directly",
+        ));
+}
+
+/// The **covariant** twin for the open `dyn`, and the construction route the help line points at.
+///
+/// Two claims one test can carry, because a rule that refused every bare-`dyn` widening would break
+/// both: a declaration that only reads the parameter out still widens, and stating the wider type at
+/// the construction site instantiates the argument at `dyn` rather than reading a narrower value
+/// through it.
+#[test]
+fn a_read_only_generic_and_a_stated_construction_widen_to_bare_dyn_silently() {
+    let file = temp_program(
+        "check_variance_bare_dyn_ok",
+        "trait Speak { fn speak(): string }\n\
+         struct Dog { impl Speak { pub fn speak(): string { return \"woof\" } } }\n\
+         class Reader<T> { pub v: T }\n\
+         class Slot<T> { pub mut v: T\n\
+         pub fn new(v: T): Slot<T> { return Slot { v: v } }\n\
+         }\n\
+         r: Reader<Dog> = Reader { v: Dog {} }\n\
+         wide: Reader<dyn> = r\n\
+         echo wide.v.speak()\n\
+         stated: Slot<dyn> = Slot { v: Dog {} }\n\
+         built: Slot<dyn> = Slot.new(Dog {})\n\
+         echo stated.v.speak()\n\
+         echo built.v.speak()\n",
+    );
+    lang()
+        .arg("check")
+        .arg(&file)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("0 error(s)"))
+        .stderr(predicate::str::contains("cannot be read as").not());
+}

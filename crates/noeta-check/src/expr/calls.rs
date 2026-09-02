@@ -32,12 +32,12 @@ impl Checker {
             let expected = params.get(i).cloned();
             *slot = self.absorb_deferred_arg(expr, expected.as_ref(), env);
         }
-        self.rebuild_literal_args_at_trait_objects(params, args, arg_exprs, env);
+        self.rebuild_literal_args_at_abstract_args(params, args, arg_exprs, env);
     }
 
-    /// Re-read a **named object literal argument** at a parameter that states a **trait object**, so
-    /// an argument position instantiates a generic at `dyn Trait` exactly as an annotated binding,
-    /// a declared return and a declared field do.
+    /// Re-read a **named object literal argument** at a parameter that states an **abstract type
+    /// argument**, so an argument position instantiates a generic at `dyn Trait`, at `dyn` or at a
+    /// kind exactly as an annotated binding, a declared return and a declared field do.
     ///
     /// A named literal is synthesized *eagerly*, before the callee is resolved — deliberately, since
     /// unlike a closure or a `.{ … }` it has a standalone type, and deferring it would cost a
@@ -48,8 +48,8 @@ impl Checker {
     /// Re-checking is what closes that, and three conditions keep it from being a second, quieter
     /// typing pass over every call in the language:
     ///
-    /// * the parameter **states a trait object** — the one thing a field value can never synthesize
-    ///   ([`Checker::trait_object_seed`]), and so the only expectation re-reading can add;
+    /// * the parameter **states an abstract argument** — the one thing a field value can never
+    ///   synthesize ([`Checker::abstract_arg_seed`]), and so the only expectation re-reading can add;
     /// * the eager type is **not assignable** to it, so the program as typed is already an error and
     ///   the re-check can only turn one into a success, never the reverse;
     /// * the re-check must **succeed**, or its diagnostics are rolled back and the eager typing —
@@ -58,7 +58,7 @@ impl Checker {
     /// The rollback is why this is a re-check and not a guess: whether the literal's fields really
     /// widen into the stated instantiation is [`Checker::check`]'s question, and asking it twice
     /// costs one walk of a literal in a program that was about to be rejected.
-    fn rebuild_literal_args_at_trait_objects(
+    fn rebuild_literal_args_at_abstract_args(
         &mut self,
         params: &[Type],
         args: &mut [Type],
@@ -72,7 +72,7 @@ impl Checker {
             let (Some(param), Some(arg)) = (params.get(i), args.get(i)) else {
                 continue;
             };
-            if !param.contains_trait_object() || self.arg_assignable(arg, param) {
+            if !param.contains_abstract_arg() || self.arg_assignable(arg, param) {
                 continue;
             }
             let param = param.clone();
@@ -2216,18 +2216,24 @@ impl Checker {
             // declared return against it, first-wins AFTER the receiver's own arguments (the
             // receiver stays authoritative for the class's parameters; the expectation fills what
             // it leaves open — typically the method's own).
+            //
+            // Both sources are **stated** rather than synthesized, so a `dyn` in either is the
+            // instantiation and not a missing one: `Box::<dyn>.new(x)` and `b: Box<dyn> = Box.new(x)`
+            // each name `T = dyn`, exactly as their `dyn Speak` spellings do. Only an inference hole
+            // is dropped. Without this the widening rule would have no construction route for the
+            // open `dyn`, which is what `E0007`'s help line sends the reader to.
             let mut seed: Subst = generic
                 .params
                 .iter()
                 .map(|(p, _)| p.id)
                 .zip(recv_args.iter().cloned())
-                .filter(|(_, t)| !t.defers_to_runtime())
+                .filter(|(_, t)| !t.is_gradual())
                 .collect();
             if let Some((pending_span, expected)) = self.pending_member_ret.clone()
                 && call_span == Some(pending_span)
             {
                 let tps: ParamSet = generic.params.iter().map(|(p, _)| p.id).collect();
-                bind_type_params(&generic.raw_ret, &expected, &tps, &mut seed);
+                bind_stated_type_params(&generic.raw_ret, &expected, &tps, &mut seed);
             }
             // A generic METHOD forwards its OWN type parameters through the call node's
             // type-argument channel (Axis A), exactly as a top-level generic fn does — keyed

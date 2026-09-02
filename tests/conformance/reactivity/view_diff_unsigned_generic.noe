@@ -69,8 +69,11 @@ viamethod.set(9223372036854775808u64)
 echo v.diff() ?? "none"
 
 // The negative control: a binding made through a `dyn` handle names no instantiation, so the tick
-// pushes the erased word. A render slot never refuses a program.
-erased: Signal<dyn> = signal(18446744073709551615u64)
+// pushes the erased word. A render slot never refuses a program. The signal is BUILT at `dyn` —
+// `Signal<T>` takes its `T` in through `set`, so a `Signal<u64>` is never readable as a
+// `Signal<dyn>` — and the handle is what erases the width.
+big_erased: dyn = 18446744073709551615u64
+erased: Signal<dyn> = signal(big_erased)
 w = view()
 bind(w, "erased", erased)
 echo w.snapshot()
