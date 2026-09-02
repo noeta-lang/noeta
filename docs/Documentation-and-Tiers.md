@@ -1,12 +1,16 @@
 # Documentation — `@doc` and doc generation
 
-A `@doc { … }` block holds extractable prose that lives with the code it documents. `@doc` is one of the four [dev tiers](Dev-Tiers) — co-located content stripped from a normal build by construction — so **production carries no doc text**. This page covers the `@doc` block itself and everything `noeta doc` generates from it. For the tier model (activation, `noeta.toml` build targets) see [Dev Tiers](Dev-Tiers); for declaring tiers of your own, [Extending Tiers](Extending-Tiers).
+A `@doc { … }` block holds extractable prose that lives with the code it documents.
+
+`@doc` is one of the four [dev tiers](Dev-Tiers), so its content is co-located with your code and stripped from a normal build. Production carries no doc text.
+
+This page covers the `@doc` block and everything `noeta doc` generates from it. For the tier model (activation, `noeta.toml` build targets) see [Dev Tiers](Dev-Tiers); for declaring tiers of your own, [Extending Tiers](Extending-Tiers).
 
 ---
 
 ## `@doc` — prose that lives with the code
 
-A `@doc { … }` block holds verbatim prose (Markdown). Its body is captured **un-parsed** by the lexer, so Markdown punctuation — `#`, `*`, backticks, `%` — never lexes as language tokens. The surrounding program still compiles and runs normally.
+A `@doc { … }` block holds verbatim Markdown. Its body is captured un-parsed by the lexer, so Markdown punctuation such as `#`, `*`, backticks and `%` never lexes as language tokens. The surrounding program compiles and runs normally.
 
 ```noeta
 @doc {
@@ -23,9 +27,11 @@ The first block stands alone and is the file's **module doc**; the second leads 
 
 ### Attachment — docs belong to declarations
 
-A `@doc` block **attaches by adjacency**: immediately above a declaration (`fn`/`struct`/`class`/`enum`/`trait`), it documents that declaration. Blank lines between the two do not break the attachment; any statement in between does. A non-attached block (above the `use` header, between sections, or standing alone) is the **module doc** if it is the file's first such block, else free-floating section prose. No new syntax — position decides.
+A `@doc` block **attaches by adjacency**. Written immediately above a declaration (`fn`/`struct`/`class`/`enum`/`trait`), it documents that declaration. Blank lines between the two keep the attachment; any statement in between breaks it.
 
-A **method** is documented the same way — the block leads the method inside the body it is declared in:
+A block that attaches to nothing (above the `use` header, between sections, or standing alone) is the **module doc** if it is the file's first such block, and free-floating section prose otherwise. Position decides, and there is no new syntax to learn.
+
+A **method** is documented the same way, with the block leading the method inside the body it is declared in:
 
 ```noeta ignore
 class Users {
@@ -34,15 +40,19 @@ class Users {
 }
 ```
 
-This works in all three places a method can be written: a type's own body, an in-body `impl Trait { … }` block, and a standalone `impl Trait for Type { … }`. A field, an enum variant and a `trait`'s bodiless method *signature* take no `@doc` — the grammar has no directive position on them.
+This works in all three places a method can be written: a type's own body, an in-body `impl Trait { … }` block, and a standalone `impl Trait for Type { … }`. A field, an enum variant and a method declared in a `trait` take no `@doc`, because the grammar has no directive position on them.
 
 Attachment feeds the whole toolchain from one resolution:
 
-- **Hover** (LSP): hovering a documented symbol — its declaration or any call site — shows the doc prose under the type.
-- **`noeta doc`**: an attached block's source header carries the symbol (see below).
-- **Runtime docstrings**: with the `doc` tier live (`noeta run --tier doc`), the attached block is stamped as the prelude `#[Doc(text: "…")]` attribute on its declaration, so `attributes_of::<Doc>()` surfaces it at runtime — Python-style docstrings, opt-in. On a normal build nothing is stamped and the blocks strip as always, so **production carries no doc text**.
+| Consumer | What attachment gives it |
+|---|---|
+| **Hover** (LSP) | Hovering a documented symbol, at its declaration or any call site, shows the doc prose under the type. |
+| **`noeta doc`** | An attached block's source header carries the symbol. |
+| **Runtime docstrings** | With the `doc` tier live (`noeta run --tier doc`), the attached block is stamped as a `#[Doc(text: "…")]` attribute on its declaration, so `attributes_of::<Doc>()` surfaces it at runtime. Reading them takes `use std.doc.Doc`. |
 
-A stamped record is keyed by the same target convention as the rest of [reflection](Attributes-and-Reflection): a bare name for a top-level `fn`/type/`trait`, and `Type.method` for a method — so a method's prose joins with `params_of` / `returns_of` / `attributes_of` on one key. This is how a framework reads documentation the author wrote once: `para/api` derives an operation's `description` from its handler's `@doc` block rather than asking for it again in an attribute.
+Runtime docstrings are opt-in, in the Python style. On a normal build nothing is stamped and the blocks strip as always.
+
+A stamped record is keyed by the same target convention as the rest of [reflection](Attributes-and-Reflection): a bare name for a top-level `fn`, type or `trait`, and `Type.method` for a method. A method's prose therefore joins with `params_of`, `returns_of` and `attributes_of` on one key, which is how a framework reads documentation the author wrote once.
 
 ```noeta
 use std.doc.Doc
@@ -59,7 +69,7 @@ for d in attributes_of::<Doc>() { echo "${d.target}: ${d.value.text.trim()}" }
 // --tier doc → "add: Adds two ints." then "Users.list: List every user."
 ```
 
-Extract every `@doc` block to stdout — from the file named **and its sibling modules**, so a one-file argument in a multi-file directory returns more than one file's blocks:
+Extract every `@doc` block to stdout, from the file named **and its sibling modules**:
 
 ```console
 $ noeta doc adder.noe
@@ -70,53 +80,54 @@ $ noeta doc adder.noe
 `add(a, b)` returns **a + b**. Pure; no side effects.
 ```
 
-- The program is **not** type-checked or run — docs extract from a parse alone, so you can pull docs from work-in-progress code.
-- Each block is **dedented** (leading/trailing blank lines dropped, common indentation stripped) and prefixed with an HTML-comment source header (`<!-- file:line -->`, plus `· symbol` for an attached block), which is valid Markdown that renders to nothing.
-- No `@doc` blocks → a notice on stderr, exit `0`.
+- The program is **not** type-checked or run. Docs extract from a parse alone, so you can pull docs from work-in-progress code.
+- Each block is **dedented**, dropping leading and trailing blank lines and stripping common indentation.
+- Each block is prefixed with an HTML-comment source header, `<!-- file:line -->`, plus `· symbol` for an attached block. That is valid Markdown and renders to nothing.
+- A file with no `@doc` blocks prints a notice on stderr and exits `0`.
 
 ```text
 noeta doc [OPTIONS] [PATH]
 ```
 
-`PATH` (default `.`) is a file or a **directory**. A directory extracts every `.noe` beneath it; a file extracts that file **and its sibling modules**, because a `@doc` block belongs to the file it sits in and linking merges declarations without the blocks beside them — extracting from the linked program alone would silently drop the documentation of every imported symbol. This is the same workspace `--out` documents, so the two halves of `noeta doc` agree on what "the docs" means. A file that does not parse contributes nothing rather than failing the run.
+`PATH` (default `.`) is a file or a **directory**. A directory extracts every `.noe` beneath it. A file extracts that file and its sibling modules, because a `@doc` block belongs to the file it sits in, and linking merges declarations without the blocks beside them. This is the same workspace `--out` documents, so the two halves of `noeta doc` agree on what "the docs" means. A file that does not parse contributes nothing rather than failing the run.
 
 ### Generating a documentation artifact
 
-`noeta doc <FILE> --out <DIR>` generates the **package documentation artifact** instead of extracting to stdout:
+`noeta doc <FILE> --out <DIR>` generates the **package documentation artifact** instead of extracting to stdout. It writes two things:
 
-- **`docs.json`** — the canonical machine-readable form: schema-versioned, keyed by the package's `[package]` identity and version, modules with their namespace, module doc, and items in source order (sections woven between declarations). Deterministic — no timestamps, no absolute paths — so the artifact is content-addressable and **registry-ready**: a published package's docs can ride along and be rendered server-side.
-- **`index.md` + one page per module** — a faithful Markdown rendering of the same data: each public declaration as a signature code block (carrying its `@tier`/`@attribute` directives) followed by its adjacency-attached prose.
+- **`docs.json`**, the canonical machine-readable form. It is schema-versioned and keyed by the package's `[package]` identity and version, and holds modules with their namespace, module doc, and items in source order, with sections woven between declarations. It is deterministic, carrying no timestamps and no absolute paths, so the artifact is content-addressable and registry-ready: a published package's docs can ride along and be rendered server-side.
+- **`index.md` plus one page per module**, a faithful Markdown rendering of the same data. Each public declaration appears as a signature code block, carrying its `@tier` and `@attribute` directives, followed by its adjacency-attached prose.
 
-A **package module** — a file whose module path derives from where it sits — documents its `pub` API only; a bare entry script outside any package documents every top-level declaration. Generation works from a bare parse — a sibling that fails to parse is skipped with a note, never fatal.
+Generation works from a bare parse, and a sibling that fails to parse is skipped with a note rather than being fatal.
 
 ### Docs on the registry
 
-`noeta publish` generates the package's `docs.json` and stores it **with the release** (skip with `--no-docs`; a docs failure warns, never blocks a publish). Fetch any published package's docs back:
+`noeta publish` generates the package's `docs.json` and stores it **with the release**. Skip it with `--no-docs`; a docs failure warns and never blocks a publish. Fetch any published package's docs back:
 
 ```console
 $ noeta doc --package acme/greeter            # highest version — docs.json to stdout
 $ noeta doc --package acme/greeter@0.3.0 --out docs/   # pinned — render the Markdown tree
 ```
 
-Stored docs are *advisory metadata*, not provenance: unsigned, last-wins on re-publish, and a hosted registry may regenerate them from source itself (the docs.rs model) rather than trust the upload.
+Stored docs are *advisory metadata* rather than provenance: unsigned, last-wins on re-publish, and a hosted registry may regenerate them from source itself rather than trust the upload.
 
 ### The other flags
 
-`noeta doc` has two more concerns: gating plain extraction on a build target, and a second mode, `--api`, which documents the **intrinsic registry** (the stdlib and any composed native modules) instead of `.noe` source. See `noeta doc --help` for the full text.
+`noeta doc` has two further concerns: gating plain extraction on a build target, and a second mode, `--api`, which documents the **intrinsic registry** (the stdlib and any composed native modules) instead of `.noe` source. Run `noeta doc --help` for the full text.
 
 | Flag | Applies to | Effect |
 |---|---|---|
-| `--target <NAME>` | plain extraction (`noeta doc <FILE>`, no `--out`/`--package`) | Gate: extract only when the `doc` tier is live in that [build target](Dev-Tiers#naming-tiers-and-build-targets--noetatoml); otherwise nothing is emitted. |
+| `--target <NAME>` | `.noe` sources, extraction and `--out` alike (not `--api` or `--package`) | Gate: work only when the `doc` tier is live in that [build target](Dev-Tiers#naming-tiers-and-build-targets--noetatoml). Otherwise it reports the inactive tier and exits `0`. |
 | `--api` | — | Document the intrinsic registry instead of `.noe` source. |
 | `--root <NAMESPACE>` | `--api` | Scope to the extensions rooted at one namespace (excluding `std`). |
-| `--non-builtin` | `--api` | Scope to every non-builtin extension — what `noeta publish` uses in a package's composed toolchain: it never guesses a root, so an extension whose namespace root diverges from its package name still documents. |
-| `--lint` | `--api --root` / `--api --non-builtin` | Fail (before emitting docs) if the scoped extensions register any symbol outside their own namespace roots — the publish quality gate. Exit 2 lists the offenders. |
+| `--non-builtin` | `--api` | Scope to every non-builtin extension. This is what `noeta publish` uses in a package's composed toolchain: it never guesses a root, so an extension whose namespace root diverges from its package name still documents. |
+| `--lint` | `--api --root` / `--api --non-builtin` | The publish quality gate. Fail before emitting docs if the scoped extensions register any symbol outside their own namespace roots. Exit 2 lists the offenders. |
 
 ---
 
 ## Folding a sample's context — `// sample:start` / `// sample:end`
 
-Every ` ```noeta ` block in these docs is run through the real `noeta` binary by CI, which is what keeps the documentation honest: a renamed method or a changed diagnostic fails the build instead of quietly misleading a reader. The cost is that a sample has to be a **complete program** — and the struct, imports and helper that make a two-line call compile can easily bury the two lines worth reading.
+An untagged ` ```noeta ` block in these docs is run through the real `noeta` binary by CI and must exit `0`, so a renamed method or a changed diagnostic fails the build rather than misleading a reader. The cost is that such a sample has to be a **complete program**, and the struct, imports and helper that make a two-line call compile can bury the two lines worth reading.
 
 Mark the interesting region and the rest folds away:
 
@@ -128,7 +139,7 @@ echo e.addr
 // sample:end
 ```
 
-Which renders as the two marked lines, with the whole program behind the expander — this block is the live article, so open it to see the `struct` the sample needs:
+That renders as the two marked lines, with the whole program behind an expander. The block below is the live article, so open it to see the `struct` the sample needs:
 
 ```noeta
 struct Email { addr: string }
@@ -139,13 +150,13 @@ echo e.addr
 // sample:end
 ```
 
-The markers are ordinary comments, so **the whole block still compiles and still runs in CI** — nothing about the gate changes. Only presentation does:
+The markers are ordinary comments, so the whole block still compiles and still runs in CI. A tag on the fence changes what CI does with it: ` ```noeta check ` type-checks a sample without executing it, ` ```noeta error ` demands a non-zero exit, and ` ```noeta ignore ` opts an illustrative fragment out. Only presentation changes:
 
 - the **Docs browser** (VS Code) shows the marked region, with a *Show full example* expander;
 - **`noeta doc --out`** and other static markdown bake the same fold in as a `<details>` block, so a reader on GitHub gets the short version with the full program one click away;
 - a block with **no markers** renders in full, unchanged.
 
-A block may mark several regions — they concatenate in order, so a page can show two interesting stretches of one program and fold the plumbing between them. Shortening a sample this way is strictly better than deleting the context: the deleted version stops compiling, and a sample that does not compile is a sample nothing can check.
+A block may mark several regions, and they concatenate in order, so a page can show two interesting stretches of one program and fold the plumbing between them. Folding keeps the context compiling, which is what keeps the sample checkable.
 
 ## See also
 
