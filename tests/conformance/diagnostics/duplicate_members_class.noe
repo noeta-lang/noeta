@@ -1,0 +1,13 @@
+// The `struct` rule of E0080 holds for a `class` too — the duplicate-member check is one rule over
+// every declaration kind that has members, not a per-kind restatement of it.
+// expect: error E0080 at 8:5
+// expect: error E0080 at 11:12
+// expect: exit 1
+class C {
+    n: int
+    n: string
+
+    pub fn label(): string { return "a"; }
+    pub fn label(): string { return "b"; }
+}
+echo "unreached"

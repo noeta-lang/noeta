@@ -380,6 +380,8 @@ struct PetStore {
 
 Failures are reported as **E0062**, blamed on the directive rather than on a generated line, with the position inside the generated source carried in the message.
 
+A generated member may not take a name the declaration already uses. Expansion members go in after the hand-written ones, and a collision between the two is **E0080**, naming the directive and both spans. The generated half comes from a document outside the program, so either precedence rule drops working code without a word: whichever member loses, what was written for it stops running. A generator that can collide with itself should suffix the loser rather than overwrite it.
+
 ### What the hook sees: `ctx.fields` and `ctx.target`
 
 A hook generates from the declaration's *shape* as well as its name. `DirectiveCtx::fields` is the decorated declaration's members as `(name, declared type spelling)` pairs, in declaration order:

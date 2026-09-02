@@ -151,6 +151,34 @@ c.set_then_read()   // method
 
 **A field holding a function is callable through the receiver.** `obj.f(args)` means `(obj.f)(args)` when `f` is a field of function type (see [Functions & Closures](Functions-and-Closures#calling-a-closure-valued-field)). If a method and a field share a name, the method wins in call position and the field in value position, so `g = obj.f; g(x)` always reaches the field.
 
+## One name, one member
+
+Within a declaration, a name belongs to one member of its kind. Two fields called `x`, two variants called `A`, or two methods called `f` in one body is **E0080**, in every kind — `struct`, `class`, `enum` and `trait` alike:
+
+```noeta error
+struct Point {
+    x: int
+    y: int
+    x: int      // E0080: `Point` declares field `x` more than once
+}
+```
+
+Nothing picks a winner, because there is no answer that keeps both: whichever member is dropped, the code written for it stops running with nothing to say so. Rename one, or delete the one you did not mean to keep.
+
+Fields and methods are separate name spaces, so the `f`-field-and-`f`-method pair above is not a duplicate — it is the resolution rule described just above, and it stands.
+
+The rule earns its keep where one of the two members was **generated**. A [directive that generates code](Native-Extensions#directives-that-generate-code) writes its members from a document outside the program — an interface description, a schema — and adds them to the declaration it decorates. So a name can be taken by something nobody typed, on a day nobody edited this file:
+
+```noeta ignore
+@openapi("petstore.json")
+pub struct PetStore {
+    // E0080 if the spec's servers already give `PetStore` a `base_url`.
+    pub fn base_url(): string { return "https://staging.example/api/v3" }
+}
+```
+
+The diagnostic names both halves: the generated member, in the expansion source `noeta expand` prints, and the hand-written one it collides with. Whichever you keep, say so explicitly — rename the method you wrote, or take the name out of the document the generator reads.
+
 ## `Self` — the type in hand
 
 Inside a type body, `Self` names the type it is the body of. Write it anywhere a type goes: a return, a parameter, a field, an enum payload, and at any depth (`List<Self>`, `?Self`).

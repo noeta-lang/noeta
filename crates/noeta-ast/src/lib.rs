@@ -5,7 +5,7 @@
 //! as distinct nodes rather than desugared in the parser, so later passes can produce precise
 //! diagnostics.
 
-use noeta_span::Span;
+use noeta_span::{SourceId, Span};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
@@ -314,6 +314,38 @@ pub struct Decorators {
     /// the AST, not on the registry. Resolution is the checker's, which is also what folds the
     /// old parser-level "unknown directive" into the one placement check.
     pub foreign: Vec<ForeignDirective>,
+    /// What each `@`-directive's expansion hook actually contributed, stamped by the loader as it
+    /// splices the generated members in. Empty for every declaration nothing expanded — which the
+    /// parser guarantees, since it has no way to fill this.
+    ///
+    /// It exists so a later pass can answer "who wrote this member?" from a member's span alone:
+    /// each expansion is parsed as its own source, so a member's `span.source` names exactly one
+    /// entry here. The checker needs that to blame a duplicate member on the directive that
+    /// generated it rather than on a file the author cannot edit.
+    pub expansions: Vec<ExpansionMark>,
+}
+
+/// One expansion's stamp on the declaration it grew: which directive ran, where the author wrote
+/// it, and the source its members were parsed from.
+///
+/// The `origin` is the `@name` token, which is the only span in a file the author can edit — a
+/// generated member's own span points into text nobody typed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExpansionMark {
+    /// The directive's name, without its `@`.
+    pub directive: String,
+    /// The `@name` token the author wrote.
+    pub origin: Span,
+    /// The generated source. Every member this expansion contributed has a span in it.
+    pub source: SourceId,
+}
+
+impl Decorators {
+    /// The expansion that produced a member with this span's source, or `None` for a member the
+    /// author wrote.
+    pub fn expansion_of(&self, source: SourceId) -> Option<&ExpansionMark> {
+        self.expansions.iter().find(|e| e.source == source)
+    }
 }
 
 /// A declaration that bears `@`-directives, as the placement check wants it: its decorators, the

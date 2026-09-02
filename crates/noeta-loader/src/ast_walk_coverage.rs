@@ -96,10 +96,10 @@
 use noeta_ast::Name as AstName;
 use noeta_ast::{
     AssocTypeDecl, AttrArg, AttrValue, Attribute, CallArg, ClassDecl, ClosureBody, Decorators,
-    DeriveSpec, EnumDecl, Expr, FieldDecl, FieldInit, FnDecl, ForPattern, ForeignDirective,
-    ImplBlock, ImplDecl, MatchArm, MemberBinding, MethodDirective, ObjectLit, Param, Pattern,
-    ReflectKind, ReflectOperand, RoleTag, Stmt, StrPart, StructDecl, TierDecl, TraitBound,
-    TraitDecl, TraitMethod, TypeOperand, TypeParam, TypeRef, UnaryOp, UseName,
+    DeriveSpec, EnumDecl, ExpansionMark, Expr, FieldDecl, FieldInit, FnDecl, ForPattern,
+    ForeignDirective, ImplBlock, ImplDecl, MatchArm, MemberBinding, MethodDirective, ObjectLit,
+    Param, Pattern, ReflectKind, ReflectOperand, RoleTag, Stmt, StrPart, StructDecl, TierDecl,
+    TraitBound, TraitDecl, TraitMethod, TypeOperand, TypeParam, TypeRef, UnaryOp, UseName,
 };
 use noeta_span::{SourceId, Span};
 
@@ -533,6 +533,17 @@ const TABLE: &[Row] = &[
              nothing in the compiler resolves one as a type. Rewriting them would hand a hook a \
              name that appears nowhere in the source; a hook that needs a RESOLVED type wants a \
              new declared argument kind, not a silent rewrite of every hook's strings",
+        ),
+    ),
+    Row(
+        "Decorators",
+        "expansions",
+        Unqualified(
+            "what an `@`-directive's expansion hook contributed, stamped by the loader AFTER \
+             qualification has already rewritten the generated members' own names. The only name \
+             in it is the directive's, which is an extension's identifier and not a declaration \
+             this program can name — the same exemption `Decorators::foreign` states, for the \
+             same directive name-space",
         ),
     ),
     Row(
@@ -1662,6 +1673,11 @@ fn decl_probes() -> Vec<Stmt> {
                         span: SP,
                     }],
                     span: SP,
+                }],
+                expansions: vec![ExpansionMark {
+                    directive: s("Decorators", "expansions"),
+                    origin: SP,
+                    source: SourceId(0),
                 }],
             },
             span: SP,

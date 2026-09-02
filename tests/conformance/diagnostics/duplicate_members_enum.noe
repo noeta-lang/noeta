@@ -1,0 +1,15 @@
+// An `enum`'s two member kinds — its variants and its inherent methods — each fall under E0080. A
+// repeated variant is the case a reader is most likely to write by accident, and it used to be
+// accepted silently: the second declaration simply replaced the first.
+// expect: error E0080 at 10:5
+// expect: error E0080 at 13:12
+// expect: exit 1
+enum E {
+    A
+    B
+    A
+
+    pub fn rank(): int { return 1; }
+    pub fn rank(): int { return 2; }
+}
+echo "unreached"

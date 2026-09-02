@@ -930,19 +930,23 @@ impl Checker {
         // not apply to a trait. That is checked by the shared placement walk, which reaches
         // a trait through `Stmt::decorated` like every other decorated declaration — this used to
         // call it a second time, which would now report each misplacement twice.
-        // Duplicate method signatures within the trait body.
-        let mut seen: HashSet<&str> = HashSet::new();
+        // Duplicate method signatures within the trait body go through the **shared**
+        // duplicate-member rule (E0080), not a trait-shaped restatement of it: a trait's members
+        // are spliced into by `@`-directive expansion exactly as a struct's are, and a rule spelled
+        // twice is a rule that drifts — only one of the two copies would ever learn to name the
+        // directive that generated the colliding method.
+        let methods_named: Vec<(&str, Span)> = decl
+            .methods
+            .iter()
+            .map(|m| (m.sig.name.as_str(), m.sig.name_span))
+            .collect();
+        self.check_duplicate_members(
+            decl.name.as_str(),
+            "method",
+            &decl.decorators,
+            &methods_named,
+        );
         for m in &decl.methods {
-            if !seen.insert(m.sig.name.as_str()) {
-                self.error(
-                    DiagnosticCode::InvalidTraitDeclaration,
-                    m.sig.name_span,
-                    format!(
-                        "trait `{}` declares method `{}` more than once",
-                        decl.name, m.sig.name
-                    ),
-                );
-            }
             // `pub` on a trait's own method DECLARATION. Every method a
             // trait declares is the contract itself, so `pub` restates what `trait` already said —
             // and it would suggest, wrongly, that the unmarked ones are private. Refused rather

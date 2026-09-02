@@ -552,6 +552,19 @@ pub enum DiagnosticCode {
     /// Appended at the tail on purpose: this enum is on the `.noeb` wire and postcard encodes a
     /// variant by declaration index, so a middle insertion silently renumbers everything after it.
     InvalidMemberSite,
+    /// A declaration names the same member twice: two fields, two enum variants, or two methods of
+    /// one name in one `struct`/`class`/`enum`/`trait` body.
+    ///
+    /// An error rather than a precedence rule, because one of the two is always lost and nothing
+    /// says which. That matters most where the second member was *generated*: an `@`-directive's
+    /// expansion is written from a file outside the program — an interface description, a schema —
+    /// so under "the author wins" a later edit to that file silently drops a generated member, and
+    /// under "the generator wins" it silently drops the author's. Refusing the collision is the one
+    /// outcome that loses neither.
+    ///
+    /// Appended at the tail because this enum is on the `.noeb` wire and postcard encodes a variant
+    /// by declaration index — see [`Self::InvalidMemberSite`].
+    DuplicateMember,
 }
 
 impl DiagnosticCode {
@@ -636,6 +649,7 @@ impl DiagnosticCode {
         DiagnosticCode::RedundantVisibility,
         DiagnosticCode::ErasedWidthDisplay,
         DiagnosticCode::InvalidMemberSite,
+        DiagnosticCode::DuplicateMember,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -721,6 +735,7 @@ impl DiagnosticCode {
             DiagnosticCode::RedundantVisibility => "E0077",
             DiagnosticCode::ErasedWidthDisplay => "E0078",
             DiagnosticCode::InvalidMemberSite => "E0079",
+            DiagnosticCode::DuplicateMember => "E0080",
         }
     }
 
@@ -998,6 +1013,42 @@ mod all_list_guard {
                 "{}: group {:?} is not in GROUPS, so it would render nowhere",
                 c.code(),
                 e.group
+            );
+        }
+    }
+
+    /// **No two variants may share a wire code.** The enum is on the `.noeb` wire and every code is
+    /// a public identifier a user cites, a corpus header pins and `from_code` reverses. A shared
+    /// code has no loud failure: `from_code` silently resolves to whichever variant it reaches
+    /// first, so one of the two diagnostics stops being nameable while everything still compiles
+    /// and every existing test still passes. Two branches each appending "the next free code" to
+    /// this enum is the way it happens.
+    #[test]
+    fn every_code_is_claimed_by_exactly_one_variant() {
+        let mut by_code: std::collections::HashMap<&str, DiagnosticCode> =
+            std::collections::HashMap::new();
+        for &c in DiagnosticCode::ALL.iter() {
+            if let Some(prev) = by_code.insert(c.code(), c) {
+                panic!("{:?} and {:?} both claim {}", prev, c, c.code());
+            }
+        }
+        assert_eq!(
+            by_code.len(),
+            DiagnosticCode::ALL.len(),
+            "every variant must have its own code"
+        );
+    }
+
+    /// Every code round-trips through [`DiagnosticCode::from_code`], which a duplicate silently
+    /// breaks for the variant that loses the lookup.
+    #[test]
+    fn every_code_round_trips() {
+        for &c in DiagnosticCode::ALL.iter() {
+            assert_eq!(
+                DiagnosticCode::from_code(c.code()),
+                Some(c),
+                "{} did not round-trip",
+                c.code()
             );
         }
     }

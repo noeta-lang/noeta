@@ -1,5 +1,7 @@
-// A `trait` that declares the same method name twice is rejected (L1, UT1). E0053.
-// expect: error E0053 at 6:8
+// A `trait` that declares the same method name twice is rejected. It goes through the same
+// duplicate-member rule a struct, class and enum use — one rule, one code — because a trait's
+// members are spliced into by `@`-directive expansion exactly as a data type's are.
+// expect: error E0080 at 8:8
 // expect: exit 1
 trait Baz {
     fn a(): int

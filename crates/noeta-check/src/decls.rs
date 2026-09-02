@@ -174,6 +174,103 @@ impl Checker {
         }
     }
 
+    /// **One declaration may not name the same member twice** — E0080, over fields, enum variants
+    /// and inherent methods alike, in every declaration kind that has members.
+    ///
+    /// `members` is one member *kind* in written order: a field never collides with a method, and
+    /// nor should it — the language resolves that pair by position (a call reaches the method, a
+    /// read reaches the field), which is a decided rule with a conformance case, not an accident.
+    /// A same-kind collision has no such rule and never could: whichever member loses, the code
+    /// written for it stops running and nothing says so.
+    ///
+    /// The stakes are highest for the half nobody typed. An `@`-directive's expansion contributes
+    /// members *after* the hand-written ones, and it writes them from a file outside the program —
+    /// an interface description, a schema. Silent precedence therefore drops real code on a day
+    /// nobody edited this file: "the author wins" loses a generated member the moment that document
+    /// grows an operation whose name is already taken, and "the generator wins" loses the author's
+    /// method the moment it does. The generator half of this seam already refuses to overwrite (a
+    /// spec whose operations collide gets suffixed names, not one operation); this is the same
+    /// refusal on the splice side.
+    ///
+    /// `decorators` is how the collision is *named*: a generated member's span belongs to the
+    /// expansion's own source, so [`noeta_ast::Decorators::expansion_of`] turns it back into the
+    /// `@directive` the author wrote — the one span in a file they can edit.
+    pub(crate) fn check_duplicate_members(
+        &mut self,
+        type_name: &str,
+        noun: &str,
+        decorators: &Decorators,
+        members: &[(&str, Span)],
+    ) {
+        // The FIRST occurrence is what a later one is blamed against, so a third member of the
+        // same name still points at the one that actually holds the name.
+        let mut first_seen: HashMap<&str, Span> = HashMap::new();
+        for (name, span) in members {
+            let first = match first_seen.entry(name) {
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(*span);
+                    continue;
+                }
+                std::collections::hash_map::Entry::Occupied(slot) => *slot.get(),
+            };
+            let generated = decorators.expansion_of(span.source);
+            let message = match generated {
+                Some(mark) => format!(
+                    "`@{}` generated {noun} `{name}`, which `{type_name}` already declares",
+                    mark.directive
+                ),
+                None => format!("`{type_name}` declares {noun} `{name}` more than once"),
+            };
+            // BOTH sites carry a label, including the primary one: the renderer draws a
+            // diagnostic's own span only when it has no labels, so a single secondary label would
+            // hide the very member the message is about. Which of the two the reader can edit is
+            // the whole question here, so each says where it came from.
+            let describe = |at: Span, written: &str| match decorators.expansion_of(at.source) {
+                Some(mark) => format!("`@{}` generated `{name}` here", mark.directive),
+                None => written.to_string(),
+            };
+            let here_label = describe(*span, &format!("`{name}` is declared again here"));
+            let first_label = describe(first, &format!("`{name}` is already declared here"));
+            let help = match generated {
+                Some(mark) => format!(
+                    "rename the {noun} written here, or stop `@{}` from generating that name — \
+                     an expansion is written from a file outside this program, so neither half may \
+                     silently replace the other",
+                    mark.directive
+                ),
+                None => {
+                    format!("rename one of them, or delete the {noun} you did not mean to keep")
+                }
+            };
+            self.error(DiagnosticCode::DuplicateMember, *span, message)
+                .label(*span, here_label)
+                .label(first, first_label)
+                .help(help);
+        }
+    }
+
+    /// The inherent methods of a declaration, in written order — the ones the author (or an
+    /// expansion) wrote directly in the body, with the `impl Trait { … }` blocks' methods removed.
+    ///
+    /// The parser flattens an in-body `impl`'s methods into `methods` so `(type, method)` dispatch
+    /// finds them, which means `methods` mixes two populations. Only the inherent half is a
+    /// duplicate-member question: two traits that each declare `f`, both implemented on one type,
+    /// is a *trait* question with its own rules, and E0080 has no business answering it.
+    pub(crate) fn inherent_methods<'a>(
+        methods: &'a [FnDecl],
+        impls: &[ImplBlock],
+    ) -> Vec<(&'a str, Span)> {
+        let from_impls: HashSet<Span> = impls
+            .iter()
+            .flat_map(|block| block.methods.iter().map(|m| m.name_span))
+            .collect();
+        methods
+            .iter()
+            .filter(|m| !from_impls.contains(&m.name_span))
+            .map(|m| (m.name.as_str(), m.name_span))
+            .collect()
+    }
+
     pub(crate) fn check_struct(&mut self, r: &StructDecl, env: &mut Env) {
         let saved = self.enter_type_body(
             Some(self_type(r.name.as_str(), &r.type_params)),
@@ -217,6 +314,14 @@ impl Checker {
             }
         }
         self.validate_field_defaults(&r.fields, env);
+        let fields_named: Vec<(&str, Span)> = r
+            .fields
+            .iter()
+            .map(|f| (f.name.as_str(), f.name_span))
+            .collect();
+        self.check_duplicate_members(r.name.as_str(), "field", &r.decorators, &fields_named);
+        let methods_named = Checker::inherent_methods(&r.methods, &r.impls);
+        self.check_duplicate_members(r.name.as_str(), "method", &r.decorators, &methods_named);
         self.check_derives(
             r.name.as_str(),
             &r.decorators.derives,
@@ -268,6 +373,14 @@ impl Checker {
             self.check_attrs(&f.attrs, TargetKind::Field);
         }
         self.validate_field_defaults(&c.fields, env);
+        let fields_named: Vec<(&str, Span)> = c
+            .fields
+            .iter()
+            .map(|f| (f.name.as_str(), f.name_span))
+            .collect();
+        self.check_duplicate_members(c.name.as_str(), "field", &c.decorators, &fields_named);
+        let methods_named = Checker::inherent_methods(&c.methods, &c.impls);
+        self.check_duplicate_members(c.name.as_str(), "method", &c.decorators, &methods_named);
         self.check_derives(
             c.name.as_str(),
             &c.decorators.derives,
@@ -323,6 +436,14 @@ impl Checker {
             // looks at.
             self.check_param_attrs(&variant.fields);
         }
+        let variants_named: Vec<(&str, Span)> = e
+            .variants
+            .iter()
+            .map(|v| (v.name.as_str(), v.name_span))
+            .collect();
+        self.check_duplicate_members(e.name.as_str(), "variant", &e.decorators, &variants_named);
+        let methods_named = Checker::inherent_methods(&e.methods, &e.impls);
+        self.check_duplicate_members(e.name.as_str(), "method", &e.decorators, &methods_named);
         self.check_derives(e.name.as_str(), &e.decorators.derives, &[], &e.methods);
         let standalone = self.standalone_for(e.name.as_str());
         // An enum carries in-body `impl Trait { }` blocks and inherent methods (the unified body),

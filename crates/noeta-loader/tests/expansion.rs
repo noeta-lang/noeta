@@ -576,3 +576,133 @@ fn a_declaration_with_no_typed_members_reports_an_empty_shape() {
         expansion_text(&linked, "Shape")
     );
 }
+
+// ---- collisions between a generated member and a hand-written one --------------------------------
+
+/// The struct `name`'s [`noeta_ast::Decorators`], for asserting what the splice stamped on it.
+fn decorators_of(linked: &Linked, name: &str) -> noeta_ast::Decorators {
+    linked
+        .program
+        .stmts
+        .iter()
+        .find_map(|s| match s {
+            noeta_ast::Stmt::Struct(d) if d.name == name => Some(d.decorators.clone()),
+            _ => None,
+        })
+        .expect("the struct is in the linked program")
+}
+
+/// Check a linked program the way a compile driver does, and return its diagnostics.
+fn diagnostics_of(linked: &Linked) -> Vec<noeta_diagnostics::Diagnostic> {
+    noeta_check::check_all_with(
+        &linked.program,
+        noeta_check::CheckOptions::for_workspace(linked.provenance.clone()),
+    )
+    .diagnostics
+}
+
+#[test]
+fn a_splice_stamps_the_declaration_with_the_directive_that_grew_it() {
+    let linked = load(
+        r#"
+        @fx_expand("petstore")
+        struct Api {
+            fn ping(): int { return 0; }
+        }
+        echo 1;
+        "#,
+    )
+    .expect("expansion succeeds");
+
+    let marks = decorators_of(&linked, "Api").expansions;
+    assert_eq!(marks.len(), 1, "{marks:?}");
+    assert_eq!(marks[0].directive, "fx_expand");
+    // The stamp's source is the generated one, so a member's `span.source` matches it — that
+    // identity is the whole mechanism, and a stamp pointing at the entry would still "have a
+    // directive name" while naming nothing the checker can match.
+    let generated: Vec<String> = linked
+        .program
+        .stmts
+        .iter()
+        .find_map(|s| match s {
+            noeta_ast::Stmt::Struct(d) if d.name == "Api" => Some(
+                d.methods
+                    .iter()
+                    .filter(|m| m.name_span.source == marks[0].source)
+                    .map(|m| m.name.to_string())
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .unwrap_or_default();
+    assert_eq!(generated, vec!["from_petstore", "target_name"]);
+    // The origin is the `@fx_expand` token in the file the author wrote, not the generated source.
+    assert_eq!(marks[0].origin.source, linked.entry.id());
+}
+
+#[test]
+fn a_generated_member_colliding_with_a_hand_written_one_is_rejected() {
+    // `fx_expand` always emits `target_name`. Writing a method of that name by hand used to be
+    // silently overwritten — the author's body simply never ran — which is the failure this rule
+    // exists for: the generated half is written from a file outside the program, so neither side
+    // may quietly replace the other.
+    let linked = load(
+        r#"
+        @fx_expand("petstore")
+        struct Api {
+            fn target_name(): string { return "mine"; }
+        }
+        echo 1;
+        "#,
+    )
+    .expect("expansion succeeds — the collision is the checker's call, not the loader's");
+
+    let duplicates: Vec<noeta_diagnostics::Diagnostic> = diagnostics_of(&linked)
+        .into_iter()
+        .filter(|d| d.code == noeta_diagnostics::DiagnosticCode::DuplicateMember)
+        .collect();
+    assert_eq!(duplicates.len(), 1, "{duplicates:?}");
+    let d = &duplicates[0];
+    // It names the directive, so the author learns *what* generated the other half…
+    assert!(d.message.contains("@fx_expand"), "{}", d.message);
+    assert!(d.message.contains("target_name"), "{}", d.message);
+    // …the blamed span is the generated member, in the expansion's own source…
+    let mark = &decorators_of(&linked, "Api").expansions[0];
+    assert_eq!(d.span.source, mark.source);
+    // …and BOTH sites are labelled, because the renderer draws a diagnostic's own span only when
+    // it has no labels: one label would show the author's file and hide the generated member the
+    // message is about. The first is the generated one, naming its directive; the second is the
+    // hand-written method, in the file the author can actually edit.
+    assert_eq!(d.labels.len(), 2, "{:?}", d.labels);
+    assert_eq!(d.labels[0].span, d.span);
+    assert!(d.labels[0].message.contains("@fx_expand"), "{:?}", d.labels);
+    assert_eq!(d.labels[1].span.source, linked.entry.id());
+    assert_ne!(d.labels[1].span.source, mark.source);
+}
+
+#[test]
+fn a_generated_member_that_collides_with_nothing_still_lands() {
+    // The other half of the rule: adding it must not make every expansion an error. The methods
+    // this hook writes have names the declaration does not use, and the program checks clean.
+    let linked = load(
+        r#"
+        @fx_expand("petstore")
+        struct Api {
+            fn ping(): int { return 0; }
+        }
+        echo 1;
+        "#,
+    )
+    .expect("expansion succeeds");
+
+    assert_eq!(
+        methods_of(&linked, "Api"),
+        vec!["ping", "from_petstore", "target_name"]
+    );
+    let duplicates: Vec<String> = diagnostics_of(&linked)
+        .iter()
+        .filter(|d| d.code == noeta_diagnostics::DiagnosticCode::DuplicateMember)
+        .map(|d| d.message.clone())
+        .collect();
+    assert!(duplicates.is_empty(), "{duplicates:?}");
+}

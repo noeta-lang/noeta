@@ -2916,6 +2916,7 @@ name = "noeta-loader"
 version = "0.8.0"
 dependencies = [
  "noeta-ast",
+ "noeta-check",
  "noeta-diagnostics",
  "noeta-ext-abi",
  "noeta-lexer",
