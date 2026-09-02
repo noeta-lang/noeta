@@ -41,13 +41,11 @@ Drop insertion places a value's release at one of three points:
 
 ## The safety invariant
 
-Correctness rests on the runtime refcount, a value being freed when its count reaches zero, plus scope teardown for whatever a pass missed. Static analysis is therefore an optimization input: every inserted `drop` is conservative in the "**never too early**" direction, so a *late* drop costs promptness while an *early* drop would be a use-after-free and is impossible by construction. A bug in an RC pass costs performance and never memory safety. Non-local exits a static pass cannot bracket (`?` propagation, panic) are caught by a runtime teardown backstop.
+Correctness rests on the runtime refcount, a value being freed when its count reaches zero, plus scope teardown for whatever a pass missed. Static analysis is therefore an optimization input. Every inserted `drop` is conservative in the "**never too early**" direction, so a *late* drop costs promptness while an *early* drop would be a use-after-free and is impossible by construction, and a bug in an RC pass costs performance rather than memory safety. Non-local exits a static pass cannot bracket (`?` propagation, panic) are caught by a runtime teardown backstop.
 
-**Deterministic `__destruct` at last use.** An object's destructor runs synchronously when its last reference drops, at the precise IR point liveness identified rather than at scope end. Children are destroyed container-before-contained: the aggregate runs its own `destruct` block first, then releases its fields in declared order, its enum payload positionally, and its collection elements in iteration order, each firing its own destructor at *its* last reference. Both backends walk the same IR, so both walk that order.
+**Deterministic `__destruct` at last use.** An object's destructor runs synchronously when its last reference drops, at the precise IR point liveness identified rather than at scope end. Children are destroyed container-before-contained. The aggregate runs its own `destruct` block first, then releases its fields in declared order, its enum payload positionally, and its collection elements in iteration order, each firing its own destructor at *its* last reference. Both backends walk the same IR, so both walk that order.
 
-**A value built for a call belongs to the caller.** Arguments are evaluated before the call, so `m.get_or(key, Fallback.new())` builds the fallback whether or not the key is present, and whichever branch the callee takes, the caller owns what it built. An unnamed argument is destroyed right after the call returns, newest first, and the destruction is refcount-gated: a fallback the callee *kept*, stored or handed back as the result, is left to its real owner and dies at that owner's own last use.
-
-So a discarded argument's `destruct` runs at the call, and a returned one's runs where the result dies. When building the default is the part you want to avoid rather than merely reclaim, reach for `m.get(key) ?? build()`, whose right side is evaluated only on a miss.
+**A value built for a call belongs to the caller.** Arguments are evaluated before the call, so `m.get_or(key, Fallback.new())` builds the fallback whether or not the key is present, and the caller owns what it built whichever branch the callee takes. An unnamed argument is destroyed right after the call returns, newest first, and refcount-gated, so a fallback the callee *kept*, stored or handed back as the result, is left to its real owner and dies at that owner's own last use. When building the default is the part you want to avoid rather than merely reclaim, reach for `m.get(key) ?? build()`, whose right side is evaluated only on a miss.
 
 **Verification.** Every phase is gated by the same oracles [Contributing](Contributing#testing-architecture) describes:
 
@@ -77,19 +75,20 @@ Every `noeta` run uses `Trace`; an embedding host selects the other through the 
 
 ## In-run safepoint collection
 
-Collection also runs **during** execution, so a program building cycles in a loop has *bounded* peak residency rather than growth until exit. The trigger is allocation pressure: a thread-local watermark over the live count (`Trace`) or the candidate buffer's growth (`TrialDeletion`), step `NOETA_GC_THRESHOLD` (default 10k objects), re-armed geometrically so genuinely-live residency pays a vanishing collection frequency.
+Collection also runs **during** execution, so a program building cycles in a loop has *bounded* peak residency rather than growth until exit. The trigger is allocation pressure, a thread-local watermark over the live count (`Trace`) or the candidate buffer's growth (`TrialDeletion`), stepped by `NOETA_GC_THRESHOLD` (default 10k objects) and re-armed geometrically so genuinely-live residency pays a vanishing collection frequency.
 
 The VM polls one thread-local bool at taken loop back-edges, frame transfers, and each scheduler drive round, so a program parked on `.await` still collects. Tier-1 native code never polls; it rejoins those sites at every bail, call, and return, so compiled frames are never interrupted at an unsafe point. Trigger state is thread-local, so every worker isolate collects its own heap at its own safepoints.
 
-The semantic rule that keeps this invisible: **a safepoint collection never runs a destructor.** A `destruct` block is the only observable memory-management effect, and its firing is tied to the last owning release, an event cyclic garbage never produces, so cycle-destructor timing belongs to the exit collection. Destructor-free garbage reclaims immediately and unobservably.
+One semantic rule keeps this invisible: **a safepoint collection never runs a destructor.** A `destruct` block is the only observable memory-management effect, and its firing is tied to the last owning release, an event cyclic garbage never produces, so cycle-destructor timing belongs to the exit collection. Destructor-free garbage reclaims immediately and unobservably.
 
-A dead component that *does* contain a destructor-bearing member is **deferred to exit**. Garbage is partitioned at weakly-connected-component granularity, so no reclaimed member can reference a deferred one, and the deferred component is left allocated for the exit collection, which reclaims it with the same members, the same reverse-`seq` order, and the same output it would otherwise have produced.
+A dead component that *does* contain a destructor-bearing member is **deferred to exit**. Garbage is partitioned at weakly-connected-component granularity, so no reclaimed member can reference a deferred one, and the exit collection reclaims that component with the same members, the same reverse-`seq` order, and the same output it would otherwise have produced.
 
-Because immediate reclamation is unobservable, the two backends need no synchronized collection points. Each collects its own way, and each carries a hard safety net.
+Because immediate reclamation is unobservable, the two backends need no synchronized collection points, and each carries a hard safety net of its own.
 
-The VM traces from its enumerated roots (register windows, upvalues, globals, channel buffers, extension arena, embed handles, scheduler-held tasks) and **aborts any collection whose garbage set does not exactly refcount-balance its internal in-edges**, so a missed root costs liveness until exit rather than safety. The reference interpreter runs trial deletion over the `Rc` graph seeded from its weak candidate registries, every Rust-held value being a counted owner, and verifies the dead set's strong counts the same way.
-
-A program that builds cycles in a loop therefore holds a bounded peak, whichever backend runs it.
+| Backend | How it collects, and what it checks |
+|---|---|
+| VM | Traces from its enumerated roots (register windows, upvalues, globals, channel buffers, extension arena, embed handles, scheduler-held tasks) and **aborts any collection whose garbage set does not exactly refcount-balance its internal in-edges**, so a missed root costs liveness until exit rather than safety. |
+| Reference interpreter | Runs trial deletion over the `Rc` graph, seeded from its weak candidate registries with every Rust-held value a counted owner, and verifies the dead set's strong counts the same way. |
 
 ## See also
 

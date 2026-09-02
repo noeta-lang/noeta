@@ -80,11 +80,11 @@ A watch or console entry is **compiled by the same compiler that built your prog
 60
 ```
 
-The fragment sees every local in scope in the selected stack frame, exactly the names the Variables panel shows and `self` included in a method frame, plus every function, type, and global of the program.
+The fragment sees every local in scope in the selected stack frame, the names the Variables panel shows plus `self` in a method frame, and every function, type and global of the program.
 
-**2. Semantics are the program's semantics, by construction.** A console expression compiles through the production pipeline, so operator behavior, method dispatch, arity rules, and error messages match a real run.
+**2. Semantics are the program's semantics.** A console expression compiles through the production pipeline, so operator behavior, method dispatch, arity rules and error messages match a real run.
 
-**3. What you create can outlive the pause.** A closure built at the console and stored into program state, by rebinding a global callback say, stays alive and callable after you `continue`:
+**3. What you create can outlive the pause.** A closure built at the console and stored into program state, by rebinding a global callback, stays alive and callable after you `continue`:
 
 ```text
 > cb = fn(n: int) => twice(n) + xs.len()
@@ -92,9 +92,9 @@ The fragment sees every local in scope in the selected stack frame, exactly the 
 5
 ```
 
-When the program later calls `cb(7)` itself, it runs your console-built closure. The runtime keeps every fragment's code resolvable for the rest of the run, so nothing dangles.
+The runtime keeps every fragment's code resolvable for the rest of the run, so when the program later calls `cb(7)` itself, it runs your console-built closure.
 
-**4. Console bindings persist.** A top-level `mut total = …`, or a bare `label = …` introducing a new name, binds a **session global** exactly as a REPL binding does, visible in every later console entry for the rest of the run:
+**4. Console bindings persist.** A top-level `mut total = …`, or a bare `label = …` introducing a new name, binds a **session global** as a REPL binding does, visible in every later console entry for the rest of the run:
 
 ```text
 > mut total = xs.len() * 10
@@ -102,9 +102,9 @@ When the program later calls `cb(7)` itself, it runs your console-built closure.
 32
 ```
 
-One rule: a console `mut` whose name collides with a **frame local** is refused with "pick another name", since the language forbids shadowing and a silent divergence from what the Variables panel shows would be worse. A `mut` nested *inside* the fragment, in a loop or closure body, stays fragment-local as it would in any function.
+One rule: a console `mut` whose name collides with a **frame local** is refused with "pick another name", since the language forbids shadowing. A `mut` nested *inside* the fragment, in a loop or closure body, stays fragment-local.
 
-Console entries **type-check before running**, against everything the debugged program declared and bound. A retype, a wrong-arity call to a program function, or a missing signature each answers with its `E0xxx` diagnostics and never runs. Frame locals enter the check untyped, so expressions touching only locals are under-constrained rather than over-rejected, and a failed entry leaves no trace in the checker or in the debugged program's diagnostics.
+Console entries **type-check before running**, against everything the debugged program declared and bound. A retype, a wrong-arity call to a program function, or a missing signature each answers with its `E0xxx` diagnostic and never runs. Frame locals enter the check untyped, so expressions touching only locals are under-constrained rather than over-rejected, and a failed entry leaves no trace in the checker or the program's diagnostics.
 
 ### One nuance about frame locals
 
