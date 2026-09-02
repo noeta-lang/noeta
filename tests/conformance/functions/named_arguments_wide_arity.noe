@@ -1,0 +1,56 @@
+// A named argument that only REORDERS a call carries no supplied mask, at any arity. The mask is a
+// `u64` indexed over the callee's declared parameters, so a parameter at index 64 or beyond has no
+// bit in it; a call that fills a dense prefix of the parameters needs no mask to say so, because
+// the ordinary "arguments fill parameters 0..n" rule already describes it exactly. Only a call that
+// SKIPS a defaulted parameter needs one, and the checker bounds those to the first 63 parameters
+// (E0061, `named_arguments_skip_bound.noe`).
+//
+// Reading "does this call skip" off the mask instead of off the binding is what breaks at 64: a
+// dense 66-argument call built a mask naming 64 parameters, which is not a prefix of 66, so the
+// call went out carrying it — and the binder, walking to the 65th set bit of a 64-bit mask, bound
+// arguments 64 and 65 to the same parameter and left the last one unset. `noeta check` passed the
+// program, and the arity-66 line below then printed a wrong number in a release build and aborted
+// on an arithmetic underflow in a debug one.
+//
+// Each callee returns a decimal readout of its three highest parameters, so a value that lands on
+// the wrong one is a wrong digit rather than a wrong total.
+// expect: stdout "23"
+// expect: stdout "34"
+// expect: stdout "45"
+// expect: stdout "45"
+// expect: stdout "345"
+// expect: stdout "45"
+// expect: stdout "9"
+// expect: exit 0
+fn w64(a0: int, a1: int, a2: int, a3: int, a4: int, a5: int, a6: int, a7: int, a8: int, a9: int, a10: int, a11: int, a12: int, a13: int, a14: int, a15: int, a16: int, a17: int, a18: int, a19: int, a20: int, a21: int, a22: int, a23: int, a24: int, a25: int, a26: int, a27: int, a28: int, a29: int, a30: int, a31: int, a32: int, a33: int, a34: int, a35: int, a36: int, a37: int, a38: int, a39: int, a40: int, a41: int, a42: int, a43: int, a44: int, a45: int, a46: int, a47: int, a48: int, a49: int, a50: int, a51: int, a52: int, a53: int, a54: int, a55: int, a56: int, a57: int, a58: int, a59: int, a60: int, a61: int, a62: int, a63: int): int { return a62 * 10 + a63; }
+fn w65(a0: int, a1: int, a2: int, a3: int, a4: int, a5: int, a6: int, a7: int, a8: int, a9: int, a10: int, a11: int, a12: int, a13: int, a14: int, a15: int, a16: int, a17: int, a18: int, a19: int, a20: int, a21: int, a22: int, a23: int, a24: int, a25: int, a26: int, a27: int, a28: int, a29: int, a30: int, a31: int, a32: int, a33: int, a34: int, a35: int, a36: int, a37: int, a38: int, a39: int, a40: int, a41: int, a42: int, a43: int, a44: int, a45: int, a46: int, a47: int, a48: int, a49: int, a50: int, a51: int, a52: int, a53: int, a54: int, a55: int, a56: int, a57: int, a58: int, a59: int, a60: int, a61: int, a62: int, a63: int, a64: int): int { return a62 * 100 + a63 * 10 + a64; }
+fn w66(a0: int, a1: int, a2: int, a3: int, a4: int, a5: int, a6: int, a7: int, a8: int, a9: int, a10: int, a11: int, a12: int, a13: int, a14: int, a15: int, a16: int, a17: int, a18: int, a19: int, a20: int, a21: int, a22: int, a23: int, a24: int, a25: int, a26: int, a27: int, a28: int, a29: int, a30: int, a31: int, a32: int, a33: int, a34: int, a35: int, a36: int, a37: int, a38: int, a39: int, a40: int, a41: int, a42: int, a43: int, a44: int, a45: int, a46: int, a47: int, a48: int, a49: int, a50: int, a51: int, a52: int, a53: int, a54: int, a55: int, a56: int, a57: int, a58: int, a59: int, a60: int, a61: int, a62: int, a63: int, a64: int, a65: int): int { return a63 * 100 + a64 * 10 + a65; }
+
+class Wide {
+    pub k: int
+
+    pub fn make(): Wide { return Wide { k: 0 }; }
+
+    pub fn m(a0: int, a1: int, a2: int, a3: int, a4: int, a5: int, a6: int, a7: int, a8: int, a9: int, a10: int, a11: int, a12: int, a13: int, a14: int, a15: int, a16: int, a17: int, a18: int, a19: int, a20: int, a21: int, a22: int, a23: int, a24: int, a25: int, a26: int, a27: int, a28: int, a29: int, a30: int, a31: int, a32: int, a33: int, a34: int, a35: int, a36: int, a37: int, a38: int, a39: int, a40: int, a41: int, a42: int, a43: int, a44: int, a45: int, a46: int, a47: int, a48: int, a49: int, a50: int, a51: int, a52: int, a53: int, a54: int, a55: int, a56: int, a57: int, a58: int, a59: int, a60: int, a61: int, a62: int, a63: int, a64: int, a65: int): int { return self.k + a64 * 10 + a65; }
+}
+
+// Arity 64: the last parameter the mask could ever hold a bit for.
+echo w64(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, a63: 3, a62: 2);
+// Arity 65: one past it, named out of order across the boundary.
+echo w65(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, a64: 4, a63: 3);
+// Arity 66: two names past the boundary, in reverse order — the failing shape.
+echo w66(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, a65: 5, a64: 4);
+// The same two names written in declaration order.
+echo w66(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, a64: 4, a65: 5);
+// Three names spanning 63, 64 and 65, out of order.
+echo w66(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, a65: 5, a63: 3, a64: 4);
+// A method shifts every parameter bit up by one to make room for the receiver, so its
+// boundary sits one parameter lower than a free function's.
+echo Wide.make().m(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, a65: 5, a64: 4);
+
+// A call that SKIPS a defaulted parameter does need a mask, and 62 is the highest parameter one may
+// name: a method's mask shifts up by one for the receiver, so 63 bits is the capacity both call
+// kinds share. Naming 63 from a skipping call is E0061 (`named_arguments_skip_bound.noe`).
+fn wskip(a0: int = 0, a1: int = 0, a2: int = 0, a3: int = 0, a4: int = 0, a5: int = 0, a6: int = 0, a7: int = 0, a8: int = 0, a9: int = 0, a10: int = 0, a11: int = 0, a12: int = 0, a13: int = 0, a14: int = 0, a15: int = 0, a16: int = 0, a17: int = 0, a18: int = 0, a19: int = 0, a20: int = 0, a21: int = 0, a22: int = 0, a23: int = 0, a24: int = 0, a25: int = 0, a26: int = 0, a27: int = 0, a28: int = 0, a29: int = 0, a30: int = 0, a31: int = 0, a32: int = 0, a33: int = 0, a34: int = 0, a35: int = 0, a36: int = 0, a37: int = 0, a38: int = 0, a39: int = 0, a40: int = 0, a41: int = 0, a42: int = 0, a43: int = 0, a44: int = 0, a45: int = 0, a46: int = 0, a47: int = 0, a48: int = 0, a49: int = 0, a50: int = 0, a51: int = 0, a52: int = 0, a53: int = 0, a54: int = 0, a55: int = 0, a56: int = 0, a57: int = 0, a58: int = 0, a59: int = 0, a60: int = 0, a61: int = 0, a62: int = 0, a63: int = 0, a64: int = 0, a65: int = 0): int { return a62; }
+
+echo wskip(a62: 9);

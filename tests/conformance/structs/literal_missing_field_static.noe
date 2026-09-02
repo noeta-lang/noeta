@@ -1,0 +1,31 @@
+// An all-fields literal must give every declared field a value (E0009). Where the literal names its
+// type, the checker decides that: the type's field list, which of them declare a default, and which
+// a `...base` spread contributes are all known before the program runs, so an incomplete literal is
+// a compile error rather than a construction that gets as far as building the object.
+//
+// Both literals sit in functions nothing calls, so the rejection can only be the checker's. A
+// program that reached its runtime would print `alive` and exit 0, and the two expectations below
+// would fail — which is what distinguishes this from the same code raised at the same span by the
+// construction-time check (`literal_missing_field_dynamic.noe`).
+// expect: error E0009 at 24:12
+// expect: error E0009 at 28:12
+// expect: exit 1
+struct Point {
+    x: int
+    y: int
+    label: string = "origin"
+}
+
+struct Flat {
+    x: int
+}
+
+fn omitted(): Point {
+    return Point { x: 1 };
+}
+
+fn spread_too_narrow(): Point {
+    return Point { ...Flat { x: 1 } };
+}
+
+echo "alive";

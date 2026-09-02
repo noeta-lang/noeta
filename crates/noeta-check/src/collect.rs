@@ -1512,7 +1512,7 @@ impl Checker {
             .collect();
         if !optional.is_empty() {
             self.symbols
-                .attribute_optional_fields
+                .defaulted_fields
                 .insert(type_name.to_string(), optional);
         }
         let decode_defaults: HashMap<String, noeta_ext_abi::FieldDefault> = fields
@@ -1540,12 +1540,13 @@ impl Checker {
         }
     }
 
-    /// Whether field `field` of attribute `attr_name` is optional (has a default), so a `#[...]`
-    /// construction may omit it.
-    pub(crate) fn is_optional_attribute_field(&self, attr_name: &str, field: &str) -> bool {
+    /// Whether field `field` of `type_name` declares a default (`name: T = …`), so a construction
+    /// may omit it. The one predicate behind both completeness gates: an object literal's and a
+    /// `#[...]` attribute's.
+    pub(crate) fn field_has_default(&self, type_name: &str, field: &str) -> bool {
         self.symbols
-            .attribute_optional_fields
-            .get(attr_name)
+            .defaulted_fields
+            .get(type_name)
             .is_some_and(|set| set.contains(field))
     }
 

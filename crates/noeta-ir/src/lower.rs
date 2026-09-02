@@ -4218,21 +4218,48 @@ impl Lowerer<'_> {
             .flatten()
             .filter_map(|&i| atoms.get(i).cloned())
             .collect();
-        let mut mask: u64 = 0;
-        for (p, b) in binding.iter().enumerate() {
-            if b.is_some() && p < 64 {
-                mask |= 1 << p;
-            }
-        }
         // A mask is only worth carrying when it says something the prefix rule cannot. A pure
         // reordering (`sub(b: 1, a: 10)`) fills a *prefix* of the parameters, and `permuted` is
         // already in parameter order — so the ordinary rule describes it exactly, and every fast
         // path that assumes the prefix rule (the JIT's direct-call setup, the tier-1 helpers)
         // keeps applying. `Some` then means precisely "this call skips a defaulted parameter".
-        // `mask` has exactly `permuted.len()` bits set by construction, so "the low `len` bits are
-        // all set" is the same as "the set bits are the prefix" — and it does not overflow at 64.
-        let is_prefix = mask.trailing_ones() as usize == permuted.len();
-        (permuted, if is_prefix { None } else { Some(mask) })
+        //
+        // Whether the call skips is read off the **binding**, never off the mask. A mask is one
+        // `u64`, so a parameter at index 64 or beyond has no bit in it, and a mask built for a
+        // dense 66-argument call therefore names only 64 parameters — asking *that* whether its
+        // set bits form a prefix answers no, and the call went out carrying a mask with two fewer
+        // bits than it had arguments. The binder then walked past the end of it and bound two
+        // arguments to the same parameter.
+        let last = binding.iter().rposition(Option::is_some);
+        let skips = binding
+            .iter()
+            .take(last.map_or(0, |p| p + 1))
+            .any(Option::is_none);
+        if !skips {
+            return (permuted, None);
+        }
+        // Only a skipping call needs a mask, and the checker bounds one to the first
+        // `MASKED_PARAM_LIMIT` parameters (E0061) before it records a binding at all — so every
+        // supplied index here has a bit. Asserted in both profiles rather than filtered: dropping
+        // an out-of-range bit is exactly how an argument comes to land on the wrong parameter, and
+        // a compile-time abort on an unreachable state beats a wrong binding in a shipped build.
+        assert!(
+            last.is_some_and(|p| p < noeta_ast::reflect::MASKED_PARAM_LIMIT),
+            "a skipping call reached lowering naming parameter {last:?}, past the \
+             supplied-mask bound of {}",
+            noeta_ast::reflect::MASKED_PARAM_LIMIT
+        );
+        let mask = binding
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.is_some())
+            .fold(0u64, |m, (p, _)| m | (1u64 << p));
+        debug_assert_eq!(
+            mask.count_ones() as usize,
+            permuted.len(),
+            "a supplied mask names exactly the arguments the call passes"
+        );
+        (permuted, Some(mask))
     }
 
     /// Lower `a && b` / `a || b` to a [`Stmt::Logical`] writing into a fresh temp, so the

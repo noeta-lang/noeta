@@ -1,0 +1,15 @@
+// A call that SKIPS a defaulted parameter carries a supplied mask — one `u64`, shifted up by one on
+// a method call to make room for the receiver at bit 0 — so such a call can only name parameters
+// among the first 63. Naming one past that is E0061, at the call, naming the parameter that does
+// not fit. Reordering is unaffected: a call filling a dense prefix carries no mask at any arity
+// (`named_arguments_wide_arity.noe`).
+//
+// The call sits in a function nothing calls, so the rejection can only be the checker's: a program
+// that reached its runtime would run to completion and print, and the `exit 1` below would fail.
+// expect: error E0061 at 13:27
+// expect: exit 1
+fn wide(a0: int = 0, a1: int = 0, a2: int = 0, a3: int = 0, a4: int = 0, a5: int = 0, a6: int = 0, a7: int = 0, a8: int = 0, a9: int = 0, a10: int = 0, a11: int = 0, a12: int = 0, a13: int = 0, a14: int = 0, a15: int = 0, a16: int = 0, a17: int = 0, a18: int = 0, a19: int = 0, a20: int = 0, a21: int = 0, a22: int = 0, a23: int = 0, a24: int = 0, a25: int = 0, a26: int = 0, a27: int = 0, a28: int = 0, a29: int = 0, a30: int = 0, a31: int = 0, a32: int = 0, a33: int = 0, a34: int = 0, a35: int = 0, a36: int = 0, a37: int = 0, a38: int = 0, a39: int = 0, a40: int = 0, a41: int = 0, a42: int = 0, a43: int = 0, a44: int = 0, a45: int = 0, a46: int = 0, a47: int = 0, a48: int = 0, a49: int = 0, a50: int = 0, a51: int = 0, a52: int = 0, a53: int = 0, a54: int = 0, a55: int = 0, a56: int = 0, a57: int = 0, a58: int = 0, a59: int = 0, a60: int = 0, a61: int = 0, a62: int = 0, a63: int = 0, a64: int = 0, a65: int = 0): int { return a63; }
+
+fn unused(): int { return wide(a63: 9); }
+
+echo "unreached";

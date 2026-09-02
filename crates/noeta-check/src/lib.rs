@@ -1276,16 +1276,17 @@ struct Symbols {
     /// *absent* from this map (bare `@attribute`) is unrestricted. Enforced per use site (E0030);
     /// kind names are validated when this is built.
     attachable: HashMap<String, Vec<TargetKind>>,
-    /// Per struct/class, the fields that carry a default (`name: T = …`) and so are **optional** in a
-    /// `#[Foo(...)]` attribute construction (object-model slice 6i): such a field may be omitted, the
-    /// default supplies it. Keyed by type name → optional field names. The construction gate consults
-    /// this to suppress the missing-field error (E0009) for a defaulted field.
-    attribute_optional_fields: HashMap<String, HashSet<String>>,
+    /// Per struct/class, the fields that carry a default (`name: T = …`) and so may be **omitted** by
+    /// a construction: the default supplies the value. Keyed by type name → field names. Both
+    /// construction gates read it through [`Checker::field_has_default`] to suppress the
+    /// missing-field error (E0009) — the object literal's completeness check and the `#[Foo(...)]`
+    /// attribute's, which are one rule over two surfaces.
+    defaulted_fields: HashMap<String, HashSet<String>>,
     /// Per struct/class, each field whose declared default means something to a **JSON decode**
     /// (json-defaults): type name → field name → [`noeta_ext_abi::FieldDefault`]. Read by
     /// [`Checker::type_to_recipe`] when it bakes a `TypeRecipe::Fielded`, so an omitted field with a
     /// literal default decodes to that default instead of erroring — the same optionality
-    /// `attribute_optional_fields` above gives an attribute construction, and `construct(name,
+    /// `defaulted_fields` above gives an attribute construction, and `construct(name,
     /// fields)` gives a dynamic construction. Only non-[`noeta_ext_abi::FieldDefault::Required`]
     /// fields are stored; an absent entry *is* `Required`.
     field_defaults: HashMap<String, HashMap<String, noeta_ext_abi::FieldDefault>>,

@@ -1,0 +1,27 @@
+// A `...base` spread whose type is `dyn` leaves the set of fields it contributes open: which slots
+// it fills is a property of the value, and there is no value until the program runs. So the
+// completeness rule (E0009) stays with the backends for this literal, and both raise it at
+// construction time with the same code, span and wording the checker uses where it can decide
+// statically (`literal_missing_field_static.noe`).
+//
+// `alive` is printed before the construction, so the expectations say the program ran. A checker
+// that rejected this literal instead would print nothing, and the stdout line below would fail —
+// which is what keeps the two halves of the rule from quietly becoming one.
+// expect: stdout "alive"
+// expect: error E0009 at 27:6
+// expect: exit 1
+struct Point {
+    x: int
+    y: int
+}
+
+struct Flat {
+    x: int
+}
+
+fn opaque(): dyn {
+    return Flat { x: 1 };
+}
+
+echo "alive";
+echo Point { ...opaque() }.y;
