@@ -427,8 +427,11 @@ fn user_facing_help_carries_no_internal_vocabulary() {
     let src = repo_root().join("crates/noeta-cli/src/lib.rs");
     let text = std::fs::read_to_string(&src).expect("the CLI surface is readable");
     let literals = help_literals(&text);
+    // A landmark no *rule* here can move: the `--color` flag's own value list. Pinning a phrase a
+    // rule polices instead (the verb in front of "diagnostics", say) would make this sentinel fire
+    // first and hide the rule's own verdict.
     assert!(
-        literals.contains("When to color diagnostics"),
+        literals.contains("auto (a terminal, unless NO_COLOR or TERM=dumb)"),
         "the global flags' builder help moved — this scan is reading the wrong strings"
     );
     let help = format!("{}\n{literals}", doc_comments(&text));
