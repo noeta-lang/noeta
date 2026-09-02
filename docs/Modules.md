@@ -1,6 +1,6 @@
 # Modules & Visibility
 
-Programs span multiple files. **A file is a module, and its path comes from where the file sits** — there is nothing to declare. You import with `use` and expose only what you mark `pub`. A complete two-file program, in a package named `local/hello`:
+Programs span multiple files. **A file is a module, and its path comes from where the file sits**, so there is nothing to declare. You import with `use` and expose only what you mark `pub`. A complete two-file program, in a package named `local/hello`:
 
 ```noeta
 // src/models.noe  →  the module `hello.models`
@@ -24,7 +24,7 @@ u = User { name: "Ada", id: 7 }
 echo greet(u)
 ```
 
-Running the entry file is the whole build step — `noeta run` links every other `.noe` file in the package automatically:
+Running the entry file is the whole build step, since `noeta run` links every other `.noe` file in the package automatically:
 
 ```console
 $ noeta run src/main.noe
@@ -33,20 +33,26 @@ hello, Ada (#7)
 
 The scan is recursive: your package is walked as a *tree*, so `src/deep/nested.noe` is a module (`hello.deep.nested`) exactly as a dependency package's subdirectories are. `noeta check`, `build`, and `test` link the same way.
 
-The walk stops at three kinds of directory, none of which are your package's source: a directory holding **its own `noeta.toml`** (a nested package — a package's `examples/<app>/` is the standard case), a **dot-directory** (`.git`, and an editor or agent worktree, which is a whole second copy of every module), and the build-output directory `target/`.
+The walk stops at three kinds of directory, none of which hold your package's source:
+
+| Directory | Why the walk stops |
+|---|---|
+| one holding its own `noeta.toml` | a nested package, of which a package's `examples/<app>/` is the standard case |
+| a dot-directory | `.git`, and an editor or agent worktree, which is a whole second copy of every module |
+| `target/` | the build-output directory |
 
 ## Where a module's path comes from
 
 **Module path = the package's import prefix + the file's path inside the package.** The rule in full:
 
 - **The prefix** is how the *importing* program addresses the package:
-  - the package you are running — your own — contributes its `[package] root`, or the `package` half of its `[package] name` when it declares none, so `local/hello` gives `hello`;
+  - the package you are running, your own, contributes its `[package] root`, or the `package` half of its `[package] name` when it declares none, so `local/hello` gives `hello`;
   - a plain `[dependencies]` entry contributes **the key** you wrote (`codec = { … }` → `codec.…`);
   - a **scope-array** member contributes `{key}.{the package's own root segment}` (`para = [{ package = "para/db" }, …]` → `para.db.…`).
 - **The relative path** is the file's path below the package root: every directory, then the file stem, becomes a segment, `/` becomes `.`, and **case is preserved verbatim** (`Helpers/URI.noe` → `Helpers.URI`).
-- **A leading `src/` is not a segment.** `src/` is a layout choice, so `src/human.noe` and `human.noe` are both `<prefix>.human` — moving your sources under `src/` never renames your API.
-- **A segment that repeats the one before it collapses.** The package-named root file *is* the module the prefix names, not a child of it: `para-db/db.noe` under the prefix `para.db` is `para.db`, not `para.db.db`.
-- **Every segment must be a legal identifier** — see [naming](#naming-a-file) below.
+- **A leading `src/` is not a segment.** `src/` is a layout choice, so `src/human.noe` and `human.noe` are both `<prefix>.human`, and moving your sources under `src/` never renames your API.
+- **A segment that repeats the one before it collapses.** The package-named root file *is* the module the prefix names: `para-db/db.noe` under the prefix `para.db` is `para.db`, rather than `para.db.db`.
+- **Every segment must be a legal identifier**, see [naming](#naming-a-file) below.
 
 | Package | Prefix from | File | Module |
 |---|---|---|---|
@@ -57,13 +63,13 @@ The walk stops at three kinds of directory, none of which are your package's sou
 | `para = [{ package = "para/db" }]` | key + root segment | `query.noe` | `para.db.query` |
 | `para = [{ package = "para/db" }]` | key + root segment | `db.noe` | `para.db` |
 
-**The key is real.** Because a dependency's modules derive under the prefix *you* wrote, renaming the key renames the import path: keying `para/cli` as `mycli` gives you `mycli.cli.run`, and nothing inside the package can override that. A package's internal file names are still its public API surface — that is the point — but the *root* they hang under is the consumer's to choose.
+**Renaming the key renames the import path.** A dependency's modules derive under the prefix *you* wrote, so keying `para/cli` as `mycli` gives you `mycli.cli.run`, and nothing inside the package can override that. A package's internal file names are still its public API surface, and the *root* they hang under is the consumer's to choose.
 
-**A plain key derives one segment shallower than a scope array.** `para = { package = "para/api" }` makes `middleware.noe` into `para.middleware`; the array form `para = [{ package = "para/api" }]` makes it `para.api.middleware`, because the array form adds the package's own root segment. When several packages of one scope must sit side by side under one root — which is exactly how the first-party `para/*` packages are published — use the array form. See [the Manifest](Manifest#dependencies--what-the-package-builds-against).
+**A plain key derives one segment shallower than a scope array.** `para = { package = "para/api" }` makes `middleware.noe` into `para.middleware`, while the array form `para = [{ package = "para/api" }]` makes it `para.api.middleware`, because the array form adds the package's own root segment. Use the array form when several packages of one scope must sit side by side under one root, which is how the first-party `para/*` packages are published. See [the Manifest](Manifest#dependencies--what-the-package-builds-against).
 
 ### Importing your own package's modules
 
-Inside a package, **lead with your `[package] root`** — the segment your own modules derive under:
+Inside a package, **lead with your `[package] root`**, the segment your own modules derive under:
 
 ```noeta ignore
 // para-db/query.noe — in a package whose manifest says `root = "db"`
@@ -71,21 +77,21 @@ use db.open              // ✅ resolves standalone AND as a dependency
 use para.db.open         // ❌ only ever resolved when a consumer keyed it `para`
 ```
 
-That one spelling works in both builds because it is what your files derive under when the package is built **on its own** — running your tests, `noeta check .`, an example app — and because a consumer's build rewrites that leading segment to whatever your modules derive under there. Standalone the prefix *is* that segment, so nothing changes; under `para = [{ package = "para/db" }, …]` your `use db.open` becomes `para.db.open`; under `mydb = { package = "para/db" }` it becomes `mydb.open`. You never write the consumer's key, and you never write your own scope.
+That one spelling works in both builds. It is what your files derive under when the package is built **on its own**, meaning your tests, `noeta check .`, or an example app, and a consumer's build rewrites that leading segment to whatever your modules derive under there. Standalone the prefix *is* that segment, so nothing changes; under `para = [{ package = "para/db" }, …]` your `use db.open` becomes `para.db.open`; under `mydb = { package = "para/db" }` it becomes `mydb.open`. You write neither the consumer's key nor your own scope.
 
-`root` is declared rather than derived because it is a **naming choice, not a fact about the filesystem** — which is the line derivation draws. A module's *path* is derived and cannot be declared ([E0072](#a-modules-path-cannot-be-declared)); the prefix it derives *under* is your package's name for itself, and nothing on disk knows what that should be.
+`root` is declared because it is a **naming choice**, and that is the line derivation draws. A module's *path* is a fact about the filesystem, so it is derived and cannot be declared ([E0072](#a-modules-path-cannot-be-declared)); the prefix it derives *under* is your package's name for itself, which nothing on disk knows.
 
-Declaring it separately from `[package] name` is what lets each be what it is. The name is a **registry coordinate** — indexed, claimed, resolved from a URL — so it may look like one: `noeta-lang/my-toolkit`. The root is a **token spelled in source**, so it must lex as one identifier. Omit `root` and the `package` half is used instead, which then has to lex.
+That is also why it is separate from `[package] name`. The name is a **registry coordinate**, indexed, claimed and resolved from a URL, so it may look like one: `noeta-lang/my-toolkit`. The root is a **token spelled in source**, so it must lex as one identifier. Omit `root` and the `package` half is used instead, which then has to lex.
 
 The rewrite touches the **leading segment only**, so everything after it is yours to spell: `use db.query.run` from a file three directories deep still names the module `query.noe` derives.
 
-Two segments are *not* rewritten, which is what you want in both cases: a `use std.…`, and a native extension's own namespace root (`para/db`'s Rust extension registers the module `para.db`, so its `.noe` modules import `use para.db.Connection` by that literal name and the loader leaves it alone).
+Two segments are left alone: a `use std.…`, and a native extension's own namespace root. `para/db`'s Rust extension registers the module `para.db`, so its `.noe` modules import `use para.db.Connection` by that literal name and the loader leaves it as written.
 
 ### Naming a file
 
-**Convention:** a lowercase, single-word stem — `models.noe`, `query.noe`, `middleware.noe` — which is what every module in the standard library and the first-party packages uses. The compiler does not enforce it, and neither does a lint; it is what makes an import path read like the rest of the language. It sits alongside the rest of the ecosystem's naming in [Conventions](Conventions).
+**Convention:** a lowercase, single-word stem such as `models.noe`, `query.noe` or `middleware.noe`, which is what every module in the standard library and the first-party packages uses. Neither the compiler nor a lint enforces it; it is what makes an import path read like the rest of the language. It sits alongside the rest of the ecosystem's naming in [Conventions](Conventions).
 
-**Rule:** every segment — each directory name and the file stem — has to lex as exactly one identifier, because every one of them is spelled out in somebody's `use`. A stem that cannot be is **E0074**, reported against the file with the rename to make:
+**Rule:** every segment, each directory name and the file stem, has to lex as exactly one identifier, because every one of them is spelled out in somebody's `use`. A stem that cannot is **E0074**, reported against the file with the rename to make:
 
 ```text
 [E0074] `my-utils` cannot be part of a module path — a module's path is derived from where its
@@ -93,9 +99,9 @@ Two segments are *not* rewritten, which is what you want in both cases: a `use s
    help: rename it to `my_utils`
 ```
 
-The hint is advice; nothing is applied silently. Mapping `my-utils` → `my_utils` behind your back would give one module two spellings, which is precisely what deriving the path exists to remove. A keyword is refused for the same reason (`class.noe` — no `use` could name it), as is a stem starting with a digit (`2fa.noe` → `_2fa`).
+The hint is advice, and nothing is applied silently: mapping `my-utils` to `my_utils` behind your back would give one module two spellings. A keyword is refused for the same reason (`class.noe`, which no `use` could name), as is a stem starting with a digit (`2fa.noe` → `_2fa`).
 
-**One name is reserved**, and it is refused with the same code for a different reason — it spells perfectly well, the language has simply already taken it. **`self`** is the method receiver, and a module of that name would collide with it: importing `pkg.self` binds the handle `self`, so inside a method `self.n` would read the receiver's field while `self.hi()` read the module's function — two meanings for one name, which the [one name, one meaning](#qualified-references) rule cannot catch, because a receiver is bound by the method rather than by a `use`. 
+**One name is reserved.** **`self`** is the method receiver, and it is refused with the same code for a different reason: it spells perfectly well, and the language has already taken it. A module of that name would collide with the receiver, because importing `pkg.self` binds the handle `self`, after which `self.n` inside a method reads the receiver's field while `self.hi()` reads the module's function. The [one name, one meaning](#qualified-references) rule cannot catch that, since a receiver is bound by the method rather than by a `use`.
 
 ### One path, one module
 
@@ -106,31 +112,31 @@ Two files that derive the same path are **E0073**, naming both:
    help: one module path is one module — rename or move one of the files so their paths differ
 ```
 
-That is the collapse rule biting: `src/api/api.noe`'s stem repeats the directory it sits in, so it lands on `hello.api` alongside `src/api.noe`. Pick one of the two spellings for the module — either a file or a directory with a root file, not both. Reporting the collision here is what keeps one file's exports from vanishing into the other's, with the failure surfacing against whoever imported them.
+That is the collapse rule biting: `src/api/api.noe`'s stem repeats the directory it sits in, so it lands on `hello.api` alongside `src/api.noe`. Pick one of the two spellings for the module, either a file or a directory with a root file. Reporting the collision here keeps one file's exports out of the other's, where the failure would surface against whoever imported them.
 
 ### Case is preserved
 
 `Helpers/URI.noe` is `Helpers.URI`, and `use pkg.helpers.uri` does not find it.
 
-The usual objection is PSR-4's cross-platform wound, and it does not apply here. PHP's autoloader *builds a path out of the name and asks the filesystem to open it*, which is where a case-insensitive filesystem bites — the same code resolves on macOS and 404s on Linux. Noeta's loader does the opposite: it **scans the directory and matches derived strings**, so the filesystem's case rules never enter the comparison and a mis-cased `use` fails identically on every platform, at check time. It also keeps one rule end to end — `Uuid` is not `uuid` anywhere else in the language either, and lowercasing module segments alone would make the path fuzzy while the imported item stayed exact.
+The loader **scans the directory and matches derived strings**, so the filesystem's own case rules never enter the comparison and a mis-cased `use` fails identically on every platform, at check time. It also keeps one rule end to end: `Uuid` is not `uuid` anywhere else in the language, and lowercasing module segments alone would make the path fuzzy while the imported item stayed exact.
 
 ### A module's path cannot be declared
 
-Inside a package, a module's path is derived and **only** derived. A file under a `noeta.toml` that declares a `namespace` is **E0072**, whatever it says — its path already comes from where it sits, so a declaration could only restate that or contradict it, and neither is worth a line of source:
+Inside a package, a module's path is derived and **only** derived. A file under a `noeta.toml` that declares a `namespace` is **E0072**, whatever it says, since its path already comes from where it sits:
 
 ```text
-[E0072] `namespace App.Models` — a module's path is derived from where its file sits, so it cannot be declared
-   help: a module's path is the package's import prefix plus the file's path inside the package —
-         delete the declaration, or move the file to where it says it lives
+[E0072] a module's path is derived from where its file sits, so it cannot be declared
+   help: delete this line: this file's path derives as `hello.models`, and moving the file is how
+         you rename the module
 ```
 
-Deleting the line is the whole fix: the path it names is the path the file already derives, as long as the file sits where the declaration says it lives. Where the two disagree, the declaration is the wrong half — move the file.
+Deleting the line is the whole fix, as long as the file sits where the declaration says it lives. Where the two disagree, the declaration is the wrong half, so move the file.
 
-**One exception.** A loose script with *no* manifest has no package, hence no prefix, hence nothing to derive a path from — so there a `namespace` declaration is how a sibling module gets a name, and it is accepted. The rule is scoped to files whose path *can* be derived. If you want derived paths, that is what `noeta init` gives you: a manifest.
+**One exception.** A loose script with *no* manifest has no package, hence no prefix, hence nothing to derive a path from. There a `namespace` declaration is how a sibling module gets a name, and it is accepted. The rule is scoped to files whose path *can* be derived. For derived paths, `noeta init` gives you a manifest.
 
 ### Derivation needs a package
 
-A prefix comes from a manifest, so a file with **no `noeta.toml` above it** has nothing to derive from. A lone script run straight out of a directory is not silently made into a module of whatever tree it happens to stand in — nothing derives, and whatever the file declares stands. That is what keeps `noeta run scratch.noe` from swallowing the tree it happens to be sitting in, and it is why the single-file samples on these pages need no package to be valid programs.
+A prefix comes from a manifest, so a file with **no `noeta.toml` above it** has nothing to derive from. A lone script run straight out of a directory keeps whatever it declares, and nothing derives. That is what confines `noeta run scratch.noe` to the one file, and it is why the single-file samples on these pages need no package to be valid programs.
 
 ### The three diagnostics
 
@@ -140,7 +146,7 @@ A prefix comes from a manifest, so a file with **no `noeta.toml` above it** has 
 | **E0073** | two files derive the same module path | rename or move one — one path is one module |
 | **E0074** | a directory name or file stem is not a legal identifier segment | rename it to the spelling the help offers |
 
-All three come from the loader, so `check`, `run`, `build`, and `test` report them identically — a program that fails to name its modules never gets as far as type-checking.
+All three come from the loader, so `check`, `run`, `build`, and `test` report them identically. A program that fails to name its modules never gets as far as type-checking.
 
 ## Importing with `use`
 
@@ -157,7 +163,7 @@ echo customer.name                          // Ada
 
 ## Qualified references
 
-A declaration can also be referenced by a **module-qualified name** at any use site — a struct literal, an annotation, a call, an enum construction or pattern, even a first-class function value. Importing a whole module binds its last segment as a navigable handle, and once a module is in scope its spelled-out fully-qualified name works too:
+A declaration can also be referenced by a **module-qualified name** at any use site: a struct literal, an annotation, a call, an enum construction or pattern, even a first-class function value. Importing a whole module binds its last segment as a navigable handle, and once a module is in scope its spelled-out fully-qualified name works too:
 
 ```noeta check
 use geometry.vec;                              // the whole module: binds `vec`
@@ -176,23 +182,25 @@ r = match s {
 
 A whole-module import follows the usual aliasing (`use geometry.vec as gv` → `gv.Vec2`) and merges only `pub` declarations. In `use a.b`, an item `b` exported by module `a` wins over a module named `a.b`.
 
-**Qualified references require an import.** A file's dependency set stays fully readable from its `use` block, so a spelled-out FQN with no import is never a silent implicit import — it is a targeted error carrying the exact line to add:
+**Qualified references require an import.** A file's dependency set stays fully readable from its `use` block, so a spelled-out FQN with no import is a targeted error carrying the exact line to add:
 
 ```text
 [E0019] qualified reference `geometry.vec.Vec2` requires an import — add `use geometry.vec`
 ```
 
-(and referencing a non-`pub` declaration by qualified name reports `` `secret` is private to module `geometry.vec` ``).
+Referencing a non-`pub` declaration by qualified name reports `` `secret` is private to module `geometry.vec` ``.
 
-**A handle means what its own file imported.** A `use` binds *in one file*, and that holds across packages: a library that writes `use std.http.url` calls `std.http.url` even when the application also depends on a package whose native extension registers a module `url` of its own. The two never see each other's handles — the linker binds every imported unit's handle under its module's qualified identity, so a leaf name is never the thing two files compete for. The same is true of an alias (`use std.http.url as codec`), which is honored at run time exactly as the checker reads it.
+**A handle means what its own file imported.** A `use` binds *in one file*, and that holds across packages: a library that writes `use std.http.url` calls `std.http.url` even when the application also depends on a package whose native extension registers a module `url` of its own.
 
-That holds for an imported **type** too, and there the binding and the identity are deliberately two different things: `use std.http.Framing as F` makes `F` the name your file writes, while a value of it still carries `Framing` — the name a native-returned value stamps and the one a pattern compares against. So `F.Sse` builds, matches, and equals the very same variant a file that imported it unaliased builds, and neither file has to know how the other spelled it.
+The linker binds every imported unit's handle under its module's qualified identity, so the two files never see each other's handles and a leaf name is never the thing two files compete for. The same is true of an alias (`use std.http.url as codec`), which is honored at run time exactly as the checker reads it.
 
-**One name, one meaning.** A value binding may not reuse the local name a `use` binds — `use geometry.vec` followed by `vec = Holder { … }` is a collision (E0020): rename the binding, or alias the import (`use geometry.vec as gv`). So a dotted chain's root is never ambiguous — it is either the module handle or a local, never both. (The same rule governs binders generally — see [no shadowing, E0059](Functions-and-Closures#sealed-functions--the-use--capture-clause).) Type positions are a separate namespace, so a dotted *type* head like `vec.Vec2` never competes with value bindings at all.
+That holds for an imported **type** too, and there the binding and the identity are deliberately two different things. `use std.http.Framing as F` makes `F` the name your file writes, while a value of it still carries `Framing`, the name a native-returned value stamps and the one a pattern compares against. So `F.Sse` builds, matches, and equals the very same variant a file that imported it unaliased builds, and neither file has to know how the other spelled it.
+
+**One name, one meaning.** A value binding may not reuse the local name a `use` binds, so `use geometry.vec` followed by `vec = Holder { … }` is a collision (E0020): rename the binding, or alias the import (`use geometry.vec as gv`). A dotted chain's root is therefore either the module handle or a local, never both. (The same rule governs binders generally, see [no shadowing, E0059](Functions-and-Closures#sealed-functions--the-use--capture-clause).) Type positions are a separate namespace, so a dotted *type* head like `vec.Vec2` never competes with value bindings at all.
 
 ## Aliasing an import — `as`
 
-An import can be renamed locally with `as`. This is how a file brings in two types that share a short name from different namespaces — each under its own local name:
+An import can be renamed locally with `as`. This is how a file brings in two types that share a short name from different namespaces, each under its own local name:
 
 ```noeta check
 use shop.money.Amount as Money;     // shop.money.Amount
@@ -208,13 +216,15 @@ Grouped imports may alias per-name: `use shop.metrics.{Counter as Hits, Gauge}`.
 
 ## Type identity across modules
 
-Every named type — and every top-level function — has a **qualified identity**, `shop.models.User` or `shop.math.boom`, not just `User` / `boom`, formed from the path of the module it is declared in — which is to say, from where its file sits. That identity is what the language keys on for method dispatch, call resolution, and `is`/`as` narrowing, so two types (or two functions) with the same short name in different modules never conflate: `use shop.metric.scale as mscale` and `use shop.audio.scale as ascale` bind distinct functions. Human-facing output — a value's display and diagnostics — shows the **short** name, so a `shop.models.User` value prints as `User {…}` and a type error names it `User`.
+Every named type, and every top-level function, has a **qualified identity**: `shop.models.User` or `shop.math.boom`, formed from the path of the module it is declared in, which is to say from where its file sits.
 
-**Reflection is the exception, deliberately.** A `Type` value carries the *qualified* identity, because that identity is the key the name-keyed queries are stored under: `type_of(u)` inside `shop.models` is `Type.Struct(shop.models.User, [])`, and `type_name::<User>()` is `"shop.models.User"`. Comparing a reflected name against a hand-written `"User"` therefore fails for every type declared in a module — write [`type_name::<User>()`](Attributes-and-Reflection#type_namet-string) and let the compiler produce the string.
+That identity is what the language keys on for method dispatch, call resolution, and `is`/`as` narrowing, so two types or two functions sharing a short name in different modules stay distinct: `use shop.metric.scale as mscale` and `use shop.audio.scale as ascale` bind different functions. Human-facing output, meaning a value's display and diagnostics, shows the **short** name, so a `shop.models.User` value prints as `User {…}` and a type error names it `User`.
 
-Because identity is qualified, a short name only ever clashes *within a single file's local names*: importing two `Amount`s without aliases, or importing a name the file also declares, is the E0020 collision below — resolved by aliasing one of them.
+**Reflection is the exception, deliberately.** A `Type` value carries the *qualified* identity, because that identity is the key the name-keyed queries are stored under: `type_of(u)` inside `shop.models` is `Type.Struct(shop.models.User, [])`, and `type_name::<User>()` is `"shop.models.User"`. Comparing a reflected name against a hand-written `"User"` therefore fails for every type declared in a module, so write [`type_name::<User>()`](Attributes-and-Reflection#type_namet-string) and let the compiler produce the string.
 
-**Native types work identically.** A standard-library type such as `std.id.Uuid` is imported — and aliased — with the same `use`, and carries the same kind of qualified identity (`std.id.Uuid`). A file may declare its own `Counter` while importing a native one under an alias; the two coexist:
+Because identity is qualified, a short name clashes only *within a single file's local names*: importing two `Amount`s without aliases, or importing a name the file also declares, is the E0020 collision below, resolved by aliasing one of them.
+
+**Native types work identically.** A standard-library type such as `std.id.Uuid` is imported, and aliased, with the same `use`, and carries the same kind of qualified identity (`std.id.Uuid`). A file may declare its own `Counter` while importing a native one under an alias; the two coexist:
 
 ```noeta check
 use std.id                           // the module handle, for `id.uuid()`
@@ -241,11 +251,11 @@ pub class User { pub name: string }    // importable
 class Internal { secret: string }      // module-private
 ```
 
-Field and method visibility inside a type is separate — see [Structs, Classes & Enums](Structs-Classes-and-Enums#fields).
+Field and method visibility inside a type is separate, see [Structs, Classes & Enums](Structs-Classes-and-Enums#fields).
 
 ## How it resolves
 
-The loader walks the package, derives each file's module path from its location, resolves every `use` to the real `pub` declarations (rewriting names to their qualified identities), and merges everything into one program — a diagnostic from a merged-in module still points at that file's own coordinates. Deriving happens before checking, so E0072/E0073/E0074 are reported by `check` exactly as by `run`. The module graph is incremental — editing one module recomputes only its dependents; see [Architecture & Pipeline](Architecture-and-Pipeline) for the pipeline.
+The loader walks the package, derives each file's module path from its location, resolves every `use` to the real `pub` declarations (rewriting names to their qualified identities), and merges everything into one program. A diagnostic from a merged-in module still points at that file's own coordinates. Deriving happens before checking, so E0072/E0073/E0074 are reported by `check` exactly as by `run`. The module graph is incremental, and editing one module recomputes only its dependents; see [Architecture & Pipeline](Architecture-and-Pipeline) for the pipeline.
 
 ## The standard library
 
@@ -258,11 +268,11 @@ echo math.sqrt(16.0)
 echo json.stringify([1, 2, 3])
 ```
 
-Unused `std` modules are tree-shaken — you only pay for what you import. The full catalog is the [standard library reference](Std).
+Unused `std` modules are tree-shaken, so you pay only for what you import. The full catalog is the [standard library reference](Std).
 
 ## Namespace groups
 
-A namespace that holds several submodules can be imported as a single **group** — one handle you dot into — instead of importing each leaf. `std.http` is the canonical example: it splits into `http.client` (the request client) and `http.server`, but you can bring in the whole group and reach either through it:
+A namespace that holds several submodules can be imported as a single **group**, one handle you dot into, instead of importing each leaf. `std.http` is the canonical example: it splits into `http.client` (the request client) and `http.server`, and you can bring in the whole group and reach either through it:
 
 ```noeta check
 use std.http
@@ -272,7 +282,7 @@ echo r.status()
 echo r is http.Response                        // a type reached through the group too
 ```
 
-`http.client.get(...)` resolves the `client` submodule at each call site and dispatches exactly as the leaf form `use std.http.client; client.get(...)` — the group handle is pure compile-time resolution, so it costs nothing at runtime and tree-shaking still sheds `http.client`'s dependencies from a server-only build. Types work the same way: `http.Response` resolves to the same `std.http.Response` identity as the leaf import `use std.http.Response`. Any extension root whose modules share a prefix can be grouped this way; the leaf forms keep working unchanged.
+`http.client.get(...)` resolves the `client` submodule at each call site and dispatches exactly as the leaf form `use std.http.client; client.get(...)`. The group handle is pure compile-time resolution, so it costs nothing at runtime and tree-shaking still sheds `http.client`'s dependencies from a server-only build. Types work the same way: `http.Response` resolves to the same `std.http.Response` identity as the leaf import `use std.http.Response`. Any extension root whose modules share a prefix can be grouped this way, and the leaf forms keep working unchanged.
 
 Reaching for a member the group does not have is a compile error, with a suggestion:
 
@@ -284,13 +294,15 @@ echo "unreachable"
 
 ## Unresolved imports are errors
 
-A `use` that resolves to nothing is a compile-time error on both backends — `check` and `run` agree, and a build never ships a binary that fails at startup. Each carries a "did you mean `X`?" hint when a valid target is a near miss:
+A `use` that resolves to nothing is a compile-time error on both backends, so `check` and `run` agree and a build never ships a binary that fails at startup. Each carries a "did you mean `X`?" hint when a valid target is a near miss:
 
-- a mistyped std module or member — `use std.htpt` → **E0019** (did you mean `http`?);
-- a missing module in your own project — `use App.Modles.User` → **E0019** (did you mean `App.Models`?);
-- a mistyped or undeclared dependency package — `use imgtx.fx` → **E0019** (did you mean `imgfx`?), when `imgfx` is a declared dependency.
+| What is misspelled | Example | Report |
+|---|---|---|
+| a std module or member | `use std.htpt` | **E0019**, did you mean `http`? |
+| a module in your own project | `use App.Modles.User` | **E0019**, did you mean `App.Models`? |
+| a dependency package | `use imgtx.fx` | **E0019**, did you mean `imgfx`? (when `imgfx` is a declared dependency) |
 
-A single file checked in isolation stays lenient about names its siblings or dependencies would supply; the strict check applies once the whole project (with its resolved dependency graph) is linked.
+A single file checked in isolation stays lenient about names its siblings or dependencies would supply. The strict check applies once the whole project, with its resolved dependency graph, is linked.
 
 ## See also
 
