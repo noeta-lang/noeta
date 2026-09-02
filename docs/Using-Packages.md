@@ -39,7 +39,7 @@ The project runs before you edit anything, and a program with no dependencies ne
 
 ## 3 · Add a dependency
 
-Dependencies live in the manifest's `[dependencies]` table, and `noeta add` makes the edit for you. The first-party `para/*` packages — `para/aether` (web framework), `para/db` (database drivers), `para/html` (LiveView), `para/api`, `para/cli`, `para/aether_db`, `para/p2p` — are published on the hosted registry at [registry.noeta.dev](https://registry.noeta.dev), where each package page lists its current version.
+Dependencies live in the manifest's `[dependencies]` table, and `noeta add` makes the edit for you. The first-party `para/*` packages are published on the hosted registry at [registry.noeta.dev](https://registry.noeta.dev), where each package page lists its current version.
 
 We will use `para/cli`, the command-line framework:
 
