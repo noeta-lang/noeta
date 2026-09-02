@@ -874,8 +874,8 @@ impl SyncStatus {
 /// core capability traits ([`FileSystem`], [`Rng`], [`Clock`], [`Env`], [`Console`], [`Os`],
 /// [`Entropy`], [`Ids`], [`Network`], the three telemetry signals [`Tracing`](crate::Tracing) /
 /// [`Metrics`](crate::Metrics) / [`Logging`](crate::Logging)) plus [`P2pProvider`], through which a
-/// host **optionally** offers the [`P2p`] capability (the p2p/local-first stack left `std` for the
-/// non-default `para` package, so peer networking is no longer a mandatory arm — see [`P2pProvider`]).
+/// host **optionally** offers the [`P2p`] capability the non-default `para` package implements, and
+/// [`Cancellable`], the cancel flag and wake hooks a blocking leaf reads to end its own wait.
 /// Backends hold a `Box<dyn Host>` and reach any capability through it; a consumer that needs only
 /// one (a read handle → [`FileReader`], the RNG dispatch → [`Rng`], …) depends on that trait instead,
 /// so a partial host (e.g. a read-only test double) implements exactly what it supports rather than

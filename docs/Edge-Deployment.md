@@ -106,7 +106,7 @@ spin deploy      # uploads the component and prints the public URL
 
 ## What the standard library gives a handler at the edge
 
-The handler runs on `WasiHost` (`crates/noeta-wasi-host`), the third `Host` implementation alongside the deterministic sandbox and the CLI's real host. It is **real but synchronous**: the capabilities WASI exposes are real, and the ones it cannot expose are runtime errors rather than silent stubs.
+The handler runs on `WasiHost` (`crates/noeta-wasi-host`), a `Host` implementation of its own alongside the deterministic sandbox and the CLI's real host. It is **real but synchronous**: the capabilities WASI exposes are real, and the ones it cannot expose are runtime errors rather than silent stubs.
 
 | Capability | At the edge | Notes |
 |---|---|---|

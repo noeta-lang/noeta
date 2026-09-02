@@ -253,7 +253,7 @@ An `ArgSpec` covers required and defaulted positionals, `--flag` booleans, strin
 
 All host-coupled effects go through one `Host` trait: the filesystem, the clock, the PRNG, `env` and `args`, the console (`std.io`'s stdin, tty and prompt seam), the operating system (`os`, covering subprocess exec, spawn and lifecycle control, and system introspection), entropy, ids, the network, and the three telemetry signals. Each is its own capability trait, and `Host` is blanket-implemented for any type that implements them all.
 
-Two implementations exist:
+The native backends run on two of them:
 
 | Host | What it is |
 |---|---|
@@ -261,6 +261,8 @@ Two implementations exist:
 | `RealHost` | Real disk, real env, real subprocesses, per-isolate tokio, and a real reqwest client. What `noeta run` uses, never differential-tested. |
 
 The network follows that split: `RealHost` overrides `net_spawn` to hand the executor a genuine `RealBody::Async` reqwest future while the sandbox resolves at spawn, and `os.exec_async` uses a `RealBody::Blocking` subprocess body.
+
+The wasm targets bring their own. `WasiHost` (`crates/noeta-wasi-host`) backs a `wasi:http` component with the capabilities WASI exposes, covered in [Edge Deployment](Edge-Deployment), and `BrowserHost` (`crates/noeta-playground`) backs the playground's real-host mode over the embedder's browser APIs, covered in [WebAssembly and the Edge](WebAssembly-and-the-Edge).
 
 ### Peer networking is an extension capability
 
