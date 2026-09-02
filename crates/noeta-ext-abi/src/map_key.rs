@@ -1,4 +1,4 @@
-//! The shared map-key representation (extern-types X4, packed keys P-PKEY): a map key is a
+//! The shared map-key representation: a map key is a
 //! `string`, a `key_capable` extern-type value, or a key-capable `@packed` struct. Defined ONCE
 //! here so the two backends' ordering, equality, hashing, and display of keys agree **by
 //! construction** — the VM's `HashMap<MapKey, _>` sorts by [`Ord`] for every order-observing
@@ -21,10 +21,10 @@ use std::hash::{Hash, Hasher};
 
 use crate::ExternBox;
 
-/// A map key: a string (the overwhelmingly common case, in the P-SSO compact representation), an
-/// integer (P-PKEY S4 — `int` and the erased fixed-width family; an immediate, so the fastest
+/// A map key: a string (the overwhelmingly common case, in the compact small-string
+/// representation), an integer (`int` and the erased fixed-width family; an immediate, so the fastest
 /// key kind: zero-allocation build, one-word hash), a key-capable extern value, or a key-capable
-/// `@packed` struct (P-PKEY).
+/// `@packed` struct.
 #[derive(Debug, Clone)]
 pub enum MapKey {
     Str(compact_str::CompactString),
@@ -39,7 +39,7 @@ pub enum MapKey {
     /// `MapKey` 24 → 40 bytes — a +67% footprint on EVERY string/int map entry, measured as
     /// ~+18% on the 100k-string-key xlang `assoc` bench (2026-07-17). Packed keys are the rare
     /// kind; they pay one cold Box per key build so the common kinds stay one cache-line-lean
-    /// word each. Same lesson as `Op` (P-VMT S4.2); the `map_key_size` test is the ratchet.
+    /// word each. Same lesson as `Op`; the `map_key_size` test is the ratchet.
     Packed(Box<PackedKey>),
 }
 
@@ -52,20 +52,19 @@ pub struct PackedKey {
     pub fields: Box<[PackedKeyField]>,
 }
 
-/// The **field-name registry** for packed keys (P-PKEY): `type name → field names`, registered
+/// The **field-name registry** for packed keys: `type name → field names`, registered
 /// once per key-capable type by each backend as it loads/declares the type, and read only when a
 /// packed key must *render* (display, JSON) — key construction, hashing, and comparison never
 /// touch it. An unregistered type (defensive) renders positionally.
 ///
 /// **Deliberately process-global** — like the shape interner, and *outside* the per-session
-/// `Registry` story (audit-2 Finding 12, disposition recorded here): it caches display-only
+/// `Registry` story: it caches display-only
 /// derived data keyed by type name, both backends register from the same declarations so renders
 /// agree, and first-registration-wins is idempotent for a given program. The known limit is
 /// cosmetic and accepted: two *sessions* in one process whose `@packed` types share a short name
 /// (or a hot-swap that renames fields) get the first registration's field names in *rendered*
 /// output only — never in key identity, hashing, or comparison, which carry the names nowhere.
-/// Move it onto the session/VM when a real per-session need materializes (tracked in
-/// `plans/deferred.md`, "Instance-registry residue").
+/// Move it onto the session/VM when a real per-session need materializes.
 pub mod packed_names {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -167,7 +166,7 @@ pub mod packed_names {
     }
 }
 
-/// One field of a packed key (P-PKEY), in declaration order: the erased integer word (`int` and
+/// One field of a packed key, in declaration order: the erased integer word (`int` and
 /// every fixed-width `{i,u}N`), a bool, or a nested key-capable packed struct. Plain data —
 /// backend-neutral, thread-safe, GC-free. The derived [`Ord`] gives field-wise semantic order
 /// (a well-typed key never compares across variants at one position: field kinds are fixed per
@@ -180,7 +179,7 @@ pub enum PackedKeyField {
 }
 
 impl MapKey {
-    /// A packed-struct key (P-PKEY) from its canonical parts: field values in declaration order.
+    /// A packed-struct key from its canonical parts: field values in declaration order.
     pub fn packed(type_name: &str, fields: Vec<PackedKeyField>) -> MapKey {
         MapKey::Packed(Box::new(PackedKey {
             type_name: compact_str::CompactString::from(type_name),
@@ -308,8 +307,8 @@ impl From<String> for MapKey {
 
 /// Heterogeneous `&str` lookup into a `HashMap<MapKey, _>`/`BTreeMap` probe — matches a string
 /// key by content, never an extern key. With the content-only [`Hash`] above, the probe's hash
-/// equals the stored key's, so hashbrown's `get(key_str)` works with zero allocation (the
-/// P-SSO hot path unchanged).
+/// equals the stored key's, so hashbrown's `get(key_str)` works with zero allocation, leaving the
+/// small-string hot path untouched.
 impl equivalent::Equivalent<MapKey> for str {
     fn equivalent(&self, key: &MapKey) -> bool {
         matches!(key, MapKey::Str(s) if s.as_str() == self)

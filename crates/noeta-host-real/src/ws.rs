@@ -1,4 +1,4 @@
-//! RFC 6455 server-side websockets on the real host (server-hmr L0b): the 101 handshake, a
+//! RFC 6455 server-side websockets on the real host: the 101 handshake, a
 //! hand-rolled TEXT-frame codec on tokio halves, and the four async descriptors overriding the
 //! `Network` hijack seam's deterministic defaults.
 //!

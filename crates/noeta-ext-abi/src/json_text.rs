@@ -38,14 +38,13 @@ pub fn stringify(value: &NativeValue) -> String {
         // An extern-type value serializes as its display form, quoted — a `Uuid` is its
         // canonical string in JSON, the same form `echo` prints.
         NativeValue::Extern(e) => json_string(&e.display_string()),
-        // An enum value — every enum reaches the serializer this way now that the deep projection
-        // carries the real variant instead of flattening it to its name. A fieldless/backed variant
-        // renders as its case name (byte-identical to the old `Str` flattening, which is why no
-        // payload-free encoding moved), a payload-carrying one as `{"Variant":[fields]}`: the tag
+        // An enum value — every enum reaches the serializer this way, because the deep projection
+        // carries the real variant rather than its name. A fieldless/backed variant renders as its
+        // case name, a payload-carrying one as `{"Variant":[fields]}`: the tag
         // names the case and the array carries the positional payload, so no field is dropped.
         // Not symmetric with decoding, deliberately — a payload-carrying variant has no canonical
         // JSON spelling, so `type_to_recipe` declines such an enum *whole* (`TypeRecipe::Enum`
-        // documents this) and nothing round-tripped one before this change either.
+        // documents this).
         NativeValue::Variant {
             variant, fields, ..
         } => {
@@ -56,7 +55,7 @@ pub fn stringify(value: &NativeValue) -> String {
                 format!("{{{}:[{}]}}", json_string(variant), parts.join(","))
             }
         }
-        // A native class instance (native-extensibility S2) serializes as a JSON object — its
+        // A native class instance serializes as a JSON object — its
         // fields in declared order, exactly like a `Map`/record aggregate.
         NativeValue::Instance { fields, .. } => {
             let parts: Vec<String> = fields
@@ -67,12 +66,11 @@ pub fn stringify(value: &NativeValue) -> String {
         }
         // A `bytes` buffer serializes as a JSON **array of its byte values** — the one encoding JSON
         // offers that is lossless and needs no out-of-band convention (base64 would be a second
-        // wire format the reader has to be told about, and `"<N bytes>"` — what the deep projection
-        // used to hand over — is the display form standing in for the value, i.e. a wrong value on
-        // the wire). It is also exactly how the embedding API surfaces a `NativeValue::Bytes`
+        // wire format the reader has to be told about, and `"<N bytes>"` is the display form
+        // standing in for the value, i.e. a wrong value on the wire). It is also exactly how the embedding API surfaces a `NativeValue::Bytes`
         // (`noeta_embed`: a list of ints), so one representation covers both doors. Not symmetric
-        // with decoding: `bytes` is not a decodable field type at all (E0050), so nothing round-trips
-        // a byte buffer through JSON in either the old form or this one.
+        // with decoding: `bytes` is not a decodable field type at all (E0050), so nothing
+        // round-trips a byte buffer through JSON.
         NativeValue::Bytes(bytes) => {
             let parts: Vec<String> = bytes.iter().map(|b| b.to_string()).collect();
             format!("[{}]", parts.join(","))
@@ -87,7 +85,7 @@ pub fn stringify(value: &NativeValue) -> String {
 
 /// Encode a string as a JSON string literal (quotes + the mandatory escapes). Shared by the
 /// serializer above and both backends, so `json.stringify` and `@derive(Serialize<Json>)` render
-/// identical output — the single source the two duplicated copies used to be.
+/// identical output from one source.
 pub fn json_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');

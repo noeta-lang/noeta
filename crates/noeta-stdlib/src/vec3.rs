@@ -1,4 +1,4 @@
-//! The `vec` module's pure 3D-vector math (P-PACK Phase 4), over `[f32; 3]`.
+//! The `vec` module's pure 3D-vector math, over `[f32; 3]`.
 //!
 //! A "Vec3" in the surface is any struct value with exactly three `f32` fields (structural — the
 //! user names the type, e.g. `@packed struct Vec3 { x: f32; y: f32; z: f32 }`). Each backend extracts
@@ -92,21 +92,21 @@ pub fn abs(a: [f32; 3]) -> [f32; 3] {
     [a[0].abs(), a[1].abs(), a[2].abs()]
 }
 
-// --- Bulk kernels over a packed `List<Vec3<f32>>` byte buffer (P-PACK Phase 4.2/4.3) ---
+// --- Bulk kernels over a packed `List<Vec3<f32>>` byte buffer ---
 //
 // A packed `List<Vec3<f32>>` is a contiguous little-endian `f32` byte buffer (12 bytes/element).
 // These kernels stream over it **byte-direct** through `f32::from_le_bytes`/`to_le_bytes` — on a
 // little-endian target those fold to plain loads/stores, and `chunks_exact` elides bounds checks,
 // so the body is a tight `f32` loop LLVM autovectorizes under `-O`. Going byte-direct (one output
 // allocation, one pass) rather than decode→`Vec<f32>`→compute→encode (four allocations, four passes)
-// is a small but real win — ~1.5–3% on the packed `add_all` path (`vm_vec_add_all` bench, P-PACK 4.3);
+// is a small but real win — ~1.5–3% on the packed `add_all` path (`vm_vec_add_all` bench);
 // modest because the kernel is a fraction of the op's cost (building the result list dominates). Both
 // backends store this layout identically, so they call these directly and agree by construction.
 // These **AoS/row** kernels stay byte-direct: an interleaved buffer has no contiguous per-component
 // run to reinterpret, so a typed `&[f32]` view would not help a reduction (the component stride is 12
 // bytes). The **column** layout does have contiguous per-component runs — see [`col_dot`]/[`col_length`]
 // below, which reinterpret each column to `&[f32]` via `bytemuck` (safe, checked) for the aligned-SIMD
-// win (P-SIMD C3). That is why the win needs the column *layout*, not just these kernels.
+// win. That is why the win needs the column *layout*, not just these kernels.
 
 /// Read one little-endian `f32` from the first 4 bytes of `c`.
 #[inline]
@@ -145,7 +145,7 @@ pub fn scale_buffer(a: &[u8], s: f32) -> Vec<u8> {
     out
 }
 
-/// [`scale_buffer`] **in place** — the `with_packed_mut` form (package-manager N3.4): the seam
+/// [`scale_buffer`] **in place** — the `with_packed_mut` form: the seam
 /// hands the kernel a uniquely-owned COW buffer, so scaling needs no second allocation at all.
 pub fn scale_buffer_in_place(a: &mut [u8], s: f32) {
     for c in a.chunks_exact_mut(4) {
@@ -176,19 +176,19 @@ pub fn length_buffer(a: &[u8]) -> Vec<f32> {
         .collect()
 }
 
-// --- Opt-in columnar (SoA) Vec3 batch (P-SIMD) ---
+// --- Opt-in columnar (SoA) Vec3 batch ---
 //
 // The AoS packed `List<Vec3>` above interleaves components (`x0,y0,z0,x1,…`), which is right for O(1)
 // append and contiguous per-element access but defeats manual SIMD: a component of N elements is
 // strided, so a reduction (dot/length) needs a scalar gather to fill a lane register (benched
-// 1.8×–9× *slower* than the autovectorized scalar loop — see `plans/perf/p-simd.md`).
+// 1.8×–9× *slower* than the autovectorized scalar loop).
 //
 // [`SoaVec3`] is the opt-in alternative a user builds explicitly for bulk math: three **contiguous**
 // `f32` columns. Now a whole reduction runs over each column independently, so `x[i]*bx[i]` is a
 // contiguous same-type `f32` loop LLVM **autovectorizes across elements** — which the AoS stride-12
 // layout could not (each AoS step is a horizontal 3-wide combine that stays scalar). That is the
 // actual throughput lever: on `dot`/`length` the SoA scalar kernels run **2.7×–4× faster** than the
-// AoS kernels (`plans/perf/p-simd.md`, `soa_reductions` bench). Explicit `wide` SIMD was tried on
+// AoS kernels (the `soa_reductions` bench). Explicit `wide` SIMD was tried on
 // these same columns and was *not* faster than the autovectorized scalar loop (it added marshaling
 // over what LLVM already does), so these stay scalar. It is a separate value type (not the general
 // packed list), so the general list keeps its O(1) append; the SoA batch is built once (an O(n)
@@ -247,8 +247,8 @@ pub fn soa_to_packed(a: &SoaVec3) -> Vec<u8> {
     out
 }
 
-/// Serialize a [`SoaVec3`] to a **column-major** packed `List<Vec3>` byte buffer (`[x×n][y×n][z×n]`,
-/// P-SIMD C3) — so a batch (or a test) can produce a `Layout.Column` buffer. Each column is written
+/// Serialize a [`SoaVec3`] to a **column-major** packed `List<Vec3>` byte buffer
+/// (`[x×n][y×n][z×n]`) — so a batch (or a test) can produce a `Layout.Column` buffer. Each column is written
 /// as one contiguous `f32` run. (The reverse — reading a column buffer — is deliberately *not* a
 /// decode helper: the reduction kernels [`col_dot`]/[`col_length`] read the contiguous columns in
 /// place, since a per-call `SoaVec3` decode benched slower than the AoS kernels; see below.)
@@ -266,7 +266,7 @@ pub fn soa_to_columns(a: &SoaVec3) -> Vec<u8> {
     out
 }
 
-// --- Direct column-buffer reduction kernels (P-SIMD C3) ---
+// --- Direct column-buffer reduction kernels ---
 //
 // The `dot`/`length` reductions over a `@packed(Layout.Column)` Vec3 buffer, reading the three
 // **contiguous** `f32` columns straight out of the byte buffer — **no** `SoaVec3` decode (that
@@ -412,7 +412,7 @@ pub fn soa_length(a: &SoaVec3) -> Vec<f32> {
         .collect()
 }
 
-// --- The bulk `vec.*_all` dispatch over the raw-buffer seam (package-manager N3.4) ---
+// --- The bulk `vec.*_all` dispatch over the raw-buffer seam ---
 //
 // Until N3.4 these five functions were the LAST per-backend native intercepts (`call_vec` twins in
 // the VM and the tree-walker): the neutral value seam could not lend a dispatch a packed list's
@@ -420,8 +420,7 @@ pub fn soa_length(a: &SoaVec3) -> Vec<f32> {
 // so the routing now lives here ONCE — a registered ctx dispatch, like `task`'s — and the
 // differential holds by construction. Packed `Vec3` operands take the flat autovectorized kernels
 // above (zero per-element traffic: one borrow per operand, one result allocation); anything else
-// falls back to an element-wise loop over `object_scalars`/`make_object_like`, exactly the boxed
-// path the old intercepts had.
+// falls back to an element-wise loop over `object_scalars`/`make_object_like` — the boxed path.
 
 use crate::registry::{ExtFn, NativeOut, NativeValue, RetTy, Scalar, ScalarVec, SigType};
 use crate::{CtxError, CtxOut, CtxResult, NativeCtx, PackedField, PackedView, Slot, ctx_arity};
@@ -544,7 +543,7 @@ fn f32_list_out(scalars: Vec<f32>) -> Result<CtxOut, CtxError> {
 /// operand, which must outlive the right operand's borrow). `None` → the caller falls back.
 ///
 /// Bounded on the narrow [`noeta_ext_abi::ctx::PackedBuffers`] view rather than the full
-/// `NativeCtx` (audit-2 F9): the signature states this helper only reads packed buffers, and the
+/// `NativeCtx`: the signature states this helper only reads packed buffers, and the
 /// `&mut dyn NativeCtx` callers pass straight through the blanket impl. The bound is
 /// path-qualified on purpose — importing the view's name file-wide would make the sibling
 /// helpers' `ctx.with_packed(…)` calls ambiguous against `NativeCtx`'s own methods.
@@ -562,8 +561,8 @@ fn packed_vec3<C: noeta_ext_abi::ctx::PackedBuffers + ?Sized>(
 }
 
 /// Element-wise fallback for `add_all`/`sub_all`: boxed operands (or packed operands of
-/// disagreeing layout/length — where the old fast path silently mis-added mixed layouts, this
-/// computes the correct per-element result). Each result element is shaped like its left input.
+/// disagreeing layout/length, which the fast path cannot mix). Each result element is shaped like
+/// its left input.
 fn bulk_binary_fallback(
     ctx: &mut dyn NativeCtx,
     func: &str,
@@ -601,7 +600,7 @@ pub(crate) fn vec_ctx_dispatch(
             expect_list(ctx, func, args[0])?;
             expect_list(ctx, func, args[1])?;
             // Fast path: two packed Vec3 buffers of the SAME layout and length — the flat
-            // element-wise kernel is layout-agnostic when the layout is shared (P-SIMD C3).
+            // element-wise kernel is layout-agnostic when the layout is shared.
             if let Some((column, ab)) = packed_vec3(ctx, args[0])? {
                 let mut out: Option<Vec<u8>> = None;
                 ctx.with_packed(args[1], &mut |v, b| {
@@ -782,9 +781,9 @@ mod tests {
         // The AoS→SoA→AoS transpose round-trips exactly.
         assert_eq!(soa_from_packed(&a_aos), a);
 
-        // P-SIMD C3: the direct column-buffer reductions read the same values from a `[x×n][y×n][z×n]`
-        // buffer and must be bit-identical to the AoS kernels too (they replace them on the column
-        // dispatch path). `add`/`sub`/`scale` are layout-agnostic: `add_buffers` on the *column*
+        // The direct column-buffer reductions read the same values from a `[x×n][y×n][z×n]`
+        // buffer and must be bit-identical to the AoS kernels too (they serve the column dispatch
+        // path). `add`/`sub`/`scale` are layout-agnostic: `add_buffers` on the *column*
         // buffers equals the column-serialized SoA add.
         let a_col = soa_to_columns(&a);
         let b_col = soa_to_columns(&b);

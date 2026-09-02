@@ -1,4 +1,4 @@
-//! `std.metrics` — the metrics SDK surface (native OTEL, Phase M).
+//! `std.metrics` — the metrics SDK surface.
 //!
 //! A facade over the [`Metrics`](noeta_ext_abi::Metrics) Host capability. Instruments are
 //! **long-lived and host-owned**: a constructor (`counter`/`up_down_counter`/`histogram`/`gauge`) is

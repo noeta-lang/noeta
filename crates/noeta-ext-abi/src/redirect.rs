@@ -1,4 +1,4 @@
-//! Redirect following (http arc): the one place that decides whether a 3xx becomes another
+//! Redirect following: the one place that decides whether a 3xx becomes another
 //! request, and what that request looks like.
 //!
 //! Following lives **above** the [`crate::host::Network`] seam rather than inside each host.

@@ -13,11 +13,11 @@
 //! is still synchronous, so each IO method drives its future to completion with
 //! `block_on` **at the leaf** and returns a plain value: no opcode and no surface
 //! syntax knows about futures yet. Building the IO path on `tokio` now means the
-//! later `async`/`await` surface (a separate M2 pass) is an additive change — these
+//! later `async`/`await` surface is an additive change — these
 //! `tokio::fs` calls get `await`ed instead of `block_on`-ed — rather than a rewrite.
 //!
 //! The filesystem is a real-disk surface (paths relative to the process working
-//! directory) with a directory hierarchy (M2.5): `fs_list_dir`/`fs_mkdir`/`fs_is_dir`
+//! directory) with a directory hierarchy: `fs_list_dir`/`fs_mkdir`/`fs_is_dir`
 //! map onto `tokio::fs`'s `read_dir`/`create_dir_all` and `Path::is_dir`, mirroring the
 //! sandbox VFS's directory model.
 
@@ -27,7 +27,7 @@ pub use executor::RealExecutor;
 /// without taking their own tokio dependency.
 pub use tokio::sync::Notify;
 
-/// The process-wide **shutdown wake** (server-hmr S0): a [`Notify`] every [`RealExecutor`] arms
+/// The process-wide **shutdown wake**: a [`Notify`] every [`RealExecutor`] arms
 /// itself with at construction, so a blocked executor — an idle server parked on its accept — can
 /// be roused. The CLI's SIGINT handler `notify_one()`s this after setting the serve shutdown flag,
 /// so a graceful drain begins immediately instead of at the next connection. Lazily created; a
@@ -45,10 +45,10 @@ mod stream;
 #[cfg(feature = "telemetry")]
 mod telemetry;
 mod ws;
-// Real p2p transport (p2p P3) — the p2panda-net node + its group encryption — ships with the
-// out-of-tree para-p2p package (para-namespace F2b). Post-F2b `RealHost` no longer owns it (the
-// `para.p2p` extension does), so this crate depends on neither that crate nor the p2panda tree;
-// `RealHost` only carries the p2p app-id config it surfaces via `P2pProvider::real_p2p`.
+// The real p2p transport — the p2panda-net node + its group encryption — ships with the
+// out-of-tree para-p2p package, and the `para.p2p` extension owns it, so this crate depends on
+// neither that crate nor the p2panda tree; `RealHost` only carries the p2p app-id config it
+// surfaces via `P2pProvider::real_p2p`.
 
 use compact_str::CompactString;
 use noeta_stdlib::net::accept_outcome;
@@ -77,22 +77,21 @@ pub struct RealHost {
     /// The user-facing PRNG and the monotonic clock stay deterministic (seeded / logical)
     /// even on the real host: `random.seed(n)` must make `random.*` a pure function of `n`
     /// everywhere, and `monotonic` is an ordering device, not wall time. Real time and real
-    /// entropy are the *separate* capabilities added by id-entropy U1 — `clock_unix_ms`
-    /// (`SystemTime`) and `Entropy` (OS entropy) — so ids get real randomness without
-    /// making the user's seeded stream lie.
+    /// entropy are the *separate* capabilities `clock_unix_ms` (`SystemTime`) and `Entropy` (OS
+    /// entropy) — so ids get real randomness without making the user's seeded stream lie.
     rng: u64,
     clock: u64,
     /// The next `id.next_id()` value — deterministic and sequential on every host (see
     /// [`noeta_stdlib::host::Ids`]).
     ids: u64,
-    /// Open lazy read streams (P-LAZY), keyed by the id handed to the file handle. A read handle
+    /// Open lazy read streams, keyed by the id handed to the file handle. A read handle
     /// pulls a line at a time via `fs_read_more` rather than buffering the whole file at open. An
     /// entry is dropped at EOF; any handle closed before EOF leaves its stream here until the host
     /// (the isolate) is dropped — acceptable for the short-lived CLI runs that use `RealHost`.
     readers: HashMap<u64, BufReader<File>>,
     /// Monotonic id source for `readers`.
     next_reader_id: u64,
-    /// The real HTTP client for the **synchronous** `Network` calls (http arc H1) — and *only* those,
+    /// The real HTTP client for the **synchronous** `Network` calls — and *only* those,
     /// which is a correctness rule rather than tidiness. See [`new_http_client`]: a client is a
     /// connection pool, a pooled connection's hyper driver task lives on whichever runtime opened it,
     /// and reusing it from a different runtime hangs silently. Everything here is driven inside
@@ -108,14 +107,14 @@ pub struct RealHost {
     /// rule stated on `http` above.
     #[cfg(feature = "ring-http-client")]
     http_async: reqwest::Client,
-    /// Inbound listeners (http-server S1), keyed by the id `net_listen` hands out. Each holds a
+    /// Inbound listeners, keyed by the id `net_listen` hands out. Each holds a
     /// bound socket; the tokio listener is created lazily on the executor's runtime at first accept
     /// (so all server socket IO stays on the runtime that drives the accept future, never this
     /// host's runtime — a `TcpStream` is bound to the runtime it was accepted on).
     servers: HashMap<u64, Arc<ServerState>>,
     /// Monotonic id source for `servers`.
     next_listener: u64,
-    /// A **pre-bound** listener a multi-core worker inherits (server-hmr S1): `noeta serve
+    /// A **pre-bound** listener a multi-core worker inherits: `noeta serve
     /// --parallel N` binds the socket once and hands each worker a `try_clone`d fd, so
     /// `net_listen(addr)` returns this dup instead of binding again (a second bind on the same
     /// address fails without `SO_REUSEPORT`). The kernel load-balances `accept()` across the
@@ -128,11 +127,11 @@ pub struct RealHost {
     /// Monotonic, thread-safe id source for `conns` (accept futures run concurrently on the
     /// executor).
     next_conn: Arc<AtomicU64>,
-    /// Upgraded websocket connections (server-hmr L0b): the split halves behind async locks,
+    /// Upgraded websocket connections: the split halves behind async locks,
     /// shared into every ws descriptor. A conn moves here from `conns` at upgrade and leaves on
     /// close/peer-EOF.
     ws_conns: ws::WsConns,
-    /// Open outbound **streaming** bodies (http-streaming arc), keyed by the id `net_stream_open`
+    /// Open outbound **streaming** bodies, keyed by the id `net_stream_open`
     /// hands out. Each holds the receiving end of its pump thread's frame channel; dropping the
     /// entry (an explicit `close`, or host teardown) ends the pump and releases the connection.
     /// Present only under `ring-http-client` — the reader is reqwest-backed, like `http` above.
@@ -141,22 +140,22 @@ pub struct RealHost {
     /// Monotonic id source for `streams`.
     #[cfg(feature = "ring-http-client")]
     next_stream: u64,
-    /// Connections switched to `text/event-stream` (http-streaming arc) — the SSE analogue of
+    /// Connections switched to `text/event-stream` — the SSE analogue of
     /// `ws_conns`. A conn moves here from `conns` when a handler answers with `server.sse`, and
     /// leaves on close or a failed write.
     sse_conns: stream::SseConns,
-    /// The program's argument vector reported through `args.all()` (M2.2). Defaults to the real
+    /// The program's argument vector reported through `args.all()`. Defaults to the real
     /// process argv (`std::env::args()`), which is exactly what a shipped `noeta build --exe` binary
     /// wants when invoked directly. `noeta run app.noe -- a b c` overrides it via
     /// [`RealHost::with_args`] with `[app.noe, a, b, c]`, so a program sees the identical argv whether
     /// run from source or shipped as an executable — the toolchain's own `noeta run` prefix never
     /// leaks into the program.
     args: Vec<String>,
-    /// The program's `env.set` writes (stdlib-gaps): an overlay consulted before the real process
+    /// The program's `env.set` writes: an overlay consulted before the real process
     /// environment, and layered into `os.exec` children. `std::env::set_var` is unsafe with live
     /// threads (isolates are OS threads), so the real environment is never mutated.
     env_overlay: HashMap<String, String>,
-    /// Spawned child processes (process-handle arc), keyed by the handle id `os_spawn` hands out.
+    /// Spawned child processes, keyed by the handle id `os_spawn` hands out.
     /// Each holds the live `Child` plus the drain threads capturing its piped stdout/stderr, so a
     /// high-output child never deadlocks on a full pipe while the program polls it.
     procs: HashMap<u64, ChildProc>,
@@ -166,11 +165,11 @@ pub struct RealHost {
     /// exporter and its span buffer. Per-isolate, like everything else on `RealHost`.
     tel: RealTelemetry,
     /// The application namespace the `para.p2p` extension's real node keys its persistent identity /
-    /// store dir on (p2p P3.4) — the toolchain sets it to the running program's package name so two
+    /// store dir on — the toolchain sets it to the running program's package name so two
     /// different Noeta apps never share one p2p dir. `None` ⇒ the node's own default (exe stem /
-    /// env). Post-F2b `RealHost` no longer owns a p2p transport at all; it only *carries* this config
-    /// and surfaces it (with "real networking permitted") through [`P2pProvider::real_p2p`], so the
-    /// extension can build the node.
+    /// env). `RealHost` does not own a p2p transport; it only *carries* this config and surfaces it
+    /// (with "real networking permitted") through [`P2pProvider::real_p2p`], so the extension can
+    /// build the node.
     p2p_app_id: Option<String>,
     /// An exact directory for the `para.p2p` node's persistent identity/store, set by a driver
     /// that runs several identities (`RealHost::with_p2p_dir`). `None` ⇒ the per-app default.
@@ -199,7 +198,7 @@ struct RealTelemetry {
     next_span: u64,
     /// In-flight spans by handle, ended entries removed.
     live: HashMap<SpanId, SpanData>,
-    /// Remote-interned contexts (T5d): pseudo-handles for contexts that arrived over a channel /
+    /// Remote-interned contexts: pseudo-handles for contexts that arrived over a channel /
     /// isolate boundary. Read by `tel_span_context`; everything else no-ops on them. Bounded by
     /// live seeds (`tel_release_remote` frees replaced ones).
     remote: HashMap<SpanId, TraceContext>,
@@ -212,11 +211,11 @@ struct RealTelemetry {
     /// Emitted log records awaiting export (flushed at [`telemetry::FLUSH_THRESHOLD`] or teardown).
     #[cfg(feature = "telemetry")]
     logs_buffer: Vec<LogRecord>,
-    /// Host-side metric aggregation (native OTEL Phase M) — the same shared store the sandbox uses,
+    /// Host-side metric aggregation — the same shared store the sandbox uses,
     /// so aggregation is byte-identical. Behind an `Arc<Mutex<_>>` because the **periodic export
-    /// reader** (M2) reads it from a background thread while the interpreter records into it.
+    /// reader** reads it from a background thread while the interpreter records into it.
     metrics: Arc<Mutex<MetricStore>>,
-    /// The metrics periodic-export reader (M2): a background thread that snapshots [`Self::metrics`]
+    /// The metrics periodic-export reader: a background thread that snapshots [`Self::metrics`]
     /// every `OTEL_METRIC_EXPORT_INTERVAL` and POSTs it, plus a final flush on shutdown. Lazily
     /// spawned on the first instrument creation when metrics are enabled; `None` otherwise. Dropping
     /// it signals shutdown and joins (the thread does the final export).
@@ -321,7 +320,7 @@ impl RealHost {
         self
     }
 
-    /// Seed a **pre-bound listener** (server-hmr S1): the multi-core `noeta serve --parallel`
+    /// Seed a **pre-bound listener**: the multi-core `noeta serve --parallel`
     /// driver binds once and gives each worker a `try_clone`d socket, so the worker's
     /// `net_listen` adopts this fd rather than binding the address a second time.
     pub fn with_prebound_listener(mut self, listener: std::net::TcpListener) -> RealHost {
@@ -450,8 +449,8 @@ fn interrupted_request(url: &str) -> NetError {
 
 impl FileReader for RealHost {
     fn fs_open_read(&mut self, path: &str) -> Result<ReadSource, StdError> {
-        // P-LAZY: stream the file instead of snapshotting it. Open it now (so a missing file is the
-        // same IO error as the old eager `fs_read`), register a buffered reader, and hand the handle
+        // Stream the file instead of snapshotting it. Open it now (so a missing file is the
+        // same IO error as the eager `fs_read`), register a buffered reader, and hand the handle
         // an id to pull lines from — so a large file is never read past the cursor.
         let file = self
             .runtime
@@ -592,7 +591,7 @@ async fn reqwest_fetch(
     if !request.body.is_empty() {
         builder = builder.body(request.body);
     }
-    // A configured `Client`'s deadline (http arc H7). reqwest applies it to the whole request
+    // A configured `Client`'s deadline. reqwest applies it to the whole request
     // including the body read, which is the semantics a caller expects from "timeout".
     if let Some(ms) = request.timeout_ms {
         builder = builder.timeout(std::time::Duration::from_millis(ms));
@@ -656,7 +655,7 @@ async fn reqwest_fetch_following(
     }
 }
 
-/// Classify a reqwest failure into the seam's [`NetErrorKind`] (http arc H6).
+/// Classify a reqwest failure into the seam's [`NetErrorKind`].
 ///
 /// reqwest exposes the class as a set of predicates rather than an enum, and it does not surface
 /// DNS or TLS distinctly — both arrive as `is_connect`, with the distinguishing detail only in the
@@ -729,7 +728,7 @@ fn connect_cause(error: &reqwest::Error) -> Option<NetErrorKind> {
     None
 }
 
-/// The real host's async network descriptor (http arc H3): its real body is a genuine reqwest
+/// The real host's async network descriptor: its real body is a genuine reqwest
 /// future driven on the executor's runtime, so `http.*_async` requests fan out concurrently.
 #[cfg(feature = "ring-http-client")]
 #[derive(Debug)]
@@ -828,11 +827,11 @@ impl Network for RealHost {
         })
     }
 
-    /// Bind a real listener (http-server S1). Uses `std::net` so the bind is runtime-free — the
+    /// Bind a real listener. Uses `std::net` so the bind is runtime-free — the
     /// tokio listener is attached lazily on the executor runtime at first accept. The socket is set
     /// non-blocking (required by `TcpListener::from_std`), and `SO_REUSEADDR` is the std default.
     fn net_listen(&mut self, addr: &str) -> Result<u64, StdError> {
-        // A multi-core worker (server-hmr S1) adopts the pre-bound, `try_clone`d listener instead
+        // A multi-core worker adopts the pre-bound, `try_clone`d listener instead
         // of binding — the socket is already listening on `addr`, and a second bind would fail.
         let listener = match self.prebound.take() {
             Some(prebound) => prebound,
@@ -886,7 +885,7 @@ impl Network for RealHost {
         unreachable!("RealHost replies via the async net_reply descriptor, never the sync fallback")
     }
 
-    // --- Websocket hijack (server-hmr L0b): the async descriptors; the sync fallbacks are never
+    // --- Websocket hijack: the async descriptors; the sync fallbacks are never
     // reached (same contract as accept/reply above).
 
     fn net_ws_upgrade(&self, conn: u64, key: String) -> Box<dyn ExternIo> {
@@ -934,7 +933,7 @@ impl Network for RealHost {
         })
     }
 
-    // --- Streaming bodies (http-streaming arc) ---
+    // --- Streaming bodies ---
 
     /// Open a real incremental body. Blocks only until the response **head** is in, so a transport
     /// failure is still the `Err` arm of `stream(...)` and the status/headers the server answered
@@ -1040,7 +1039,7 @@ impl Network for RealHost {
     }
 }
 
-/// The real host's async accept descriptor (http-server S1): its body attaches the tokio listener
+/// The real host's async accept descriptor: its body attaches the tokio listener
 /// on first use, accepts one connection on the executor's runtime, reads the request off it, and
 /// parks the stream in the shared `conns` map keyed by a fresh conn id for the reply to pick up.
 #[derive(Debug)]
@@ -1332,8 +1331,8 @@ impl Ids for RealHost {
     }
 }
 
-// Post-F2b `RealHost` no longer owns a p2p transport (the p2panda node moved into the `para.p2p`
-// extension). It only declares, through the optional `P2pProvider` seam, that real peer networking
+// `RealHost` does not own a p2p transport — the p2panda node lives in the `para.p2p` extension.
+// It only declares, through the optional `P2pProvider` seam, that real peer networking
 // is permitted here and with what app namespace — the extension reads this to build the real node
 // (vs the deterministic loopback broker on a host that returns `None`).
 impl noeta_stdlib::host::P2pProvider for RealHost {
@@ -1429,7 +1428,7 @@ struct StreamBuf {
     ///
     /// It lives **here**, under the same lock as the bytes, rather than in the owning
     /// [`ChildProc`], because a `read_line_async` body runs on the blocking pool with no access to
-    /// the host's process registry (subprocess-async arc). A cursor kept beside the handle would
+    /// the host's process registry. A cursor kept beside the handle would
     /// have to be copied out before the read and written back after it, and an async read has
     /// nowhere to write it back to — so a sync read and an async read on the same child would each
     /// re-read from the other's position. Under the buffer's own lock, every reader of this stream
@@ -1624,7 +1623,7 @@ impl ChildProc {
     }
 }
 
-/// The shared exit slot a `wait_async` background waiter publishes to (process-signals arc): the
+/// The shared exit slot a `wait_async` background waiter publishes to: the
 /// blocking body reaps the detached child and stores the outcome here, so a later synchronous
 /// `wait`/`try_wait` on the same handle can block on / poll it. The single hop between the off-thread
 /// waiter and the isolate's synchronous process API.
@@ -1746,7 +1745,7 @@ impl ExternIo for RealProcWaitIo {
     }
 }
 
-/// The real host's awaitable-streaming-read descriptor (subprocess-async arc): the twin of
+/// The real host's awaitable-streaming-read descriptor: the twin of
 /// [`RealProcWaitIo`] for `read_line_async` / `read_err_line_async` / `read_async(n)`.
 ///
 /// It owns nothing but a clone of the target stream's `Arc`, because the read cursor lives inside
@@ -2800,7 +2799,7 @@ fn cardinality_limit_from(raw: Option<&str>) -> usize {
         .unwrap_or(noeta_stdlib::DEFAULT_CARDINALITY_LIMIT)
 }
 
-/// The metrics periodic-export reader (M2): a background thread snapshotting the shared
+/// The metrics periodic-export reader: a background thread snapshotting the shared
 /// [`MetricStore`] on an interval and POSTing the cumulative OTLP/JSON, plus a final export on
 /// shutdown. Real-host-only (the sandbox collects deterministically at teardown instead).
 #[cfg(feature = "telemetry")]
@@ -3754,7 +3753,7 @@ mod tests {
         );
 
         assert!(host.fs_remove(&path).unwrap());
-        // Opening a now-missing file lazily is the same IO error as the old eager read.
+        // Opening a now-missing file lazily is the same IO error as the eager read.
         assert_eq!(host.fs_open_read(&path).unwrap_err().kind, ErrorKind::Io);
     }
 

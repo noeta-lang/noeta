@@ -1,4 +1,4 @@
-//! The [`crate::host::P2p`] capability's seam types (p2p P1): the default async receive descriptor.
+//! The [`crate::host::P2p`] capability's seam types: the default async receive descriptor.
 //!
 //! A published message and a received one are plain `Vec<u8>` — they cross the [`crate::host::P2p`]
 //! seam by value, like every other host payload. The only non-trivial piece is the async *receive*,
@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-/// The deterministic in-process message broker both hosts use as their p2p "network" (p2p P1/P2).
+/// The deterministic in-process message broker both hosts use as their p2p "network".
 /// A topic is an **append-only log**; readers hold independent cursors, so it is genuine broadcast
 /// pub/sub — every subscriber sees every message — not a queue that one reader could drain out from
 /// under another (which multi-replica convergence needs). Deterministic and finite: a program
@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 pub struct P2pBroker {
     /// topic → its append-only message log.
     logs: BTreeMap<String, Vec<Vec<u8>>>,
-    /// The cursor behind the topic-level `p2p.receive(topic)` (P1): one implicit reader per topic.
+    /// The cursor behind the topic-level `p2p.receive(topic)`: one implicit reader per topic.
     default_cursors: BTreeMap<String, usize>,
     /// subscription id → (topic, cursor). A `synced_signal` holds one, from the log's start, so a
     /// late-joining replica still sees all prior state and converges.
@@ -75,8 +75,8 @@ impl P2pBroker {
 /// The loopback broker **is** a self-contained [`crate::host::P2p`] provider — every required method
 /// maps to a broker operation, and the trait's defaults (durable → ephemeral, encrypted-group →
 /// plaintext pass-through, no identity, always-`Synced`) are exactly the loopback semantics. This is
-/// what lets the p2p capability be **owned by an extension** rather than baked into every host
-/// (para-namespace follow-on F2/F2b): the `para.p2p` extension parks one of these behind a
+/// what lets the p2p capability be **owned by an extension** rather than baked into every host:
+/// the `para.p2p` extension parks one of these behind a
 /// [`P2pBackend`] and serves both the synchronous ops and the async `receive` from it, so a host that
 /// speaks no peer networking implements no `P2p` at all.
 impl crate::host::P2p for P2pBroker {
@@ -99,7 +99,7 @@ impl crate::host::P2p for P2pBroker {
 }
 
 /// A shareable, `Send` handle to a **P2p backend** — either this loopback [`P2pBroker`] or the real
-/// p2panda node shipped with the out-of-tree para-p2p package (para-namespace F2b). Both implement [`crate::host::P2p`]; the
+/// p2panda node shipped with the out-of-tree para-p2p package. Both implement [`crate::host::P2p`]; the
 /// `para.p2p` extension picks which at creation (by the host's `real_p2p()` config) and holds one in
 /// per-run ctx state. It lives behind `Arc<Mutex<…>>` because the async `p2p.receive` leaf
 /// ([`P2pReceiveIo`]) is `Send` while ctx state is `Rc`-based — the `Arc` is what crosses into the
@@ -107,8 +107,8 @@ impl crate::host::P2p for P2pBroker {
 /// async leaf, and no host holds any p2p state at all.
 pub type P2pBackend = Arc<Mutex<dyn crate::host::P2p + Send>>;
 
-/// The async receive descriptor over an extension-owned [`P2pBackend`] (para-namespace F2b) — the
-/// `Send` twin of the old host-driven receive. It captures a clone of the backend `Arc` at spawn
+/// The async receive descriptor over an extension-owned [`P2pBackend`] — the
+/// `Send` twin of the host-driven receive. It captures a clone of the backend `Arc` at spawn
 /// (where the extension's ctx is available) and, at resolve, locks it and pops the topic's next
 /// message. Works uniformly for the loopback broker and the real node.
 pub struct P2pReceiveIo {
@@ -157,7 +157,7 @@ mod tests {
 
     #[test]
     fn loopback_broker_round_trips() {
-        // The loopback broker is a self-contained `P2p` provider (para-namespace F2b): the extension
+        // The loopback broker is a self-contained `P2p` provider: the extension
         // parks one when a host speaks no peer networking. A published message reaches a subscriber
         // exactly once, then the subscription reads caught-up. (Was a `WasiHost` test before P2p left
         // the Host union; it belongs here now, at the broker itself.)

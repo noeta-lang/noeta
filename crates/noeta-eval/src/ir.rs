@@ -38,7 +38,7 @@ use crate::{
     compare_primitive,
 };
 
-/// The outcome of materializing one recipe node (validation arc): a built value, or a validation
+/// The outcome of materializing one recipe node: a built value, or a validation
 /// rejection carrying the path-rich [`noeta_stdlib::json::JsonError`] the failing `Validate::validate`
 /// produced. A rejection propagates up through containers until a `Result`-wrapped door recovers it
 /// into a `Result.Err` or the aborting door raises it — so `validate` fires bottom-up.
@@ -53,7 +53,7 @@ enum MatOut {
 /// `type_of_sites`, so the reference backend decodes by runtime type identically to the VM.
 pub type DeserializeRecipes = std::collections::HashMap<String, noeta_stdlib::TypeRecipe>;
 
-/// Every `@packed` struct's flat layout by type name (native type-declaration unification, Slice E2),
+/// Every `@packed` struct's flat layout by type name (native type-declaration unification),
 /// lifted from `noeta_check::Sites::packed_type_layouts`. Threaded through the `run_ir` entry points
 /// beside `deserialize_recipes` so the from-scratch producer [`NativeCtx::make_packed`] can resolve a
 /// produced `List<packed>`'s element schema BY (qualified) name — the tree-walker twin of the VM's
@@ -65,7 +65,7 @@ pub type PackedTypeLayouts = std::collections::HashMap<String, noeta_ast::reflec
 /// [`noeta_ir::Temp`]; a slot is `None` until its defining `let` runs.
 /// Whether an atom is an ANF temporary (vs a named source variable or a constant). A temp receiver
 /// is *owned* — single-use by the ANF invariant, holding no live binding — so after an access
-/// consumes it its destructor must fire at last use (Phase 4.4). A `Var` receiver is borrowed (its
+/// consumes it its destructor must fire at last use. A `Var` receiver is borrowed (its
 /// binding fires at its own drop), so it is left alone.
 fn is_temp(atom: &noeta_ir::Atom) -> bool {
     matches!(atom, noeta_ir::Atom::Temp(_))
@@ -318,7 +318,7 @@ impl Interpreter {
         // Slice E2: every `@packed` struct's layout by name, so a native fn's `make_packed` resolves a
         // produced list's element schema — the tree-walker twin of the VM's interned `packed_schemas`.
         self.packed_type_layouts = packed_type_layouts;
-        // The forwarding type-argument table (poly-values F2b) rides the IR itself, so both
+        // The forwarding type-argument table rides the IR itself, so both
         // backends read the same entries by construction.
         self.type_args = ir.type_args.clone();
         self.type_arg_reprs = ir.type_arg_reprs.clone();
@@ -337,7 +337,7 @@ impl Interpreter {
         // against a heap being dismantled, and the exit reapers reclaim everything a pending
         // safepoint would have.
         crate::leak::safepoint_disarm();
-        // Release every value still in the extensions' retained arena (higher-order-abi H4) —
+        // Release every value still in the extensions' retained arena —
         // destructor-aware, mirroring the VM's teardown release, so a `destruct`-bearing value
         // left in an extension (an undisposed `Cell`) fires identically on both backends.
         for value in std::mem::take(&mut self.ext_arena).into_iter().flatten() {
@@ -345,8 +345,8 @@ impl Interpreter {
         }
         self.ext_arena_free.clear();
         self.destroy_globals();
-        // Reap cycles left after teardown so residency reaches 0: closure-capture cycles (Phase 6.3)
-        // and reference-`class` field cycles (object-model slice 2c).
+        // Reap cycles left after teardown so residency reaches 0: closure-capture cycles
+        // and reference-`class` field cycles.
         self.reap_captured_scope_cycles();
         self.reap_object_cycles();
         // A deliberate `os.exit(code)` wins over the diagnostic-derived code (there are no
@@ -526,14 +526,14 @@ impl Interpreter {
                 // The discarded result of a bare expression statement. Route it through
                 // `destroy_value` (not a silent slot clear) so a destructor-bearing value used only
                 // as a statement (`Resource.new();`) fires its `destruct` at its last reference —
-                // Phase 4.4 (a temp is an owner too, spec §2). Non-aggregates/aliased values no-op.
+                // a temp is an owner too (spec §2). Non-aggregates/aliased values no-op.
                 let value = frame.take(*t);
                 self.destroy_value(value);
                 Ok(Flow::Normal)
             }
-            // A source-variable drop (Phase 3 drop-insertion): release the binding's value at its
+            // A source-variable drop: release the binding's value at its
             // last use, aligning this backend's reclamation timing with the VM's. When the drop is
-            // destructor-relevant (Phase 4), take the value out and run `destroy_value`, firing its
+            // destructor-relevant, take the value out and run `destroy_value`, firing its
             // `destruct` block if this is the final reference (the VM's `release_value` mirror);
             // otherwise the value reaches no destructor, so the plain `release_binding` is used.
             noeta_ir::Stmt::DropVar { name, relevant, .. } => {
@@ -606,7 +606,7 @@ impl Interpreter {
                     child.declare(name, bound, false);
                 }
                 let saved = std::mem::replace(&mut self.scope, child);
-                // A statement-BLOCK arm (aether F1) may carry non-local flow — a `return` exits
+                // A statement-BLOCK arm may carry non-local flow — a `return` exits
                 // the enclosing function, a `break`/`continue` the enclosing loop — so the arm
                 // body's flow propagates instead of being a value-position invariant (the VM's
                 // inline codegen gets the same behavior from its jump targets).
@@ -712,7 +712,7 @@ impl Interpreter {
             .iter()
             .map(|(name, func)| (name.clone(), Rc::new(self.make_ir_closure(func))))
             .collect();
-        // P-PKEY: a `@packed` struct feeds the key-capability fixpoint (stamped onto the defs
+        // A `@packed` struct feeds the key-capability fixpoint (stamped onto the defs
         // right after this declaration lands, below).
         let packed = noeta_ast::packed_named_fields(decl);
         if let Some(named) = packed.clone() {
@@ -738,7 +738,7 @@ impl Interpreter {
         };
         self.scope
             .declare(decl.name.to_string(), Value::Type(Rc::new(def)), false);
-        // P-PKEY: settle the fixpoint with this declaration included and stamp every settled
+        // Settle the fixpoint with this declaration included and stamp every settled
         // type's (`Rc`-shared) def — a later declaration completing a forward-referenced nested
         // chain retro-marks the earlier defs, and every live instance sees it through the shared
         // `Rc`. Capability is read only at key-USE time, which follows all involved declarations.
@@ -747,7 +747,7 @@ impl Interpreter {
             for name in &self.key_capable_packed {
                 if let Some(Value::Type(def)) = self.globals.lookup(name) {
                     def.key_capable.set(true);
-                    // P-PKEY: register the field names so a packed key renders its display on
+                    // Register the field names so a packed key renders its display on
                     // demand (idempotent; same registry the VM fills at load).
                     noeta_stdlib::map_key::packed_names::register(
                         name,
@@ -758,7 +758,7 @@ impl Interpreter {
         }
     }
 
-    /// Register an enum whose methods are IR-bodied closures (object-model slice 3). Mirrors
+    /// Register an enum whose methods are IR-bodied closures. Mirrors
     /// [`Self::declare_ir_struct`]: variants/derives come from the carried surface declaration; the
     /// methods are the lowered IR funcs. The AST-walker counterpart is `declare_enum`.
     fn declare_ir_enum(&mut self, en: &noeta_ir::EnumDef) {
@@ -855,7 +855,7 @@ impl Interpreter {
         let result = self.exec_ir_stmts(&func.body.stmts, &mut frame);
         if matches!(result, Err(Unwind::Abort)) {
             // A panic abandons this frame: destroy its live locals (reverse-construction) before the
-            // abort unwinds to the caller (Phase 4.2c-ii).
+            // abort unwinds to the caller.
             self.fire_aborted_scope();
         }
         match result? {
@@ -1169,7 +1169,7 @@ impl Interpreter {
                     mismatch()
                 };
 
-                // Deserialize a `bytes` buffer into a flat `List<T>` (P-PACK 4.4): resolve T's schema,
+                // Deserialize a `bytes` buffer into a flat `List<T>`: resolve T's schema,
                 // then wrap the raw bytes as a packed list — the inverse of `to_bytes`, an O(n) copy.
                 let blob_val = self.eval_ir_atom(blob, frame)?;
                 let Value::Bytes(bytes) = blob_val else {
@@ -1206,7 +1206,7 @@ impl Interpreter {
                     ));
                 }
                 let list = Value::packed_list_from(schema, (*bytes).clone());
-                // Validation arc: `from_bytes` is an abort door — run each decoded element's
+                // `from_bytes` is an abort door — run each decoded element's
                 // `validate()` (materialized boxed for the re-entry) and abort at `[i]` on the first
                 // rejection, consistent with a length/shape mismatch. Closes the hole a `@validated`
                 // packed type would otherwise have here.
@@ -1258,7 +1258,7 @@ impl Interpreter {
                 Some(value) => Ok(value),
                 None => {
                     // Not a local. A bare name inside a method NEVER resolves to a field
-                    // (prelude-redesign EX.1 — member access is explicit: `self.field`), so a miss
+                    // (member access is explicit: `self.field`), so a miss
                     // here is a plain unknown name, exactly as the VM reports it.
                     self.record_abort_trace(*span);
                     self.diagnostics.push(Diagnostic::error(
@@ -1317,7 +1317,7 @@ impl Interpreter {
     fn eval_ir_rvalue(&mut self, rvalue: &noeta_ir::Rvalue, frame: &mut Frame) -> Eval<Value> {
         match rvalue {
             noeta_ir::Rvalue::Use(atom) => self.eval_ir_atom(atom, frame),
-            // A native module-fn reference as a value (expr-tiers arc) — the same `Value::ModuleFn`
+            // A native module-fn reference as a value — the same `Value::ModuleFn`
             // an imported `use std.mod.fn` binding holds, so a `Call` on it dispatches to the native
             // function identically. Mirrors the VM's `Const::ModuleFn`.
             noeta_ir::Rvalue::ModuleFn { module, func, .. } => {
@@ -1395,7 +1395,7 @@ impl Interpreter {
                 reuse,
                 span,
             } => {
-                // In-place self-append (Phase 5.1b): a marked `acc = acc ~ rhs` moves the accumulator
+                // In-place self-append: a marked `acc = acc ~ rhs` moves the accumulator
                 // out of its (reassigned) binding and extends its list buffer in place when uniquely
                 // owned — the IR-interpreter analogue of the VM's `ConcatInPlace` (and the same
                 // `cow_concat` the AST walker uses). The `rhs` is evaluated *before* the accumulator is
@@ -1469,7 +1469,7 @@ impl Interpreter {
                 for item in items {
                     values.push(self.eval_ir_atom(item, frame)?);
                 }
-                // Stamp the checker-resolved element type onto the list (R1) so `type_of` recovers it
+                // Stamp the checker-resolved element type onto the list so `type_of` recovers it
                 // after a `dyn` launder — the tree-walker twin of the VM's node tag, agreeing by
                 // construction. `None` → an untagged list, reflecting head-only.
                 let repr =
@@ -1477,7 +1477,7 @@ impl Interpreter {
                 Ok(Value::List(repr))
             }
             noeta_ir::Rvalue::PackedListNew { layout, .. } => {
-                // Start a streaming flat build (P-PACK 2.5): an empty `List<packed>` buffer, or an
+                // Start a streaming flat build: an empty `List<packed>` buffer, or an
                 // empty boxed list if the element type can't resolve to a packed schema (a defensive
                 // fall-back — the layout comes from the checker, so this is never hit for a valid
                 // `@packed` type). Subsequent pushes extend whichever representation this produced.
@@ -1574,7 +1574,7 @@ impl Interpreter {
                 let mut map = BTreeMap::new();
                 for (key_atom, value_atom) in entries {
                     let key_value = self.eval_ir_atom(key_atom, frame)?;
-                    // A string, or a key-capable extern value (extern-types X4).
+                    // A string, or a key-capable extern value.
                     let Some(key) = crate::value_map_key(&key_value) else {
                         let error = noeta_stdlib::map_key::map_key_error(key_value.type_name());
                         return Err(self.runtime_error(
@@ -1586,7 +1586,7 @@ impl Interpreter {
                     let value = self.eval_ir_atom(value_atom, frame)?;
                     map.insert(key, value);
                 }
-                // Stamp the checker-resolved `Map(K, V)` type (R1) so `type_of` recovers it after a
+                // Stamp the checker-resolved `Map(K, V)` type so `type_of` recovers it after a
                 // `dyn` launder — the tree-walker twin of the VM's node tag. `None` → untagged.
                 Ok(Value::map_value_tagged(
                     Rc::new(map),
@@ -1602,7 +1602,7 @@ impl Interpreter {
                 let idx = self.eval_ir_atom(index, frame)?;
                 if is_temp(receiver) {
                     // The receiver is an owned temporary whose only use is this access; fire its
-                    // destructor after (Phase 4.4). `eval_index` consumes the receiver, so clone for
+                    // destructor after. `eval_index` consumes the receiver, so clone for
                     // the call and destroy the held copy — firing iff it is the last reference.
                     let result = self.eval_index(recv.clone(), idx, *span);
                     self.destroy_value(recv);
@@ -1627,7 +1627,7 @@ impl Interpreter {
             noeta_ir::Rvalue::Call {
                 callee,
                 args,
-                // A forwarding generic's type arguments (poly-values F2b), in slot order — empty
+                // A forwarding generic's type arguments, in slot order — empty
                 // for every call that forwards nothing. Their own channel, which is why `supplied`
                 // below still indexes the VALUE parameters alone.
                 type_args,
@@ -1675,7 +1675,7 @@ impl Interpreter {
                 // the tick that serializes will have none.
                 let pushed = self.resolve_push_hint(push, push_slots, frame)?;
                 self.note_binding_hint(*span, &pushed);
-                // In-place collection self-update (Phase 5.1c): a marked `m = m.set(k,v)` moves the
+                // In-place collection self-update: a marked `m = m.set(k,v)` moves the
                 // receiver out of its (reassigned) binding so a uniquely-owned map can be mutated in
                 // place; mirrors the VM's reuse-aware dispatch. A non-map receiver (e.g. a user method
                 // named `set`) falls back to an ordinary consuming call with the moved-out value, so
@@ -1732,7 +1732,7 @@ impl Interpreter {
                 let temps = temp_arg_copies(args, &values);
                 let result = if is_temp(receiver) {
                     // An owned temp receiver (`Resource.new().use()`): fire its destructor after the
-                    // call (Phase 4.4). `call_method` consumes the receiver, so clone for the call
+                    // call. `call_method` consumes the receiver, so clone for the call
                     // and destroy the held copy — last-reference-gated, so a method that returns
                     // `self` (the result aliases it) correctly defers destruction.
                     let result =
@@ -1759,8 +1759,8 @@ impl Interpreter {
                 };
                 result.map(|v| tag_call_reflect(tag_call_reflect(v, reflect), &dynamic))
             }
-            // A trait method call (native default body, slice 2; or a kernel-trait method since the
-            // ExtBundle→ExtTrait fold-in, slice 4): the route was baked at the call site — straight to
+            // A trait method call (a native default body, or a kernel-trait method): the route
+            // was baked at the call site — straight to
             // the trait's shared ctx dispatch, receiver as slot 0.
             noeta_ir::Rvalue::TraitMethod {
                 receiver,
@@ -1782,7 +1782,7 @@ impl Interpreter {
                 // Mirrors `eval_expr`'s `Member` arm: enum-variant constructor, object field
                 // load, or associated-function reference. The receiver is *borrowed* to read the
                 // field (cloned out), so an owned temp receiver — e.g. the `b.inner` projected out
-                // of a container in `b.inner.tag` — is destroyed afterward (Phase 4.4), firing its
+                // of a container in `b.inner.tag` — is destroyed afterward, firing its
                 // destructor iff it held the last reference (the field clone is a separate object,
                 // so it survives).
                 let recv = self.eval_ir_atom(receiver, frame)?;
@@ -1812,7 +1812,7 @@ impl Interpreter {
                 span,
                 ..
             } => {
-                // Fused `list[i].field` (P-PACK 2.5+). A packed list decodes the one field directly,
+                // Fused `list[i].field`. A packed list decodes the one field directly,
                 // without materializing the element. Any miss (non-int/out-of-range index, or unknown
                 // field) falls through to the ordinary index-then-load, which reproduces the exact
                 // diagnostics of the unfused `Index` + `Field` it replaces.
@@ -2000,11 +2000,11 @@ impl Interpreter {
                 reflect,
                 span,
             } => {
-                // The checker-resolved reflected type (R2) for a generic instantiation; `None` for a
+                // The checker-resolved reflected type for a generic instantiation; `None` for a
                 // non-generic type → the value reflects head-only. Wrapped in an `Rc` to match the tag
                 // stored on the object (a cheap refcount bump on construction).
                 let reflect = reflect.clone().map(Rc::new);
-                // In-place reuse (Phase 5): a marked self-update `acc = Type { ...acc, … }` moves the
+                // In-place reuse: a marked self-update `acc = Type { ...acc, … }` moves the
                 // accumulator out of its (reassigned) binding and mutates it in place when uniquely
                 // owned, mirroring the VM's `MakeStructInPlace`. The token guarantees the spread is the
                 // reassigned base; both backends gate on the runtime refcount so an alias copies.
@@ -2107,7 +2107,7 @@ impl Interpreter {
                 }
                 let scope_idx = self.innermost_open();
                 let task_idx = self.scopes[scope_idx].len();
-                // The child inherits a snapshot of the spawner's task-local context (T5a).
+                // The child inherits a snapshot of the spawner's task-local context.
                 let context = self.ctx_current.clone();
                 self.scopes[scope_idx].push(crate::Task {
                     future,
@@ -2182,7 +2182,7 @@ impl Interpreter {
                 }
                 let scope_idx = self.innermost_open();
                 let task_idx = self.scopes[scope_idx].len();
-                // The child inherits a snapshot of the spawner's task-local context (T5a).
+                // The child inherits a snapshot of the spawner's task-local context.
                 let context = self.ctx_current.clone();
                 self.scopes[scope_idx].push(crate::Task {
                     future,
@@ -2243,7 +2243,7 @@ impl Interpreter {
                     .iter()
                     .map(|a| self.eval_ir_atom(a, frame))
                     .collect::<Result<_, _>>()?;
-                // The recipe: baked at the call site, or (F2b) resolved per-instantiation
+                // The recipe: baked at the call site, or resolved per-instantiation
                 // through the enclosing forwarding fn's hidden slot — an index into the
                 // program's type-argument table. A table entry without a recipe is statically
                 // rejected at the instantiating call; the runtime check is the safety net.
@@ -2323,7 +2323,7 @@ impl Interpreter {
                 dynamic,
                 span,
             } => {
-                // The extern-METHOD twin of `TypedModuleCall` above (http arc H8), step for step —
+                // The extern-METHOD twin of `TypedModuleCall` above, step for step —
                 // the only differences are that the receiver's own runtime identity selects the
                 // type (no module name) and the dispatch takes the receiver. Mirrors the VM.
                 let recv_val = self.eval_ir_atom(recv, frame)?;
@@ -2440,7 +2440,7 @@ impl Interpreter {
     }
 
     /// Materialize a `json.parse::<T>` result tree ([`noeta_stdlib::NativeOut`]) into a value of `T`,
-    /// running any `Validate::validate` **bottom-up** (validation arc). A struct is built through
+    /// running any `Validate::validate` **bottom-up**. A struct is built through
     /// [`Self::construct_object`] — its real registered definition, so the instance has its
     /// methods/defaults exactly like a literal; the VM builds a matching same-name shape, so both
     /// backends agree.
@@ -2470,8 +2470,8 @@ impl Interpreter {
             // `Result.Err(JsonError)`) carries a path-rich extern; a recipe decode of `T` itself
             // never yields one, only a wrapper's `Err` does.
             NativeOut::Extern(e) => MatOut::Value(Value::Extern(Rc::new(RefCell::new(e)))),
-            // An enum value: decoded from a `TypeRecipe::Enum` (enum-construction arc), or carried by
-            // a native `Result`/`Option` wrapper (native-extensibility S1). Both build through the
+            // An enum value: decoded from a `TypeRecipe::Enum`, or carried by
+            // a native `Result`/`Option` wrapper. Both build through the
             // ordinary `materialize_native` path, so a decoded case is indistinguishable from a
             // source-written one. Only a recipe door sets `has_validator`, and it re-enters exactly
             // as a struct's does — the case is built first, then `validate()` runs, so a rejection
@@ -2487,11 +2487,11 @@ impl Interpreter {
                 MatOut::Value(value)
             }
             out @ NativeOut::Variant { .. } => MatOut::Value(crate::materialize_native(out)),
-            // A native class instance (native-extensibility S2) — like a `Variant`, never decoded
+            // A native class instance — like a `Variant`, never decoded
             // from a JSON recipe, but a native `Result`/`Option` wrapper may carry one.
             out @ NativeOut::Instance { .. } => MatOut::Value(crate::materialize_native(out)),
             // A `TypeRecipe` names only JSON shapes; async work, bulk scalar vectors (a packed
-            // reduction's result, N3.4), and an in-place instance mutation (boundary 1, only a class
+            // reduction's result), and an in-place instance mutation (boundary 1, only a class
             // method returns it) can never decode from one.
             NativeOut::Spawn(_) | NativeOut::Scalars(_) | NativeOut::InstanceUpdate { .. } => {
                 unreachable!("json recipes never produce spawn/bulk-scalar/update results")
@@ -2561,7 +2561,7 @@ impl Interpreter {
                         MatOut::Value(v) => field_values.push((fname, span, v)),
                     }
                 }
-                // A `json.parse::<T>` result carries no reflected tag (R2) — its concrete type is
+                // A `json.parse::<T>` result carries no reflected tag — its concrete type is
                 // recovered head-only from the shape; untagged.
                 //
                 // A NATIVE fielded struct (native type-declaration unification) has no `.noe` def in
@@ -2601,7 +2601,7 @@ impl Interpreter {
         })
     }
 
-    /// Run `value`'s `Validate::validate` (validation arc) — ordinary Noeta code re-entered
+    /// Run `value`'s `Validate::validate` — ordinary Noeta code re-entered
     /// mid-materialize. Returns `Some(message)` (the validator's own error message) when the
     /// validator's `Result` is an `Err`, `None` when it is `Ok`. The message is a `string`-typed
     /// error's bare string, or an `Error`-typed error's `message()`. Shared by the JSON recipe doors
@@ -2679,8 +2679,8 @@ impl Interpreter {
             unreachable!("caller checked the receiver is a list")
         };
         // The in-place reuse path operates on a boxed `Rc<Vec<Value>>`. A boxed list passes its `Rc`
-        // straight through (so a uniquely-owned list still mutates in place); a packed list (P-PACK
-        // 2.3) has no specialized `set` yet, so it materializes to a fresh boxed vector — correct,
+        // straight through (so a uniquely-owned list still mutates in place); a packed list has no
+        // specialized `set`, so it materializes to a fresh boxed vector — correct,
         // just not flat. The result is a boxed list either way.
         let mut rc = match repr {
             ListRepr::Boxed { items: rc, .. } => rc,
@@ -2718,7 +2718,7 @@ impl Interpreter {
         }
     }
 
-    /// In-place map `set` for a marked self-update `m = m.set(k, v)` (Phase 5.1c). The receiver has
+    /// In-place map `set` for a marked self-update `m = m.set(k, v)`. The receiver has
     /// already been moved out of its binding by the caller. When uniquely owned its backing map is
     /// mutated in place (the displaced value, if any, fires its destructor now — matching the
     /// copy-and-reassign baseline, which releases it when the old map dies); an aliased map copies,
@@ -2754,7 +2754,7 @@ impl Interpreter {
         }
     }
 
-    /// In-place map `remove` for a marked self-update `m = m.remove(k)` (Phase 5.1c), the companion to
+    /// In-place map `remove` for a marked self-update `m = m.remove(k)`, the companion to
     /// [`Interpreter::map_set_in_place`]. `values` is `[key]`.
     fn map_remove_in_place(
         &mut self,
@@ -2851,7 +2851,7 @@ impl Interpreter {
         }
     }
 
-    /// In-place struct reuse for a marked self-update `acc = Type { ...acc, f: v }` (Phase 5, the
+    /// In-place struct reuse for a marked self-update `acc = Type { ...acc, f: v }` (the
     /// IR-interpreter analogue of the VM's `Op::MakeStructInPlace`). The reuse pass guarantees the
     /// spread base `base_name` is the very binding the result is reassigned to (so moving it out is
     /// sound) and that `Type` has no own `destruct` (so reusing the allocation never skips a
@@ -2887,7 +2887,7 @@ impl Interpreter {
                 // `x` has no other alias, mutating its allocation in place is unobservable. (Distinct
                 // from the in-place `x.f = v` class mutation in `set_field_in_place`.)
                 if Rc::strong_count(&rc) == 1 {
-                    // Reuse keeps the accumulator's existing reflected type (R2) — a self-update
+                    // Reuse keeps the accumulator's existing reflected type — a self-update
                     // rebuilds a value of the same (generic) type, matching the VM's reuse path.
                     for (name, value) in overrides {
                         if let Some(old) = rc.set_field_value(&name, value) {
@@ -2899,7 +2899,7 @@ impl Interpreter {
                 // Aliased: copy, preserving the alias's view. The displaced fields live in `rc`,
                 // whose `Rc` drops at the end of this statement (releasing the scope's old
                 // reference); the alias keeps the original object. The fresh copy carries the
-                // literal's reflected type (R2), matching the VM's copy branch.
+                // literal's reflected type, matching the VM's copy branch.
                 let mut new_slots = rc.fields_snapshot();
                 for (name, value) in overrides {
                     if let Some(i) = rc.slot_of(&name) {
@@ -2931,7 +2931,7 @@ impl Interpreter {
         }
     }
 
-    /// Set field `field` of an object to `new_value` (`x.f = v`, object-model slice 2b). Semantics
+    /// Set field `field` of an object to `new_value` (`x.f = v`). Semantics
     /// are **kind-dependent**: a reference `class` mutates the shared instance **in place** — through
     /// the `RefCell`, regardless of refcount — so the change is visible through every alias; a value
     /// `struct` keeps copy-on-write — it mutates in place only when uniquely owned, else copies so
@@ -2960,7 +2960,7 @@ impl Interpreter {
                         self.destroy_value(old);
                     }
                     // A class field-set can close a reference cycle (`a.next = b; b.next = a`);
-                    // register the receiver so the exit reaper can reclaim it (slice 2c).
+                    // register the receiver so the exit reaper can reclaim it.
                     if !rc.def.is_struct {
                         crate::register_mutated_object(&rc);
                     }

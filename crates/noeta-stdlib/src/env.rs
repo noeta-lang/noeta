@@ -1,4 +1,4 @@
-//! The `env`/`args` Ring 2 host-introspection surface (M2.2). Imported with
+//! The `env`/`args` Ring 2 host-introspection surface. Imported with
 //! `use std.{env}` / `use std.{args}` and called `env.get("HOME")`, `env.keys()`,
 //! `args.all()`.
 //!
@@ -33,7 +33,7 @@ pub fn sandbox_args() -> Vec<String> {
     vec!["noeta".to_string(), "run".to_string()]
 }
 
-/// The deterministic stdin the sandbox presents (CLI-completion slice 2) — a small fixed script of
+/// The deterministic stdin the sandbox presents — a small fixed script of
 /// lines so a read-loop program (`io.stdin_line()` / `io.stdin_all()` / `io.prompt(..)`) has
 /// something to consume, terminates in-oracle, and reads identically on both backends. Three lines,
 /// the stdin analogue of the `env`/`args` fixtures.

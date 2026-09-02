@@ -1,10 +1,9 @@
-//! Buffer-direct reductions over a packed scalar `List<T>` (packed-reductions arc).
+//! Buffer-direct reductions over a packed scalar `List<T>`.
 //!
-//! The packed-widths arc made a bare `List<i32>`/`List<f32>`/… a compact flat byte buffer, but no
-//! reduction read that buffer: `sum` materialized every element into a boxed `Value` before folding.
-//! These kernels fold the **raw bytes** in a tight `chunks_exact` loop (the same shape as the
-//! `vec3.rs` bulk kernels — not `std::simd`; a plain loop LLVM autovectorizes under `-O`), so the
-//! compact storage finally pays off in throughput.
+//! A bare `List<i32>`/`List<f32>`/… is a compact flat byte buffer. These kernels fold the **raw
+//! bytes** in a tight `chunks_exact` loop (the same shape as the `vec3.rs` bulk kernels — not
+//! `std::simd`; a plain loop LLVM autovectorizes under `-O`) rather than materializing each element
+//! into a boxed `Value`, so the compact storage pays off in throughput.
 //!
 //! Both backends call these bodies (the VM and the tree-walker each project their own packed schema /
 //! element values onto the neutral inputs here), so a reduction is **byte-identical** across backends
@@ -182,7 +181,7 @@ fn non_bool(op: BoolReduce) -> StdError {
 /// `Sum`/`Product` accumulate in the native width (wrapping) seeded at the identity, so an *empty*
 /// buffer folds to `0`/`1` (always `Some`); `Min`/`Max` return `None` for an empty buffer. Integer
 /// wrap and the float NaN-avoiding `min`/`max` live in the [`Elem`] impl, so this body is
-/// width-agnostic yet byte-identical to the old per-width fold.
+/// width-agnostic.
 fn reduce_buf<S: Elem>(op: NumReduce, bytes: &[u8]) -> Option<S> {
     let elems = || bytes.chunks_exact(S::BYTES).map(S::read_le);
     match op {

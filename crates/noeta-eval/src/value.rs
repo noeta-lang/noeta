@@ -31,20 +31,20 @@ pub enum Value {
     Bool(bool),
     Int(i64),
     Float(f64),
-    /// A 32-bit float (P-PACK Phase 3) — a distinct primitive from `Float`, with observable f32
+    /// A 32-bit float — a distinct primitive from `Float`, with observable f32
     /// precision. Arithmetic rounds at f32 (see `apply_binary_op`); display matches the VM.
     F32(f32),
     Str(String),
-    /// A raw immutable byte buffer (`bytes`, P-PACK 4.4) — the binary-serialization surface. `Rc`
+    /// A raw immutable byte buffer (`bytes`) — the binary-serialization surface. `Rc`
     /// keeps copies cheap; equality is content-wise. Mirrors the VM's `Payload::Bytes`.
     Bytes(Rc<Vec<u8>>),
     /// An immutable list. The backing [`ListRepr`] is either the general boxed `Rc<Vec<Value>>`
-    /// (any element type) or, for a `List<packed>`, a flat raw-primitive buffer (P-PACK Phase 2).
+    /// (any element type) or, for a `List<packed>`, a flat raw-primitive buffer.
     /// `Rc` keeps copies cheap (map/filter produce new lists). The representation is invisible to
     /// `RunResult` — every operation observes the same elements either way.
     List(ListRepr),
-    /// A tuple: a fixed-arity, heterogeneous, value-semantic positional aggregate (object-model
-    /// slice 4). `Rc` keeps copies cheap; equality is structural (element-wise).
+    /// A tuple: a fixed-arity, heterogeneous, value-semantic positional aggregate. `Rc` keeps
+    /// copies cheap; equality is structural (element-wise).
     Tuple(Rc<Vec<Value>>),
     /// An immutable set, held in canonical (sorted, de-duplicated) order so iteration,
     /// display, and equality are deterministic and identical to the VM's `Payload::Set`. The second
@@ -90,7 +90,7 @@ pub enum Value {
     /// A **bound** method handle (`value.method`, EX.2b): the receiver captured at bind time.
     /// Calling it dispatches the method on the captured receiver. VM twin: `Payload::BoundMethod`.
     BoundMethod(Box<Value>, String),
-    /// A registered extern-type value (extern-types X1) — the ONE hosting variant every
+    /// A registered extern-type value — the ONE hosting variant every
     /// registry-contributed type shares; the tree-walker twin of the VM's `Payload::Extern`.
     /// `Rc<RefCell<…>>` gives the shared, interior-mutable cell a mutating method needs
     /// (reference semantics, the FileHandle discipline generalized); a pure type never borrows
@@ -136,8 +136,6 @@ pub enum Value {
     /// A **leaf channel-recv future** (isolates I.1): the twin of the VM's `Payload::ChannelRecv`.
     /// `rx.recv()` produces one, carrying the channel index.
     ChannelRecv(crate::ChannelId),
-    // (`Reactive` lived here until higher-order-abi H5 — the handles are registry extern
-    // types now, their contents in the extensions' retained arena.)
 }
 
 /// The state machine behind a [`Value::Iter`] (Track I) — the tree-walker mirror of the VM's
@@ -165,7 +163,7 @@ pub enum IterState {
     Gen { step: Value },
 }
 
-/// The backing representation of a [`Value::List`] (P-PACK Phase 2). `Boxed` is the general form,
+/// The backing representation of a [`Value::List`]. `Boxed` is the general form,
 /// holding the same `Rc<Vec<Value>>` lists have always used — so every existing boxed-list code path
 /// (copy-on-write reuse, refcount checks, `try_unwrap`) operates on the inner `Rc` unchanged.
 /// `Packed` is the flat raw-primitive buffer for a `List<packed>` (2.3): one contiguous `Vec<u64>`
@@ -175,7 +173,7 @@ pub enum IterState {
 #[derive(Clone)]
 pub enum ListRepr {
     /// The general boxed list: elements are full `Value`s in an `Rc`-shared vector. `reflect` is the
-    /// checker-resolved element type (runtime type-argument reflection, R1), set at literal
+    /// checker-resolved element type (runtime type-argument reflection), set at literal
     /// construction so `type_of` recovers the list's element type after a `dyn` launder; `None` for
     /// every derived/mutated list (the tag survives pure aliasing only — a `Clone` of the `ListRepr`
     /// keeps it, but the list-producing ops rebuild through [`ListRepr::boxed`], which clears it). It
@@ -200,7 +198,7 @@ impl ListRepr {
         }
     }
 
-    /// This list's reflected element type (R1), or `None` if untagged (a packed or derived list).
+    /// This list's reflected element type, or `None` if untagged (a packed or derived list).
     pub(crate) fn reflect(&self) -> Option<Rc<TypeRepr>> {
         match self {
             ListRepr::Boxed { reflect, .. } => reflect.clone(),
@@ -221,7 +219,7 @@ impl ListRepr {
         }
     }
 
-    /// This list with its reflected element type set to `tag` (R1) — used at literal construction to
+    /// This list with its reflected element type set to `tag` — used at literal construction to
     /// stamp the checker-resolved type. A no-op on a packed list (which reflects head-only).
     pub(crate) fn with_reflect(self, tag: Option<Rc<TypeRepr>>) -> Self {
         match self {
@@ -241,7 +239,7 @@ impl ListRepr {
         }
     }
 
-    /// The raw flat byte buffer of a packed list (`to_bytes`, P-PACK 4.4), or `None` for a boxed list
+    /// The raw flat byte buffer of a packed list (`to_bytes`), or `None` for a boxed list
     /// (which has no canonical serialized form — the caller errors).
     pub(crate) fn packed_raw_bytes(&self) -> Option<Vec<u8>> {
         match self {
@@ -291,7 +289,7 @@ impl fmt::Debug for ListRepr {
     }
 }
 
-/// A `List<packed>` stored as one contiguous raw-primitive buffer (P-PACK Phase 2.3). The `schema`
+/// A `List<packed>` stored as one contiguous raw-primitive buffer. The `schema`
 /// describes how to pack a `Value::Object` element into, and materialize it back from, `word_count`
 /// consecutive words; `words` holds `len` elements end-to-end. `Rc` keeps clones cheap, exactly as
 /// the boxed list's `Rc<Vec<Value>>` does. The representation is invisible to `RunResult`: every
@@ -316,16 +314,16 @@ impl fmt::Debug for PackedList {
 /// element of the list.
 pub(crate) struct PackedSchema {
     /// The element type, used to build a materialized [`Value::Object`]. **`None`** marks a bare-scalar
-    /// element (packed-widths bare-scalar arc): a `List<i32>`/`List<f32>` has one scalar field and no
+    /// element: a `List<i32>`/`List<f32>` has one scalar field and no
     /// struct wrapper, so it materializes to a bare `Value` (`Int`/`F32`), not an object — the eval twin
     /// of `noeta_object::PackedSchema::shape == None`.
     pub(crate) def: Option<Rc<TypeDef>>,
     /// One entry per field, in `def.fields` (slot) order. A scalar element (`def == None`) holds one.
     pub(crate) fields: Vec<PackedSlot>,
-    /// Bytes per element — the sum of each field's [`SlotKind::byte_width`] (P-PACK 3.2b: a byte-
-    /// addressed buffer, so an `f32` field is 4 bytes, not 8).
+    /// Bytes per element — the sum of each field's [`SlotKind::byte_width`] (a byte-addressed
+    /// buffer, so an `f32` field is 4 bytes, not 8).
     pub(crate) byte_size: usize,
-    /// Whether the list buffer is stored column-major (`@packed(Layout.Column)`, P-SIMD C2) — the
+    /// Whether the list buffer is stored column-major (`@packed(Layout.Column)`) — the
     /// eval mirror of `noeta_object::PackedSchema::column`. Performance-only; observed values are
     /// identical either way (the differential pins that both backends agree).
     pub(crate) column: bool,
@@ -362,8 +360,8 @@ pub(crate) struct PackedSlot {
     pub(crate) kind: SlotKind,
 }
 
-/// Map a bare-scalar element's [`SlotKind`] to its reflected [`TypeRepr`] (packed-widths bare-scalar
-/// arc) — the eval twin of `noeta_value::packed_kind_to_repr`. Only `IntN`/`F32` ever reach here for a
+/// Map a bare-scalar element's [`SlotKind`] to its reflected [`TypeRepr`] — the eval twin of
+/// `noeta_value::packed_kind_to_repr`. Only `IntN`/`F32` ever reach here for a
 /// real scalar list; the other arms are defensive and mirror the width-erased scalar each stores.
 fn slot_kind_to_repr(kind: &SlotKind) -> TypeRepr {
     match kind {
@@ -380,7 +378,7 @@ fn slot_kind_to_repr(kind: &SlotKind) -> TypeRepr {
     }
 }
 
-/// Project one packed field onto the seam's neutral [`noeta_stdlib::PackedField`] (N3.4).
+/// Project one packed field onto the seam's neutral [`noeta_stdlib::PackedField`].
 fn seam_field(kind: &SlotKind) -> noeta_stdlib::PackedField {
     use noeta_stdlib::PackedField;
     match kind {
@@ -404,12 +402,12 @@ fn seam_field(kind: &SlotKind) -> noeta_stdlib::PackedField {
 pub(crate) enum SlotKind {
     Int,
     Float,
-    /// A 32-bit float field (P-PACK Phase 3).
+    /// A 32-bit float field.
     F32,
-    /// An explicit 64-bit float field `f64` (packed-widths arc) — 8 bytes, storage-identical to
+    /// An explicit 64-bit float field `f64` — 8 bytes, storage-identical to
     /// `Float`.
     F64,
-    /// A fixed-width integer field `i8..i64`/`u8..u64` (packed-widths arc): `bits/8` bytes, `signed`
+    /// A fixed-width integer field `i8..i64`/`u8..u64`: `bits/8` bytes, `signed`
     /// deciding read-back extension.
     IntN {
         bits: u8,
@@ -420,7 +418,7 @@ pub(crate) enum SlotKind {
 }
 
 impl PackedList {
-    /// The neutral seam view of this list's element layout (package-manager N3.4) — what
+    /// The neutral seam view of this list's element layout — what
     /// `NativeCtx::with_packed*` lends a raw-buffer kernel. The eval twin of the VM's projection
     /// from its interned `noeta_object::PackedSchema`.
     pub(crate) fn seam_view(&self) -> noeta_stdlib::PackedView {
@@ -443,7 +441,7 @@ impl PackedList {
     }
 
     /// A packed list **sharing this one's schema** over a fresh buffer — the eval half of
-    /// `NativeCtx::make_packed_like` (N3.4). `bytes` must hold a whole number of elements.
+    /// `NativeCtx::make_packed_like`. `bytes` must hold a whole number of elements.
     pub(crate) fn like(&self, bytes: Vec<u8>) -> PackedList {
         debug_assert!(
             self.schema.byte_size > 0 && bytes.len().is_multiple_of(self.schema.byte_size),
@@ -455,7 +453,7 @@ impl PackedList {
         }
     }
 
-    /// Mutate the byte buffer through `f`, copy-on-write (`NativeCtx::with_packed_mut`, N3.4):
+    /// Mutate the byte buffer through `f`, copy-on-write (`NativeCtx::with_packed_mut`):
     /// `Rc::make_mut` mutates in place iff this list is the buffer's sole owner, else clones —
     /// exactly the value-semantics COW the boxed list's `Rc<Vec<Value>>` gets for free.
     pub(crate) fn mutate_bytes(&mut self, f: &mut dyn FnMut(&noeta_stdlib::PackedView, &mut [u8])) {
@@ -466,8 +464,8 @@ impl PackedList {
         );
     }
 
-    /// An empty packed list with the given `schema` — the start of a streaming flat build
-    /// (P-PACK 2.5). Elements are appended one at a time by [`PackedList::push`].
+    /// An empty packed list with the given `schema` — the start of a streaming flat build.
+    /// Elements are appended one at a time by [`PackedList::push`].
     pub(crate) fn empty(schema: Rc<PackedSchema>) -> PackedList {
         PackedList {
             schema,
@@ -475,7 +473,7 @@ impl PackedList {
         }
     }
 
-    /// A packed list directly from a result byte buffer (P-PACK 4.2 bulk kernels). The `bytes` must
+    /// A packed list directly from a result byte buffer. The `bytes` must
     /// match `schema` (a whole number of `byte_size`-wide elements); the caller guarantees it.
     pub(crate) fn from_bytes(schema: Rc<PackedSchema>, bytes: Vec<u8>) -> PackedList {
         PackedList {
@@ -497,7 +495,7 @@ impl PackedList {
         }
         let buf = Rc::make_mut(&mut self.bytes);
         if self.schema.column {
-            // Column-major append (P-SIMD C2): the new element joins the *end of every column*, so
+            // Column-major append: the new element joins the *end of every column*, so
             // the whole buffer is rebuilt (O(n)) — column layout trades cheap append for fast bulk
             // field math, as designed. `staged` is one row (fields in slot order).
             *buf = column_append(&self.schema, buf, &staged);
@@ -542,7 +540,7 @@ impl PackedList {
         Some(Value::Object(Rc::new(object)))
     }
 
-    /// Read a single field of the element at `index` (P-PACK 2.5+ fused `list[i].field`), decoding
+    /// Read a single field of the element at `index` (the fused `list[i].field`), decoding
     /// only that field's word(s) — no full-element materialization. Returns `None` if `index` is out
     /// of range or `name` is not a field (the checker only fuses real field reads on a packed type, so
     /// a hit is the norm; the caller falls back on `None`).
@@ -568,7 +566,7 @@ impl PackedList {
 }
 
 impl SlotKind {
-    /// The number of bytes this field occupies (P-PACK 3.2b): an `f32` is 4, the other primitives 8,
+    /// The number of bytes this field occupies: an `f32` is 4, the other primitives 8,
     /// a nested struct its own `byte_size`.
     fn byte_width(&self) -> usize {
         match self {
@@ -592,7 +590,7 @@ fn read_u32(bytes: &[u8], offset: usize) -> u32 {
 }
 
 /// Read a fixed-width integer slot (`bits/8` little-endian bytes at `offset`) back into the runtime's
-/// 8-byte `int` (packed-widths arc). A **signed** slot sign-extends its top bit (a stored `-1i8`
+/// 8-byte `int`. A **signed** slot sign-extends its top bit (a stored `-1i8`
 /// reads back `-1`); an **unsigned** slot zero-extends (`255u8` reads back `255`). The runtime scalar
 /// is width-erased, so the result is a plain `i64` regardless of the stored width.
 fn read_intn(bytes: &[u8], offset: usize, bits: u8, signed: bool) -> i64 {
@@ -610,7 +608,7 @@ fn read_intn(bytes: &[u8], offset: usize, bits: u8, signed: bool) -> i64 {
     raw as i64
 }
 
-/// Append a fixed-width integer's low `bits/8` little-endian bytes to `out` (packed-widths arc). The
+/// Append a fixed-width integer's low `bits/8` little-endian bytes to `out`. The
 /// runtime carries the value as an 8-byte `int`; only its low bytes are stored, so the checker's
 /// range rules are what keep a value inside the slot (a raw `from_bytes` buffer is trusted as-is).
 fn write_intn(out: &mut Vec<u8>, value: i64, bits: u8) {
@@ -622,7 +620,7 @@ fn write_intn(out: &mut Vec<u8>, value: i64, bits: u8) {
 }
 
 /// Pack one bare-scalar list element (`value`) — a bare `Value` (`Int`/`F32`), not an object — onto
-/// the end of `out` per its single `kind` (packed-widths bare-scalar arc). The eval twin of the VM's
+/// the end of `out` per its single `kind`. The eval twin of the VM's
 /// `pack_scalar`; returns `None` on a runtime-kind mismatch so the caller can demote to a boxed list.
 fn pack_scalar(value: &Value, kind: &SlotKind, out: &mut Vec<u8>) -> Option<()> {
     match (kind, value) {
@@ -675,7 +673,7 @@ fn pack_object(value: &Value, schema: &PackedSchema, out: &mut Vec<u8>) -> Optio
             (SlotKind::Float, Value::Float(x)) => out.extend_from_slice(&x.to_bits().to_le_bytes()),
             (SlotKind::F32, Value::F32(f)) => out.extend_from_slice(&f.to_bits().to_le_bytes()),
             // `f64`/`iN`/`uN` fields carry width-erased scalars at runtime (a `Float`/`Int`); only
-            // the buffer slot is narrowed (packed-widths arc).
+            // the buffer slot is narrowed.
             (SlotKind::F64, Value::Float(x)) => out.extend_from_slice(&x.to_bits().to_le_bytes()),
             (SlotKind::IntN { bits, .. }, Value::Int(i)) => write_intn(out, *i, *bits),
             (SlotKind::Bool, Value::Bool(b)) => out.push(u8::from(*b)),
@@ -687,7 +685,7 @@ fn pack_object(value: &Value, schema: &PackedSchema, out: &mut Vec<u8>) -> Optio
 }
 
 /// Append one packed `row` (`byte_size` bytes, fields in slot order) to a column-major buffer,
-/// returning the rebuilt buffer with each field's column extended by the new element (P-SIMD C2).
+/// returning the rebuilt buffer with each field's column extended by the new element.
 /// O(n): column layout stores each field contiguously, so a new element inserts into the middle of
 /// the buffer at every column's end. Used only on the `Layout.Column` path.
 fn column_append(schema: &PackedSchema, buf: &[u8], row: &[u8]) -> Vec<u8> {
@@ -754,18 +752,18 @@ fn unpack_object(schema: &PackedSchema, bytes: &[u8], offset: usize) -> (Value, 
 }
 
 impl Value {
-    /// Construct a boxed list value from its elements (the general representation). Untagged (R1);
+    /// Construct a boxed list value from its elements (the general representation). Untagged;
     /// a literal that carries a reflected type stamps it afterward via [`ListRepr::with_reflect`].
     pub(crate) fn list(items: Vec<Value>) -> Value {
         Value::List(ListRepr::boxed(Rc::new(items)))
     }
 
-    /// Construct a boxed list value from an already-shared `Rc<Vec<Value>>`. Untagged (R1).
+    /// Construct a boxed list value from an already-shared `Rc<Vec<Value>>`. Untagged.
     pub(crate) fn list_rc(items: Rc<Vec<Value>>) -> Value {
         Value::List(ListRepr::boxed(items))
     }
 
-    /// Construct a map value from its shared entries, **untagged** (R1) — the constructor every
+    /// Construct a map value from its shared entries, **untagged** — the constructor every
     /// map-producing path uses. A literal that carries a reflected `Map(K, V)` type stamps it via
     /// [`Value::map_value_tagged`]; every other map (derived, mutated) stays untagged and reflects
     /// head-only.
@@ -773,7 +771,7 @@ impl Value {
         Value::Map(entries, None)
     }
 
-    /// As [`Value::map_value`], but carrying the reflected `Map(K, V)` type (R1) — used only at map
+    /// As [`Value::map_value`], but carrying the reflected `Map(K, V)` type — used only at map
     /// literal construction.
     pub(crate) fn map_value_tagged(
         entries: Rc<BTreeMap<noeta_stdlib::MapKey, Value>>,
@@ -795,7 +793,7 @@ impl Value {
         Value::Set(items, reflect)
     }
 
-    /// Build a packed `List` value directly from a result byte buffer + schema (P-PACK 4.2).
+    /// Build a packed `List` value directly from a result byte buffer + schema.
     pub(crate) fn packed_list_from(schema: Rc<PackedSchema>, bytes: Vec<u8>) -> Value {
         Value::List(ListRepr::Packed(PackedList::from_bytes(schema, bytes)))
     }
@@ -1073,7 +1071,7 @@ impl PartialEq for Value {
             }
             // A bound handle compares by method name + receiver equality.
             (Value::BoundMethod(ra, ma), Value::BoundMethod(rb, mb)) => ma == mb && ra == rb,
-            // Extern-type values compare through their contract (extern-types X2). This impl is
+            // Extern-type values compare through their contract. This impl is
             // the one enum/list/tuple/set *payload* comparisons route through, so a missing arm
             // here is the classic silent-wrong-`false` hole (`some(u) == some(u)` was false).
             (Value::Extern(a), Value::Extern(b)) => a.borrow().eq_value(&**b.borrow()),
@@ -1089,7 +1087,7 @@ fn format_float(f: f64) -> String {
     noeta_stdlib::format_float(f)
 }
 
-/// Display an `f32` (P-PACK Phase 3) at f32 precision (the shortest round-tripping f32 decimal), so
+/// Display an `f32` at f32 precision (the shortest round-tripping f32 decimal), so
 /// e.g. `0.1f32` shows `0.1`, not the f64-widened `0.10000000149…`. Delegates to the shared
 /// [`noeta_stdlib::format_f32`] so the two backends agree by construction.
 pub(crate) fn format_f32(f: f32) -> String {

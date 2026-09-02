@@ -1,4 +1,4 @@
-//! The deterministic sandbox host (M2.1). The host-capability *traits* (`FileSystem`/`Rng`/
+//! The deterministic sandbox host. The host-capability *traits* (`FileSystem`/`Rng`/
 //! `Clock`/`Env`/`Entropy`/`Ids`/`Network`/`Host` + `FileReader`, and `ReadSource`) live in the ABI
 //! crate ([`noeta_ext_abi::host`], re-exported here); this module provides the concrete
 //! [`SandboxHost`] — the in-memory VFS, seeded PRNG, logical clock, and pure network responder that
@@ -32,7 +32,7 @@ pub const SANDBOX_EPOCH_MS: u64 = 1_767_225_600_000;
 /// [`random::DEFAULT_SEED`] so the entropy and user-`random` streams never coincide.
 pub const SANDBOX_ENTROPY_SEED: u64 = 0xA076_1D64_78BD_642F;
 
-// --- embeddable deterministic capability components (audit-6 F9) --------------------------------
+// --- embeddable deterministic capability components --------------------------------
 //
 // The `Rng`/`Clock`/`Entropy`/`Ids` impls of the deterministic hosts (Sandbox here, Wasi, Browser)
 // were line-identical state-threading around the shared pure kernels (`random::*`) — 3x per
@@ -171,7 +171,7 @@ impl Clock for DeterministicClock {
 #[derive(Debug, Clone)]
 pub struct SandboxHost {
     fs: Vfs,
-    // The deterministic quartet, as embedded components (audit-6 F9): `delegate_host!` below
+    // The deterministic quartet, as embedded components: `delegate_host!` below
     // forwards each capability to its field, so the state-threading lives once in the component.
     rng: SeededRng,
     entropy: DeterministicEntropy,
@@ -179,25 +179,25 @@ pub struct SandboxHost {
     clock: DeterministicClock,
     env: BTreeMap<String, String>,
     args: Vec<String>,
-    /// The scripted stdin fixture (CLI-completion slice 2): the lines a read-loop program consumes,
+    /// The scripted stdin fixture: the lines a read-loop program consumes,
     /// seeded with a small deterministic default (see [`env::sandbox_stdin`]). `stdin_read_line`
     /// pops the front, `stdin_read_all` drains the rest, `prompt` consumes one line — deterministic
     /// and identical across backends, the stdin analogue of the `env`/`args` fixtures. `is_tty` is
     /// always false here, so the fixture never has to model an interactive terminal.
     stdin: VecDeque<String>,
-    /// Scripted spawned processes (process-handle arc): id → the pre-computed instant-complete
-    /// outcome plus a stdout read cursor (process-streaming arc, for `read_line`). A sandbox
+    /// Scripted spawned processes: id → the pre-computed instant-complete
+    /// outcome plus a stdout read cursor (for `read_line`). A sandbox
     /// "child" runs to completion at spawn (the scripted `os_exec`), so `wait` returns its stored
     /// outcome and `try_wait` always reports it done — deterministic and in-oracle, the process
     /// analogue of the Vfs / logical clock.
     procs: BTreeMap<u64, ScriptedProc>,
     /// The next spawned-process handle id (starts at 1, like `ids`).
     next_proc: u64,
-    /// The inbound server state (http-server S1), armed by `net_listen`. A sandbox run serves at
+    /// The inbound server state, armed by `net_listen`. A sandbox run serves at
     /// most one listener — a differential program calls `http.serve` once — so a single slot
     /// suffices; a second `net_listen` re-arms it.
     inbound: Option<InboundState>,
-    /// Open outbound **streaming** response bodies (http-streaming arc): id → the remaining frames
+    /// Open outbound **streaming** response bodies: id → the remaining frames
     /// of its scripted body, decoded in full at `net_stream_open`. A cursor over a pure function of
     /// the request, so both backends hand out the identical sequence.
     ///
@@ -207,7 +207,7 @@ pub struct SandboxHost {
     streams: BTreeMap<u64, VecDeque<noeta_ext_abi::stream::Frame>>,
     /// The next outbound stream id. Starts at 1, like `ids`.
     next_stream: u64,
-    /// The deterministic telemetry recorder (native OTEL): in-progress spans by id, ended spans in
+    /// The deterministic telemetry recorder: in-progress spans by id, ended spans in
     /// end order, and the counters deriving deterministic span/trace ids. Since spans are write-only
     /// (never program output), this exists only so conformance can assert on emitted spans; the
     /// differential never observes it.
@@ -222,7 +222,7 @@ struct TelRecorder {
     next_trace: u64,
     live: BTreeMap<SpanId, SpanData>,
     recorded: Vec<SpanData>,
-    /// Remote-interned contexts (T5d): pseudo-handles minted by `tel_intern_remote` for contexts
+    /// Remote-interned contexts: pseudo-handles minted by `tel_intern_remote` for contexts
     /// that arrived over a channel/isolate boundary. Not spans — `tel_span_context` reads them,
     /// everything else no-ops. Bounded by live seeds (`tel_release_remote` frees replaced ones).
     remote: BTreeMap<SpanId, TraceContext>,
@@ -230,12 +230,12 @@ struct TelRecorder {
     /// installed by [`SandboxHost::set_span_sink`] so a caller that only sees the host by value (it
     /// is moved into the VM and dropped at teardown) can still observe the spans a program emitted.
     sink: Option<Arc<Mutex<Vec<SpanData>>>>,
-    /// Emitted log records, in emission order — the logs signal's recorder (native OTEL Phase L).
+    /// Emitted log records, in emission order — the logs signal's recorder.
     logs: Vec<LogRecord>,
     /// An optional external sink that also receives every emitted [`LogRecord`] — the logs analogue
     /// of `sink`, installed by [`SandboxHost::set_log_sink`] for the logs parity oracle.
     log_sink: Option<Arc<Mutex<Vec<LogRecord>>>>,
-    /// Host-side metric aggregation (native OTEL Phase M). Shared logic with the real host, so a
+    /// Host-side metric aggregation. Shared logic with the real host, so a
     /// given call sequence collects byte-identically.
     metrics: MetricStore,
     /// An optional external sink that receives the collected [`MetricData`] at **teardown** (the
@@ -252,13 +252,13 @@ struct InboundState {
     script: Vec<crate::NetRequest>,
     cursor: usize,
     transcript: Vec<(u64, crate::NetResponse)>,
-    /// Upgraded websocket connections (server-hmr L0): each drives the fixed scripted client
+    /// Upgraded websocket connections: each drives the fixed scripted client
     /// conversation ([`crate::net::sandbox_ws_client_frames`]) — the value is the cursor into it —
     /// and records the handler's outbound frames in `ws_transcript`. Deterministic and finite,
     /// so an upgraded handler terminates in-oracle exactly like the request script itself.
     ws_conns: BTreeMap<u64, usize>,
     ws_transcript: Vec<(u64, String)>,
-    /// Connections switched to `text/event-stream` (http-streaming arc) — the SSE analogue of
+    /// Connections switched to `text/event-stream` — the SSE analogue of
     /// `ws_conns`. A set rather than a map: unlike a websocket there is no inbound conversation to
     /// keep a cursor into, only outbound frames.
     sse_conns: std::collections::BTreeSet<u64>,
@@ -278,7 +278,7 @@ struct ScriptedProc {
     stdin: ScriptedStdin,
 }
 
-/// The state of a scripted child's stdin pipe (subprocess-doors arc). The sandbox models it because
+/// The state of a scripted child's stdin pipe. The sandbox models it because
 /// a failing write is the *point* of the recoverable `try_write` door: without a scripted way to
 /// reach one, the door's `Err` arm could never be compared backend-to-backend. An enum rather than a
 /// `bool` because the two failures have different causes and different fixes, and `OsError.kind()`
@@ -365,13 +365,13 @@ impl SandboxHost {
     }
 
     /// The spans this sandbox has recorded (ended), in end order — test introspection for the
-    /// telemetry conformance oracle (native OTEL). Spans not yet ended are not included.
+    /// telemetry conformance oracle. Spans not yet ended are not included.
     pub fn recorded_spans(&self) -> &[SpanData] {
         &self.tel.recorded
     }
 
-    /// The event-stream bytes handlers wrote, as `(conn, wire)` in write order (http-streaming
-    /// arc) — test introspection, so the exact SSE wire format a `sse` handler produced can be
+    /// The event-stream bytes handlers wrote, as `(conn, wire)` in write order — test
+    /// introspection, so the exact SSE wire format a `sse` handler produced can be
     /// asserted directly rather than inferred from the program's own output. Empty before any
     /// `net_listen`.
     pub fn sse_transcript(&self) -> &[(u64, String)] {
@@ -390,7 +390,7 @@ impl SandboxHost {
     }
 
     /// The log records this sandbox has emitted, in emission order — test introspection for the logs
-    /// parity oracle (native OTEL Phase L).
+    /// parity oracle.
     pub fn recorded_logs(&self) -> &[LogRecord] {
         &self.tel.logs
     }
@@ -431,8 +431,8 @@ impl Default for SandboxHost {
 }
 
 impl FileReader for SandboxHost {
-    /// The sandbox is in-memory with tiny fixtures, so it always snapshots — keeping reads
-    /// deterministic and behavior byte-identical to the pre-P-LAZY handle. It therefore never hands
+    /// The sandbox is in-memory with tiny fixtures, so it always snapshots, which keeps reads
+    /// deterministic. It therefore never hands
     /// out a lazy id, so `fs_read_more` is unreachable here.
     fn fs_open_read(&mut self, path: &str) -> Result<ReadSource, StdError> {
         Ok(ReadSource::Snapshot(self.fs.read(path)?))
@@ -510,7 +510,7 @@ impl Network for SandboxHost {
         Ok(crate::net::sandbox_respond(&request))
     }
 
-    /// Arm the fixed inbound request script (http-server S1); `addr` is ignored (the sandbox binds
+    /// Arm the fixed inbound request script; `addr` is ignored (the sandbox binds
     /// no socket). One listener per run — always id `1`.
     fn net_listen(&mut self, _addr: &str) -> Result<u64, StdError> {
         self.inbound = Some(InboundState {
@@ -621,7 +621,7 @@ impl Network for SandboxHost {
         Ok(())
     }
 
-    // --- Streaming bodies (http-streaming arc) ---
+    // --- Streaming bodies ---
 
     /// Open a scripted stream: answer the head from the deterministic responder, decode the whole
     /// deterministic body for `request` up front, and hand back a cursor over its frames.
@@ -704,9 +704,8 @@ impl Network for SandboxHost {
     }
 }
 
-// The sandbox no longer bakes in the P2p capability (para-namespace follow-on F2): the loopback
-// broker moved into the `para.p2p` extension, which owns it in per-run ctx state. So the sandbox
-// keeps the **default** `P2pProvider` (`as_p2p` → `None`) — a host with no peer networking — and the
+// The `para.p2p` extension owns the loopback broker, in per-run ctx state, so the sandbox keeps
+// the **default** `P2pProvider` (`as_p2p` → `None`) — a host with no peer networking — and the
 // `para.p2p`/`para.synced` surface serves itself from the extension broker.
 impl P2pProvider for SandboxHost {}
 
@@ -1199,7 +1198,7 @@ mod tests {
     // Only the assertions inspect a `StdError`'s kind, so the import lives here.
     use crate::ErrorKind;
 
-    /// The overlay pattern (audit-2 F7): a custom host overrides ONE capability by hand and
+    /// The overlay pattern: a custom host overrides ONE capability by hand and
     /// forwards the rest to a wrapped base with `delegate_host!` — instead of ~70 hand-written
     /// forwarding methods. This is the seam the embed docs advertise ("or a custom Host
     /// implementation"); the test pins that the result is a full `Box<dyn Host>`, the override
@@ -1574,7 +1573,7 @@ mod tests {
         }
     }
 
-    /// http-streaming arc — the outbound stream seam: a scripted body is decoded at open, handed
+    /// The outbound stream seam: a scripted body is decoded at open, handed
     /// out frame by frame, and ends with `None`; `close` releases it and a closed (or unknown)
     /// stream reads as ended rather than erroring.
     #[test]
@@ -1631,7 +1630,7 @@ mod tests {
         host.net_stream_close(9999).unwrap();
     }
 
-    /// http-streaming arc — the inbound SSE seam: starting a stream marks the connection, every
+    /// The inbound SSE seam: starting a stream marks the connection, every
     /// write lands in the transcript verbatim, and closing releases it.
     ///
     /// The transcript is asserted against the wire bytes the ENCODER produces (rather than a

@@ -83,8 +83,8 @@ impl crate::ExternIo for ExecIo {
     }
 }
 
-/// The registered extern-type name of a spawned, still-controllable child process (process-handle
-/// arc): `os.spawn(cmd, args?)` returns one, and `pid`/`wait`/`try_wait`/`kill` on it route back to
+/// The registered extern-type name of a spawned, still-controllable child process:
+/// `os.spawn(cmd, args?)` returns one, and `pid`/`wait`/`try_wait`/`kill` on it route back to
 /// the [`crate::host::Os`] seam by id.
 pub const PROCESS_TYPE_NAME: &str = "Process";
 
@@ -188,7 +188,7 @@ impl OsErrorKind {
 }
 
 /// A recoverable subprocess failure — the payload of the `Result`-returning doors `os.try_spawn`
-/// and `Process.try_write` (subprocess-doors arc), modelled on [`crate::NetError`]/`JsonError`.
+/// and `Process.try_write`, modelled on [`crate::NetError`]/`JsonError`.
 ///
 /// It exists because the conditions these doors hit are **remote-input-shaped**: a tool server that
 /// is not installed, a server that crashed mid-call. A library whose contract is "a failing tool is
@@ -329,7 +329,7 @@ pub fn unknown_process_error(handle: u64) -> crate::StdError {
     }
 }
 
-/// The OS signal `child.signal(name)` sends to a spawned child (process-signals arc). Signal
+/// The OS signal `child.signal(name)` sends to a spawned child. Signal
 /// identity is an **enum**, not a magic string — the string a program passes (`"TERM"` /
 /// `"SIGTERM"`) is parsed into a variant at the dispatch boundary, and every host works against the
 /// typed value. Covers the portable POSIX job-control and termination signals; the numeric values
@@ -417,7 +417,7 @@ pub fn unknown_signal_error(name: &str) -> crate::StdError {
     }
 }
 
-/// The `child.wait_async()` work descriptor (process-signals arc): the awaitable twin of
+/// The `child.wait_async()` work descriptor: the awaitable twin of
 /// [`Process`]'s blocking `wait`. Its deterministic body waits on the child through the
 /// [`crate::host::Os`] seam by handle id — the sandbox uses this at spawn (the scripted child is
 /// already complete, so it is instantly ready, in-oracle), and `RealHost` overrides
@@ -452,8 +452,8 @@ pub enum ProcRead {
     Stdout(i64),
 }
 
-/// The `child.read_line_async()` / `read_err_line_async()` / `read_async(n)` work descriptor
-/// (subprocess-async arc): the awaitable twin of the blocking streaming reads.
+/// The `child.read_line_async()` / `read_err_line_async()` / `read_async(n)` work descriptor: the
+/// awaitable twin of the blocking streaming reads.
 ///
 /// **Why the twin exists.** A blocking `read_line` on a child that has not spoken yet parks the
 /// isolate's whole scheduler — a sibling `spawn`ed watchdog in the same isolate does not run until

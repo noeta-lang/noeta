@@ -8,7 +8,7 @@
 //! a third-party extension would use. Each module declares its [`ExtFn`] signatures
 //! plus one shared `dispatch`; both backends route every call through the lookup functions here
 //! (`find_module`/`dispatch`/`find_type`/`dispatch_method`), so the differential oracle
-//! (`TreeWalkBackend` ≡ `VmBackend`) holds by construction. The neutral value marshalling
+//! (`IrRefBackend` ≡ `VmBackend`) holds by construction. The neutral value marshalling
 //! ([`NativeValue`]/[`NativeOut`]) and the [`Host`] seam are the ABI crate's; this module only
 //! *uses* them.
 
@@ -19,15 +19,14 @@ use crate::{
     type_error,
 };
 
-// Core's `std` is registered as **several in-tree [`Extension`] units** (package-manager P1.4),
+// Core's `std` is registered as **several in-tree [`Extension`] units**,
 // all sharing the `"std"` namespace root — the dogfood proving the multi-extension registry a
-// third-party package plugs into. Each unit is a wholesale include/exclude boundary (the seam
-// Phase 2/3 populate; the shape a heavy ring would gate behind a Cargo feature): [`CoreExtension`]
+// third-party package plugs into. Each unit is a wholesale include/exclude boundary (the shape a
+// heavy ring would gate behind a Cargo feature): [`CoreExtension`]
 // is the always-on Ring-1/2 surface, and each capability with a separable identity — `http`,
 // `crypto`, `id`, the `vec`/`quat` geometry pair (extraction-prep, native-extensions), `p2p` — is
 // its own unit. `find_module`/`find_type`/`commands` iterate every unit filtered by root, so the
-// registered surface is **identical** to the former single `StdExtension` — this is a faithful
-// partition, differential-green by construction.
+// partition is invisible to a caller: the registered surface is the union of the units.
 
 /// A one-line `impl Extension` for a `std`-rooted core unit: a label name, the shared `"std"` root,
 /// and its module/type slices. Commands are default-empty (only `http` overrides).
@@ -113,13 +112,13 @@ std_unit!(
     modules = ID_MODULES,
     types = ID_TYPES
 );
-// The `vec`/`quat` packed-3D-math pair, split into its own unit to **prep extraction** into an
-// out-of-tree geometry package (native-extensions; Phase 3). No extern types — pure value math.
-// Written out (not `std_unit!`) because it declares the two kernel `ExtTrait`s (ExtBundle→ExtTrait
-// fold-in, slice 4): the `impl vec.Kernels for T {}` / `impl vec.SatKernels for T {}` binding surface.
+// The `vec`/`quat` packed-3D-math pair, its own unit so it can be extracted into an out-of-tree
+// geometry package. No extern types — pure value math. Written out (not `std_unit!`) because it
+// declares the two kernel `ExtTrait`s: the `impl vec.Kernels for T {}` /
+// `impl vec.SatKernels for T {}` binding surface.
 #[derive(Debug, Clone, Copy)]
 pub struct VecExtension;
-/// The two migrated kernel traits (`vec.Kernels`, `vec.SatKernels`). Namespaced `std.vec` so the
+/// The two kernel traits (`vec.Kernels`, `vec.SatKernels`). Namespaced `std.vec` so the
 /// module-qualified `impl` spelling and the runtime dispatch route resolve one identity.
 static VEC_TRAITS: &[noeta_ext_abi::registry::ExtTrait] = &[
     crate::vec_kernels::VEC_KERNELS,
@@ -142,10 +141,9 @@ impl Extension for VecExtension {
         VEC_TRAITS
     }
 }
-// The p2p/local-first stack (`crdt`/`p2p`/`synced`) left `std` for the first-party non-default
-// `para` namespace — it now lives in the standalone para-p2p package repo
-// (github.com/noeta-lang/para-p2p), installed only when a program depends on it. See the
-// para-namespace arc.
+// The p2p/local-first stack (`crdt`/`p2p`/`synced`) lives in the first-party non-default `para`
+// namespace, in the standalone para-p2p package repo (github.com/noeta-lang/para-p2p), installed
+// only when a program depends on it.
 
 /// The `http` unit — the only one contributing a CLI subcommand (`noeta serve`), so it can't use the
 /// `std_unit!` shorthand.
@@ -166,7 +164,7 @@ impl Extension for HttpExtension {
         HTTP_TYPES
     }
     fn commands(&self) -> &'static [noeta_ext_abi::ExtCommand] {
-        // `noeta serve` (higher-order-abi H6) — contributed here, not a core CLI verb.
+        // `noeta serve` — contributed here, not a core CLI verb.
         &[crate::serve::SERVE_COMMAND]
     }
     fn enums(&self) -> &'static [ExtEnum] {
@@ -177,7 +175,7 @@ impl Extension for HttpExtension {
     }
 }
 
-/// The `http` unit's native enum: `Framing` (http-streaming arc) — how `client.stream` cuts a
+/// The `http` unit's native enum: `Framing` — how `client.stream` cuts a
 /// response body. A real language enum rather than a string, so a `match` over it is exhaustive
 /// (E0011) and a typo is a compile error instead of a runtime surprise.
 ///
@@ -244,7 +242,7 @@ const FRAMING_DOCS: &[(&str, &str)] = &[
     ),
 ];
 
-/// The `http` unit's native value struct: `Frame` (http-streaming arc) — one frame cut out of a
+/// The `http` unit's native value struct: `Frame` — one frame cut out of a
 /// streaming body.
 ///
 /// A **struct**, not a class and not an extern handle, and that is the load-bearing decision: a
@@ -321,7 +319,7 @@ const FRAME_DOCS: &[(&str, &str)] = &[
     ),
 ];
 
-/// The `id` unit's extern type: `Uuid` (X2 — pure, byte-ordered, key-capable).
+/// The `id` unit's extern type: `Uuid` (pure, byte-ordered, key-capable).
 ///
 /// It declares `Comparable`, because it is: a UUID compares by its 16 bytes at every door the
 /// runtime has — `compare`, a set's canonical order, a map key's placement — and a version-7 UUID's
@@ -343,7 +341,7 @@ const ID_TYPES: &[ExtType] = &[ExtType {
     ..ExtType::DEFAULTS
 }];
 
-/// The `crypto` unit's extern type: the incremental `Hasher` (C3).
+/// The `crypto` unit's extern type: the incremental `Hasher`.
 const CRYPTO_TYPES: &[ExtType] = &[ExtType {
     name: crate::crypto::HASHER_TYPE_NAME,
     namespace: "std.crypto",
@@ -354,8 +352,8 @@ const CRYPTO_TYPES: &[ExtType] = &[ExtType {
     ..ExtType::DEFAULTS
 }];
 
-/// The `http` unit's extern types: the outbound `Response` and inbound `Request` (http arc /
-/// http-server). Both stay top-level type names (no module move in P0.3b's client/server split).
+/// The `http` unit's extern types: the outbound `Response` and inbound `Request`. Both are
+/// top-level type names, unmoved by the client/server module split.
 const HTTP_TYPES: &[ExtType] = &[
     ExtType {
         name: crate::net::RESPONSE_TYPE_NAME,
@@ -377,7 +375,7 @@ const HTTP_TYPES: &[ExtType] = &[
         docs: REQUEST_DOCS,
         ..ExtType::DEFAULTS
     },
-    // `Keyring` (session arc S2) — the signing secrets. Opaque on purpose: it has no methods, so
+    // `Keyring` — the signing secrets. Opaque on purpose: it has no methods, so
     // there is no way to read a secret back out of one in-language.
     ExtType {
         name: crate::session::KEYRING_TYPE_NAME,
@@ -386,7 +384,7 @@ const HTTP_TYPES: &[ExtType] = &[
         docs: KEYRING_DOCS,
         ..ExtType::DEFAULTS
     },
-    // `Session` (session arc S3) — the decoded data plus whether it changed.
+    // `Session` — the decoded data plus whether it changed.
     ExtType {
         name: crate::session::SESSION_TYPE_NAME,
         namespace: "std.session",
@@ -398,7 +396,7 @@ const HTTP_TYPES: &[ExtType] = &[
         docs: SESSION_DOCS,
         ..ExtType::DEFAULTS
     },
-    // `Cookie` (cookie arc C1) — a validated `Set-Cookie`. Pure, content-equal, immutable data
+    // `Cookie` — a validated `Set-Cookie`. Pure, content-equal, immutable data
     // like `Response`; every builder returns a new one.
     ExtType {
         name: crate::cookie::COOKIE_TYPE_NAME,
@@ -409,7 +407,7 @@ const HTTP_TYPES: &[ExtType] = &[
         docs: COOKIE_DOCS,
         ..ExtType::DEFAULTS
     },
-    // `Client` (http arc H7) — the configured client: base URL, headers, auth, deadline. Pure,
+    // `Client` — the configured client: base URL, headers, auth, deadline. Pure,
     // content-equal config; immutable, so every builder method returns a new one.
     ExtType {
         name: crate::http_client::CLIENT_TYPE_NAME,
@@ -423,7 +421,7 @@ const HTTP_TYPES: &[ExtType] = &[
         docs: CLIENT_DOCS,
         ..ExtType::DEFAULTS
     },
-    // `HttpError` (http arc H6) — the transport failure the client's `Result` door carries. Pure,
+    // `HttpError` — the transport failure the client's `Result` door carries. Pure,
     // content-equal data like `Response`; declares `Error` + `Display` (the `JsonError` model) so
     // `<E: Error>` bounds accept it and `?` converts through `From`.
     ExtType {
@@ -436,7 +434,7 @@ const HTTP_TYPES: &[ExtType] = &[
         docs: HTTP_ERROR_DOCS,
         ..ExtType::DEFAULTS
     },
-    // The websocket session handle (server-hmr L0) — its methods reach the `Network` hijack seam
+    // The websocket session handle — its methods reach the `Network` hijack seam
     // (send/recv/close ride the executor), so they live in the ctx table.
     ExtType {
         name: crate::serve::SOCKET_TYPE_NAME,
@@ -449,7 +447,7 @@ const HTTP_TYPES: &[ExtType] = &[
         docs: SOCKET_DOCS,
         ..ExtType::DEFAULTS
     },
-    // The incremental body reader (http-streaming arc) — the `Socket` shape on the OUTBOUND side:
+    // The incremental body reader — the `Socket` shape on the OUTBOUND side:
     // a host-resource handle whose `recv` rides the executor, so its body methods live in the ctx
     // table. Its **head** methods (`status`/`ok`/`header`/`error_for_status`) are plain reads off
     // the handle and live in the ordinary table, so answering "did this request fail?" costs no
@@ -467,7 +465,7 @@ const HTTP_TYPES: &[ExtType] = &[
         docs: FRAME_STREAM_DOCS,
         ..ExtType::DEFAULTS
     },
-    // The event-stream sink (http-streaming arc) — `Socket`'s write-only inbound twin. Its `send`
+    // The event-stream sink — `Socket`'s write-only inbound twin. Its `send`
     // takes a `Frame` value struct, which must arrive marshalled rather than as an opaque handle.
     ExtType {
         name: noeta_ext_abi::stream::SSE_SINK_TYPE_NAME,
@@ -544,8 +542,8 @@ const SSE_SINK_DOCS: &[(&str, &str)] = &[
     ),
 ];
 
-/// The always-on core extern types: `FileHandle` (X3 — mutable + effectful, `fs`), `Cell<T>` (H4),
-/// and the reactive handles (H5).
+/// The always-on core extern types: `FileHandle` (mutable + effectful, `fs`), `Cell<T>`,
+/// and the reactive handles.
 const CORE_TYPES: &[ExtType] = &[
     // `Span` (native OTEL T1) — a mutable, effectful, host-coupled handle (like `FileHandle`): its
     // methods reach the `Tracing` capability by id. NOT key-capable (identifies a host resource).
@@ -562,7 +560,7 @@ const CORE_TYPES: &[ExtType] = &[
         docs: SPAN_METHOD_DOCS,
         ..ExtType::DEFAULTS
     },
-    // The metrics instrument handles (native OTEL Phase M) — mutable, effectful, host-coupled like
+    // The metrics instrument handles — mutable, effectful, host-coupled like
     // `Span`: their methods reach the `Metrics` capability by id. Namespaced under `std.metrics`, so
     // the idiomatic OTel names are `use`-imported (not globally reserved) and coexist with a user's
     // own `Counter`. Not key-capable; `deep_marshal` so the `*_with(_, attrs)` map argument arrives
@@ -606,7 +604,7 @@ const CORE_TYPES: &[ExtType] = &[
         docs: FILE_HANDLE_DOCS,
         ..ExtType::DEFAULTS
     },
-    // `JsonError` (error-machinery arc) — the JSON decode failure: pure, content-equal data (the
+    // `JsonError` — the JSON decode failure: pure, content-equal data (the
     // `ExecResult` model), std's first `Error` implementor. Declares `Error` + `Display` through
     // the registration (the extern-type analogue of a user `impl`), so `<E: Error>` bounds accept
     // it and it renders as its composed message.
@@ -643,7 +641,7 @@ const CORE_TYPES: &[ExtType] = &[
         docs: EXEC_RESULT_DOCS,
         ..ExtType::DEFAULTS
     },
-    // `Process` (process-handle arc) — a spawned child's control handle: a mutable, host-coupled
+    // `Process` — a spawned child's control handle: a mutable, host-coupled
     // reference value (like `FileHandle`), its methods reaching the `Os` seam by id.
     ExtType {
         name: crate::os::PROCESS_TYPE_NAME,
@@ -654,7 +652,7 @@ const CORE_TYPES: &[ExtType] = &[
         docs: PROCESS_DOCS,
         ..ExtType::DEFAULTS
     },
-    // `OsError` (subprocess-doors arc) — the recoverable failure the `try_spawn`/`try_write` doors
+    // `OsError` — the recoverable failure the `try_spawn`/`try_write` doors
     // carry. Pure, content-equal data like `HttpError`; declares `Error` + `Display` so `<E: Error>`
     // bounds accept it and `?` converts it through `From`.
     ExtType {
@@ -667,9 +665,9 @@ const CORE_TYPES: &[ExtType] = &[
         docs: OS_ERROR_DOCS,
         ..ExtType::DEFAULTS
     },
-    // `Cell<T>` (higher-order-abi H4) — the generic, Class-3 corner of the matrix: all methods
+    // `Cell<T>` — the generic, Class-3 corner of the matrix: all methods
     // higher-order (ctx table), the held value in the retained arena; `get` is a declared
-    // always-open arena read (H5), so the backend inlines it.
+    // always-open arena read, so the backend inlines it.
     ExtType {
         name: crate::cell::CELL_TYPE_NAME,
         namespace: "std.cell",
@@ -683,7 +681,7 @@ const CORE_TYPES: &[ExtType] = &[
         docs: CELL_METHOD_DOCS,
         ..ExtType::DEFAULTS
     },
-    // The reactive handles (higher-order-abi H5): generic extern types over the per-run graph
+    // The reactive handles: generic extern types over the per-run graph
     // state; `get` on both readable kinds is a declared arena read behind the extension's gate.
     ExtType {
         name: crate::reactive::SIGNAL_TYPE_NAME,
@@ -717,7 +715,7 @@ const CORE_TYPES: &[ExtType] = &[
         docs: EFFECT_METHOD_DOCS,
         ..ExtType::DEFAULTS
     },
-    // `View` (server-hmr L1) — the diff-push flush subscriber: named bindings onto
+    // `View` — the diff-push flush subscriber: named bindings onto
     // Signal/Computed/SyncedSignal handles, `snapshot()`/`diff()` render the wire frames.
     ExtType {
         name: crate::reactive::VIEW_TYPE_NAME,
@@ -735,8 +733,7 @@ const CORE_TYPES: &[ExtType] = &[
     },
 ];
 
-/// The `FileHandle` instance methods (extern-types X3) — the signatures the checker's
-/// `file_handle_method`/`file_handle_params` tables used to hardcode.
+/// The `FileHandle` instance methods — the signatures the checker and both backends read.
 const FILE_HANDLE_METHODS: &[ExtFn] = &[
     ExtFn {
         param_names: &[],
@@ -764,7 +761,7 @@ const FILE_HANDLE_METHODS: &[ExtFn] = &[
     },
 ];
 
-/// Method dispatch for `FileHandle` (extern-types X3): the cursor logic lives on the shared
+/// Method dispatch for `FileHandle`: the cursor logic lives on the shared
 /// [`crate::FileHandle`] as before — this replaces the two per-backend `call_file_handle_method`
 /// twins with ONE body. The receiver mutates in place (reference semantics through the shared
 /// cell) and `close` flushes through the host — the whole effectful corner of the matrix.
@@ -840,19 +837,18 @@ pub fn std_units() -> Vec<&'static (dyn Extension + Sync)> {
     units
 }
 
-// --- the registry facade (package-manager Phase 3, N3.0) ----------------------------------------
+// --- the registry facade ----------------------------------------
 //
 // The registry *mechanism* — the assembled unit list and the whole generic lookup layer — lives in
-// `noeta_ext_abi::registry` (it was grown here around the dogfood, but nothing in it was
-// std-specific, and Phase 3's composed shim must not register its units through the dogfood
-// crate). These wrappers keep every existing `noeta_stdlib::registry::*` call site working
-// unchanged, and make an unseeded registry unobservable: each ensures the std units are installed
+// `noeta_ext_abi::registry` — nothing in it is std-specific, and the composed shim must not
+// register its units through the dogfood crate. These wrappers keep every
+// `noeta_stdlib::registry::*` call site working, and make an unseeded registry unobservable: each
+// ensures the std units are installed
 // (a no-op after the first call, or after an assembling binary's explicit earlier `install`).
 //
 // Std residue deliberately NOT moved: the unit definitions above and the `static_dispatch_ctx*`
 // monomorphized fast routes below (they name `cell`/`reactive` concretely — the per-crate
-// compiled-in fast path). (`is_module_function`'s transitional `vec`/`fs` special cases died with
-// the N3.4 `with_packed` migration, as planned.)
+// compiled-in fast path).
 
 /// Ensure the std units are installed before a lookup (lazy default; an explicit
 /// [`noeta_ext_abi::registry::install`] by the assembling binary wins).
@@ -863,10 +859,8 @@ fn ensure() {
 /// Register [`std_units`] as the registry's **fallback provider** at load time, so that merely
 /// *linking* this crate gives a process a working default registry — no call site has to remember
 /// to seed. That is what makes seeding structural: the front-end crates reach the registry through
-/// `noeta_ext_abi::registry::single_registry_process()`, which used to panic unless something had
-/// already seeded. An assembling binary does seed; a **test** binary does not, so a crate's tests
-/// passed only when a sibling test happened to run first through this crate's lazily-seeding facade
-/// — a race CI lost across four crates at once.
+/// `noeta_ext_abi::registry::single_registry_process()`, and linking is enough for a **test**
+/// binary, which does not seed the way an assembling binary does.
 ///
 /// This registers a function pointer and installs **nothing** (see
 /// [`noeta_ext_abi::registry::set_default_provider`]): installation stays lazy on first lookup, so a
@@ -883,8 +877,8 @@ fn register_default_provider() {
 }
 
 /// The process-global default [`Registry`] as a first-class handle — the seeded-and-unwrapped form
-/// the instance-registry threading (server-hmr F2) hands to a checker/backend that was **not**
-/// given an explicit per-session registry. Ensures the std units are installed (like every facade
+/// the registry threading hands to a checker/backend that was **not** given an explicit
+/// per-session registry. Ensures the std units are installed (like every facade
 /// lookup), so the returned reference is always live. A host wanting a *different* extension set per
 /// session builds its own [`Registry`] and threads that instead of calling this.
 pub fn default_seeded() -> &'static noeta_ext_abi::registry::Registry {
@@ -894,8 +888,8 @@ pub fn default_seeded() -> &'static noeta_ext_abi::registry::Registry {
 }
 
 /// The process-global default [`Registry`], named for what calling it MEANS: **this call site
-/// assumes a single-registry process** (cross-cutting audit finding 5). The CLI, LSP, MCP, and IDE
-/// run one registry per process (the recorded instance-registry decision), so their leaf lookups —
+/// assumes a single-registry process**. The CLI, LSP, MCP, and IDE run one registry per process by
+/// design, so their leaf lookups —
 /// loader tier-seeding, IDE completion/namespace answers, the compiler's default entry presets —
 /// take the global by design. A session assembled with extra extensions (noeta-embed, a composed
 /// MCP toolchain) must NOT reach code that calls this; it threads its own registry via the
@@ -906,7 +900,7 @@ pub fn single_registry_process() -> &'static noeta_ext_abi::registry::Registry {
 }
 
 /// Assemble the registry for a toolchain binary: the std units plus a composed shim's `extra`
-/// extension units (package-manager Phase 3). Called by `noeta_cli::run_cli` at entry, before
+/// extension units. Called by `noeta_cli::run_cli` at entry, before
 /// anything can look a name up. With no extras this is exactly the lazy default; with extras it
 /// installs eagerly so a later facade lookup cannot race in an std-only default first.
 pub fn install_with_extras(extra: &[&'static (dyn Extension + Sync)]) {
@@ -920,7 +914,7 @@ pub fn install_with_extras(extra: &[&'static (dyn Extension + Sync)]) {
 }
 
 /// Assemble a **standalone** registry — the std units plus `extra` — **without** touching the
-/// process-global default (instance-registry IR5). This is the per-session assembly seam: an
+/// process-global default. This is the per-session assembly seam: an
 /// embedding host that wants a session with its own extension set builds one here and threads it
 /// through the checker / compiler / VM, so two sessions with different extension sets can coexist in
 /// one process. (The uniqueness sweep in [`noeta_ext_abi::registry::Registry::new`] still applies —
@@ -934,7 +928,7 @@ pub fn assemble_with_extras(
 }
 
 /// Assemble (std ∪ `extra`) as an **interned** `&'static` registry — the per-session entry
-/// (instance-registry IR5) for hosts that create sessions repeatedly. The whole pipeline hands out
+/// for hosts that create sessions repeatedly. The whole pipeline hands out
 /// `&'static Registry`, so a per-session assembly must leak; interning by the unit set bounds that
 /// leak by *distinct configurations* instead of by session count (a game engine reloading levels
 /// re-uses one assembly forever). Fallible: a mis-assembled unit set (duplicate identities, a type
@@ -1109,10 +1103,10 @@ pub fn commands() -> impl Iterator<Item = &'static noeta_ext_abi::ExtCommand> {
     noeta_ext_abi::registry::commands()
 }
 
-// (`find_bundle` / `dispatch_bundle_method` were removed in the ExtBundle→ExtTrait fold-in (slice 4):
+// (A bundle is an `ExtTrait`:
 // a kernel bundle is now a native `ExtTrait`, dispatched through `dispatch_trait_method` below.)
 
-/// See [`noeta_ext_abi::registry::find_trait_in_module`] (ExtBundle→ExtTrait fold-in, slice 4).
+/// See [`noeta_ext_abi::registry::find_trait_in_module`].
 pub fn find_trait_in_module(
     qualified_module: &str,
     name: &str,
@@ -1121,7 +1115,7 @@ pub fn find_trait_in_module(
     noeta_ext_abi::registry::find_trait_in_module(qualified_module, name)
 }
 
-/// See [`noeta_ext_abi::registry::dispatch_trait_method`] (ExtBundle→ExtTrait convergence, slice 2).
+/// See [`noeta_ext_abi::registry::dispatch_trait_method`].
 pub fn dispatch_trait_method(
     trait_q: &str,
     method: &str,
@@ -1192,17 +1186,14 @@ pub fn dispatch_method(
     noeta_ext_abi::registry::dispatch_method(recv, method, host, args)
 }
 
-// (The **virtual-module** mechanism — prelude-redesign P2's `VIRTUAL_MODULES` table, backend
-// `call_native_module` intercepts, and compiler `Builtin` bindings for selective imports — died
-// with higher-order-abi H5: `task` migrated at H0/H2, `http.serve` at H3, and `reactive`, the
-// last entry, at H5. Every std module is registry-backed now; the whole `Builtin` orchestration
-// family dispatches through the `NativeCtx` seam.)
+// (Every std module is registry-backed: the whole `Builtin` orchestration family dispatches
+// through the `NativeCtx` seam.)
 
 /// Whether `<module>.<func>` names a callable module function — the single predicate the checker
 /// and both backends share to decide what a selective member import (`use std.<mod>.<fn>`) binds,
-/// so all three agree by construction. Pure registry delegation since package-manager N3.4
-/// migrated the last per-backend fallbacks (the `vec` bulk `*_all` kernels became registered ctx
-/// functions; `fs.list` got its real trailing-optional signature).
+/// so all three agree by construction. Pure registry delegation, with no per-backend fallback:
+/// the `vec` bulk `*_all` kernels are registered ctx functions and `fs.list` carries its real
+/// trailing-optional signature.
 pub fn is_module_function(module: &str, func: &str) -> bool {
     find_function_sig(module, func).is_some()
 }
@@ -1219,7 +1210,7 @@ pub fn dispatch(
 }
 
 // --- argument helpers (shared by the module dispatch functions) ---------------------------------
-// The exact-duplicate guard family lives once in `noeta_ext_abi::args` (audit-2 F8); only the
+// The exact-duplicate guard family lives once in `noeta_ext_abi::args`; only the
 // module-specific extractors (`want_data`/`want_tag`/`want_headers`/`want_argv`) stay here.
 use noeta_ext_abi::args::{want_arity, want_arity_range, want_int, want_str};
 
@@ -1252,9 +1243,9 @@ fn native_type_name(value: &NativeValue) -> &str {
         NativeValue::Map(_) => "map",
         NativeValue::Object { type_name, .. } | NativeValue::Opaque(type_name) => type_name,
         NativeValue::Extern(e) => e.type_display_name(),
-        // A native enum value (native-extensibility S1): its enum name is the surface type.
+        // A native enum value: its enum name is the surface type.
         NativeValue::Variant { enum_name, .. } => enum_name,
-        // A native class instance (native-extensibility S2): its class name is the surface type.
+        // A native class instance: its class name is the surface type.
         NativeValue::Instance { class, .. } => class,
     }
 }
@@ -1367,7 +1358,7 @@ fn time_dispatch(
     }
 }
 
-// --- `id`: sequential ids + UUIDs (id-entropy U2) ------------------------------------------------
+// --- `id`: sequential ids + UUIDs ------------------------------------------------
 
 fn id_dispatch(
     func: &str,
@@ -1436,7 +1427,7 @@ fn id_dispatch(
     }
 }
 
-// --- `crypto`: digests, HMAC (crypto arc C2) -----------------------------------------------------
+// --- `crypto`: digests, HMAC -----------------------------------------------------
 
 /// A digest input: a string hashes as its UTF-8 bytes, a `bytes` buffer as-is.
 const STR_OR_BYTES: SigType = SigType::Union(&[SigType::String, SigType::Bytes]);
@@ -1687,7 +1678,7 @@ const CRYPTO_FNS: &[ExtFn] = &[
         params: &[STR_OR_BYTES, STR_OR_BYTES],
         ret: Concrete(SigType::Bytes),
     },
-    // Constant-time verification (C7): tag comparison must not short-circuit like `bytes ==`.
+    // Constant-time verification: tag comparison must not short-circuit like `bytes ==`.
     ExtFn {
         param_names: &["key", "message", "tag"],
         name: "hmac_sha256_verify",
@@ -1706,7 +1697,7 @@ const CRYPTO_FNS: &[ExtFn] = &[
         params: &[STR_OR_BYTES, STR_OR_BYTES],
         ret: Concrete(SigType::Bool),
     },
-    // Incremental hashing (C3): per-algorithm constructors, one `Hasher` type.
+    // Incremental hashing: per-algorithm constructors, one `Hasher` type.
     ExtFn {
         param_names: &[],
         name: "sha256_hasher",
@@ -1719,7 +1710,7 @@ const CRYPTO_FNS: &[ExtFn] = &[
         params: &[],
         ret: Concrete(HASHER_SIG),
     },
-    // Password hashing + crypto-grade randomness (C4) — the module's Host-entropy corner.
+    // Password hashing + crypto-grade randomness — the module's Host-entropy corner.
     ExtFn {
         param_names: &["password", "cost"],
         name: "bcrypt_hash",
@@ -1743,9 +1734,9 @@ const CRYPTO_FNS: &[ExtFn] = &[
 /// The `Hasher` signature type, named once.
 const HASHER_SIG: SigType = SigType::Named(crate::crypto::HASHER_TYPE_NAME);
 
-/// The `Hasher` instance methods (crypto C3): `update` is the mutable + host-free seam corner —
+/// The `Hasher` instance methods: `update` is the mutable + host-free seam corner —
 /// it mutates the receiver through the shared cell and never touches the Host; `digest` is a
-/// non-destructive read (interim digests keep flowing).
+/// non-destructive read, so a caller can take a digest mid-stream and keep feeding.
 const HASHER_METHODS: &[ExtFn] = &[
     ExtFn {
         param_names: &["data"],
@@ -1912,7 +1903,7 @@ fn crypto_dispatch(
     }
 }
 
-// --- `http`: an HTTP client over the Network capability (http arc H2) ----------------------------
+// --- `http`: an HTTP client over the Network capability ----------------------------
 
 /// The `Response` signature type, named once.
 use crate::serve::REQUEST_SIG;
@@ -1925,7 +1916,7 @@ const SESSION_SIG: SigType = SigType::Named(crate::session::SESSION_TYPE_NAME);
 const SESSION_DATA_SIG: SigType = SigType::Map(&Str, &Str);
 const HTTP_ERROR_SIG: SigType = SigType::Named(crate::net::HTTP_ERROR_TYPE_NAME);
 
-/// What every client verb returns (http arc H6): `Result<Response, HttpError>`.
+/// What every client verb returns: `Result<Response, HttpError>`.
 ///
 /// The split is deliberate and load-bearing. A **transport** failure — the request never produced
 /// a response — is the `Err`, so `?` on a request means exactly "the network broke". An HTTP error
@@ -1934,7 +1925,7 @@ const HTTP_ERROR_SIG: SigType = SigType::Named(crate::net::HTTP_ERROR_TYPE_NAME)
 /// `resp.error_for_status()?`.
 const RESPONSE_RESULT_SIG: SigType = SigType::Result(&RESPONSE_SIG, &HTTP_ERROR_SIG);
 
-/// The `Framing` choice a `stream` call cuts with (http-streaming arc).
+/// The `Framing` choice a `stream` call cuts with.
 const FRAMING_SIG: SigType = SigType::Named(noeta_ext_abi::stream::FRAMING_TYPE_NAME);
 /// The open incremental reader.
 const FRAME_STREAM_SIG: SigType = SigType::Named(noeta_ext_abi::stream::FRAME_STREAM_TYPE_NAME);
@@ -1949,23 +1940,23 @@ const FRAME_STREAM_RESULT_SIG: SigType = SigType::Result(&FRAME_STREAM_SIG, &HTT
 
 /// A request-headers argument type — `Map<string, string>`, named once.
 const HEADERS: SigType = SigType::Map(&SigType::String, &SigType::String);
-/// The optional trailing `headers` parameter every verb accepts (http arc H5).
+/// The optional trailing `headers` parameter every verb accepts.
 const OPT_HEADERS: SigType = SigType::Optional(&HEADERS);
-/// The optional `body` parameter of the `http.response` builder (http-server S2).
+/// The optional `body` parameter of the `http.response` builder.
 const OPT_BODY: SigType = SigType::Optional(&STR_OR_BYTES);
 
 /// The `http` surface. Bodyless verbs take a url; `post`/`put`/`query` take a `string|bytes` body;
 /// `request(method, url)` covers any other (bodyless) verb. **Every** verb accepts an optional
-/// trailing `headers: Map<string, string>` (H5, via the registry's optional-param support). All
-/// return a `Response`; the `*_async` twins return `Future<Response>` (H3) and drive a real
+/// trailing `headers: Map<string, string>` (via the registry's optional-param support). All
+/// return a `Response`; the `*_async` twins return `Future<Response>` and drive a real
 /// reqwest future on the real host. `query` is the RFC-draft HTTP QUERY method — safe, idempotent,
 /// body-carrying. Each performs the request through the Host (deterministic sandbox, real under
 /// `noeta run`). Timeouts are a deferred follow-on.
 /// The outbound-client functions of `std.http.client` — each pulls the reqwest/TLS ring. Split out
-/// of the former single `http` module (package-manager P0.3b) so a whole-module `use std.http.client`
-/// is precisely the client-ring signal, and `use std.http.server` sheds reqwest entirely.
+/// from `std.http.server` so a whole-module `use std.http.client` is precisely the client-ring
+/// signal, and `use std.http.server` sheds reqwest entirely.
 const HTTP_CLIENT_FNS: &[ExtFn] = &[
-    // The configured door (http arc H7): `client.new(base?)` mints a `Client` carrying base URL,
+    // The configured door: `client.new(base?)` mints a `Client` carrying base URL,
     // headers, auth, and a deadline. The free verbs below stay the one-shot door.
     ExtFn {
         param_names: &["base"],
@@ -2057,7 +2048,7 @@ const HTTP_CLIENT_FNS: &[ExtFn] = &[
         params: &[Str, Str, OPT_HEADERS],
         ret: Concrete(SigType::Future(&RESPONSE_RESULT_SIG)),
     },
-    // `stream(req, framing)` (http-streaming arc) — read a response body INCREMENTALLY instead of
+    // `stream(req, framing)` — read a response body INCREMENTALLY instead of
     // buffering it whole.
     //
     // It takes a prepared `Request` rather than a url, because a streaming call is always a
@@ -2075,7 +2066,7 @@ const HTTP_CLIENT_FNS: &[ExtFn] = &[
     },
 ];
 
-/// `std.session` — the signed-cookie session surface (session arc S2/S3).
+/// `std.session` — the signed-cookie session surface.
 ///
 /// Two layers in one module. `keyring`/`encode`/`decode` are the pure codec: no HTTP, so they also
 /// serve any other signed-token need (a one-click unsubscribe link, a CSRF token). `open`/`attach`
@@ -2332,7 +2323,7 @@ const HTTP_SERVER_FNS: &[ExtFn] = &[
         params: &[Int, OPT_BODY, OPT_HEADERS],
         ret: Concrete(RESPONSE_SIG),
     },
-    // The `Set-Cookie` builder (cookie arc C1). Server-side: a client sends cookies back through
+    // The `Set-Cookie` builder. Server-side: a client sends cookies back through
     // the `Cookie:` header, which `Request.cookies()` reads, so only the reply side builds one.
     ExtFn {
         param_names: &["name", "value"],
@@ -2379,7 +2370,7 @@ const HTTP_SERVER_FNS: &[ExtFn] = &[
 ];
 
 /// Read the optional `headers: Map<string, string>` argument at `index`, or an empty list if the
-/// call omitted it (http arc H5). The `http` module is `deep_marshal`, so the map arrives as a
+/// call omitted it. The `http` module is `deep_marshal`, so the map arrives as a
 /// [`NativeValue::Map`]; the checker has already typed the values as strings.
 fn want_headers(
     func: &str,
@@ -2458,7 +2449,7 @@ fn http_dispatch(
     host: &mut dyn Host,
     args: &[NativeValue],
 ) -> Result<NativeOut, StdError> {
-    // The server-side response builder (http-server S2) — constructs a value, no request/fetch.
+    // The server-side response builder — constructs a value, no request/fetch.
     if func == "response" {
         want_arity_range(func, args, 1, 3)?;
         let status = want_int(func, args, 0)?;
@@ -2479,7 +2470,7 @@ fn http_dispatch(
             },
         )));
     }
-    // The cookie constructor (cookie arc C1) — pure, and validating: an invalid name or value is
+    // The cookie constructor — pure, and validating: an invalid name or value is
     // refused here so `Cookie.to_header` is total and no reply can be split by a crafted value.
     if func == "cookie" {
         want_arity(func, args, 2)?;
@@ -2569,7 +2560,7 @@ fn http_dispatch(
                 .collect(),
         ));
     }
-    // The configured-client constructor (http arc H7) — pure, no request performed.
+    // The configured-client constructor — pure, no request performed.
     if func == "new" {
         want_arity_range(func, args, 0, 1)?;
         let base = match args.first() {
@@ -2580,7 +2571,7 @@ fn http_dispatch(
             crate::http_client::HttpClient::new(base),
         )));
     }
-    // `stream(req, framing)` (http-streaming arc) — open the body incrementally. Unlike the verbs
+    // `stream(req, framing)` — open the body incrementally. Unlike the verbs
     // below it takes a prepared request, so there is nothing to build.
     if func == "stream" {
         want_arity(func, args, 2)?;
@@ -2622,11 +2613,11 @@ fn http_dispatch(
         _ => return Err(no_function_error("http", func)),
     };
     // Sync verbs fetch through the Host now; `*_async` hand the host its async descriptor to
-    // ticket on the executor (H3).
+    // ticket on the executor.
     if func.ends_with("_async") {
         Ok(NativeOut::Spawn(SpawnBox(host.net_spawn(request))))
     } else {
-        // A transport failure is `Err(HttpError)`, never a `StdError` abort (http arc H6) — the
+        // A transport failure is `Err(HttpError)`, never a `StdError` abort — the
         // caller decides whether to `?` it, retry it, or inspect its `kind()`.
         //
         // Redirects are followed here rather than at the seam, exactly as a `Client` follows them:
@@ -2644,13 +2635,10 @@ fn http_dispatch(
 /// typo or a missing `match` arm — that guarantee is static and holds regardless of how the value
 /// is projected across the seam.
 ///
-/// One shape reaches this function, and it is the enum: [`NativeValue::Variant`]. This used to
-/// accept a bare [`NativeValue::Str`] as well, because the *deep* (JSON-shaped) projection — which
-/// `http.client` takes, since its optional `headers` argument is a `Map` — flattened every
-/// non-`Option` enum to its variant **name**, so the two projections of the same value disagreed and
-/// a reader had to know both. The deep projection now carries the real variant (see
-/// `Value::to_native_deep`), so the second shape no longer exists and the string arm is retired with
-/// it: the workaround's whole cost was the disagreement it papered over.
+/// One shape reaches this function, and it is the enum: [`NativeValue::Variant`]. The *deep*
+/// (JSON-shaped) projection `http.client` takes — its optional `headers` argument is a `Map` —
+/// carries the real variant too (see `Value::to_native_deep`), so both projections of a value agree
+/// and there is no second shape to accept.
 fn want_framing(
     func: &str,
     args: &[NativeValue],
@@ -2683,7 +2671,7 @@ fn stream_outcome(
 
 const CLIENT_SIG: SigType = SigType::Named(crate::http_client::CLIENT_TYPE_NAME);
 
-/// The `Client` instance methods (http arc H7): the immutable configuration chain, then the verbs
+/// The `Client` instance methods: the immutable configuration chain, then the verbs
 /// that spend it.
 ///
 /// Every configuration method returns a **new** `Client` (`-> Client`), the copy-modify shape
@@ -2796,7 +2784,7 @@ const CLIENT_METHODS: &[ExtFn] = &[
         params: &[REQUEST_SIG],
         ret: Concrete(RESPONSE_RESULT_SIG),
     },
-    // The streaming terminal (http-streaming arc) — `send`'s incremental twin, and the door a
+    // The streaming terminal — `send`'s incremental twin, and the door a
     // configured client needs: a streaming call in practice carries a base URL and an auth header,
     // so without this the whole `Client` configuration chain would be unreachable from `stream`.
     //
@@ -3188,7 +3176,7 @@ fn client_method_dispatch(
             );
             return Ok(crate::net::fetch_outcome(client.perform(outgoing, host)));
         }
-        // The streaming terminal (http-streaming arc) — `send`'s twin, layering the same client
+        // The streaming terminal — `send`'s twin, layering the same client
         // configuration onto a prepared request, minus the retry policy (see the signature's note:
         // re-sending discards a response the caller may already be reading).
         "stream" => {
@@ -3252,12 +3240,12 @@ fn client_method_dispatch(
             ));
         }
     };
-    // Through the client's own `perform`, which applies the retry policy (http arc H9); without a
+    // Through the client's own `perform`, which applies the retry policy; without a
     // policy it is exactly `host.net_fetch`, so a non-retrying client costs nothing extra.
     Ok(crate::net::fetch_outcome(client.perform(request, host)))
 }
 
-/// The `HttpError` instance methods (http arc H6): pure reads over the transport failure. Mirrors
+/// The `HttpError` instance methods: pure reads over the transport failure. Mirrors
 /// `JsonError` — `message`/`to_string` satisfy the `Error` + `Display` declarations on its
 /// registration, so `?` converts it through `From` and `${e}` interpolates the sentence.
 const HTTP_ERROR_METHODS: &[ExtFn] = &[
@@ -3344,7 +3332,7 @@ fn http_error_method_dispatch(
     }
 }
 
-/// The `Response` instance methods (http arc H2): all pure reads over the wrapped response.
+/// The `Response` instance methods: all pure reads over the wrapped response.
 const RESPONSE_METHODS: &[ExtFn] = &[
     ExtFn {
         param_names: &[],
@@ -3408,7 +3396,7 @@ const RESPONSE_METHODS: &[ExtFn] = &[
         params: &[COOKIE_SIG],
         ret: Concrete(RESPONSE_SIG),
     },
-    // The opt-in status-as-error door (http arc H6): `resp.error_for_status()?` turns a non-2xx
+    // The opt-in status-as-error door: `resp.error_for_status()?` turns a non-2xx
     // into the `Err` arm, for callers who want a 404 to short-circuit like a transport failure.
     // Kept explicit rather than folded into the verbs, so `?` on a request keeps one meaning.
     ExtFn {
@@ -3431,7 +3419,7 @@ const RESPONSE_METHODS: &[ExtFn] = &[
     },
 ];
 
-/// `Response`'s **call-site-typed** methods (http arc H8): `resp.json::<User>()`.
+/// `Response`'s **call-site-typed** methods: `resp.json::<User>()`.
 ///
 /// Recoverable by construction — it returns `Result<T, JsonError>`, the `json.try_parse::<T>`
 /// wrapper, because a response body is remote input: a server that changes its shape must be a
@@ -3593,7 +3581,7 @@ fn response_method_dispatch(
     }
 }
 
-/// The `Session` instance methods (session arc S3). Copy-modify like `Response` and `Cookie`, which
+/// The `Session` instance methods. Copy-modify like `Response` and `Cookie`, which
 /// is what makes `dirty` trustworthy: the flag moves exactly where a builder ran, never because an
 /// aliased handle mutated underneath.
 const SESSION_METHODS: &[ExtFn] = &[
@@ -3713,7 +3701,7 @@ fn session_method_dispatch(
     }
 }
 
-/// The `Cookie` instance methods (cookie arc C1): accessors plus copy-modify builders, the
+/// The `Cookie` instance methods: accessors plus copy-modify builders, the
 /// `Response.with_header` shape. Every builder that can be given an invalid component returns a
 /// new `Cookie` only after validating it, so an unserializable cookie is unrepresentable.
 const COOKIE_METHODS: &[ExtFn] = &[
@@ -3947,7 +3935,7 @@ fn cookie_method_dispatch(
     }
 }
 
-/// The `Request` instance methods (http-server S2): pure reads over the wrapped inbound request,
+/// The `Request` instance methods: pure reads over the wrapped inbound request,
 /// plus the `with_*` copy-modify builders a middleware layer rewrites a request through.
 const REQUEST_METHODS: &[ExtFn] = &[
     ExtFn {
@@ -4021,7 +4009,7 @@ const REQUEST_METHODS: &[ExtFn] = &[
         params: &[Str],
         ret: Concrete(REQUEST_SIG),
     },
-    // The inbound read side of cookies (cookie arc C1). Every cookie the client sent, by name.
+    // The inbound read side of cookies. Every cookie the client sent, by name.
     //
     // A `Map` rather than a `List<Cookie>` because a request cookie *is* only a name/value pair —
     // attributes are write-only, never echoed back — so a `Cookie` here would carry six fields the
@@ -4184,7 +4172,7 @@ fn env_dispatch(
             want_arity(func, args, 0)?;
             Ok(str_list(host.env_keys()))
         }
-        // `.env` support (F5). `parse` is pure; `load` reads a file through the filesystem
+        // `.env` support. `parse` is pure; `load` reads a file through the filesystem
         // capability, parses it, then overlays the ambient environment on top (real env wins).
         "parse" => {
             want_arity(func, args, 1)?;
@@ -4295,7 +4283,7 @@ fn os_dispatch(
             )))
         }
         // `spawn(command, args?)` — start a child WITHOUT waiting and hand back a controllable
-        // `Process` handle (process-handle arc), unlike `exec`'s run-to-completion. The **aborting**
+        // `Process` handle, unlike `exec`'s run-to-completion. The **aborting**
         // door of the pair; `try_spawn` below is its recoverable twin.
         "spawn" => {
             want_arity_range(func, args, 1, 2)?;
@@ -4306,7 +4294,7 @@ fn os_dispatch(
                 crate::os::Process { id },
             )))
         }
-        // `try_spawn(command, args?)` — the **recoverable** door (subprocess-doors arc), the shape
+        // `try_spawn(command, args?)` — the **recoverable** door, the shape
         // `json.parse`/`json.try_parse` sets. A tool server that is not installed is an ordinary
         // condition for a client, not a reason to take the program down, so this hands back
         // `Result<Process, OsError>` and never a `StdError` abort.
@@ -4426,7 +4414,7 @@ fn exec_result_dispatch(
     }
 }
 
-/// The `Process` instance methods (process-handle arc): lifecycle control over a spawned child,
+/// The `Process` instance methods: lifecycle control over a spawned child,
 /// each routing to the `Os` seam by the handle's id.
 const PROCESS_METHODS: &[ExtFn] = &[
     ExtFn {
@@ -4453,14 +4441,14 @@ const PROCESS_METHODS: &[ExtFn] = &[
         params: &[],
         ret: Concrete(SigType::Unit),
     },
-    // Signalling (process-signals arc): the general form of `kill` — send a named OS signal.
+    // Signalling: the general form of `kill` — send a named OS signal.
     ExtFn {
         param_names: &["name"],
         name: "signal",
         params: &[Str],
         ret: Concrete(SigType::Unit),
     },
-    // `wait_async` (process-signals arc): the awaitable twin of `wait` — yields a
+    // `wait_async`: the awaitable twin of `wait` — yields a
     // `Future<ExecResult>`. Deterministic in the sandbox; genuinely overlapping on the real host.
     ExtFn {
         param_names: &[],
@@ -4468,7 +4456,7 @@ const PROCESS_METHODS: &[ExtFn] = &[
         params: &[],
         ret: Concrete(SigType::Future(&EXEC_RESULT_SIG)),
     },
-    // Streaming (process-streaming arc): consume stdout line-by-line or by character count while
+    // Streaming: consume stdout line-by-line or by character count while
     // the child runs, read stderr, and feed / close its stdin. `wait` still returns the whole
     // captured output.
     ExtFn {
@@ -4489,7 +4477,7 @@ const PROCESS_METHODS: &[ExtFn] = &[
         params: &[],
         ret: Concrete(SigType::Option(&Str)),
     },
-    // The awaitable twins of the three reads (subprocess-async arc): each yields a `Future<?string>`
+    // The awaitable twins of the three reads: each yields a `Future<?string>`
     // an `.await` unwraps, so `race([p.read_line_async(), task.tick(500)])` is how a program bounds
     // a child read. All three, not a chosen subset — a blocking read without a twin parks the
     // isolate's whole scheduler, and the stderr side parks it exactly as the stdout side does.
@@ -4517,7 +4505,7 @@ const PROCESS_METHODS: &[ExtFn] = &[
         params: &[Str],
         ret: Concrete(SigType::Unit),
     },
-    // The recoverable write door (subprocess-doors arc) — `write`'s `json.try_parse` twin.
+    // The recoverable write door — `write`'s `json.try_parse` twin.
     ExtFn {
         param_names: &["contents"],
         name: "try_write",
@@ -4538,7 +4526,7 @@ const OPT_STR_SIG: SigType = SigType::Option(&Str);
 /// The `OsError` signature — the payload of both recoverable subprocess doors.
 const OS_ERROR_SIG: SigType = SigType::Named(crate::os::OS_ERROR_TYPE_NAME);
 
-/// The `OsError` instance methods (subprocess-doors arc): pure reads over the recoverable
+/// The `OsError` instance methods: pure reads over the recoverable
 /// subprocess failure. The `HttpError`/`JsonError` shape — `message`/`to_string` satisfy the
 /// `Error` + `Display` declarations on its registration, so `?` converts it through `From` and
 /// `${e}` interpolates the sentence.
@@ -4673,7 +4661,7 @@ fn process_method_dispatch(
             want_arity(method, args, 0)?;
             Ok(opt_str_out(host.os_proc_read_stderr_line(id)?))
         }
-        // The awaitable twins of the three reads above (subprocess-async arc). Every blocking read
+        // The awaitable twins of the three reads above. Every blocking read
         // has one, because whichever lacked it could still park the isolate's whole scheduler —
         // which is the condition that makes a bounded child read inexpressible.
         "read_line_async" => {
@@ -4702,7 +4690,7 @@ fn process_method_dispatch(
             host.os_proc_write_stdin(id, data)?;
             Ok(NativeOut::Unit)
         }
-        // The **recoverable** write door (subprocess-doors arc). A child that exited between the
+        // The **recoverable** write door. A child that exited between the
         // program's last liveness check and this write is an ordinary condition — and the race
         // cannot be closed from the language, because the child can die in the gap — so the failure
         // is a value the caller decides about.
@@ -4839,9 +4827,8 @@ fn fs_dispatch(
             };
             Ok(NativeOut::Extern(crate::ExternBox::new(handle)))
         }
-        // The async fs surface (Track A.4c/A.10, on the open seam since extern-types X5): each
-        // returns WORK (`NativeOut::Spawn`), which the backend tickets on its executor — the
-        // per-backend by-name intercepts are gone.
+        // The async fs surface: each returns WORK (`NativeOut::Spawn`), which the backend tickets
+        // on its executor.
         "read_async" => {
             want_arity(func, args, 1)?;
             let path = want_str(func, args, 0)?;
@@ -4867,7 +4854,7 @@ fn fs_dispatch(
             };
             Ok(NativeOut::Spawn(SpawnBox(Box::new(io))))
         }
-        // The async metadata twins (extern-types X6; the directory pair is A.10 residue).
+        // The async metadata twins.
         "exists_async" | "remove_async" | "is_dir_async" => {
             want_arity(func, args, 1)?;
             let path = want_str(func, args, 0)?.to_string();
@@ -5269,7 +5256,7 @@ const MATH_FNS: &[ExtFn] = &[
     },
 ];
 
-/// Documentation prose for `std.math` (docs-browser Arc 2 pilot). Sparse — a function absent here
+/// Documentation prose for `std.math`. Sparse — a function absent here
 /// renders signature-only. Keyed by name; see [`ExtModule::docs`].
 const MATH_DOCS: &[(&str, &str)] = &[
     ("pi", "The mathematical constant π ≈ 3.14159, as a `float`."),
@@ -5339,7 +5326,7 @@ const MATH_DOCS: &[(&str, &str)] = &[
     ("tanh", "The hyperbolic tangent of `x`."),
 ];
 
-/// Prose for the remaining `std.*` modules (docs-browser Arc 2 A3 backfill). Each table is keyed by
+/// Prose for the remaining `std.*` modules. Each table is keyed by
 /// function name and wired into its module below via `docs: <MODULE>_DOCS`; a function absent from
 /// its table renders signature-only. Kept next to the module tables so prose and signatures evolve
 /// together.
@@ -6053,7 +6040,7 @@ const VEC_DOCS: &[(&str, &str)] = &[
     ),
 ];
 
-// ---- Extern-type method prose (docs-browser Arc 2 A3), wired below via `docs:` on each ExtType. --
+// ---- Extern-type method prose, wired below via `docs:` on each ExtType. --
 
 const CELL_METHOD_DOCS: &[(&str, &str)] = &[
     ("get", "The current value."),
@@ -6567,7 +6554,7 @@ const ID_FNS: &[ExtFn] = &[
         ret: Concrete(Int),
     },
     // `uuid()` is v4 — the "just give me a UUID" default; `uuid_v7()` (time-ordered keys) is the
-    // explicit opt-in. Both return the first-class `Uuid` (extern-types X2), which displays in
+    // explicit opt-in. Both return the first-class `Uuid`, which displays in
     // canonical hyphenated lowercase.
     ExtFn {
         param_names: &[],
@@ -6587,7 +6574,7 @@ const ID_FNS: &[ExtFn] = &[
         params: &[Str],
         ret: Concrete(SigType::Option(&UUID_SIG)),
     },
-    // Name-based UUIDs (crypto arc C5): pure — same namespace + name = same UUID, everywhere.
+    // Name-based UUIDs: pure — same namespace + name = same UUID, everywhere.
     ExtFn {
         param_names: &["namespace", "name"],
         name: "uuid_v5",
@@ -6624,7 +6611,7 @@ const ID_FNS: &[ExtFn] = &[
 /// The `Uuid` signature type, named once (`SigType::Option` borrows a static).
 const UUID_SIG: SigType = SigType::Named(crate::id::TYPE_NAME);
 
-/// The `Uuid` instance methods (extern-types X2): all pure (`key_capable` demands it).
+/// The `Uuid` instance methods: all pure (`key_capable` demands it).
 /// `version()` reads the version nibble back; `timestamp_ms()` is `some(ms)` iff the version
 /// carries a timestamp (v7) — the Option IS the version distinction.
 const UUID_METHODS: &[ExtFn] = &[
@@ -6679,7 +6666,7 @@ fn uuid_method_dispatch(
     }
 }
 
-/// The `Map<string, string>` a `.env` parse/load yields (F5) — shared by `env.parse`/`env.load`.
+/// The `Map<string, string>` a `.env` parse/load yields — shared by `env.parse`/`env.load`.
 const STR_MAP: SigType = SigType::Map(&Str, &Str);
 
 const ENV_FNS: &[ExtFn] = &[
@@ -6695,7 +6682,7 @@ const ENV_FNS: &[ExtFn] = &[
         params: &[],
         ret: Concrete(SigType::List(&Str)),
     },
-    // `.env` support folded into the same namespace (F5): a pure parser and a file loader that
+    // `.env` support folded into the same namespace: a pure parser and a file loader that
     // applies a `.env`'s defaults under real-env-wins precedence.
     ExtFn {
         param_names: &["text"],
@@ -6729,7 +6716,7 @@ const ARGS_FNS: &[ExtFn] = &[ExtFn {
 /// The `ExecResult` signature — `os.exec`'s return (stdlib-gaps).
 const EXEC_RESULT_SIG: SigType = SigType::Named(crate::os::EXEC_RESULT_TYPE_NAME);
 
-/// The `Process` signature — `os.spawn`'s return (process-handle arc).
+/// The `Process` signature — `os.spawn`'s return.
 const PROCESS_SIG: SigType = SigType::Named(crate::os::PROCESS_TYPE_NAME);
 
 /// The `os` module (stdlib-gaps): system introspection leaves + subprocess execution + exit.
@@ -6789,7 +6776,7 @@ const OS_FNS: &[ExtFn] = &[
         params: &[Str, SigType::Optional(&SigType::List(&Str))],
         ret: Concrete(PROCESS_SIG),
     },
-    // `try_spawn(command, args?)` — the recoverable twin (subprocess-doors arc).
+    // `try_spawn(command, args?)` — the recoverable twin.
     ExtFn {
         param_names: &["command", "args"],
         name: "try_spawn",
@@ -6874,7 +6861,7 @@ const FS_FNS: &[ExtFn] = &[
         params: &[Str, Str],
         ret: Concrete(SigType::Future(&SigType::Unit)),
     },
-    // The async metadata twins (extern-types X6) — pure `FsIo` additions: no backend code
+    // The async metadata twins — pure `FsIo` additions: no backend code
     // changed to add these, which is the point of the open seam.
     ExtFn {
         param_names: &["path"],
@@ -6888,7 +6875,7 @@ const FS_FNS: &[ExtFn] = &[
         params: &[Str],
         ret: Concrete(SigType::Future(&SigType::Bool)),
     },
-    // Trailing-optional dir, like the sync `list` (package-manager N3.4).
+    // Trailing-optional dir, like the sync `list`.
     ExtFn {
         param_names: &["path"],
         name: "list_async",
@@ -6939,8 +6926,7 @@ const FS_FNS: &[ExtFn] = &[
         params: &[Str],
         ret: Concrete(SigType::Future(&SigType::Unit)),
     },
-    // `list([dir])` — the directory argument is trailing-optional (the http-arc H4 machinery,
-    // which post-dates this function's old "checker special-cases the arity" note).
+    // `list([dir])` — the directory argument is trailing-optional.
     ExtFn {
         param_names: &["path"],
         name: "list",
@@ -7193,7 +7179,7 @@ fn json_dispatch(
 /// `parse` is the **aborting** door — a decode failure is `Err(StdError)`, a runtime abort. `try_parse`
 /// is the **recoverable** door — it never uses the `Err` channel, returning the whole `Result` inside
 /// the `NativeOut` (`Ok(value)` on success, `Err(JsonError)` — a path-rich extern — on failure), so
-/// both backends materialize one tree and stay byte-identical to the former hardcoded branch.
+/// both backends materialize one tree.
 fn json_typed_dispatch(
     func: &str,
     _host: &mut dyn Host,
@@ -7220,7 +7206,7 @@ fn json_typed_dispatch(
     }
 }
 
-/// The `JsonError` instance methods (error-machinery arc): pure reads over the decode failure —
+/// The `JsonError` instance methods: pure reads over the decode failure —
 /// the `ExecResult` accessor model. `message` is `impl Error`'s required method; `to_string` is
 /// `impl Display`'s (both declared on the type's registration below), and both return the same
 /// composed message the value also displays as.
@@ -7383,7 +7369,7 @@ const CORE_MODULES: &[ExtModule] = &[
         docs: TRACING_DOCS,
         ..ExtModule::DEFAULTS
     },
-    // `log` (native OTEL Phase L) — the logs SDK facade. Emits OTel `LogRecord`s auto-correlated to
+    // `log` — the logs SDK facade. Emits OTel `LogRecord`s auto-correlated to
     // the active span, so its functions read the per-task active-span stack and are ctx functions
     // (like `tracing`). Records go host-side (recorder / OTLP `/v1/logs` exporter), never to stdout.
     ExtModule {
@@ -7393,7 +7379,7 @@ const CORE_MODULES: &[ExtModule] = &[
         docs: LOG_DOCS,
         ..ExtModule::DEFAULTS
     },
-    // `metrics` (native OTEL Phase M) — the metrics SDK facade. Instrument constructors are
+    // `metrics` — the metrics SDK facade. Instrument constructors are
     // get-or-create over host-owned aggregation, so they are ctx functions; the `Counter`/`Histogram`/
     // `Gauge` handle methods are plain (host-only). Aggregation + export live host-side.
     ExtModule {
@@ -7403,13 +7389,13 @@ const CORE_MODULES: &[ExtModule] = &[
         docs: METRICS_DOCS,
         ..ExtModule::DEFAULTS
     },
-    // `io` (CLI-completion slice 1) — the program's stdout/stderr streams. `out`/`outln` write to
+    // `io` — the program's stdout/stderr streams. `out`/`outln` write to
     // the same stdout buffer the `echo` keyword uses; `err`/`errln` write to stderr. Both are
     // *observable output* routed through the backends' buffers (via the `NativeCtx` write seam), so
     // they are ctx functions and the differential oracle holds them byte-identical across backends.
     // The `io` module carries BOTH dispatch tables: the ctx `out`/`outln`/`err`/`errln` reach the
-    // backends' output buffers, while the host-backed `stdin_*`/`is_tty`/`prompt` (CLI-completion
-    // slice 2) are plain `Console`-capability effects (sandbox fixture / real stdin). The two name
+    // backends' output buffers, while the host-backed `stdin_*`/`is_tty`/`prompt` are plain
+    // `Console`-capability effects (sandbox fixture / real stdin). The two name
     // sets are disjoint (assembly enforces it), and the backends resolve plain `functions` before
     // `ctx_functions`, so each call reaches the table that declares it.
     ExtModule {
@@ -7460,7 +7446,7 @@ const CORE_MODULES: &[ExtModule] = &[
         typed_dispatch: Some(json_typed_dispatch),
         ..ExtModule::DEFAULTS
     },
-    // The `task` concurrency module (higher-order-abi H0/H2): its functions need the executor,
+    // The `task` concurrency module: its functions need the executor,
     // so they live in the **ctx** table and dispatch through the `NativeCtx` seam.
     ExtModule {
         name: "task",
@@ -7469,7 +7455,7 @@ const CORE_MODULES: &[ExtModule] = &[
         docs: TASK_DOCS,
         ..ExtModule::DEFAULTS
     },
-    // `cell` (higher-order-abi H4) — the Class-3 proving module: `cell.new(v)` retains the value
+    // `cell` — the Class-3 proving module: `cell.new(v)` retains the value
     // in the per-run arena and hands back a `Cell<T>` extern handle.
     ExtModule {
         name: "cell",
@@ -7478,7 +7464,7 @@ const CORE_MODULES: &[ExtModule] = &[
         docs: CELL_DOCS,
         ..ExtModule::DEFAULTS
     },
-    // `reactive` (higher-order-abi H5) — the last virtual module, now fully registry-backed:
+    // `reactive` — registry-backed like every other module:
     // creation retains the value/body into the arena and hands back a generic extern handle.
     ExtModule {
         name: "reactive",
@@ -7489,7 +7475,7 @@ const CORE_MODULES: &[ExtModule] = &[
         docs: REACTIVE_DOCS,
         ..ExtModule::DEFAULTS
     },
-    // `template` (expr-tiers arc) — the native handler for the `@json` expression tier: takes the
+    // `template` — the native handler for the `@json` expression tier: takes the
     // block's statics and hole closures, returns the rendered string. The dogfood proving a native
     // package can ship an expression tier with a native handler.
     ExtModule {
@@ -7503,7 +7489,7 @@ const CORE_MODULES: &[ExtModule] = &[
     },
 ];
 
-/// [`IdExtension`]'s module — sequential ids + UUIDs (id-entropy U2).
+/// [`IdExtension`]'s module — sequential ids + UUIDs.
 const ID_MODULES: &[ExtModule] = &[ExtModule {
     name: "id",
     functions: ID_FNS,
@@ -7513,7 +7499,7 @@ const ID_MODULES: &[ExtModule] = &[ExtModule {
     ..ExtModule::DEFAULTS
 }];
 
-/// [`CryptoExtension`]'s module — digests / HMAC / bcrypt (crypto arc).
+/// [`CryptoExtension`]'s module — digests / HMAC / bcrypt.
 const CRYPTO_MODULES: &[ExtModule] = &[ExtModule {
     name: "crypto",
     functions: CRYPTO_FNS,
@@ -7600,14 +7586,12 @@ const VEC_MODULES: &[ExtModule] = &[
         functions: VEC_FNS,
         dispatch: vec_dispatch,
         deep_marshal: false,
-        // The bulk `*_all` kernels (package-manager N3.4): they read/produce packed buffers
-        // through the raw-buffer ctx seam, so they live in the ctx table — the LAST per-backend
-        // intercepts, migrated.
+        // The bulk `*_all` kernels: they read/produce packed buffers
+        // through the raw-buffer ctx seam, so they live in the ctx table.
         ctx_functions: crate::vec3::VEC_CTX_FNS,
         ctx_dispatch: Some(crate::vec3::vec_ctx_dispatch),
-        // The same kernels as opt-in METHODS (`impl vec.Kernels for T {}`). Since the ExtBundle→ExtTrait
-        // fold-in (slice 4) they are native `ExtTrait`s — [`VEC_TRAITS`], registered through
-        // `VecExtension::traits()` — not a module `bundles` field. The TWO unified traits generic over
+        // The same kernels as opt-in METHODS (`impl vec.Kernels for T {}`). They are native
+        // `ExtTrait`s — [`VEC_TRAITS`], registered through `VecExtension::traits()`. The TWO unified traits generic over
         // the element type: `vec.Kernels` (default arithmetic, every numeric width incl. f64) and
         // `vec.SatKernels` (saturating, integer/`Color`); one generic kernel body per op serves every width.
         docs: VEC_DOCS,
@@ -7652,17 +7636,16 @@ pub fn static_dispatch_ctx<C: crate::NativeCtx + ?Sized>(
 
 /// Whether `module` names a compiled-in ctx fast route ([`static_dispatch_ctx`]) — split out so
 /// the route keys are testable against the exact identity the compiler emits. Module identities
-/// are **root-qualified** end to end since the namespaced-types arc (`use std.cell` compiles to
-/// the constant `"std.cell"`), which is what this matches; the bare spellings are kept for any
-/// pre-qualification caller. This predicate rotted silently once before: the match keyed on the
-/// bare names after identities became qualified, so the monomorphized H5 route never fired and
-/// everything fell through to the dyn table with no behavioral difference to notice.
+/// are **root-qualified** end to end (`use std.cell` compiles to the constant `"std.cell"`), which
+/// is what this matches; the bare spellings are kept for any unqualified caller. A mismatch here is
+/// silent — the monomorphized route simply never fires and everything falls through to the dyn
+/// table with no behavioral difference to notice — so the route keys are pinned by a test.
 #[inline]
 pub fn has_static_ctx_route(module: &str) -> bool {
     matches!(module, "std.cell" | "std.reactive" | "cell" | "reactive")
 }
 
-/// Compiled-in fast route for ctx **type methods** (H5 perf) — the type-method twin of
+/// Compiled-in fast route for ctx **type methods** — the type-method twin of
 /// [`static_dispatch_ctx`].
 #[inline]
 pub fn static_dispatch_ctx_method<C: crate::NativeCtx + ?Sized>(
@@ -8154,7 +8137,7 @@ mod tests {
         assert_ne!(a, b);
         let mut fresh = host();
         assert_eq!(dispatch("id", "uuid", &mut fresh, &[]), Ok(a));
-        // v7: an extern `Uuid` value (extern-types X2) — version nibble 7, the sandbox epoch in
+        // v7: an extern `Uuid` value — version nibble 7, the sandbox epoch in
         // the leading 48 bits.
         let Ok(NativeOut::Extern(v7)) = dispatch("id", "uuid_v7", &mut h, &[]) else {
             panic!("uuid_v7 should produce a Uuid");
@@ -8163,7 +8146,7 @@ mod tests {
         assert_eq!(&v7[14..15], "7");
         let ms = u64::from_str_radix(&v7[..13].replace('-', ""), 16).unwrap();
         assert_eq!(ms, crate::host::SANDBOX_EPOCH_MS);
-        // `id` is an ordinary registry module (the virtual table itself died at H5).
+        // `id` is an ordinary registry module.
         assert!(find_function("id", "uuid_v7").is_some());
         // The `Uuid` extern type is registered with its method table, and `parse` round-trips
         // (`none` on malformed input).
@@ -8249,7 +8232,7 @@ mod tests {
             Some(SameAsArg(0))
         ));
         assert!(find_function("vec", "add_all").is_none());
-        // `json` is registered (B4): dynamic `parse` + `stringify` dispatch through the registry.
+        // `json` is registered: dynamic `parse` + `stringify` dispatch through the registry.
         assert!(matches!(
             find_function("json", "parse").map(|f| f.ret),
             Some(Concrete(SigType::Dyn))

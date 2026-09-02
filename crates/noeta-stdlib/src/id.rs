@@ -1,4 +1,4 @@
-//! The first-class `Uuid` extern type and its constructors (id-entropy U2 → extern-types X2).
+//! The first-class `Uuid` extern type and its constructors.
 //!
 //! Construction is pure functions from raw bits/time to a [`Uuid`] — the host supplies the
 //! inputs ([`crate::host::Entropy`] for random bits, [`crate::host::Clock::clock_unix_ms`] for
@@ -66,8 +66,7 @@ pub fn v4(hi: u64, lo: u64) -> Uuid {
 pub fn v7(unix_ms: u64, ra: u64, rb: u64) -> Uuid {
     // rand_a's 12 low bits land in counter bytes 0-1 (the version nibble overwrites byte 0's
     // high half); rand_b's 64 bits land in bytes 2-9 (the variant bits overwrite the top two,
-    // leaving 62). Identical bit placement to the id-entropy arc's hand-rolled layout — the
-    // exact-value conformance pins (`std/id_uuid.noe`) hold across the swap.
+    // leaving 62). The exact-value conformance pins (`std/id_uuid.noe`) hold this placement.
     let mut tail = [0u8; 10];
     tail[0] = (ra >> 8) as u8;
     tail[1] = ra as u8;
@@ -78,7 +77,7 @@ pub fn v7(unix_ms: u64, ra: u64, rb: u64) -> Uuid {
 /// A v5 (name-based, RFC 9562 §5.5) UUID — pure, no Host input: the SHA-1 of the namespace's
 /// bytes followed by the name, with the version nibble (`5`) and variant bits overwriting their
 /// fixed positions. Same namespace + same name = same UUID, everywhere, forever — the point.
-/// The digest comes from our own `sha1` dep (crypto arc C5) rather than the uuid crate's `v5`
+/// The digest comes from our own `sha1` dep rather than the uuid crate's `v5`
 /// feature, which would drag in a second SHA-1 implementation (`sha1_smol`).
 pub fn v5(ns: &Uuid, name: &str) -> Uuid {
     let mut input = Vec::with_capacity(16 + name.len());
@@ -155,8 +154,8 @@ mod tests {
 
     #[test]
     fn v4_is_canonical_with_version_and_variant_pinned() {
-        // The exact values the id-entropy arc's hand-rolled builder produced — the crate swap
-        // is bit-identical (the sandbox conformance pins depend on it).
+        // The exact canonical rendering, pinned bit for bit (the sandbox conformance pins
+        // depend on it).
         let uuid = v4(0xFFFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFF);
         assert_eq!(uuid.to_string(), "ffffffff-ffff-4fff-bfff-ffffffffffff");
         let uuid = v4(0, 0);
