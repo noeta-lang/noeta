@@ -2,7 +2,7 @@
 //! hermetic startup cache, temp program/directory scaffolding, the lean-runner/C-toolchain probes,
 //! and the git helpers the package-manager and namespace-protection tests drive real repos with.
 //!
-//! One test binary, many modules (audit-4 F12): each `mod` in `main.rs` glob-imports this, so the
+//! One test binary, many modules: each `mod` in `main.rs` glob-imports this, so the
 //! former single-file test suite keeps its flat helper vocabulary without one 6,000-line namespace.
 
 pub use std::path::PathBuf;
@@ -30,7 +30,7 @@ pub fn temp_root() -> PathBuf {
 
 /// Write a one-off program into its own private temp *directory* and return its path. The
 /// directory isolation matters: `lang run` resolves sibling `.noe` modules from the entry's
-/// directory (M1.9), so a bare temp file dropped into a shared temp root would make the loader
+/// directory, so a bare temp file dropped into a shared temp root would make the loader
 /// scan — and parse — every other test's (or stray) `.noe` file as a candidate module. A dedicated
 /// directory guarantees the entry is the only module in scope.
 pub fn temp_program(name: &str, src: &str) -> PathBuf {

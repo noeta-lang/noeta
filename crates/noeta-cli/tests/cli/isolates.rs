@@ -101,7 +101,7 @@ fn run_real_isolates_fan_out_and_join() {
 
 #[test]
 fn run_real_isolate_borrowed_arg_mutation_is_isolated() {
-    // P-PAR S2: a promotable data argument is borrow-shared (promoted once into the parent's
+    // A promotable data argument is borrow-shared (promoted once into the parent's
     // SharedRegion), not copied per worker. The worker "mutating" its parameter must therefore
     // hit the COW slow path — `is_uniquely_owned` is false on a shared object — and copy, never
     // touching the parent's graph. Worker sees 4 elements after its append; parent still 3.
@@ -132,7 +132,7 @@ fn run_real_isolate_borrowed_arg_mutation_is_isolated() {
 
 #[test]
 fn run_real_isolate_borrowed_arg_round_trips_as_result() {
-    // P-PAR S2: the worker returns (part of) the borrowed graph itself; the result marshal walks
+    // The worker returns (part of) the borrowed graph itself; the result marshal walks
     // the shared objects read-only and ships an owned copy home. Also fans the same corpus to two
     // workers, exercising the promote-once memo path.
     let file = temp_program(

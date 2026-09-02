@@ -1,4 +1,4 @@
-//! The **packed-list machinery** (P-PACK): flat `List<packed>` values storing raw primitive
+//! The **packed-list machinery**: flat `List<packed>` values storing raw primitive
 //! bytes interpreted through a `&'static PackedSchema` — pack/unpack, in-place mutation, the
 //! columnar (SoA) codec, and the byte-level free helpers. `impl Value` methods moved verbatim
 //! from the crate root (audit-1 finding 8) — same crate, so private access is preserved; no
@@ -10,8 +10,8 @@ use noeta_object::{PackedKind, PackedSchema};
 use crate::Value;
 use crate::heap::{self, Payload};
 
-/// Map a bare-scalar element's [`PackedKind`] to its reflected [`TypeRepr`] (packed-widths bare-scalar
-/// arc) — the element type a scalar packed list reflects. Only the sub-8-byte numerics ever reach here
+/// Map a bare-scalar element's [`PackedKind`] to its reflected [`TypeRepr`] — the element type a
+/// scalar packed list reflects. Only the sub-8-byte numerics ever reach here
 /// (`IntN`/`F32`); the other arms are defensive and mirror the width-erased scalar each stores.
 fn packed_kind_to_repr(kind: &PackedKind) -> TypeRepr {
     match kind {
@@ -72,7 +72,7 @@ impl Value {
                             .map(|f| out.extend_from_slice(&f.to_bits().to_le_bytes()))
                             .is_some(),
                         // `f64`/`iN`/`uN` fields carry width-erased scalars at runtime (a
-                        // `float`/`int`); only the buffer slot is narrowed (packed-widths arc).
+                        // `float`/`int`); only the buffer slot is narrowed.
                         PackedKind::F64 => slot
                             .as_float()
                             .map(|f| out.extend_from_slice(&f.to_bits().to_le_bytes()))
@@ -148,7 +148,7 @@ impl Value {
                 let stride = schema.byte_size;
                 // Gather the element into row order first (a plain byte copy, no allocation), so the
                 // materialization below is layout-agnostic. Row-major is a contiguous stride; column-
-                // major scatters the element across its columns (P-SIMD C2).
+                // major scatters the element across its columns.
                 let elem = if schema.column {
                     let count = schema.count(bytes.len());
                     gather_row(schema, bytes, index, count)
@@ -179,7 +179,7 @@ impl Value {
                 // A bare-scalar element has no named fields (`shape == None`), so a field read never
                 // resolves — the checker only fuses `list[i].field` on a struct element anyway.
                 let slot = schema.shape?.slot_of(field)?;
-                // The field's byte offset resolves through the layout axis (row vs column, P-SIMD C2).
+                // The field's byte offset resolves through the layout axis (row vs column).
                 let at = schema.field_offset(index, slot, count);
                 let width = schema.fields[slot].byte_width();
                 Some((schema.fields[slot].clone(), bytes[at..at + width].to_vec()))
@@ -219,8 +219,7 @@ impl Value {
     }
 
     /// Borrow this packed list's schema and raw byte buffer for the duration of `f` — the
-    /// zero-copy read under the native raw-buffer seam (`NativeCtx::with_packed`, package-manager
-    /// N3.4; superseding the vec3-specific cloning accessors the bulk `vec` intercepts used).
+    /// zero-copy read under the native raw-buffer seam (`NativeCtx::with_packed`).
     /// `None` (without running `f`) for anything that is not a packed list.
     pub fn with_packed_ref<R>(
         self,
@@ -360,7 +359,7 @@ impl Value {
             } => std::ptr::eq(schema, *s2).then(|| b2.clone()),
             _ => None,
         })?;
-        // Same shape ⇒ same layout. Row appends the buffers; column interleaves per column (P-SIMD C2).
+        // Same shape ⇒ same layout. Row appends the buffers; column interleaves per column.
         if schema.column {
             buf = column_concat(schema, &buf, &other_bytes);
         } else {
@@ -429,7 +428,7 @@ impl Value {
 }
 
 /// Render a float deterministically: whole-valued floats keep a trailing `.0` so they are
-/// visibly distinct from ints (mirrors the M0 tree-walker exactly).
+/// visibly distinct from ints (mirrors the tree-walker exactly).
 /// Materialize one packed element from `words` starting at `offset`, returning the owned
 /// `Value::Object` (refcount 1) and the offset just past it — so nested structs and the caller
 /// advance in lock-step with [`Value::pack_element`]. Each primitive becomes an immediate (or a
@@ -446,7 +445,7 @@ fn read_u32(bytes: &[u8], offset: usize) -> u32 {
 }
 
 /// Read a fixed-width integer slot (`bits/8` little-endian bytes at `offset`) back into the runtime's
-/// 8-byte `int` (packed-widths arc). A **signed** slot sign-extends its top bit (a stored `-1i8`
+/// 8-byte `int`. A **signed** slot sign-extends its top bit (a stored `-1i8`
 /// reads back `-1`); an **unsigned** slot zero-extends (`255u8` reads back `255`).
 fn read_intn(bytes: &[u8], offset: usize, bits: u8, signed: bool) -> i64 {
     let n = (bits as usize) / 8;
@@ -463,7 +462,7 @@ fn read_intn(bytes: &[u8], offset: usize, bits: u8, signed: bool) -> i64 {
     raw as i64
 }
 
-/// Append a fixed-width integer's low `bits/8` little-endian bytes to `out` (packed-widths arc).
+/// Append a fixed-width integer's low `bits/8` little-endian bytes to `out`.
 fn write_intn(out: &mut Vec<u8>, value: i64, bits: u8) {
     let n = (bits as usize) / 8;
     let raw = value as u64;
@@ -473,7 +472,7 @@ fn write_intn(out: &mut Vec<u8>, value: i64, bits: u8) {
 }
 
 /// Pack one bare-scalar list element (`self`) — a bare `int`/`f32`, not an object — onto the end of
-/// `out` per its single `kind` (packed-widths bare-scalar arc). The inverse of [`decode_packed_field`].
+/// `out` per its single `kind`. The inverse of [`decode_packed_field`].
 /// Returns `false` (leaving `out` untouched of a partial write is the caller's staging concern) if the
 /// value's runtime kind disagrees with the slot, so the caller can demote to a boxed list. A scalar
 /// element is only ever a fixed-width numeric (`IntN`/`F32`) or, defensively, one of the other
@@ -570,7 +569,7 @@ fn unpack_element(schema: &PackedSchema, bytes: &[u8], offset: usize) -> (Value,
 }
 
 /// Gather element `index`'s fields (a buffer of `count` elements) into a fresh **row-order** byte
-/// vector (fields contiguous, slot order) — the inverse of the column scatter (P-SIMD C2). For a
+/// vector (fields contiguous, slot order) — the inverse of the column scatter. For a
 /// row-major buffer this simply copies the element's contiguous stride; for a column-major one it
 /// pulls each field from its column. The row-order result feeds [`unpack_element`], so materializing
 /// an element is layout-agnostic once gathered. Pure byte copies — no `Value` allocation, so it is
@@ -585,7 +584,7 @@ fn gather_row(schema: &PackedSchema, bytes: &[u8], index: usize, count: usize) -
 }
 
 /// Append one packed `row` (`byte_size` bytes, slot order) to a column-major buffer, rebuilding it so
-/// each field's column gains the new element at its end (P-SIMD C2). O(n) — column layout trades
+/// each field's column gains the new element at its end. O(n) — column layout trades
 /// cheap append for fast bulk field math.
 fn column_append(schema: &PackedSchema, buf: &[u8], row: &[u8]) -> Vec<u8> {
     let n = schema.count(buf.len());
@@ -602,7 +601,7 @@ fn column_append(schema: &PackedSchema, buf: &[u8], row: &[u8]) -> Vec<u8> {
 }
 
 /// Build a new column-major buffer holding the selected `indices` of a column-major buffer of `count`
-/// elements (P-SIMD C2) — each field's column is the gather of that field across the selected
+/// elements — each field's column is the gather of that field across the selected
 /// elements. Mirrors [`Value::packed_select`]'s row-block copy for the column layout.
 fn column_select(schema: &PackedSchema, buf: &[u8], indices: &[usize], count: usize) -> Vec<u8> {
     let m = indices.len();
@@ -619,7 +618,7 @@ fn column_select(schema: &PackedSchema, buf: &[u8], indices: &[usize], count: us
 }
 
 /// Overwrite element `index`'s fields in a column-major buffer of `count` elements with one packed
-/// `row` (slot order), writing each field into its column (P-SIMD C2).
+/// `row` (slot order), writing each field into its column.
 fn column_set(schema: &PackedSchema, buf: &mut [u8], index: usize, count: usize, row: &[u8]) {
     let mut row_at = 0;
     for (slot, kind) in schema.fields.iter().enumerate() {
@@ -630,7 +629,7 @@ fn column_set(schema: &PackedSchema, buf: &mut [u8], index: usize, count: usize,
     }
 }
 
-/// Concatenate two column-major buffers of the same schema into a new one (P-SIMD C2): each field's
+/// Concatenate two column-major buffers of the same schema into a new one: each field's
 /// output column is `a`'s column followed by `b`'s. Mirrors the row path's buffer append.
 fn column_concat(schema: &PackedSchema, a: &[u8], b: &[u8]) -> Vec<u8> {
     let na = schema.count(a.len());

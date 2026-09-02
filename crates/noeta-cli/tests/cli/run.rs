@@ -119,7 +119,7 @@ fn run_help_and_flag_errors_are_untouched_by_the_fast_path() {
 
 #[test]
 fn run_real_host_uuids_are_real() {
-    // Under `noeta run` (the real host, id-entropy U3) `id.uuid()` draws OS entropy and
+    // Under `noeta run` (the real host) `id.uuid()` draws OS entropy and
     // `id.uuid_v7()` real wall time — unlike the sandbox's pinned values (`std/id_uuid.noe`),
     // here we assert the *shape*: canonical form, correct version/variant, distinct v4s, and
     // non-decreasing v7 timestamps.
@@ -244,7 +244,7 @@ fn cache_info_path_and_clear() {
 
 #[test]
 fn startup_cache_is_semantically_invisible() {
-    // The transparent startup cache (M3) must be *semantically invisible*: a warm run (cache hit —
+    // The transparent startup cache must be *semantically invisible*: a warm run (cache hit —
     // decode a stored module and run it) produces byte-identical stdout, stderr, and exit code to an
     // uncached run (compile from source). Each program is observed three ways and all must agree:
     //   - baseline: NOETA_NO_CACHE (never touches the cache),
@@ -368,7 +368,7 @@ fn run_without_passthrough_reports_only_the_program_name() {
         .stdout(format!("{}\n", file.display()));
 }
 
-// --- M2.3: `lang run` uses the real host (real env/args + real-disk IO) ------------
+// --- `lang run` uses the real host (real env/args + real-disk IO) ------------------
 
 #[test]
 fn run_reads_the_real_environment() {
@@ -457,7 +457,7 @@ fn run_os_spawn_controls_a_real_child_process() {
 
 #[test]
 fn run_os_proc_signal_and_wait_async_over_a_real_child() {
-    // `signal` sends a real OS signal (process-signals arc): SIGTERM to a `sleep` terminates it, so
+    // `signal` sends a real OS signal: SIGTERM to a `sleep` terminates it, so
     // `wait` reports a non-success status. `wait_async` awaits a real child's exit on the blocking
     // pool and yields its captured output. Proves the real-host `kill(2)` + async-wait paths, not
     // the sandbox script.
@@ -595,7 +595,7 @@ fn run_reads_files_asynchronously_on_the_real_executor() {
 
 #[test]
 fn run_async_metadata_twins_on_the_real_executor() {
-    // Extern-types X6: `fs.exists_async`/`remove_async`/`list_async` have NO real body — the
+    // `fs.exists_async`/`remove_async`/`list_async` have NO real body — the
     // real executor's None fallback runs their sync body against the RealHost at spawn. This
     // exercises that degradation path end-to-end on real disk.
     let dir = temp_root().join("noeta_cli_async_meta_dir");
@@ -626,7 +626,7 @@ fn run_async_metadata_twins_on_the_real_executor() {
 #[test]
 #[ignore = "hits the real network; run explicitly"]
 fn run_http_get_over_the_real_network() {
-    // http arc H2/H3 on the real host: `http.get` (sync) and `http.get_async(...).await`
+    // On the real host `http.get` (sync) and `http.get_async(...).await`
     // (RealBody::Async on the executor's runtime) both reach a live endpoint. `#[ignore]` so CI
     // stays hermetic — run explicitly when online.
     let src = "use std.{http}\n\
@@ -646,7 +646,7 @@ fn run_http_get_over_the_real_network() {
 
 #[test]
 fn run_bcrypt_round_trips_on_real_entropy() {
-    // Crypto arc C4: on the RealHost the bcrypt salt comes from OS entropy, so the hash string
+    // On the RealHost the bcrypt salt comes from OS entropy, so the hash string
     // is unpredictable — but it must verify against the password that made it (and not against
     // another), and carry the requested cost in its self-describing prefix.
     let src = "use std.{crypto}\n\
@@ -765,7 +765,7 @@ fn run_orders_example_produces_the_headline_output() {
         );
 }
 
-// --- `run --tier` (object-model slice 6: `@debug` inline-code activation) -----------
+// --- `run --tier` (`@debug` inline-code activation) --------------------------------
 
 const DEBUG_PROGRAM: &str = "fn f(x: int): void {\n\
          @debug { echo \"debug: x is ${x}\"; }\n\
@@ -895,7 +895,7 @@ fn a_repl_panic_prints_a_stack_trace_and_the_session_continues() {
 
 // --- `run --jit-stats` ------------------------------------------------------------
 
-/// `--jit-stats` (P-JIT S0): the report renders to stderr after the program's own output. The
+/// `--jit-stats`: the report renders to stderr after the program's own output. The
 /// declined-loop section is deterministic — a loop carrying a non-native op is declined OSR
 /// synchronously at its 50th back-edge (`worth_osr` says no), so a 200-iteration loop reliably
 /// lists the blocking ops with their source lines, regardless of off-thread compile timing.

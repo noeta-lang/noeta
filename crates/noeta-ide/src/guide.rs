@@ -1,4 +1,4 @@
-//! The embedded language-guide corpus (docs-browser arc, slice **2**) and the lexical retrieval
+//! The embedded language-guide corpus and the lexical retrieval
 //! over it — the one canonical loader for the `docs/*.md` wiki.
 //!
 //! An installed `noeta` binary has no repo beside it, so the guides are baked in at compile time

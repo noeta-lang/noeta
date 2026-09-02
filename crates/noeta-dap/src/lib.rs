@@ -1,10 +1,10 @@
 //! `noeta dap` — the Debug Adapter Protocol server.
 //!
 //! A stdio adapter, sibling to `noeta lsp`, that lets an editor's debug UI run a `.noe` program under
-//! the *production* bytecode VM (JIT unarmed, so every frame is tier-0 and inspectable). This slice
-//! adds **breakpoints** and **stop-on-entry** on top of the D0 skeleton: the program compiles with
-//! debug info, a [`debugger::DapDebugger`] is attached to the run, and it pauses at resolved
-//! breakpoints (emitting `stopped`) until the client sends `continue`.
+//! the *production* bytecode VM (JIT unarmed, so every frame is tier-0 and inspectable). The
+//! program compiles with debug info, a [`debugger::DapDebugger`] is attached to the run, and it
+//! pauses at **breakpoints** and **stop-on-entry** (emitting `stopped`) until the client sends
+//! `continue`.
 //!
 //! ## Threading
 //!
@@ -211,7 +211,7 @@ fn serve<R: BufRead, W: Write + Send + 'static>(mut reader: R, out: W) {
                     let _ = tx.send(error_response(&request, &message));
                 }
             },
-            // Edit a paused frame's local from the Variables panel (U1): the value string
+            // Edit a paused frame's local from the Variables panel: the value string
             // evaluates as a console fragment, and the frame's register is written in place.
             "setVariable" => match set_variable(&request, &paused, resume_tx.as_ref()) {
                 Ok(body) => {
@@ -279,7 +279,7 @@ fn spawn_run(
                     &breakpoints,
                 );
                 let stops = compile_resolved_breakpoints(resolved);
-                // The launch's session checker moves into the debugger (C3): console fragments
+                // The launch's session checker moves into the debugger: console fragments
                 // check on this worker, against everything the program declared and bound.
                 let checker = std::mem::take(&mut compiled.checker);
                 let hook = Box::new(DapDebugger::new(
@@ -335,9 +335,9 @@ fn capabilities() -> Value {
     json!({
         "supportsConfigurationDoneRequest": true,
         // The editor may evaluate a hovered expression (VS Code's debug hover). We answer read-only
-        // variable paths (D5); hover is path-only by design (a hover must never run user code).
+        // variable paths; hover is path-only by design (a hover must never run user code).
         "supportsEvaluateForHovers": true,
-        // The Variables-panel edit (U1): a local's value can be replaced while paused; the new
+        // The Variables-panel edit: a local's value can be replaced while paused; the new
         // value is any console-evaluable expression (frame locals visible).
         "supportsSetVariable": true,
         // Conditional / hit-count breakpoints: a breakpoint may carry a `condition` (evaluated in
@@ -580,7 +580,7 @@ fn variables_body(request: &Value, paused: &Option<Paused>) -> Value {
 /// the selected frame **on the run worker** (where the values live and, for a call, the VM can run
 /// code) and return its rendered value + type. Names, `.field`, `[index]`, operators, literals, and
 /// **calls** (`xs.len()`, `f(x)`, `p.mag()`) are all supported — a call runs the same function/method
-/// a real call would (D5.2). A **hover** (`context: "hover"`) stays side-effect-free: it evaluates
+/// a real call would. A **hover** (`context: "hover"`) stays side-effect-free: it evaluates
 /// paths and operators but refuses a call, so hovering never runs code.
 ///
 /// Returns `Err` (→ a DAP error response) when the program isn't paused, the frame is gone, the name
@@ -641,7 +641,7 @@ fn evaluate(
     }
 }
 
-/// Answer a DAP `setVariable` request while paused (U1): the `variablesReference` names the frame
+/// Answer a DAP `setVariable` request while paused: the `variablesReference` names the frame
 /// (`frame + 1`, as `scopes` handed it out), `name` the local, and `value` an expression evaluated
 /// as a console fragment (frame locals visible) whose result replaces the local's register. Returns
 /// the new value rendered, exactly as the Variables panel expects; `Err` when the program isn't
@@ -1251,7 +1251,7 @@ mod tests {
         session.disconnect_and_join();
     }
 
-    /// U2 (tooling-unification): a console `mut` binding persists across console entries — it is a
+    /// A console `mut` binding persists across console entries — it is a
     /// SESSION global, not a closure-local — and a name colliding with a frame local is refused.
     #[test]
     fn console_mut_bindings_persist_across_entries() {
@@ -1451,7 +1451,7 @@ mod tests {
         session.disconnect_and_join();
     }
 
-    /// C3 (session-checker): a console fragment type-checks against the program's session BEFORE
+    /// A console fragment type-checks against the program's session BEFORE
     /// it runs — an ill-typed fragment answers with its `E0xxx` diagnostics and the VM never sees
     /// it; clean fragments (and the session) are unaffected.
     #[test]
@@ -1512,7 +1512,7 @@ mod tests {
         session.disconnect_and_join();
     }
 
-    /// U1 (tooling-unification): `setVariable` writes a paused frame's local — the response carries
+    /// `setVariable` writes a paused frame's local — the response carries
     /// the new value, a `variables` re-read shows it (the snapshot refreshes), and the RESUMED
     /// program actually uses the written register.
     #[test]
@@ -1646,7 +1646,7 @@ mod tests {
         // A computed index works (it is itself an expression).
         assert_eq!(session.evaluate("xs[p.x - 3]")["body"]["result"], "10");
 
-        // A built-in method call runs (D5.2) — `xs.len()` dispatches through the real call machinery.
+        // A built-in method call runs — `xs.len()` dispatches through the real call machinery.
         let call = session.evaluate("xs.len()");
         assert_eq!(call["success"], true, "{call:#?}");
         assert_eq!(call["body"]["result"], "3");
@@ -1727,7 +1727,7 @@ mod tests {
         session.disconnect_and_join();
     }
 
-    /// T5 (tooling-unification): the debug console is a REPL over the paused program — fragments
+    /// The debug console is a REPL over the paused program — fragments
     /// compile through the adopted session, so **closures** work, statements execute, and a value
     /// that ESCAPES into program state (a fragment closure rebound into a program global) is still
     /// live after `continue`, called by the program's own resumed code.
@@ -1771,7 +1771,7 @@ mod tests {
             "[20, 40, 60]"
         );
         // Statements execute; a trailing bare expression is the fragment's value. The `mut` local
-        // lives only inside the fragment (persistent console bindings are a deferred follow-on).
+        // lives only inside the fragment.
         assert_eq!(
             session.evaluate("mut y = xs.len() * 10; y + 1")["body"]["result"],
             "31"
@@ -1806,7 +1806,7 @@ mod tests {
         session.disconnect_and_join();
     }
 
-    /// T6 (tooling-unification): hover purity has two layers — the AST gate (a call is refused
+    /// Hover purity has two layers — the AST gate (a call is refused
     /// before compiling) and the RUNTIME backstop for receiver-dependent dispatches the AST cannot
     /// decide: `b[0]` on a value whose type has an `Index` impl would push a `get` frame, refused
     /// under hover but allowed in a watch. One evaluator serves both, gated.

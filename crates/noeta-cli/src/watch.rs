@@ -1,4 +1,4 @@
-//! `--watch` — the restart-on-change dev loop (server-hmr W0).
+//! `--watch` — the restart-on-change dev loop.
 //!
 //! Watch mode wraps the *whole invocation*: `noeta run --watch app.noe` (equally `serve`, `test`,
 //! or any other subcommand) re-executes `noeta run app.noe` as a child process and restarts it
@@ -6,11 +6,10 @@
 //! which is what makes it uniform across derive-built commands and extension-contributed ones
 //! (`noeta serve` is an `ExtCommand`) without either knowing watch exists.
 //!
-//! Full restart is deliberate at this slice: the startup cache makes a cold start cheap
-//! (~milliseconds + compile of the changed file), and restart remains the permanent fallback for
-//! changes the hot path cannot absorb (`SwapBlocker` — signature/layout/namespace changes). The
-//! W1 hot path swaps body-level edits into the running process instead of restarting; it slots in
-//! underneath this same watcher.
+//! Full restart is cheap — the startup cache makes a cold start ~milliseconds plus the compile of
+//! the changed file — and it is the fallback for changes the hot path cannot absorb (`SwapBlocker`
+//! — signature/layout/namespace changes). The hot path underneath this same watcher swaps
+//! body-level edits into the running process instead of restarting.
 //!
 //! Watched: `*.noe` plus `noeta.toml` / `noeta.lock` under the current directory, recursively
 //! (hidden directories like `.git` are ignored). Events are debounced so an editor's
@@ -31,7 +30,7 @@ const DEBOUNCE: Duration = Duration::from_millis(150);
 /// How often the loop checks whether the child exited on its own while also polling for events.
 const POLL: Duration = Duration::from_millis(100);
 
-/// The child-exit sentinel meaning "restart me now" (server-hmr W1): the in-process hot path
+/// The child-exit sentinel meaning "restart me now": the in-process hot path
 /// exits with this code when an edit needs a full restart (a `SwapBlocker`, or a change outside
 /// the entry file), and the `--watch` wrapper restarts immediately instead of waiting for the
 /// next filesystem event.
@@ -101,14 +100,14 @@ fn watch_loop(args: &[OsString]) -> ExitCode {
             .join(" ")
     );
 
-    // `serve` gets the in-process HOT path (server-hmr W1): the child owns watching, swapping
+    // `serve` gets the in-process HOT path: the child owns watching, swapping
     // edits into the live process, and exiting with [`HOT_RESTART_CODE`] when only a full restart
     // can absorb a change — the wrapper then restarts immediately and otherwise stays out of the
     // way (double-watching would restart the server on the very edits the child just swapped).
-    // `--parallel` (server-hmr F5) hot-reloads too: the swap broadcasts to every worker isolate
+    // `--parallel` hot-reloads too: the swap broadcasts to every worker isolate
     // via the shared queue, so the whole fleet swaps in place.
     let hot = args.first().is_some_and(|a| a == "serve");
-    // Impact-filtered tier watch (server-hmr W3; multi-file since the salsa rework): a
+    // Impact-filtered tier watch: a
     // `test`/`bench` rerun narrows to the declarations the edit impacted (the runners'
     // `--name` filter), computed by the whole-project engine
     // ([`noeta_ide::impact::ImpactSession`]) — a salsa workspace over the entry's directory,
@@ -213,7 +212,7 @@ fn watch_loop(args: &[OsString]) -> ExitCode {
     }
 }
 
-/// What the next tier run should execute (server-hmr W3).
+/// What the next tier run should execute.
 enum Filter {
     /// Everything — with the reason when the edit was unattributable.
     All(Option<String>),
@@ -386,7 +385,7 @@ fn relevant_path(path: &Path, reads: &[PathBuf]) -> bool {
 
 // ------------------------------------------------------------------ the in-process hot watcher
 
-/// Spawn the hot-reload watcher thread (server-hmr W1) inside a `NOETA_HOT` serve process. On an
+/// Spawn the hot-reload watcher thread inside a `NOETA_HOT` serve process. On an
 /// edit of `entry` it **re-links the project** (the same load the boot did, `tail` and all),
 /// checks it (transactional: red code is reported and the old version keeps serving), diffs the
 /// entry unit against the last version the VM consumed, and deposits swappable plans into
@@ -488,7 +487,7 @@ fn hot_watcher(
         }
         // The transactional gate: red code never swaps; the old version keeps serving. The
         // rendered diagnostics also ride the channel's error slot to live LiveView clients
-        // (the browser overlay, server-hmr L3) — waking the run thread to deliver promptly.
+        // (the browser overlay) — waking the run thread to deliver promptly.
         let (new_unit, sites) =
             match relink_entry_unit(&entry, &tail, &front, noeta_diagnostics::stderr_color()) {
                 Ok(checked) => checked,
@@ -508,7 +507,7 @@ fn hot_watcher(
                     continue;
                 }
             };
-        // Diff against the last version this watcher DEPOSITED (server-hmr F5). The watcher is the
+        // Diff against the last version this watcher DEPOSITED. The watcher is the
         // single depositor, so `applied` is the exact baseline of the append-only broadcast
         // queue: each plan is diffed against its predecessor, and every worker applies the queue
         // in order — no per-consumer reconciliation.
@@ -521,9 +520,9 @@ fn hot_watcher(
             noeta_compiler::hotswap::SwapDiff::Unchanged => {}
             noeta_compiler::hotswap::SwapDiff::Swap(plan) => {
                 // Convert the compiler's `SwapPlan` into the VM's compiler-free `HotFragment` at the
-                // boundary (native-size slice 2): the watcher owns the compiler, the VM must not.
+                // boundary: the watcher owns the compiler, the VM must not.
                 //
-                // The gate's own `Sites` ride along (server-hmr H5). The check above is of the
+                // The gate's own `Sites` ride along. The check above is of the
                 // WHOLE new program and the fragment's statements are clones of that program's,
                 // spans intact — so every worker draining this deposit compiles the swapped code
                 // with the same site-keyed codegen and precise destructor relevance a restart
@@ -560,7 +559,7 @@ fn hot_watcher(
     }
 }
 
-/// Rouse every worker executor parked on the shared wake (server-hmr F5): `notify_waiters` wakes
+/// Rouse every worker executor parked on the shared wake: `notify_waiters` wakes
 /// all currently-parked accepts at once, and `notify_one` leaves a stored permit for a worker
 /// racing into its wait.
 ///
@@ -925,7 +924,7 @@ mod tests {
 
     #[test]
     fn a_reported_read_is_relevant_even_though_it_is_not_a_noe_file() {
-        // The reason the `reads` argument exists (directive-expansion arc): an OpenAPI spec a hook
+        // The reason the `reads` argument exists: an OpenAPI spec a hook
         // read is not a `.noe` file and matches no manifest name, so it would be filtered out — but
         // editing it must rebuild the generated client. A path listed in `reads` is relevant.
         let reads = [PathBuf::from("api/petstore.json")];

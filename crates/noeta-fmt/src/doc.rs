@@ -1,9 +1,9 @@
-//! A Wadler/Leijen pretty-printing algebra — the intermediate form the AST lowers to (F2).
+//! A Wadler/Leijen pretty-printing algebra — the intermediate form the AST lowers to.
 //!
 //! Instead of emitting strings directly, the printer builds a [`Doc`] tree and hands it to
 //! [`render`], which lays it out within a column budget using the classic best-fit algorithm
 //! (Wadler's *A prettier printer*, in Lindig's strict/iterative formulation). The payoff is that the
-//! *same* tree serves both formatter policies (see `FmtConfig::wrap`): the F3 lowering chooses
+//! *same* tree serves both formatter policies (see `FmtConfig::wrap`): the lowering chooses
 //! whether a break point is a hard break (author-directed, `wrap = false`) or a [`Doc::group`]-gated
 //! soft break (width-driven, `wrap = true`) — the renderer below is identical either way.
 //!
@@ -152,7 +152,7 @@ enum Mode {
     Break,
 }
 
-/// The display width of a text fragment (F2: char count — adequate for layout decisions; identifiers
+/// The display width of a text fragment (char count — adequate for layout decisions; identifiers
 /// and punctuation are ASCII, and a slightly-off width on an exotic string literal only affects
 /// wrapping, never correctness).
 fn width_of(s: &str) -> isize {

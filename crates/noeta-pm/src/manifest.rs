@@ -1,4 +1,4 @@
-//! The project manifest (`noeta.toml`) — build **targets** (object-model slice 6g).
+//! The project manifest (`noeta.toml`) — build **targets**.
 //!
 //! A *target* is a named build recipe: it says which dev-tiers are live in the build and which
 //! package provides each — the axis Cargo calls a profile and MSBuild a configuration, under the
@@ -52,7 +52,7 @@ use crate::error::PmError;
 use crate::reserved;
 
 // The `[fmt]` grammar lives in `noeta-fmt` (dev tooling), so reading a manifest's formatter config
-// pulls in the formatter crate — gated behind `fmt-config` (dev-deps D3c) so a lean runtime that only
+// pulls in the formatter crate — gated behind `fmt-config` so a lean runtime that only
 // needs tier/dependency resolution never links it.
 #[cfg(feature = "fmt-config")]
 use noeta_fmt::FmtConfig;
@@ -108,7 +108,7 @@ pub struct Manifest {
     patch: BTreeMap<String, PathBuf>,
 }
 
-/// The `[registries]` table (private-registries arc) — a map from a **scope** (`company`) to the
+/// The `[registries]` table — a map from a **scope** (`company`) to the
 /// registry that scope's packages resolve from, plus an optional `default` for every other scope. Lets
 /// a project mix the public hosted registry with private ones (e.g. a whole GitHub org) without making
 /// everything private: `acme/*` can come from `github:acme` while everything else stays on the default.
@@ -143,7 +143,7 @@ impl Registries {
     }
 }
 
-/// Where a scope's packages resolve from (private-registries arc). Crypto-/IO-free: the manifest layer
+/// Where a scope's packages resolve from. Crypto-/IO-free: the manifest layer
 /// only parses the *shape*; opening the concrete index happens in the resolver.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RegistrySource {
@@ -232,7 +232,7 @@ fn forge_group(scheme: &str, group: &str) -> Result<String, String> {
     Ok(group.to_string())
 }
 
-/// The `[trust]` table (package-manager Phase 4) — the **complete, auditable set of every elevated
+/// The `[trust]` table — the **complete, auditable set of every elevated
 /// authority** a consumer grants its dependencies. Empty by default: pulling a dependency gives it
 /// sandboxed library code and nothing more. Authority is granted here, at the **root**, keyed by
 /// **package identity** (`company/package`) — never inherited from a dependency, so a transitive
@@ -266,13 +266,13 @@ pub struct Trust {
     /// catch a compromised release before it auto-propagates to consumers. An existing lockfile pin is
     /// unaffected (already your choice); only fresh selection is held back. `None` = off (default).
     pub publish_cooldown: Option<u64>,
-    /// Per-advisory-tier policy (advisory-intake arc, tier 5): whether an advisory of a given intake
+    /// Per-advisory-tier policy: whether an advisory of a given intake
     /// tier (`operator`/`publisher`/`imported`) makes `noeta audit` **fail** the build, merely **warn**,
     /// or is ignored (`off`). Default: every tier warns; a project opts a tier up to `fail` for CI.
     pub advisories: AdvisoryPolicy,
 }
 
-/// A single entry in a `[trust.commands]` (or, from Slice 2, `[trust.directives]`) table: the
+/// A single entry in a `[trust.commands]` (or `[trust.directives]`) table: the
 /// providing package and the name that package exported the command/directive under. The table
 /// **key** is the local name the project uses; this is the resolved right-hand side. Written
 /// `local = "company/package"` (exported name == local name) or `local = "company/package:exported"`
@@ -326,8 +326,8 @@ pub struct DbConfig {
     pub seeds: Option<String>,
 }
 
-/// What a matched advisory of a given intake tier does to an `noeta audit` run (advisory-intake arc,
-/// tier 5). Default [`AdvisoryAction::Warn`] — surfaced, but not a build failure.
+/// What a matched advisory of a given intake tier does to an `noeta audit` run. Default
+/// [`AdvisoryAction::Warn`] — surfaced, but not a build failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AdvisoryAction {
     /// A matched advisory of this tier is printed but does not fail the audit.
@@ -352,7 +352,7 @@ impl AdvisoryAction {
     }
 }
 
-/// The consumer's per-tier advisory policy (advisory-intake arc, tier 5). Which intake tiers act as
+/// The consumer's per-tier advisory policy. Which intake tiers act as
 /// build **failures** versus **warnings** in `noeta audit`. Configured under `[trust.advisories]`
 /// (per-tier keys) or a bare `advisories = "fail"` (all tiers). Default: all three warn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -398,7 +398,7 @@ impl RequireProvenance {
     }
 }
 
-/// The `[package]` table — a package's global identity and version (package-manager P2.0). Absent for
+/// The `[package]` table — a package's global identity and version. Absent for
 /// a bare entry script that declares no `[package]`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PackageMeta {
@@ -419,7 +419,7 @@ pub struct PackageMeta {
     /// constraint on its registry name, and made every source file spell the registry name.
     pub root: Option<String>,
     pub version: semver::Version,
-    /// The pinned language [`Edition`] (follow-on arc F1). `None` when the package omits `edition`,
+    /// The pinned language [`Edition`]. `None` when the package omits `edition`,
     /// which the toolchain treats as [`Edition::DEFAULT`]; the value is validated at parse time
     /// (an unknown edition is a manifest error), so a present value is always a known edition.
     pub edition: Option<crate::edition::Edition>,
@@ -430,8 +430,8 @@ pub struct PackageMeta {
     /// an author-side promise, not a sandbox: the real compatibility contract is the extension
     /// ABI, this field only turns a violation into a clear, early message.
     pub toolchain: Option<semver::VersionReq>,
-    /// The relative directory of this package's native Rust **entry crate** (package-manager
-    /// Phase 3, N3.1): `native = "native"` points at a `Cargo.toml` whose crate exports the
+    /// The relative directory of this package's native Rust **entry crate**: `native = "native"`
+    /// points at a `Cargo.toml` whose crate exports the
     /// package's extension units (one crate, any number of units — std's own shape). `None` for a
     /// pure-Noeta package. Declaring native code is deliberately explicit — it pulls arbitrary
     /// Rust into a consumer's build, which should never be triggered by the mere presence of a
@@ -494,7 +494,7 @@ impl PackageMeta {
     }
 }
 
-/// A global package identity `company/package` (package-manager P2.0). The slash is deliberately
+/// A global package identity `company/package`. The slash is deliberately
 /// **not** an identifier, so this global id is decoupled from the local import root (the
 /// dependency-table key) — mirroring Rust's `foo = { package = "real-name" }`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -552,10 +552,9 @@ impl std::fmt::Display for PackageName {
     }
 }
 
-/// One `[dependencies]` entry's **source** (package-manager P2.0). The table *key* is the local import
 /// Which git reference a `git` dependency tracks. A **tag** is the release model (a published,
 /// immutable version); a **branch** or bare **HEAD** tracks a moving ref — for an in-development or
-/// bundled package that isn't cut into tagged releases yet (follow-on: `git` deps without a tag). In
+/// bundled package that isn't cut into tagged releases yet. In
 /// every case the lockfile pins the resolved commit SHA, so a build reproduces exactly; `noeta
 /// update` re-resolves a branch/HEAD ref to its latest commit (a tag re-resolves to the same commit
 /// unless it moved).
@@ -593,10 +592,11 @@ impl GitRef {
     }
 }
 
-/// root (an identifier), decoupled from the resolved package's global `company/package` identity.
+/// One `[dependencies]` entry's **source**. The table *key* is the local import root (an
+/// identifier), decoupled from the resolved package's global `company/package` identity.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Dependency {
-    /// A local source tree — `dep = { path = "…" }`. Needs no network or resolver (P2.1). An
+    /// A local source tree — `dep = { path = "…" }`. Needs no network or resolver. An
     /// optional `package = "company/pkg"` is a **checked claim** about the tree the path points at
     /// (see [`Dependency::declared_package`]) — never a selector: the path alone says which tree,
     /// and the tree's own `[package] name` alone says which package.
@@ -615,7 +615,7 @@ pub enum Dependency {
     },
     /// A registry dependency by SemVer requirement — `dep = "^1.2"` or
     /// `dep = { version = "^1.2", package = "company/pkg" }`. The registry index resolves
-    /// name→git-coords (P2.5). `package` is the registry identity (decoupled from the import-root
+    /// name→git-coords. `package` is the registry identity (decoupled from the import-root
     /// key, like Rust's `foo = { package = "real" }`); it is **required** to resolve — the bare
     /// shorthand leaves it `None` and errors at resolution with a pointer to add it.
     Registry {
@@ -670,7 +670,7 @@ struct Target {
     /// both parse into this same map.
     tiers: BTreeMap<String, bool>,
     /// This target's own **target-scoped dependencies** — packages present only when building this
-    /// target (dev-deps arc). Overlaid on the base's (via `extends`) and on the global
+    /// target. Overlaid on the base's (via `extends`) and on the global
     /// `[dependencies]` during resolution. A dev tool a package ships lives here under `dev`, so it
     /// is simply absent from a `prod` build.
     dependencies: BTreeMap<String, Dependency>,
@@ -687,7 +687,7 @@ pub fn find(start_dir: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Read + parse the manifest at `manifest_path` (package-manager Phase 4, backing `noeta audit`).
+/// Read + parse the manifest at `manifest_path` — what backs `noeta audit`.
 /// Errors (tagged with the path) on an unreadable or invalid manifest.
 pub fn load(manifest_path: &Path) -> Result<Manifest, PmError> {
     let text = std::fs::read_to_string(manifest_path)
@@ -696,8 +696,8 @@ pub fn load(manifest_path: &Path) -> Result<Manifest, PmError> {
         .map_err(|err| err.map_msg(|m| format!("invalid `{}`: {m}", manifest_path.display())))
 }
 
-/// The `[package]` identity (`company/package`) and version of the manifest at `manifest_path`
-/// (package-manager P2.5, backing `noeta publish`). Errors when the manifest can't be read/parsed or
+/// The `[package]` identity (`company/package`) and version of the manifest at `manifest_path` —
+/// what backs `noeta publish`. Errors when the manifest can't be read/parsed or
 /// declares no `[package]` (a bare script can't be published).
 pub fn current_package(manifest_path: &Path) -> Result<(String, semver::Version), PmError> {
     let text = std::fs::read_to_string(manifest_path)
@@ -717,7 +717,7 @@ pub fn current_package(manifest_path: &Path) -> Result<(String, semver::Version)
 }
 
 /// Add a dependency `key = <value_toml>` to the `[dependencies]` table of the manifest at
-/// `manifest_path` (package-manager P2.4d, backing `noeta add`). `value_toml` is the raw TOML value
+/// `manifest_path` — what backs `noeta add`. `value_toml` is the raw TOML value
 /// (`{ path = "../x" }`, `{ git = "…", tag = "…" }`, or `"^1.2"`). The edit is **format-preserving**:
 /// the new entry is inserted under an existing `[dependencies]` header (or a new section is appended),
 /// leaving the rest of the file — comments, ordering, whitespace — untouched. The result is re-parsed
@@ -979,17 +979,17 @@ pub fn resolve_tier_providers(entry: &Path) -> Result<BTreeMap<String, String>, 
     Ok(manifest.directives_provider_map())
 }
 
-/// Gather the entry's **dependency packages** as loader [`DepPackage`]s (package-manager P2.1/P2.4):
+/// Gather the entry's **dependency packages** as loader [`DepPackage`]s:
 /// resolve the full transitive dependency graph and hand back the re-rooted packages the loader links.
 /// No manifest, or no `[dependencies]`, yields an empty list (a bare script has no deps). The graph
 /// walk ([`crate::graph`]) materializes each package (a `path` tree, a fetched `git` tag; a `registry`
-/// dependency errors pending P2.5), dedups by identity, and assigns global segments so transitive
+/// dependency resolves through the index), dedups by identity, and assigns global segments so transitive
 /// `use`s link without key collision.
 pub fn dependency_packages(entry: &Path) -> Result<Vec<noeta_loader::DepPackage>, PmError> {
     Ok(crate::graph::resolve_graph(entry)?.packages)
 }
 
-/// As [`dependency_packages`], but resolving for a build **target** (dev-deps D2): the root's
+/// As [`dependency_packages`], but resolving for a build **target**: the root's
 /// dependency set is [`Manifest::active_dependencies`] — the global `[dependencies]` plus the
 /// target's own and inherited `[targets.<name>.dependencies]`. This is what makes a declared
 /// dev-only dependency actually LINK under `--target dev`; `None` is the global set.
@@ -1018,7 +1018,7 @@ pub fn dependency_packages_query(entry: &Path) -> Result<Vec<noeta_loader::DepPa
     Ok(crate::graph::resolve_graph_query(entry)?.packages)
 }
 
-/// The **effective language edition** the entry compiles under (follow-on F1) — its own
+/// The **effective language edition** the entry compiles under — its own
 /// `[package].edition`, or [`Edition::DEFAULT`] when it declares none or has no manifest at all (a
 /// bare script). This is the entry's *own* package edition, independent of its dependency graph
 /// (each dependency's edition is pinned separately in `noeta.lock`), so it is a cheap manifest read,
@@ -1077,7 +1077,7 @@ pub fn native_rings(entry: &Path) -> Vec<String> {
 }
 
 /// The `[package] name` of a **cargo** manifest — what a composed-toolchain shim writes into its
-/// dependency line for a native entry crate (package-manager Phase 3, N3.2). Kept here because
+/// dependency line for a native entry crate. Kept here because
 /// `noeta-pm` owns the toml dependency; this reads cargo's manifest, not ours.
 pub fn cargo_package_name(crate_dir: &Path) -> Result<String, PmError> {
     let path = crate_dir.join("Cargo.toml");
@@ -1095,7 +1095,7 @@ pub fn cargo_package_name(crate_dir: &Path) -> Result<String, PmError> {
         .ok_or_else(|| PmError::Manifest(format!("`{}` has no `[package] name`", path.display())))
 }
 
-/// The feature names a **cargo** manifest declares under `[features]` (dev-deps D5b). A composed
+/// The feature names a **cargo** manifest declares under `[features]`. A composed
 /// **dev toolchain** consults this to turn on a mixed crate's conventional dev-capability feature
 /// (e.g. `fmt`, gating a tier's `body_formatters`) — but only if the crate actually declares it, so
 /// enabling an absent feature never makes cargo error. A missing/empty `[features]` table yields the
@@ -1222,7 +1222,7 @@ impl Manifest {
                 ),
             };
 
-            // Target-scoped dependencies (dev-deps arc): parsed before tiers so a tier this target
+            // Target-scoped dependencies: parsed before tiers so a tier this target
             // declares may name a target-scoped dep as its provider.
             let target_deps =
                 match target_table.get("dependencies") {
@@ -1328,12 +1328,12 @@ impl Manifest {
         self.package.as_ref()
     }
 
-    /// The `[registries]` mapping (private-registries arc) — which registry each scope resolves from.
+    /// The `[registries]` mapping — which registry each scope resolves from.
     pub fn registries(&self) -> &Registries {
         &self.registries
     }
 
-    /// The `[trust]` grants — the authority this manifest extends to its dependencies (Phase 4).
+    /// The `[trust]` grants — the authority this manifest extends to its dependencies.
     pub fn trust(&self) -> &Trust {
         &self.trust
     }
@@ -1417,7 +1417,7 @@ impl Manifest {
     /// each target's own tiers on top. `chain` records the targets visited along the current path
     /// to detect a cycle.
     /// The active dependency set for `target`: the global `[dependencies]` overlaid with the target's
-    /// own and inherited (`extends`) `[targets.<name>.dependencies]` (dev-deps arc). A target-scoped
+    /// own and inherited (`extends`) `[targets.<name>.dependencies]`. A target-scoped
     /// key shadows a global one of the same name. `None` (no `--target`) yields just the globals; an
     /// **unknown** target is lenient — it contributes no scoped deps — since target-scoped deps are
     /// optional and a project need not declare a `[targets.*]` block to build a bare `--target` name.
@@ -1733,7 +1733,7 @@ pub fn validate_description(text: &str) -> Result<String, String> {
     Ok(trimmed.to_string())
 }
 
-/// Syntactic validation of a `package.native` value (Phase 3, N3.1): a non-empty **relative**
+/// Syntactic validation of a `package.native` value: a non-empty **relative**
 /// directory that stays inside the package tree. A git/registry package's tree is materialized
 /// into the shared content-addressed store, so a `..` escape would point at other packages'
 /// content; existence of the directory (and its `Cargo.toml`) is checked at resolve time, where
@@ -1795,7 +1795,7 @@ fn parse_dependency_map(deps: &toml::Table) -> Result<BTreeMap<String, Dependenc
     Ok(out)
 }
 
-/// Parse the optional `[trust]` table (package-manager Phase 4): `native` and `commands`, each an
+/// Parse the optional `[trust]` table: `native` and `commands`, each an
 /// array of package identities (`company/package`) the consumer authorizes for that escalation. Each
 /// entry is validated as an identity (so a typo'd grant is a hard error, not a silently ineffective
 /// one). An absent `[trust]` table yields empty grants — the safe default (no dependency may run
@@ -1977,7 +1977,7 @@ fn parse_binding_table(
 /// and those *plus every target-scoped dependency key* for `[directives]` (a dev-only tier provider is
 /// declared under `[targets.<t>.dependencies]`, and the package-level `[directives]` table must still be
 /// able to name it).
-/// Every dependency key declared under any `[targets.<t>.dependencies]` (dev-deps arc) — the extra
+/// Every dependency key declared under any `[targets.<t>.dependencies]` — the extra
 /// provider keys a package-level `[directives]` table may name beyond the global `[dependencies]`. Read
 /// straight off the raw TOML (the targets are not parsed into [`Target`]s until later), tolerating a
 /// malformed `[targets]`/target/`dependencies` shape here (the targets loop reports it precisely).
@@ -2167,7 +2167,7 @@ fn parse_use_bindings(
     Ok(out)
 }
 
-/// Parse `[trust].advisories` (advisory-intake arc, tier 5): either a bare action string applied to
+/// Parse `[trust].advisories`: either a bare action string applied to
 /// every tier (`advisories = "fail"`), or a sub-table with per-tier keys
 /// (`[trust.advisories]` / `operator = "fail"`, `publisher = "warn"`, `imported = "off"`). Absent →
 /// every tier warns (the default).
@@ -2209,7 +2209,7 @@ fn parse_advisory_policy(trust_table: &toml::Table) -> Result<AdvisoryPolicy, St
     Ok(policy)
 }
 
-/// Parse the `[registries]` table (private-registries arc): a map of scope (`company`) → source string
+/// Parse the `[registries]` table: a map of scope (`company`) → source string
 /// (`github:<org>` or an http(s):// URL), plus an optional reserved `default` key applied to unmapped
 /// scopes. A non-string value, an unknown source syntax, or a non-identifier scope key is an error.
 fn parse_registries(table: &toml::Table) -> Result<Registries, String> {
@@ -2581,7 +2581,7 @@ mod tests {
         );
     }
 
-    // --- `[registries]` (private-registries arc) -----------------------------------------------
+    // --- `[registries]` ------------------------------------------------------------------------
 
     #[test]
     fn parses_a_registries_table() {
@@ -2700,7 +2700,7 @@ mod tests {
         assert!(RegistrySource::parse("just-a-string").is_err());
     }
 
-    // --- `[package]` + `[dependencies]` (package-manager P2.0) ---------------------------------
+    // --- `[package]` + `[dependencies]` --------------------------------------------------------
 
     #[test]
     fn parses_a_package_table() {
@@ -2866,7 +2866,7 @@ mod tests {
         assert!(err.message().contains("single line"), "{err}");
     }
 
-    // --- cargo manifest introspection (composition: dev-deps D5b) ------------------------------
+    // --- cargo manifest introspection (composition) --------------------------------------------
 
     #[test]
     fn reads_declared_cargo_features() {
@@ -2890,7 +2890,7 @@ mod tests {
         assert!(cargo_features(&dir).unwrap().is_empty());
     }
 
-    // --- `package.native` (package-manager Phase 3, N3.1) --------------------------------------
+    // --- `package.native` ----------------------------------------------------------------------
 
     #[test]
     fn parses_a_native_entry_crate() {
@@ -2971,7 +2971,7 @@ mod tests {
         );
     }
 
-    // --- `[trust]` (package-manager Phase 4) ---------------------------------------------------
+    // --- `[trust]` -----------------------------------------------------------------------------
 
     #[test]
     fn trust_defaults_to_empty() {
@@ -3617,7 +3617,7 @@ mod tests {
 
     #[test]
     fn a_declared_dependency_may_provide_a_tier() {
-        // package-manager P2.6: a resolved dependency (`bench_kit`) is a valid tier provider, named
+        // A resolved dependency (`bench_kit`) is a valid tier provider, named
         // in `[directives]`; the target's live-set activates the local names.
         let m = Manifest::parse(
             "[dependencies]\n\
@@ -3728,7 +3728,7 @@ mod tests {
         );
     }
 
-    // --- `noeta add` manifest editing (package-manager P2.4d) ----------------------------------
+    // --- `noeta add` manifest editing ----------------------------------------------------------
 
     #[test]
     fn insert_uses_an_existing_dependencies_table() {

@@ -1,4 +1,4 @@
-//! The **impact engine** (server-hmr W3; multi-file since the salsa rework) — one
+//! The **impact engine** — one
 //! runner-agnostic seam answering: *given this edit, which declarations may behave
 //! differently?* Consumers filter the answer to their own tier and rerun only that:
 //! `noeta test --watch` reruns the impacted `@test` fns (via the runner's `--name` filter),

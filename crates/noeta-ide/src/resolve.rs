@@ -1,21 +1,20 @@
 //! Definition resolution for go-to-definition, in three layers:
 //!
-//! - [`DefUse`] — a **scope-aware value index** (L3.2): a use of a local, parameter, `for`/`match`/
+//! - [`DefUse`] — a **scope-aware value index**: a use of a local, parameter, `for`/`match`/
 //!   closure binding, or top-level function resolves to the precise binding in scope at the cursor,
 //!   respecting shadowing. Built by one AST walk that mirrors the language's scoping.
-//! - [`MemberTable`] — a **per-type member table** (L3.3): a member access `x.foo` resolves to the
+//! - [`MemberTable`] — a **per-type member table**: a member access `x.foo` resolves to the
 //!   field, enum variant, or method `foo` on `x`'s type. The [`DefUse`] walk records each
 //!   `receiver.member` access; the caller supplies the receiver's type (from the checker) and looks
 //!   the member up here.
-//! - [`Definitions`] — a **top-level name table** (L3): the fallback for what the value index does
+//! - [`Definitions`] — a **top-level name table**: the fallback for what the value index does
 //!   not cover — type references and constructors — resolved by the identifier text under the cursor
 //!   against the top-level `fn` / `struct` / `class` / `enum` declarations.
 //!
 //! Go-to-definition tries the value index first, then the member table, then the name table (see
 //! [`crate`]).
 //!
-//! Deliberately *not* here yet (a documented follow-on): cross-module definitions (need the linked
-//! workspace). A reference none of this covers simply yields no jump — never a wrong one.
+//! A reference none of this covers simply yields no jump — never a wrong one.
 
 use std::collections::HashMap;
 
@@ -61,7 +60,7 @@ impl Definitions {
                         .entry(decl.name.to_string())
                         .or_insert(decl.name_span);
                 }
-                // A user trait's name resolves like a type name (L1) — so goto-def / hover on a
+                // A user trait's name resolves like a type name — so goto-def / hover on a
                 // `dyn Trait` annotation or a `<T: Trait>` bound lands on the declaration, and it is
                 // emitted as a `Type` semantic token.
                 Stmt::Trait(decl) => {
@@ -169,7 +168,7 @@ impl MemberTable {
                     );
                     table.add_methods(decl.name.as_str(), &decl.methods);
                 }
-                // A trait's method signatures register under the trait name (L1) — so member
+                // A trait's method signatures register under the trait name — so member
                 // resolution on a `dyn Trait` receiver's `.method` resolves to the contract.
                 Stmt::Trait(decl) => {
                     let sigs: Vec<FnDecl> = decl.methods.iter().map(|m| m.sig.clone()).collect();
@@ -708,7 +707,7 @@ impl<'a> Resolver<'a> {
             Stmt::Struct(decl) => self.walk_methods(&decl.methods),
             Stmt::Class(decl) => self.walk_methods(&decl.methods),
             Stmt::Enum(decl) => self.walk_methods(&decl.methods),
-            // A tier block's items (server-hmr W3) resolve like top-level statements: a `@test`
+            // A tier block's items resolve like top-level statements: a `@test`
             // fn's body references program declarations, and both the editor (goto/refs inside a
             // test body) and the impact engine (which tests call a changed fn) need the edges. A
             // `@doc` text tier carries no items, so this is naturally a no-op for it.
@@ -718,7 +717,7 @@ impl<'a> Resolver<'a> {
                 }
             }
             // A trait's default-method bodies reference declarations — walk them for goto/refs
-            // inside a default body (L1). Required (bodiless) sigs have empty bodies, so this is a
+            // inside a default body. Required (bodiless) sigs have empty bodies, so this is a
             // no-op for them.
             Stmt::Trait(decl) => {
                 let sigs: Vec<FnDecl> = decl.methods.iter().map(|m| m.sig.clone()).collect();

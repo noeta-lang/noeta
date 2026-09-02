@@ -1,5 +1,5 @@
 //! `noeta` — the user-facing toolchain, as a **library** with a thin binary shim (`src/main.rs`
-//! is `run_cli(&[], &[])`). The library form exists for package-manager Phase 3: a composed
+//! is `run_cli(&[], &[])`). The library form exists for composition: a composed
 //! toolchain (an app with native extension dependencies) is a generated crate depending on this
 //! one, whose `main` passes the extra extension units (and the command-trusted subset of them)
 //! into [`run_cli`].
@@ -10,7 +10,7 @@
 //! named `noeta` (the Noeta toolchain binary). The conformance corpus / differential
 //! / leak harness that tests the *implementation* is a separate dev binary (`noeta-conformance`), not
 //! a subcommand here — which is what keeps the `noeta test` verb free for a user program's own
-//! `@test {}` blocks (object-model slice 6).
+//! `@test {}` blocks.
 
 // The runtime is allocation-heavy (every heap value — strings, lists, maps, objects — is a boxed
 // `Obj`), so the toolchain binary uses mimalloc instead of the system allocator. Correctness is
@@ -29,11 +29,11 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use noeta_ast::Expr;
 
-// The package manager (package-manager P2) now lives in the `noeta-pm` library so `noeta-lsp` and
+// The package manager now lives in the `noeta-pm` library so `noeta-lsp` and
 // `noeta-db` resolve dependencies through the same code; the CLI names its modules unqualified.
 use noeta_pm::{graph, manifest};
-// The L2 compile pipeline (source → runnable module) and the execution core live in `noeta-runner`
-// so the CLI and the standalone lean runtime share one implementation (dev-deps D3c). The CLI's
+// The compile pipeline (source → runnable module) and the execution core live in `noeta-runner`
+// so the CLI and the standalone lean runtime share one implementation. The CLI's
 // `run`/`dump`/`build`/`test` paths call these by the same names they used when defined here.
 use noeta_runner::resolve_providers;
 
@@ -351,9 +351,8 @@ enum Command {
         #[arg(long)]
         jit: bool,
     },
-    // (`Serve` was a variant here until higher-order-abi H6 — `noeta serve` is now an
-    // extension-contributed command, `noeta-stdlib/src/serve.rs::SERVE_COMMAND`, wired
-    // dynamically in `main`.)
+    // (`noeta serve` is an extension-contributed command,
+    // `noeta-stdlib/src/serve.rs::SERVE_COMMAND`, wired dynamically in `main`.)
     /// Inspect or clean the per-user cache (`~/.cache/noeta/`). It holds three kinds of derived
     /// state: cached compilations (`*.noeb`, the transparent startup cache), composed
     /// toolchains (`compose/` — a full build per native-dependency set, easily 1–2 GiB each),
@@ -920,7 +919,7 @@ pub fn run_cli(
         vec![&tier_runner::STD_TIER_RUNNERS_UNIT];
     units.extend_from_slice(extra);
     noeta_stdlib::registry::install_with_extras(&units);
-    // Phase 4: std's own commands (root `"std"`) are always available under their own names. A
+    // std's own commands (root `"std"`) are always available under their own names. A
     // dependency's `ExtCommand` reaches the CLI only through a `[trust.commands]` binding, which
     // names the providing package and the command it exported and fixes the LOCAL name it is
     // registered + dispatched under — so trust is keyed by package identity (never a root-name
@@ -997,14 +996,14 @@ pub fn run_cli(
             None => trusted_commands.push((binding.local, ext)),
         }
     }
-    // P-AOT L2: if this executable is a `noeta build --exe` artifact (a bundle stapled onto a copy
+    // If this executable is a `noeta build --exe` artifact (a bundle stapled onto a copy
     // of the runtime), run the embedded program directly — the shipped app is not the toolchain, so
     // its CLI verbs are irrelevant. A plain `noeta` binary has no trailer and falls through to the
     // normal CLI. Detection reads only the tail of the file, not the whole binary.
     if let Some(code) = try_run_stapled() {
         return code;
     }
-    // `--watch` (server-hmr W0): wrap ANY invocation in the restart-on-change dev loop. Stripped
+    // `--watch`: wrap ANY invocation in the restart-on-change dev loop. Stripped
     // from argv before clap so it works uniformly for derive-built and extension-contributed
     // commands (`noeta serve --watch`); the clap arg added below exists purely so `--help` and
     // `--watch`'s error messages know the flag.
@@ -1015,7 +1014,7 @@ pub fn run_cli(
     if let Some(code) = try_plain_run(&trusted_commands) {
         return code;
     }
-    // Extension-contributed subcommands (higher-order-abi H6): augment the derive-built CLI with
+    // Extension-contributed subcommands: augment the derive-built CLI with
     // each registered command (so `noeta --help` lists them and each gets real clap parsing),
     // then dispatch a matched name to its extension `run` — the in-process `cargo clippy` model.
     let mut cli = <Cli as clap::CommandFactory>::command()
@@ -1058,7 +1057,7 @@ pub fn run_cli(
         cli = cli.subcommand(ext_command_clap(local, ext));
     }
     // An unknown subcommand may be a command contributed by a *native dependency* — visible only
-    // inside the app's composed toolchain (Phase 3). Before rendering clap's error, try composing
+    // inside the app's composed toolchain. Before rendering clap's error, try composing
     // from the current directory's manifest; if the app has no native deps (or we already are the
     // composed binary), fall through to the ordinary error.
     let matches = match cli.try_get_matches() {
@@ -1089,13 +1088,13 @@ pub fn run_cli(
                 if let Some(code) = try_bare_file_run(&err) {
                     return code;
                 }
-                // Then a **declared tier** (tier-providers T4): `noeta <tier> <file>` where the
+                // Then a **declared tier**: `noeta <tier> <file>` where the
                 // file's linked program declares `<tier>` with `@tier` dispatches to that tier's
                 // runner in-process.
                 if let Some(code) = try_tier_dispatch(&err) {
                     return code;
                 }
-                // Then the external-binary form (Phase 3, N3.7 — the `cargo-<name>` model): an
+                // Then the external-binary form (the `cargo-<name>` model): an
                 // executable `noeta-<cmd>` on PATH serves `noeta <cmd> …`. Registered
                 // (compiled-in) commands never reach here — clap knows them.
                 if let Some(code) = external_command_fallback(&err) {

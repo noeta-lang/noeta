@@ -1,8 +1,8 @@
-//! `noeta test` (object-model slice 6): the `@test` runner and test metadata attributes (6h).
+//! `noeta test`: the `@test` runner and test metadata attributes.
 
 use crate::support::*;
 
-// --- `test` (object-model slice 6: the `@test` runner) -----------------------------
+// --- `test` (the `@test` runner) ---------------------------------------------------
 
 /// A program whose `@test` block holds a mix of passing and failing tests. The top-level `echo`
 /// must NOT run (the runner runs the tests, not the program's `main`).
@@ -16,7 +16,7 @@ const MIXED_TESTS: &str = "fn add(a: int, b: int): int { return a + b; }\n\
 
 #[test]
 fn test_name_filter_runs_only_the_named_test() {
-    // `--name` (ide-ui U3): the editor's run-one-test seam — only the named fn runs, so a suite
+    // `--name`: the editor's run-one-test seam — only the named fn runs, so a suite
     // with failures exits 0 when the selected test passes.
     let file = temp_program("test_name_filter", MIXED_TESTS);
     lang()
@@ -42,7 +42,7 @@ fn test_name_filter_runs_only_the_named_test() {
 
 #[test]
 fn test_json_reports_machine_readable_outcomes() {
-    // `--json` (ide-ui U3): one JSON object on stdout — per-test outcomes + totals, no human
+    // `--json`: one JSON object on stdout — per-test outcomes + totals, no human
     // report lines — with the same exit-code semantics.
     let file = temp_program("test_json", MIXED_TESTS);
     let assert = lang()
@@ -174,7 +174,7 @@ fn test_no_tests_is_success() {
 
 #[test]
 fn test_annotation_form_is_discovered() {
-    // `@test fn …` (the annotation form, slice 6c) is grouping sugar for a one-item block: the
+    // `@test fn …` (the annotation form) is grouping sugar for a one-item block: the
     // runner discovers an annotated fn exactly as it does a fn inside `@test { … }`, and the two
     // forms mix freely. The program's own top-level `echo` still does not run.
     let file = temp_program(
@@ -194,7 +194,7 @@ fn test_annotation_form_is_discovered() {
 
 #[test]
 fn test_white_box_private_field_access() {
-    // Slice 6d: an in-source `@test` block gets white-box access to its module's private fields —
+    // An in-source `@test` block gets white-box access to its module's private fields —
     // it reads/writes/constructs `Account.balance` (private) directly and passes. (Ordinary code
     // doing the same would be E0035, exercised in the checker's unit tests.)
     let file = temp_program(
@@ -260,10 +260,10 @@ fn test_unknown_tier_is_e0036() {
         .stderr(predicate::str::contains("E0036"));
 }
 
-// --- test metadata attributes (object-model slice 6h) ------------------------------
+// --- test metadata attributes ------------------------------------------------------
 
 /// A program exercising `#[Skip]` / `#[Name(...)]` / `#[Group(...)]` on `@test` fns (the tier
-/// metadata attributes live under `std.test`, D2b — imported like any attribute). The attributes
+/// metadata attributes live under `std.test` — imported like any attribute). The attributes
 /// lead the annotation, one per line.
 const ATTR_TESTS: &str = "use std.test.{Skip, Name, Group}\n\
      fn add(a: int, b: int): int { return a + b }\n\
@@ -293,7 +293,7 @@ fn test_skip_is_reported_not_run_and_does_not_fail() {
 
 #[test]
 fn test_skip_reason_is_shown() {
-    // `#[Skip("reason")]` (slice 6i — `Skip.reason` defaults to `""`, so the bare and reasoned forms
+    // `#[Skip("reason")]` (`Skip.reason` defaults to `""`, so the bare and reasoned forms
     // both work) shows the reason after the skipped test's name.
     let file = temp_program(
         "test_skip_reason",

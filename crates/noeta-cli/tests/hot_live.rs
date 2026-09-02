@@ -1,4 +1,4 @@
-//! The L3 showcase, end to end: a LiveView client is connected while the developer edits the
+//! The LiveView showcase, end to end: a LiveView client is connected while the developer edits the
 //! server under `noeta serve --watch`. A hot-swappable edit pushes `{"type":"reload"}` to the
 //! live socket and closes it; the reconnect lands in a fresh session running the NEW code whose
 //! snapshot carries the PRESERVED signal state. A rejected (red-check) edit pushes an `error`

@@ -12,7 +12,7 @@
 //!   and runs until Ctrl-C) or a page fragment referencing names defined elsewhere, but that
 //!   **must** still type-check. Checked in **session mode** (like a REPL entry): a genuine type
 //!   error — a renamed API, a wrong operand, bad arity — fails CI, while an unresolved *external*
-//!   name is tolerated (F1), so a snippet need not restate its whole context.
+//!   name is tolerated, so a snippet need not restate its whole context.
 //! * ```` ```noeta ignore ```` — an illustrative fragment (references a type defined elsewhere on the
 //!   page, or shows declaration syntax in isolation). Not verified at all, exactly like a Rust
 //!   `ignore` doctest. Keep these to a minimum; prefer a runnable block, or `check` if it at least
@@ -104,7 +104,7 @@ fn check(sample: &Sample, idx: usize) -> Result<(), String> {
     // A `check`-tagged sample type-checks without executing (it would bind sockets / never exit,
     // or it is a page fragment referencing names defined elsewhere). A doc fragment is a
     // REPL-like snippet, so it is checked in **session mode** — parse + type-check, with unknown
-    // external names deferred (F1) rather than a hard error. A genuine type error (arity, a
+    // external names deferred rather than a hard error. A genuine type error (arity, a
     // wrong operand) is still caught. `run`/untagged samples must be complete programs and run.
     if sample.tag == "check" {
         let source =

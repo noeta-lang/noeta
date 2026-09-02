@@ -1,8 +1,8 @@
-//! `--target` (object-model slice 6g): the `noeta.toml` build-target manifest.
+//! `--target`: the `noeta.toml` build-target manifest.
 
 use crate::support::*;
 
-// --- `--target` (object-model slice 6g: the `noeta.toml` build-target manifest) ----
+// --- `--target` (the `noeta.toml` build-target manifest) --------------------------
 
 /// Write a `noeta.toml` alongside a program in its private temp directory, returning the program
 /// path. The manifest is discovered by walking up from the entry file's directory.
@@ -202,7 +202,7 @@ fn check_resolves_a_target_against_the_directory_it_is_given() {
 /// **A `--target`'s `[targets.<t>.dependencies]` is in the checked program, not only the run one.**
 ///
 /// `--target` selects two things: which tiers are live, and which *dependencies* are resolved
-/// (`[targets.dev.dependencies]` layered onto the globals — dev-deps D2). `noeta check` carried the
+/// (`[targets.dev.dependencies]` layered onto the globals). `noeta check` carried the
 /// first half and dropped the second, resolving the global set however the target was spelled, so a
 /// dev-only dependency was absent from the checker's program and every import of it was an E0019 on
 /// a project `noeta run --target dev` compiles and runs.

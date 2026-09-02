@@ -1,4 +1,4 @@
-//! M6 Execute pillar, session half: `debug_start` / `debug_inspect` / `debug_step` / `debug_eval`
+//! The Execute pillar's session half: `debug_start` / `debug_inspect` / `debug_step` / `debug_eval`
 //! / `debug_stop` — interactive debugging of a real program over the VM's per-op
 //! [`Debugger`](noeta_vm::Debugger) seam directly (no DAP wire), built on the same shared support
 //! `noeta dap` uses ([`noeta_vm::debug`]): breakpoints resolve, steps land, and stacks capture
@@ -10,11 +10,11 @@
 //! handlers read. The tools are request/response, so a resume **waits** (bounded) for the next
 //! pause or exit and answers with it — an agent sees "you are now paused at line 7" in one call.
 //!
-//! Liveness (decision #5) holds between pauses too: every resume carries a fresh budget (wall
+//! Liveness holds between pauses too: every resume carries a fresh budget (wall
 //! clock + step cap); a runaway `continue` lands in a **pause** with reason `limit` — inspectable
 //! and resumable, which for an agent beats a kill. Console fragments are type-checked against the
-//! program's session before they run (session-checker C3) and the VM bounds their execution
-//! (M6b), so no `debug_eval` can hang a session either.
+//! program's session before they run and the VM bounds their execution,
+//! so no `debug_eval` can hang a session either.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -46,7 +46,7 @@ const MAX_SESSIONS: usize = 8;
 /// `running`. Longer than the resume budget, so a runaway program normally answers as a `limit`
 /// pause rather than a `running` timeout.
 const WAIT_MS: u64 = 8_000;
-/// How long `debug_eval` waits for the VM's reply. The M6b in-VM budget bounds the evaluation
+/// How long `debug_eval` waits for the VM's reply. The in-VM budget bounds the evaluation
 /// itself at 5 s, so this only guards against a session that was never paused.
 const EVAL_REPLY_MS: u64 = 15_000;
 /// The per-resume liveness budget: a `continue`/`step` that neither pauses nor exits within this
@@ -331,7 +331,7 @@ impl McpDebugger {
     }
 
     /// Block until a command needs acting on. Continue/step/terminate leave the pause; an
-    /// `Evaluate` is type-checked against the program's session first (C3) — an ill-typed
+    /// `Evaluate` is type-checked against the program's session first — an ill-typed
     /// fragment answers with its diagnostics right here and the wait continues.
     fn wait(&mut self, view: &DebugView) -> DebugAction {
         loop {
@@ -373,7 +373,7 @@ impl McpDebugger {
         }
     }
 
-    /// Type-check one console fragment against the program's session (session-checker C3), the
+    /// Type-check one console fragment against the program's session, the
     /// same rule the DAP console applies: the paused frame's in-scope names become the wrapper's
     /// parameters. `Err` carries the rendered `E0xxx` lines.
     fn check_fragment(

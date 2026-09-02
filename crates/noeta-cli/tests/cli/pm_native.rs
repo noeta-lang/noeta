@@ -1,9 +1,8 @@
-//! Package manager phase 3: third-party NATIVE packages and the composed toolchain
-//! (N3.2/N3.3).
+//! Package manager: third-party NATIVE packages and the composed toolchain.
 
 use crate::support::*;
 
-// --- package manager: composed toolchain (Phase 3, N3.2/N3.3) -----------------------------------
+// --- package manager: composed toolchain --------------------------------------------------------
 
 /// Lay out an app + a dependency package carrying a **native entry crate** (the Phase-3 proving
 /// package): module `fx` (plain dispatch), extern type `Acc` (plain methods + a higher-order ctx
@@ -36,7 +35,7 @@ fn composed_project(name: &str) -> PathBuf {
          a.apply(fn(t) => t * 10);\n\
          echo fx.double(21);\n\
          echo a.total();\n\n\
-         // The raw-buffer seam, third-party edition (N3.4): the extension's column kernel\n\
+         // The raw-buffer seam, third-party edition: the extension's column kernel\n\
          // reduces the app's own @packed type, and its COW-mutating kernel produces a new list.\n\
          impl fx.Pixels for Px {}\n\
          ps = [Px { r: 0.25f32, g: 1.0f32, b: 2.0f32 }, Px { r: 0.5f32, g: 1.0f32, b: 2.0f32 }];\n\
@@ -194,7 +193,7 @@ fn fx_dispatch(
     }
 }
 
-// The raw-buffer seam (package-manager N3.4), third-party edition: kernels over the CONSUMER's
+// The raw-buffer seam, third-party edition: kernels over the CONSUMER's
 // own `@packed` pixel type — a column reduction (zero per-element traffic) and a COW-mutating
 // transform producing a new list.
 const FX_CTX_FNS: &[ExtFn] = &[
@@ -410,10 +409,10 @@ fn fx_info_run(_ctx: &mut dyn CommandCtx, _args: &ParsedArgs) -> u8 {
     0
 }
 
-// A third-party METHOD BUNDLE (kernel-methods K6): the consumer's own @packed pixel type opts in
+// A third-party METHOD BUNDLE: the consumer's own @packed pixel type opts in
 // with `impl fx.Pixels for Px {}` and gains `ps.brighten(delta)` — same COW raw-buffer kernel as
 // `fx.brighten_all`, in method position, statically routed through the composed toolchain.
-// Since the ExtBundle→ExtTrait fold-in (slice 4) a method bundle is a native `ExtTrait`, namespaced
+// Since the ExtBundle→ExtTrait fold-in a method bundle is a native `ExtTrait`, namespaced
 // to the qualified module (`imgfx.fx`) so `impl fx.Pixels for Px {}` resolves through the surface
 // adapter (`resolve_bundle_ref` → `find_trait_in_module`).
 const PIXELS_BUNDLE: ExtTrait = ExtTrait {
@@ -562,7 +561,7 @@ impl Extension for ImgfxExtension {
             },
         ]
     }
-    // dev-deps D5: a DEV-only capability — a tier-body formatter — gated behind the `fmt` feature.
+    // A DEV-only capability — a tier-body formatter — gated behind the `fmt` feature.
     // The runtime capabilities above (module/type/command) always compile; this one, and the marker
     // string it carries, only when `fmt` is enabled. A shipped composed runner is built with default
     // features (fmt OFF), so the formatter and marker are absent from the artifact; the dev toolchain
@@ -585,7 +584,7 @@ fn imgfx_reformat(
     Some(format!("{MARKER}:{}", body.trim()))
 }
 
-/// The composition convention (package-manager Phase 3): the entry crate exports its units as a
+/// The composition convention: the entry crate exports its units as a
 /// slice — one crate, any number of units.
 pub static NOETA_EXTENSIONS: &[&(dyn Extension + Sync)] = &[&ImgfxExtension];
 "##;
@@ -617,7 +616,7 @@ fn composed_env(cmd: &mut Command) -> &mut Command {
 #[test]
 fn build_exe_of_a_native_dep_app_strips_the_mixed_crates_formatter() {
     let _guard = compose_guard();
-    // dev-deps D5, the capstone: a shipped native-dependency app carries its runtime handler but not
+    // A shipped native-dependency app carries its runtime handler but not
     // the mixed crate's dev formatter. `build --exe` composes a RUNNER (lean base + imgfx runtime
     // extension, `fmt` OFF) and staples the bundle. We prove both halves:
     //   1. the artifact RUNS the native handler (`fx.double(21)` → 42) — the extension is composed in;
@@ -673,7 +672,7 @@ fn find_composed_binary(cache: &std::path::Path) -> Option<PathBuf> {
 #[test]
 fn dev_toolchain_composition_includes_a_mixed_crates_formatter() {
     let _guard = compose_guard();
-    // dev-deps D5b, the mirror of the capstone: a *dev toolchain* composed for the same native-dep app
+    // The mirror: a *dev toolchain* composed for the same native-dep app
     // turns the mixed crate's `fmt` feature ON, so its tier-body formatter (and its marker) compile IN
     // — exactly the capability a shipped runner strips. We compose the toolchain via a delegating dev
     // command (`check`) and confirm the cached composed binary carries the formatter marker.
@@ -913,8 +912,8 @@ fn composed_toolchain_end_to_end() {
     );
 
     // 1. First run: composes (banner on stderr), then dispatches the native module, the extern
-    //    type's plain methods, the higher-order ctx method, and the raw-buffer kernels (N3.4:
-    //    `sum_r` reduces the app's own @packed column type; `brighten_all` produces a new list
+    //    type's plain methods, the higher-order ctx method, and the raw-buffer kernels
+    //    (`sum_r` reduces the app's own @packed column type; `brighten_all` produces a new list
     //    while — copy-on-write — the input stays intact: 1.5 then 1.0) — all composed.
     composed_env(&mut lang())
         .arg("run")

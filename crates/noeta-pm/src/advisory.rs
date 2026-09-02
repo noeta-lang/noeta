@@ -22,7 +22,7 @@ use crate::transparency::hex_to_array;
 const ADVISORY_PREFIX: &str = "noeta-advisory-v1";
 const FEED_PREFIX: &str = "noeta-advisory-feed-v1";
 
-/// How an advisory entered the feed — its **intake tier** (advisory-intake arc). Bound into the
+/// How an advisory entered the feed — its **intake tier**. Bound into the
 /// canonical signing bytes (and thus the transparency-log leaf), so a client can trust *which* tier the
 /// registry served and apply a per-tier policy. Deserialized from the wire's lowercase spelling;
 /// defaults to [`AdvisoryTier::Operator`] for a feed (or a registry) that predates the field.
@@ -92,7 +92,7 @@ pub struct Advisory {
     /// logged.
     #[serde(default)]
     pub log_index: Option<u64>,
-    /// The intake tier (advisory-intake arc). Bound into [`Self::canonical_bytes`]; defaults to
+    /// The intake tier. Bound into [`Self::canonical_bytes`]; defaults to
     /// [`AdvisoryTier::Operator`] for a feed that predates the field.
     #[serde(default)]
     pub tier: AdvisoryTier,
@@ -119,8 +119,8 @@ impl Advisory {
     /// The exact bytes the registry signed — reproduced identically so the signature verifies. MUST
     /// match the server's `canonicalBytes`. `details` is folded in as a SHA-256 digest (it may be
     /// multi-line); `state` binds the withdrawn flag so an advisory can't be silently un-retracted
-    /// under the same signature; `tier` is the trailing field (appended by the advisory-intake arc) so
-    /// a client can trust which intake tier the registry served.
+    /// under the same signature; `tier` is the trailing field, so a client can trust which intake
+    /// tier the registry served.
     pub fn canonical_bytes(&self) -> Vec<u8> {
         let details_hash = hex_encode(&Sha256::digest(self.details.as_bytes()));
         let state = if self.withdrawn {

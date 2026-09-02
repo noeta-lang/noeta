@@ -71,7 +71,7 @@ enum FileBenches {
     Collected(Vec<BenchOutcome>),
 }
 
-/// `noeta bench [PATH]` — discover `@bench` blocks (object-model slice 6) and measure each. Unlike
+/// `noeta bench [PATH]` — discover `@bench` blocks and measure each. Unlike
 /// `noeta test`, benchmarks run **sequentially** (concurrency would corrupt timings). Each bench's
 /// per-iteration cost is estimated by a **two-point** measurement: the fn is invoked N and 2N times
 /// in fresh isolates and the per-iteration time is `(t(2N) − t(N)) / N`, which cancels the fixed
@@ -183,7 +183,7 @@ fn run_file_benches(
     let activated = &run.activated;
 
     // `--name` keeps only exact fn-name matches — the single-benchmark seam editors use, and the
-    // impact-filtered `--watch` consumer (server-hmr W3).
+    // impact-filtered `--watch` consumer.
     let selected: Vec<&TierFn> = if opts.names.is_empty() {
         activated.benches.iter().collect()
     } else {

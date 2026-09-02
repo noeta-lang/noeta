@@ -84,7 +84,7 @@ impl Value {
 
     /// If this iterator is directly backed by a list (`xs.iter()` with no adapters), return the
     /// backing list value and the cursor's current position, and **drain** it (advance the cursor to
-    /// the end). Used by the eager reduction delegation (packed-reductions arc) so `xs.iter().sum()`
+    /// the end). Used by the eager reduction delegation so `xs.iter().sum()`
     /// folds the same buffer as `xs.sum()` and thus width-wraps identically. The returned list value
     /// is borrowed (still owned by the iterator), so the caller must not release it. `None` for an
     /// adapter/generator iterator or a non-iterator.
@@ -285,7 +285,7 @@ impl Value {
     /// The narrow integer element width (`signed`, `bits < 64`) of this iterator's backing list,
     /// traced through the **width-preserving** adapters (`take`/`drop`/`chain`/`filter`) to a packed
     /// list — for masking a narrow-typed `sum` so `xs.iter().take(k).sum()` wraps at the same width
-    /// `xs.sum()` does (array-ops arc). `map`/`enumerate`/`zip` change the element type, so they stop
+    /// `xs.sum()` does. `map`/`enumerate`/`zip` change the element type, so they stop
     /// the trace (the fold then stays at 64 bits — the element is already a full `int`). `None` for a
     /// boxed / wide / non-integer backing, or a non-iterator/non-list value.
     pub fn iter_narrow_width(self) -> Option<(bool, u8)> {

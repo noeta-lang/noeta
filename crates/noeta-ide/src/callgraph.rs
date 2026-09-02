@@ -1,4 +1,4 @@
-//! The static function-level **call graph** (role-graph R3): which function uses which, with call
+//! The static function-level **call graph**: which function uses which, with call
 //! sites — the structural skeleton a role-aware trace walks (`noeta mcp`'s `trace` tool) and a
 //! future LSP call hierarchy can serve.
 //!
@@ -149,7 +149,7 @@ pub fn build(
                     functions.push(method_node(decl.target.as_str(), m));
                 }
             }
-            // Tier fns (`@test fn adds…`) are graph nodes like any top-level fn (server-hmr W3):
+            // Tier fns (`@test fn adds…`) are graph nodes like any top-level fn:
             // the impact engine's reverse closure walks from a changed fn to the tests that call
             // it, and the editor's call hierarchy works inside tier bodies.
             Stmt::TierBlock { items, .. } => {

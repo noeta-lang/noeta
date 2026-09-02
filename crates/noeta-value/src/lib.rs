@@ -1,4 +1,4 @@
-//! The M1 runtime value: a NaN-boxed 64-bit word.
+//! The runtime value: a NaN-boxed 64-bit word.
 //!
 //! Every value is one `u64`. Doubles are stored as their own bit pattern; everything else
 //! lives in the unused encoding space of a quiet NaN. The scheme (a refinement of the
@@ -16,7 +16,7 @@
 //! in `i64`. This is the representation the VM (`noeta-vm`) operates on through the safe
 //! API here; all `unsafe` is quarantined to the [`heap`] module.
 //!
-//! Why a separate value type from the M0 tree-walker's `Value` enum? An `Rc<T>` cannot
+//! Why a separate value type from the tree-walker's `Value` enum? An `Rc<T>` cannot
 //! live in a NaN-box pointer slot, so the two backends keep different value models and are
 //! only ever compared on observable output (`RunResult`), never on representation.
 
@@ -76,7 +76,7 @@ pub enum IterAbort<E> {
 pub enum HeapKind {
     Str,
     Bytes,
-    /// A registered extern-type value (extern-types X1).
+    /// A registered extern-type value.
     Extern,
     Int,
     Closure,
@@ -90,9 +90,9 @@ pub enum HeapKind {
     Enum,
     NativeModule,
     NativeFn,
-    /// A selectively-imported module function (`use std.math.sqrt`, prelude-redesign P0).
+    /// A selectively-imported module function (`use std.math.sqrt`).
     ModuleFn,
-    /// An unbound method handle (`Type.method` as a value, prelude-redesign MH).
+    /// An unbound method handle (`Type.method` as a value).
     MethodHandle,
     /// A bound method handle (`value.method`, receiver captured, prelude-redesign EX.2b).
     BoundMethod,
@@ -150,7 +150,7 @@ impl Value {
     pub(crate) const PTR_MASK: u64 = 0x0000_ffff_ffff_ffff;
     /// Discriminates an immediate small int from the unit/bool singletons (a free QNAN bit).
     const INT_TAG: u64 = 1 << 49;
-    /// Discriminates an immediate `f32` (P-PACK Phase 3): a distinct free QNAN bit, one below
+    /// Discriminates an immediate `f32`: a distinct free QNAN bit, one below
     /// `INT_TAG`. The 32 f32 bits live in the low 32 of the payload (bits 32–47 stay zero, and bit 49
     /// — `INT_TAG` — stays clear, so an `f32` is neither a small int nor a float/pointer/singleton).
     const F32_TAG: u64 = 1 << 48;
@@ -246,7 +246,7 @@ impl Value {
         }
     }
 
-    /// A heap string (refcount 1). Content ≤ 24 bytes lives inline in the payload (P-SSO) —
+    /// A heap string (refcount 1). Content ≤ 24 bytes lives inline in the payload —
     /// the value is then a single allocation.
     pub fn string(s: &str) -> Value {
         heap::alloc(Payload::Str(CompactString::new(s)))
@@ -379,7 +379,7 @@ impl Value {
         heap::alloc(Payload::List(items))
     }
 
-    /// This value's **reflected type tag** (runtime type-argument reflection, R1), or `None` if the
+    /// This value's **reflected type tag** (runtime type-argument reflection), or `None` if the
     /// value is untagged (an immediate, or a heap value whose construction site carried no type). Read
     /// by `type_of` to recover a container's element type after its static type was laundered through
     /// `dyn`. A cheap `Rc` clone; `None` for every non-pointer value.
@@ -401,7 +401,7 @@ impl Value {
             .unwrap_or_else(|| self.type_name().to_string())
     }
 
-    /// Stamp (or clear) this value's reflected type tag (R1). Used at list-literal construction to
+    /// Stamp (or clear) this value's reflected type tag. Used at list-literal construction to
     /// record the checker-resolved element type. A no-op on a non-pointer value (an immediate carries
     /// no tag). The tag is invisible to value semantics — it lives beside the payload, never inside it.
     pub fn set_reflect(self, tag: Option<Rc<TypeRepr>>) {
@@ -410,8 +410,8 @@ impl Value {
         }
     }
 
-    /// A heap tuple (refcount 1) — a fixed-arity, value-semantic positional aggregate (object-model
-    /// slice 4). Ownership of one reference to each element transfers in, exactly like [`Value::list`].
+    /// A heap tuple (refcount 1) — a fixed-arity, value-semantic positional aggregate. Ownership
+    /// of one reference to each element transfers in, exactly like [`Value::list`].
     pub fn tuple(items: Vec<Value>) -> Value {
         heap::alloc(Payload::Tuple(items))
     }
@@ -423,7 +423,7 @@ impl Value {
         heap::alloc(Payload::Set(items))
     }
 
-    /// A registered extern-type value (extern-types X1) — the general form of
+    /// A registered extern-type value — the general form of
     /// [`Value::file_handle`]. A GC leaf (the contract owns no child values).
     pub fn extern_value(value: noeta_ext_abi::ExternBox) -> Value {
         heap::alloc(Payload::Extern(value))
@@ -543,7 +543,7 @@ impl Value {
         ))
     }
 
-    /// A heap map from already-built keys (extern-types X4) — the `MakeMap`/extern-key path.
+    /// A heap map from already-built keys — the `MakeMap`/extern-key path.
     /// Later duplicates win (insertion order), matching the string builder's BTreeMap semantics.
     pub fn map_keyed(entries: Vec<(noeta_ext_abi::MapKey, Value)>) -> Value {
         heap::alloc(Payload::Map(entries.into_iter().collect()))
@@ -621,7 +621,7 @@ impl Value {
         }
     }
 
-    /// A 32-bit float (P-PACK Phase 3) — an **immediate** value (no heap allocation, not refcounted),
+    /// A 32-bit float — an **immediate** value (no heap allocation, not refcounted),
     /// its 32 bits NaN-boxed under `F32_TAG`.
     pub fn f32(f: f32) -> Value {
         Value(Self::QNAN | Self::F32_TAG | u64::from(f.to_bits()))
@@ -816,7 +816,7 @@ impl Value {
                 },
                 _ => false,
             });
-            // Content-changing → drop the reflected type tag (R1); see `list_extend`.
+            // Content-changing → drop the reflected type tag; see `list_extend`.
             heap::set_reflect(self, None);
             inserted
         } else {
@@ -843,7 +843,7 @@ impl Value {
                 },
                 _ => None,
             });
-            // Content-changing → drop the reflected type tag (R1); see `list_extend`.
+            // Content-changing → drop the reflected type tag; see `list_extend`.
             heap::set_reflect(self, None);
             removed
         } else {
@@ -901,7 +901,7 @@ impl Value {
         }
     }
 
-    /// The value for an owned [`MapKey`] probe — the packed-key lane (P-PKEY), where the key was
+    /// The value for an owned [`MapKey`] probe — the packed-key lane, where the key was
     /// just built from a value's content. Same sharing contract as [`Value::map_get`].
     ///
     /// [`MapKey`]: noeta_ext_abi::MapKey
@@ -931,7 +931,7 @@ impl Value {
         }
     }
 
-    /// The value for an extern-type `key`, if this is a map containing it (extern-types X4).
+    /// The value for an extern-type `key`, if this is a map containing it.
     /// Probes through the extern contract with no key allocation. Same sharing contract as
     /// [`Value::map_get`].
     pub fn map_get_extern(self, key: &dyn noeta_ext_abi::ExternValue) -> Option<Value> {
@@ -980,7 +980,7 @@ impl Value {
                 }
             });
         }
-        // A content-changing op yields a logically new list: drop the reflected type tag (R1) so the
+        // A content-changing op yields a logically new list: drop the reflected type tag so the
         // reused node does not carry the original literal's element type. The tag survives pure
         // aliasing only — matching the tree-walker, which produces a fresh untagged list here.
         heap::set_reflect(self, None);
@@ -1034,7 +1034,7 @@ impl Value {
                 items.push(element);
             }
         });
-        // Content-changing → drop the reflected type tag (R1); see `list_extend`.
+        // Content-changing → drop the reflected type tag; see `list_extend`.
         heap::set_reflect(self, None);
     }
 
@@ -1055,7 +1055,7 @@ impl Value {
                 }
                 _ => Value::unit(),
             });
-            // Content-changing → drop the reflected type tag (R1); see `list_extend`.
+            // Content-changing → drop the reflected type tag; see `list_extend`.
             heap::set_reflect(self, None);
             displaced
         } else {
@@ -1128,7 +1128,7 @@ impl Value {
                 Payload::Map(entries) => entries.insert(key, value),
                 _ => None,
             });
-            // Content-changing → drop the reflected type tag (R1); see `list_extend`.
+            // Content-changing → drop the reflected type tag; see `list_extend`.
             heap::set_reflect(self, None);
             displaced
         } else {
@@ -1148,7 +1148,7 @@ impl Value {
                 Payload::Map(entries) => entries.remove(key),
                 _ => None,
             });
-            // Content-changing → drop the reflected type tag (R1); see `list_extend`.
+            // Content-changing → drop the reflected type tag; see `list_extend`.
             heap::set_reflect(self, None);
             removed
         } else {
@@ -1156,7 +1156,7 @@ impl Value {
         }
     }
 
-    /// Remove an extern-type `key` **in place** (extern-types X4) — the extern twin of
+    /// Remove an extern-type `key` **in place** — the extern twin of
     /// [`Value::map_remove`], same uniqueness requirement and handback contract.
     pub fn map_remove_extern(self, key: &dyn noeta_ext_abi::ExternValue) -> Option<Value> {
         debug_assert!(
@@ -1200,7 +1200,7 @@ impl Value {
     }
 
     /// A shallow clone of a map's full `MapKey → value` entries in sorted-key order
-    /// (extern-types X4) — the keyed twin of [`Value::map_entries`], for derived-map rebuilds
+    /// — the keyed twin of [`Value::map_entries`], for derived-map rebuilds
     /// that must preserve extern keys. Values share references (not retained), like
     /// [`Value::map_entries`].
     pub fn map_entries_keyed(self) -> Option<Vec<(noeta_ext_abi::MapKey, Value)>> {
@@ -1312,7 +1312,7 @@ impl Value {
         }
     }
 
-    /// The [`MapKey`] for a **key-capable `@packed` struct** value (P-PKEY), or `None` when this
+    /// The [`MapKey`] for a **key-capable `@packed` struct** value, or `None` when this
     /// value is not one. Walks the fields in declaration order into plain
     /// [`noeta_ext_abi::PackedKeyField`] data — the erased integer word (immediate or boxed),
     /// bools, nested key-capable structs — plus the display form (render/JSON only, not
@@ -1378,8 +1378,8 @@ impl Value {
     }
 
     /// Fill `out` (cleared first) with this object's primitive fields in slot (declared) order —
-    /// the allocation-free shallow scalar projection under the ctx element loops (package-manager
-    /// N3.4). `false` for a non-object or any non-primitive field (with `out` left cleared).
+    /// the allocation-free shallow scalar projection under the ctx element loops. `false` for a
+    /// non-object or any non-primitive field (with `out` left cleared).
     pub fn scalar_slots_into(self, out: &mut Vec<noeta_ext_abi::Scalar>) -> bool {
         use noeta_ext_abi::Scalar;
         out.clear();
@@ -1464,7 +1464,7 @@ impl Value {
         }))
     }
 
-    /// The user-facing type name, for diagnostics (mirrors M0's `Value::type_name`).
+    /// The user-facing type name, for diagnostics (mirrors the tree-walker's `Value::type_name`).
     pub fn type_name(self) -> &'static str {
         if self.as_bool().is_some() {
             "bool"
@@ -1476,7 +1476,7 @@ impl Value {
             "f32"
         } else if self.is_pointer() {
             // Boxed ints were already caught by `as_int` above, so a pointer here is a
-            // closure, list, map, or string. M0 names both user functions and builtins
+            // closure, list, map, or string. The tree-walker names both user functions and builtins
             // "function".
             if self.as_closure().is_some()
                 || self.as_native_fn().is_some()
@@ -1543,8 +1543,8 @@ impl Value {
     }
 
     /// Whether this heap value may be **mutated in place** under the COW invariant: the caller
-    /// holds the only reference (`refcount == 1`) *and* the object is not borrow-shared (P-PAR
-    /// S2). A shared object's refcount is frozen at 1 (retain/release no-op), so a bare
+    /// holds the only reference (`refcount == 1`) *and* the object is not borrow-shared. A shared
+    /// object's refcount is frozen at 1 (retain/release no-op), so a bare
     /// `refcount() == 1` test would wrongly treat a corpus borrowed from a [`SharedRegion`] as
     /// uniquely owned and mutate a buffer other isolate threads are reading — every in-place
     /// fast path must gate on this, never on `refcount()` alone.
@@ -1552,7 +1552,7 @@ impl Value {
         self.is_pointer() && heap::refcount(self) == 1 && !heap::is_shared(self)
     }
 
-    /// Whether this value's whole graph can be promoted into a [`SharedRegion`] (P-PAR S2) —
+    /// Whether this value's whole graph can be promoted into a [`SharedRegion`] —
     /// `Send` **data** kinds only. A function value, bound method, or channel endpoint is
     /// `Wire`-shippable but not promotable, so an argument containing one keeps the copy path.
     pub fn is_promotable_graph(self) -> bool {
@@ -1591,7 +1591,7 @@ impl Value {
         self.0
     }
 
-    /// Drop one owning reference, reclaiming through the **active cycle collector** (Phase 6.4):
+    /// Drop one owning reference, reclaiming through the **active cycle collector**:
     /// a prompt refcount free in `Trace` mode, or the Bacon–Rajan `Decrement` (buffer a surviving
     /// cycle-capable root, defer a buffered object's dealloc) in `TrialDeletion` mode. This is the
     /// release the runtime should use; `dec_ref` + `free` is the lower-level pair the collector and
@@ -1657,7 +1657,7 @@ impl Value {
         }
     }
 
-    /// The object's creation sequence — its allocation age (object-model slice 2c), used by the
+    /// The object's creation sequence — its allocation age, used by the
     /// cycle collector to finalize reclaimed members in a deterministic reverse-creation order. `0`
     /// for non-pointer values (they are never collected).
     pub fn gc_seq(self) -> u32 {

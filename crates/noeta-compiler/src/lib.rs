@@ -1,7 +1,7 @@
 //! The bytecode compiler: **Core IR → [`Module`]**.
 //!
-//! Since the memory-management migration's Phase 2 the compiler lowers the shared
-//! [A-normal-form Core IR][noeta_ir] both backends run, not the surface AST: [`compile`] first
+//! The compiler lowers the shared [A-normal-form Core IR][noeta_ir] both backends run, not the
+//! surface AST: [`compile`] first
 //! lowers the parsed program to `noeta_ir` (the same lowering the IR interpreter consumes), then
 //! emits bytecode from it. Because the IR has already named every intermediate value and fixed
 //! evaluation order, the compiler is a near-1:1 structural lowering — an IR `let v = a + b`
@@ -145,8 +145,8 @@ fn binds_native_value(
     )
 }
 
-/// Build the compiler's constructible-type record for a native-declared enum (native-extensibility
-/// S1b), so `Hue.Red` / `Hue.Labeled(x)` lower to `MakeEnum` exactly like a `.noe` enum. Variant
+/// Build the compiler's constructible-type record for a native-declared enum, so `Hue.Red` /
+/// `Hue.Labeled(x)` lower to `MakeEnum` exactly like a `.noe` enum. Variant
 /// declaration order — hence each variant's index — comes straight from the [`ExtEnum`], matching
 /// the index a native-returned variant carries and the tree-walker's `EnumDef`. A payload variant's
 /// field names are synthesized positionally (`_0`, `_1`, …): only their **count** is load-bearing
@@ -217,8 +217,8 @@ pub struct CompileOptions {
     /// CLI, salsa, and the differential pass false (no debug info, unconstrained coalescing —
     /// goldens unchanged).
     pub debug: bool,
-    /// The extension registry `use`-import lowering and native-type narrowing resolve against
-    /// (instance-registry IR5). The production/CLI path keeps the process-global default; an
+    /// The extension registry `use`-import lowering and native-type narrowing resolve against.
+    /// The production/CLI path keeps the process-global default; an
     /// embed session threads its own assembled set.
     pub registry: &'static noeta_ext_abi::registry::Registry,
 }
@@ -352,7 +352,7 @@ pub fn compile_with(
 }
 
 /// Compile a whole **checked** program and keep the compiler alive as a [`SessionCompiler`] — the
-/// debug console's seed (tooling-unification T3). The returned session's tables *are* the module's
+/// debug console's seed. The returned session's tables *are* the module's
 /// own id-spaces (proto indices, global slots, shapes, interned names), so a later
 /// [`SessionCompiler::extend`] appends a fragment onto the running program exactly as a REPL entry
 /// appends onto a session: stable prefix, new ids at the end. The initial compile is fully checked
@@ -377,7 +377,7 @@ pub fn compile_with_sites_session(
 }
 
 /// As [`compile_with_sites_session`], but resolving native names against an explicit `registry`
-/// (instance-registry IR5) — the seam an embedding host with its own assembled extension set uses so
+/// — the seam an embedding host with its own assembled extension set uses so
 /// its session's compile binds `use` imports and narrowing targets against *its* extensions, not the
 /// process-global default. The default entry point above passes `default_seeded()`, so every CLI /
 /// REPL / debug-adapter caller is unchanged.
@@ -566,11 +566,11 @@ const TABLE_POLICIES: &[(&str, Policy, &str)] = &[
 pub struct SessionCompiler {
     mc: ModuleCompiler,
     /// Accumulated `map(...)`-result packed pairs (span → interned schema index), from the checked
-    /// launch compile and every checked entry (session-checker C5). Every snapshot carries the FULL
+    /// launch compile and every checked entry. Every snapshot carries the FULL
     /// accumulation: an earlier entry's still-live function looks its call span up at run time, so
     /// the pairs must survive into every later module.
     map_packed: Vec<(Span, u32)>,
-    /// Reflection accumulated across entries (REPL-on-VM follow-on): each entry's
+    /// Reflection accumulated across entries: each entry's
     /// [`noeta_ast::reflect::build`] is merged in latest-wins, so `attributes_of` / `type_of` /
     /// `roles_of` on a type declared in an *earlier* entry resolve — where a per-entry rebuild would
     /// only see the current entry's declarations. The tree-walker `Session` accumulates identically,
@@ -603,7 +603,7 @@ impl Default for SessionCompiler {
 impl SessionCompiler {
     /// A fresh REPL session: an empty compiler resolving native names against the process-global
     /// default registry (an embed session that assembled its own set installs it explicitly through
-    /// [`compile_with_sites_session_with_registry`], instance-registry IR5).
+    /// [`compile_with_sites_session_with_registry`]).
     pub fn new() -> SessionCompiler {
         SessionCompiler::empty(
             false,
@@ -679,8 +679,8 @@ impl SessionCompiler {
         Ok(self.snapshot(reachable))
     }
 
-    /// [`SessionCompiler::extend`] with the checker's **accumulated [`Sites`]** (session-checker
-    /// C5): the entry lowers with its span-keyed codegen hints active — packed lists, `type_of`
+    /// [`SessionCompiler::extend`] with the checker's **accumulated [`Sites`]**: the entry lowers
+    /// with its span-keyed codegen hints active — packed lists, `type_of`
     /// full fidelity, method handles, streaming `for`s, width masking — and with PRECISE destructor
     /// relevance/reachability instead of the conservative over-approximations. That makes it the
     /// *same* compile a cold start performs — which is what the hot-swap differential oracle
@@ -697,7 +697,7 @@ impl SessionCompiler {
         Ok(self.snapshot(reachable))
     }
 
-    /// The session's live **type-argument table** (poly-values F2b) — the one
+    /// The session's live **type-argument table** — the one
     /// [`Module::type_args`] every snapshot carries. Exposed for the hot-swap install path and its
     /// tests: the table's indices are held by LIVE runtime values, so a caller that wants to prove
     /// prefix stability across an install reads it here before and after.
@@ -856,7 +856,7 @@ impl SessionCompiler {
         real_isolates: bool,
     ) -> Result<Vec<String>, Unsupported> {
         // ── front end ───────────────────────────────────────────────────────────────────────
-        // Hoist standalone-`impl` methods onto their target type (L1 user traits, UT2) so the
+        // Hoist standalone-`impl` methods onto their target type so the
         // surface pass-1 (`register_types`) and the IR pass-2 (`compile_methods`) agree on the
         // method set. The helper is idempotent, so the lowering below re-hoisting is a no-op;
         // rebinds only when such an impl exists.
@@ -897,7 +897,7 @@ impl SessionCompiler {
         // checkerless install lowers with the all-empty set — the same call, not a second path.
         let opts = || noeta_ir::LowerOptions {
             real_isolates,
-            // This compiler's own registry (instance-registry IR5) — the process-global default for
+            // This compiler's own registry — the process-global default for
             // the CLI and a plain REPL session, an embed session's own set when it installed one.
             registry: self.mc.registry,
             // What lowering knows from the programs installed BEFORE this one. On an empty compiler
@@ -927,7 +927,7 @@ impl SessionCompiler {
         // install to lower against.
         self.facts
             .absorb(noeta_ir::ProgramFacts::of(hoisted, self.mc.registry));
-        // The precise-RC drop-insertion pass (Phase 3) annotates the IR with `DropVar`s at last-use
+        // The precise-RC drop-insertion pass annotates the IR with `DropVar`s at last-use
         // death points; they lower to plain releases (prompt reclamation, no destructor), so this is
         // behavior-neutral — it reclaims a local's value at its last use instead of at frame
         // teardown. Without a bundle the conservative `None` marks every value destructor-relevant.
@@ -935,7 +935,7 @@ impl SessionCompiler {
             .as_deref()
             .map(|s| passes_relevance(&s.destructor_relevance));
         let ir = noeta_ir_passes::insert_drops(&ir, relevance.as_ref());
-        // Thread in-place-reuse tokens (Phase 5) onto self-update constructors. A pure function of
+        // Thread in-place-reuse tokens onto self-update constructors. A pure function of
         // the drop-annotated IR, run identically by the IR interpreter (`reference_run`), so both
         // backends reuse at the same points by construction.
         //
@@ -961,8 +961,8 @@ impl SessionCompiler {
             self.mc.record_elem_width(*span, *width);
         }
         if let Some(bundle) = sites.as_mut() {
-            // `deserialize_recipes` — Replace. `@derive(Deserialize<Json>)` decode recipes (L2.2
-            // DI): the runtime registry `json.decode_typed` resolves against is baked from
+            // `deserialize_recipes` — Replace. `@derive(Deserialize<Json>)` decode recipes: the
+            // runtime registry `json.decode_typed` resolves against is baked from
             // `Module::deserialize_recipes`. The checker's bundle is the full accumulated set
             // (latest-wins on a redeclared name once the VM lifts it into a name→recipe map), so a
             // wholesale replace stays idempotent across installs. An install with no bundle has no
@@ -1081,13 +1081,13 @@ impl SessionCompiler {
                 let idx = self.mc.intern_packed_schema(layout);
                 self.map_packed.push((span, idx));
             }
-            // (2) Every `vec`-bundle-bound type's schema (scalar-unification slice 3), so the VM has
+            // (2) Every `vec`-bundle-bound type's schema, so the VM has
             // the element width even for a type that never appears in a `List<T>`.
             for layout in &bundle.bundle_schema_layouts {
                 self.mc.intern_packed_schema(layout);
             }
             // (3) EVERY `@packed` struct's layout unconditionally (native type-declaration
-            // unification, Slice E2) — the from-scratch producer's schema-availability channel. A
+            // unification) — the from-scratch producer's schema-availability channel. A
             // native fn's `NativeCtx::make_packed(type_name, …)` resolves the produced
             // `List<packed>`'s element schema by matching the interned schema's shape name, so a
             // native `@packed` struct must be present even when it never appears in a source
@@ -1152,7 +1152,7 @@ impl SessionCompiler {
             shapes: self.mc.shapes,
             packed_schemas: self.mc.packed_schemas,
             // The FULL map-packed accumulation rides every module — an earlier install's still-live
-            // function looks its `map(...)` call span up at run time (session-checker C5).
+            // function looks its `map(...)` call span up at run time.
             map_packed_sites: self.map_packed,
             order_hint_sites: self.mc.order_hint_sites,
             elem_width_sites: self.mc.elem_width_sites,
@@ -1206,8 +1206,8 @@ impl SessionCompiler {
     }
 
     /// Register `name` as a module-global binding **without compiling a declaration** — the debug
-    /// console promotes a fragment's top-level bindings to session globals (tooling-unification
-    /// U2), so the assignment inside the fragment's closure wrapper resolves to a global slot
+    /// console promotes a fragment's top-level bindings to session globals, so the assignment
+    /// inside the fragment's closure wrapper resolves to a global slot
     /// instead of declaring a closure-local that dies with the entry. `mutable` marks the binding
     /// re-assignable (console bindings are, like REPL bindings). With `overwrite` (a console `mut`
     /// redeclaration) an existing registration is replaced — the same latest-wins a REPL entry's
@@ -1253,7 +1253,7 @@ enum TypeInfo {
     },
     /// An enum: each variant's positional data-field names, plus each `fn`'s reserved prototype
     /// index (an enum `fn` is callable as an associated function `E.f(...)` and as an instance
-    /// method `value.f(...)`, exactly like a class method — the unified body, object-model slice 3).
+    /// method `value.f(...)`, exactly like a class method — the unified body).
     Enum {
         variants: HashMap<String, VariantSlots>,
         fns: HashMap<String, u32>,
@@ -1296,15 +1296,15 @@ struct ModuleCompiler {
     packed_schemas: Vec<noeta_bytecode::PackedSchemaDef>,
     methods: Vec<MethodEntry>,
     destructors: Vec<(String, u32)>,
-    /// `(type_name, field_name, proto)` for each field with a default (object-model slice 5), the
+    /// `(type_name, field_name, proto)` for each field with a default, the
     /// thunk compiled in global scope (see [`Module::field_defaults`]).
     field_defaults: Vec<(String, String, u32)>,
     comparable_derives: Vec<String>,
     tojson_derives: Vec<String>,
-    /// `@derive(Deserialize<Json>)` decode recipes (L2.2 DI), taken verbatim from the checker's
+    /// `@derive(Deserialize<Json>)` decode recipes, taken verbatim from the checker's
     /// [`noeta_check::Sites::deserialize_recipes`] and copied onto [`Module::deserialize_recipes`].
     deserialize_recipes: Vec<(String, noeta_ext_abi::TypeRecipe)>,
-    /// The program-wide type-argument table (poly-values F2b), taken from the lowered IR
+    /// The program-wide type-argument table, taken from the lowered IR
     /// `Program::type_args` and copied onto [`Module::type_args`].
     type_args: Vec<noeta_ext_abi::TypeArgInfo>,
     /// The reflection projection of [`Self::type_args`], indexed identically: each instantiation's
@@ -1318,7 +1318,7 @@ struct ModuleCompiler {
     /// Type names whose `==` is **structural** (baked into each instance's `Shape::structural_eq`):
     /// every `struct`, plus a `class` that is `Equatable` (derives it or hand-`impl`s `eq`). A
     /// `class` absent here compares by reference identity. Mirrors the tree-walker's
-    /// `TypeDef::structural_eq` so both backends agree (object-model slice 2).
+    /// `TypeDef::structural_eq` so both backends agree.
     structural_eq_types: HashSet<String>,
     /// Per declared struct/class, the slot indices of its `#[Transient]` fields (baked into each
     /// instance's `Shape::transient_slots`, which the deep marshal reads). Only types that mark a
@@ -1385,14 +1385,14 @@ struct ModuleCompiler {
     module_binding_names: Vec<String>,
     /// The concrete static type the checker resolved for each `type_of(value)` site (keyed by the
     /// `Expr::TypeOf` span), harvested from the *same* program the tree-walker harvests, so both
-    /// backends bake identical full-fidelity `Type` constants (`type_of` fidelity A, P2.3). A site
+    /// backends bake identical full-fidelity `Type` constants. A site
     /// absent here lowers to the runtime head-constructor op instead.
     type_of_sites: HashMap<Span, noeta_ast::reflect::TypeRepr>,
     /// Running count of inline-cache slots assigned so far. Each `LoadField`/`CallMethod` emission
     /// takes the next id (module-global across all chunks); the total becomes [`Module::cache_slots`],
     /// sizing the VM's per-run cache array. See [`ModuleCompiler::next_cache_slot`].
     cache_slots: u32,
-    /// The interned reflected element types (R1), referenced by index from [`Op::MakeList`]. Interned
+    /// The interned reflected element types, referenced by index from [`Op::MakeList`]. Interned
     /// by [`Self::intern_type_repr`]; becomes [`Module::type_reprs`].
     type_reprs: Vec<noeta_ast::reflect::TypeRepr>,
     /// The interned instruction name table (P-VMT-OPSZ), becomes [`Module::names`]. Every op name
@@ -1413,7 +1413,7 @@ struct ModuleCompiler {
     /// production/differential compile leaves this `false`, so no debug info is produced and
     /// coalescing is unconstrained (goldens/benchmarks are untouched).
     debug: bool,
-    /// The extension registry name resolution consults during compilation (instance-registry IR5):
+    /// The extension registry name resolution consults during compilation:
     /// `use` import lowering — `is_native_module` / `selective_import_module` / the module-function
     /// binding — resolves against it, so a session compiling with its own extension set binds
     /// imports to *its* registry. The production/CLI path holds the process-global default; an embed
@@ -1825,7 +1825,7 @@ impl ModuleCompiler {
                         self.tojson_derives.push(decl.name.to_string());
                     }
                     // Reserve a prototype per method, shared by associated-fn and instance-method
-                    // dispatch (the unified body, object-model slice 3).
+                    // dispatch (the unified body).
                     let fns = self.reserve_method_protos(&decl.name, &decl.methods, &from_keys);
                     self.types
                         .insert(decl.name.to_string(), TypeInfo::Enum { variants, fns });
@@ -1838,13 +1838,13 @@ impl ModuleCompiler {
                         use noeta_ext_abi::registry::UseKind;
                         match self.registry.classify_use(path, &imported.name) {
                             UseKind::MemberFn { .. } => continue,
-                            // A native enum (`use shade.Hue`, native-extensibility S1b): register it
+                            // A native enum (`use shade.Hue`): register it
                             // as a **constructible** type handle keyed by the imported short name — so
                             // `Hue.Red` / `Hue.Labeled(x)` lower exactly like a `.noe` enum. The
                             // registry (keyed by qualified identity) is the single source of variants,
                             // the same channel `Ordering` is hand-seeded through. The shape name is the
                             // short local name, matching what a native-returned variant carries and
-                            // what a `TheEnum.Variant` pattern compares against (S1 identity note).
+                            // what a `TheEnum.Variant` pattern compares against.
                             UseKind::ExtEnum(qualified) => {
                                 if let Some(en) = self.registry.find_enum_qualified(&qualified) {
                                     // Keyed by the import's LOCAL binding — its alias when one is
@@ -1857,8 +1857,8 @@ impl ModuleCompiler {
                                     self.types.insert(key, ext_enum_type_info(en));
                                 }
                             }
-                            // A native **fielded type** — a class (`use geo.Handle`,
-                            // native-extensibility S2) or a value struct (`use geo.Point`, fielded
+                            // A native **fielded type** — a class (`use geo.Handle`) or a value
+                            // struct (`use geo.Point`, fielded
                             // unification): register it as a **constructible** type handle keyed by
                             // the imported short name, so `Handle { … }` / `Point { … }` lowers
                             // exactly like a `.noe` class/struct. The registry (keyed by qualified
@@ -1978,7 +1978,7 @@ impl ModuleCompiler {
                 self.compile_field_defaults(name.as_str(), &strukt.field_defaults)?;
                 continue;
             }
-            // An enum method (object-model slice 3) compiles like a struct/class method but with an
+            // An enum method compiles like a struct/class method but with an
             // **empty** field scope: an enum's variants carry different data, so there are no implicit
             // fields to resolve — a method reaches its payload by `match`ing on the receiver (`self`).
             if let Stmt::Decl(Decl::Enum(en)) = stmt {
@@ -2039,7 +2039,7 @@ impl ModuleCompiler {
         Ok(())
     }
 
-    /// Compile each field-default thunk (object-model slice 5) into a fresh parameterless prototype
+    /// Compile each field-default thunk into a fresh parameterless prototype
     /// and record `(type, field) → proto` in [`Self::field_defaults`]. The thunk is compiled in
     /// **global scope** (empty upvalues + no enclosing locals — a type is top-level, so its default
     /// resolves globals only, never `self`/sibling fields/the construction site). `MakeStruct` runs
@@ -2092,7 +2092,7 @@ impl ModuleCompiler {
     /// nested closures. A body [`Block`] with a `tail` atom (a closure/arrow or a default thunk)
     /// returns that atom; a block body without one falls off the end as an implicit unit return.
     /// `hidden` is how many leading `params` are type-argument slots rather than value parameters
-    /// (poly-values F2b) — carried straight through to [`Chunk::hidden`], and zero for everything
+    /// — carried straight through to [`Chunk::hidden`], and zero for everything
     /// but a forwarding generic.
     #[allow(clippy::too_many_arguments)]
     fn compile_chunk(
@@ -2122,9 +2122,9 @@ impl ModuleCompiler {
         );
 
         // The capturable layer this function exposes to its own nested closures. A method also
-        // exposes `self` (captured by boxing the receiver — aether F3); its FIELDS are deliberately
-        // absent: a bare name never resolves to a field anywhere (prelude-redesign EX.1 — the
-        // reference binds only `self` into a method frame, see `call_method_on`), so a bare name
+        // exposes `self` (captured by boxing the receiver); its FIELDS are deliberately absent: a
+        // bare name never resolves to a field anywhere (the reference binds only `self` into a
+        // method frame, see `call_method_on`), so a bare name
         // that happens to match a field is an ordinary local/global reference here too.
         let mut local_layer = analysis.local.clone();
         if method.is_some() {
@@ -2192,7 +2192,7 @@ impl ModuleCompiler {
             fc.stmt(stmt)?;
         }
         // A value-position body (closure/arrow, default thunk) returns its tail atom; a block
-        // body that falls off the end implicitly returns unit (M0's `exec_fn_body`).
+        // body that falls off the end implicitly returns unit (the tree-walker's `exec_fn_body`).
         if let Some(tail) = &body.tail {
             let src = fc.atom_reg(tail)?;
             fc.code.push(Op::Return { src });
@@ -2254,7 +2254,7 @@ impl ModuleCompiler {
         if let Some(i) = self.shapes.iter().position(|s| *s == shape) {
             // Same structural identity (`Shape::eq` excludes metadata): merge the metadata so
             // insertion order can't drop it — e.g. the packed-schema path builds a type's shape
-            // before `make_record` arrives with the key-capable flag (P-PKEY), or vice versa.
+            // before `make_record` arrives with the key-capable flag, or vice versa.
             if shape.key_capable {
                 self.shapes[i].key_capable = true;
             }
@@ -2294,7 +2294,7 @@ impl ModuleCompiler {
                     layout.fields.iter().map(|f| f.name.clone()).collect(),
                 )
                 // Carry the key-capability so a materialized element keys maps/sets exactly like a
-                // constructed one (P-PKEY).
+                // constructed one.
                 .with_key_capable(self.key_capable_types.contains(&layout.type_name)),
             )
         });
@@ -2330,7 +2330,7 @@ impl ModuleCompiler {
         idx
     }
 
-    /// Intern a reflected element type (R1) into [`Self::type_reprs`], returning its index — the value
+    /// Intern a reflected element type into [`Self::type_reprs`], returning its index — the value
     /// [`Op::MakeList`]'s `reflect` carries. Dedups structurally so repeated identical list-literal
     /// element types share one table entry.
     fn intern_type_repr(&mut self, repr: &noeta_ast::reflect::TypeRepr) -> u32 {
@@ -2360,8 +2360,8 @@ impl ModuleCompiler {
 }
 
 /// Marks a chunk as a method body: register 0 is the receiver, so `self` resolves to it (and a
-/// nested closure captures it by boxing that register — aether F3). Fields carry no compile
-/// state: a bare name never resolves to a field (prelude-redesign EX.1).
+/// nested closure captures it by boxing that register). Fields carry no compile state: a bare name
+/// never resolves to a field.
 struct MethodCtx;
 
 /// Per-prototype compilation state (one register file, one constant/diagnostic pool).
@@ -2600,7 +2600,7 @@ impl<'m> FnCompiler<'m> {
     }
 
     /// `hidden` is how many of the leading `num_params` registers are type-argument slots rather
-    /// than value parameters (poly-values F2b) — see [`Chunk::hidden`].
+    /// than value parameters — see [`Chunk::hidden`].
     fn into_chunk(
         self,
         num_params: u16,
@@ -2788,8 +2788,7 @@ impl<'m> FnCompiler<'m> {
         let mut captures = Vec::with_capacity(free.len());
         for name in free {
             // The method receiver captures like an (immutable) local: boxed into a fresh cell at
-            // closure creation (aether F3 — this was the long-standing VM `Unsupported`; the
-            // reference interpreter always supported it). Inside the closure, `self` then
+            // closure creation. Inside the closure, `self` then
             // resolves as an ordinary upvalue, and `self.field` reads go through it.
             if name == "self" && self.method.is_some() {
                 upvalues.push((name, false));
@@ -2869,7 +2868,7 @@ impl<'m> FnCompiler<'m> {
                 self.rvalue(rvalue, reg)
             }
             // The discarded result of a bare expression statement (`Resource.new();`). Release its
-            // register destructor-aware (Phase 4.4) so a destructor-bearing value used only as a
+            // register destructor-aware so a destructor-bearing value used only as a
             // statement fires its `destruct` at last use — a temp is an owner too (spec §2).
             // `relevant: true` routes through `release_value`, which runtime-gates on reachability
             // (a non-destructor/immediate result just frees, as the reuse allocator did before).
@@ -2881,14 +2880,14 @@ impl<'m> FnCompiler<'m> {
                 });
                 Ok(())
             }
-            // A source-variable drop (Phase 3 drop-insertion) releases the binding's value at its
+            // A source-variable drop (from the drop-insertion pass) releases the binding's value at its
             // last use. Only a value held **directly** in a frame register is released here, via
             // `Op::Drop` (clears the register to unit). A celled/captured local, an upvalue, a
             // global, or a method field is left alone (the drop pass already excludes captured
             // locals and globals; resolving to any of those means there is nothing this frame
-            // uniquely owns to release). The IR's destructor-relevance bit (Phase 3.2b) rides along
+            // uniquely owns to release). The IR's destructor-relevance bit rides along
             // as `Op::Drop.relevant`: a relevant drop fires the value's `destruct` at this last use
-            // (Phase 4) if it is the final reference; an irrelevant one stays a plain release.
+            // if it is the final reference; an irrelevant one stays a plain release.
             Stmt::DropVar { name, relevant, .. } => {
                 if let Resolved::Local(reg) = self.resolve(name) {
                     // Debug compiles keep **plain** named locals alive to frame teardown instead of
@@ -3140,8 +3139,8 @@ impl<'m> FnCompiler<'m> {
         reg
     }
 
-    /// Pre-create the upvalue cells for a block's **directly nested `fn` declarations** (F1 forward /
-    /// mutual capture) — the codegen mirror of the checker's `bind_nested_fns`. A captured (celled)
+    /// Pre-create the upvalue cells for a block's **directly nested `fn` declarations** (forward
+    /// and mutual capture) — the codegen mirror of the checker's `bind_nested_fns`. A captured (celled)
     /// nested `fn` is bound to a fresh unit-holding cell *before* any sibling body is lowered, so a
     /// forward reference (`a` calling `b` declared later) or mutual recursion (`even`/`odd`) sources a
     /// live cell instead of failing to resolve ("a capture that could not be sourced from the
@@ -3326,7 +3325,7 @@ impl<'m> FnCompiler<'m> {
                     self.bind_loop_var(name, element, *name_span);
                 }
                 // A tuple for-pattern is desugared to a `Single` hidden var + `.N` projections in
-                // lowering (object-model slice 4b), so it never reaches the compiler.
+                // lowering, so it never reaches the compiler.
                 ForPattern::Tuple { .. } => {
                     unreachable!("a tuple for-pattern is desugared to projections in IR lowering")
                 }
@@ -3406,7 +3405,7 @@ impl<'m> FnCompiler<'m> {
                     self.bind_loop_var(name, elem, *name_span);
                 }
                 // A tuple for-pattern is desugared to a `Single` hidden var + `.N` projections in
-                // lowering (object-model slice 4b), so it never reaches the compiler.
+                // lowering, so it never reaches the compiler.
                 ForPattern::Tuple { .. } => {
                     unreachable!("a tuple for-pattern is desugared to projections in IR lowering")
                 }
@@ -3599,7 +3598,7 @@ impl<'m> FnCompiler<'m> {
         // captured upvalues, then globals — mirroring the tree-walker's outward `Scope::assign`),
         // else declare a fresh local.
         if let Some(var) = self.lookup_local(name) {
-            // A field-set `x.f = v` skips the immutability check (object-model slice 2b′): the
+            // A field-set `x.f = v` skips the immutability check: the
             // checker has already rejected a `struct` field-set on an immutable `x` statically, and a
             // `class` field-set mutates in place (this store just restores `x` to that instance).
             if !var.mutable && !field_assign {
@@ -3894,7 +3893,7 @@ impl<'m> FnCompiler<'m> {
     }
 
     /// After an access (field / method / index) consumes a receiver register, release the receiver
-    /// if it was an owned ANF **temporary** — firing its destructor at last use (Phase 4.4): a
+    /// if it was an owned ANF **temporary** — firing its destructor at last use: a
     /// destructor-bearing value used *only* as a receiver (`Resource.new().use()`, the `b.inner`
     /// projected in `b.inner.tag`) would otherwise never fire. A non-temp receiver (a live local or
     /// a type name) is left alone — its binding fires at its own drop, or it is borrowed. The access
@@ -4001,7 +4000,7 @@ impl<'m> FnCompiler<'m> {
             }
             // A bare reference to a prelude builtin becomes a first-class native-function value (a
             // direct call still uses its fast op / `CallBuiltin`). This covers the collection
-            // builtins AND (poly-values F3) the constructors `Ok`/`Err`/`some` and `panic`, so
+            // builtins AND the constructors `Ok`/`Err`/`some` and `panic`, so
             // `results.map(Ok)` passes a genuine callable — both backends construct the same value
             // family, and a call through it shares `call_builtin`'s exact arity/error text.
             Resolved::Prelude => match Builtin::from_name(name) {
@@ -4100,7 +4099,7 @@ impl<'m> FnCompiler<'m> {
                 });
                 Ok(())
             }
-            // Sign-dependent fixed-width `/ % < <= > >=` (Tier W3): a single width-carrying op the VM
+            // Sign-dependent fixed-width `/ % < <= > >=`: a single width-carrying op the VM
             // resolves via `apply_binary_wide`. No trait dispatch (operands are erased ints), no
             // reuse — always the copying form.
             Rvalue::WideInt {
@@ -4124,7 +4123,7 @@ impl<'m> FnCompiler<'m> {
                 });
                 Ok(())
             }
-            // Width-exact bit intrinsic on a fixed-width receiver (Tier W5): a single op the backend
+            // Width-exact bit intrinsic on a fixed-width receiver: a single op the backend
             // computes via `int_method_width`. `arg` is the sole `rotate_*` amount (absent otherwise).
             Rvalue::WidthIntMethod {
                 receiver,
@@ -4156,7 +4155,7 @@ impl<'m> FnCompiler<'m> {
                 reuse,
                 span,
             } => {
-                // In-place self-append (Phase 5.1b): a marked `acc = acc ~ rhs` whose accumulator is a
+                // In-place self-append: a marked `acc = acc ~ rhs` whose accumulator is a
                 // directly-held local or a top-level global reuses that list's buffer via `ConcatInPlace`
                 // instead of the copying `~`. The right operand is resolved *before* the accumulator is
                 // taken so a `TakeGlobal` cannot vacate a slot the rhs still reads (the reuse pass also
@@ -4251,7 +4250,7 @@ impl<'m> FnCompiler<'m> {
                     // frame to read a render slot from, and this call does.
                     self.emit_resolve_hint(*span, noeta_ext_abi::HintDoor::Json, push_slots)?;
                 }
-                // A generic enum-variant construction carries its reflected type (R2b.2); intern it so
+                // A generic enum-variant construction carries its reflected type; intern it so
                 // the `MakeEnum` op can stamp it. `None` for an ordinary method call.
                 let reflect = reflect.as_ref().map(|r| self.module.intern_type_repr(r));
                 // Its dynamic twin (generic-in-generic construction): the hidden slot register whose
@@ -4361,7 +4360,7 @@ impl<'m> FnCompiler<'m> {
                 // A boxed list: each element is consumed (retained into the list) and the temporary
                 // released. A `List<packed>` literal never reaches here — lowering streams it into
                 // `PackedListNew` + `PackedListPush` instead (P-PACK 2.5).
-                // The checker-resolved element type (R1), interned into the module table so the VM can
+                // The checker-resolved element type, interned into the module table so the VM can
                 // stamp it onto the built list for `type_of`. `None` → the list stays untagged.
                 let reflect = reflect.as_ref().map(|r| self.module.intern_type_repr(r));
                 let mut consumed = Vec::new();
@@ -4405,7 +4404,7 @@ impl<'m> FnCompiler<'m> {
                 self.release_consumed(&consumed);
                 Ok(())
             }
-            // A tuple literal builds exactly like a list (object-model slice 4) — each element
+            // A tuple literal builds exactly like a list — each element
             // consumed into the aggregate, which takes one reference to each.
             Rvalue::Tuple { items, .. } => {
                 let mut consumed = Vec::new();
@@ -4440,9 +4439,9 @@ impl<'m> FnCompiler<'m> {
                 reflect,
                 span,
             } => {
-                // Evaluate each key, check it is a string (matching M0's per-entry error timing),
+                // Evaluate each key, check it is a string (matching the tree-walker's per-entry error timing),
                 // then the value — then assemble the map.
-                // The checker-resolved `Map(K, V)` type (R1), interned into the module table so the VM
+                // The checker-resolved `Map(K, V)` type, interned into the module table so the VM
                 // can stamp it onto the built map for `type_of`. `None` → the map stays untagged.
                 let reflect = reflect.as_ref().map(|r| self.module.intern_type_repr(r));
                 let mut consumed = Vec::new();
@@ -4490,7 +4489,7 @@ impl<'m> FnCompiler<'m> {
                 reflect,
                 span,
             } => {
-                // The checker-resolved reflected type (R2), interned so the VM can stamp it onto the
+                // The checker-resolved reflected type, interned so the VM can stamp it onto the
                 // built struct for `type_of`. `None` for a non-generic type → the value reflects
                 // head-only.
                 let reflect = reflect.as_ref().map(|r| self.module.intern_type_repr(r));
@@ -4533,7 +4532,7 @@ impl<'m> FnCompiler<'m> {
             } => {
                 let src = self.atom_reg(operand)?;
                 // Resolve the drop pass's error-path locals to registers; on the `Err`/`none` path the
-                // VM drops these (firing destructors) before unwinding (Phase 4.2c). Owned frame-locals
+                // VM drops these (firing destructors) before unwinding. Owned frame-locals
                 // always resolve to a register; anything else is conservatively skipped.
                 let mut on_error: Vec<(Reg, bool)> = on_error
                     .iter()
@@ -4825,7 +4824,7 @@ impl<'m> FnCompiler<'m> {
                 Ok(())
             }
             Rvalue::DecodeTyped { name, text, span } => {
-                // The router-facing runtime decode (L2.2 DI): load the type-name and JSON-text
+                // The router-facing runtime decode: load the type-name and JSON-text
                 // operands into registers and carry the `Result.Ok`/`Result.Err` shapes (as
                 // `Op::Invoke`/`TypedModuleCall` do) — the VM wraps a decode / lookup outcome in one.
                 let name = self.atom_reg(name)?;
@@ -4842,7 +4841,7 @@ impl<'m> FnCompiler<'m> {
                 });
                 Ok(())
             }
-            // A native module-fn reference as a value (expr-tiers arc): load the same
+            // A native module-fn reference as a value: load the same
             // `Const::ModuleFn` a `use std.mod.fn` binding produces — a `Call` on it then dispatches
             // to the native function, exactly like a call to an imported module fn.
             Rvalue::ModuleFn { module, func, .. } => {
@@ -4862,8 +4861,8 @@ impl<'m> FnCompiler<'m> {
                 self.code.push(Op::LoadConst { dst, k });
                 Ok(())
             }
-            // A trait method call (native default body, slice 2; or a kernel-trait method since the
-            // ExtBundle→ExtTrait fold-in, slice 4): route baked by the checker; the receiver and args
+            // A trait method call — a native default body, or a kernel-trait method (a method
+            // bundle is a native `ExtTrait`): route baked by the checker; the receiver and args
             // are borrowed registers, the ctx-method convention.
             Rvalue::TraitMethod {
                 receiver,
@@ -4891,7 +4890,7 @@ impl<'m> FnCompiler<'m> {
 
     /// Lower a string interpolation: start from an empty string and fold each part's display form
     /// in with `~` concatenation, mirroring the tree-walker (literal text verbatim, a hole via its
-    /// `display`). The interpolation's own span is used for each `Stringify`, matching M0.
+    /// `display`). The interpolation's own span is used for each `Stringify`, matching the tree-walker.
     fn lower_interp(
         &mut self,
         parts: &[InterpPart],
@@ -4935,7 +4934,7 @@ impl<'m> FnCompiler<'m> {
     /// Lower an ordinary call `callee(args)` (a method call is [`Rvalue::Method`], lowered
     /// separately). A prelude function called directly by name routes to its dedicated op.
     ///
-    /// `type_args` is the call's type-argument channel (poly-values F2b) — the atoms filling a
+    /// `type_args` is the call's type-argument channel — the atoms filling a
     /// forwarding generic's leading hidden slots, empty for every other call. A prelude/builtin
     /// callee declares no hidden slots, so a non-empty channel there is refused for the same
     /// reason a `supplied` mask is.
@@ -4977,8 +4976,8 @@ impl<'m> FnCompiler<'m> {
             // `Ok(x)`/`Ok()`, `Err(e)`, `some(x)`, `panic(msg)` — an arity-correct direct call
             // keeps its dedicated fast op (`MakeEnum` / `Op::Panic`, which tier-1 also compiles).
             // A wrong-arity call falls through to the generic `CallBuiltin` below, whose RUNTIME
-            // arity error is byte-identical to a call through the first-class value (poly-values
-            // F3) — so the direct and indirect paths cannot diverge, and neither aborts compile.
+            // arity error is byte-identical to a call through the first-class value — so the
+            // direct and indirect paths cannot diverge, and neither aborts compile.
             match name.as_str() {
                 "Ok" if args.len() <= 1 => {
                     return self.make_result_option("Result", "Ok", args, dst, span);
@@ -5089,7 +5088,7 @@ impl<'m> FnCompiler<'m> {
                 if (name == "try_from" || name == "from") && !fns.contains_key(name) {
                     return self.lower_enum_from_str(type_name, name == "from", args, dst, span);
                 }
-                // An associated function `Enum.f(...)` (the unified body, object-model slice 3):
+                // An associated function `Enum.f(...)` (the unified body):
                 // resolved at compile time when the name is a method, not a variant. Variant
                 // construction still wins for a variant name (uppercase by convention, so no clash).
                 if let Some(&proto) = fns.get(name) {
@@ -5125,7 +5124,7 @@ impl<'m> FnCompiler<'m> {
         // Otherwise the receiver is a value: a runtime-dispatched method call (a user instance
         // method, or a `count`/`enumerate` built-in — the VM decides).
         //
-        // In-place collection self-update (Phase 5.1c / S1): forward the IR reuse token to the op when
+        // In-place collection self-update: forward the IR reuse token to the op when
         // the receiver's sole reference can be handed to the in-place path — a directly-held **local**
         // (its register *is* the binding) or a top-level **global** (moved out with `TakeGlobal` so the
         // in-place op sees refcount 1, the same shape `lower_set_field` uses for a global field-set and
@@ -5192,7 +5191,7 @@ impl<'m> FnCompiler<'m> {
         Ok(())
     }
 
-    /// Lower a field assignment `receiver.name = value` (`x.f = v`, Phase 5.2). Forward the IR reuse
+    /// Lower a field assignment `receiver.name = value` (`x.f = v`). Forward the IR reuse
     /// token to the op only when the receiver is a storage kind whose sole reference we can hand to
     /// the in-place path: a directly-held **local** (its register *is* the binding) or a top-level
     /// **global** (moved out with `TakeGlobal` so the in-place op sees refcount 1, the same shape as
@@ -5311,8 +5310,8 @@ impl<'m> FnCompiler<'m> {
                         dst,
                         shape,
                         args: Box::new([]),
-                        // A nullary variant infers `Enum<dyn>` — reflected head-only (R2b.2 tags only
-                        // payload variants, which pin the type arguments).
+                        // A nullary variant infers `Enum<dyn>` — reflected head-only (only payload
+                        // variants tag, since they pin the type arguments).
                         reflect: None,
                     });
                     return Ok(());
@@ -5437,8 +5436,8 @@ impl<'m> FnCompiler<'m> {
             .with_transient_slots(transient)
             .with_unsigned_slots(unsigned),
         );
-        // In-place reuse (Phase 5): a self-update `acc = Type { ...acc, f: v }` whose spread base is a
-        // directly-held **local** (Phase 5.1a) or a top-level **global** (Phase 5.1b) reuses that
+        // In-place reuse: a self-update `acc = Type { ...acc, f: v }` whose spread base is a
+        // directly-held **local** or a top-level **global** reuses that
         // allocation. For a local the register *is* the binding's sole storage, read in place; for a
         // global, `TakeGlobal` moves the value out of its slot so the in-place op sees unique ownership
         // (the trailing reassignment stores the result back). `MakeStructInPlace` then moves the base
@@ -6144,7 +6143,7 @@ impl<'m> FnCompiler<'m> {
                     target: 0,
                 });
             }
-            // A tuple pattern `(p, q, …)` (object-model slice 4b.2): test the value is a tuple of
+            // A tuple pattern `(p, q, …)`: test the value is a tuple of
             // the right arity (fail-jump otherwise), then project each element with `TupleIndex` and
             // recurse — the structural mirror of the variant case's `MatchVariant` + `ExtractField`.
             Pattern::Tuple { elements, span } => {
@@ -6247,7 +6246,7 @@ fn rvalue_is_destructor_free(rvalue: &Rvalue) -> bool {
 fn is_immediate_const(c: &IrConst) -> bool {
     matches!(
         c,
-        // `f32` is an immediate NaN-boxed value (P-PACK Phase 3) — not refcounted, nothing to release.
+        // `f32` is an immediate NaN-boxed value — not refcounted, nothing to release.
         IrConst::Unit | IrConst::Bool(_) | IrConst::Int(_) | IrConst::Float(_) | IrConst::F32(_)
     )
 }
@@ -6313,9 +6312,8 @@ fn narrow_target(ty: &TypeRef) -> NarrowTarget {
         TypeRef::DynTrait { trait_name, .. } => NarrowTarget::DynTrait(trait_name.to_string()),
         // A `Self::Name` projection has no static runtime head (resolution is per-impl at the
         // checker); narrowing to one stays the permissive dynamic top — deliberately, and now
-        // UNLIKE the precise `dyn Trait` above: a projection names a concrete per-impl type, not a
-        // trait, and the erased value carries no impl identity to reconstruct that binding from
-        // (slice 1a).
+        // unlike the precise `dyn Trait` above: a projection names a concrete per-impl type, not a
+        // trait, and the erased value carries no impl identity to reconstruct that binding from.
         TypeRef::AssocProjection { .. } => NarrowTarget::Dyn,
         TypeRef::Tuple { .. } => NarrowTarget::Tuple,
         // Function types are erased: narrowing to one is a head-constructor "is callable" test
@@ -6325,7 +6323,7 @@ fn narrow_target(ty: &TypeRef) -> NarrowTarget {
         TypeRef::Named { name, args, .. } => {
             let head = NarrowTarget::from_runtime_name(name.as_str());
             // A parametrized target (`List<int>`, `Box<int>`) additionally checks its type arguments
-            // against the value's reflected tag (R3); a bare name (`List`, `Box`, `Struct`) stays the
+            // against the value's reflected tag; a bare name (`List`, `Box`, `Struct`) stays the
             // head-only target, preserving the widening `x is List` and the untagged fallback.
             if args.is_empty() {
                 head
@@ -6409,8 +6407,8 @@ mod tests {
     fn debug_skips_plain_local_last_use_drops() {
         // `a` is read for the last time at `mut b = a + 1`; the drop pass places an `Op::Drop` there.
         // A **production** compile keeps that drop (prompt reclamation, unchanged). A **debug** compile
-        // skips it so a debugger paused at `b` can still read `a` — the whole point of D2. All values
-        // here are non-destructor immediates, so this is pure promptness, invisible to behaviour.
+        // skips it so a debugger paused at `b` can still read `a`. All values here are
+        // non-destructor immediates, so this is pure promptness, invisible to behavior.
         let src = "fn f(): int {\n  mut a = 10;\n  mut b = a + 1;\n  return b\n}\nf();\n";
         let drops = |m: &Module| {
             m.protos
@@ -6668,7 +6666,7 @@ mod tests {
 
     #[test]
     fn vm_reflection_is_the_shared_builder_output() {
-        // P2.0's parity guarantee: the VM-side artifact (in the compiled `Module`) is *exactly*
+        // The parity guarantee: the VM-side artifact (in the compiled `Module`) is *exactly*
         // what `noeta_ast::reflect::build` produces from the AST — the same pure builder the
         // tree-walker calls. So both backends agree on reflection by construction, no drift.
         let src = "#[Entity]\nstruct User { id: int }\nenum Color { Red; Rgb(r: int); }\n";

@@ -1,10 +1,10 @@
-//! The AST → [`Doc`] printer (F3).
+//! The AST → [`Doc`] printer.
 //!
-//! Emits the canonical style. This slice implements the **source-directed** policy (`wrap = false`,
-//! the default): a construct the author broke across lines stays broken; one they wrote inline stays
-//! inline. Block bodies (fn/class/match/…) always break — that is canonical, not author-directed.
-//! F5 adds the width-driven policy (`wrap = true`) by swapping the break decision in the `seq`/chain
-//! helpers for width-gated groups; the lowering below is otherwise unchanged.
+//! Emits the canonical style under both policies. Under the **source-directed** policy
+//! (`wrap = false`, the default) a construct the author broke across lines stays broken and one they
+//! wrote inline stays inline; block bodies (fn/class/match/…) always break — that is canonical, not
+//! author-directed. Under the **width-driven** policy (`wrap = true`) the `seq`/chain helpers swap
+//! that break decision for width-gated groups, and the lowering is otherwise identical.
 //!
 //! Correctness is underwritten by the safety gate in [`crate::format_source`]: any mis-print either
 //! fails to re-parse or re-parses to a different AST, and is caught before it can touch a file.
@@ -1114,8 +1114,8 @@ impl Printer<'_> {
     // ---- declarations ------------------------------------------------------------------------
 
     fn fn_decl(&self, decl: &FnDecl) -> Result<Doc, FmtError> {
-        // A `@tier(…)` declaration rides on its runner/handler fn (tier-providers T2, expr-tiers
-        // arc) — re-emit it on its own line above the header (canonical key order: config, text,
+        // A `@tier(…)` declaration rides on its runner/handler fn — re-emit it on its own line
+        // above the header (canonical key order: config, text,
         // expr), *before* the fn's own attrs so the pair re-parses (the `@tier` declaration form
         // is `@tier(…)` then the fn, whose leading `#[…]` attrs bind to it). Dropping the
         // directive would silently un-declare the tier and stop every consumer block lexing.
@@ -1458,7 +1458,7 @@ impl Printer<'_> {
         ]))
     }
 
-    /// One `type Name = Concrete` associated-type binding in an impl body (slice 1a).
+    /// One `type Name = Concrete` associated-type binding in an impl body.
     fn assoc_binding(&self, name: &str, ty: &TypeRef) -> Result<Doc, FmtError> {
         Ok(Doc::concat([
             Doc::text(format!("type {name} = ")),
@@ -1531,7 +1531,7 @@ impl Printer<'_> {
     }
 
     fn trait_decl(&self, d: &TraitDecl) -> Result<Doc, FmtError> {
-        // Render leading decorators (UT6) so a `#[...]`-attributed trait round-trips; a valid trait
+        // Render leading decorators so a `#[...]`-attributed trait round-trips; a valid trait
         // carries only data attributes, but fmt must preserve whatever parsed (even a to-be-rejected
         // `@…`) so re-parsing is identical.
         let mut parts = self.decl_directives(&d.decorators)?;
@@ -1580,7 +1580,7 @@ impl Printer<'_> {
         Ok(Doc::concat(parts))
     }
 
-    /// One associated-type declaration in a trait body: `type Name;` or `type Name = Default;` (slice 1a).
+    /// One associated-type declaration in a trait body: `type Name;` or `type Name = Default;`.
     fn assoc_type_decl(&self, a: &noeta_ast::AssocTypeDecl) -> Result<Doc, FmtError> {
         Ok(match &a.default {
             Some(ty) => Doc::concat([Doc::text(format!("type {} = ", a.name)), self.type_ref(ty)?]),
@@ -1609,7 +1609,7 @@ impl Printer<'_> {
         parts.push(Doc::text("fn "));
         parts.push(Doc::text(m.sig.name.to_string()));
         // A trait method's own `<...>` is rejected by the checker (E0058 — trait method sets stay
-        // monomorphic, poly-deferrals D3), but the formatter must still round-trip it faithfully:
+        // monomorphic), but the formatter must still round-trip it faithfully:
         // dropping it here would make the formatted source re-parse to a different AST (the fmt
         // safety gate). Emit it exactly as a free fn / concrete method does.
         parts.push(self.type_params(&m.sig.type_params)?);
@@ -3172,7 +3172,7 @@ impl Printer<'_> {
         ])
     }
 
-    /// Preserve a **multiline backtick template** verbatim (F4). All string kinds decode to
+    /// Preserve a **multiline backtick template** verbatim. All string kinds decode to
     /// `Expr::Str`/`Expr::Interp`, so the canonical form is a double-quoted literal — but a
     /// multiline `` `…` `` template's dedented layout collapses into an escaped `\n`-laden
     /// one-liner, which defeats the point of the template. When the original source of a string

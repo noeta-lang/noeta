@@ -1,4 +1,4 @@
-//! Document symbols for the outline / breadcrumbs / `@`-symbol-search (slice **L4**).
+//! Document symbols for the outline / breadcrumbs / `@`-symbol-search.
 //!
 //! A single-file feature: walk the entry document's AST and produce the hierarchical symbol tree
 //! the editor renders — top-level `fn`s and type declarations, with a type's fields/variants and
@@ -29,7 +29,7 @@ pub enum SymbolKind {
     Field,
     Method,
     Interface,
-    /// A user-defined `trait` declaration (L1 user traits).
+    /// A user-defined `trait` declaration.
     Trait,
 }
 

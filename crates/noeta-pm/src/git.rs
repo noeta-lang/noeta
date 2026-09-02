@@ -1,4 +1,4 @@
-//! Git dependency fetch (package-manager P2.3b) — the real-IO seam, CLI-only, **outside** the
+//! Git dependency fetch — the real-IO seam, CLI-only, **outside** the
 //! differential oracle (a network operation, done before compilation; the build then runs over the
 //! materialized on-disk tree).
 //!
@@ -8,7 +8,7 @@
 //! `PATH` only when it actually pulls a git dependency (a pure-path / pure-`std` program needs
 //! nothing). The ref is resolved to a **commit SHA** at the remote, the commit is checked out into
 //! the [`Store`], and the clone's `HEAD` is verified against the resolved SHA (integrity: a moved ref
-//! or a tampered remote is rejected). The SHA + content hash are what the lockfile pins (P2.4), so a
+//! or a tampered remote is rejected). The SHA + content hash are what the lockfile pins, so a
 //! later build reproduces exactly regardless of the ref kind; `noeta update` re-resolves a moving
 //! branch/HEAD ref to its new tip.
 
@@ -22,10 +22,10 @@ use crate::store::{Store, hash_tree};
 /// A materialized git dependency.
 #[derive(Debug)]
 pub struct Fetched {
-    /// The commit SHA the tag resolved to — the store key and the lockfile pin (consumed in P2.4).
+    /// The commit SHA the tag resolved to — the store key and the lockfile pin.
     #[allow(dead_code)]
     pub sha: String,
-    /// The content hash of the checked-out tree (the lockfile's integrity value, P2.4).
+    /// The content hash of the checked-out tree — the lockfile's integrity value.
     #[allow(dead_code)]
     pub content_hash: String,
     /// The on-disk tree in the store.
@@ -41,7 +41,7 @@ pub fn fetch(url: &str, git_ref: &GitRef, store: &Store) -> Result<Fetched, PmEr
     materialize_sha(url, git_ref, sha, store)
 }
 
-/// Fetch `url` at `git_ref` **pinned to a known commit `sha`** (package-manager P2.4) — the lockfile
+/// Fetch `url` at `git_ref` **pinned to a known commit `sha`** — the lockfile
 /// path. If the SHA is already stored, this touches the network **not at all** (offline,
 /// reproducible). If it isn't, the ref is cloned and its `HEAD` verified against `sha`; a mismatch
 /// means the ref moved since the lock was written — a reproducibility check the user resolves with
@@ -83,8 +83,8 @@ fn materialize_sha(
     })
 }
 
-/// Resolve `url`@`tag` to the commit SHA it currently points at, without cloning (package-manager
-/// Phase 4, S2) — used by `noeta publish` to pin the SHA into the registry index at publish time
+/// Resolve `url`@`tag` to the commit SHA it currently points at, without cloning — used by
+/// `noeta publish` to pin the SHA into the registry index at publish time
 /// (a published release is always a tag).
 pub fn resolve_tag_sha(url: &str, tag: &str) -> Result<String, PmError> {
     ls_remote_ref(url, &GitRef::Tag(tag.to_string())).map_err(PmError::Network)

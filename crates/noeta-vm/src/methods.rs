@@ -11,7 +11,7 @@ use noeta_value::Value;
 
 use crate::*;
 
-/// The per-call-site routing decision for a method on an extern receiver (H5 perf), cached in
+/// The per-call-site routing decision for a method on an extern receiver, cached in
 /// `Op::CallMethod`'s route cache keyed by the pointer of the extern value's interned
 /// **qualified identity** ([`noeta_stdlib::ExternValue::type_identity`]). The routes carry no
 /// name of their own: the dispatch site already holds the identity it cached under, which is the
@@ -30,8 +30,8 @@ pub(crate) enum ExternRoute {
 }
 
 /// Resolve the route for `method` on the extern type with qualified identity `identity` — the
-/// uncached registry walk a route-cache miss performs. The caller passes its VM's registry
-/// (instance-registry IR3); the walk is `#[cold]` (only a route-cache miss reaches it), so the
+/// uncached registry walk a route-cache miss performs. The caller passes its VM's registry;
+/// the walk is `#[cold]` (only a route-cache miss reaches it), so the
 /// extra argument never touches the hot per-op path.
 #[cold]
 pub(crate) fn resolve_extern_route(
@@ -378,7 +378,7 @@ impl<'m> Vm<'m> {
                         }
                         let set = Value::set(canonical);
                         // Carry the element type from the source list's `List<T>` tag onto the
-                        // resulting `Set<T>` (R1 set tags) — sets have no literal, so `to_set` is the
+                        // resulting `Set<T>` — sets have no literal, so `to_set` is the
                         // one construction point where the element type is known.
                         set.set_reflect(set_tag_from_list(list));
                         Ok(set)
@@ -526,15 +526,13 @@ impl<'m> Vm<'m> {
         args: &[Value],
         span: Span,
     ) -> Result<Value, Abort> {
-        // (The virtual-module intercept died with higher-order-abi H5: `task` migrated at H0/H2,
-        // `http.serve` at H3, and `reactive` — the last virtual module — at H5. Every std module
-        // now dispatches through the registry arms below.)
+        // (Every std module dispatches through the registry arms below.)
         // A function registered in the native-extension registry dispatches through the shared
         // seam: project arguments onto `NativeValue`, run the one shared dispatch body (host
         // threaded in), and materialize the `NativeOut` result (the result shape supplied from the
         // function's `RetTy`). Routing is per-function so a partially-migrated module (`vec`/`quat`,
         // whose bulk `*_all` kernels stay per-backend) falls through for its unmigrated functions.
-        // Bound once (instance-registry IR3): `reg` is `&'static`, so it outlives the `&mut self`
+        // Bound once: `reg` is `&'static`, so it outlives the `&mut self`
         // borrows below (the host, the executor) and every native lookup routes through this VM's
         // registry rather than the process-global default.
         let reg = self.reg();
@@ -548,7 +546,7 @@ impl<'m> Vm<'m> {
                 args.iter().map(|a| marshal_native_arg(*a, reg)).collect()
             };
             return match reg.dispatch(module, func, &mut *self.persist.host, &nargs) {
-                // Async WORK (extern-types X5): ticket the descriptor on the executor and hand
+                // Async WORK: ticket the descriptor on the executor and hand
                 // back a leaf async-IO future `.await` later resolves — the same shape the old
                 // per-backend `fs.*_async` intercept produced, now reached by ordinary dispatch.
                 Ok(noeta_stdlib::NativeOut::Spawn(spawn)) => {
@@ -562,12 +560,11 @@ impl<'m> Vm<'m> {
                 Err(error) => Err(self.std_dispatch_error(error, span)),
             };
         }
-        // A registered **higher-order** function (higher-order-abi H0) dispatches through the
+        // A registered **higher-order** function dispatches through the
         // `NativeCtx` seam: opaque slots + backend re-entry instead of marshalled values. Checked
         // after the plain table — plain functions vastly outnumber ctx ones, and the two name
         // sets are disjoint, so order is behavior-neutral and keeps the common path lean.
-        // (The last per-backend intercept — `vec`'s bulk `*_all` kernels — died with the N3.4
-        // raw-buffer seam: they are ordinary ctx functions now, reached right here.)
+        // (`vec`'s bulk `*_all` kernels are ordinary ctx functions, reached right here.)
         if reg.find_ctx_function(module, func).is_some() {
             return self.call_ctx_function(module, func, args, span);
         }
@@ -575,13 +572,13 @@ impl<'m> Vm<'m> {
         Err(self.std_dispatch_error(error, span))
     }
 
-    /// Dispatch a method on an extern-type receiver (extern-types X1) through its registered
+    /// Dispatch a method on an extern-type receiver through its registered
     /// [`noeta_stdlib::ExtType`]'s shared dispatch — project the arguments, run the one shared
     /// body (host threaded in, receiver `&mut`), materialize the result. Mirrors the
     /// tree-walker's `call_extern_method`, so the two backends agree by construction.
     ///
     /// (The `Op::CallMethod` handler short-circuits extern receivers through the per-site route
-    /// cache before reaching this chain — H5 perf; this entry stays for the non-op paths and
+    /// cache before reaching this chain; this entry stays for the non-op paths and
     /// resolves the same [`ExternRoute`] decisions uncached.)
     pub(crate) fn call_extern_method(
         &mut self,
@@ -591,9 +588,9 @@ impl<'m> Vm<'m> {
         span: Span,
     ) -> Result<Value, Abort> {
         // ONE heap access + ONE registry lookup resolves everything the routing below needs
-        // (H5 perf): the type entry, and — for a declared **gated arena read**
+        // the type entry, and — for a declared **gated arena read**
         // (`ExtType::arena_getter`) — the projected retained id. `reg` is bound once (`&'static`,
-        // Copy) so the closures below capture it without holding a borrow of `self` (IR3).
+        // Copy) so the closures below capture it without holding a borrow of `self`.
         let reg = self.reg();
         let (identity, ext, fast_read) = recv.with_extern(|e| {
             let identity = e.type_identity();
@@ -617,7 +614,7 @@ impl<'m> Vm<'m> {
             retain(value);
             return Ok(value);
         }
-        // A type's **higher-order** methods (higher-order-abi H4) route through the ctx seam —
+        // A type's **higher-order** methods route through the ctx seam —
         // they call closures back and reach the retained arena, which the plain by-value
         // dispatch below cannot. Name sets are disjoint, so routing is per-method.
         if let Some(ext) = ext
@@ -645,7 +642,7 @@ impl<'m> Vm<'m> {
         let host = &mut *self.persist.host;
         let result = recv.with_extern_mut(|e| reg.dispatch_method(e, method, host, &nargs));
         match result {
-            // Async WORK from an extern-type method (`Process.wait_async`, process-signals arc):
+            // Async WORK from an extern-type method (`Process.wait_async`):
             // ticket the descriptor and hand back the async-IO future — mirrors the module-function
             // path above and the tree-walker's `call_extern_method`.
             Ok(noeta_stdlib::NativeOut::Spawn(spawn)) => {
@@ -673,7 +670,7 @@ impl<'m> Vm<'m> {
         args: &[Value],
         span: Span,
     ) -> Result<Value, Abort> {
-        // Bound once (`&'static`, Copy), so it survives the `&mut self` host borrow below (IR3).
+        // Bound once (`&'static`, Copy), so it survives the `&mut self` host borrow below.
         let reg = self.reg();
         // Resolve over BOTH classes and structs (fielded unification) — a value-struct method
         // dispatches through the same seam; only in-place mutation (`InstanceUpdate`) is class-only.
@@ -755,7 +752,7 @@ impl<'m> Vm<'m> {
         }
     }
 
-    /// Dispatch a **native enum**'s instance method (native-extensibility S1 / Slice B) — the
+    /// Dispatch a **native enum**'s instance method — the
     /// [`noeta_stdlib::ExtEnum`] analogue of [`Self::call_native_class_method`], reusing the shared
     /// [`noeta_stdlib::NativeMethodDispatch`] seam. The receiver is an enum value; it crosses to the
     /// native `dispatch` as a [`noeta_stdlib::NativeValue::Variant`] (its case + declaration index +
@@ -771,7 +768,7 @@ impl<'m> Vm<'m> {
         args: &[Value],
         span: Span,
     ) -> Result<Value, Abort> {
-        // Bound once (`&'static`, Copy), so it survives the `&mut self` host borrow below (IR3).
+        // Bound once (`&'static`, Copy), so it survives the `&mut self` host borrow below.
         let reg = self.reg();
         let en = recv.shape().and_then(|s| reg.resolve_enum(&s.name));
         let Some(en) = en else {
@@ -1191,7 +1188,7 @@ impl<'m> Vm<'m> {
                 }
                 // A string key becomes a fresh string value; an extern key a fresh extern value
                 // (its box cloned — a key is a snapshot); a packed key rebuilds its struct value
-                // from the content snapshot (P-PKEY).
+                // from the content snapshot.
                 Ok(Value::list(
                     keys.into_iter()
                         .map(|k| match k {
@@ -1277,7 +1274,7 @@ impl<'m> Vm<'m> {
         }
     }
 
-    /// Apply an in-place map update (`set`/`remove`) to a **consumed** map receiver (Phase 5.1c): the
+    /// Apply an in-place map update (`set`/`remove`) to a **consumed** map receiver: the
     /// caller has already taken the receiver's single reference out of its register. When uniquely
     /// owned (`refcount == 1`) the backing buffer is mutated in place — O(1) — and the displaced value
     /// (if any) fires its destructor now via `release_value`, matching the copy-and-reassign baseline
@@ -1379,7 +1376,7 @@ impl<'m> Vm<'m> {
     /// its P-SSO paths exactly: when `consume_key` is set (the compiler proved the key a
     /// single-use temporary) and the value is a sole-owned string, **move** its buffer out; else
     /// clone (allocation-free for inline ≤ 24-byte content). A key-capable extern value snapshots
-    /// via `clone_box` (extern-types X4). Anything else raises the shared map-key error.
+    /// via `clone_box`. Anything else raises the shared map-key error.
     fn map_update_key(
         &mut self,
         consume_key: bool,
@@ -1392,7 +1389,7 @@ impl<'m> Vm<'m> {
         } else if let Some(k) = key.as_compact_string() {
             Ok(noeta_stdlib::MapKey::Str(k))
         } else if let Some(i) = key.as_int() {
-            // P-PKEY S4: an int key (immediate or boxed) — the zero-allocation kind.
+            // An int key (immediate or boxed) — the zero-allocation kind.
             Ok(noeta_stdlib::MapKey::Int(i))
         } else if key.is_extern() && key.with_extern(noeta_stdlib::map_key::extern_key_capable) {
             Ok(key.with_extern(|e| {
@@ -1407,7 +1404,7 @@ impl<'m> Vm<'m> {
         }
     }
 
-    /// Rebuild a packed key's struct value (P-PKEY) — the `keys()` direction. The key's content
+    /// Rebuild a packed key's struct value — the `keys()` direction. The key's content
     /// snapshot carries the field values; the canonical interned shape comes from the module's
     /// shape table by name (a key of type `T` implies `T` is declared in this module).
     fn packed_key_value(&self, type_name: &str, fields: &[noeta_stdlib::PackedKeyField]) -> Value {

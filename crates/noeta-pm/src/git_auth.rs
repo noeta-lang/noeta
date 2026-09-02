@@ -1,4 +1,4 @@
-//! Optional git credential injection (private-registries arc, S5). Private repos in a `github:<org>`
+//! Optional git credential injection. Private repos in a `github:<org>`
 //! registry need authentication for **both** halves that shell out to git — version discovery
 //! ([`crate::git_forge`]) and materialization ([`crate::git`]). Two mechanisms, in order:
 //!

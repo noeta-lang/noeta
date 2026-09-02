@@ -1,13 +1,13 @@
-//! The **composed toolchain** (package-manager Phase 3, N3.2): when an app's dependency graph
-//! carries native entry crates (`[package] native = …`, N3.1), the stock `noeta` binary cannot
+//! The **composed toolchain**: when an app's dependency graph carries native entry crates
+//! (`[package] native = …`), the stock `noeta` binary cannot
 //! serve it — the extensions' signatures must feed the checker, their completions the LSP, their
 //! commands the CLI. So the stock binary **generates a shim crate** (depend on `noeta-cli` as a
 //! lib + each entry crate; `main` passes the extra units into `run_cli`), builds it with `cargo`,
 //! caches the result content-addressed, and **delegates the original invocation** to the composed
 //! binary. A pure-Noeta app never reaches this module.
 //!
-//! Retrieval of the toolchain source (user decision, 2026-07-09): **cargo fetches it** — inside
-//! the noeta workspace the shim uses path dependencies (instant, the interim norm); outside, it
+//! Retrieval of the toolchain source: **cargo fetches it** — inside
+//! the noeta workspace the shim uses path dependencies (instant); outside, it
 //! declares git dependencies pinned to the running binary's version tag and cargo's own git cache
 //! handles fetch/offline/reuse. `NOETA_TOOLCHAIN_SRC` overrides with an explicit checkout. In
 //! both forms the shim also carries a `[patch]` on the canonical toolchain repo redirecting
@@ -35,8 +35,8 @@ use sha2::{Digest, Sha256};
 /// running in can link the project in front of it (see [`noeta_pm::composed`]).
 const COMPOSED_GUARD: &str = noeta_pm::composed::COMPOSED_ENV;
 
-/// The conventional Cargo features a package uses to gate its **dev-kind** capabilities (dev-deps
-/// D5b) — a tier's formatter today (`fmt`, which drags in a parser like `malva`). A composed **dev
+/// The conventional Cargo features a package uses to gate its **dev-kind** capabilities — a tier's
+/// formatter today (`fmt`, which drags in a parser like `malva`). A composed **dev
 /// toolchain** ([`ShimKind::Toolchain`]) turns on each of these that a native crate *declares*, so
 /// `noeta fmt` can reflow that crate's tier bodies; a shipped **runner/AOT** base never enables them,
 /// so the formatter and its parser stay uncompiled and out of the artifact (the security split).
@@ -45,7 +45,7 @@ const COMPOSED_GUARD: &str = noeta_pm::composed::COMPOSED_ENV;
 const DEV_FEATURES: &[&str] = &["fmt"];
 
 /// What a composed shim is built as. The **toolchain** (dev) embeds `noeta-cli` and serves every
-/// command for a native-dependency app. The **runner** (dev-deps D4c) embeds only the lean
+/// command for a native-dependency app. The **runner** embeds only the lean
 /// `noeta-runner` + the app's native runtime extensions — no dev tooling — and is the base a
 /// `build --exe`/`--native` artifact staples onto, so a shipped native-dependency app carries its
 /// runtime handlers but none of the toolchain.
@@ -93,7 +93,7 @@ impl ShimKind {
 ///
 /// Returns `Ok(_)` when the stock binary should just proceed: `Ok(Some(graph))` hands back the
 /// dependency graph this probe resolved (the **default** selection — no `--target`), so the same
-/// invocation's command path can reuse it instead of resolving again (audit-5 F2); `Ok(None)`
+/// invocation's command path can reuse it instead of resolving again; `Ok(None)`
 /// means no graph is available (we ARE the composed binary, or the graph fails to resolve — the
 /// normal command path re-resolves and surfaces the identical error with its usual rendering).
 /// Returns `Err(code)` only when composition was needed and **failed** — declared native
@@ -326,7 +326,7 @@ fn delegate(
 
 /// Build (or reuse the cached) **composed runner** for an app whose dependency graph carries native
 /// runtime crates, and return its path — the lean base a `build --exe`/`--native` artifact staples
-/// onto (dev-deps D4c). Unlike [`delegate`], this never execs: `emit_exe`/`emit_native` read the
+/// onto. Unlike [`delegate`], this never execs: `emit_exe`/`emit_native` read the
 /// returned binary and staple the program's bundle onto it. Returns `Ok(None)` when the app has **no**
 /// native crates (the stock lean `noeta-runner` is the base instead).
 pub fn compose_runner_binary(entry: &Path) -> Result<Option<PathBuf>, String> {
@@ -565,7 +565,7 @@ struct Entry {
     /// ignores this and pulls the crate at default features.
     dev_features: Vec<String>,
     /// The **footprint rings** this entry crate declares (a `ring-*` feature — e.g. `ring-p2p` for the
-    /// para.p2p transport, para-namespace F2b). A Toolchain/Runner composition enables **all** of them
+    /// para.p2p transport). A Toolchain/Runner composition enables **all** of them
     /// (full runtime capability); the AOT composition enables only the subset the program's footprint
     /// scan selected, so a `--native` binary that never imports the ring's modules sheds its native
     /// dep tree. Empty for a crate with no gated rings (built at default features, unchanged).
@@ -693,8 +693,8 @@ fn compose_key(
         h.update(ring);
     }
     // The command bindings change the shim (and the CLI surface), so any edit to `[trust.commands]`
-    // — a new binding, a dropped one, or a rename of the local or exported name — must recompose
-    // (Phase 4). Fold each binding's three parts in, delimited, so distinct bindings can't alias.
+    // — a new binding, a dropped one, or a rename of the local or exported name — must recompose.
+    // Fold each binding's three parts in, delimited, so distinct bindings can't alias.
     for b in command_bindings {
         h.update(b"cmd:");
         h.update(&b.local);
@@ -983,8 +983,8 @@ fn aot_shim_cargo_toml(
         }
     };
     // Rings the AOT **base** (`noeta-aot-runtime`) owns — it forwards them to noeta-stdlib /
-    // noeta-host-real. An **extension-owned** ring is not a base feature: since para-namespace F2b the
-    // p2panda transport is `ring-p2p` on the `para.p2p` *extension* crate, whose native tree is linked
+    // noeta-host-real. An **extension-owned** ring is not a base feature: the p2panda transport is
+    // `ring-p2p` on the `para.p2p` *extension* crate, whose native tree is linked
     // through the entry crate that declares it (default-on there), not the base. So such a ring is
     // filtered out of the base feature set here — applying it to the base would be an unknown-feature
     // error. (Shedding p2panda from a para-*depending* but non-*importing* `--native` binary is a
@@ -1122,11 +1122,11 @@ fn shim_cargo_toml(
         ),
     };
     // The base: the full toolchain (`noeta-cli`) for a dev composition, or the lean `noeta-runner`
-    // for a shipped artifact's base (dev-deps D4c — no fmt/LSP/DAP). `noeta-ext-abi` supplies the
+    // for a shipped artifact's base (no fmt/LSP/DAP). `noeta-ext-abi` supplies the
     // extension ABI for both. Each `extN` (a native runtime crate) is pulled with **default features**
     // for a shipped base, so a mixed crate's formatter (gated behind its `fmt` feature) is *not*
     // compiled in; a **dev toolchain** additionally turns on the crate's declared dev features
-    // (dev-deps D5b) so `noeta fmt` can reflow its tier bodies.
+    // so `noeta fmt` can reflow its tier bodies.
     out.push_str(&toolchain_dep(kind.base_crate()));
     out.push_str(&toolchain_dep("noeta-ext-abi"));
     for (n, e) in entries.iter().enumerate() {
@@ -1269,7 +1269,7 @@ fn materialize_toolchain_checkout(repo: &str, tag: &str) -> Result<PathBuf, Stri
 }
 
 /// The `[patch]` section that redirects a native package's git dependencies **on the canonical
-/// toolchain repo** to *this* toolchain's own crates (para-namespace follow-on F3). It is what makes
+/// toolchain repo** to *this* toolchain's own crates. It is what makes
 /// an **out-of-tree** native package buildable: the package's entry crate depends on `noeta-ext-abi`
 /// (and, for a first-party package, its own toolchain-resident impl crate) by git on the noeta repo —
 /// resolvable in a standalone clone — and here the composer overrides every one of those with the
@@ -1338,7 +1338,7 @@ fn toolchain_patch_section(src_root: &Path) -> String {
 /// The generated shim entry point: aggregate every entry crate's exported `NOETA_EXTENSIONS`
 /// slice and hand the whole toolchain to `run_cli`, along with the **command bindings** — one per
 /// `[trust.commands]` entry, each pairing the local name the command is registered under with the
-/// exported command and the providing entry's units (Phase 4). Trust is tied to the providing
+/// exported command and the providing entry's units. Trust is tied to the providing
 /// package identity (never to a namespace-root string, which would over-trust every package sharing
 /// a scope root — trusting `para/db`'s commands must not trust all of `para/*`), and the local name
 /// is what resolves a collision between two packages exporting the same command name.
@@ -1743,7 +1743,7 @@ mod tests {
 
     #[test]
     fn runner_shim_manifest_bases_on_noeta_runner_not_the_cli() {
-        // dev-deps D4c: a shipped artifact's base is the LEAN runner — no `noeta-cli` (no dev tooling).
+        // A shipped artifact's base is the LEAN runner — no `noeta-cli` (no dev tooling).
         let toml = shim_cargo_toml(
             &entries(),
             &ToolchainSource::Workspace(PathBuf::from("/src/noeta")),
@@ -1765,7 +1765,7 @@ mod tests {
 
     #[test]
     fn dev_toolchain_enables_a_mixed_crates_fmt_feature() {
-        // dev-deps D5b: a composed *dev toolchain* turns on the crate's declared `fmt` feature, so
+        // A composed *dev toolchain* turns on the crate's declared `fmt` feature, so
         // `noeta fmt` can reflow its tier bodies (the formatter + its parser compile in).
         let toml = shim_cargo_toml(
             &mixed_entries(),
@@ -1819,7 +1819,7 @@ mod tests {
 
     #[test]
     fn shipped_runner_keeps_a_mixed_crate_at_default_features() {
-        // dev-deps D5b/D4c: the shipped base pulls the same crate at *default* features — its `fmt`
+        // The shipped base pulls the same crate at *default* features — its `fmt`
         // feature stays off, so the formatter and its parser never enter the artifact.
         let toml = shim_cargo_toml(
             &mixed_entries(),
@@ -2012,7 +2012,7 @@ mod tests {
 
     #[test]
     fn runner_shim_main_installs_units_and_runs_stapled() {
-        // dev-deps D4c: the runner shim installs the native runtime units then runs the stapled
+        // The runner shim installs the native runtime units then runs the stapled
         // program — no `run_cli`, no command-trust (a stapled artifact exposes no CLI).
         let bindings = vec![binding("blur", "acme/imgfx", "blur")];
         let main = shim_main_rs(&entries(), &bindings, ShimKind::Runner);

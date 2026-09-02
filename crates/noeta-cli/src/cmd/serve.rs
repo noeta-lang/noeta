@@ -64,7 +64,7 @@ fn entry_tail(entry: &noeta_stdlib::EntryCall) -> Vec<Stmt> {
                 value: value.clone(),
                 span: sp,
             },
-            // In hot mode (server-hmr W1), late-bind an identifier argument through a trampoline
+            // In hot mode, late-bind an identifier argument through a trampoline
             // closure `fn(req) => fetch(req)`: the serve loop captures its handler argument ONCE at
             // startup, but the trampoline's body re-resolves the global per call — so a hot swap
             // rebinding `fetch` reaches the live loop.
@@ -198,7 +198,7 @@ fn positional_kind(kind: &noeta_stdlib::ArgKind) -> bool {
     )
 }
 
-/// Install the SIGINT graceful-drain handler for a serving process (server-hmr S0): the first
+/// Install the SIGINT graceful-drain handler for a serving process: the first
 /// Ctrl-C sets the process shutdown flag and wakes any blocked serve loop (which then finishes
 /// in-flight requests and returns); a second Ctrl-C forces an immediate exit. Runs on its own
 /// thread with a tiny tokio runtime so it never contends with the isolate executors.
@@ -220,7 +220,7 @@ pub(crate) fn install_shutdown_handler() {
                 "\nnoeta serve: draining — finishing in-flight requests (Ctrl-C again to force)"
             );
             noeta_stdlib::serve::request_shutdown();
-            // Wake every blocked worker (server-hmr S1: `notify_waiters` rouses all currently
+            // Wake every blocked worker (`notify_waiters` rouses all currently
             // parked accepts at once) plus one stored permit for a worker racing into its wait.
             let wake = noeta_host_real::shutdown_notify();
             wake.notify_waiters();
@@ -239,7 +239,7 @@ pub(crate) fn ext_command_dispatch(
     ext: &'static noeta_stdlib::ExtCommand,
     matches: &clap::ArgMatches,
 ) -> ExitCode {
-    // Graceful drain (server-hmr S0): a long-lived server honors SIGINT by finishing in-flight
+    // Graceful drain: a long-lived server honors SIGINT by finishing in-flight
     // requests and closing the listener rather than dying mid-response. `noeta serve --watch`
     // (the hot path) is Ctrl-C'd through its wrapper process instead, so only the plain path
     // installs this.
@@ -314,7 +314,7 @@ pub(crate) fn ext_command_dispatch(
     ExitCode::from((ext.run)(&mut CliCommandCtx, &parsed))
 }
 
-/// The CLI's [`noeta_stdlib::CommandCtx`] driver (higher-order-abi H6): load + check a program
+/// The CLI's [`noeta_stdlib::CommandCtx`] driver: load + check a program
 /// file and run it on the real host, optionally appending a synthesized trailing entry call —
 /// exactly what the hardcoded `cmd_serve` did, generalized over [`noeta_stdlib::EntryCall`].
 /// Layering the entry on the loaded program means the mechanism is the exact same registered
@@ -374,7 +374,7 @@ impl noeta_stdlib::CommandCtx for CliCommandCtx {
         if let Some(banner) = banner {
             noeta_stdlib::serve::arm_serve_banner(banner.to_string());
         }
-        // Hot mode (server-hmr W1, armed by the `--watch` wrapper for `serve`): run through the
+        // Hot mode (armed by the `--watch` wrapper for `serve`): run through the
         // debug-session machinery with the hot-swap mailbox, so edits swap into the LIVE process.
         if std::env::var_os("NOETA_HOT").is_some() {
             let baseline = watch::EntryUnit::of(&loaded.program, &entry_source);
@@ -400,11 +400,11 @@ impl noeta_stdlib::CommandCtx for CliCommandCtx {
     }
 }
 
-/// Multi-core `noeta serve --parallel N` (server-hmr S1): bind the listener ONCE, then run the
+/// Multi-core `noeta serve --parallel N`: bind the listener ONCE, then run the
 /// serve program in `workers` OS-thread isolates, each with a real host adopting a `try_clone`d
 /// dup of the listening socket. Intra-process fds are shared across threads, so the kernel
 /// load-balances `accept()` across the workers with no `SO_REUSEPORT`/`socket2` and no new dep.
-/// The process-wide shutdown flag (S0) drains every worker on SIGINT.
+/// The process-wide shutdown flag drains every worker on SIGINT.
 ///
 /// `entry` is the command's own [`noeta_stdlib::EntryCall`] — the *same value* the single-worker
 /// path runs, handed down rather than rebuilt here (audit-10). The CLI used to hand-write a twin of
@@ -422,7 +422,7 @@ pub(crate) fn serve_parallel_impl(
         Ok(resolved) => resolved,
     };
     // The same tail the single-worker path builds from the same declaration — including the
-    // hot-mode handler trampoline, which `entry_tail` applies to an `Ident` argument (F5).
+    // hot-mode handler trampoline, which `entry_tail` applies to an `Ident` argument.
     let tail = entry_tail(entry);
     // The one front half (audit-10), shared with the single-worker path and the hot re-link.
     let (loaded, entry_source, front) = match crate::context::load_entry_with_tail(
@@ -456,7 +456,7 @@ pub(crate) fn serve_parallel_impl(
     let args: Vec<String> = std::env::args().collect();
     let app_id = p2p_app_namespace(&args);
 
-    // Hot multi-core (F5): each worker runs the debug-session hot path; ONE watcher deposits into
+    // Hot multi-core: each worker runs the debug-session hot path; ONE watcher deposits into
     // the shared broadcast queue and every worker drains it, so a swap spans the whole fleet.
     if std::env::var_os("NOETA_HOT").is_some() {
         let baseline = watch::EntryUnit::of(&loaded.program, &entry_source);
@@ -572,7 +572,7 @@ fn serve_host(
     })
 }
 
-/// One `--parallel` worker (server-hmr S1): a real host seeded with the pre-bound listener plus a
+/// One `--parallel` worker: a real host seeded with the pre-bound listener plus a
 /// wall-clock executor, running the compiled serve module to completion (it returns when the
 /// graceful-drain flag closes the accept loop).
 ///
@@ -660,9 +660,9 @@ impl HotRig {
     /// that will arm this mailbox — 1 for `serve --watch`, N for `serve --parallel N --watch`. It
     /// is the *only* parameter, because it is the only real difference between the two installs.
     ///
-    /// The wake lets the watcher rouse a *blocked* executor the moment it deposits (server-hmr L3)
-    /// — otherwise an idle server (accept pending, no traffic) would only apply the swap at its
-    /// next request (the W1 one-request lag).
+    /// The wake lets the watcher rouse a *blocked* executor the moment it deposits —
+    /// otherwise an idle server (accept pending, no traffic) would only apply the swap at its
+    /// next request, one request late.
     fn arm(
         entry_path: &std::path::Path,
         tail: Vec<Stmt>,
@@ -773,12 +773,12 @@ fn emit_run_tail(
     tail.status()
 }
 
-/// Run an entry-call program with **in-process hot reload** (server-hmr W1) — `noeta serve
+/// Run an entry-call program with **in-process hot reload** — `noeta serve
 /// --watch`'s hot mode. The program compiles through the *session* compiler (kept alive for
 /// fragment installs) and runs on the real host with a [`noeta_vm::HotSwapMailbox`] armed; a
 /// watcher thread ([`watch::spawn_hot_watcher`]) re-links/checks/diffs each edit of the entry file
 /// and deposits swappable plans (blockers or non-entry edits exit with the restart sentinel the
-/// `--watch` wrapper honors). JIT stays unarmed on this path (H3 lifts).
+/// `--watch` wrapper honors). JIT stays unarmed on this path.
 ///
 /// A fleet of exactly one: the install is [`HotRig`], the same nine steps the `--parallel` fleet
 /// runs, with one consumer instead of N.

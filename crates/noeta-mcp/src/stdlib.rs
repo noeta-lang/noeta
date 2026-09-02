@@ -1,4 +1,4 @@
-//! M2 — the `stdlib_api` tool's engine: render the native-extension registry into agent-readable
+//! The `stdlib_api` tool's engine: render the native-extension registry into agent-readable
 //! Noeta signatures, so an agent reads the *real* standard-library surface instead of inventing
 //! calls it half-remembers from other languages.
 //!

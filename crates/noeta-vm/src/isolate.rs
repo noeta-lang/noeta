@@ -1,9 +1,9 @@
-//! Real OS-thread isolates: copy-at-the-boundary marshalling (isolates I.4b).
+//! Real OS-thread isolates: copy-at-the-boundary marshalling.
 //!
 //! A real `isolate f(args)` runs on its own OS thread with its own VM and heap (out-of-oracle, CLI
 //! only). Because runtime `Value`s are raw NaN-boxed heap pointers with non-atomic refcounts,
-//! **no `Value` may cross a thread** (shape handles themselves are `Arc` since P-PAR S1 — the
-//! prerequisite for shared-region borrow-share — but the object graph they hang off is not).
+//! **no `Value` may cross a thread** (shape handles themselves are `Arc` — the prerequisite for
+//! shared-region borrow-share — but the object graph they hang off is not).
 //! Instead the argument graph is copied into a `Send`, self-contained
 //! [`Wire`] on the parent thread and rebuilt into fresh heap objects on the worker (and the result
 //! copied back the same way). The one thing genuinely shared is `Arc<Module>` — the compiled module is
@@ -33,7 +33,7 @@ use noeta_bytecode::Builtin;
 /// under a short lock); the callers poll cooperatively (Pending on full/empty), so no thread ever
 /// blocks *on the channel* and a producer/consumer split across isolate threads makes progress by
 /// each thread's scheduler re-polling. Successful ops bump the process-wide [`WAKE`] eventcount
-/// (P-PAR S3) so a scheduler parked at a stall re-polls immediately instead of sleeping a quantum.
+/// so a scheduler parked at a stall re-polls immediately instead of sleeping a quantum.
 #[derive(Debug)]
 pub struct ChannelCore {
     inner: Mutex<ChannelInner>,
@@ -49,7 +49,7 @@ pub struct ChannelCore {
 
 #[derive(Debug)]
 struct ChannelInner {
-    // Each message carries the sender's trace context (native-otel T5d) — the automatic-
+    // Each message carries the sender's trace context — the automatic-
     // propagation envelope, crossing the thread with the payload.
     queue: VecDeque<(Wire, Option<TraceContext>)>,
     closed: bool,
@@ -274,7 +274,7 @@ impl Drop for SchedulerGuard {
     }
 }
 
-/// Cross-thread progress wakeup (P-PAR S3): a process-wide eventcount replacing the stall wait's
+/// Cross-thread progress wakeup: a process-wide eventcount replacing the stall wait's
 /// 100 µs sleep-spin. Every cross-thread progress event — a worker's result landing, a shared
 /// channel gaining a message, freeing a slot, or closing — bumps the generation and signals; a
 /// scheduler that finished an unproductive poll round parks in [`wait_past`](WakeSignal::wait_past)
@@ -334,7 +334,7 @@ impl WakeSignal {
     }
 }
 
-/// One isolate argument as shipped to a worker thread (P-PAR S2): either a [`Wire`] deep copy
+/// One isolate argument as shipped to a worker thread: either a [`Wire`] deep copy
 /// (the I.4b path — kept for immediates, channel endpoints, function values, and any graph that
 /// is not [promotable](noeta_value::Value::is_promotable_graph)), or a **borrowed** root into the
 /// parent's [`noeta_value::SharedRegion`] — promoted once, read zero-copy by every worker.
@@ -375,7 +375,7 @@ pub enum Wire {
     /// A top-level function value (empty upvalues): its prototype index. Lets a marshalled global
     /// function be reconstructed on the worker so an isolate body can call it.
     Function(u32),
-    /// A first-class builtin (`use std.task.{sleep}` binds one, prelude-redesign P2) — plain `Send`
+    /// A first-class builtin (`use std.task.{sleep}` binds one) — plain `Send`
     /// data, so an import-bound global reaches the worker and the isolate body can call it.
     NativeFn(Builtin),
     /// A Ring 2 native module binding (`use std.{math}`), by surface name — plain data; the worker's
@@ -504,7 +504,7 @@ pub fn marshal(
         }
         return Err("closure with captures".to_string());
     }
-    // Import-bound callables (prelude-redesign P2/MH) are plain `Send` data: a first-class builtin,
+    // Import-bound callables are plain `Send` data: a first-class builtin,
     // a native-module binding, a selectively-imported module function, or a method handle. Shipping
     // them keeps `use`-bound globals usable inside a real isolate body.
     if let Some(builtin) = value.as_native_fn() {

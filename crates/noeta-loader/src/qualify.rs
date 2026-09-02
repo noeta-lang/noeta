@@ -181,7 +181,7 @@ fn q_typeref(ty: &mut TypeRef, visit: &mut NameVisitor) {
             visit(trait_name, NameKind::Type, None);
         }
         // `Self::Name` has no nominal leaf to qualify — the associated-type name resolves per-impl
-        // at the checker, not through the import map (slice 1a).
+        // at the checker, not through the import map.
         TypeRef::AssocProjection { name: _, span: _ } => {}
         TypeRef::Optional { inner, span: _ } => q_typeref(inner, visit),
         TypeRef::Union { members, span: _ } => members.iter_mut().for_each(|m| q_typeref(m, visit)),
@@ -1361,7 +1361,7 @@ fn q_variant(variant: &mut VariantDecl, visit: &mut NameVisitor) {
 }
 
 fn q_impl_block(b: &mut ImplBlock, visit: &mut NameVisitor) {
-    // The trait name qualifies iff it is a user-defined trait (L1) — `visit` only rewrites names in
+    // The trait name qualifies iff it is a user-defined trait — `visit` only rewrites names in
     // the module map (local/imported user traits); a built-in trait (`Add`, `Clone`) is absent from
     // it and left as-is.
     visit(&mut b.trait_name, NameKind::Type, None);

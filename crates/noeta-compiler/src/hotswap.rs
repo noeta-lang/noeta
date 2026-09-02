@@ -1,4 +1,4 @@
-//! Hot-swap diffing (server-hmr H0): given two versions of a program, decide what a live session
+//! Hot-swap diffing: given two versions of a program, decide what a live session
 //! can swap in place and what forces a restart.
 //!
 //! The differ compares **source-text slices**, not AST nodes: the two programs come from separate
@@ -18,7 +18,7 @@
 //!   new protos while existing instances keep the same `&'static Shape` and flow into the new
 //!   bodies untouched.
 //!
-//! A changed **top-level statement** makes the swap re-running (server-hmr H1): the new top level
+//! A changed **top-level statement** makes the swap re-running: the new top level
 //! re-executes with the unchanged reactive anchors (`signal`/`computed`/`cell.new`/`synced_signal`
 //! bindings) withheld, so their live nodes — the state — survive; the previous epoch's effects are
 //! disposed first and re-created by the re-run. The language rule this implements: *reactive state
@@ -67,10 +67,10 @@ pub struct SwapPlan {
     /// global/method entry is unreachable from freshly-checked code but keeps in-flight callers
     /// sound); reported so a driver can surface them.
     pub removed: Vec<String>,
-    /// Whether the top level changed, making this a **re-running** swap (server-hmr H1): the
+    /// Whether the top level changed, making this a **re-running** swap: the
     /// fragment carries the new version's top-level statements (minus `preserved`), and the
     /// session first disposes the previous epoch's effects plus the reactive nodes the re-run
-    /// re-binds. `false` = the H0 body-only swap: no top-level statement re-runs, all state
+    /// re-binds. `false` = a body-only swap: no top-level statement re-runs, all state
     /// (reactive or plain) is trivially preserved.
     pub rerun_top_level: bool,
     /// Whether the **declaration region moved** — a declaration reordered, or one inserted before
@@ -145,7 +145,7 @@ pub enum SwapBlocker {
 }
 
 impl std::fmt::Display for SwapBlocker {
-    /// The human-readable reason the dev loop reports next to "restarting" (server-hmr H4).
+    /// The human-readable reason the dev loop reports next to "restarting".
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SwapBlocker::SignatureChanged { name } => {
@@ -198,9 +198,9 @@ pub fn diff_programs(old: &Program, old_src: &str, new: &Program, new_src: &str)
     }
 
     // Top-level non-declaration statements compared as an ordered text sequence. Any difference
-    // makes this a RE-RUNNING swap (server-hmr H1): the new top level re-executes — with the
+    // makes this a RE-RUNNING swap: the new top level re-executes — with the
     // unchanged reactive anchors withheld (preserved) so their live nodes survive — instead of
-    // blocking. Identical sequences keep the H0 body-only swap, which re-runs nothing.
+    // blocking. Identical sequences keep the body-only swap, which re-runs nothing.
     let rerun_top_level = old_items.others != new_items.others;
 
     // Free functions: keyed by name; body-only edits swap, signature edits block.
@@ -522,7 +522,7 @@ fn classify<'a>(stmts: &'a [Stmt], src: &'a str) -> Items<'a> {
                 items.uses.insert(text(src, stmt.span()));
             }
             Stmt::Namespace { .. } => items.namespaces.push(text(src, stmt.span())),
-            // A code tier's fns (`@test fn adds…`) diff like top-level fns (server-hmr W3): a
+            // A code tier's fns (`@test fn adds…`) diff like top-level fns: a
             // test-body edit is a body-level change attributed to `adds` — the impact engine
             // narrows reruns to its callers, and a hot server doesn't re-run its top level over
             // a test tweak (the swapped block is stripped at lowering anyway). Non-fn tier items
@@ -680,11 +680,11 @@ fn diff_type<'a>(
 }
 
 /// The declaration's **token fingerprint** with each method's tokens removed — the
-/// layout-and-everything-else check (server-hmr H2). Everything that is not a method body is
+/// layout-and-everything-else check. Everything that is not a method body is
 /// included by construction — fields, variants, defaults, derives, directives, type params,
 /// impl-block headers, the destructor — so the check stays sound against syntax it has never
 /// heard of; but it compares *tokens*, not raw text, so a comment or whitespace edit inside a
-/// type declaration no longer reads as a layout change (H0's raw-text residual forced a
+/// type declaration does not read as a layout change (a raw-text check would force a
 /// state-losing restart on a doc tweak between two fields). Transitivity is free: a layout
 /// change to an embedded type is a change to *that* type's own declaration, which blocks the
 /// whole swap regardless of who contains it. Deliberate staleness: a **doc-comment** edit is

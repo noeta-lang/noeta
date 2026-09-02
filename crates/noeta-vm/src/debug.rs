@@ -1,4 +1,4 @@
-//! Protocol-neutral debug-session support (MCP arc M6, extracted from `noeta-dap`): the pieces
+//! Protocol-neutral debug-session support: the pieces
 //! every interactive debugger over the [`Debugger`](crate::Debugger) seam needs, independent of
 //! the wire it answers on — `noeta dap` (DAP JSON) and `noeta mcp` (MCP tools) both build on this
 //! module, so breakpoints resolve, steps land, and stacks capture identically in either.
@@ -351,7 +351,7 @@ pub fn capture(view: &DebugView, sources: &SourceMap) -> PausedState {
 
 /// The in-scope local *names* of snapshot frame `frame` (innermost-first indexing, as debuggers
 /// number stack frames) — the parameter list a console fragment is checked against before it runs
-/// (session-checker C3; the checking itself lives with the checker, keeping the VM checker-free).
+/// (the checking itself lives with the checker, keeping the VM checker-free).
 /// Uses the same [`local_in_scope`] rule as [`capture`], so the console sees exactly the names the
 /// Variables panel shows — a name declared by the paused line (not yet stored) is not a parameter,
 /// and referencing it is an ordinary undefined-name error rather than an `int`-and-`unit` confusion.

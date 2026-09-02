@@ -1,4 +1,4 @@
-//! The VM's [`NativeCtx`] implementation (higher-order-abi H0): how a registered higher-order
+//! The VM's [`NativeCtx`] implementation: how a registered higher-order
 //! native function re-enters the VM. A `VmCtx` is a per-call wrapper over `&mut Vm` plus a
 //! **slot table** — each `Some` entry owns exactly one reference to its value (retained on
 //! insert, released on [`NativeCtx::free`] or at drop). Centralizing the ownership here is the
@@ -21,7 +21,7 @@ use crate::{Abort, Poll, Vm, isolate};
 pub(crate) struct VmCtx<'c, 'm> {
     vm: &'c mut Vm<'m>,
     /// The slot table. Entries below `seeded` are **borrowed** from the caller's registers (which
-    /// outlive the call) — no retain on entry, no release at drop (H5 perf: a hot `set(v)` pays
+    /// outlive the call) — no retain on entry, no release at drop (a hot `set(v)` pays
     /// zero refcount traffic for its receiver + argument). Entries at/above `seeded` own one
     /// reference each; `None` is freed (index reusable via `free_list`, which never holds a seed).
     slots: Vec<Option<Value>>,
@@ -30,8 +30,8 @@ pub(crate) struct VmCtx<'c, 'm> {
     span: Span,
 }
 
-/// Project the VM's interned packed schema onto the seam's neutral [`PackedView`] (package-manager
-/// N3.4) — built per `with_packed*` call; a bulk kernel pays it once per *call*, not per element.
+/// Project the VM's interned packed schema onto the seam's neutral [`PackedView`] — built per
+/// `with_packed*` call; a bulk kernel pays it once per *call*, not per element.
 fn packed_view(schema: &noeta_object::PackedSchema, buffer_len: usize) -> PackedView {
     PackedView {
         fields: schema.fields.iter().map(packed_field).collect(),
@@ -93,7 +93,7 @@ fn bad_retained() -> CtxError {
 impl<'c, 'm> VmCtx<'c, 'm> {
     /// Wrap the VM for one dispatch, seeding the table with the caller's (borrowed) arguments —
     /// NOT retained: the caller's registers own them and outlive the call (see `seeded`). The
-    /// table itself comes from the VM's pool (H5 perf), so a hot dispatch loop runs alloc-free;
+    /// table itself comes from the VM's pool, so a hot dispatch loop runs alloc-free;
     /// re-entrant dispatches simply pop the next spare.
     pub(crate) fn new(vm: &'c mut Vm<'m>, args: &[Value], span: Span) -> VmCtx<'c, 'm> {
         let mut slots = vm.ctx_table_pool.pop().unwrap_or_default();
@@ -452,7 +452,7 @@ impl NativeCtx for VmCtx<'_, '_> {
     }
 
     fn advance_tasks(&mut self) -> CtxResult<bool> {
-        // The hot-reload safepoint (server-hmr W1): every ctx-driven loop (the HTTP serve loop)
+        // The hot-reload safepoint: every ctx-driven loop (the HTTP serve loop)
         // ticks the scheduler each iteration, so a pending swap lands here — before the poll, so
         // the next accepted request already dispatches into the new bodies. One `Option` branch
         // on every run that isn't `serve --watch`.
@@ -523,7 +523,7 @@ impl NativeCtx for VmCtx<'_, '_> {
         Ok(())
     }
 
-    // ----- Class 3 (H4): per-run state + the retained arena live on the Vm, so they survive
+    // ----- Class 3: per-run state + the retained arena live on the Vm, so they survive
     // across dispatches; the ctx methods are thin views over those fields. -----
 
     fn state(
@@ -685,7 +685,7 @@ impl NativeCtx for VmCtx<'_, '_> {
         Ok(())
     }
 
-    // ----- The raw-buffer ABI (package-manager N3.4) -----
+    // ----- The raw-buffer ABI ----------------------------
 
     fn with_packed(
         &mut self,
@@ -862,7 +862,7 @@ impl NativeCtx for VmCtx<'_, '_> {
     }
 }
 
-// task-local context (native-otel T5a): thin views over `Vm::ctx_current`.
+// task-local context: thin views over `Vm::ctx_current`.
 impl noeta_stdlib::TaskContext for VmCtx<'_, '_> {
     fn top(&mut self) -> Option<u64> {
         self.vm.sched.ctx_current.last().copied()
@@ -906,7 +906,7 @@ impl noeta_stdlib::FutureTracing for VmCtx<'_, '_> {
 
 impl noeta_stdlib::HotReload for VmCtx<'_, '_> {
     fn swap_count(&mut self) -> u64 {
-        // Per-VM (server-hmr F5): each worker reports its OWN applied-swap generation, so its
+        // Per-VM: each worker reports its OWN applied-swap generation, so its
         // serve loop pushes `reload` to its OWN clients when it applies a broadcast swap.
         self.vm.applied_swaps as u64
     }
@@ -920,7 +920,7 @@ impl noeta_stdlib::HotReload for VmCtx<'_, '_> {
 }
 
 impl<'m> Vm<'m> {
-    /// Call a registered extern type's **higher-order method** (higher-order-abi H4): the
+    /// Call a registered extern type's **higher-order method**: the
     /// type-method twin of [`Vm::call_ctx_function`] — the receiver rides as slot 0, the
     /// arguments after it.
     pub(crate) fn call_ctx_type_method(
@@ -931,8 +931,8 @@ impl<'m> Vm<'m> {
         args: &[Value],
         span: Span,
     ) -> Result<Value, Abort> {
-        // Bound before the closures so they capture the registry (`&'static`, Copy), not `self`
-        // (instance-registry IR3). The `static_dispatch_ctx_method` fast path stays on the global —
+        // Bound before the closures so they capture the registry (`&'static`, Copy), not `self`.
+        // The `static_dispatch_ctx_method` fast path stays on the global —
         // std is in every assembled registry — and only the dyn-table fallback consults `reg`.
         let reg = self.reg();
         self.ctx_receiver_call(
@@ -941,7 +941,7 @@ impl<'m> Vm<'m> {
             span,
             || format!("{type_name}.{method}"),
             // Compiled-in extensions dispatch through the monomorphized route (every ctx op
-            // inlines); anything else falls back to the dyn table (H5 perf).
+            // inlines); anything else falls back to the dyn table.
             |ctx, arg_slots| {
                 noeta_stdlib::registry::static_dispatch_ctx_method(
                     type_name, method, ctx, 0, arg_slots,
@@ -956,8 +956,8 @@ impl<'m> Vm<'m> {
         )
     }
 
-    /// Call a **trait** method (a native default body, slice 2; or a kernel-trait method since the
-    /// ExtBundle→ExtTrait fold-in, slice 4): the compiler baked the `(trait, method)` route at the call
+    /// Call a **trait** method — a native default body, or a kernel-trait method (a method bundle
+    /// is a native `ExtTrait`): the compiler baked the `(trait, method)` route at the call
     /// site, so this goes straight to the trait's shared ctx dispatch — receiver as slot 0. `trait_q` is
     /// the trait's qualified identity.
     pub(crate) fn call_trait_method(
@@ -968,7 +968,7 @@ impl<'m> Vm<'m> {
         args: &[Value],
         span: Span,
     ) -> Result<Value, Abort> {
-        // Bound before the closures so they capture the registry, not `self` (IR3).
+        // Bound before the closures so they capture the registry, not `self`.
         let reg = self.reg();
         self.ctx_receiver_call(
             recv,
@@ -1073,7 +1073,7 @@ impl<'m> Vm<'m> {
         }
     }
 
-    /// Hot-swap pre-run (server-hmr H1): before a swap fragment that re-runs the top level,
+    /// Hot-swap pre-run: before a swap fragment that re-runs the top level,
     /// dispose the previous epoch's effects (the re-run re-creates the ones that still exist)
     /// and the reactive nodes held by the globals the fragment is about to re-bind (their
     /// replacements arrive when the fragment runs; preserved subscribers re-subscribe on their
@@ -1092,7 +1092,7 @@ impl<'m> Vm<'m> {
         noeta_stdlib::reactive::hotswap_dispose_handles(&mut ctx, &slots);
     }
 
-    /// Call a registered **higher-order** native function (higher-order-abi H0): wrap the VM in a
+    /// Call a registered **higher-order** native function: wrap the VM in a
     /// [`VmCtx`], run the shared ctx dispatch, and unwrap the result. The twin of the plain
     /// registry arm in `call_native_module`; the tree-walker mirrors this shape (the dispatch
     /// body itself is shared, so the backends agree by construction).
@@ -1103,12 +1103,12 @@ impl<'m> Vm<'m> {
         args: &[Value],
         span: Span,
     ) -> Result<Value, Abort> {
-        // Bound before `ctx` takes `&mut self` (IR3): `reg` is `&'static`, so it survives the
+        // Bound before `ctx` takes `&mut self`: `reg` is `&'static`, so it survives the
         // borrow and the fallback dispatch routes through this VM's registry.
         let reg = self.reg();
         let mut ctx = VmCtx::new(self, args, span);
         let arg_slots: Vec<Slot> = (0..args.len() as Slot).collect();
-        // Compiled-in extensions dispatch through the monomorphized route (H5 perf).
+        // Compiled-in extensions dispatch through the monomorphized route.
         let outcome =
             noeta_stdlib::registry::static_dispatch_ctx(module, func, &mut ctx, &arg_slots)
                 .unwrap_or_else(|| reg.dispatch_ctx(module, func, &mut ctx, &arg_slots));

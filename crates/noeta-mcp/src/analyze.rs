@@ -1,11 +1,10 @@
-//! M3 shared plumbing for the Understand + Introspect tools: build a salsa workspace from a
+//! Shared plumbing for the Understand + Introspect tools: build a salsa workspace from a
 //! `source`/`file` request (the same shape `check` takes), and convert byte spans ↔ line/column so
 //! a tool can report *where* in the source an answer sits and an agent can point at a position.
 //!
-//! Every M3 tool is a pure read over the public salsa graph (`noeta-db`) or the parsed AST
-//! (`noeta-ast`) — no VM, no host, no private LSP code (the shared IDE engine that would let
-//! `definition`/`references` reuse the LSP's resolver is extracted later, at M5). Each builds a
-//! fresh `LangDatabase` per call, exactly as `check` does.
+//! Every Understand and Introspect tool is a pure read over the public salsa graph (`noeta-db`) or
+//! the parsed AST (`noeta-ast`) — no VM, no host. Each builds a fresh `LangDatabase` per call,
+//! exactly as `check` does.
 
 use noeta_db::{LangDatabase, Workspace};
 use noeta_span::{Source, SourceId};
@@ -61,7 +60,7 @@ pub struct Loc {
     pub offset: u32,
 }
 
-/// A span resolved to its start/end [`Loc`]s — how every M3 tool reports "where".
+/// A span resolved to its start/end [`Loc`]s — how every analysis tool reports "where".
 #[derive(Debug, Clone, Copy, Serialize, schemars::JsonSchema)]
 pub struct SpanLoc {
     pub start: Loc,

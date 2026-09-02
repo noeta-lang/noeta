@@ -1,11 +1,9 @@
 //! The query graph: the compile pipeline as a [salsa] database.
 //!
-//! M1.1 threads the existing straight-line pipeline (lex → parse → compile) through salsa
-//! **before** the type checker (M1.7) needs it, so later slices edit a graph rather than
-//! rewrite a pipeline. This slice is deliberately *behavior-preserving*: every query is a
-//! thin wrapper that calls the existing `noeta_lexer::lex` / `noeta_parser::parse` /
-//! `noeta_compiler::compile` function and memoizes the result. The differential oracle proves
-//! the wrap changes nothing — the VM still reproduces the tree-walker byte-for-byte.
+//! The pipeline (lex → parse → check → compile) runs through salsa: every query is a thin wrapper
+//! that calls the corresponding `noeta_lexer::lex` / `noeta_parser::parse` / `noeta_check` /
+//! `noeta_compiler::compile` function and memoizes the result. The graph is *behavior-preserving* —
+//! the differential oracle holds the VM to reproducing the tree-walker byte-for-byte through it.
 //!
 //! ```text
 //!   SourceProgram (input)
@@ -14,9 +12,6 @@
 //!     tokens(db)  ──►  ast(db)  ──►  checked(db)   ──►  bytecode(db)
 //!     (noeta-lexer)    (noeta-parser)  (noeta-check)       (noeta-compiler)
 //! ```
-//!
-//! The checker query (`checked`, added in M1.7) slotted in between [`ast`] and [`bytecode`]
-//! with no re-threading — exactly what landing the plumbing early bought.
 //!
 //! ## Foreign results and `Update`
 //!
@@ -69,7 +64,7 @@ pub struct SourceProgram {
     #[returns(ref)]
     pub text: String,
     /// The language [`Edition`](noeta_lexer::Edition) this source is written against, in canonical
-    /// typed form — its package's edition (editions arc). Every db query that
+    /// typed form — its package's edition. Every db query that
     /// lexes/parses/checks this source does so under it, so the IDE stack honors a future edition's
     /// grammar/rules exactly as the batch compiler does. A string (not the enum) because a salsa
     /// input field must be `Update`, which the leaf `Edition` enum does not implement; the queries
@@ -77,7 +72,7 @@ pub struct SourceProgram {
     #[returns(ref)]
     pub edition: noeta_lexer::Edition,
     /// The module path this source's **location** derives — its identity, which the linker writes in
-    /// as its `namespace` (namespace-derivation arc). A [`Source`] carries a file name, not an
+    /// as its `namespace`. A [`Source`] carries a file name, not an
     /// identity, so the derivation has to be an input beside it or the query graph would fall back
     /// to declared namespaces while the batch loader derives, and the editor would disagree with the
     /// compiler about which module a file is.
@@ -168,11 +163,10 @@ pub struct Checked {
     /// it empty so `noeta run`/differential pay nothing for it.
     pub expr_types: std::collections::HashMap<Span, noeta_ast::reflect::TypeRepr>,
     /// The checker's compile-input bundle (every span-keyed codegen hint + destructor relevance),
-    /// consumed as a unit by the compiler and the eval reference. (The T2 `Sites` bundling subsumed
-    /// main's flat per-map fields, including the noeta-ext-abi `TypeRecipe` rename — the bundle's
-    /// field types live in `noeta_check::Sites` and follow that rename through the re-export.)
+    /// consumed as a unit by the compiler and the eval reference. The bundle's field types live in
+    /// `noeta_check::Sites`.
     pub sites: noeta_check::Sites,
-    /// Method-bundle bindings by target type (kernel-methods K4) — what member completion reads
+    /// Method-bundle bindings by target type — what member completion reads
     /// to offer bound methods.
     pub bundle_bindings: std::collections::HashMap<String, Vec<(String, String)>>,
     /// Every `@packed` struct's flat layout by type name — the IDE storage-fact index hover and
@@ -187,7 +181,7 @@ pub struct Checked {
 #[derive(Debug, Clone)]
 pub struct Bytecode(pub Result<Module, Unsupported>);
 
-/// Linker output (M1.9.3): the merged [`Program`] of an entry and its resolved imports, or the
+/// Linker output: the merged [`Program`] of an entry and its resolved imports, or the
 /// `use`-resolution diagnostics (entry parse errors, E0019, E0020). The whole-workspace analogue
 /// of [`Ast`] — what [`linked_checked`] and [`linked_bytecode`] build on.
 #[derive(Debug, Clone)]
@@ -468,7 +462,7 @@ pub fn bytecode(db: &dyn salsa::Database, src: SourceProgram) -> Bytecode {
 }
 
 // ---------------------------------------------------------------------------
-// The module graph (M1.9.3; entry-parametric since the ide-workspaces rework)
+// The module graph (entry-parametric)
 // ---------------------------------------------------------------------------
 //
 // A multi-file program is a [`Workspace`]: a flat set of member `SourceProgram` inputs (a
@@ -491,10 +485,10 @@ pub fn bytecode(db: &dyn salsa::Database, src: SourceProgram) -> Bytecode {
 // The entry is a QUERY PARAMETER, not a workspace field: salsa memoizes the link/check per
 // `(ws, entry)`, while the per-source `tokens_in`/`ast_in` memoize once per file no matter how
 // many entries link over the same workspace — the sharing that lets an editor keep one workspace
-// (one set of inputs) per directory instead of one per open document (audit-4 finding 6).
+// (one set of inputs) per directory instead of one per open document.
 // Resolution lives in [`linked_from`], so it depends on every member's `ast_in` — editing any
 // member re-links — but the per-source parses stay independent: editing one module never
-// recomputes another's parse. That is the incremental boundary M2's hot reload builds on.
+// recomputes another's parse. That is the incremental boundary hot reload builds on.
 //
 // The classic single-entry surface ([`linked`], [`linked_checked`], [`linked_checked_ide`],
 // [`linked_bytecode`]) remains as thin wrappers that link from the workspace's FIRST member —
@@ -502,7 +496,7 @@ pub fn bytecode(db: &dyn salsa::Database, src: SourceProgram) -> Bytecode {
 // compile-path consumers (conformance, MCP `check`) read exactly what they always did.
 
 /// A multi-file program: the member sources — each a memoized [`SourceProgram`] input — and, for
-/// a package (package-manager P2.1c), its resolved dependency packages' modules. Mutating any one
+/// a package, its resolved dependency packages' modules. Mutating any one
 /// source invalidates exactly the queries that read it. There is no distinguished entry member:
 /// the entry is a parameter of [`linked_from`] and friends, so one workspace serves every member
 /// as an entry (memoized per `(ws, entry)`).
@@ -553,7 +547,7 @@ pub fn workspace_entry(db: &dyn salsa::Database, ws: Workspace) -> SourceProgram
     ws.members(db)[0]
 }
 
-/// One dependency package module in a salsa [`Workspace`] (package-manager P2.1c): its source input
+/// One dependency package module in a salsa [`Workspace`]: its source input
 /// plus the re-root info [`linked`] applies before merging it (`root`→`prefix`, then each of the
 /// package's local dependency keys → the target package's global segment). `renames` is a **flat**
 /// list of `[local0, global0, local1, global1, …]` pairs — a `BTreeMap` is not a salsa input field
@@ -582,8 +576,8 @@ impl DepModule {
     }
 }
 
-/// A dependency package's sources + re-root info, the ergonomic input to [`workspace_with_deps`]
-/// (package-manager P2.1c). Mirrors `noeta_loader::DepPackage` but with already-labeled [`Source`]s.
+/// A dependency package's sources + re-root info, the ergonomic input to [`workspace_with_deps`].
+/// Mirrors `noeta_loader::DepPackage` but with already-labeled [`Source`]s.
 #[derive(Debug)]
 pub struct DepSources {
     pub root: String,
@@ -597,7 +591,7 @@ pub struct DepSources {
     /// declaration stands, as before derivation).
     pub paths: Vec<noeta_loader::ModulePath>,
     /// This package's language edition — its modules are parsed and checked under it, exactly as
-    /// the CLI's `load_with_deps` does (editions arc). Typed: a value resolution never produced is
+    /// the CLI's `load_with_deps` does. Typed: a value resolution never produced is
     /// unrepresentable, instead of a free string silently degrading to the default.
     pub edition: noeta_lexer::Edition,
 }
@@ -629,7 +623,7 @@ pub fn workspace(
     )
 }
 
-/// Build a [`Workspace`] that also links **dependency packages** (package-manager P2.1c): the entry
+/// Build a [`Workspace`] that also links **dependency packages**: the entry
 /// and siblings take `root_edition`; each dependency's modules take that package's own edition. Each
 /// dep module becomes a [`DepModule`] input carrying its re-root info, so cross-package
 /// `use <dep-key>.…` resolves in the salsa graph exactly as in the CLI's `load_with_deps`.
@@ -679,7 +673,7 @@ pub fn workspace_with_deps(
 }
 
 /// Reclaim the resident content of a [`SourceProgram`] whose file was **deleted** from a workspace
-/// (audit F9 residual a). salsa 0.27 has **no public API to delete an input**: inputs live in an
+/// salsa 0.27 has **no public API to delete an input**: inputs live in an
 /// append-only table (`salsa::input`), and the only teardown paths (`evict_lru`, revision GC) act on
 /// LRU-configured *tracked functions*, never on inputs or on non-LRU memos. So a source that vanishes
 /// cannot have its input slot freed. What *can* be reclaimed is everything unbounded the slot anchors:
@@ -742,7 +736,7 @@ fn reroot_map(flat: &[String]) -> std::collections::BTreeMap<String, String> {
         .collect()
 }
 
-/// The workspace's declared text-tier names (text-tiers arc): the union of every member file's
+/// The workspace's declared text-tier names: the union of every member file's
 /// `@tier(<name>, …, text: "…")` declarations — members and dependency modules alike —
 /// sorted and deduped. Derived from the per-file [`tokens`] scans, so an edit that adds or
 /// removes a declaration changes this value and invalidates exactly the workspace-aware lexes
@@ -766,8 +760,7 @@ pub fn workspace_text_tiers(db: &dyn salsa::Database, ws: Workspace) -> Vec<Stri
 }
 
 /// The local `@name`s each package binds to a **text** (verbatim-body) tier, keyed by the binding
-/// package's [`PackageOrigin`] — the per-package input to [`tokens_in`]'s lex (per-package
-/// tier-naming arc, sub-step 3g).
+/// package's [`PackageOrigin`] — the per-package input to [`tokens_in`]'s lex.
 ///
 /// **Not a twin of the loader's resolution — the same function.** This query supplies the two inputs
 /// the editor has and the batch loader does not phrase the same way, and
@@ -947,7 +940,7 @@ pub fn linked_from(db: &dyn salsa::Database, ws: Workspace, entry: SourceProgram
         }
     }
 
-    // Dependency-package modules (package-manager P2.1c): re-rooted clones (owned, because the
+    // Dependency-package modules: re-rooted clones (owned, because the
     // rewrite mutates the parsed AST) that drive their own imports as closed units — the salsa twin
     // of the CLI's `link_with_deps`. Depends on each dep module's `ast`, so editing a path-dependency
     // source re-links, but leaves sibling parses untouched.
@@ -1679,7 +1672,7 @@ mod tests {
     use super::*;
 
     /// Seed the process-default registry with the std units — these tests are their own
-    /// assembling driver (audit-6 F2): an unseeded db falls back to the process default for the
+    /// assembling driver: an unseeded db falls back to the process default for the
     /// extensions' verbatim-tier names, and the checker behind `checked`/`workspace_checked`
     /// resolves std names against the same default.
     fn seed_std() {
@@ -1728,9 +1721,9 @@ mod tests {
 
     #[test]
     fn a_long_check_is_cancelled_mid_module_by_a_concurrent_write() {
-        // audit F9 residual (b): a whole-program check is ONE salsa query, so before the
-        // per-declaration cancellation poll a pending input write could not take effect until the
-        // entire module had been checked. With the poll, a superseded check unwinds promptly.
+        // A whole-program check is ONE salsa query, so without the per-declaration cancellation
+        // poll a pending input write could not take effect until the entire module had been
+        // checked. With the poll, a superseded check unwinds promptly.
         seed_std();
         let mut db = LangDatabase::default();
         // A large module whose *check* dominates: many top-level declarations, each a real
@@ -1989,7 +1982,7 @@ mod tests {
         assert_eq!(bytecode(&db, src).0.is_ok(), direct.is_ok());
     }
 
-    // ----- the module graph (M1.9.3) -----
+    // ----- the module graph --------------
 
     #[test]
     fn module_graph_links_checks_and_compiles_a_used_module() {
@@ -2195,7 +2188,7 @@ mod tests {
 
     #[test]
     fn workspace_with_deps_resolves_cross_package_use() {
-        // package-manager P2.1c: a dependency package keyed `hi` (its own root segment is `greet`)
+        // A dependency package keyed `hi` (its own root segment is `greet`)
         // links into the salsa graph; the entry's `use hi.hello.greeting` resolves after re-root.
         seed_std();
         let db = LangDatabase::default();
@@ -2298,8 +2291,8 @@ mod tests {
 
     #[test]
     fn workspace_with_deps_lexes_a_renamed_text_tier_verbatim() {
-        // Per-package tier-naming arc (3g), harness seam: the `workspace_with_deps` path (used by
-        // `noeta-mcp` and `noeta-conformance`) now carries the whole program's `@name` tables, so a
+        // The harness seam: the `workspace_with_deps` path (used by
+        // `noeta-mcp` and `noeta-conformance`) carries the whole program's `@name` tables, so a
         // `[directives] docs = "std:doc"` binding — the root package renaming std's `doc` **text** tier
         // under a local `@docs` — lexes the `@docs { … }` body verbatim, exactly as the loader does
         // under `noeta run`/`noeta check` and the editor does through `sync`. The db twin of the IDE's

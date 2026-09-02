@@ -58,7 +58,7 @@ pub(crate) fn repl_bootstrap(
 ) -> Result<(VmSession, Vec<Source>), ExitCode> {
     // The shared front half (drift firewall): `repl --load` sees the same dependency packages and
     // editions `noeta run` resolves — a program that runs must also load at the prompt. The
-    // compose probe's graph (default selection) is reused rather than resolved again (audit-5 F2).
+    // compose probe's graph (default selection) is reused rather than resolved again.
     let loaded = match noeta_runner::compile::load_default_project_with(
         path,
         resolved.map(|g| noeta_runner::compile::ResolvedFront {
@@ -124,7 +124,7 @@ pub(crate) fn repl_bootstrap(
 
 pub(crate) fn cmd_repl(check: bool, load: Option<PathBuf>) -> ExitCode {
     // A `--load` bootstrap is a program run — a native-dep app's REPL must be the composed one.
-    // The probe's resolved graph (default selection) feeds the bootstrap load (audit-5 F2).
+    // The probe's resolved graph (default selection) feeds the bootstrap load.
     let mut resolved = None;
     if let Some(file) = &load {
         match compose::maybe_delegate(file) {
@@ -132,7 +132,7 @@ pub(crate) fn cmd_repl(check: bool, load: Option<PathBuf>) -> ExitCode {
             Ok(graph) => resolved = graph,
         }
     }
-    // The edition prompt entries lex/parse under (editions arc): the `--load` file's package
+    // The edition prompt entries lex/parse under: the `--load` file's package
     // edition when bootstrapped, else the enclosing project's (a bare prompt in a package dir
     // tinkers in that package's dialect); a manifest-less cwd is the default edition.
     let edition = load
@@ -142,7 +142,7 @@ pub(crate) fn cmd_repl(check: bool, load: Option<PathBuf>) -> ExitCode {
             let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
             manifest::root_edition(&cwd.join("_.noe"))
         });
-    // The optional per-entry type checker (session-checker C2): `Some` = every entry is checked
+    // The optional per-entry type checker: `Some` = every entry is checked
     // against the accumulated session before it runs; an erroring entry prints diagnostics and is
     // skipped (and commits nothing — `check_entry` is transactional). Toggleable at the prompt.
     // A `--load` bootstrap replaces the fresh checker with one seeded from the bootstrap's own
@@ -160,7 +160,7 @@ pub(crate) fn cmd_repl(check: bool, load: Option<PathBuf>) -> ExitCode {
             Err(code) => return code,
         },
     };
-    // `precise_codegen`: whether SITE-DRIVEN codegen is still sound (session-checker C5) — true only
+    // `precise_codegen`: whether SITE-DRIVEN codegen is still sound — true only
     // while the checker has seen every entry of the session. `:check off` clears it PERMANENTLY —
     // precise destructor relevance derived from a registry that missed an unchecked entry's
     // `destruct` class could skip a destructor, so once any entry runs unchecked the session stays
@@ -170,7 +170,7 @@ pub(crate) fn cmd_repl(check: bool, load: Option<PathBuf>) -> ExitCode {
     // `sources`: each evaluated entry is parsed with a **distinct** `SourceId` (its index here) and
     // kept, so a stack trace into a function defined in an *earlier* entry renders against that
     // entry's real text and line — rather than degrading to name-only, as it did when every entry
-    // reused `SourceId::FIRST` (REPL-on-VM follow-on). Only entries that actually run are kept; a
+    // reused `SourceId::FIRST`. Only entries that actually run are kept; a
     // syntax-error entry compiles nothing, so no future trace can reference it.
     let mut state = ReplState {
         session,
@@ -219,7 +219,7 @@ pub(crate) fn cmd_repl(check: bool, load: Option<PathBuf>) -> ExitCode {
 pub(crate) struct ReplState {
     pub(crate) session: VmSession,
     pub(crate) checker: Option<noeta_check::SessionChecker>,
-    /// Whether SITE-DRIVEN codegen is still sound (session-checker C5) — see [`cmd_repl`].
+    /// Whether SITE-DRIVEN codegen is still sound — see [`cmd_repl`].
     pub(crate) precise_codegen: bool,
     /// The multi-line entry still being gathered. Only the piped reader accumulates here: the
     /// interactive editor gathers continuation lines itself (its validator asks
@@ -322,7 +322,7 @@ pub(crate) fn repl_meta(
             }
             eprintln!("(session reset)");
         }
-        // Toggle per-entry type checking (session-checker C2). Turning it on mid-session starts
+        // Toggle per-entry type checking. Turning it on mid-session starts
         // from an EMPTY typing environment: earlier (unchecked) bindings are simply unknown to it,
         // which the checker's unknown-ident tolerance treats as runtime-deferred — degraded
         // precision, never false errors.
@@ -511,7 +511,7 @@ pub(crate) fn print_repl_help() {
 
 /// Evaluate one checked-clean entry: with the checker on AND every prior entry checked
 /// (`precise_codegen`), the entry compiles with the checker's accumulated site bundle — the same
-/// site-driven codegen the file pipeline runs (session-checker C5); otherwise the conservative
+/// site-driven codegen the file pipeline runs; otherwise the conservative
 /// checkerless codegen, which is always sound.
 pub(crate) fn eval_entry(
     session: &mut VmSession,
@@ -527,7 +527,7 @@ pub(crate) fn eval_entry(
     }
 }
 
-/// The `--check` gate (session-checker C2): type-check one parsed entry against the accumulated
+/// The `--check` gate: type-check one parsed entry against the accumulated
 /// session. Returns whether the entry should RUN — `true` with no checker, or when the entry has
 /// no error-severity diagnostics (warnings print and the entry still runs). Errors render against
 /// the entry's own source and the entry is skipped; `check_entry`'s transactionality means a
@@ -587,7 +587,7 @@ pub(crate) fn parse_entry(
     edition: noeta_lexer::Edition,
 ) -> Entry {
     let source = Source::new(id, name.clone(), buffer.to_string());
-    // Prompt entries lex/parse under the enclosing package's edition (editions arc) — the same
+    // Prompt entries lex/parse under the enclosing package's edition — the same
     // edition a `--load` bootstrap checked and compiled under, so an entry can't parse under
     // different rules than the program it extends.
     let lexed = noeta_lexer::lex_in(&source, edition, &noeta_lexer::TextTiers::default());
@@ -666,7 +666,7 @@ pub(crate) fn buffer_incomplete(buffer: &str, edition: noeta_lexer::Edition) -> 
 /// the half that checks and runs. A genuine syntax error is reported and the buffer reset, so one
 /// bad entry cannot wedge the session.
 ///
-/// With a `checker` present (`--check` / `:check on`, session-checker C2), a parsed entry is
+/// With a `checker` present (`--check` / `:check on`), a parsed entry is
 /// type-checked against the accumulated session first: an entry with errors prints its `E0xxx`
 /// diagnostics (rendered against the entry's own source) and is **skipped** — and `check_entry`'s
 /// transactionality means it commits nothing, so the checker stays aligned with what actually ran.

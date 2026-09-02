@@ -20,7 +20,7 @@ pub(crate) fn cmd_dump(
     target: &Option<String>,
 ) -> ExitCode {
     // The compose probe hands back the graph it resolved (default selection) so the compile
-    // below doesn't resolve it again (audit-5 F2).
+    // below doesn't resolve it again.
     let resolved = match compose::maybe_delegate(file) {
         Err(code) => return code,
         Ok(resolved) => resolved,
@@ -49,7 +49,7 @@ pub(crate) fn cmd_dump(
     }
 }
 
-/// `noeta build <FILE>` — compile a program to a self-contained artifact (P-AOT L1/L2). Loads +
+/// `noeta build <FILE>` — compile a program to a self-contained artifact. Loads +
 /// links, activates any `--tier`/`--target`, type-checks, and compiles through the **same**
 /// `compile_real` pipeline as `run`/`dump`. The result is emitted either as a `.noeb` bundle
 /// (`noeta_bundle::write`, run by `noeta run app.noeb`) or — with `--exe` — as a self-contained
@@ -67,7 +67,7 @@ pub(crate) fn cmd_build(
     target: &Option<String>,
 ) -> ExitCode {
     // The compose probe hands back the graph it resolved (default selection) so the compile
-    // below doesn't resolve it again (audit-5 F2).
+    // below doesn't resolve it again.
     let resolved = match compose::maybe_delegate(file) {
         Err(code) => return code,
         Ok(resolved) => resolved,
@@ -109,7 +109,7 @@ pub(crate) fn cmd_build(
     }
 }
 
-/// Emit `module` as a standalone `.noeb` bundle (P-AOT L1.2) — the default `noeta build` output.
+/// Emit `module` as a standalone `.noeb` bundle — the default `noeta build` output.
 /// Writes to `out` if given, else the input path with a `.noeb` extension.
 pub(crate) fn emit_bundle(
     file: &std::path::Path,
@@ -132,8 +132,8 @@ pub(crate) fn emit_bundle(
     }
 }
 
-/// Emit `module` as a self-contained executable (P-AOT L2.1): staple its bundle onto a copy of the
-/// lean `noeta-runner` (dev-deps D4a — *not* the toolchain), so the artifact runs the program with no
+/// Emit `module` as a self-contained executable: staple its bundle onto a copy of the
+/// lean `noeta-runner` (*not* the toolchain), so the artifact runs the program with no
 /// separate `.noeb`, no interpreter, and no dev tooling. Writes to `out` if given, else the input
 /// path with its extension stripped (`app.noe` → `app`, or `.exe` on Windows). Marked executable on
 /// Unix.
@@ -142,11 +142,11 @@ pub(crate) fn emit_exe(
     out: Option<&std::path::Path>,
     module: &noeta_bytecode::Module,
 ) -> ExitCode {
-    // The runtime image to embed is the LEAN `noeta-runner` (dev-deps D4a) — NOT this CLI. A stapled
+    // The runtime image to embed is the LEAN `noeta-runner` — NOT this CLI. A stapled
     // artifact's argv belongs to the program (it never invokes a CLI verb: `try_run_stapled` fires
     // before arg-parsing), so the toolchain was always dead weight and attack surface here. For an app
     // with native runtime dependencies the base is a *composed* runner (the lean runner + those crates'
-    // runtime extensions, dev tooling off — dev-deps D4c); a pure-Noeta app uses the stock runner.
+    // runtime extensions, dev tooling off); a pure-Noeta app uses the stock runner.
     // Either way it links only app-execution layers (no fmt/LSP/DAP/formatter parsers).
     let runner_path = match runner_base(file) {
         Ok(path) => path,
@@ -208,7 +208,7 @@ pub(crate) fn emit_exe(
     ExitCode::SUCCESS
 }
 
-/// Emit `module` as a single **wasm** artifact (P-WASM W1.2) — the `--exe` analogue for the wasm
+/// Emit `module` as a single **wasm** artifact — the `--exe` analogue for the wasm
 /// target. A wasm guest cannot read its own binary, so instead of a tail trailer the bundle is
 /// injected into the runner's data section and its compiled-in slot patched to point at it
 /// (`noeta_bundle::staple_wasm`). Writes to `out` if given, else the input path with a `.wasm`
@@ -262,7 +262,7 @@ pub(crate) fn emit_wasm(
     }
 }
 
-/// Emit `module` as a **wasi:http serve component** (P-WASM W4): staple its bundle into the
+/// Emit `module` as a **wasi:http serve component**: staple its bundle into the
 /// prebuilt generic `noeta-wasm-serve` component — the exact `--wasm` mechanism one format
 /// level up (`staple_wasm` descends into the component's embedded engine module), so no cargo
 /// runs at user build time once a generic component exists. Writes to `out` if given, else

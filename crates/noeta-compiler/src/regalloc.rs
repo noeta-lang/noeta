@@ -1,5 +1,4 @@
-//! Reuse-aware register coalescing — a bytecode→bytecode post-pass over a compiled [`Chunk`]
-//! (memory-management migration, Phase 3.3).
+//! Reuse-aware register coalescing — a bytecode→bytecode post-pass over a compiled [`Chunk`].
 //!
 //! The IR→bytecode lowering allocates registers **monotonically**: every temporary and local gets
 //! a fresh register that lives until frame teardown. This pass reclaims that waste. It computes,
@@ -190,7 +189,7 @@ pub fn coalesce(chunk: &mut Chunk) {
     }
     let liveness = Liveness::analyze(&chunk.code, n);
     let mut interfere = build_interference(&chunk.code, &liveness, n);
-    // Pin the panic-teardown registers (Phase 4.2c-ii): make each interfere with every other
+    // Pin the panic-teardown registers: make each interfere with every other
     // register so colouring gives it a unique slot and never reuses it for another local. Without
     // this, a destructor-bearing local that dies only at an abort-skipped drop would have its slot
     // coalesced away and its value lost before the panic teardown fires. Parameters are already
@@ -849,9 +848,8 @@ fn op_facts(op: &Op) -> OpFacts {
     f
 }
 
-/// Registers an op writes *in addition* to its primary `def`. No current op is multi-def (the only
-/// one, `DestructurePair`, was retired with the tuple-destructure migration — object-model slice 4b),
-/// but the mechanism is kept so a future multi-def op needs no liveness rework.
+/// Registers an op writes *in addition* to its primary `def`. No op is multi-def today, but the
+/// mechanism is kept so a future multi-def op needs no liveness rework.
 fn extra_defs(op: &Op) -> Option<Reg> {
     // `IterForNext` writes a second register — the bool continue flag (its element is the primary
     // `def`); both must be treated as defined by liveness (Track I.2).

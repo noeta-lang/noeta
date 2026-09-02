@@ -1,7 +1,7 @@
-//! Off-thread tier-1 compilation (P-PAR S4): a background thread owns the Cranelift [`Jit`]
-//! engine for its whole life, so hot-counter promotion never pauses the mutator — S0c measured
-//! synchronous compiles at 3.5–145 ms *each* (up to ~194 ms worst), dominating wall time on
-//! compile-heavy programs.
+//! Off-thread tier-1 compilation: a background thread owns the Cranelift [`Jit`]
+//! engine for its whole life, so hot-counter promotion never pauses the mutator: a synchronous
+//! compile costs milliseconds to tenths of a second *each*, which dominates wall time on
+//! compile-heavy programs (`examples/jit_pause.rs` measures it).
 //!
 //! Shape: the mutator sends prototype indices down an mpsc channel and keeps interpreting at
 //! tier 0; the service compiles and pushes a [`Ready`] response into a mutex mailbox; the
@@ -35,7 +35,7 @@ use crate::JitStats;
 pub(crate) enum Job {
     /// The whole-prototype body (+ its fast-convention twin): the frame-entry shape.
     Main(usize),
-    /// The **region-scoped OSR body** (P-OSRW) for the loop that got hot at `header`. Falls back
+    /// The **region-scoped OSR body** for the loop that got hot at `header`. Falls back
     /// to the whole-prototype body when the window is the whole prototype, so a back-edge-born
     /// promotion always ends up with *something* native.
     Osr { proto: usize, header: usize },

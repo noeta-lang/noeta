@@ -1,6 +1,6 @@
-//! M3 Understand pillar (the compiler-answers-cheaply half): `type_at` and `symbols`. Both ride
-//! only the public salsa graph + parsed AST — no private LSP resolver (that arrives with the
-//! `noeta-ide` extraction at M5, which unlocks `definition`/`references`/`completions`/`signature`).
+//! The Understand pillar's compiler-answers-cheaply half: `type_at` and `symbols`. Both ride only
+//! the public salsa graph + parsed AST — the shared IDE engine's resolver backs the navigation
+//! tools instead (see [`crate::navigate`]).
 
 use crate::analyze::{self, LineIndex, Prepared, SpanLoc};
 use noeta_ast::Program;
@@ -130,7 +130,7 @@ pub struct SymbolNode {
     pub children: Vec<SymbolNode>,
 }
 
-/// One `@doc { … }` block of the project, adjacency-resolved (tier-providers T5): what it
+/// One `@doc { … }` block of the project, adjacency-resolved: what it
 /// documents, where it lives, and its dedented Markdown body.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct ProjectDoc {
@@ -189,7 +189,7 @@ pub fn project_docs(p: &Prepared) -> ProjectDocsOutput {
     ProjectDocsOutput { docs }
 }
 
-// ---- The docs browser over MCP (docs-browser arc, slice 1). ---------------------------------
+// ---- The docs browser over MCP. -------------------------------------------------------------
 //
 // The agent browses the *same* unified doc model (`noeta_ide::docs`) the LSP docs browser serves —
 // both go through it, so the human's tree and the agent's tree can never drift. This is the MCP

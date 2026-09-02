@@ -73,7 +73,7 @@ pub trait ProfileHook: Send {
     fn into_any(self: Box<Self>) -> Box<dyn std::any::Any>;
 }
 
-/// The debug-console evaluation budget (MCP M6b): a fragment run is bounded by wall clock and by
+/// The debug-console evaluation budget: a fragment run is bounded by wall clock and by
 /// instruction count — whichever trips first. Wall clock is the interactive bound (a console
 /// answer seconds late is already useless); the step cap is the deterministic backstop.
 pub(crate) const DEBUG_EVAL_TIMEOUT_MS: u64 = 5_000;
@@ -144,10 +144,10 @@ pub enum DebugAction {
     /// request here and the dispatch loop, which *has* `&mut self`, services it via
     /// [`Vm::debug_eval_request`], sends the rendered result back on the request's `reply`, and
     /// re-consults the debugger (which stays paused, resuming its wait without re-announcing the stop).
-    /// This is the D5.2 trampoline: it is the one path on which a paused program runs code (a call in a
+    /// This is the evaluate trampoline: it is the one path on which a paused program runs code (a call in a
     /// watch), and it stays off the `Debugger` trait so no VM internals leak.
     Evaluate(DebugEvalRequest),
-    /// The paused debugger asked to **write a frame local** (the Variables-panel edit, U1). Same
+    /// The paused debugger asked to **write a frame local** (the Variables-panel edit). Same
     /// trampoline shape as [`DebugAction::Evaluate`]; the dispatch loop additionally holds the
     /// mutable register stack, so it can store the evaluated value into the frame's register.
     SetVariable(DebugSetRequest),
@@ -159,10 +159,10 @@ pub enum DebugAction {
 pub struct DebugEvalRequest {
     /// The parsed fragment (the adapter parses the console string; statements are allowed — a
     /// trailing bare expression is the fragment's value). On a session run whose [`EvalKind`] allows
-    /// calls the VM compiles it through the adopted session (closures included, tooling-unification
-    /// T5); a hover walks its trailing expression read-only.
+    /// calls the VM compiles it through the adopted session (closures included); a hover walks its
+    /// trailing expression read-only.
     pub program: Program,
-    /// The raw console string `program` was parsed from — the memo key (U3): a re-evaluated watch
+    /// The raw console string `program` was parsed from — the memo key: a re-evaluated watch
     /// (same text, same scope shape) reuses its compiled wrapper instead of appending a new one.
     pub text: String,
     /// Which paused frame's scope to evaluate against, as the client numbers frames (innermost first).
@@ -234,7 +234,7 @@ pub enum DebugEvalOutcome {
     Error(String),
 }
 
-/// A paused-frame **`setVariable`** request (tooling-unification U1): evaluate `value` (a console
+/// A paused-frame **`setVariable`** request: evaluate `value` (a console
 /// fragment, frame locals visible) and write the result into the named local's register in the
 /// selected frame — the DAP Variables-panel edit. Replies with the written value rendered, or an
 /// error (unknown/out-of-scope name, `self`, or an evaluation failure — the frame is untouched

@@ -43,7 +43,7 @@ pub(crate) fn marshal_native_arg(
         // shaped, never a hot path. Mirrors the tree-walker's projection.
         NativeValue::Extern(value.with_extern(|e| noeta_stdlib::ExternBox(e.clone_box())))
     } else if matches!(value.shape().map(|s| s.kind), Some(ShapeKind::Class)) {
-        // A class instance crossing INTO a dispatch (native-extensibility S2): the full instance
+        // A class instance crossing INTO a dispatch: the full instance
         // (class name + `(field, value)` pairs in slot order, each marshalled), so a native fn can
         // receive a native class value a program constructed. Mirrors the tree-walker's projection;
         // fields marshal recursively. (An extern-handle field would `clone_box`, so a class holding
@@ -104,7 +104,7 @@ pub(crate) fn marshal_native_arg(
             None => NativeValue::Opaque(value.type_name()),
         }
     } else if value.is_enum() {
-        // A native enum value crossing INTO a dispatch (native-extensibility S1): the full variant
+        // A native enum value crossing INTO a dispatch: the full variant
         // (name + case + declaration index + payload), so a native fn can receive a variant a user
         // matched or a native call produced — not the lossy `Opaque` the fallback would give.
         // Mirrors the tree-walker's projection; the payload marshals recursively.
@@ -148,7 +148,7 @@ pub(crate) fn scalar_to_value(scalar: noeta_stdlib::Scalar) -> Value {
     }
 }
 
-/// Lift a numeric reduction result (packed-reductions arc) into a VM value. An integer (`int`/`IntN`,
+/// Lift a numeric reduction result into a VM value. An integer (`int`/`IntN`,
 /// erased) becomes `Value::int`; the float widths keep their runtime tag.
 pub(crate) fn rednum_to_value(rn: noeta_stdlib::RedNum) -> Value {
     match rn {
@@ -194,7 +194,7 @@ pub(crate) fn materialize_native(out: noeta_stdlib::NativeOut) -> Value {
         NativeOut::Bytes(b) => Value::bytes(b),
         NativeOut::Unit => Value::unit(),
         NativeOut::List(items) => Value::list(items.into_iter().map(materialize_native).collect()),
-        // A typed bulk-primitive vector (N3.4: a packed reduction's result) converts in one pass.
+        // A typed bulk-primitive vector (a packed reduction's result) converts in one pass.
         NativeOut::Scalars(v) => {
             use noeta_stdlib::ScalarVec;
             Value::list(match v {
@@ -212,7 +212,7 @@ pub(crate) fn materialize_native(out: noeta_stdlib::NativeOut) -> Value {
                 .map(|(k, v)| (k, materialize_native(v)))
                 .collect(),
         ),
-        // An extern-type value: host the box in the VM's single extern payload (extern-types X1).
+        // An extern-type value: host the box in the VM's single extern payload.
         NativeOut::Extern(e) => Value::extern_value(e),
         // Object results carry no shape, so they are built by `materialize_ext` (which has the
         // function's `RetTy` + arguments) and never reach here.
@@ -220,12 +220,12 @@ pub(crate) fn materialize_native(out: noeta_stdlib::NativeOut) -> Value {
             unreachable!("object results are materialized by `materialize_ext`")
         }
         // Option results from ordinary dispatch (`id.parse`, extern-type methods like
-        // `timestamp_ms` — extern-types X2).
+        // `timestamp_ms`).
         NativeOut::None => make_none(),
         NativeOut::Some(inner) => make_some(materialize_native(*inner)),
         NativeOut::Ok(inner) => make_ok(materialize_native(*inner)),
         NativeOut::Err(inner) => make_err(materialize_native(*inner)),
-        // A native-declared enum value (native-extensibility S1): a REAL enum with a fresh interned
+        // A native-declared enum value: a REAL enum with a fresh interned
         // shape carrying the enum's short name + variant + declaration index, so it is
         // match-exhaustive and differential-identical to the tree-walker's `EnumValue`. The payload
         // is materialized recursively (a payload-carrying variant nests). Shapes match by
@@ -245,7 +245,7 @@ pub(crate) fn materialize_native(out: noeta_stdlib::NativeOut) -> Value {
             );
             Value::enum_value(shape, fields.into_iter().map(materialize_native).collect())
         }
-        // A native-declared **fielded-type** instance (native-extensibility S2, unified): a REAL
+        // A native-declared **fielded-type** instance: a REAL
         // `Object` with a fresh interned shape whose kind comes from the carried `FieldedKind`. A
         // `Class` gets a **class-kind** shape (`structural_eq = false` → `==` is identity; RC + cycle
         // participation; its extern-handle field's `Drop` is the destructor). A `Struct` gets a
@@ -277,7 +277,7 @@ pub(crate) fn materialize_native(out: noeta_stdlib::NativeOut) -> Value {
         NativeOut::InstanceUpdate { ret, .. } => materialize_native(*ret),
         // The typed `json.parse::<T>` results that name their own types are built by the typed-call
         // path (`materialize_recipe`, which has the VM's shape table), not here; async work is
-        // ticketed at the dispatch return (extern-types X5), never materialized.
+        // ticketed at the dispatch return, never materialized.
         NativeOut::Fielded { .. } | NativeOut::Spawn(_) => {
             unreachable!("recipe/spawn results never reach materialize_native")
         }
@@ -390,7 +390,7 @@ pub(crate) fn canonical_set(items: &[Value]) -> Option<Vec<Value>> {
 /// Build a built-in `Ordering` enum value (`Ordering.Less`/`Equal`/`Greater`). Shapes carry no
 /// identity for matching or equality (both compare by name + variant), so any `Ordering` shape is
 /// interchangeable with any other — including the tree-walker's, which is what keeps the
-/// differential identical. The three shapes are `OnceLock`-cached (P-PAR S1b): `make_ordering`
+/// differential identical. The three shapes are `OnceLock`-cached: `make_ordering`
 /// runs per *comparison* inside `.sorted()`, so it must not take the interner lock each call.
 pub(crate) fn make_ordering(variant: &str) -> Value {
     static LESS: OnceLock<&'static Shape> = OnceLock::new();
@@ -435,9 +435,7 @@ pub(crate) fn make_role(enum_name: &str, variant: &str) -> Value {
     Value::enum_value(shape, Vec::new())
 }
 
-/// Classify a runtime value into its **head-constructor** [`TypeRepr`] (`type_of`, fidelity B).
-/// Generics are erased at runtime, so a container's element/argument types collapse to `Dyn`.
-/// Derive a `Set<T>` reflected tag from a source list's `List<T>` tag (R1 set tags): `to_set` on a
+/// Derive a `Set<T>` reflected tag from a source list's `List<T>` tag: `to_set` on a
 /// tagged list carries the element type onto the resulting set. `None` if the list is untagged (the
 /// set reflects head-only) or, defensively, its tag is not a `List`.
 pub(crate) fn set_tag_from_list(list: Value) -> Option<Rc<noeta_ast::reflect::TypeRepr>> {
@@ -448,12 +446,14 @@ pub(crate) fn set_tag_from_list(list: Value) -> Option<Rc<noeta_ast::reflect::Ty
     }
 }
 
-/// Mirrors the tree-walker's `eval_type_repr` exactly so both backends reflect identical `Type`
-/// values; the classification follows the same kind order as [`Value::type_name`].
+/// Classify a runtime value into its **head-constructor** [`TypeRepr`] (what `type_of` reports for
+/// an untagged value). Generics are erased at runtime, so a container's element/argument types
+/// collapse to `Dyn`. Mirrors the tree-walker's `eval_type_repr` exactly so both backends reflect
+/// identical `Type` values; the classification follows the same kind order as [`Value::type_name`].
 pub(crate) fn vm_type_repr(value: &Value) -> noeta_ast::reflect::TypeRepr {
     use noeta_ast::reflect::TypeRepr;
     let v = *value;
-    // A value carrying a reflected type tag (R1 — a tagged list literal, preserved through pure
+    // A value carrying a reflected type tag (a tagged list literal, preserved through pure
     // aliasing) reports that precise type, so `type_of` recovers a container's element type after a
     // `dyn` launder. An untagged value falls back to the head-only runtime classification below.
     if let Some(tag) = v.reflect() {
@@ -755,8 +755,8 @@ pub(crate) fn arity_message(kind: &str, required: usize, total: usize, supplied:
 
 /// Build the built-in `Option::some(value)` (the `builtin_result_option` flag makes it render as
 /// `some(..)`, matching the tree-walker and the compiler-lowered `some(x)`). The enum owns one
-/// reference to `value`, so the caller must have retained it first. `OnceLock`-cached shape
-/// (P-PAR S1b): `some`/`none` are built on every optional-returning native op, far too hot for
+/// reference to `value`, so the caller must have retained it first. `OnceLock`-cached shape:
+/// `some`/`none` are built on every optional-returning native op, far too hot for
 /// the interner lock.
 pub(crate) fn make_some(value: Value) -> Value {
     static SOME: OnceLock<&'static Shape> = OnceLock::new();
@@ -785,7 +785,7 @@ pub(crate) fn make_ok(value: Value) -> Value {
 }
 
 /// Build the built-in **void success** `Result::Ok()` (no payload) — the `Ok()` form through the
-/// first-class-constructor value path (poly-values F3). Same interned shape as [`make_ok`] (the
+/// first-class-constructor value path. Same interned shape as [`make_ok`] (the
 /// interner dedups), just an empty payload, so it is display- and match-identical to the
 /// compiler-lowered `Ok()`.
 pub(crate) fn make_ok_void() -> Value {
@@ -835,7 +835,7 @@ pub(crate) fn make_none() -> Value {
     Value::enum_value(shape, Vec::new())
 }
 
-/// The outcome of materializing one recipe node (validation arc): a built value, or a validation
+/// The outcome of materializing one recipe node: a built value, or a validation
 /// rejection carrying the path-rich [`noeta_stdlib::json::JsonError`] the failing `Validate::validate`
 /// produced. A rejection propagates up through containers (short-circuiting a container before its
 /// own `validate`) until a `Result`-wrapped door recovers it into a `Result.Err` or the aborting
@@ -847,7 +847,7 @@ pub(crate) enum MatOut {
 
 impl Vm<'_> {
     /// Materialize a `json.parse::<T>` result tree ([`noeta_stdlib::NativeOut`]) into a VM value of
-    /// `T`, running any `Validate::validate` **bottom-up** (validation arc). A struct is built from a
+    /// `T`, running any `Validate::validate` **bottom-up**. A struct is built from a
     /// fresh same-name shape (exactly as reflection materializes attribute structs); method dispatch
     /// keys on the type *name*, so the instance behaves like a literal. The tree-walker builds the
     /// same value through its real type definition, so both backends agree. Every value is freshly
@@ -964,8 +964,8 @@ impl Vm<'_> {
             // `Result.Err(JsonError)`) carries a path-rich extern. A recipe decode of `T` itself
             // never yields one; it reaches here only inside a wrapper's `Err`.
             NativeOut::Extern(e) => MatOut::Value(Value::extern_value(e)),
-            // An enum value: decoded from a `TypeRecipe::Enum` (enum-construction arc), or carried by
-            // a native `Result`/`Option` wrapper (native-extensibility S1). Both build through the
+            // An enum value: decoded from a `TypeRecipe::Enum`, or carried by
+            // a native `Result`/`Option` wrapper. Both build through the
             // ordinary `materialize_native` path — the same interned shape a `MakeEnum` builds — so a
             // decoded case is indistinguishable from a source-written one. Only a recipe door sets
             // `has_validator`, and it re-enters exactly as a struct's does.
@@ -981,12 +981,12 @@ impl Vm<'_> {
                 MatOut::Value(value)
             }
             out @ NativeOut::Variant { .. } => MatOut::Value(materialize_native(out)),
-            // A native class instance (native-extensibility S2) — like a `Variant`, never decoded
+            // A native class instance — like a `Variant`, never decoded
             // from a JSON recipe, but a native `Result`/`Option` wrapper may carry one; materialize
             // it through the ordinary (non-recipe) path.
             out @ NativeOut::Instance { .. } => MatOut::Value(materialize_native(out)),
-            // `Object` (shape-from-argument), bulk scalar vectors (a packed reduction's result,
-            // N3.4), and an in-place instance mutation (boundary 1, only a class method returns it)
+            // `Object` (shape-from-argument), bulk scalar vectors (a packed reduction's result),
+            // and an in-place instance mutation (boundary 1, only a class method returns it)
             // are never produced by a recipe decode (a `TypeRecipe` names only JSON shapes).
             NativeOut::Object(_)
             | NativeOut::Spawn(_)
@@ -999,7 +999,7 @@ impl Vm<'_> {
         })
     }
 
-    /// Run `value`'s `Validate::validate` (validation arc) — ordinary Noeta code re-entered through
+    /// Run `value`'s `Validate::validate` — ordinary Noeta code re-entered through
     /// the method-handle dispatch — and return the validator's own error message when it rejects,
     /// **consuming** `value` (the re-entry releases it). Shared by the JSON recipe doors and the
     /// `from_bytes` element loop.
@@ -1120,7 +1120,7 @@ pub(crate) fn result_err_payload(value: Value) -> Option<Value> {
 }
 
 /// Wrap a path-carrying [`noeta_stdlib::json::JsonError`] as an extern VM value — the `Err` payload
-/// of a validation-rejecting recipe door (validation arc).
+/// of a validation-rejecting recipe door.
 fn json_error_value(error: noeta_stdlib::json::JsonError) -> Value {
     Value::extern_value(noeta_stdlib::ExternBox::new(error))
 }

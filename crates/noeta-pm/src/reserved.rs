@@ -1,4 +1,4 @@
-//! Reserved namespace protection (namespace-protection arc #2) — the single source of truth for which
+//! Reserved namespace protection — the single source of truth for which
 //! `company` scopes are not open for anyone to occupy, and why.
 //!
 //! A package identity is `company/package` ([`crate::manifest::PackageName`]); the `company` segment
@@ -17,7 +17,7 @@
 //!   registry, so it must stay resolvable. Its protection is at the **claim** boundary: only the
 //!   designated first-party identity may register/publish under it, so no one can squat `para/*`.
 //!   The resolver treats it like any other registry package (trust is pinned via `ScopeTrust`); only
-//!   scope registration (namespace-protection arc #1) consults [`Reserved::FirstParty`].
+//!   scope registration consults [`Reserved::FirstParty`].
 //!
 //! Parsing stays neutral on purpose ([`crate::manifest::PackageName::parse`] accepts any identifier
 //! pair): reservation is an *authority* decision enforced at the resolve / add / publish / claim

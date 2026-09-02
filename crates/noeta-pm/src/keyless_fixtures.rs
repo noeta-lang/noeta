@@ -1,4 +1,4 @@
-//! **Hermetic Sigstore test fixtures** (Phase 5, K4 — the `keyless-test-fixtures` feature).
+//! **Hermetic Sigstore test fixtures** (the `keyless-test-fixtures` feature).
 //!
 //! A complete in-process Sigstore: a test **CA** (Fulcio), a test **CT log**, and a test
 //! **Rekor log**, each a deterministic P-256 key this module holds the private half of. The
@@ -138,7 +138,7 @@ impl TestSigstore {
         serde_json::json!({ "value": self.fake_jwt() }).to_string()
     }
 
-    /// The mock **OIDC provider** (K6, the interactive login): the authorization-code flow with
+    /// The mock **OIDC provider** for the interactive login: the authorization-code flow with
     /// **real PKCE enforcement**, stateless — the issued code encodes the challenge + state, and
     /// the token exchange recomputes `b64url(sha256(verifier))` against it. `GET /auth` plays
     /// the login page (returning the code as JSON where a browser would display it);
@@ -801,7 +801,7 @@ mod tests {
             .expect("response has a body")
     }
 
-    /// The interactive login end-to-end (K6), hermetic: OAuth authorization-code flow with the
+    /// The interactive login end-to-end, hermetic: OAuth authorization-code flow with the
     /// mock provider ENFORCING PKCE, an email identity (rfc822 SAN in the minted cert), then the
     /// same Fulcio/Rekor publish and default-policy verification as the CI path.
     #[test]

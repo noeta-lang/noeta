@@ -1,5 +1,5 @@
-//! Heap-residency regression for the audit **F9 residual (a)** — deleted-file inputs are never
-//! freed. salsa 0.27 cannot free an input slot (its table is append-only, with no public delete),
+//! Heap-residency regression: a deleted file's input is never freed. salsa 0.27 cannot free an
+//! input slot (its table is append-only, with no public delete),
 //! so a source that vanishes from a workspace used to keep its *whole* analysis resident: the input
 //! text plus the fat downstream memos (AST, merged `Program`, `Sites`, `Module`). [`release_source`]
 //! reclaims all of that — text cleared, memos overwritten with empty-program equivalents — leaving

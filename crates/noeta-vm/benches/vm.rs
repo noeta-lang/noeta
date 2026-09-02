@@ -1,13 +1,8 @@
-//! Criterion benchmarks over the VM hot paths named in `plans/roadmap.md` and
-//! `plans/m2/slice-00-benchmarks.md`: the **dispatch loop**, **property access
-//! through inline caches**, and **allocation**. Each program is compiled to a
-//! `Module` once in setup; the timed closure runs the already-compiled module,
+//! Criterion benchmarks over the VM hot paths: the **dispatch loop**, **property
+//! access through inline caches**, and **allocation**. Each program is compiled to
+//! a `Module` once in setup; the timed closure runs the already-compiled module,
 //! so the measurement is execution (the dispatch loop / IC / allocator), not the
 //! lexer/parser/compiler front end.
-//!
-//! This is the M2.0 baseline captured *before* the M2.1+ host/async indirection
-//! lands, so later slices can prove they introduced no dispatch/property/
-//! allocation regression (implementation-plan §6.6/§6.7).
 
 use std::hint::black_box;
 
@@ -22,7 +17,7 @@ use noeta_vm::VmBackend;
 /// Source → compiled `Module`. Panics if the program falls outside the VM
 /// subset — bench programs must stay compilable so they exercise real opcodes.
 fn compile(src: &str) -> Module {
-    // The bench is its own assembling driver (audit-6 F2): the compiler resolves std names
+    // The bench is its own assembling driver: the compiler resolves std names
     // against the process-default registry. Outside the measured loop; idempotent.
     noeta_stdlib::registry::default_seeded();
     let source = Source::new(SourceId::FIRST, "bench.noe", src);
@@ -83,7 +78,7 @@ fn record_update_read_src(n: usize) -> String {
     )
 }
 
-/// A **`mut` field-assignment** accumulator inside a function (`acc.f0 = acc.f0 + i`, Phase 5.2),
+/// A **`mut` field-assignment** accumulator inside a function (`acc.f0 = acc.f0 + i`),
 /// returned after the loop. An 8-field class whose `mut f0` is overwritten each iteration. With the
 /// in-place field-set reuse it overwrites the single slot in place (O(1)); without it (the copy
 /// path) it clones all 8 slots per step — so the win is a constant factor proportional to the field
@@ -214,7 +209,7 @@ fn serialize_src(n: usize, binary: bool) -> String {
     )
 }
 
-/// A bulk `vec.add_all` workload (P-PACK Phase 4.2): build two `n`-element `Vec3<f32>` lists and add
+/// A bulk `vec.add_all` workload: build two `n`-element `Vec3<f32>` lists and add
 /// them component-wise. With `@packed` the operands are flat `f32` byte buffers and the kernel runs an
 /// autovectorized loop over them (`noeta_stdlib::vec3::add_buffers`); the plain-`struct` variant misses
 /// the packed fast path and takes the scalar fallback (materialize each element, add, rebuild). The
@@ -287,11 +282,9 @@ fn dispatch_src() -> String {
         .to_string()
 }
 
-/// S2 (P-VMT-FRAME): call-heavy recursion. `fib(n)` performs ~2·fib(n) calls. Before this slice each
-/// call heap-allocated its register file (`vec![Value::unit(); num_registers]`) and freed it on
-/// return; now every frame is a base offset into one contiguous per-run register stack that a call
-/// extends and a return truncates — so an ordinary call allocates nothing once the stack has grown
-/// to the run's deepest depth. Parameterized over depth so the per-call cost, not just a constant, is
+/// Call-heavy recursion. `fib(n)` performs ~2·fib(n) calls. Every frame is a base offset into one
+/// contiguous per-run register stack that a call extends and a return truncates, so an ordinary
+/// call allocates nothing once the stack has grown to the run's deepest depth. Parameterized over depth so the per-call cost, not just a constant, is
 /// visible.
 fn fib_src(n: usize) -> String {
     format!(
@@ -338,9 +331,9 @@ fn global_loop_src(n: usize) -> String {
 
 const LOOP_ITERS: &[usize] = &[100_000, 1_000_000];
 
-/// J1 (P-JIT integer fast path): a pure-integer `while` loop in a function (register-local `i`/`total`,
+/// The integer fast path: a pure-integer `while` loop in a function (register-local `i`/`total`,
 /// no globals, no calls) — the shape the JIT compiles to native machine code. The `while` form (not
-/// `for i in 0..n`, which materializes a range list) keeps the whole body in the J1 op set:
+/// `for i in 0..n`, which materializes a range list) keeps the whole body in the native op set:
 /// `LoadConst`/`Binary`/`CondBranch`/`Move`/`Drop`/`Jump`. Benched interpreter vs forced-JIT so the
 /// native win is directly visible.
 #[cfg(feature = "jit")]
@@ -350,9 +343,9 @@ fn jit_loop_src(n: usize) -> String {
     )
 }
 
-/// S1 (P-JIT bitwise): an xorshift-style loop of `^ & << >>` whose intermediates provably fit the
-/// 48-bit immediate range (36-bit state, shifts of 11/7), so the whole body stays native — the
-/// Tier-B ops this slice made JITable. Interp-vs-JIT pair like `loop_*`.
+/// Bitwise: an xorshift-style loop of `^ & << >>` whose intermediates provably fit the 48-bit
+/// immediate range (36-bit state, shifts of 11/7), so the whole body stays native. Interp-vs-JIT
+/// pair like `loop_*`.
 #[cfg(feature = "jit")]
 fn jit_bitwise_loop_src(n: usize) -> String {
     format!(
@@ -360,8 +353,8 @@ fn jit_bitwise_loop_src(n: usize) -> String {
     )
 }
 
-/// S2 (P-JIT mixed lane): the canonical float-accumulator loop — `total + i` pairs an f64 with the
-/// int counter every iteration, the shape that previously bailed per iteration. Interp-vs-JIT pair.
+/// The mixed lane: the canonical float-accumulator loop — `total + i` pairs an f64 with the int
+/// counter every iteration. Interp-vs-JIT pair.
 #[cfg(feature = "jit")]
 fn jit_mixed_loop_src(n: usize) -> String {
     format!(
@@ -369,7 +362,7 @@ fn jit_mixed_loop_src(n: usize) -> String {
     )
 }
 
-/// J2 (P-JIT float fast path): the same loop shape with an f64 accumulator — a float `Binary` (`*`,
+/// The float fast path: the same loop shape with an f64 accumulator — a float `Binary` (`*`,
 /// `+`) each iteration alongside the integer counter, so the JIT's runtime int-vs-float dispatch and
 /// the native f64 arithmetic both get exercised.
 #[cfg(feature = "jit")]
@@ -379,7 +372,7 @@ fn jit_float_loop_src(n: usize) -> String {
     )
 }
 
-/// J4 slice 2 (P-JIT field access): a hot loop reading (`LoadField`) and writing (`SetField`) the
+/// Field access: a hot loop reading (`LoadField`) and writing (`SetField`) the
 /// fields of a mutable `struct`, so the leaf-op helper's field paths get exercised on the fast path
 /// while the surrounding loop stays native.
 #[cfg(feature = "jit")]
@@ -418,7 +411,7 @@ fn wide_field_read_src(n: usize) -> String {
     )
 }
 
-/// J4 slice 3 (P-JIT indexing): a hot loop indexing a list (`xs[i]`) and a map (`m[key]`) — the
+/// Indexing: a hot loop indexing a list (`xs[i]`) and a map (`m[key]`) — the
 /// `Op::Index` list/map paths run through the leaf-op helper while the loop stays native.
 #[cfg(feature = "jit")]
 fn index_loop_src(n: usize) -> String {
@@ -427,11 +420,10 @@ fn index_loop_src(n: usize) -> String {
     )
 }
 
-/// S5 (P-VMT-STR): string-interpolation throughput. Before S5 the compiler lowered a `"…${x}…"` to
-/// `LoadConst "" + N×(Stringify + Concat)` — an intermediate `String` per part, the accumulator
-/// reallocated on every step. S5 lowers it to a single `Op::BuildString` (one pass, one output
-/// allocation). `single_hole` is the wordcount-style hot key `"word${i}"`; `multi_hole` stresses the
-/// old fold's O(k²) copying with three holes.
+/// String-interpolation throughput. A `"…${x}…"` lowers to a single `Op::BuildString` — one pass,
+/// one output allocation, rather than an intermediate `String` per part. `single_hole` is the
+/// wordcount-style hot key `"word${i}"`; `multi_hole` uses three holes, where a per-part fold's
+/// O(k²) copying would show.
 fn interp_single_hole_src(n: usize) -> String {
     format!(
         "fn build(): int {{\n    \
@@ -488,11 +480,10 @@ fn allocation_src() -> String {
     )
 }
 
-/// The self-append accumulator `acc ~= [i]` n times. Was O(n²) (each `~` copied the whole left
-/// list); Phase 5.1b's `ConcatInPlace` (with a `TakeGlobal` exposing the global accumulator's unique
-/// ownership) extends the backing buffer in place, bringing it to O(n) — measured ~31× at n=8000,
-/// and the gap widens with n. Parameterized over n so the scaling — not just a constant factor — is
-/// visible.
+/// The self-append accumulator `acc ~= [i]` n times. `ConcatInPlace` (with a `TakeGlobal` exposing
+/// the global accumulator's unique ownership) extends the backing buffer in place, so this is O(n)
+/// rather than the O(n²) a copying `~` would cost. Parameterized over n so the scaling — not just a
+/// constant factor — is visible.
 fn accumulate_src(n: usize) -> String {
     format!(
         "mut acc = [];\n\
@@ -504,11 +495,10 @@ fn accumulate_src(n: usize) -> String {
 }
 
 /// A function-local map accumulator built by repeated index-assignment `m[k] = i` (desugaring to
-/// `m = m.set(k, i)`) n times. Was O(n²) (each `set` copied the whole map); Phase 5.1c's in-place
-/// reuse (the receiver register is consumed and the uniquely-owned backing map mutated) brings it to
-/// O(n) — measured ~295× at n=8000 (791 ms → 2.7 ms), the gap widening with n. Local (in a function)
-/// because the VM's method-receiver reuse covers directly-held locals this slice; parameterized over
-/// n so the scaling is visible.
+/// `m = m.set(k, i)`) n times. In-place reuse (the receiver register is consumed and the
+/// uniquely-owned backing map mutated) makes this O(n) rather than the O(n²) a copying `set` would
+/// cost. Local (in a function), so it exercises the directly-held-local receiver; parameterized
+/// over n so the scaling is visible.
 fn map_accumulate_src(n: usize) -> String {
     format!(
         "fn build(): int {{\n    mut m = {{}};\n    for i in 0..{n} {{\n        m[\"k${{i}}\"] = i;\n    }}\n    return m.count();\n}}\necho build();\n"
@@ -559,23 +549,22 @@ fn set_accumulate_src(n: usize) -> String {
 }
 
 /// A **top-level (global)** map accumulator built by `m[k] = i` n times — the idiomatic
-/// script-at-module-scope shape. Was O(n²) even after Phase 5.1c (which reused only function-local
-/// receivers): the compiler dropped the reuse token for a global receiver, so every `set` deep-copied
-/// the whole map. S1 (P-VMT-GACC) moves the global out with `TakeGlobal` so the in-place op sees
-/// refcount 1, bringing it to O(n) — ~850× at n=40000 (33.5 s → 40 ms). The local twin is
-/// `map_accumulate_src`; this is its global counterpart, parameterized so the scaling is visible.
+/// script-at-module-scope shape. `TakeGlobal` moves the global out so the in-place op sees
+/// refcount 1, making this O(n) rather than the O(n²) a deep copy per `set` would cost. The local
+/// twin is `map_accumulate_src`; this is its global counterpart, parameterized so the scaling is
+/// visible.
 fn map_accumulate_global_src(n: usize) -> String {
     format!("mut m = {{}};\nfor i in 0..{n} {{\n    m[\"k${{i}}\"] = i;\n}}\necho m.count();\n")
 }
 
 /// A top-level (global) list index-write accumulator — the global twin of `list_index_write_src`.
-/// O(n²)→O(n) under S1 (global-receiver reuse via `TakeGlobal`).
+/// O(n) through global-receiver reuse via `TakeGlobal`.
 fn list_index_write_global_src(n: usize) -> String {
     format!("mut xs = 0..{n};\nfor i in 0..{n} {{\n    xs[i] = i * 2;\n}}\necho xs.count();\n")
 }
 
 /// A top-level (global) set accumulator — the global twin of `set_accumulate_src`.
-/// O(n² log n)→O(n) under S1 (global-receiver reuse via `TakeGlobal`).
+/// O(n) through global-receiver reuse via `TakeGlobal`.
 fn set_accumulate_global_src(n: usize) -> String {
     format!("mut s = #{{}};\nfor i in 0..{n} {{\n    s = s.add(i);\n}}\necho s.count();\n")
 }
@@ -653,14 +642,12 @@ fn operator_overload_src(n: usize) -> String {
 /// the complexity class (≈4× per doubling ⇒ O(n²); ≈2× ⇒ O(n)).
 const LOOP_SIZES: &[usize] = &[1000, 2000, 4000, 8000];
 
-// --- Memory-management stress benches (architecture §0.3) — the pre-migration baseline the
-// memory-management track (`plans/memory-management/`) compares against. Each isolates a reclamation
-// cost: allocation churn, destructor firing, and deep-structure teardown. The cyclic-garbage bench is
-// deferred to Phase 6 (it needs a live cycle collector; today it would leak each iteration).
+// --- Memory-management stress benches (architecture §0.3). Each isolates a reclamation cost:
+// allocation churn, destructor firing, deep-structure teardown, and cyclic garbage.
 
 /// **Allocation churn:** build and drop a short-lived struct on every iteration. Each step allocates
 /// a fresh `Pair` and lets it die immediately — pure allocator + refcount-to-zero throughput, the
-/// path prompt reclamation (Phase 3) and reuse (Phase 5) most affect.
+/// path prompt reclamation and reuse most affect.
 fn mm_alloc_churn_src(n: usize) -> String {
     format!(
         "class Pair {{\n    a: int\n    b: int\n}}\n\
@@ -673,7 +660,7 @@ fn mm_alloc_churn_src(n: usize) -> String {
     )
 }
 
-/// **Cyclic garbage** (Phase 6.4): each `make_cycle` call ties a closure↔cell reference cycle (a
+/// **Cyclic garbage**: each `make_cycle` call ties a closure↔cell reference cycle (a
 /// self-recursive nested `fn`) that is unreachable once the call returns — `n` cycles built and
 /// abandoned, the workload that *only* the cycle collector reclaims. Stresses collection: the trace
 /// must walk the whole live heap, while trial-deletion examines only the buffered candidates.
@@ -691,7 +678,7 @@ fn mm_cyclic_garbage_src(n: usize) -> String {
 
 /// **Destructor-heavy:** a `mut` global holding a `destruct`-bearing instance, reassigned every
 /// iteration. The reassignment destroys the displaced instance immediately (spec §5), so the
-/// destructor fires `n` times — the deterministic-destruction path Phase 4 generalizes to all scopes.
+/// destructor fires `n` times — the deterministic-destruction path.
 /// The `destruct` body is side-effect-free (no `echo`) so the bench measures destructor *dispatch*,
 /// not output.
 fn mm_destructor_heavy_src(n: usize) -> String {
@@ -799,8 +786,8 @@ fn vm_hot_paths(c: &mut Criterion) {
     }
     setacc.finish();
 
-    // S1 (P-VMT-GACC): the same collection accumulators built in a **top-level global** — O(n²)
-    // before this slice (the compiler dropped the reuse token for a global receiver), O(n) after.
+    // The same collection accumulators built in a **top-level global** — O(n) through the reuse
+    // token the compiler forwards for a global receiver.
     let mut gacc = c.benchmark_group("vm_global_accumulate");
     for &n in LOOP_SIZES {
         let map = compile(&map_accumulate_global_src(n));
@@ -818,8 +805,8 @@ fn vm_hot_paths(c: &mut Criterion) {
     }
     gacc.finish();
 
-    // S2 (P-VMT-FRAME): call-heavy recursion — every call previously heap-allocated its register
-    // file; the contiguous per-run register stack removes the per-call alloc after warm-up.
+    // Call-heavy recursion — the contiguous per-run register stack removes the per-call register
+    // file allocation after warm-up.
     let mut recur = c.benchmark_group("vm_recursion");
     for &n in FIB_DEPTHS {
         let module = compile(&fib_src(n));
@@ -829,7 +816,7 @@ fn vm_hot_paths(c: &mut Criterion) {
     }
     recur.finish();
 
-    // S3 (P-VMT-DISP): the dispatch floor — a tight arithmetic loop whose per-iteration cost is
+    // The dispatch floor — a tight arithmetic loop whose per-iteration cost is
     // the interpreter's per-op overhead, not real work. Hoisting the frame window out of the loop
     // head (re-derived only on call/return) is what this measures.
     let mut disp = c.benchmark_group("vm_dispatch");
@@ -838,8 +825,8 @@ fn vm_hot_paths(c: &mut Criterion) {
         disp.bench_with_input(BenchmarkId::new("loop_sum", n), &module, |b, module| {
             b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
         });
-        // P-VMT-GSLOT: the same loop with top-level (global) accumulators — measures the
-        // per-iteration global-access cost slot indexing removed.
+        // The same loop with top-level (global) accumulators — measures the per-iteration
+        // global-access cost that slot indexing removes.
         let g = compile(&global_loop_src(n));
         disp.bench_with_input(BenchmarkId::new("global_loop", n), &g, |b, module| {
             b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
@@ -847,7 +834,7 @@ fn vm_hot_paths(c: &mut Criterion) {
     }
     disp.finish();
 
-    // S5 (P-VMT-STR): interpolation throughput — one `BuildString` vs the old N-way concat fold.
+    // Interpolation throughput — one `BuildString` rather than an N-way concat fold.
     let mut interp = c.benchmark_group("vm_interp");
     for &n in LOOP_ITERS {
         let single = compile(&interp_single_hole_src(n));
@@ -998,10 +985,8 @@ fn vm_hot_paths(c: &mut Criterion) {
     odisp.finish();
 
     // Blind-overwrite struct accumulator (`acc = Wide { ...acc, f0: i }`), parameterized over n so
-    // the complexity class is visible. Today's copying lowering is O(n·fields); the anchor for the
-    // Phase-5 in-place reuse that will cut it to O(n). (Was a three-mode `ReuseMode` matrix; the modes
-    // were retired with the inert P-REUSE machinery in memory-management Phase 3.3c — a single
-    // canonical compile remains.)
+    // the complexity class is visible: the copying lowering is O(n·fields), and in-place reuse cuts
+    // it to O(n).
     let mut reuse = c.benchmark_group("vm_record_update");
     for &n in LOOP_SIZES {
         let module = compile(&record_update_src(n));
@@ -1045,7 +1030,7 @@ fn vm_hot_paths(c: &mut Criterion) {
     });
     mm.finish();
 
-    // Phase 6.4 head-to-head: the two cycle collectors on a cycle-heavy workload (collection time)
+    // A head-to-head: the two cycle collectors on a cycle-heavy workload (collection time)
     // and on acyclic allocation churn (the per-allocation / per-release overhead each imposes on code
     // that forms no cycles). The lower-overhead one is the default; this is the data behind that call.
     use noeta_value::CollectorMode::{Trace, TrialDeletion};
@@ -1072,7 +1057,7 @@ fn vm_hot_paths(c: &mut Criterion) {
     }
     col.finish();
 
-    // J1 (P-JIT): the integer fast path. A register-local integer `while` loop, run through the
+    // The integer fast path. A register-local integer `while` loop, run through the
     // interpreter (tier 0) and the forced JIT (tier 1) so the native speedup is directly visible.
     #[cfg(feature = "jit")]
     {
@@ -1132,8 +1117,8 @@ fn vm_hot_paths(c: &mut Criterion) {
             jit.bench_with_input(BenchmarkId::new("global_jit", n), &gmodule, |b, module| {
                 b.iter(|| black_box(VmBackend::new().run_module_jit(black_box(module))));
             });
-            // J4 (heap/collections): a `for i in 0..n` range loop — its MakeRange/IterSnapshot/
-            // ListLen/ListGet internals now run through the leaf-op helper, so the loop is native.
+            // Heap/collections: a `for i in 0..n` range loop — its MakeRange/IterSnapshot/
+            // ListLen/ListGet internals run through the leaf-op helper, so the loop is native.
             let rmodule = compile(&loop_sum_src(n));
             jit.bench_with_input(
                 BenchmarkId::new("forrange_interp", n),
@@ -1149,7 +1134,7 @@ fn vm_hot_paths(c: &mut Criterion) {
                     b.iter(|| black_box(VmBackend::new().run_module_jit(black_box(module))));
                 },
             );
-            // J4 slice 2 (field access): a loop reading/writing `struct` fields — LoadField/SetField
+            // Field access: a loop reading/writing `struct` fields — LoadField/SetField
             // run through the leaf-op helper, keeping the surrounding loop native.
             let field_module = compile(&field_loop_src(n));
             jit.bench_with_input(
@@ -1184,7 +1169,7 @@ fn vm_hot_paths(c: &mut Criterion) {
                     b.iter(|| black_box(VmBackend::new().run_module_jit(black_box(module))));
                 },
             );
-            // J4 slice 3 (indexing): a loop indexing a list and a map — Op::Index runs through the
+            // Indexing: a loop indexing a list and a map — Op::Index runs through the
             // leaf-op helper, keeping the surrounding loop native.
             let index_module = compile(&index_loop_src(n));
             jit.bench_with_input(
@@ -1202,7 +1187,7 @@ fn vm_hot_paths(c: &mut Criterion) {
                 },
             );
         }
-        // Native calls (J3): recursive `fib`, interpreter vs forced JIT. Each frame's pre-call region
+        // Native calls: recursive `fib`, interpreter vs forced JIT. Each frame's pre-call region
         // and both recursive subtrees run native (the callee enters at pc 0); the caller's tail after
         // its first call resumes in tier 0.
         for &d in FIB_DEPTHS {
@@ -1214,7 +1199,7 @@ fn vm_hot_paths(c: &mut Criterion) {
                 b.iter(|| black_box(VmBackend::new().run_module_jit(black_box(module))));
             });
         }
-        // OSR (J5): the same top-level global loop, but through **ordinary hot-counter promotion**
+        // OSR: the same top-level global loop, but through **ordinary hot-counter promotion**
         // (`run_module_jit_hot`, not forced) — the real production path. Before OSR, `main` (entered
         // once) never crossed the entry threshold, so this loop ran entirely in tier 0 in production;
         // OSR counts its back-edges and jumps into native code mid-flight. Benched interp vs hot-JIT

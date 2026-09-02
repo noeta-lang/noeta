@@ -39,7 +39,7 @@ pub(crate) fn cmd_expand(path: &std::path::Path) -> ExitCode {
     // binary does not carry: without composing from the app's manifest first, an app whose whole
     // reason to run this command is its expanding directive would report no expansions at all.
     // The probe hands back the graph it resolved, reused below for the directory it resolved
-    // against (audit-5 F2).
+    // against.
     let mut resolved = match compose::maybe_delegate(path) {
         Err(code) => return code,
         Ok(resolved) => resolved,

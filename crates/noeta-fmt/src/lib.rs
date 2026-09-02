@@ -11,10 +11,10 @@
 //! # Pipeline
 //!
 //! ```text
-//! source ──lex(+trivia)──▶ tokens (+comments)   [comments: F1]
+//! source ──lex(+trivia)──▶ tokens (+comments)
 //!        ──parse─────────▶ Program (AST, spans)
-//!        ──reattach──────▶ AST + comment map     [F4]
-//!        ──lower─────────▶ Doc  (Wadler IR)       [F2]
+//!        ──reattach──────▶ AST + comment map
+//!        ──lower─────────▶ Doc  (Wadler IR)
 //!        ──render────────▶ formatted String
 //!        ──SAFETY GATE───▶ re-parse, assert AST-equal-modulo-spans, else abort untouched
 //! ```
@@ -45,11 +45,11 @@
 //! 1. **Safety** — formatting never changes meaning: the output re-parses to an AST equal to the
 //!    input's modulo spans, or the formatter aborts and returns the file untouched.
 //! 2. **Idempotency** — `format(format(x)) == format(x)`.
-//! 3. **Comment completeness** (F4+) — every comment in the input appears once in the output.
+//! 3. **Comment completeness** — every comment in the input appears once in the output.
 //!
-//! # Status
+//! # What the crate holds
 //!
-//! **Arc complete (F0–F7).** Crate skeleton, [`FmtConfig`] seam + `noeta.toml` `[fmt]` parsing
+//! The [`FmtConfig`] seam + `noeta.toml` `[fmt]` parsing
 //! ([`FmtConfig::from_toml`], shared by the CLI and LSP — discovery of the manifest itself lives
 //! in `noeta-pm`, the one owner of the `noeta.toml` ancestor walk), the
 //! [`format_source`] entry point with the safety gate, the **full printer** ([`print`], on the
@@ -64,7 +64,7 @@
 use noeta_diagnostics::Diagnostic;
 use noeta_span::{Source, SourceId};
 
-// The Wadler pretty-printing algebra (F2): source-directed hardlines (`wrap = false`) and
+// The Wadler pretty-printing algebra: source-directed hardlines (`wrap = false`) and
 // width-driven groups (`wrap = true`) both lower onto it.
 mod config;
 mod doc;
@@ -229,7 +229,7 @@ pub fn format_source(name: &str, text: &str, config: &FmtConfig) -> Result<Strin
     )
 }
 
-/// [`format_source`] with an explicit text-tier set (text-tiers arc): tiers declared in *other*
+/// [`format_source`] with an explicit text-tier set: tiers declared in *other*
 /// files (siblings, dependency packages) whose `@<name> { … }` bodies in this file must be
 /// preserved verbatim, never formatted as code. Same-file declarations need no help (the lexer's
 /// two-pass self-use); the CLI passes the project-wide set, the LSP its workspace's.
@@ -295,7 +295,7 @@ pub fn format_source_in_with_formatters(
 ) -> Result<String, FmtError> {
     let source = Source::new(SourceId(0), name, text);
 
-    // Lex with trivia so comments are available to the printer (reattached in F4). The token stream
+    // Lex with trivia so comments are available to the printer. The token stream
     // is identical to a plain `lex`, so parsing is unaffected. Everything — forward lex/parse, the
     // printer's token lookup, and the safety-gate reparse — runs under the file's edition, so a
     // future edition's grammar is parsed (and re-parsed) consistently.
@@ -609,7 +609,7 @@ mod tests {
 
     #[test]
     fn text_tier_bodies_are_preserved_verbatim() {
-        // Text-tiers arc: a `@doc`/declared-text-tier body is raw prose — the formatter must keep
+        // A `@doc`/declared-text-tier body is raw prose — the formatter must keep
         // it byte-identical (odd spacing, escapes, punctuation and all), while still formatting
         // the code around it.
         let src = "@doc {\n    weird   spacing, a \\} escaped brace, \"quotes\"\n}\nfn   f(): int { return 1 }\n";
@@ -1121,7 +1121,7 @@ mod tests {
 
     #[test]
     fn multiline_backtick_templates_are_preserved_verbatim() {
-        // A multiline `` `…` `` template keeps its layout (F4) — the dedent + newlines would
+        // A multiline `` `…` `` template keeps its layout — the dedent + newlines would
         // otherwise collapse into an escaped `\n`-laden double-quoted one-liner. Single-line
         // backticks still canonicalize to `"…"` (lossless), matching the one-quote-form policy.
         let src = "fn page(): string {\n    return `\n        <html>\n        <body>${x}</body>\n        </html>\n    `\n}\n";

@@ -6,7 +6,7 @@
 //! `noeta doc` (whose native path deliberately neither activates nor type-checks) shares the
 //! same building blocks ([`target_gate`], [`load_linked`], [`provider_escape`]).
 //!
-//! Editions threading is structural here (audit-3 F8): a whole linked program is checked through
+//! Editions threading is structural here: a whole linked program is checked through
 //! the runner's [`Loaded::check`] (via [`loaded`]), and a program *synthesized from* one (a
 //! per-test case, a bench loop, a tier-dispatch call) through [`check_under`] — the crate's one
 //! remaining hand-paired `check_all_with_editions` call.
@@ -75,7 +75,7 @@ pub(crate) fn target_gate(
 /// a program whose tier content imports from a dependency (a test exercising `use fuzzkit.…`, a
 /// declared tier's runner) must link exactly as it does for a run. `resolved` is the graph the
 /// caller's compose probe already resolved, reused here — the tier verbs always load under the
-/// default selection, so it always matches (audit-5 F2).
+/// default selection, so it always matches.
 pub(crate) fn load_linked(
     file: &std::path::Path,
     resolved: Option<noeta_pm::graph::ResolvedGraph>,
@@ -90,8 +90,8 @@ pub(crate) fn load_linked(
 /// The resolved graph is boxed: it is an order of magnitude larger than an `Arc`, and this enum is
 /// passed by value at every call.
 pub(crate) enum Front {
-    /// Resolve it — reusing the graph the caller's compose probe already resolved when it has one
-    /// (audit-5 F2), else resolving here so the error renders on this path.
+    /// Resolve it — reusing the graph the caller's compose probe already resolved when it has one,
+    /// else resolving here so the error renders on this path.
     Resolve(Option<Box<noeta_pm::graph::ResolvedGraph>>),
     /// **The facts a boot already resolved.** The hot re-link's source: every re-link of a running
     /// server must link against the graph the running program was built with, not against whatever
@@ -263,7 +263,7 @@ pub(crate) fn tier_prologue(
     target: &Option<String>,
 ) -> Prologue {
     // The compose probe hands back the graph it resolved (default selection) for the load below
-    // — the tier verbs always load under the default selection (audit-5 F2).
+    // — the tier verbs always load under the default selection.
     let resolved = match compose::maybe_delegate(file) {
         // Composition needed but failed (`maybe_delegate` yields a fixed exit-1 `ExitCode`); the
         // tier subsystem speaks `u8`, so surface it as code 1.
@@ -289,7 +289,7 @@ pub(crate) fn tier_prologue(
     };
     // Activate the tier: inline its `@<tier>` blocks as ordinary top-level declarations and
     // collect the tier fns. An unknown-tier block is an E0036 (a typo must not silently vanish).
-    // Each `@name` resolves per the package that wrote it (per-package naming arc).
+    // Each `@name` resolves per the package that wrote it.
     let activated = noeta_check::activate_tiers(&linked.program, &[tier], &linked.provenance);
     let mut activated = match provider_escape(tier, &linked, activated, &providers) {
         Ok(activated) => activated,

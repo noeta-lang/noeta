@@ -1,4 +1,4 @@
-//! `noeta bench` (object-model slice 6): the `@bench` runner.
+//! `noeta bench`: the `@bench` runner.
 
 use crate::support::*;
 
@@ -66,7 +66,7 @@ fn measurable_program(names: &[&str]) -> String {
     src
 }
 
-// --- `bench` (object-model slice 6: the `@bench` runner) ---------------------------
+// --- `bench` (the `@bench` runner) -------------------------------------------------
 
 #[test]
 fn bench_runs_and_reports_each_benchmark() {

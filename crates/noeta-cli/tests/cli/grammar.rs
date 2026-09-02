@@ -1,4 +1,4 @@
-//! `noeta grammar tree-sitter` — the per-project tree-sitter overlay generator (text-tiers arc).
+//! `noeta grammar tree-sitter` — the per-project tree-sitter overlay generator.
 
 use super::support::*;
 

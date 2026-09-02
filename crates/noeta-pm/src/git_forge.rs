@@ -1,4 +1,4 @@
-//! A **git forge as a registry** (private-registries arc) — resolve packages directly from any git
+//! A **git forge as a registry** — resolve packages directly from any git
 //! host (GitHub, GitLab, Gitea/Forgejo, a bare git server) instead of the hosted index service. The
 //! convention is Go-module-like: a package `company/pkg` routed to a forge base `<base>` lives at
 //! `<base>/<pkg>`, its **published versions are the semver git tags** (`v1.2.3`), and each version's
@@ -140,7 +140,7 @@ impl Index for GitForgeIndex {
         let tag_list = git(&["-C", bare_str, "tag", "--list", "v*"]).map_err(PmError::Network)?;
         let mut releases = Vec::new();
         // Version tags whose `noeta.toml` won't parse (malformed, or a future edition this toolchain
-        // can't read). Never silently dropped (editions follow-on): warned about when other versions
+        // can't read). Never silently dropped: warned about when other versions
         // are usable, promoted to a hard error when they are the *only* candidates.
         let mut unparseable: Vec<UnparseableTag> = Vec::new();
         for tag in tag_list.lines().map(str::trim).filter(|t| !t.is_empty()) {
@@ -197,8 +197,8 @@ impl Index for GitForgeIndex {
                 description: None,
             });
         }
-        // A tag whose `noeta.toml` doesn't parse must never disappear without a trace (editions
-        // follow-on). If no version is usable at all, fail naming each cause — never let the caller
+        // A tag whose `noeta.toml` doesn't parse must never disappear without a trace. If no
+        // version is usable at all, fail naming each cause — never let the caller
         // report a misleading "no versions found". If *some* versions are usable, the broken tags must
         // not brick resolution (a future-edition tag can't be allowed to strand an older toolchain), so
         // warn and proceed.
@@ -262,8 +262,8 @@ struct UnparseableTag {
     error: String,
 }
 
-/// The stderr warning for one unparseable tag when *other* versions of the package resolved fine
-/// (private-registries + editions follow-on). The broken tag must not brick resolution, but the skip
+/// The stderr warning for one unparseable tag when *other* versions of the package resolved fine.
+/// The broken tag must not brick resolution, but the skip
 /// has to be visible and name the cause; a future-edition tag's own error already says "update the
 /// toolchain", so it flows through verbatim.
 fn skipped_tag_warning(name: &str, skip: &UnparseableTag) -> String {
@@ -275,8 +275,8 @@ fn skipped_tag_warning(name: &str, skip: &UnparseableTag) -> String {
     )
 }
 
-/// The hard error when the **only** candidate versions of a package are unparseable (the
-/// private-registries + editions follow-on). Resolution fails naming each cause, so a package whose
+/// The hard error when the **only** candidate versions of a package are unparseable. Resolution
+/// fails naming each cause, so a package whose
 /// tags are all broken (or all future-edition) never degrades to a misleading "no versions found".
 fn all_unparseable_error(name: &str, skipped: &[UnparseableTag]) -> PmError {
     let list = skipped
@@ -296,7 +296,7 @@ fn path_str(p: &Path) -> Result<&str, PmError> {
 }
 
 /// Run `git` with `args`, returning trimmed stdout or an error built from stderr. Token auth
-/// (private-registries S5) is prepended so private-repo version discovery authenticates; empty when no
+/// is prepended so private-repo version discovery authenticates; empty when no
 /// `NOETA_GITHUB_TOKEN`, so git uses ambient credentials.
 fn git(args: &[&str]) -> Result<String, String> {
     // Delegates to the git_auth choke point (one runner, one credential-injection path); the

@@ -1,4 +1,4 @@
-//! The unified documentation model (docs-browser arc, slice **0**).
+//! The unified documentation model.
 //!
 //! One navigable, searchable model of *everything worth documenting*, assembled over the compiler
 //! so that every tool — `noeta lsp` (the editor's docs browser), `noeta mcp` (the agent's docs
@@ -82,7 +82,7 @@ pub enum DocKind {
     Field,
     Method,
     Interface,
-    /// A user-defined `trait` (L1 user traits).
+    /// A user-defined `trait`.
     Trait,
     /// Free-floating section prose between declarations (an unattached `@doc` block).
     Section,
@@ -496,7 +496,7 @@ pub fn id_for_name_span(
     found
 }
 
-// ---- The language-guide corpus dispatch (slice 2). Static, workspace-independent. --------------
+// ---- The language-guide corpus dispatch. Static, workspace-independent. ------------------------
 
 /// The children of a guide id: the guide root lists one node per `docs/*.md` page; a page is a
 /// leaf (its full markdown is the page body).
@@ -581,8 +581,8 @@ fn api_detail(signature: &str) -> String {
         .to_string()
 }
 
-/// Auto-derived cross-references from an API symbol back to the language-guide pages that mention it
-/// (Arc 2 A3): a guide page using `math.sqrt(…)` links from the `std.math.sqrt` API page. Matches
+/// Auto-derived cross-references from an API symbol back to the language-guide pages that mention
+/// it: a guide page using `math.sqrt(…)` links from the `std.math.sqrt` API page. Matches
 /// the call form `<short>.<name>` (`math.sqrt`) in guide bodies; capped to keep a page's "see also"
 /// tidy. One direction only — the guide is the source of truth for what links where, so the
 /// backlink is derived, never hand-maintained.

@@ -1,4 +1,4 @@
-//! The REPL session on the VM (REPL-on-VM R1).
+//! The REPL session on the VM.
 //!
 //! A [`VmSession`] runs many REPL entries against **one persistent runtime** so bindings, `fn` /
 //! `type` / `enum` / `class` declarations, channels, the reactive graph, and the host's id / entropy /
@@ -127,8 +127,8 @@ impl<'m> Vm<'m> {
 
 /// The outcome of one [`VmSession::eval`]: this entry's stdout, diagnostics, the display form of a
 /// trailing bare expression (for the REPL to echo), and the abort traceback if it panicked. Mirrors
-/// `noeta_eval::SessionOutput` field-for-field so the CLI's REPL rendering is backend-agnostic and the
-/// R2 session differential can compare the two directly.
+/// `noeta_eval::SessionOutput` field-for-field so the CLI's REPL rendering is backend-agnostic and
+/// the session differential can compare the two directly.
 #[derive(Debug, Clone)]
 pub struct SessionOutput {
     pub stdout: String,
@@ -142,8 +142,8 @@ pub struct SessionOutput {
     pub trace: Vec<TraceFrame>,
 }
 
-/// An opaque, GC-rooted reference to a live language value the embedding host keeps across calls
-/// (server-hmr F3). Minted by [`VmSession::call_retaining`], read via [`VmSession::read_handle`],
+/// An opaque, GC-rooted reference to a live language value the embedding host keeps across calls.
+/// Minted by [`VmSession::call_retaining`], read via [`VmSession::read_handle`],
 /// freed via [`VmSession::release_handle`]. A plain index — meaningful only until released.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EmbedHandle(u32);
@@ -170,7 +170,7 @@ enum CallResult {
     Handle(EmbedHandle),
 }
 
-/// Why a [`VmSession::call_by_name`] returned no value (server-hmr E0).
+/// Why a [`VmSession::call_by_name`] returned no value.
 #[derive(Debug)]
 pub enum CallError {
     /// No top-level binding of this name exists in the session.
@@ -231,7 +231,7 @@ impl VmSession {
         self.debugger = debugger;
     }
 
-    /// A session **adopted from a checked compile** (tooling-unification T3): run `module` — the
+    /// A session **adopted from a checked compile**: run `module` — the
     /// snapshot [`noeta_compiler::compile_with_sites_session`] returned alongside `compiler` — to
     /// completion as entry 0, then continue the session incrementally from its final state. A
     /// fragment evaluated afterwards resolves the checked program's globals, functions, types, and
@@ -250,7 +250,7 @@ impl VmSession {
     }
 
     /// As [`VmSession::adopted`], but resolving native names against an explicit `registry`
-    /// (instance-registry IR5) — the seam an embedding host with its own assembled extension set
+    /// — the seam an embedding host with its own assembled extension set
     /// threads in so **every** entry of the session (the launch run and each later fragment /
     /// hot-swap) dispatches against *its* extensions. The registry rides in the persistent
     /// [`SessionState`], so it survives the state's round-trip through every entry. `None` keeps the
@@ -307,7 +307,7 @@ impl VmSession {
         self.run_capturing(program, None, |v| (!v.is_unit()).then(|| v.display()))
     }
 
-    /// [`VmSession::eval`] with the checker's accumulated [`Sites`] bundle (session-checker C5):
+    /// [`VmSession::eval`] with the checker's accumulated [`Sites`] bundle:
     /// the entry compiles through [`SessionCompiler::extend_checked`] — the same site-driven
     /// codegen the file pipeline runs (packed lists, `type_of` full fidelity, method handles,
     /// precise destructor relevance). The caller is responsible for the soundness gate: only a
@@ -338,7 +338,7 @@ impl VmSession {
         })
     }
 
-    /// Apply a hot-swap plan (server-hmr H0/H1): re-evaluate the plan's fragment — added/changed
+    /// Apply a hot-swap plan: re-evaluate the plan's fragment — added/changed
     /// `use` imports, changed/added `fn` declarations, method-level type re-declarations, and (on
     /// a re-running swap) the new top-level statements — as one session entry. Running the
     /// fragment *is* the swap: each `fn` declaration stores a fresh closure into its **existing**
@@ -358,7 +358,7 @@ impl VmSession {
     /// [`noeta_compiler::hotswap::diff_programs`]): the NEW program checked green (transactional —
     /// never swap red code), and the differ found no blockers.
     ///
-    /// `sites` is that green check's **whole-program** bundle (server-hmr H5). Supplying it
+    /// `sites` is that green check's **whole-program** bundle. Supplying it
     /// compiles the fragment exactly as a cold start of the new version compiles it — packed
     /// lists, `type_of` full fidelity, decode recipes, call-site-typed native calls, precise
     /// destructor relevance — because the fragment's statements are cloned from the checked
@@ -499,7 +499,7 @@ impl VmSession {
         }
     }
 
-    /// Call a top-level function **by name** (the embed seam, server-hmr E0): arguments arrive as
+    /// Call a top-level function **by name** (the embed seam): arguments arrive as
     /// neutral [`NativeOut`]s (materialized into fresh values the callee's frame consumes), the
     /// result returns as the neutral deep [`NativeValue`] view — no fragment compilation per
     /// call, so a host loop (a game engine's `update(dt)`) pays lookup + call, not a compile.
@@ -521,8 +521,8 @@ impl VmSession {
         }
     }
 
-    /// Call `name` with a mix of marshalled values and handles, returning the deep result value
-    /// (server-hmr F3): the handle-argument twin of [`Self::call_by_name`].
+    /// Call `name` with a mix of marshalled values and handles, returning the deep result value:
+    /// the handle-argument twin of [`Self::call_by_name`].
     pub fn call_mixed(
         &mut self,
         name: &str,
@@ -535,7 +535,7 @@ impl VmSession {
         }
     }
 
-    /// Call `name`, **retaining** its result as an embed handle (server-hmr F3) — the host keeps
+    /// Call `name`, **retaining** its result as an embed handle — the host keeps
     /// the live value across frames without marshalling it out, and passes it back via
     /// [`EmbedArg::Handle`]. Read a handle's current value with [`Self::read_handle`]; free it with
     /// [`Self::release_handle`] (a forgotten handle reclaims at teardown). Arguments may mix
@@ -615,7 +615,7 @@ impl VmSession {
         }
     }
 
-    /// The current value behind an embed handle, as the neutral deep view (F3). Reading does not
+    /// The current value behind an embed handle, as the neutral deep view. Reading does not
     /// consume the handle.
     pub fn read_handle(&mut self, handle: EmbedHandle) -> noeta_stdlib::NativeValue {
         let state = self.state.as_ref().expect("state present between entries");
@@ -624,7 +624,7 @@ impl VmSession {
             .to_native_deep()
     }
 
-    /// Release an embed handle (F3): drop the host's reference, destructor-aware. Its slot is
+    /// Release an embed handle: drop the host's reference, destructor-aware. Its slot is
     /// reused by a later retain. Releasing a handle twice is a misuse the debug build catches.
     pub fn release_handle(&mut self, handle: EmbedHandle) {
         let module = self
@@ -757,7 +757,7 @@ impl SessionOutput {
     }
 }
 
-/// The compiler-free seam the VM core drives fragment installs through (native-size slice 2): the
+/// The compiler-free seam the VM core drives fragment installs through: the
 /// real incremental compiler, adapted to [`crate::FragmentCompiler`] so `DebugSession`,
 /// `install_fragment`, and the hot-swap apply never name `noeta-compiler`. This impl — the only
 /// implementor — lives in the `compile`-gated module, so a shipped AOT binary links none and sheds
@@ -796,7 +796,7 @@ impl crate::FragmentCompiler for SessionCompiler {
     }
 }
 
-/// The checker's bundle, viewed through the VM core's opaque site seam (server-hmr H5): a hot
+/// The checker's bundle, viewed through the VM core's opaque site seam: a hot
 /// deposit travels the compiler-free mailbox as a [`crate::FragmentSites`] handle and is recovered
 /// here — the one place that may name `noeta_compiler`. Lives in the `compile`-gated module for the
 /// same reason the [`crate::FragmentCompiler`] impl above does.
@@ -849,7 +849,7 @@ mod tests {
     }
 
     /// Compile `src` as a **checked** program keeping the compiler alive — the dance the debug
-    /// adapter's launch path runs (T3). Panics on any parse/check/compile failure.
+    /// adapter's launch path runs. Panics on any parse/check/compile failure.
     fn checked_session(src: &str) -> (noeta_bytecode::Module, noeta_compiler::SessionCompiler) {
         noeta_stdlib::registry::default_seeded();
         let source = Source::new(SourceId::FIRST, "<file>", src);

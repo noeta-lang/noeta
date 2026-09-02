@@ -34,17 +34,16 @@ thread_local! {
     static LIVE: Cell<usize> = const { Cell::new(0) };
     /// High-water mark of [`LIVE`] since the last [`reset_peak`] — the peak-residency meter
     /// (architecture §0.3). Doubles the leak counter as a memory-footprint gauge: prompt last-use
-    /// reclamation (Phase 3) should cut this materially vs the reclaim-at-teardown baseline.
+    /// reclamation should cut this materially vs the reclaim-at-teardown baseline.
     static PEAK: Cell<usize> = const { Cell::new(0) };
     /// The set of every live heap object on this thread, keyed by its NaN-boxed word — the
     /// **object registry** the Phase-6 backup mark-sweep collector ([`noeta_gc`]) sweeps. Updated on
     /// every [`alloc`] (insert) and every free ([`free`]/[`free_shallow`], remove). A cycle escapes
     /// refcounting but never the registry, so a trace from the live roots can find and reclaim it.
-    /// (Always-on, like [`LIVE`]; an intrusive object-list is the perf option Phase 6.4 weighs.)
     /// Keyed with the fast [`FxHasher`], not the default SipHash — this set is hit on every alloc and
     /// free, and the keys are already well-distributed pointer words, so a crypto hash is pure cost.
     static REGISTRY: RefCell<RegistrySet> = RefCell::new(RegistrySet::default());
-    /// Monotonic object-creation counter (object-model slice 2c) — stamps each allocation's
+    /// Monotonic object-creation counter — stamps each allocation's
     /// `ObjHeader::seq` so the cycle collector can finalize in a deterministic age order.
     static NEXT_SEQ: Cell<u32> = const { Cell::new(0) };
 }
@@ -203,7 +202,7 @@ fn live_dec() {
 #[repr(C)]
 pub(crate) struct Obj {
     header: ObjHeader,
-    /// The value's **reflected type tag** (runtime type-argument reflection, slice R1): the
+    /// The value's **reflected type tag** (runtime type-argument reflection): the
     /// `TypeRepr` the checker resolved for this value's *construction site*, so `type_of` recovers a
     /// container's element type even after the value's static type was laundered through `dyn` — e.g.
     /// `type_of(launder([1,2,3]))` is `List(Int)`, not the head-only `List(Dyn)`. `None` for every
@@ -220,7 +219,7 @@ pub(crate) struct Obj {
 struct ObjHeader {
     /// Non-atomic: per-isolate single-threaded ownership (architecture §5, §7).
     refcount: u32,
-    /// A monotonic per-isolate **creation sequence** (object-model slice 2c): assigned at
+    /// A monotonic per-isolate **creation sequence**: assigned at
     /// allocation, it gives every object a stable, deterministic age. The cycle collector finalizes
     /// reclaimed members in reverse-creation order (newest-first), matching the language's
     /// reverse-declaration teardown — so cyclic `destruct` order is deterministic and agrees with the
@@ -261,7 +260,7 @@ pub enum Color {
     Purple,
 }
 
-/// Which cycle collector the release path feeds (Phase 6.4 — the two are benchmarked head to head).
+/// Which cycle collector the release path feeds.
 /// `Trace` (the default) keeps the live-object [`REGISTRY`] up to date for the backup mark-sweep and
 /// frees promptly on every reclamation. `TrialDeletion` instead **buffers candidate roots** on a
 /// surviving decrement and **defers the deallocation** of a buffered object that reaches refcount 0
@@ -406,12 +405,12 @@ pub fn collector_mode() -> CollectorMode {
 /// index into the compiled module's proto table plus the captured upvalue cells (see the
 /// variant doc); a top-level function captures only globals (read live) and so has none.
 ///
-/// `List` and `Map` are the M1.3 heap collections. A collection **owns one reference to
+/// `List` and `Map` are the heap collections. A collection **owns one reference to
 /// each value it holds** (the list's elements, the map's values; map keys are plain owned
 /// `String`s, not values). When the collection is freed those owned references are released
 /// first (see [`free`]), so dropping a list of strings frees the strings too. `BTreeMap`
-/// gives the map deterministic, sorted-key iteration, matching the M0 tree-walker exactly.
-/// `Object` and `Enum` are the M1.4 shaped aggregates. Each pairs a shared [`Shape`] handle
+/// gives the map deterministic, sorted-key iteration, matching the tree-walker exactly.
+/// `Object` and `Enum` are the shaped aggregates. Each pairs a shared [`Shape`] handle
 /// (the layout — same shape for same-built aggregates, so identity is a cheap `Rc` pointer
 /// comparison) with a flat slot array it **owns one reference to each of**. An `Object`'s slots
 /// A fast, deterministic string hasher (the `FxHash` rustc uses) for the map store. Rust's default
@@ -495,7 +494,7 @@ impl std::hash::Hasher for FxHasher {
 }
 
 /// The map store: a hashbrown `HashMap` with the fast [`FxHasher`] (see above), so
-/// get/insert/remove are O(1) and cheap. Keyed by the shared [`MapKey`] (extern-types X4):
+/// get/insert/remove are O(1) and cheap. Keyed by the shared [`MapKey`]:
 /// string keys keep their exact P-SSO representation and hash (content-only), and the bare
 /// `&str` probe still allocates nothing (hashbrown's `Equivalent` lookup); extern keys ride the
 /// same table. Aliased so the type appears in exactly one place. (hashbrown IS std's table —
@@ -514,7 +513,7 @@ pub(crate) enum Payload {
     /// A raw immutable byte buffer (`bytes`, P-PACK 4.4) — a GC leaf like `Str`; owns no child
     /// references, freeing it just drops the `Vec<u8>`.
     Bytes(Vec<u8>),
-    /// A registered extern-type value (extern-types X1) — the ONE hosting variant every
+    /// A registered extern-type value — the ONE hosting variant every
     /// registry-contributed type shares. A GC leaf: the contract is acyclic by design (no child
     /// `Value`s), so freeing just drops the box. The payload is RC-shared like any other, so a
     /// mutating method (through [`with_extern_mut`]) has reference semantics — the FileHandle
@@ -534,8 +533,8 @@ pub(crate) enum Payload {
     /// by [`children`]), so the defining frame and every capturing closure see one live binding.
     Cell(Value),
     List(Vec<Value>),
-    /// A tuple: a fixed-arity, heterogeneous, value-semantic positional aggregate (object-model
-    /// slice 4). Stored as its element vector, owning one reference to each element exactly like a
+    /// A tuple: a fixed-arity, heterogeneous, value-semantic positional aggregate. Stored as its
+    /// element vector, owning one reference to each element exactly like a
     /// list — equality is structural and there is no shape (arity/positions are static, checked at
     /// compile time, so no per-value metadata is needed).
     Tuple(Vec<Value>),
@@ -647,8 +646,8 @@ pub(crate) enum Payload {
     /// receiver). Polling it harvests the marshalled result once the worker finishes, else pending. A GC
     /// leaf — the id is a plain integer; the worker's state lives in the backend. VM-real path only.
     IsolateFuture(u32),
-    // (`Reactive` lived here until higher-order-abi H5 — the handles are registry extern types
-    // now, their contents in the extensions' retained arena.)
+    // (A reactive handle is a registry extern type, its contents in the extensions' retained
+    // arena.)
 }
 
 impl Payload {
@@ -911,7 +910,7 @@ pub(crate) fn with_payload_mut<R>(value: Value, f: impl FnOnce(&mut Payload) -> 
     f(&mut obj.payload)
 }
 
-/// The value's reflected type tag (slice R1), or `None` if untagged. A cheap `Rc` clone (refcount
+/// The value's reflected type tag, or `None` if untagged. A cheap `Rc` clone (refcount
 /// bump). The caller must have checked `value.is_pointer()`.
 pub(crate) fn reflect(value: Value) -> Option<Rc<TypeRepr>> {
     // SAFETY: live object allocated by this module; single-threaded read.
@@ -919,7 +918,7 @@ pub(crate) fn reflect(value: Value) -> Option<Rc<TypeRepr>> {
     obj.reflect.clone()
 }
 
-/// Set (or clear) the value's reflected type tag (slice R1). Used at list-literal construction to
+/// Set (or clear) the value's reflected type tag. Used at list-literal construction to
 /// stamp the checker-resolved element type, and to **clear** the tag on an in-place COW mutation (so
 /// a reused list node does not carry the original literal's type through a value-producing op — the
 /// tag survives pure aliasing only, refcount-independently). The caller must hold `value.is_pointer()`.
@@ -939,7 +938,7 @@ pub(crate) fn refcount(value: Value) -> u32 {
     obj.header.refcount
 }
 
-/// The object's creation sequence (object-model slice 2c) — its allocation age, for the cycle
+/// The object's creation sequence — its allocation age, for the cycle
 /// collector's deterministic reverse-creation finalization order.
 pub(crate) fn seq(value: Value) -> u32 {
     // SAFETY: live object allocated by this module; single-threaded read.
@@ -1054,7 +1053,7 @@ fn release_child(value: Value) {
     release(value);
 }
 
-/// Drop one owning reference to `value`, reclaiming it through the **active collector** (Phase 6.4).
+/// Drop one owning reference to `value`, reclaiming it through the **active collector**.
 /// In `Trace` mode this is the prompt refcount free; in `TrialDeletion` mode it is the Bacon–Rajan
 /// `Decrement` — a surviving decrement buffers a possible cycle root, and an object reaching zero
 /// releases its children immediately but **defers its own deallocation if it is buffered** (so the
@@ -1282,7 +1281,7 @@ pub(crate) fn free_shallow(value: Value) {
     drop(boxed);
 }
 
-/// Read an extern-type value under a closure (extern-types X1). The caller must have checked the
+/// Read an extern-type value under a closure. The caller must have checked the
 /// value is an `Extern`.
 pub(crate) fn with_extern<R>(
     value: Value,
@@ -1425,8 +1424,8 @@ enum PromoteJob {
     Enum(&'static Shape, Vec<Value>),
 }
 
-/// Whether `value`'s whole graph consists of payloads [`SharedRegion::promote`] can copy (P-PAR
-/// S2): the `Send` **data** kinds. `Send`-checked (E0042) is necessary but not sufficient — a
+/// Whether `value`'s whole graph consists of payloads [`SharedRegion::promote`] can copy: the
+/// `Send` **data** kinds. `Send`-checked (E0042) is necessary but not sufficient — a
 /// function value, bound method, or channel endpoint is `Send`-shippable over `Wire` yet has no
 /// promoted form, so an argument graph containing one falls back to the `Wire` copy path instead
 /// of borrow-share. Immediates are trivially promotable (they pass through unchanged).
@@ -1515,7 +1514,7 @@ impl SharedRegion {
         self.promote_value(root, &mut memo)
     }
 
-    /// [`promote`](Self::promote) with a **caller-owned memo** (P-PAR S2): the real spawn path
+    /// [`promote`](Self::promote) with a **caller-owned memo**: the real spawn path
     /// keeps one memo across every `isolate f(corpus)` in flight, so a corpus fanned to N workers
     /// is promoted **once** and the other N−1 spawns hit the memo. The caller owns the memo's
     /// validity: an entry keys on the *source* object's address, so the caller must keep each
@@ -1609,7 +1608,7 @@ impl SharedRegion {
     }
 }
 
-/// A sanctioned `Value` crossing (P-PAR S2): the root of a graph promoted into a [`SharedRegion`].
+/// A sanctioned `Value` crossing: the root of a graph promoted into a [`SharedRegion`].
 /// The blanket rule is "no `Value` crosses a thread" — this newtype is the one exception and
 /// carries the safety argument: every object in the promoted graph is `shared`-tagged
 /// (retain/release no-op and `is_uniquely_owned` is `false`, so no refcount is ever written and no

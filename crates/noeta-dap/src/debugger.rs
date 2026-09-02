@@ -1,5 +1,5 @@
 //! The [`Debugger`] the VM consults before each instruction — the DAP **wire adapter** over the
-//! shared debug-session support in [`noeta_vm::debug`] (MCP arc M6): breakpoint resolution,
+//! shared debug-session support in [`noeta_vm::debug`]: breakpoint resolution,
 //! line-granular stepping, and stack capture live there (one implementation for `noeta dap` and
 //! `noeta mcp`); this module owns what is DAP — the resume-channel protocol, the `stopped` events,
 //! and the console-fragment checking against the launch's session checker.
@@ -129,18 +129,18 @@ pub enum Resume {
     /// `reply`. The debugger cannot run this itself — running code needs `&mut Vm` — so it hands
     /// the request to the VM (via [`DebugAction::Evaluate`]); the program **stays paused**
     /// throughout, so a watch/hover re-query never resumes it. When the [`EvalKind`] allows calls
-    /// the VM compiles the fragment through the debug session (full language, closures included —
-    /// T5); a hover ([`EvalKind::Hover`]) stays side-effect-free and refuses to run code. The kind
+    /// the VM compiles the fragment through the debug session (full language, closures included);
+    /// a hover ([`EvalKind::Hover`]) stays side-effect-free and refuses to run code. The kind
     /// also drives watch-memoization in the VM.
     Evaluate {
         program: Program,
-        /// The raw console string, for the VM's compiled-wrapper memo (U3).
+        /// The raw console string, for the VM's compiled-wrapper memo.
         text: String,
         frame: usize,
         kind: EvalKind,
         reply: Sender<DebugEvalOutcome>,
     },
-    /// Write a paused frame's local (the Variables-panel edit, U1): evaluate `value` as a console
+    /// Write a paused frame's local (the Variables-panel edit): evaluate `value` as a console
     /// fragment and store the result into `name`'s register in frame `frame`. Handled by the VM via
     /// [`DebugAction::SetVariable`]; the program stays paused, and the refreshed stack snapshot is
     /// re-captured when the debugger re-enters its wait.
@@ -190,7 +190,7 @@ pub struct DapDebugger {
     /// The step in progress, if the last resume was a step. `Some` between a `Resume::Step` and the
     /// instruction it lands on; `None` while running freely.
     step: Option<StepState>,
-    /// The session type-checker seeded from the launch's checked compile (session-checker C3): a
+    /// The session type-checker seeded from the launch's checked compile: a
     /// console/watch fragment is checked against everything the program declared and bound BEFORE
     /// it is handed to the VM — an ill-typed fragment answers with its `E0xxx` diagnostics and the
     /// VM never sees it. Runs here (the worker) because this thread owns the paused view the
@@ -198,7 +198,7 @@ pub struct DapDebugger {
     checker: noeta_check::SessionChecker,
     /// Whether we are already inside a stop, waiting for a resume. Set when a pause first announces
     /// itself (captures the stack + emits `stopped`); it lets the VM re-consult the debugger after
-    /// servicing an evaluate (the D5.2 trampoline leaves and re-enters `before_op`) without
+    /// servicing an evaluate (the evaluate trampoline leaves and re-enters `before_op`) without
     /// re-announcing the same stop. Cleared when a terminal resume (continue / step / terminate)
     /// actually leaves the pause.
     mid_pause: bool,
@@ -269,7 +269,7 @@ impl DapDebugger {
 
     /// Block until a resume command needs acting on. Continue / step / terminate leave the pause
     /// (via [`DapDebugger::finish`]); an [`Resume::Evaluate`] is **type-checked first**
-    /// (session-checker C3) — an ill-typed fragment answers with its diagnostics right here and the
+    /// — an ill-typed fragment answers with its diagnostics right here and the
     /// wait continues — and a clean one is handed to the VM as [`DebugAction::Evaluate`]. The VM
     /// services it with `&mut self`, then re-consults `before_op`, which (seeing `mid_pause`)
     /// calls straight back here without re-announcing the stop.
@@ -343,7 +343,7 @@ impl DapDebugger {
         }
     }
 
-    /// Type-check one console fragment against the program's session (session-checker C3): the
+    /// Type-check one console fragment against the program's session: the
     /// selected frame's in-scope local names become the wrapper closure's parameters (shared
     /// [`frame_param_names`]) and the fragment checks as one entry
     /// ([`noeta_check::SessionChecker::check_closure_fragment`]). `Err` carries the rendered
@@ -465,7 +465,7 @@ impl Debugger for DapDebugger {
         // Re-entry after the VM serviced an evaluate or setVariable (the trampoline left and
         // re-entered here): we are still parked at the same instruction, so resume waiting without
         // re-announcing the stop — but RE-CAPTURE the stack first, so a `variables` request after a
-        // register write (U1) reads the new value rather than the stale pause-time snapshot.
+        // register write reads the new value rather than the stale pause-time snapshot.
         if self.mid_pause {
             *self.paused.lock().unwrap() = Some(capture(view, &self.sources));
             return self.wait(view);
@@ -544,7 +544,7 @@ impl Debugger for DapDebugger {
 
 /// Parse a console fragment (statements allowed; a trailing bare expression is its value); `None`
 /// if it does not lex/parse cleanly. The adapter parses here, then hands the [`Program`] to the VM
-/// (via [`Resume::Evaluate`]), which compiles it through the debug session (T5) — or, for a hover,
+/// (via [`Resume::Evaluate`]), which compiles it through the debug session — or, for a hover,
 /// walks its trailing expression read-only.
 ///
 /// The fragment's [`SourceId`] is deliberately far outside the program's range: fragment spans must

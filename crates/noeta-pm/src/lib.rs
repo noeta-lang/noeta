@@ -1,4 +1,4 @@
-//! The Noeta **package manager** (package-manager milestone, Phase 2).
+//! The Noeta **package manager**.
 //!
 //! Everything a build needs to turn a `noeta.toml`'s `[dependencies]` into the re-rooted source
 //! packages the loader links: manifest parsing, the transitive graph walk, git fetch + a
@@ -12,9 +12,8 @@
 //! producing on-disk source trees + `noeta.lock`; the loader/compiler then run deterministically over
 //! those, outside the differential oracle.
 
-/// Language **editions** — re-exported from the leaf `noeta-edition` crate so `noeta_pm::edition`
-/// keeps resolving (the resolution-side arc introduced the type here; the compiler arc relocated it
-/// to a crate the front-end can also depend on).
+/// Language **editions** — re-exported from the leaf `noeta-edition` crate, which the front-end
+/// depends on directly, so `noeta_pm::edition` also resolves.
 pub use noeta_edition as edition;
 pub mod composed;
 pub mod error;
@@ -35,10 +34,10 @@ pub use error::PmError;
 pub mod github;
 
 /// A git forge (GitHub org) used as a registry — resolve packages from repos + tags instead of the
-/// hosted index (private-registries arc). Implements the `registry::Index` trait.
+/// hosted index. Implements the `registry::Index` trait.
 pub mod git_forge;
 
-/// Package provenance — Ed25519-signed attestations binding a release to its commit (Phase 4, #2).
+/// Package provenance — Ed25519-signed attestations binding a release to its commit.
 /// Behind the `provenance` feature (CLI-only; the LSP and offline consumers don't pull the crypto).
 #[cfg(feature = "provenance")]
 pub mod provenance;
@@ -62,19 +61,19 @@ pub mod advisory;
 pub mod cvss;
 
 /// Keyless provenance — Sigstore bundles verified offline against the public sigstore.dev trust
-/// root (Phase 5). Behind the `keyless` feature (CLI-only), for the same reason as `provenance`.
+/// root. Behind the `keyless` feature (CLI-only), for the same reason as `provenance`.
 #[cfg(feature = "keyless")]
 pub mod keyless;
 
 /// Hermetic Sigstore test fixtures — a real in-process CA/CT/Rekor for minting bundles that
-/// verify under the default policy (Phase 5, K4). Test builds only (`keyless-test-fixtures`).
+/// verify under the default policy. Test builds only (`keyless-test-fixtures`).
 #[cfg(feature = "keyless-test-fixtures")]
 pub mod keyless_fixtures;
 
 // Internal to the crate: the git fetch, the content-addressed store, and the pure resolver are
 // implementation details the public modules above compose (the CLI never names them directly).
 mod git;
-/// Optional git credential injection for private-repo access (private-registries arc).
+/// Optional git credential injection for private-repo access.
 mod git_auth;
 mod resolve;
 mod store;
@@ -94,7 +93,7 @@ mod lock_census;
 /// front-ends reach them without the rest of the git-fetch internals (which keep `Store` private).
 pub use git::{Authorship, authorship, commit_web_url, repo_web_url, tag_web_url};
 
-/// Resolve a git `url`@`tag` to its current commit SHA (package-manager Phase 4, S2) — the one git
+/// Resolve a git `url`@`tag` to its current commit SHA — the one git
 /// operation `noeta publish` needs, to pin the SHA into the registry index at publish time.
 pub use git::resolve_tag_sha;
 

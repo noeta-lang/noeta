@@ -1,4 +1,4 @@
-//! Criterion benchmark for the reactivity milestone (architecture §9.4): the **large fan-out flush**,
+//! Criterion benchmark for reactivity (architecture §9.4): the **large fan-out flush**,
 //! the hot path a `signal.set` drives. One signal fans out to `N` effects; each `set` marks all `N`
 //! dirty and the flush reruns every one in ascending-`NodeId` order. The timed work is therefore
 //! `SETS × N` effect body runs plus the graph bookkeeping (queue drain + sort, dependency
@@ -23,7 +23,7 @@ use noeta_vm::VmBackend;
 /// Source → compiled `Module`. Panics if the program falls outside the VM subset, so a silently
 /// near-empty module never benches nothing (mirrors the `vm` bench's `compile`).
 fn compile(src: &str) -> Module {
-    // The bench is its own assembling driver (audit-6 F2): the compiler resolves std names
+    // The bench is its own assembling driver: the compiler resolves std names
     // against the process-default registry. Outside the measured loop; idempotent.
     noeta_stdlib::registry::default_seeded();
     let source = Source::new(SourceId::FIRST, "reactivity_bench.noe", src);
@@ -62,7 +62,7 @@ fn fanout_src(n: usize) -> String {
 }
 
 /// The fan-out program with the change log switched on (a `view` exposes the signal, which is what
-/// enables observation) — benched against the plain `fanout` to pin the L1 recording overhead on
+/// enables observation) — benched against the plain `fanout` to pin the change-log recording overhead on
 /// the flush hot path at ~zero. No `diff()` in the loop: this isolates record+distribute.
 fn fanout_observed_src(n: usize) -> String {
     format!(
@@ -82,7 +82,7 @@ fn fanout_observed_src(n: usize) -> String {
     )
 }
 
-/// The diff-push shape (server-hmr L1): one view exposing `n` cold bindings plus one hot signal;
+/// The diff-push shape: one view exposing `n` cold bindings plus one hot signal;
 /// each iteration sets the hot signal and renders `diff()`. The minimal-diff promise is that the
 /// patch cost tracks the ONE dirty binding (serialize one value), not the `n` cold ones — the
 /// change log narrows the candidate set before any serialization happens.

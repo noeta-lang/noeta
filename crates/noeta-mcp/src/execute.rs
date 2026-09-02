@@ -1,8 +1,8 @@
-//! M4 Execute pillar: `run`, `eval`, and `test` — the "run this and tell me what actually happened"
+//! The Execute pillar: `run`, `eval`, and `test` — the "run this and tell me what actually happened"
 //! loop. Every execution is **sandboxed by default** (deterministic: in-memory `fs`, logical clock,
 //! seeded `random`, pure network responders) with a **real-host opt-in** (`real: true`, for "does
 //! this actually work end-to-end"), and **always-on liveness limits** bound every run — sandbox or
-//! real (decision #5): determinism does not prevent an infinite loop or an output flood.
+//! real: determinism does not prevent an infinite loop or an output flood.
 //!
 //! The liveness bound rides the VM's own per-instruction [`Debugger`] seam (the same hook `noeta dap`
 //! uses): a [`LimitDebugger`] counts instructions and checks a wall-clock deadline between them,

@@ -1,5 +1,5 @@
-//! M4 transform leg: `format` — a thin wrapper over the parallel `noeta fmt` arc's reusable
-//! [`noeta_fmt::format_source`] entry (decision #6). The MCP does not reimplement the formatter; it
+//! The transform leg: `format` — a thin wrapper over `noeta fmt`'s reusable
+//! [`noeta_fmt::format_source`] entry. The MCP does not reimplement the formatter; it
 //! reformats the entry source under the default style and reports the canonical text (or why it
 //! declined — a formatter that guesses is worse than one that leaves broken source untouched).
 

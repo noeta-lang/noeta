@@ -1,4 +1,4 @@
-//! Multi-file module loading and linking (M1.9).
+//! Multi-file module loading and linking.
 //!
 //! A program is rooted at an *entry* `.noe` file. The other `.noe` files of its **package** are
 //! candidate *modules*, and a module's identity is **derived from where its file sits** (see
@@ -9,7 +9,7 @@
 //! differential oracle is preserved by construction.
 //!
 //! Linking is *additive and backward-compatible*: a `use` that no loaded module provides is left
-//! in place, so the runtime falls back to its M0 opaque-stub behavior — a single file with no
+//! in place, so the runtime falls back to its opaque-stub behavior — a single file with no
 //! sibling modules links to exactly itself. Real module loading therefore lights up only when
 //! sibling modules actually provide the imported names.
 //!
@@ -17,7 +17,7 @@
 //! module's parse error renders against that module, not the entry). *Check/runtime* diagnostics
 //! that land on a declaration merged in from a sibling resolve to the right source too: every span
 //! is tagged at parse time with its [`SourceId`], so the caller resolves it through the [`Linked`]
-//! [`SourceMap`] rather than against the entry (slice F4).
+//! [`SourceMap`] rather than against the entry.
 
 pub mod derive;
 pub mod expand;
@@ -53,7 +53,7 @@ pub struct Linked {
     /// wrote it, and that package's extension `@name` bindings, as one
     /// [`Provenance`](noeta_lexer::Provenance). The parallel of [`Self::sources`]: a merged program
     /// destroys this information, and every rule that recovers it does so from a span's `SourceId`.
-    /// The checker applies each package's own edition rules per declaration (the editions arc), and
+    /// The checker applies each package's own edition rules per declaration, and
     /// enforces the package orphan rule — an `impl Trait for Type` must live in the same package as
     /// the trait or as the type — against the same map.
     ///
@@ -225,7 +225,7 @@ impl RawModule {
 }
 
 /// Load and link the program rooted at `entry_path` **with its dependency packages** — the
-/// dependency-aware twin of [`load`] (package-manager P2.1). The entry's siblings resolve as before;
+/// dependency-aware twin of [`load`]. The entry's siblings resolve as before;
 /// each [`DepPackage`]'s modules are additionally re-rooted and linked in. An `io::Error` is only for
 /// a failure to read the entry file itself.
 pub fn load_with_deps(
@@ -239,7 +239,7 @@ pub fn load_with_deps(
 }
 
 /// As [`load_with_deps`], but appending `entry_tail` — statements a **driver** synthesizes onto the
-/// entry (higher-order-abi H6) — to the entry program *before* it links.
+/// entry — to the entry program *before* it links.
 ///
 /// An extension command runs a program with a synthesized trailing call: `noeta serve` appends
 /// `server.serve(port, fetch)`, `noeta migrate` appends `migrations.emit(path, up)`. Those
@@ -283,8 +283,8 @@ pub fn load_with_deps_appending(
     ))
 }
 
-/// A dependency package's sources, to be linked into the entry under the consumer's import root
-/// (package-manager P2.1, model R1). `root` is the package's own namespace root segment (the
+/// A dependency package's sources, to be linked into the entry under the consumer's import root.
+/// `root` is the package's own namespace root segment (the
 /// `package` half of its `[package] name`); `prefix` is the prefix its modules derive under here (the
 /// consumer's dependency-table key, plus the package segment for a scope-array member). The loader
 /// **re-roots** the package's modules from `root` to `prefix` — rewriting the leading segment of each
@@ -296,7 +296,7 @@ pub fn load_with_deps_appending(
 /// closed unit: its internal cross-references must resolve) — the re-rooting above is what makes its
 /// intra-package `use`s address the same modules the consumer's key does.
 ///
-/// **Transitive dependencies** (package-manager P2.4). A package's own modules import *its own*
+/// **Transitive dependencies**. A package's own modules import *its own*
 /// dependencies by *its own* local keys (`use jsonlib.parse.X`), which collide across packages (two
 /// packages may both key a dep `jsonlib` pointing at different packages). `dep_renames` disambiguates:
 /// it maps each of this package's local dependency keys to the **globally-unique segment** the resolver
@@ -321,16 +321,16 @@ pub struct DepPackage {
     pub root: String,
     pub modules: Vec<RawModule>,
     /// This package's local dependency keys → the global segment of the package each resolves to
-    /// (transitive linking, P2.4). Empty for a leaf package; then re-rooting is just `root` → `key`.
+    /// (transitive linking). Empty for a leaf package; then re-rooting is just `root` → `key`.
     pub dep_renames: std::collections::BTreeMap<String, String>,
-    /// Whether this package carries a **native** entry crate (package-manager Phase 3). A native
+    /// Whether this package carries a **native** entry crate. A native
     /// package's modules are provided by its Rust extension, registered only in the *composed*
     /// toolchain — so the host loader cannot see them and must **retain** (not flag) a `use` under
     /// its key; the composed checker validates the members. A pure-Noeta package has all its modules
     /// in the link pool, so a `use` under its key that resolves to nothing is a genuine typo.
     pub native: bool,
-    /// The package's language **edition** — the semantics its source is written against (editions
-    /// arc), carried per package from resolution and applied per source (each dependency's modules
+    /// The package's language **edition** — the semantics its source is written against, carried
+    /// per package from resolution and applied per source (each dependency's modules
     /// lex/parse/check under *its* edition; the entry and siblings under the root's). Typed — the
     /// validated enum, not a free string — so a value that resolution never produced is
     /// unrepresentable here rather than silently degrading to the default. (`noeta-edition` is the
@@ -355,8 +355,7 @@ impl DepPackage {
     }
 }
 
-/// Re-root a namespace/use path in place: replace its leading segment per the rules
-/// (package-manager P2.1/P2.4).
+/// Re-root a namespace/use path in place: replace its leading segment per the rules.
 ///
 /// **The rule: a leading segment equal to the package's own root segment becomes the whole prefix
 /// the package's modules derive under here.** `root` is always the *package* half of the identity
@@ -464,8 +463,7 @@ fn reroot_use(
 ///
 /// Public so a salsa-based linker (`noeta-db`) can re-root a dependency's parsed [`Program`] before
 /// feeding it to [`link_parsed_with_deps`] — the CLI's [`link_with_deps`] does this inline, but the
-/// db builds `Program`s through its own memoized parse and re-roots them itself (package-manager
-/// P2.1c).
+/// db builds `Program`s through its own memoized parse and re-roots them itself.
 pub fn reroot_program(
     program: &mut Program,
     root: &str,
@@ -485,8 +483,8 @@ pub fn reroot_program(
 
 /// The raw [`Source`]s of a workspace: the entry plus its sibling module files, each with its own
 /// [`SourceId`] (entry = 0, siblings 1..) assigned identically to [`link`]. Lexing/parsing happen
-/// downstream, so this only reads and labels files — it feeds the salsa module graph (`noeta-db`,
-/// M1.9.3), which derives one memoized `SourceProgram` input per source.
+/// downstream, so this only reads and labels files — it feeds the salsa module graph (`noeta-db`),
+/// which derives one memoized `SourceProgram` input per source.
 #[derive(Debug)]
 pub struct RawWorkspace {
     pub entry: Source,
@@ -929,7 +927,7 @@ pub fn run_expansion(
     (expanded.sources, expanded.reads, expanded.diagnostics)
 }
 
-/// Link the entry against its sibling modules **and its dependency packages** (package-manager P2.1).
+/// Link the entry against its sibling modules **and its dependency packages**.
 /// Each [`DepPackage`]'s modules are parsed, re-rooted from the package's own root segment to the
 /// consumer's dependency key ([`reroot_program`]), and linked as a closed unit (their own `use`s
 /// drive imports). SourceIds continue past the siblings (entry = 0, siblings `1..=S`, dependency
@@ -1271,7 +1269,7 @@ pub fn native_dep_roots(deps: &[DepPackage]) -> Vec<String> {
 type ModuleParse = Result<Program, Box<BrokenModule>>;
 
 /// A directory's modules (plus the entry's dependency packages) lexed and parsed **once**, and
-/// linkable against *any* member as the entry — `noeta check`'s directory mode (audit-4 F4).
+/// linkable against *any* member as the entry — `noeta check`'s directory mode.
 /// Checking a directory treats every `.noe` file as its own entry; loading each entry through
 /// [`load_with_deps`] re-lexed and re-parsed the whole directory per entry (N entries → N× the
 /// work). Here ids are assigned once, in directory (sorted-path) order with dependency modules
@@ -1759,7 +1757,7 @@ pub fn widened_text_tiers<'a>(
     set
 }
 
-/// Lex every module of a program as one unit (text-tiers arc): each file lexes with the default
+/// Lex every module of a program as one unit: each file lexes with the default
 /// text-tier set first; if any file declares a text tier (`@tier(x, …, text: "…")`), the union of
 /// all declarations is applied and every file re-lexes with it — so a tier declared in one file
 /// (or one dependency package) captures `@x { … }` bodies verbatim in every other. Only programs
@@ -1779,10 +1777,9 @@ fn lex_program(
     packages: &noeta_span::PackageMap,
     package_uses: &noeta_span::PackageUses,
 ) -> (Vec<noeta_lexer::Lexed>, noeta_lexer::TextTiers) {
-    // Each source lexes under ITS OWN package's edition (editions arc): the map was built in
-    // lock-step with the sources, so a future edition that changes tokenization (a promoted
-    // keyword, a new literal syntax) applies per package — the multi-package leg the arc's
-    // "already at the point that would consult it" claim depends on.
+    // Each source lexes under ITS OWN package's edition: the map was built in lock-step with the
+    // sources, so a future edition that changes tokenization (a promoted keyword, a new literal
+    // syntax) applies per package.
     let edition_of = |source: &Source| editions.source_edition(source.id());
     let lexeds: Vec<_> = sources
         .iter()
@@ -2072,7 +2069,7 @@ fn first_line(source: &Source) -> Span {
 
 /// Resolve and merge an *already-parsed* entry against already-parsed candidate modules — the pure
 /// linking core shared by [`link`] (which lexes/parses first) and the salsa module-graph query
-/// (`noeta-db`, M1.9.3), which feeds it programs straight from the memoized `ast` queries. `entry`
+/// (`noeta-db`), which feeds it programs straight from the memoized `ast` queries. `entry`
 /// is the entry's [`Source`] (so import errors render against it); `modules` are the cleanly-parsed
 /// candidate module programs (each declaring its `namespace`). Returns the merged [`Program`] — each
 /// resolved import's declaration ahead of the entry's own statements — or the `use`-resolution
@@ -2098,7 +2095,7 @@ pub fn link_parsed(
     )
 }
 
-/// The cross-package variant (package-manager P2.1): like [`link_parsed`], but `dep_modules` are the
+/// The cross-package variant: like [`link_parsed`], but `dep_modules` are the
 /// re-rooted source modules of the entry's dependency packages. They are **both** resolution
 /// candidates *and* import drivers — a package is a closed unit, so its own `use`s (already re-rooted
 /// to the consumer's key) resolve its internal cross-references, the same way a sibling's do.
@@ -2190,7 +2187,7 @@ fn link_core(
 ) -> Result<Linkage, Vec<LoadDiagnostic>> {
     // For the complete policy: the always-retained roots are the installed extensions. The loader
     // is already global-registry-coupled (verbatim-tier names below), so the process default —
-    // seeded by the assembling driver (audit-6 F2) — is the lens.
+    // seeded by the assembling driver — is the lens.
     let reg = noeta_ext_abi::registry::single_registry_process();
     // A module contributes only if it declares a namespace to resolve against.
     // The **entry** is a resolution candidate alongside the pool: it declares a namespace like any
@@ -3028,7 +3025,7 @@ fn qualifiable_decl_name(stmt: &Stmt) -> Option<&str> {
         Stmt::Struct(decl) => Some(decl.name.as_str()),
         Stmt::Enum(decl) => Some(decl.name.as_str()),
         Stmt::Fn(decl) => Some(decl.name.as_str()),
-        // A user-defined trait is a qualifiable declaration (L1): a `dyn Trait` type, a `<T: Trait>`
+        // A user-defined trait is a qualifiable declaration: a `dyn Trait` type, a `<T: Trait>`
         // bound, or an `impl Trait for T` referencing a module-local trait drags its declaration into
         // the merged program via the cross-module closure — without this a package-local trait
         // (e.g. aether's `Middleware`) is "unknown" once the package is linked as a dependency.
@@ -3701,7 +3698,7 @@ enum Resolution {
     Private,
     /// The namespace exists but declares no such name.
     Missing,
-    /// No loaded module declares the namespace — fall back to the opaque stub (M0 behavior).
+    /// No loaded module declares the namespace — fall back to the opaque stub.
     NoModule,
 }
 
@@ -3882,7 +3879,7 @@ fn decl_name(stmt: &Stmt) -> Option<&str> {
         Stmt::Struct(decl) => Some(decl.name.as_str()),
         Stmt::Enum(decl) => Some(decl.name.as_str()),
         Stmt::Fn(decl) => Some(decl.name.as_str()),
-        // A user-defined trait is an importable name (L1) — `use pkg.mod.{MyTrait}` brings it into
+        // A user-defined trait is an importable name — `use pkg.mod.{MyTrait}` brings it into
         // scope for `dyn MyTrait`, a `<T: MyTrait>` bound, or an `impl MyTrait for T`.
         Stmt::Trait(decl) => Some(decl.name.as_str()),
         _ => None,
@@ -3911,7 +3908,7 @@ mod tests {
     use noeta_ast::Expr;
 
     /// Seeding wrappers: production drivers seed the process-default registry before the loader
-    /// runs (audit-6 F2 — the loader consumes the registry as data and does not link the std
+    /// runs (the loader consumes the registry as data and does not link the std
     /// units); these tests are their own driver, so the wrappers seed via the dev-dependency.
     /// Local items shadow the `use super::*` glob, so every call below goes through them.
     fn link(
@@ -3953,7 +3950,7 @@ mod tests {
         RawModule::declared(name, text)
     }
 
-    // --- cross-package linking (package-manager P2.1) -----------------------------------------
+    // --- cross-package linking ----------------------------------------------------------------
 
     /// The leaf (short) segment of a possibly-qualified identity — `webclient.client.Client` →
     /// `Client`. A namespaced module's declarations carry qualified identities now (arc Phase B), so

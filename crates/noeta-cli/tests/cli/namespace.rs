@@ -1,9 +1,7 @@
-//! Namespace-protection arc: reserved scopes, claim flow (OIDC/OAuth/domain), provenance,
+//! Namespace protection: reserved scopes, claim flow (OIDC/OAuth/domain), provenance,
 //! transparency log, advisory feed, publish cooldown — against a mock registry.
 
 use crate::support::*;
-
-// ===== namespace-protection arc tests (merged) =====
 
 /// A tiny in-process HTTP/1.1 server for the CLI e2e: `handler(method, path, body) -> (status, json)`.
 /// Handles connections sequentially on a background thread; returns the base URL.
@@ -405,7 +403,7 @@ fn noeta_audit_flags_a_dependency_with_a_known_advisory() {
 
     let entry = path_dep_project("pm_audit_advisory");
     let app_dir = entry.parent().unwrap();
-    // Opt this project into failing on an operator-tier advisory (advisory-intake arc, tier 5): the
+    // Opt this project into failing on an operator-tier advisory: the
     // default is warn, so a CI gate declares `[trust].advisories = "fail"` to break the build on a hit.
     std::fs::write(
         app_dir.join("noeta.toml"),
@@ -423,7 +421,7 @@ fn noeta_audit_flags_a_dependency_with_a_known_advisory() {
         .stdout(predicate::str::contains("Security advisories:"))
         .stdout(predicate::str::contains("NOETA-2026-0007"))
         .stdout(predicate::str::contains("greeting injection"))
-        // The intake tier is shown per advisory (advisory-intake arc, tier 5).
+        // The intake tier is shown per advisory.
         .stdout(predicate::str::contains("[operator/high]"))
         // The advisory is verified as included in the transparency log (log-binding).
         .stdout(predicate::str::contains("included in the transparency log"));
@@ -701,7 +699,7 @@ fn noeta_claim_device_flow_works_without_a_configured_client_id() {
 
 #[test]
 fn noeta_advisory_report_posts_a_public_report() {
-    // advisory-intake arc, tier 4: `noeta advisory report <package> <summary>` POSTs an unauthenticated
+    // `noeta advisory report <package> <summary>` POSTs an unauthenticated
     // report to the registry. The mock captures the request and confirms its shape.
     let (tx, rx) = std::sync::mpsc::channel();
     let base = mock_http(move |method, path, body| {
@@ -739,8 +737,8 @@ fn noeta_advisory_report_posts_a_public_report() {
 
 #[test]
 fn noeta_advisory_watch_pins_a_baseline_and_reads_its_scopes_from_the_lock() {
-    // advisory-intake arc, tier 6: `noeta advisory watch [<scope>]` verifies the advisory feed + transparency
-    // log and pins a baseline on the first run. Here the mock serves a verifiable *empty* feed and log
+    // `noeta advisory watch [<scope>]` verifies the advisory feed + transparency log and pins a
+    // baseline on the first run. Here the mock serves a verifiable *empty* feed and log
     // (an empty tree's root and an empty feed's digest are both sha256 of nothing), so the first run
     // establishes the baseline and reports clean, writing a state file.
     use ed25519_dalek::{Signer, SigningKey};
@@ -1118,8 +1116,8 @@ fn noeta_claim_uses_the_github_device_flow_off_ci() {
 
 #[test]
 fn noeta_scope_require_provenance_validates_and_needs_a_registry() {
-    // namespace-protection #1 Phase 1: the CLI validates `--root` before it would ever contact the
-    // network, and — since the default chain now ends at the built-in hosted registry — the one
+    // The CLI validates `--root` before it would ever contact the network, and — since the default
+    // chain ends at the built-in hosted registry — the one
     // route with no policy endpoint is `NOETA_REGISTRY_DIR` (the file-backed local index), which
     // gets an explanation rather than a silent fall-through to the network.
     lang()
@@ -1285,7 +1283,7 @@ fn publish_cooldown_holds_back_a_freshly_published_registry_version() {
 
 #[test]
 fn require_provenance_refuses_an_unsigned_registry_dependency() {
-    // namespace-protection #1, Phase 1 (consumer side): `[trust].require_provenance` demands a scope's
+    // The consumer side: `[trust].require_provenance` demands a scope's
     // releases carry verified provenance. The published `acme/greet` is unsigned, so a consumer that
     // requires provenance for `acme` refuses to resolve it — while an unconstrained consumer still can.
     if !git_available() {

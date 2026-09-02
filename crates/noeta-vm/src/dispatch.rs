@@ -48,7 +48,7 @@ impl<'m> Vm<'m> {
         mut regs: Vec<Value>,
     ) -> Result<Value, Abort> {
         self.run_depth += 1;
-        // Give the register stack generous headroom up front (P-JIT J3): a native direct call only
+        // Give the register stack generous headroom up front: a native direct call only
         // fires when the callee window fits without reallocating (so the caller's register pointer
         // stays valid), so a pre-reserved buffer keeps common recursion on the fast path. A deeper
         // stack simply reallocates once and the direct-call check re-passes at the new capacity, so
@@ -88,7 +88,7 @@ impl<'m> Vm<'m> {
                     span,
                 });
             }
-            // Phase 4.2c-ii: a panic unwinds the live frames. Before reclaiming their memory, fire
+            // A panic unwinds the live frames. Before reclaiming their memory, fire
             // the `destruct` of every live destructor-bearing frame local — innermost frame first,
             // reverse-construction within each (the `frame_locals` list reversed) — so an aborting
             // program destroys its abandoned values deterministically (spec §6). This matches the
@@ -143,11 +143,11 @@ impl<'m> Vm<'m> {
         // `self` field) so it neither borrows `self` in the loop nor leaks across runs; holding the
         // `&'static Shape` keeps the cached shape alive, so the pointer key can never alias a freed
         // shape. Pooled (finding 5): a re-entrant entry pops the spare pair instead of allocating
-        // two vectors sized to the whole module's cache-slot count; the entries were cleared on the
-        // previous exit, so a run still starts cold — the same fresh-per-run semantics as before.
+        // two vectors sized to the whole module's cache-slot count; the entries are cleared on
+        // exit, so a run always starts cold.
         let (mut caches, mut extern_caches) = self.cache_pool.pop().unwrap_or_default();
         caches.resize(self.module.cache_slots as usize, None);
-        // Extern-method route cache (H5 perf): per `CallMethod` site, the resolved routing for an
+        // Extern-method route cache: per `CallMethod` site, the resolved routing for an
         // extern receiver, keyed by the extern type's name pointer (a registry `&'static str`, a
         // stable identity). A hit is one heap probe + one pointer compare — no registry scans on
         // the `signal.get()`/`.set()` hot paths.
@@ -206,7 +206,7 @@ impl<'m> Vm<'m> {
                 return Err(self.observe_cancel());
             }
             // Re-read the module each frame transfer, NOT once per dispatch: a debug-console
-            // fragment install ([`Vm::install_fragment`], tooling-unification T4) swaps
+            // fragment install ([`Vm::install_fragment`]) swaps
             // `self.module` to an extended snapshot mid-run, and the next frame must resolve
             // against the newest module — an escaped fragment closure's proto index only exists
             // there. Every snapshot is a stable-prefix superset, so a frame that started under an
@@ -219,7 +219,7 @@ impl<'m> Vm<'m> {
             if caches.len() < module.cache_slots as usize {
                 caches.resize(module.cache_slots as usize, None);
             }
-            // Hover purity chokepoint (T6): a hover fragment runs as a single wrapper frame; every
+            // Hover purity chokepoint: a hover fragment runs as a single wrapper frame; every
             // way of running user code — a call, an object's `Index` impl, a user ordering method —
             // pushes a second frame, which re-enters `'reload` here. Refuse it instead of running.
             // `pure_eval` is false on every non-hover run (one predicted branch per frame transfer).
@@ -240,14 +240,14 @@ impl<'m> Vm<'m> {
             let proto = frames[top].proto as usize;
             let chunk = &module.protos[proto];
             let mut pc = frames[top].pc;
-            // Tier-0/tier-1 dispatch (P-JIT). Only at a fresh frame entry (`pc == 0`): a return-pop
+            // Tier-0/tier-1 dispatch. Only at a fresh frame entry (`pc == 0`): a return-pop
             // re-enters `'reload` with the caller's saved `pc > 0`, and an in-frame jump never leaves
             // the inner loop, so `pc == 0` is exactly "this frame is starting". A compiled prototype
-            // may run the whole frame in native code; J0 always bails, so control falls straight
-            // through to the interpreter below (byte-identical).
+            // may run the whole frame in native code; a prototype with no compiled entry bails, so
+            // control falls straight through to the interpreter below (byte-identical).
             // Fire at every frame `'reload`, not only fresh entries: after a native `Call`'s callee
             // returns, the interpreter re-enters the caller at its resume pc and native execution
-            // picks up there (J3 resume-native). `entry_pc = pc` is 0 for a fresh frame or the saved
+            // picks up there (resume-native). `entry_pc = pc` is 0 for a fresh frame or the saved
             // resume pc otherwise; the compiled code jumps to that block (or bails if it has no entry
             // for it).
             #[cfg(feature = "jit-rt")]
@@ -278,7 +278,7 @@ impl<'m> Vm<'m> {
                     Some(JitOutcome::Abort) => return Err(Abort),
                 }
             }
-            // OSR back-edge trigger (P-JIT J5): a taken backward branch to `target` is a loop
+            // OSR back-edge trigger: a taken backward branch to `target` is a loop
             // back-edge. When the JIT is armed (real-host path only — `self.jit` is `None` on the
             // sandbox/differential path, so this is a single predicted branch there) and the branch
             // goes backward, count it; once the prototype is hot, compile it and re-enter native at the
@@ -430,7 +430,7 @@ impl<'m> Vm<'m> {
                         // Release a dead binding/temporary at its last use and clear it to `unit` (so
                         // `set_reg`/teardown later release `unit`, never double-freeing). This frees the
                         // value promptly, restoring an accumulator's unique ownership. When the IR marked
-                        // the drop destructor-relevant (Phase 4), route it through `release_value` so a
+                        // the drop destructor-relevant, route it through `release_value` so a
                         // `destruct` block fires here if this is the final owning reference; otherwise the
                         // value provably reaches no destructor and the plain `release` is used.
                         let v = std::mem::replace(&mut regs[fbase + *reg as usize], Value::unit());
@@ -489,7 +489,7 @@ impl<'m> Vm<'m> {
                     // `MakeList`'s consumed operands. If any element fails to pack (a shape the schema
                     // does not expect — not reachable for a well-typed marked site), fall back to a boxed
                     // list that retains each element, staying consistent with those drops.
-                    // A tuple builds exactly like a list (object-model slice 4): retain each element into
+                    // A tuple builds exactly like a list: retain each element into
                     // the aggregate, which owns one reference to each.
                     // Positional projection `receiver.N`: read the Nth element of the tuple, retaining it
                     // into `dst`. The index is in range by construction (the checker verified it).
@@ -631,7 +631,7 @@ impl<'m> Vm<'m> {
                         // per candidate type — a deep rung (map/iter methods) used to pay a
                         // dereference for every rung above it.
                         let hk = v.heap_kind();
-                        // In-place map self-update (Phase 5.1c): a reuse-marked `m = m.set(k,v)` /
+                        // In-place map self-update: a reuse-marked `m = m.set(k,v)` /
                         // `m = m.remove(k)` whose runtime receiver is actually a map consumes the receiver
                         // register and mutates the sole-owned backing buffer in place (an alias copies). A
                         // non-map receiver — a user method that happens to be named `set` — falls through to
@@ -855,10 +855,10 @@ impl<'m> Vm<'m> {
                                     ));
                                 }
                                 None => {
-                                    // Not a string: an int keys directly (P-PKEY S4), a
-                                    // key-capable extern value probes through the contract
-                                    // (extern-types X4), a key-capable packed struct by its
-                                    // content snapshot (P-PKEY); anything else is the existing
+                                    // Not a string: an int keys directly, a
+                                    // key-capable extern value probes through the contract,
+                                    // a key-capable packed struct by its
+                                    // content snapshot; anything else is the existing
                                     // type error.
                                     if let Some(i) = idx.as_int() {
                                         if let Some(element) =
@@ -1079,7 +1079,7 @@ impl<'m> Vm<'m> {
                             data.push(v);
                         }
                         let value = Value::enum_value(shape, data);
-                        // Stamp the reflected type onto a generic enum-variant construction (R2b.2) so
+                        // Stamp the reflected type onto a generic enum-variant construction so
                         // `type_of` recovers its type arguments after a `dyn` launder. Like an object's tag,
                         // an enum value's type is invariant, so it is never cleared.
                         if let Some(idx) = reflect {
@@ -1157,7 +1157,7 @@ impl<'m> Vm<'m> {
                     } => {
                         let field = module.name(*field);
                         // The store (class in-place / struct COW / reuse) is shared with the tier-1 JIT
-                        // leaf helper (P-JIT J4); a `false` return is the field-not-found error path.
+                        // leaf helper; a `false` return is the field-not-found error path.
                         if !self.set_field_fast(regs, fbase, *dst, *obj, field, *value, *reuse) {
                             let v = regs[fbase + *obj as usize];
                             return Err(self.error(
@@ -1306,7 +1306,7 @@ impl<'m> Vm<'m> {
                             pc = *fail as usize;
                         }
                     }
-                    // A tuple pattern test (object-model slice 4b.2): `src` must be a tuple of exactly
+                    // A tuple pattern test: `src` must be a tuple of exactly
                     // `arity` elements. The elements are then read with `TupleIndex` for sub-patterns.
                     Op::MatchTuple { src, arity, fail } => {
                         let v = regs[fbase + *src as usize];
@@ -1368,7 +1368,7 @@ impl<'m> Vm<'m> {
                         let left = regs[fbase + *a as usize];
                         let right = regs[fbase + *b as usize];
                         // Operator-trait dispatch on a user object or enum value (the unified body's
-                        // in-body `impl` blocks are uniform across kinds — object-model slice 3): an
+                        // in-body `impl` blocks are uniform across kinds): an
                         // arithmetic/concat operator routes to its trait method and uses the result
                         // directly; `==`/`!=` route to `Equatable::eq` (`!=` negating via the frame's
                         // return transform); `< <= > >=` route to `Comparable::compare`. The method table
@@ -1449,7 +1449,7 @@ impl<'m> Vm<'m> {
                             }
                             continue;
                         }
-                        // Element-wise array-programming ops (array-ops arc): `+`/`-`/`*` on two lists
+                        // Element-wise array-programming ops: `+`/`-`/`*` on two lists
                         // of the same numeric element type fold into a new list (`~` is concat, so the
                         // operator is free). One shared `noeta-stdlib` kernel with the tree-walker, so
                         // the differential holds; ints wrap at the element width. The result is a fresh
@@ -1613,8 +1613,8 @@ impl<'m> Vm<'m> {
                         }
                         // A user object or enum value lights up the `Display` trait: render it via its
                         // `to_string` method (which runs bytecode, so it is pushed as a call frame). The
-                        // method table is keyed by the value's shape name, identical for both kinds
-                        // (object-model slice 3). Matches the tree-walker's `display_value`.
+                        // method table is keyed by the value's shape name, identical for both kinds.
+                        // Matches the tree-walker's `display_value`.
                         if (v.is_object() || v.is_enum())
                             && let Some(proto) =
                                 self.method_proto(&v.shape().unwrap().name, "to_string")
@@ -1886,7 +1886,7 @@ impl<'m> Vm<'m> {
             set_reg(regs, fbase, *dst, value);
             return Ok(Some(ColdStep::Next(pc + 1)));
         }
-        // An extern receiver routes through the per-site cache (H5 perf): a
+        // An extern receiver routes through the per-site cache: a
         // declared arena read inlines to an arena load while its gate is open;
         // ctx methods go straight to their dispatch; anything else falls to the
         // shared by-value chain below.
@@ -2075,9 +2075,9 @@ impl<'m> Vm<'m> {
             )?;
             return Ok(Some(ColdStep::Reload));
         }
-        // An enum value dispatches to a user method (the unified body, object-model
-        // slice 3) through the same type→method table as an object — and, audit-1
-        // finding 7, through the same per-site inline cache: an enum's `&'static
+        // An enum value dispatches to a user method (the unified body) through the
+        // same type→method table as an object — and through the same per-site
+        // inline cache: an enum's `&'static
         // Shape` handle is as stable an identity as an object's, so a hit resolves
         // the prototype with one pointer compare (the object arm's exact hit test;
         // the two kinds share the slot safely because their shapes are distinct).
@@ -2093,8 +2093,8 @@ impl<'m> Vm<'m> {
                 set_reg(regs, fbase, *dst, json);
                 return Ok(Some(ColdStep::Next(pc + 1)));
             }
-            // `color.value()` on a native **backed** enum (native-extensibility
-            // S1): a native enum has no user method proto, so its backing constant
+            // `color.value()` on a native **backed** enum: a native enum has no
+            // user method proto, so its backing constant
             // is resolved from the registry by the value's (short) name + variant —
             // the twin of the tree-walker's `.value()` accessor.
             if method == "value"
@@ -2155,8 +2155,8 @@ impl<'m> Vm<'m> {
                 )?;
                 return Ok(Some(ColdStep::Reload));
             }
-            // A native enum's instance method (native-extensibility S1 / Slice B):
-            // no user proto and not the built-in `value()`/`to_json`, but the shape
+            // A native enum's instance method: no user proto and not the built-in
+            // `value()`/`to_json`, but the shape
             // names a registered native enum that declares it — route to the enum's
             // native `dispatch`, the enum twin of the Object arm's `find_class_method`
             // → `call_native_class_method` fall-through above. Left uncached like the
@@ -2256,9 +2256,9 @@ impl<'m> Vm<'m> {
                         kind,
                         reply,
                     } = req;
-                    // Every evaluate compiles through the adopted session (T5): full
+                    // Every evaluate compiles through the adopted session: full
                     // language for a watch/console, and for a hover the same engine
-                    // gated to the read-only surface (T6) — one evaluator, not two. The
+                    // gated to the read-only surface — one evaluator, not two. The
                     // `kind` also drives watch-memoization (cache reuse + generation
                     // bumping) inside `debug_eval_fragment`.
                     let outcome = if self.debug_session.is_some() {
@@ -2280,7 +2280,7 @@ impl<'m> Vm<'m> {
                     };
                     let _ = reply.send(outcome);
                 }
-                // A Variables-panel edit (U1): evaluate the replacement value as a
+                // A Variables-panel edit: evaluate the replacement value as a
                 // console fragment and write the frame's register in place.
                 DebugAction::SetVariable(req) => {
                     let DebugSetRequest {
@@ -2414,7 +2414,7 @@ impl<'m> Vm<'m> {
                         elements.push(v);
                     }
                     let list = Value::list(elements);
-                    // Stamp the checker-resolved element type onto the list (R1) so `type_of` recovers
+                    // Stamp the checker-resolved element type onto the list so `type_of` recovers
                     // it after a `dyn` launder. A cheap `Rc` clone of the shared load-time entry; the
                     // tag lives beside the payload, invisible to value semantics.
                     if let Some(idx) = reflect {
@@ -2497,7 +2497,7 @@ impl<'m> Vm<'m> {
                     // `&Module`, so bind the op's ids under different names to avoid shadowing it).
                     let mod_name = module.name(*mod_id);
                     let func = module.name(*func_id);
-                    // The recipe: baked at the call site, or (poly-values F2b) resolved
+                    // The recipe: baked at the call site, or resolved
                     // per-instantiation through the forwarding fn's hidden slot register — an
                     // index into the module's type-argument table. Mirrors the tree-walker.
                     let dynamic_recipe = dynamic.and_then(|slot| {
@@ -2590,7 +2590,7 @@ impl<'m> Vm<'m> {
                     dynamic,
                     span,
                 } => {
-                    // The extern-METHOD twin of `TypedModuleCall` above (http arc H8), step for
+                    // The extern-METHOD twin of `TypedModuleCall` above, step for
                     // step — the only differences are that the receiver's own runtime identity
                     // selects the type (no module lookup) and the dispatch takes the receiver.
                     // Mirrors the tree-walker, so the two backends agree by construction.
@@ -2664,7 +2664,7 @@ impl<'m> Vm<'m> {
                     err_shape,
                     span,
                 } => {
-                    // The router-facing runtime decode (L2.2 DI). Fully recoverable: an unknown
+                    // The router-facing runtime decode. Fully recoverable: an unknown
                     // type name, a non-string operand, or a malformed body all land as
                     // `Result.Err` wrapping a path-carrying `JsonError` (the same error story
                     // as `json.try_parse::<T>`). Mirrors the recoverable `try_parse` branch
@@ -2724,7 +2724,7 @@ impl<'m> Vm<'m> {
                     args,
                     span,
                 } => {
-                    // A trait default-body call (ExtBundle→ExtTrait convergence, slice 2): the
+                    // A trait default-body call: the
                     // (trait, method) route was baked at compile time — straight to the trait's
                     // shared ctx dispatch, receiver as slot 0. Values are copied out of the
                     // registers first (borrowed by the ctx seed; the seam owns the refcount).
@@ -2859,7 +2859,7 @@ impl<'m> Vm<'m> {
                         };
                         let value = regs[fbase + *value_reg as usize];
                         retain(value);
-                        // A duplicate key keeps the later value (M0 `BTreeMap` semantics); the
+                        // A duplicate key keeps the later value (tree-walker `BTreeMap` semantics); the
                         // displaced value loses its owner, so release it.
                         if let Some(pos) = map.iter().position(|(k, _)| *k == key) {
                             let (_, old) = map.remove(pos);
@@ -2868,7 +2868,7 @@ impl<'m> Vm<'m> {
                         map.push((key, value));
                     }
                     let map = Value::map_keyed(map);
-                    // Stamp the checker-resolved `Map(K, V)` type onto the map (R1) so `type_of`
+                    // Stamp the checker-resolved `Map(K, V)` type onto the map so `type_of`
                     // recovers it after a `dyn` launder — the same node-tag path `MakeList` uses.
                     if let Some(idx) = reflect {
                         map.set_reflect(Some(Rc::clone(&self.persist.type_reprs[*idx as usize])));
@@ -2879,11 +2879,11 @@ impl<'m> Vm<'m> {
                 Op::RequireMapKey { reg, span } => {
                     let v = regs[fbase + *reg as usize];
                     let ok = v.is_string()
-                    // P-PKEY S4: ints key maps (`float` stays excluded — NaN).
+                    // Ints key maps (`float` stays excluded — NaN).
                     || v.as_int().is_some()
                     || (v.is_extern()
                         && v.with_extern(noeta_stdlib::map_key::extern_key_capable))
-                    // P-PKEY: a key-capable `@packed` struct keys a map by content.
+                    // A key-capable `@packed` struct keys a map by content.
                     || v.shape().is_some_and(|s| s.key_capable);
                     if !ok {
                         let error = noeta_stdlib::map_key::map_key_error(v.type_name());
@@ -2984,8 +2984,8 @@ impl<'m> Vm<'m> {
                             release(old);
                         }
                     }
-                    // A slot still unset after spread + named is filled from its field default
-                    // (slice 5), run in global scope (empty upvalues — a default resolves globals
+                    // A slot still unset after spread + named is filled from its field default,
+                    // run in global scope (empty upvalues — a default resolves globals
                     // only). A slot with neither a value nor a default violates the
                     // full-initialization guarantee (E0009).
                     let mut missing: Vec<String> = Vec::new();
@@ -3031,7 +3031,7 @@ impl<'m> Vm<'m> {
                     }
                     let slots = slots.into_iter().map(Option::unwrap).collect();
                     let object = Value::object(shape, slots);
-                    // Stamp the reflected type onto a generic instantiation (R2) so `type_of` recovers
+                    // Stamp the reflected type onto a generic instantiation so `type_of` recovers
                     // its type arguments after a `dyn` launder. The object's type is invariant under
                     // field mutation, so — unlike the collection tags — it is never cleared.
                     if let Some(idx) = reflect {
@@ -3088,7 +3088,7 @@ impl<'m> Vm<'m> {
                             let old = base_val.replace_slot(*slot as usize, v);
                             self.release_value(old);
                         }
-                        // Reuse keeps the base node's existing reflected type (R2): a self-update
+                        // Reuse keeps the base node's existing reflected type: a self-update
                         // rebuilds a value of the same (generic) type, so the base's tag already carries
                         // it — matching the tree-walker's reuse path, which keeps the accumulator's tag.
                         set_reg(regs, fbase, *dst, base_val);
@@ -3273,7 +3273,7 @@ impl<'m> Vm<'m> {
                             pc += 1;
                         }
                         // `Err(_)`/`none`: early-return the whole value from this frame, exactly
-                        // as `Op::Return` does (the M0 `Unwind::Return`).
+                        // as `Op::Return` does (the tree-walker's `Unwind::Return`).
                         Some(TryOutcome::Empty) => {
                             // An `Err` propagating out of the outermost run's BOTTOM frame is
                             // top-level code: there is no caller to hand it to, and no declared
@@ -3297,7 +3297,7 @@ impl<'m> Vm<'m> {
                                 return Err(Abort);
                             }
                             retain(v);
-                            // Drop the frame locals this `?` abandons before unwinding (Phase 4.2c) —
+                            // Drop the frame locals this `?` abandons before unwinding —
                             // destructor-relevant ones fire `destruct`, in the drop pass's order. Each
                             // is cleared to `unit`, so the teardown release below never double-frees.
                             for (reg, relevant) in on_error.iter() {
@@ -3485,8 +3485,8 @@ impl<'m> Vm<'m> {
                         }
                         let scope_idx = self.innermost_open();
                         let task_idx = self.sched.scopes[scope_idx].len();
-                        // The child inherits a snapshot of the spawner's task-local context
-                        // (T5a): a task spawned inside `with_span` parents its spans there.
+                        // The child inherits a snapshot of the spawner's task-local context:
+                        // a task spawned inside `with_span` parents its spans there.
                         let context = self.sched.ctx_current.clone();
                         let strand = self.sched.current_strand;
                         self.sched.scopes[scope_idx].push(Task {
@@ -4092,7 +4092,7 @@ impl<'m> Vm<'m> {
                     bits,
                     span,
                 } => {
-                    // Sign-dependent fixed-width op (Tier W3): `/ % < <= > >=` on erased-int operands,
+                    // Sign-dependent fixed-width op: `/ % < <= > >=` on erased-int operands,
                     // read as `signed`/unsigned `bits`-wide. No trait dispatch (ints only).
                     let left = regs[fbase + *a as usize];
                     let right = regs[fbase + *b as usize];
@@ -4112,7 +4112,7 @@ impl<'m> Vm<'m> {
                     bits,
                     ..
                 } => {
-                    // An int method needing the receiver's static width (Tier W5): a bit intrinsic
+                    // An int method needing the receiver's static width: a bit intrinsic
                     // computes within `bits` rather than the erased i64; a range-checked conversion
                     // answers an option. The checker guarantees an integer receiver and (for
                     // `rotate_*`) an integer arg.
@@ -4287,7 +4287,7 @@ impl ArgBuf {
 }
 
 /// Overwrite a register, releasing the value it held.
-/// Map an arithmetic operator to its element-wise list op (array-ops arc): `+`/`-`/`*` fold two lists
+/// Map an arithmetic operator to its element-wise list op: `+`/`-`/`*` fold two lists
 /// element-wise; every other operator has no list form (`None` → the scalar `apply_binary`).
 pub(crate) fn elem_bin_op(op: noeta_ast::BinaryOp) -> Option<noeta_stdlib::ElemBinOp> {
     Some(match op {
@@ -4369,8 +4369,8 @@ pub(crate) fn reserve_window(regs: &mut Vec<Value>, n: usize) -> usize {
 // re-runs the op and raises the same diagnostic). Each helper performs **no register write** and
 // no failure-side effect, preserving the leaf-op contract that every early return happens before
 // any register write. The residual duplication in `jit_run_leaf_op` — the map/string `Op::Index`
-// cases and `Op::LoadField` (interpreter-side inline cache, measured not-profitable for tier 1 in
-// J6) — stays at its call sites with the divergence documented there.
+// cases and `Op::LoadField` (interpreter-side inline cache, measured not-profitable for tier 1) —
+// stays at its call sites with the divergence documented there.
 //
 // Not every shared leaf path is a free function here: where the op's happy path already needs the
 // VM (`Op::CallMethod`'s map routes need `release_value` for a displaced value, and the diagnostic

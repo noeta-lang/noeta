@@ -31,7 +31,7 @@ use noeta_lexer::lex;
 use noeta_parser::parse;
 use noeta_span::{Source, SourceId};
 
-/// P-AOT L3.2b drift guard: the `#[export_name]` literals on the JIT helpers (which an AOT
+/// A drift guard: the `#[export_name]` literals on the JIT helpers (which an AOT
 /// program object links against) must equal the `noeta_jit_abi::*_HELPER` name constants the JIT
 /// declares its imports under. The literals are hardcoded (an attribute needs a string literal,
 /// not a const), so this asserts they still agree — a changed constant fails here, flagging the
@@ -104,8 +104,8 @@ fn on_deep_stack<T: Send>(f: impl FnOnce() -> T + Send) -> T {
     })
 }
 
-/// P-AOT L3.2b: prove the dispatch-table binding + native dispatch **in-process**, isolating the
-/// linker as the only remaining unknown for a real AOT binary. Force-JIT a hot call-free loop,
+/// Prove the dispatch-table binding + native dispatch **in-process**, leaving the linker as the
+/// only untested step for a real AOT binary. Force-JIT a hot call-free loop,
 /// harvest its finalized entry pointer into an [`noeta_jit_abi::AOT_DISPATCH_SYMBOL`]-shaped table,
 /// then run a *fresh* VM bound to that table with the compiler unarmed (`vm.aot = true`, `jit`
 /// stays `None`). The native entry must actually run — not interpret — and match the tier-0
@@ -238,7 +238,7 @@ fn an_unalignable_fast_entry_is_refused_by_the_dispatch_binding() {
     drop(keep);
 }
 
-/// P-AOT L3.2b(3): [`compile_module_aot`] wires the object backend end-to-end — it emits a
+/// [`compile_module_aot`] wires the object backend end-to-end — it emits a
 /// relocatable object carrying the [`noeta_jit_abi::AOT_DISPATCH_SYMBOL`] table. Byte-identity of the
 /// native codegen itself is proven corpus-wide by the JIT differential's **AOT-bodies arm**
 /// (`noeta-conformance --jit-differential --aot-bodies`, per-commit) and by the linked-artifact
@@ -293,7 +293,7 @@ fn fragment(src: &str) -> Program {
 }
 
 /// Build a **session-adopted debug Vm**: the checked program compiled with the compiler kept
-/// alive (T3), the module arena'd, and the [`DebugSession`] installed — the debug console's
+/// alive, the module arena'd, and the [`DebugSession`] installed — the debug console's
 /// launch shape. Returns the Vm ready to `run_top` entry 0.
 fn debug_session_vm<'a>(arena: &'a typed_arena::Arena<Module>, src: &str) -> Vm<'a> {
     noeta_stdlib::registry::default_seeded();
@@ -330,7 +330,7 @@ fn debug_session_vm<'a>(arena: &'a typed_arena::Arena<Module>, src: &str) -> Vm<
     vm
 }
 
-/// T4 (tooling-unification): a fragment installed into a *running* Vm executes against the
+/// A fragment installed into a *running* Vm executes against the
 /// swapped extended module — calling the program's functions and reading its globals by their
 /// original ids — and code the fragment defines (a closure bound into a global) stays callable
 /// by LATER code, including the program's own functions, after further installs.
@@ -412,9 +412,9 @@ fn installed_fragments_extend_a_running_debug_vm() {
     );
 }
 
-/// M6b (MCP arc): a runaway console fragment (`while true { … }`) is STOPPED by the
-/// evaluation budget — the nested run executes with the session debugger held out of `self`,
-/// so without the budget nothing could interrupt it and the paused session hung forever. The
+/// A runaway console fragment (`while true { … }`) is STOPPED by the evaluation budget — the
+/// nested run executes with the session debugger held out of `self`, so without the budget
+/// nothing could interrupt it and the paused session would hang forever. The
 /// trip is an ordinary nested abort: the paused program is untouched and the very next
 /// fragment evaluates normally.
 #[test]
@@ -520,7 +520,7 @@ fn observational_watch_result_is_memoized_until_the_generation_bumps() {
     );
 }
 
-/// U3 (tooling-unification): a re-evaluated fragment — same text, same scope shape — reuses its
+/// A re-evaluated fragment — same text, same scope shape — reuses its
 /// compiled wrapper instead of appending a fresh proto + slot to the session per step.
 #[test]
 fn watch_fragments_are_memoized_by_text_and_scope() {
@@ -588,7 +588,7 @@ fn watch_fragments_are_memoized_by_text_and_scope() {
     assert!(vm.module.protos.len() > protos, "new text compiles fresh");
 }
 
-/// R0 (REPL-on-VM): [`Vm::run_top`] runs the entry chunk against globals that **persist between
+/// [`Vm::run_top`] runs the entry chunk against globals that **persist between
 /// calls**, and a single [`Vm::teardown`] afterwards brings heap residency back to zero. This is
 /// the mechanism the session rides on — a first entry's global bindings survive into the next, and
 /// cleanup is deferred to one final teardown rather than run after every entry.
@@ -669,10 +669,9 @@ fn an_abort_captures_a_stack_trace_and_a_clean_run_captures_none() {
     assert!(trace.is_empty(), "clean run must not trace: {trace:?}");
 }
 
-/// P-PKEY S0: the compiler bakes key-capability into `Module.shapes` — a `@packed` struct of
-/// int/bool fields (or a nested chain of them, forward references included) is `key_capable`;
-/// a float-field packed struct and a plain struct are not. Plumbing only — no behavior reads
-/// the flag yet.
+/// The compiler bakes key-capability into `Module.shapes` — a `@packed` struct of int/bool fields
+/// (or a nested chain of them, forward references included) is `key_capable`; a float-field packed
+/// struct and a plain struct are not.
 #[test]
 fn shapes_carry_packed_key_capability() {
     let src = "@packed struct Outer { m: Mid }\n@packed struct Mid { c: Cell; n: i64 }\n@packed struct Cell { x: int; y: bool }\n@packed struct Vec2f { x: f32; y: f32 }\nstruct Plain { x: int }\no = Outer { m: Mid { c: Cell { x: 1, y: true }, n: 2i64 } }\nv = Vec2f { x: 1.0f32, y: 2.0f32 }\np = Plain { x: 1 }\necho o.m.n\n";
@@ -709,7 +708,7 @@ fn compile_module(src: &str) -> Module {
     compile(&parsed.program).expect(COVERAGE_REGRESSION)
 }
 
-/// P-CALL S1 lock test: every offset [`frame_layout`] reports must locate the real `Frame` field,
+/// A layout lock test: every offset [`frame_layout`] reports must locate the real `Frame` field,
 /// and the probed `Vec`-header word indices must read back a live `Vec`'s ptr/len/cap. Because the
 /// JIT bakes these numbers into native code generated in the same build, a silent `Frame`-layout
 /// or `Vec`-header change would corrupt memory under the JIT; this test fails the build first.
@@ -755,7 +754,7 @@ fn frame_layout_locks_the_real_layout() {
     assert_eq!(idx, [0, 1, 2]);
 }
 
-/// S1 (Tier-B bitwise native): an xorshift-with-masks loop of `^ & << >>` runs fully native
+/// Bitwise native: an xorshift-with-masks loop of `^ & << >>` runs fully native
 /// under forced JIT and matches the interpreter bit-for-bit; the two bail contracts hold —
 /// a shift amount outside `0..64` aborts identically (native bails before any write, tier 0
 /// raises), and a `<<` result past the 48-bit immediate range round-trips through the
@@ -795,7 +794,7 @@ fn jit_bitwise_ops_native_with_identical_semantics() {
     assert_eq!(jit.stdout, "2\n");
 }
 
-/// S1 (Tier W native): the sign-dependent fixed-width ops run native with the interpreter's
+/// Fixed-width native: the sign-dependent fixed-width ops run native with the interpreter's
 /// exact semantics. A u32 div/wrap loop stays native (no per-iteration bails); u64 semantics
 /// on negative-erased words (unsigned div/compare/shift of `u64::MAX`, which erases to the
 /// immediate `-1`) agree with tier 0 including where the result must heap-box (the fit guard
@@ -840,7 +839,7 @@ fn jit_wide_int_ops_native_with_identical_semantics() {
     assert_eq!(jit.stdout, "-128\n");
 }
 
-/// S2 (mixed int/float + float `%` native): the canonical float-accumulator loop
+/// Mixed int/float, and float `%`, native: the canonical float-accumulator loop
 /// (`total = total + i` — f64 × int every iteration) stays native with no per-iteration
 /// bails and matches tier 0 bit-for-bit; float `%` runs through the fmod helper (including
 /// a NaN result canonicalized like every float op); mixed comparisons and equality follow
@@ -872,7 +871,7 @@ fn jit_mixed_numeric_and_float_rem_native_with_identical_semantics() {
     assert_eq!(jit.stdout.lines().nth(2), Some("true"), "1 == 1.0 widens");
 }
 
-/// The `--jit-stats` bail histogram (S0): a function whose body holds a non-native op
+/// The `--jit-stats` bail histogram: a function whose body holds a non-native op
 /// (`MakeList`, a list literal) bails there on **every call**, and the seam counts each one
 /// against that exact `(proto, pc)`. Under `force_jit` everything compiles up front, so the counts
 /// are deterministic: 10 calls → count 10 at `tag`'s `MakeList`, sorted first (the histogram is
@@ -949,7 +948,7 @@ fn jit_foundation_bails_to_identical_result_and_runs_native_stubs() {
     assert_eq!(printed.stdout, "hi\n");
 }
 
-/// J1 (integer fast path): a pure-integer `while`-loop function compiles to native code and, run
+/// The integer fast path: a pure-integer `while`-loop function compiles to native code and, run
 /// through the forced JIT, produces exactly the interpreter's result. This exercises the whole
 /// integer op set — `LoadConst`, `Binary` (`+`/`%`/`<`), `CondBranch`, `Move`, `Drop`, `Jump` —
 /// natively, with the `Return` bailing to tier 0.
@@ -957,14 +956,14 @@ fn jit_foundation_bails_to_identical_result_and_runs_native_stubs() {
 #[test]
 fn jit_integer_while_loop_is_native_and_correct() {
     // sum of (i % 7) for i in 0..n — arithmetic, remainder, comparison, and a back-edge, all in
-    // registers (no globals, no calls) → J1-eligible.
+    // registers (no globals, no calls) → JIT-eligible.
     let src = "fn run(n: int): int {\n  mut total = 0;\n  mut i = 0;\n  while i < n {\n    total = total + (i % 7);\n    i = i + 1;\n  }\n  return total;\n}\necho run(1000);\n";
     let module = compile_module(src);
 
     let interp = VmBackend::new().run_module(&module);
     let (jit, stats) = VmBackend::new().run_module_jit_with_stats(&module);
 
-    // The `run` prototype (and only it) is J1-eligible.
+    // The `run` prototype (and only it) is JIT-eligible.
     assert!(
         stats.native >= 1,
         "the while-loop fn must go native, got {stats:?}"
@@ -975,7 +974,7 @@ fn jit_integer_while_loop_is_native_and_correct() {
     assert_eq!(jit.stdout, format!("{expected}\n"));
 }
 
-/// J1 deopt: a would-be big-int result (overflowing the 48-bit immediate range) bails from native
+/// Deopt: a would-be big-int result (overflowing the 48-bit immediate range) bails from native
 /// code to the interpreter, which heap-boxes it — so the JIT and interpreter still agree.
 #[cfg(feature = "jit")]
 #[test]
@@ -992,7 +991,7 @@ fn jit_integer_overflow_bails_and_matches() {
     );
 }
 
-/// J2 (float fast path): a mixed int/float `while` loop — a float accumulator (`+`) with an
+/// The float fast path: a mixed int/float `while` loop — a float accumulator (`+`) with an
 /// integer counter (`<`, `+`) — compiles to native code (each homogeneous `Binary` takes its
 /// int or float branch) and matches the interpreter exactly.
 #[cfg(feature = "jit")]
@@ -1013,7 +1012,7 @@ fn jit_float_while_loop_is_native_and_correct() {
     assert_eq!(jit.stdout, "1500.0\n");
 }
 
-/// J2 float division, comparison, and NaN: `6.0 / 4.0` divides natively, `0.0 / 0.0` produces a
+/// Float division, comparison, and NaN: `6.0 / 4.0` divides natively, `0.0 / 0.0` produces a
 /// canonicalized NaN, and an ordered float `<` (false on NaN) drives a `CondBranch` — the paths
 /// most likely to diverge from the interpreter.
 #[cfg(feature = "jit")]
@@ -1034,8 +1033,8 @@ fn jit_float_division_and_nan_match() {
     assert_eq!(jit.stdout, "1.5\n");
 }
 
-/// J4 (heap/collections): a `for i in 0..n` loop — the idiomatic range loop, whose `MakeRange` /
-/// `IterSnapshot` / `ListLen` / `ListGet` internals now run natively (through the leaf-op helper),
+/// Heap/collections: a `for i in 0..n` loop — the idiomatic range loop, whose `MakeRange` /
+/// `IterSnapshot` / `ListLen` / `ListGet` internals run natively (through the leaf-op helper),
 /// so the whole loop body is native. Refcount-exact (the snapshot list is a heap value) and
 /// byte-identical to the interpreter.
 #[cfg(feature = "jit")]
@@ -1054,7 +1053,7 @@ fn jit_for_range_loop_is_native_and_correct() {
     assert_eq!(jit.stdout, format!("{expected}\n"));
 }
 
-/// Field access (P-JIT J4 slice 2): a hot loop that reads (`LoadField`) and writes (`SetField`,
+/// Field access: a hot loop that reads (`LoadField`) and writes (`SetField`,
 /// the struct copy-on-write / reuse path) object fields runs natively through the leaf-op helper
 /// and matches the interpreter — the store logic is the shared `set_field_fast`, so refcounts are
 /// identical across the tier boundary (the `--jit-differential` leak check gates that).
@@ -1076,7 +1075,7 @@ fn jit_field_access_loop_is_native_and_correct() {
     assert_eq!(jit.stdout, "171600\n");
 }
 
-/// Subscript indexing (P-JIT J4 slice 3): a hot loop that indexes a list (`xs[i]`), a map
+/// Subscript indexing: a hot loop that indexes a list (`xs[i]`), a map
 /// (`m[key]`), and a nested list-of-keys runs natively through the leaf-op helper's `Op::Index`
 /// arm (the non-dispatching list/map/string paths; a user `Index` impl and every error case bail)
 /// and matches the interpreter, including the borrow/retain of each looked-up element.
@@ -1095,7 +1094,7 @@ fn jit_indexing_loop_is_native_and_correct() {
     assert_eq!(jit.stdout, "960\n");
 }
 
-/// Tuple construction + projection (P-JIT J4 slice 4): a `for (i, x) in xs.enumerate()` loop —
+/// Tuple construction + projection: a `for (i, x) in xs.enumerate()` loop —
 /// `enumerate` yields `(int, T)` tuples (native `ListGet`) that the destructuring reads with
 /// `TupleIndex` — runs natively through the leaf-op helper and matches the interpreter, including
 /// the retain of each projected element.
@@ -1118,11 +1117,11 @@ fn jit_tuple_enumerate_loop_is_native_and_correct() {
     assert_eq!(jit.stdout, "200\n");
 }
 
-/// OSR (P-JIT J5): a **top-level** loop — the whole program is one `while` loop in `main`, which
+/// OSR: a **top-level** loop — the whole program is one `while` loop in `main`, which
 /// is entered exactly *once*, so entry-count promotion would never make it hot. Under ordinary
 /// hot-counter promotion (not `force_jit`), it must still go native by counting the loop's
-/// **back-edges** and entering tier 1 mid-frame at the loop header (on-stack replacement). This is
-/// the production hole J5 closes.
+/// **back-edges** and entering tier 1 mid-frame at the loop header (on-stack replacement) — the
+/// production shape entry-count promotion alone would miss.
 #[cfg(feature = "jit")]
 #[test]
 fn jit_osr_top_level_loop_goes_native() {
@@ -1145,7 +1144,7 @@ fn jit_osr_top_level_loop_goes_native() {
     assert_eq!(jit.stdout, format!("{expected}\n"));
 }
 
-/// OSR refcount-exactness (P-JIT J5): a top-level loop whose body moves **heap** values — a
+/// OSR refcount-exactness: a top-level loop whose body moves **heap** values — a
 /// top-level struct `b` read (`LoadField`) and written (`SetField`, the struct copy-on-write path)
 /// each iteration, with the global `b` loaded into a register (a heap value) every pass. It
 /// promotes and OSRs into native code mid-frame with that heap value live. Forcing `heap_aware`
@@ -1230,7 +1229,7 @@ fn jit_osr_gives_each_sequential_hot_loop_its_own_window() {
     assert_eq!(jit.stdout, format!("{a}\n{}\n", a * 2));
 }
 
-/// Native calls (P-JIT J3): recursive `fib` — the callee closure loaded via a heap-aware
+/// Native calls: recursive `fib` — the callee closure loaded via a heap-aware
 /// `LoadGlobal` (retain), the recursive `Call` handled by the shared setup on the contiguous
 /// stack, refcounts exact across the tier-0/tier-1 boundary — produces exactly the interpreter's
 /// result. The `fib` prototype (and the top-level) go native.
@@ -1253,7 +1252,7 @@ fn jit_recursive_call_is_native_and_correct() {
     assert_eq!(jit.stdout, "6765\n");
 }
 
-/// Native globals (P-JIT): a **top-level** loop with global `mut` accumulators — the natural
+/// Native globals: a **top-level** loop with global `mut` accumulators — the natural
 /// scripting shape — compiles natively (LoadGlobal/StoreGlobal inlined; first-bind via the
 /// `note_global_bound` helper; `echo` at the end bails) and matches the interpreter. This exercises
 /// per-op bail (the top-level prototype has `Echo`/`Stringify` it can't compile) plus the
@@ -1499,7 +1498,7 @@ fn cow_in_place_append_paths() {
 fn record_update_reuse_paths() {
     // VM-side record-update reuse (`acc = T { ...acc, … }`). Covers the RUNTIME-checked
     // `Op::MakeStructInPlace` paths reached via a GLOBAL accumulator (`TakeGlobal` exposes the
-    // taken-out value's uniqueness; Phase 5.1b): (1) the in-place hit — a global whose update
+    // taken-out value's uniqueness): (1) the in-place hit — a global whose update
     // overwrites a field, with a HEAP field (`tag`) whose reference must transfer untouched across
     // the reuse; (2) the copy fallback — an aliased accumulator (`snap = acc`) must keep `snap` at
     // the pre-update value (the runtime refcount > 1 forces the copy). Heap fields exercise the
@@ -1513,7 +1512,7 @@ fn record_update_reuse_paths() {
 
 #[test]
 fn map_update_reuse_paths() {
-    // VM-side in-place map update (`m[k] = v` ⟶ `m = m.set(k, v)`; Phase 5.1c). Covers the two
+    // VM-side in-place map update (`m[k] = v` ⟶ `m = m.set(k, v)`). Covers the two
     // runtime paths of a reuse-marked local map self-update: (1) the in-place hit — a uniquely-owned
     // accumulator mutated in place, including overwriting a key (its displaced HEAP value released)
     // and removing one; (2) the copy fallback — an aliased accumulator (`snap = m`) must keep `snap`
@@ -1571,7 +1570,7 @@ fn mut_field_set_reuse_paths() {
 
 #[test]
 fn class_field_set_is_reference_semantic() {
-    // VM-side in-place `mut` field assignment on a reference `class` (object-model slice 2b):
+    // VM-side in-place `mut` field assignment on a reference `class`:
     // the instance is mutated in place even when **aliased**, so a snapshot taken beforehand
     // (`snap = p`) observes the change (`snap.tag` → "changed", unlike the struct copy fallback).
     // The displaced HEAP string is released on each overwrite; run under miri (no UAF / double
@@ -1585,7 +1584,7 @@ fn class_field_set_is_reference_semantic() {
 
 #[test]
 fn reference_cycle_is_collected_at_exit() {
-    // VM-side reference-`class` cycle (object-model slice 2c): `a.next = b; b.next = a` ties a
+    // VM-side reference-`class` cycle: `a.next = b; b.next = a` ties a
     // cycle precise refcounting cannot reclaim. The exit-time backup `collect_trace(&[])` reclaims
     // both members and runs each `destruct` in reverse-creation order (newest-first). Run under
     // miri to validate the cycle's `gc_free_shallow` reclamation (no UAF / double free) and the
@@ -1605,8 +1604,7 @@ fn reference_cycle_is_collected_at_exit() {
 
 #[test]
 fn record_reassign_reuse_paths() {
-    // VM-side whole-value struct reassignment reuse (`p = P { … }`, no spread; Phase 5 general
-    // reassignment). The reuse pass injects a `...p` spread (a struct literal sets every field, so
+    // VM-side whole-value struct reassignment reuse (`p = P { … }`, no spread). The reuse pass injects a `...p` spread (a struct literal sets every field, so
     // it is value-identical), so this lowers to `MakeStructInPlace` overwriting *all* slots — the
     // in-place hit reuses `p`'s cell across the loop (its displaced HEAP field `tag` released each
     // step), while an aliased reassignment (`snap = q`) copies to preserve `snap`. Run under miri to
@@ -1638,7 +1636,7 @@ fn record_update_reuse_with_self_read() {
 
 #[test]
 fn in_place_reuse_fires_replaced_field_destructor() {
-    // Phase 5.1a: a function-local self-update of a destructor-free `Box` reuses in place, but the
+    // A function-local self-update of a destructor-free `Box` reuses in place, but the
     // *replaced* field `r` (a destructor-bearing `Res`) must run its `destruct` at the update via
     // the in-place path's `replace_slot` + `release_value`. Run under miri to validate the
     // displaced field is released exactly once (no UAF / double-free) and the carried field `n`
@@ -1753,7 +1751,7 @@ fn arity_mismatch_is_type_error() {
 
 #[test]
 fn implicit_unit_return_displays_empty() {
-    // A function with no `return` yields unit, which echoes as an empty line (M0 parity).
+    // A function with no `return` yields unit, which echoes as an empty line (tree-walker parity).
     let r = run("fn noop(x: int): void { x + 1; }\necho noop(5);\n");
     assert_eq!(r.stdout, "\n");
     assert_eq!(r.exit_code, 0);
@@ -1801,7 +1799,7 @@ fn destructors_run_at_program_end_in_reverse_declaration_order() {
 
 #[test]
 fn destructor_fires_at_a_locals_last_use_not_at_program_end() {
-    // Phase 4: a destructor-bearing function **local** runs its `destruct` at its last use —
+    // A destructor-bearing function **local** runs its `destruct` at its last use —
     // here the `r.announce()` call — before the function returns, not deferred to program end.
     // The bare `compile` path marks every drop conservatively relevant, so the local's
     // `Op::Drop` routes through `release_value` and fires the destructor.
@@ -1825,7 +1823,7 @@ fn reassigning_a_binding_destroys_the_displaced_value() {
 
 #[test]
 fn reassigning_a_local_destroys_displaced_then_survivor_at_scope_exit() {
-    // Phase 4.2a: a reassigned **local** (not a global) destroys its displaced value at the
+    // A reassigned **local** (not a global) destroys its displaced value at the
     // assignment via the `Op::Drop` the compiler emits before the overwriting `Op::Move`
     // (`set_reg`'s plain release would not fire the destructor), and its surviving value via the
     // function-body scope-exit drop. "first" closes between the two reads; "second" before return.
@@ -1841,7 +1839,7 @@ fn reassigning_a_local_destroys_displaced_then_survivor_at_scope_exit() {
 
 #[test]
 fn question_mark_propagation_destroys_abandoned_locals() {
-    // Phase 4.2c: a `?` that early-returns an `Err` destroys the frame locals it abandons before
+    // A `?` that early-returns an `Err` destroys the frame locals it abandons before
     // unwinding (the `on_error` drops the compiler attaches to `Op::TryUnwrap`). `r` is live past
     // the `?`, so `close r` fires on the error path, before the caller prints the propagated Err.
     let r = run(
@@ -1853,7 +1851,7 @@ fn question_mark_propagation_destroys_abandoned_locals() {
 
 #[test]
 fn panic_destroys_live_frame_locals_in_reverse_construction_order() {
-    // Phase 4.2c-ii: as a panic aborts, the VM's per-frame teardown fires the `destruct` of each
+    // As a panic aborts, the VM's per-frame teardown fires the `destruct` of each
     // live destructor-bearing frame local (the `frame_locals` list reversed), so `a` and `b` are
     // destroyed — `b` before `a` — before the program exits 1. They are never read, so they live
     // undropped to the panic; the panic-aware `coalesce` pinning keeps them in distinct registers.
@@ -1866,7 +1864,7 @@ fn panic_destroys_live_frame_locals_in_reverse_construction_order() {
 
 #[test]
 fn destroying_a_container_runs_its_destructor_then_its_fields_in_declared_order() {
-    // Phase 4.3 (spec §4): destroying an object runs the container's own `destruct` first (its
+    // Spec §4: destroying an object runs the container's own `destruct` first (its
     // fields still live), then releases its fields depth-first in declared order, each firing its
     // own `destruct`. `Outer`'s two destructor-bearing `Leaf` fields are built inline (so the
     // struct holds the sole reference — the construction-temp release makes refcount 1 here), and
@@ -1883,7 +1881,7 @@ fn destroying_a_container_runs_its_destructor_then_its_fields_in_declared_order(
 
 #[test]
 fn destroying_a_list_runs_its_elements_destructors_in_order() {
-    // Phase 4.3 (spec §4): a collection releases its elements in iteration order. The list has no
+    // Spec §4: a collection releases its elements in iteration order. The list has no
     // `destruct`; its contained `Leaf`s do, and fire a, b, c (index order) when the list dies. The
     // construction-temp releases make the list the sole owner, so each element is at refcount 1.
     let r = run(
@@ -1895,11 +1893,10 @@ fn destroying_a_list_runs_its_elements_destructors_in_order() {
 
 #[test]
 fn a_temp_used_only_as_a_receiver_fires_its_destructor() {
-    // Phase 4.4 (spec §2): a destructor-bearing value used only as a method receiver, or
-    // discarded as a bare statement, still fires at last use — a temp is an owner. `R.new("a")`
-    // is consumed by `.use_it()` (fires after the call); `R.new("b");` is discarded (fires at the
-    // statement). The compiler emits a destructor-aware `Op::Drop` of the receiver / discarded
-    // register where there was none before.
+    // Spec §2: a destructor-bearing value used only as a method receiver, or discarded as a bare
+    // statement, still fires at last use — a temp is an owner. `R.new("a")` is consumed by
+    // `.use_it()` (fires after the call); `R.new("b");` is discarded (fires at the statement). The
+    // compiler emits a destructor-aware `Op::Drop` of the receiver / discarded register.
     let r = run(
         "class R {\n  name: string\n  pub fn new(name: string): R { return R { name: name }; }\n  pub fn use_it(): void { echo \"use ${self.name}\"; }\n  destruct { echo \"close ${self.name}\"; }\n}\necho \"start\";\nR.new(\"a\").use_it();\nR.new(\"b\");\necho \"end\";\n",
     );
@@ -1967,7 +1964,7 @@ fn structural_update_overrides_one_field() {
 
 #[test]
 fn operator_trait_overloads_plus() {
-    // `a + b` on a class implementing `Add` dispatches to its `add` method (M1.8).
+    // `a + b` on a class implementing `Add` dispatches to its `add` method.
     let r = run(
         "class Money {\n  amount: int\n  currency: string\n  pub fn new(a: int, c: string): Money { return Money { amount: a, currency: c }; }\n  impl Add {\n    pub fn add(other: Money): Money { return Money { amount: self.amount + other.amount, currency: self.currency }; }\n  }\n}\na = Money.new(5, \"USD\");\nb = Money.new(3, \"USD\");\nt = a + b;\necho t.amount;\necho t.currency;\n",
     );
@@ -2134,7 +2131,7 @@ fn echo_dispatches_to_display_trait() {
 
 #[test]
 fn tuple_construct_project_and_equality() {
-    // Object-model slice 4: build a tuple (`MakeTuple`), project positions (`TupleIndex`,
+    // Build a tuple (`MakeTuple`), project positions (`TupleIndex`,
     // including a nested `.0.1`), and compare structurally. Mirrors the tree-walker (the
     // differential oracle guards the agreement).
     let r = run(
@@ -2146,7 +2143,7 @@ fn tuple_construct_project_and_equality() {
 
 #[test]
 fn match_tuple_patterns() {
-    // Object-model slice 4b.2: refutable tuple patterns in `match` — literal, binding, wildcard,
+    // Refutable tuple patterns in `match` — literal, binding, wildcard,
     // and nested tuple positions all compose (the `MatchTuple` test + `TupleIndex` extraction).
     let r = run(
         "fn f(p: (int, int)): string { return match p { (0, 0) => \"o\", (0, y) => \"y${y}\", (x, _) => \"x${x}\" }; }\necho f((0, 0));\necho f((0, 7));\necho f((3, 9));\necho match (1, (\"a\", true)) { (n, (s, b)) => \"${n}/${s}/${b}\" };\n",
@@ -2157,7 +2154,7 @@ fn match_tuple_patterns() {
 
 #[test]
 fn enum_method_and_impl_dispatch() {
-    // Object-model slice 3: an enum's unified body. An instance method (`label`) takes the whole
+    // An enum's unified body. An instance method (`label`) takes the whole
     // value as `self`; `echo`/`${}` route to an `impl Display { to_string }`; and `==` routes to
     // an `impl Equatable { eq }` — all through the same `(type, method)` table an object uses.
     let r = run(
@@ -2221,7 +2218,7 @@ fn opaque_use_stub_constructs_and_reads_fields() {
     let r = run(
         "use App.Models.User;\nu = User { name: \"Ada\", id: 7 };\necho u.name;\necho u.id;\necho u;\n",
     );
-    // Opaque objects display their fields in sorted-key order (M0 `BTreeMap` parity).
+    // Opaque objects display their fields in sorted-key order (tree-walker `BTreeMap` parity).
     assert_eq!(r.stdout, "Ada\n7\nUser {id: 7, name: \"Ada\"}\n");
 }
 
@@ -2398,7 +2395,7 @@ fn iterating_a_non_collection_is_a_type_error() {
 
 #[test]
 fn len_of_an_int_is_an_unknown_method() {
-    // `len` is a collection method (P1.2), so on an int it is an unknown method (E0005) — the
+    // `len` is a collection method, so on an int it is an unknown method (E0005) — the
     // same error every other unknown method raises (the old free `len(42)` was a TypeMismatch).
     // Deliberately checker-rejected: the missing method IS the subject (see the module docs).
     let r = run("echo (42).len();\n");
@@ -2520,7 +2517,7 @@ fn disassembly_of_the_object_model_is_stable() {
 
 #[test]
 fn local_self_update_lowers_to_in_place_record_reuse() {
-    // Phase 5.1a: a self-update of a destructor-free type whose accumulator is a directly-held
+    // A self-update of a destructor-free type whose accumulator is a directly-held
     // **function-local** must lower to the in-place `MakeStructInPlace` (the reuse pass marks it,
     // the compiler emits it) rather than a copying `MakeStruct` — the proof the reuse token reaches
     // the VM. (A top-level global accumulator is the `TakeGlobal` case — see
@@ -2581,7 +2578,7 @@ fn a_top_level_self_update_reuses_in_place_in_either_storage() {
 
 #[test]
 fn local_map_self_update_lowers_to_reuse_method_call() {
-    // Phase 5.1c: a function-local map accumulator updated with `m[k] = v` (desugaring to
+    // A function-local map accumulator updated with `m[k] = v` (desugaring to
     // `m = m.set(k, v)`) must carry the in-place-reuse token to the VM — `CallMethod ... [reuse]` —
     // so the dispatch mutates the uniquely-owned backing map in place rather than copying it. A
     // top-level map accumulator reuses too — off its own register, or via `TakeGlobal` when it is
@@ -2671,7 +2668,7 @@ fn disassembly_of_a_map_filter_chain_is_stable() {
 #[test]
 fn disassembly_of_local_bindings_consumes_temporaries() {
     // Each local declaration's value is a single-use temporary, so the local *adopts* the
-    // temporary's register (a consuming move, Phase 3.3b) instead of a retaining `Op::Move` into
+    // temporary's register (a consuming move) instead of a retaining `Op::Move` into
     // a fresh slot: the body holds no `Move` between the producing `Add` and the binding, and
     // `registers` stays small. A borrowed source (`y = x`, an aliased live local) still copies.
     let source = Source::new(

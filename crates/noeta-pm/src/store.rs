@@ -1,4 +1,4 @@
-//! The content-addressed **package store** (package-manager P2.3a) — fetched dependency source
+//! The content-addressed **package store** — fetched dependency source
 //! trees under `<cache>/pkg/<key>/`, each key a content hash (a git commit SHA / tree hash).
 //!
 //! It reuses [`noeta_cache`]'s resolved cache root and its security discipline (a private, per-user
@@ -78,7 +78,7 @@ impl Store {
     }
 }
 
-/// A stable content hash of a directory tree (package-manager P2.3a) — the integrity value the
+/// A stable content hash of a directory tree — the integrity value the
 /// lockfile pins and a fetch verifies. Every file under `dir` is folded in **sorted by relative
 /// path**, each as `(relative path, bytes)`, so the hash is independent of directory-walk order and
 /// of where the tree is rooted. Reuses [`KeyBuilder`]'s length-prefixed, domain-separated hashing.

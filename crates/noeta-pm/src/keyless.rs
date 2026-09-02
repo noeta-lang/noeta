@@ -1,4 +1,4 @@
-//! **Keyless provenance** (package-manager Phase 5): Sigstore bundles in place of registered keys.
+//! **Keyless provenance**: Sigstore bundles in place of registered keys.
 //!
 //! The [`crate::provenance::Attestation`] shape — the signed "version → commit" binding — is
 //! unchanged; what changes is the trust root. Instead of "signed by the scope's registered Ed25519
@@ -75,8 +75,7 @@ pub fn publish_statement(attestation: &Attestation<'_>, coords: &GitCoords) -> S
     .to_string()
 }
 
-/// The in-toto predicate type naming a Noeta **advisory** attestation (advisory-intake arc, publisher
-/// tier) — the keyless counterpart of a publish attestation, so a monitor can recognize an
+/// The in-toto predicate type naming a Noeta **advisory** attestation — the keyless counterpart of a publish attestation, so a monitor can recognize an
 /// owner-issued advisory in the public transparency log.
 pub const ADVISORY_PREDICATE_TYPE: &str = "https://noeta.dev/attestation/advisory/v1";
 
@@ -238,7 +237,7 @@ fn is_unprovisioned(err: &ambient_id::Error) -> bool {
     )
 }
 
-/// Acquire an OIDC identity **interactively** (K6): the OAuth 2.0 authorization-code flow with
+/// Acquire an OIDC identity **interactively**: the OAuth 2.0 authorization-code flow with
 /// PKCE against Sigstore's public OAuth frontend (`oauth2.sigstore.dev` — Dex fronting
 /// GitHub/Google/Microsoft logins; the certified identity is the **email**). Opens the browser
 /// and waits on a local redirect server; a headless environment (or `force_oob`) falls back to
@@ -472,7 +471,7 @@ mod tests {
         );
     }
 
-    /// Parse the real bundle, apply one structural mutation, re-serialize. Each K2 tamper test
+    /// Parse the real bundle, apply one structural mutation, re-serialize. Each tamper test
     /// corrupts exactly one verification property, so a pass proves that property is *actually
     /// checked* (a verifier that skipped it would accept the mutant).
     fn mutated(mutate: impl FnOnce(&mut serde_json::Value)) -> String {

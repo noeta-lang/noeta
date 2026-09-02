@@ -92,7 +92,7 @@ fn check_shared_erroring_module_is_reported_once() {
 
 #[test]
 fn bare_relative_entry_still_links_siblings() {
-    // Regression (multi-file impact arc): an entry given as a bare relative filename
+    // Regression: an entry given as a bare relative filename
     // (`noeta check main.noe` run FROM the project directory) has parent `""`, and
     // `read_dir("")` errors — the sibling scan silently came up empty and the import failed
     // E0019 while the byte-equivalent `./main.noe` linked fine.

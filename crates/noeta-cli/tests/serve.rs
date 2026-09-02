@@ -1,4 +1,4 @@
-//! `noeta serve` integration test (http-server S4): spawn the CLI serving a real handler, drive a
+//! `noeta serve` integration test: spawn the CLI serving a real handler, drive a
 //! real HTTP request over a loopback socket, and assert the routed response.
 //!
 //! `#[ignore]`d because it binds a real port and spawns a process — a plain `cargo test` should not

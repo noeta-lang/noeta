@@ -60,7 +60,7 @@ fn immediates_round_trip() {
 
 #[test]
 fn tuple_display_type_name_and_projection() {
-    // Object-model slice 4: a heap tuple renders parenthesized with `repr` elements, names its
+    // A heap tuple renders parenthesized with `repr` elements, names its
     // type, and projects by position. Freed at the end so miri sees no leak (it owns one
     // reference per element).
     let t = Value::tuple(vec![Value::int(1), Value::string("two"), Value::float(3.0)]);
@@ -182,7 +182,7 @@ fn packed_push_streams_in_place_and_frees() {
 
 #[test]
 fn packed_column_layout_round_trips_and_frees() {
-    // P-SIMD C2: a `@packed(Layout.Column)` list stores each field contiguously across elements
+    // A `@packed(Layout.Column)` list stores each field contiguously across elements
     // (`[x×n][y×n]`) yet observes identically to a row list. Build it by streaming push (exercising
     // `column_append`'s O(n) rebuild), then check get / field / select / set / concat all read the
     // right values through the column offset math — and free clean under miri. Mixed field widths
@@ -504,7 +504,7 @@ fn promote_passes_immediates_through() {
 
 #[test]
 fn promote_with_memo_dedups_across_calls() {
-    // P-PAR S2: the spawn path keeps one memo across every `isolate f(corpus)` in flight, so
+    // The spawn path keeps one memo across every `isolate f(corpus)` in flight, so
     // fanning one corpus to N workers promotes once — the second call returns the same
     // promoted root and the region grows by nothing.
     let base = live_count();
@@ -527,7 +527,7 @@ fn promote_with_memo_dedups_across_calls() {
 
 #[test]
 fn shared_values_are_never_uniquely_owned() {
-    // P-PAR S2 (the COW gate): a shared object's refcount is frozen at 1, so the in-place
+    // The COW gate: a shared object's refcount is frozen at 1, so the in-place
     // mutation fast paths must consult `is_uniquely_owned`, which excludes it — a worker
     // "mutating" a borrowed corpus copies instead of touching the shared buffer.
     let base = live_count();
@@ -551,7 +551,7 @@ fn shared_values_are_never_uniquely_owned() {
 
 #[test]
 fn promotable_graph_accepts_data_and_rejects_functions() {
-    // P-PAR S2: promotability = Send *data* kinds. A closure is Wire-shippable but has no
+    // Promotability = Send *data* kinds. A closure is Wire-shippable but has no
     // promoted form, so a graph containing one falls back to the copy path.
     let list = Value::list(vec![Value::int(1), Value::string("x")]);
     assert!(list.is_promotable_graph());
@@ -567,7 +567,7 @@ fn promotable_graph_accepts_data_and_rejects_functions() {
 
 #[test]
 fn f32_is_immediate_and_round_trips() {
-    // P-PACK Phase 3: an `f32` is an *immediate* NaN-boxed value — no heap allocation, not
+    // An `f32` is an *immediate* NaN-boxed value — no heap allocation, not
     // refcounted (like an immediate int/float). Round-trips through `as_f32`, names itself `f32`,
     // and is distinguishable from every other immediate.
     let v = Value::f32(1.5);
@@ -1054,7 +1054,7 @@ fn objects_display_in_slot_order_and_free_their_slots() {
     // Same shape handle (the `Rc`) is shared, not copied per-instance.
     let obj2 = Value::object(shape, vec![Value::float(2.5), Value::int(4)]);
     assert!(std::ptr::eq(obj.shape().unwrap(), obj2.shape().unwrap()));
-    // Structural equality (M0 parity): same type + equal fields.
+    // Structural equality (tree-walker parity): same type + equal fields.
     assert!(
         apply_binary(noeta_ast::BinaryOp::Eq, obj, obj2)
             .unwrap()
@@ -1138,7 +1138,7 @@ fn live_count_tracks_alloc_and_free() {
 
 #[test]
 fn reflect_tag_is_invisible_to_value_semantics_and_leaks_nothing() {
-    // The R1 reflected-type tag lives beside the payload: it round-trips through construction and
+    // The reflected-type tag lives beside the payload: it round-trips through construction and
     // free with no residual (a leaf `Rc<TypeRepr>`, not a child object, so `live_count` is
     // unchanged by tagging), and it is invisible to equality — a tagged and an untagged list of
     // the same elements compare equal.
