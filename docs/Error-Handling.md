@@ -200,7 +200,7 @@ The fix is whichever of these fits the caller you have in mind:
 - **Declare the return.** `?T` for the absence, `Result<T, E>` for the failure — and if the propagated `Err` type differs from `E`, [convert it through `From`](#converting-errors-at---impl-fromsource).
 - **Handle it here.** `match` the `Option`/`Result` and answer with a value of your own, or supply a fallback with [`??`](#--coalesce).
 
-A return type that **defers** — `dyn`, an unannotated closure, or top-level code, which declares no return at all — accepts `?` without a diagnostic, as everywhere in the gradual checker. The judgement then lands at runtime instead of being discarded:
+A return type that **defers** — `dyn`, an unannotated closure, or top-level code, which declares no return at all — accepts `?` without a diagnostic, as everywhere in the gradual checker. The judgment then lands at runtime instead of being discarded:
 
 - An `Err` that propagates all the way **out of the top level** aborts the program with the error's `message()` and a **non-zero exit** (**E0069**). Output produced before it is kept and nothing after it runs, exactly as [`panic`](#panic-and-assert) behaves. So a top-level `?` is a legitimate shape for a script's entry point — "do the work, and let a failure stop the program loudly" — and a broken run can never be mistaken for a clean one.
 - A `none` reaching the top is not a failure and ends the program normally.

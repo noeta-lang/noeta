@@ -11,7 +11,7 @@
 //!
 //! This is a **lint over high-precision patterns, not a proof**. It catches the phrasings that
 //! have actually appeared here; a page written as a changelog in other words will pass. See the
-//! "Writing docs" section of `AGENTS.md` for the rule this enforces — the judgement half is the
+//! "Writing docs" section of `AGENTS.md` for the rule this enforces — the judgment half is the
 //! author's.
 //!
 //! Every pattern below is verified clean against the tree as it stands. If one starts firing on a
@@ -47,6 +47,7 @@ const RULES: &[Rule] = &[
             "the old behaviour",
             "no longer names",
             "has since been",
+            "the default since",
         ],
         why: "history — the reader never saw the old behavior; state the current rule",
         exempt: &[],
@@ -71,7 +72,229 @@ const RULES: &[Rule] = &[
         // The contributor guide is where pointing at the roadmap belongs.
         exempt: &["Contributing"],
     },
+    Rule {
+        needles: &[
+            "phase 1", "phase 2", "phase 3", "phase 4", "phase 5", "phase 6", "phase 7", "phase 8",
+            "phase 9",
+        ],
+        why: "internal milestone vocabulary — the reader has no phase ledger",
+        exempt: &[],
+    },
+    Rule {
+        // American English, everywhere. `analyse` is left out on purpose: it is a prefix of
+        // `analyses`, the ordinary American plural of `analysis`, which the tree uses.
+        needles: &[
+            "colour",
+            "behaviour",
+            "serialise",
+            "serialised",
+            "serialisation",
+            "neighbour",
+            "finalise",
+            "finalised",
+            "initialise",
+            "initialised",
+            "organise",
+            "organised",
+            "judgement",
+            "centre",
+            "catalogue",
+            "favour",
+            "honour",
+            "defence",
+            "licence",
+        ],
+        why: "British spelling — this project writes American English",
+        exempt: &[],
+    },
 ];
+
+/// A pattern with no fixed spelling: a milestone code, or a project label in trailing position.
+/// These are the shapes a substring list cannot hold, since the *next* arc is named something
+/// nobody has typed yet.
+struct Shape {
+    /// Reads the line as written (case matters here), returning the offending fragment.
+    find: fn(&str) -> Option<String>,
+    why: &'static str,
+}
+
+const SHAPES: &[Shape] = &[
+    Shape {
+        find: milestone_code,
+        why: "internal milestone code — `P2.4`, `Phase 4`, `M3` and `C2/C5` name a ledger the \
+              reader has never seen",
+    },
+    Shape {
+        find: internal_label,
+        why: "internal project label — an arc/slice/residual name means nothing outside this repo",
+    },
+];
+
+/// A milestone code **in label position**: `(package-manager P2.4)`, `(… startup cache, M3)`,
+/// `(package-manager Phase 3, N3.0)`, `the pre-C2 behavior`, `session-checker C2/C5`.
+///
+/// The token shape alone is far too common to ban, because a type name reads the same way:
+/// `Type.F32`, `struct V3`, a `V8/JSC`-style hidden class, and the **F5** key are all one or two
+/// capitals over one or two digits. So the shape is only half the test, and position is the other
+/// half. A code counts when it **closes a parenthetical** (`… P2.4)`), which is where a ledger
+/// reference is written, or when a **hyphenated project name** introduces it (`session-checker
+/// C2/C5`, `pre-C2`). Everything above passes: none of them sits in either place.
+///
+/// Three bounds keep the shape itself honest. Two capitals at most clears `SHA256SUMS` and `UTF8`;
+/// two digits and no third clears `Ed25519` and every `E0xxx` diagnostic code this project prints;
+/// no letter or `_` after the digits clears `E2E`, `P2P` and `F32_TAG`. A `.`, `:` or backtick in
+/// front means a qualified name (`Type.F32`, `ScalarVec::F32`), not a code.
+fn milestone_code(line: &str) -> Option<String> {
+    let b = line.as_bytes();
+    for start in 0..b.len() {
+        // Token boundary: a code is never the tail of a longer word, and never the tail of a
+        // qualified name (`Type.F32`) or an inline code span.
+        if start > 0 && matches!(b[start - 1], b'.' | b':' | b'`' | b'_') {
+            continue;
+        }
+        if start > 0 && b[start - 1].is_ascii_alphanumeric() {
+            continue;
+        }
+        let mut i = start;
+        while i < b.len() && b[i].is_ascii_uppercase() && i - start < 2 {
+            i += 1;
+        }
+        let letters = i - start;
+        if letters == 0 || (i < b.len() && b[i].is_ascii_uppercase()) {
+            continue; // no capitals, or a third one (`SHA256`)
+        }
+        let digits_at = i;
+        while i < b.len() && b[i].is_ascii_digit() && i - digits_at < 2 {
+            i += 1;
+        }
+        if i == digits_at {
+            continue; // capitals with no digits: an ordinary acronym
+        }
+        // `Ed25519` has a third digit; `E0059` has two more.
+        if i < b.len() && b[i].is_ascii_digit() {
+            continue;
+        }
+        let mut end = i;
+        // `N3.0` — a dotted tail, but only when a digit follows the dot (a sentence period does
+        // not extend the code).
+        if end + 1 < b.len() && b[end] == b'.' && b[end + 1].is_ascii_digit() {
+            end += 2;
+            while end < b.len() && b[end].is_ascii_digit() {
+                end += 1;
+            }
+        }
+        // `E2E`, `P2P`, `F32_TAG`: a letter or `_` after the digits means this was never a code.
+        if end < b.len() && (b[end].is_ascii_alphabetic() || b[end] == b'_') {
+            continue;
+        }
+        if in_label_position(line, start, end) {
+            return Some(line[start..end].to_string());
+        }
+    }
+    None
+}
+
+/// Where a ledger reference is written, and a type name is not: closing a parenthetical
+/// (`(package-manager P2.4)`, and `C2/C5)` for a pair), or introduced by a hyphenated lowercase
+/// project name (`session-checker C2/C5`, `pre-C2`).
+fn in_label_position(line: &str, start: usize, end: usize) -> bool {
+    let b = line.as_bytes();
+    // `… P2.4)` — the code closes a group this line opened.
+    let mut after = end;
+    // A slash-joined pair closes as one label: `C2/C5)`.
+    if after < b.len() && b[after] == b'/' {
+        while after < b.len() && (b[after].is_ascii_alphanumeric() || b[after] == b'/') {
+            after += 1;
+        }
+    }
+    if after < b.len() && b[after] == b')' && line[..start].contains('(') {
+        return true;
+    }
+    // `pre-C2` — a lowercase word hyphenated straight onto the code.
+    if start >= 2 && b[start - 1] == b'-' && b[start - 2].is_ascii_lowercase() {
+        return true;
+    }
+    // `session-checker C2/C5` — a hyphenated project name introduces it.
+    line[..start]
+        .strip_suffix(' ')
+        .map(|before| before.rsplit([' ', '(']).next().unwrap_or(""))
+        .is_some_and(is_hyphenated_name)
+}
+
+/// An internal project label: a hyphenated lowercase name followed by the word that makes it a
+/// ledger entry. `text-tiers arc`, `advisory-intake residual a`, `object-model slice 6`,
+/// `namespace-protection #1`, and the `, tier 6)` that trails one.
+///
+/// Two things keep this precise, because `arc`, `slice` and `tier` are ordinary words and `tier`
+/// is a user-facing concept here (`--tier debug`, a tier-1 JIT frame). The name in front must be
+/// hyphenated, which "the arc of the animation" is not; and the label must sit in **label
+/// position**, closing its parenthetical or naming an entry after it. So `a zero-copy slice of
+/// the buffer` passes and `object-model slice 6` does not.
+fn internal_label(line: &str) -> Option<String> {
+    let lower = line.to_lowercase();
+    for label in ["arc", "residual", "slice", "milestone"] {
+        for (at, _) in lower.match_indices(label) {
+            let after = &lower[at + label.len()..];
+            // Label position: the end of a parenthetical, or an entry designator (`slice 6`,
+            // `residual a`) — never an ordinary noun with a sentence after it.
+            let labelled = after.is_empty()
+                || after.starts_with([')', ',', ';'])
+                || after
+                    .strip_prefix(' ')
+                    .and_then(|r| r.chars().next())
+                    .is_some_and(|c| c.is_ascii_digit())
+                || after.strip_prefix(' ').is_some_and(|r| {
+                    // A one-letter designator and nothing more: `residual a)`, not `slice of`.
+                    r.starts_with(|c: char| c.is_ascii_alphabetic())
+                        && r.chars().nth(1).is_none_or(|c| !c.is_ascii_alphanumeric())
+                })
+                || after.starts_with(|c: char| c.is_ascii_digit());
+            if !labelled {
+                continue;
+            }
+            let Some(before) = lower[..at].strip_suffix(' ') else {
+                continue;
+            };
+            let name: &str = before.rsplit([' ', '(']).next().unwrap_or("");
+            if is_hyphenated_name(name) {
+                return Some(format!("{name} {label}"));
+            }
+        }
+    }
+    // `(namespace-protection #1)` — the same label, numbered instead of named.
+    for (at, _) in lower.match_indices(" #") {
+        let digit = lower[at + 2..].chars().next();
+        if !digit.is_some_and(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        let name: &str = lower[..at].rsplit([' ', '(']).next().unwrap_or("");
+        if is_hyphenated_name(name) {
+            return Some(format!("{name} #"));
+        }
+    }
+    // `(… arc, tier 6)` — a trailing tier label. A parenthetical that closes right after
+    // `tier <digit>` is a ledger reference; prose about a tier does not read that way.
+    for (at, _) in lower.match_indices("tier ") {
+        let rest = &lower[at + 5..];
+        let mut chars = rest.chars();
+        if chars.next().is_some_and(|c| c.is_ascii_digit()) && chars.next() == Some(')') {
+            return Some(format!("tier {})", &rest[..1]));
+        }
+    }
+    None
+}
+
+/// `advisory-intake`, `text-tiers` — a lowercase name with an interior hyphen, and nothing else.
+fn is_hyphenated_name(word: &str) -> bool {
+    let word = word.trim_start_matches(['(', '`', '*']);
+    let Some((head, tail)) = word.split_once('-') else {
+        return false;
+    };
+    !head.is_empty()
+        && !tail.is_empty()
+        && head.chars().all(|c| c.is_ascii_lowercase())
+        && tail.chars().all(|c| c.is_ascii_lowercase() || c == '-')
+}
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -94,7 +317,73 @@ fn scan(label: &str, stem: &str, text: &str, out: &mut Vec<String>) {
                 ));
             }
         }
+        for shape in SHAPES {
+            if let Some(hit) = (shape.find)(line) {
+                out.push(format!(
+                    "{label}:{}: `{hit}` — {}\n    {}",
+                    i + 1,
+                    shape.why,
+                    line.trim()
+                ));
+            }
+        }
     }
+}
+
+/// The `///` lines of a source file: what clap prints for a `Command` variant or an `#[arg]`
+/// field. A `//!` module header and a `//` comment are not printed, and are not scanned.
+fn doc_comments(text: &str) -> String {
+    text.lines()
+        .filter(|l| l.trim_start().starts_with("///"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The help strings a *builder* supplies, which no `///` scan can see: `.help("…")` and
+/// `.about("…")` on a `clap::Arg`/`Command`, and the `help:`/`about:` fields of an `ExtCommand`
+/// an extension contributes. Both reach `--help` exactly like a doc comment, and the global
+/// `--color` flag is built this way.
+///
+/// Multi-line literals are read to their closing quote, so a help string wrapped with a trailing
+/// `\` is scanned whole rather than by its first line.
+fn help_literals(text: &str) -> String {
+    const OPENERS: [&str; 5] = [".help(", ".about(", ".long_about(", "help: ", "about: "];
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut at = 0;
+    while at < text.len() {
+        let Some(start) = OPENERS
+            .iter()
+            .filter_map(|o| text[at..].find(o).map(|i| at + i + o.len()))
+            .min()
+        else {
+            break;
+        };
+        // The literal's opening quote. Only whitespace may precede it, so a `help: CONSTANT`
+        // (or a `.about(` whose argument is a call) is skipped rather than swallowing the file
+        // up to some unrelated quote.
+        let Some(open) = bytes[start..]
+            .iter()
+            .position(|c| !matches!(c, b' ' | b'\n' | b'\r' | b'\t'))
+            .map(|i| start + i)
+            .filter(|i| bytes[*i] == b'"')
+        else {
+            at = start;
+            continue;
+        };
+        let mut i = open + 1;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'\\' => i += 2,
+                b'"' => break,
+                _ => i += 1,
+            }
+        }
+        let end = i.min(bytes.len());
+        out.push(text[open + 1..end].to_string());
+        at = end + 1;
+    }
+    out.join("\n")
 }
 
 #[test]
@@ -130,21 +419,52 @@ fn the_wiki_describes_the_present() {
 
 /// The same rules over the CLI's **user-facing** help. A `///` on a clap `Command` variant or an
 /// `#[arg]` field is printed by `noeta <cmd> --help`; a `//!` module header or a `//` comment is
-/// not, so only the doc comments are scanned.
+/// not, so only the doc comments are scanned. The builder-supplied strings are scanned beside
+/// them: the global `--color`, `--watch` and `--stdio` flags carry their help in a `.help("…")`
+/// call, and a doc-comment-only scan reads none of it.
 #[test]
 fn user_facing_help_carries_no_internal_vocabulary() {
     let src = repo_root().join("crates/noeta-cli/src/lib.rs");
     let text = std::fs::read_to_string(&src).expect("the CLI surface is readable");
-    let help: String = text
-        .lines()
-        .filter(|l| l.trim_start().starts_with("///"))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let literals = help_literals(&text);
+    assert!(
+        literals.contains("When to color diagnostics"),
+        "the global flags' builder help moved — this scan is reading the wrong strings"
+    );
+    let help = format!("{}\n{literals}", doc_comments(&text));
     let mut violations = Vec::new();
     scan("crates/noeta-cli/src/lib.rs", "lib", &help, &mut violations);
     assert!(
         violations.is_empty(),
         "`noeta --help` is read by users, not maintainers \
+         (AGENTS.md → Writing docs):\n\n{}\n",
+        violations.join("\n")
+    );
+}
+
+/// The commands an **extension** contributes print help too, and theirs is data rather than doc
+/// comments: an `ExtCommand`'s `about` and each `ArgSpec`'s `help`, which `noeta test --help`,
+/// `noeta bench --help`, `noeta doc --help` and `noeta serve --help` render. Same rule, same
+/// reader, different storage.
+#[test]
+fn contributed_command_help_carries_no_internal_vocabulary() {
+    let sources = [
+        "crates/noeta-cli/src/tier_runner.rs",
+        "crates/noeta-stdlib/src/serve.rs",
+    ];
+    let mut violations = Vec::new();
+    for src in sources {
+        let text = std::fs::read_to_string(repo_root().join(src)).expect("the source is readable");
+        let literals = help_literals(&text);
+        assert!(
+            !literals.is_empty(),
+            "{src} declares no help strings — this scan is reading the wrong file"
+        );
+        scan(src, "ext", &literals, &mut violations);
+    }
+    assert!(
+        violations.is_empty(),
+        "a contributed command's `--help` is read by users, not maintainers \
          (AGENTS.md → Writing docs):\n\n{}\n",
         violations.join("\n")
     );
@@ -197,6 +517,20 @@ fn the_gate_catches_what_actually_shipped() {
         "Compile a program to a self-contained bundle (P-AOT L1).",
         "compile in `@debug` blocks (object-model slice 6)",
         "the design is in `plans/interruptible-host-io.md`",
+        // Every one of these shipped in `noeta --help`.
+        "Add a dependency to the nearest `noeta.toml` (package-manager P2.4).",
+        "Publish this package to the registry index (package-manager P2.5).",
+        "Report the dependency tree's trust footprint (package-manager Phase 4)",
+        "Claim a registry scope (namespace-protection #1). Self-service.",
+        "Issue, file, or monitor security advisories (advisory-intake arc).",
+        "List the reports queued for triage (advisory-intake residual a).",
+        "Monitor the transparency log (advisory-intake arc, tier 6): verify",
+        "Generate editor grammar artifacts for declared text tiers (text-tiers arc).",
+        "cached compilations (`*.noeb` — the transparent startup cache, M3)",
+        "Entries type-check before running — the default since session-checker C2/C5.",
+        "Skip per-entry type checking (the pre-C2 behavior: every entry runs)",
+        "When to colour diagnostics: auto, always, or never",
+        "the declared-tier dispatch keeps its behaviour byte for byte",
     ];
     for case in cases {
         let mut violations = Vec::new();
@@ -212,6 +546,34 @@ fn the_gate_catches_what_actually_shipped() {
         "no previously-seen advisory has disappeared",
         "an in-development package not yet cut into releases",
         "One test that never returns can no longer swallow the whole run.",
+        // The shapes above are token-tight on purpose. Each of these is real text from this
+        // tree or its user-facing help, and each one sits a character away from a rule.
+        "Manage the Ed25519 signing key used to attest published packages.",
+        "verify the `.vsix` against the release's SHA256SUMS",
+        "Explain a diagnostic code: `noeta explain E0059` (`e0059` works too).",
+        "the p2p transport dials over QUIC",
+        "an E2E run of the browser smoke test",
+        "encoded as UTF8 and hashed with SHA256",
+        "Install this exact release tag (e.g. `v0.2.0`) instead of the latest.",
+        "Arm the tier-1 JIT while sampling (default: tier-0 pinned).",
+        "Activate a dev-tier for this run, e.g. `--tier debug`, repeatable.",
+        "a tier 1 frame is labeled in the flamegraph",
+        "the two analyses ask about the same property from opposite sides",
+        "a zero-copy slice of the backing buffer",
+        "the arc of the animation is interpolated",
+        // Lines that live in `docs/` today, each one a capital-over-digit token that is a type
+        // name, a key or a product, and none of them in label position.
+        "open a `.noe` file and press **F5** — the active file launches under the debugger",
+        "the run profiles the extension picks up (F5 debugging over `noeta dap`)",
+        "@packed struct V3 { x: f32  y: f32  z: f32 }",
+        "ys = from_bytes::<V3>(blob)             // -> List<V3>",
+        "echo vec.add_all(ps, ps)                // a column V3 list",
+        "the scalars `Type.Int`, `Type.Float`, `Type.F32`, `Type.F64`",
+        "// xs: Type.List(Type.F32) optional=false",
+        "f32        : QNAN | F32_TAG | bits32                   (immediate packed f32)",
+        "each aggregate points to a **shape** (a V8/JSC-style hidden class)",
+        "This is the standard `-O0`-style trade: identical semantics, full observability.",
+        "a reduction returns `NativeOut::Scalars(ScalarVec::F32(…))`",
     ] {
         let mut violations = Vec::new();
         scan("case", "Some-Page", ok, &mut violations);
