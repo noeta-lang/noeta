@@ -1,6 +1,6 @@
 # Control Flow & Pattern Matching
 
-Conditionals, loops, and `match` — including the expression forms and flow-narrowing.
+Conditionals, loops, and `match`, including the expression forms and flow-narrowing.
 
 ## `if` / `else`
 
@@ -18,7 +18,7 @@ if n == 0 {
 ```
 
 > [!NOTE]
-> The `{` after `if`/`while`/`for` is always the block, so a **bare struct literal cannot** lead a condition — parenthesize it: `if (Cfg { debug: true }).debug { … }`.
+> The `{` after `if`/`while`/`for` is always the block, so a **bare struct literal cannot** lead a condition. Parenthesize it: `if (Cfg { debug: true }).debug { … }`.
 
 ## `if … then … else` — the conditional expression
 
@@ -67,7 +67,9 @@ for (i, x) in ["a", "b"].enumerate() {   // enumerate yields (index, value) tupl
 
 Iterating a map yields its values; iterating a set yields elements in sorted order.
 
-A user type iterates through the `Iterable` protocol — `iter()` returning a list — or as a **`next`-driven iterator**: an object exposing a callable `next` member (a method, or a closure-valued field) is driven `next()` → `some(x)`/`none` until exhausted (`some`/`none` and the optional type `?int` are covered in [Error Handling](Error-Handling)). `iter()` may itself return such a handle. User iteration is eager: the elements are materialized up front. Lazy, on-demand streaming belongs to the built-in `Iterator<T>` (`xs.iter()`).
+A user type iterates two ways. Through the `Iterable` protocol, `iter()` returns a list. Or as a **`next`-driven iterator**, where an object exposing a callable `next` member, a method or a closure-valued field, is driven `next()` → `some(x)`/`none` until exhausted. `iter()` may itself return such a handle. [Error Handling](Error-Handling) covers `some`/`none` and the optional type `?int`.
+
+User iteration is eager, so the elements are materialized up front. Lazy, on-demand streaming belongs to the built-in `Iterator<T>` reached through `xs.iter()`.
 
 ```noeta
 struct Gen {
@@ -98,7 +100,7 @@ for n in 0..100 {
 
 ## `match`
 
-`match scrut { pat => expr, … }` is an **expression**, and it is checked for **exhaustiveness** — a missing case with no `_` is E0011.
+`match scrut { pat => expr, … }` is an **expression**, and it is checked for **exhaustiveness**. A missing case with no `_` is E0011.
 
 ```noeta check
 enum Status { Pending; Paid; Refunded }
@@ -150,7 +152,7 @@ echo match parse_age("42") {
 
 ### A bare identifier is a variant when the scrutinee's enum has one
 
-A bare identifier in a pattern is read against the **scrutinee's own type**. If that type is an enum with a **payload-free variant of that name**, the pattern *is* that variant: it binds nothing, it matches only that case, and it counts toward exhaustiveness. Otherwise it is a **binding** — it names the whole value and matches everything.
+A bare identifier in a pattern is read against the **scrutinee's own type**. If that type is an enum with a **payload-free variant of that name**, the pattern *is* that variant: it binds nothing, it matches only that case, and it counts toward exhaustiveness. Otherwise it is a **binding**, naming the whole value and matching everything.
 
 ```noeta
 enum Kind { Text; Number }
@@ -164,19 +166,19 @@ fn describe(k: Kind): string {
 echo describe(Kind.Number)            // number
 ```
 
-The qualified spelling `Kind.Text` still works and means exactly the same thing; reach for it when the short name would be ambiguous *to a reader*. A payload-carrying variant is call-shaped (`Type.List(inner)`, `some(x)`, `Ok(v)`) and was never ambiguous either way.
+The qualified spelling `Kind.Text` means exactly the same thing. Reach for it when the short name would be ambiguous *to a reader*. A payload-carrying variant is call-shaped, as in `Type.List(inner)`, `some(x)` or `Ok(v)`, and reads unambiguously either way.
 
 Resolution is **scrutinee-directed**, which is the whole of the rule:
 
-- a name that is a payload-free variant of some *other* enum is not this scrutinee's case — it stays a binding;
+- a name that is a payload-free variant of some *other* enum is not this scrutinee's case, so it stays a binding;
 - when the scrutinee's type is `dyn`, gradual, or otherwise not a known enum, there is nothing to resolve against and every bare name is a binding;
-- a nested pattern resolves against the **field's** type, not the outer scrutinee's — in `Ok(none)` the inner `none` is read against the `Ok` payload's type;
+- a nested pattern resolves against the **field's** type rather than the outer scrutinee's, so in `Ok(none)` the inner `none` is read against the `Ok` payload's type;
 - a guard changes nothing;
 - `for` loops, `let`-destructuring and other binder positions are not match arms and are unaffected.
 
-`none` follows the same rule against the built-in `Option`, so it is the none *case* rather than a catch-all — which is why `match o { none => …, some(v) => … }` means what it reads as.
+`none` follows the same rule against the built-in `Option`, so it is the none *case* rather than a catch-all, which is why `match o { none => …, some(v) => … }` means what it reads as.
 
-The cost of the rule: a catch-all cannot be *named* after a case of the scrutinee's enum. Writing
+The rule costs one thing: a catch-all cannot be *named* after a case of the scrutinee's enum. Writing
 
 ```noeta error
 fn describe(k: Kind): string {
@@ -187,11 +189,11 @@ fn describe(k: Kind): string {
 }
 ```
 
-gives you two case arms, not a case and a catch-all — and if you meant to bind, rename it (`rest`, `other`, `k2`). A name that reads as a variant *is* that variant, so a reader never has to guess which one an arm meant.
+gives you two case arms. If you meant to bind, rename it to `rest`, `other`, or `k2`. A name that reads as a variant *is* that variant, so a reader never has to guess which one an arm meant.
 
 ### Arm order — an arm after a catch-all is dead (E0066)
 
-An unguarded `_`, or an unguarded bare identifier that is genuinely a binding, matches every value — so any arm written after it can never run. That is **E0066**, an error: the arm is dead code no author intends, and (unlike an always-false type test) nothing in the source shows it. Put the catch-all last.
+An unguarded `_`, or an unguarded bare identifier that is genuinely a binding, matches every value, so any arm written after it can never run. That is **E0066**, an error, because the arm is dead code no author intends and nothing in the source shows it. Put the catch-all last.
 
 ```noeta error
 fn rank(n: int): string {
@@ -203,11 +205,11 @@ fn rank(n: int): string {
 echo rank(1)
 ```
 
-A **guarded** arm (`pattern if cond`) is not a catch-all — the checker cannot prove a guard ever true — so arms after it stay reachable. Neither is a bare identifier that [resolved to a variant](#a-bare-identifier-is-a-variant-when-the-scrutinees-enum-has-one): it emits a real test, so the arms below it stay live. Only a `_`, or a bare name that is genuinely a binding, closes a `match`.
+Two arm shapes stay clear of the rule. A **guarded** arm (`pattern if cond`) is no catch-all, the checker being unable to prove a guard ever true, so arms after it stay reachable. A bare identifier that [resolved to a variant](#a-bare-identifier-is-a-variant-when-the-scrutinees-enum-has-one) emits a real test, so the arms below it stay live too. Only a `_`, or a bare name that is genuinely a binding, closes a `match`.
 
 ### Guards
 
-An arm may carry a **guard**: `pattern if cond => body`. The guard is a plain `bool` expression, evaluated only after the pattern structurally matches — with the pattern's bindings in scope. A `false` guard **falls through to the next arm**, exactly as a failed pattern would:
+An arm may carry a **guard**, `pattern if cond => body`. The guard is a plain `bool` expression, evaluated only after the pattern structurally matches, with the pattern's bindings in scope. A `false` guard **falls through to the next arm**, exactly as a failed pattern would:
 
 ```noeta
 fn check(n: int): Result<int, string> {
@@ -231,7 +233,7 @@ echo label(15)                 // teen
 echo label(4)                  // child
 ```
 
-Guards narrow nothing — narrowing stays purely pattern-driven — but they compose with `is` arms, where the guard already sees the scrutinee narrowed to the arm's type:
+Guards narrow nothing, narrowing staying purely pattern-driven, and they compose with `is` arms, where the guard already sees the scrutinee narrowed to the arm's type:
 
 ```noeta
 fn describe(x: int | string): string {
@@ -246,7 +248,7 @@ echo describe(12)              // big int 12
 echo describe(3)               // int 3
 ```
 
-A guarded arm contributes **nothing to exhaustiveness**: the checker cannot prove a guard ever true, so the arm's case stays uncovered for when the guard is false. A `match` whose only `Ok` arm is guarded is non-exhaustive (E0011) — add an unguarded arm for the case (or a `_` catch-all):
+A guarded arm contributes **nothing to exhaustiveness**. The checker cannot prove a guard ever true, so the arm's case stays uncovered for when the guard is false. A `match` whose only `Ok` arm is guarded is non-exhaustive (E0011); add an unguarded arm for the case, or a `_` catch-all:
 
 ```noeta error
 // E0011: non-exhaustive — `Ok(x) if x > 0` does not cover `Ok` (its guard may be false).
@@ -257,7 +259,7 @@ echo match f() {
 }
 ```
 
-A guard chooses an *arm*; when both outcomes share one arm, branching inside it with the `if … then … else` expression still reads well:
+A guard chooses an *arm*. When both outcomes share one arm, branching inside it with the `if … then … else` expression still reads well:
 
 ```noeta
 n = 5
@@ -270,7 +272,9 @@ echo match n {
 
 ### Arm bodies: expressions vs. blocks
 
-An arm body is usually a **value expression** (`pattern => expr`) — that value becomes the `match`'s result. An arm may also be a **statement block** (`pattern => { stmts }`) for side effects that need no artificial expression. A block is a statement sequence, so — like a block-bodied function — it **produces no value** (`unit`); its statements run in the enclosing frame, so a `return` inside exits the enclosing function and `break`/`continue` target the enclosing loop.
+An arm body is usually a **value expression** (`pattern => expr`), and that value becomes the `match`'s result. An arm may also be a **statement block** (`pattern => { stmts }`) for side effects that need no artificial expression.
+
+A block is a statement sequence, so, like a block-bodied function, it **produces no value**. Its statements run in the enclosing frame, so a `return` inside exits the enclosing function and `break`/`continue` target the enclosing loop.
 
 ```noeta
 enum Cmd { Log; Skip; Retry; }
@@ -286,7 +290,7 @@ match cmd {
 }
 ```
 
-Because a block yields no value, a block arm is only valid where the `match`'s value is **discarded** — i.e. the `match` stands in statement position. Using a block arm where the value is **consumed** (a binding RHS, an argument, a `return`, an operand) is a compile error (**E0055**): the arm would silently contribute `unit` where a value is expected. Give such an arm a value expression instead (the block's last statement is *not* its value):
+Because a block yields no value, a block arm is valid only where the `match`'s value is **discarded**, meaning the `match` stands in statement position. Using one where the value is **consumed**, in a binding's right-hand side, an argument, a `return`, or an operand, is a compile error (**E0055**): the arm would silently contribute `unit` where a value is expected. Give such an arm a value expression instead, since the block's last statement is not its value:
 
 ```noeta error
 // E0055: `2 => { … }` produces no value, but this `match` is bound to `r`.
@@ -298,12 +302,12 @@ r = match x {
 }
 ```
 
-`{ … }` still parses as an **expression** first, so `=> {}` and `=> {"k": v}` keep their empty-map / map-literal meaning.
+`{ … }` still parses as an **expression** first, so `=> {}` and `=> {"k": v}` keep their empty-map and map-literal meaning.
 
 ### Open vs. closed matching
 
-- A **union** (`A | B`) is a *closed* world — a `match` over it is exhaustive with **no `_`** (one `is` arm per member).
-- **`dyn`** is *open* — a finite set of `is T` arms can never exhaust it, so a `_` arm is required (E0011 without one).
+- A **union** (`A | B`) is a *closed* world, so a `match` over it is exhaustive with **no `_`**, one `is` arm per member.
+- **`dyn`** is *open*. A finite set of `is T` arms can never exhaust it, so a `_` arm is required (E0011 without one).
 
 ```noeta
 fn kind(x: int | string): string {
