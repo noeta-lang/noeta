@@ -453,10 +453,10 @@ impl Checker {
 
 impl Checker {
     /// Validate an extension directive's arguments against what it declared: how many positional
-    /// arguments it takes, and which `name:` keys it understands.
+    /// arguments it takes (`max_args`), and which `name:` keys it understands (`named_keys`).
     ///
     /// A declared constraint nothing enforces is worse than none: it tells an extension author
-    /// their contract is checked when nothing checks it, so every field here has a reader.
+    /// their contract is checked when nothing checks it, so both fields have a reader here.
     ///
     /// Deliberately mirrors what a `#[...]` data attribute already gets (E0005 for an unknown
     /// key, E0009 for the wrong count), because an extension directive's arguments are the same
