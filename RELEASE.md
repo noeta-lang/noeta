@@ -169,6 +169,17 @@ alone. That needs a **pin-bump commit** in each. Whether you cut a *release* off
 call: if the published version already works under the new toolchain, the version number buys
 consumers nothing.
 
+`scripts/pin-para.sh vX.Y.Z` writes those commits' content: it rewrites the git tag pins, the
+crates.io ranges, and the exact pin inside a `[patch]` table, across every checkout under `../para`.
+Run `--check` first to see which repos have drifted; it reports and changes nothing. Commit and push
+each rewritten repo separately — its own CI builds against the new toolchain on the push, which is
+the verification, so a red there is the answer to "did the release break this package".
+
+The `[patch]` line is the one worth knowing about. It names a full version rather than a range,
+because a `[patch]` entry has to resolve to exactly one candidate, and it has to move with the tag
+beside it. When it did not, para-api held two copies of the contract crate and its extension type
+stopped satisfying `noeta_stdlib::Extension`.
+
 The four pure-Noeta repos — **para-aether, para-cli, para-aether-db, para-ai** — have no pins and
 need nothing unless their sources actually break.
 
@@ -308,7 +319,7 @@ in full for that reason.
     (a green notify-web only means the message was sent — see §2)
 [ ] the docs site actually serves the new version:
     curl -fsS https://docs.noeta.dev/ | grep -oE 'v0\.[0-9]+\.[0-9]+' | sort -u
-[ ] para: native pins bumped where CI's guard demands it
+[ ] para: `scripts/pin-para.sh vX.Y.Z` run, each rewritten repo pushed, its CI green
 [ ] para: any package needing a release identified — floor, source break, or stale lock
 [ ] para: released in dependency order, each confirmed live in the registry
 [ ] consumers (test-*) verified against the released binary, unpiped
