@@ -138,7 +138,8 @@ gate is a PR workflow that builds all four consumer sites against the PR's theme
 
 ### First: do they need anything at all?
 
-Usually **no**. Check before assuming, because the intuitive answer is wrong.
+For a **patch** release, usually no. For a **minor** one, yes — every package that ships native
+Rust, and then everything depending on those. Check before assuming either way.
 
 The four repos that ship native Rust — **para-api, para-db, para-html, para-p2p** — pin the
 toolchain crates by git tag in their `crates/*/Cargo.toml`:
@@ -154,9 +155,22 @@ binary the consumer is running. Measured across a toolchain minor bump — inclu
 `ABI_VERSION` bump — published packages pinned to the *previous* tag ran unchanged under the new
 binary, in both directions.
 
-So a toolchain release does **not** oblige you to re-release the fleet. What the pin still governs
-is whether each package's **Rust source** compiles against whatever it is patched to, which is a
-real question with a real answer: build it (§5).
+So a **git tag** pin does not oblige you to re-release the fleet.
+
+The **crates.io range** beside it is a different axis, and a minor toolchain release does oblige
+you there. `noeta-ext-abi = "0.7"` does not admit 0.8.0, and cargo applies a `[patch]` only when it
+satisfies the requirement — so the composer's redirect is dropped, the published contract crate
+arrives from crates.io beside the running binary's source, and the two `Extension` traits are
+different types. A consumer sees `the trait bound ...: noeta_stdlib::Extension is not satisfied`
+with a note naming multiple versions of `noeta_ext_abi`.
+
+That makes the range a real compatibility latch. Moving it means the package now requires the new
+toolchain, so `toolchain = ">=X.Y"` moves with it, and a floor move is breaking — a minor bump for
+every package that ships native Rust, then a minor bump for everything that depends on them. The
+0.8 release moved seven packages this way.
+
+What the git tag pin still governs is whether each package's **Rust source** compiles against
+whatever it is patched to, which is a real question with a real answer: build it (§5).
 
 ### What does force a change
 
@@ -189,9 +203,16 @@ Cut one when:
 
 - its **source** stops compiling on the new toolchain (a real language change), or
 - its **`toolchain = ">=X.Y"` floor** is now wrong, or
-- it carries a committed **`noeta.lock` pinning a native dependency** you need it to stop using.
-  Only packages with resolved dependencies have one; today that is **para-ai** (`para/api`) — the
-  rest resolve fresh.
+- it carries a committed **`noeta.lock`** naming a version you need it to stop using. Find them all
+  before assuming the count — `find ~/Code/para -name noeta.lock`. The 0.8 release found **13**
+  across three repos, nine of them inside `examples/`, and a root-only sweep left every example
+  behind.
+
+  A stale lock does not merely resolve an old version. It pins that release's **signing identity**,
+  so the failure is `keyless verification failed: identity mismatch: expected
+  ...release.yml@refs/tags/vA, got ...@refs/tags/vB` — which reads like a broken release rather
+  than a stale consumer. Check the registry entry before suspecting the publish: it records the tag
+  and commit, and if those are right the expectation is local. `noeta update` rewrites the lock.
 
 **A floor move is breaking.** If `toolchain = ">=0.3"` becomes `">=0.4"`, consumers on 0.3.x can no
 longer build the package, so it is a **minor** bump (`0.2.x → 0.3.0`), not a patch. A patch release
