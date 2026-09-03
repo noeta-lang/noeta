@@ -81,7 +81,7 @@ A range rather than an exact version, because a *patch* release of the toolchain
 A git pin on the toolchain repository also works, and is what a package reaching past the contract must use, since the internal crates are not published:
 
 ```toml ignore
-noeta-ext-abi = { git = "https://github.com/noeta-lang/noeta", tag = "v0.8.0" }
+noeta-ext-abi = { git = "https://github.com/noeta-lang/noeta", tag = "v0.8.1" }
 ```
 
 That pin governs **only the package's own repository**: `cargo test` in your CI, and your local builds. When a *consumer* depends on your package, toolchain composition builds your crate again, from source, inside the consumer's composed shim, and a `[patch]` section resolves every toolchain crate to **the consumer's own toolchain version** rather than your tag:
@@ -114,8 +114,8 @@ The consumed crates (`noeta-ext-abi`, `noeta-reactive-abi`, `noeta-cli` as the c
 ```toml ignore
 # the package's native crate — test-only, does not ship
 [dev-dependencies]
-noeta-conformance = { git = "https://github.com/noeta-lang/noeta", tag = "v0.8.0" }
-noeta-stdlib      = { git = "https://github.com/noeta-lang/noeta", tag = "v0.8.0" }
+noeta-conformance = { git = "https://github.com/noeta-lang/noeta", tag = "v0.8.1" }
+noeta-stdlib      = { git = "https://github.com/noeta-lang/noeta", tag = "v0.8.1" }
 ```
 
 ## See also
