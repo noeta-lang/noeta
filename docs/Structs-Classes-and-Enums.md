@@ -167,7 +167,7 @@ Nothing picks a winner, because there is no answer that keeps both: whichever me
 
 Fields and methods are separate name spaces, so the `f`-field-and-`f`-method pair above is not a duplicate — it is the resolution rule described just above, and it stands.
 
-The rule earns its keep where one of the two members was **generated**. A [directive that generates code](Native-Extensions#directives-that-generate-code) writes its members from a document outside the program — an interface description, a schema — and adds them to the declaration it decorates. So a name can be taken by something nobody typed, on a day nobody edited this file:
+The rule earns its keep where one of the two members was **generated**. A [directive that generates code](Native-Extensions#directives-that-generate-code-extdirectiveexpand) writes its members from a document outside the program — an interface description, a schema — and adds them to the declaration it decorates. So a name can be taken by something nobody typed, on a day nobody edited this file:
 
 ```noeta ignore
 @openapi("petstore.json")
