@@ -1,0 +1,22 @@
+// A type INVARIANT in its parameter does not widen to `dyn`. `Inner<T>` carries a `mut` field
+// mentioning `T`, so a `Inner<int>` written into an `Inner<dyn>` field would hand out a door to
+// store a non-`int` into a list an `Inner<int>` holder still reads as `List<int>`.
+//
+// The companion case `generics/forwarded_param_constructs_invariant.noe` pins what stays allowed:
+// a generic type building another out of its own parameter, where both sides name that parameter.
+// expect: error E0007 at 21:29
+// expect: exit 1
+class Inner<T> {
+    pub v: string
+    pub mut pending: List<T>
+    pub fn new(v: string): Inner<T> { return Inner { v: v, pending: [] } }
+}
+
+class Holder {
+    pub inner: Inner<dyn>
+    pub fn new(i: Inner<dyn>): Holder { return Holder { inner: i } }
+}
+
+concrete: Inner<int> = Inner.new("x")
+h: Holder = Holder { inner: concrete }
+echo h.inner.v

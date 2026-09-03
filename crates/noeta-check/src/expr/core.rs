@@ -2470,6 +2470,21 @@ impl Checker {
         let field_expectation = |declared: &Type, erased: &ParamSet| {
             erase_type_params(apply_subst(declared, &seed), erased)
         };
+        // The parameters this construction INFERS: every parameter of the type except one the
+        // enclosing member forwards on a hidden slot. A forwarded parameter is not inferred from
+        // the value, it is delivered to it, so erasing it would discard the only fact the position
+        // has. `repo: Repository<T>` inside `LiveRepository<T>.new` keeps its `T`.
+        let inferred_params: ParamSet = pset
+            .iter()
+            .filter(|id| {
+                !self
+                    .coloring
+                    .forwardable_params
+                    .iter()
+                    .any(|p| p.id == **id)
+            })
+            .copied()
+            .collect();
         for f in &lit.fields {
             // A polymorphic named function assigned to a **concretely `Fn`-typed field**
             // instantiates against the field's declared type — the field
@@ -2510,17 +2525,6 @@ impl Checker {
             // `LiveRepository<T>.new` keeps its `T`, and `dynamic_ctor_slot` (consulted by
             // `absorbs_constructor_expectation` below) is what decides whether that `T` really
             // arrives; a `T` with no slot still erases and records nothing.
-            let inferred_params: ParamSet = pset
-                .iter()
-                .filter(|id| {
-                    !self
-                        .coloring
-                        .forwardable_params
-                        .iter()
-                        .any(|p| p.id == **id)
-                })
-                .copied()
-                .collect();
             let absorbed_declared = if field_fn_expectation.is_none()
                 && let Some((_, declared)) = declared_field
                 && let e = field_expectation(declared, &inferred_params)
@@ -2546,10 +2550,18 @@ impl Checker {
                     bind_type_params(declared, &vty, &pset, &mut subst);
                 }
                 // The field value must be assignable to the declared field type (`E0007`),
-                // mirroring the field-default check. The type's own parameters are erased to
-                // `dyn` (they are inferred from this very value above), so a generic field
+                // mirroring the field-default check. The type's own INFERRED parameters are erased
+                // to `dyn` (they are inferred from this very value above), so a generic field
                 // accepts any value while a concrete field type is enforced.
-                let expected = field_expectation(declared, &pset);
+                //
+                // A FORWARDED parameter is not erased here, for the same reason it is not erased
+                // when the expectation is pushed into the value above. Erasing on one side of this
+                // comparison and not the other compares a type against itself and loses: a
+                // `repo: Repository<T>` field given a real `Repository<T>` reads as "expected
+                // `Repository<dyn>`, found `Repository<T>`", which no edit to the program can
+                // satisfy. An unconditional widening to `dyn` hid that until the widening was
+                // correctly withdrawn from invariant types.
+                let expected = field_expectation(declared, &inferred_params);
                 // …unless the value was just CHECKED against that very type above, whose `subsume`
                 // has already reported any mismatch at this same span. Re-testing it here would
                 // print the identical error twice.

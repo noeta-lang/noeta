@@ -1,0 +1,29 @@
+// A generic type constructing another generic type OUT OF ITS OWN PARAMETER keeps that parameter,
+// and keeps it when the inner type is INVARIANT. `generic_in_generic_construction/` pins the same
+// shape for a covariant inner type, where a widening to `dyn` is available and hides which
+// parameter each side resolved. A `mut` field of a `class` mentioning `T` withdraws that widening,
+// so here the field's declared type and the value must name the same `T` outright.
+//
+// When the expectation erased the forwarded parameter and the value did not, this read as "field
+// `inner` expects type `Inner<dyn>`, found `Inner<T>`": a type failing against itself, which no
+// edit to the program can satisfy. `invariant_arg_does_not_widen.noe` holds the other half — a
+// CONCRETE argument still may not widen.
+// expect: stdout "x"
+// expect: stdout "0"
+// expect: exit 0
+class Inner<T> {
+    pub v: string
+    pub mut pending: List<T>
+    pub fn new(v: string): Inner<T> { return Inner { v: v, pending: [] } }
+}
+
+class Outer<T> {
+    pub inner: Inner<T>
+    pub fn new(v: string): Outer<T> {
+        return Outer { inner: Inner.new(v) }
+    }
+}
+
+o: Outer<int> = Outer.new("x")
+echo o.inner.v
+echo o.inner.pending.len()
