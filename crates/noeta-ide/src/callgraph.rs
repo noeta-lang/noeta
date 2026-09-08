@@ -889,6 +889,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_tier_block_declaration_is_a_node_distinct_from_its_top_level_namesake() {
+        let (g, _) = graph(
+            "fn helper(): int { return 1 }\n\
+             @test {\n\
+             fn helper(): int { return 2 }\n\
+             fn checks(): void { assert(helper() == 2) }\n\
+             }\n",
+        );
+        let both: Vec<&FnNode> = g.functions.iter().filter(|f| f.name == "helper").collect();
+        assert_eq!(
+            both.len(),
+            2,
+            "two declarations, two nodes: {:?}",
+            g.functions
+        );
+        assert_ne!(both[0].name_span, both[1].name_span);
+        // The name names neither on its own, so the lookup hands back the choice.
+        assert!(matches!(g.lookup_named("helper"), NameLookup::Ambiguous(_)));
+        assert!(g.function_named("checks").is_some());
+    }
+
     fn node(name: &str) -> FnNode {
         let span = Span::new_in(SourceId::FIRST, 0, 1);
         FnNode {
