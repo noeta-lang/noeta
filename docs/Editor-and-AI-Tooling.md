@@ -6,9 +6,9 @@ Noeta's editor story ships in four layers, all in-tree: **static syntax highligh
 
 ### VS Code / VSCodium
 
-The extension in [`editors/vscode-noeta/`](https://github.com/noeta-lang/noeta/tree/main/editors/vscode-noeta) bundles everything on this page: the static TextMate grammar, the language server, the debugger type, the profiler view, and MCP auto-registration.
+The [**Noeta** extension](https://marketplace.visualstudio.com/items?itemName=noeta.noeta) on the Visual Studio Marketplace bundles everything on this page: the static TextMate grammar, the language server, the debugger type, the profiler view, and MCP auto-registration. Its source is [`editors/vscode-noeta/`](https://github.com/noeta-lang/noeta/tree/main/editors/vscode-noeta).
 
-1. Run [`noeta ide --vscode`](The-CLI#noeta-ide). It downloads the `.vsix` matching your toolchain's version from the GitHub release, verifies it against the release's `SHA256SUMS`, and installs it into the first of `code`, `codium` or `code-insiders` on your PATH. Pick one explicitly with `--bin <NAME|PATH>`. The release asset is the extension's distribution channel, so this path covers VS Code, VSCodium, and offline installs alike.
+1. Run [`noeta ide --vscode`](The-CLI#noeta-ide). It downloads the `.vsix` matching your toolchain's version from the GitHub release, verifies it against the release's `SHA256SUMS`, and installs it into the first of `code`, `codium` or `code-insiders` on your PATH. Pick one explicitly with `--bin <NAME|PATH>`. Installing from the [Marketplace listing](https://marketplace.visualstudio.com/items?itemName=noeta.noeta) works as well, and the CLI path is what pins the extension to the toolchain you are running, so it is also what covers VSCodium and offline installs.
 2. Open a `.noe` file. Highlighting is immediate, and the extension starts `noeta lsp` automatically; set `noeta.server.path` if the binary is not on your PATH.
 3. After a `noeta upgrade`, re-run `noeta ide --vscode` so the extension moves in step with the toolchain.
 

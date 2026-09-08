@@ -91,10 +91,15 @@ Point the extension at it with the **`noeta.server.path`** setting (an absolute 
 the server can't be launched, the highlighting still works — only the semantic features are disabled,
 and the reason appears in the **Noeta Language Server** output channel.
 
-## Install (from source)
+## Install
 
-No published Marketplace release yet. The extension is not bundled, so install its runtime dependency
-first, then load it:
+The extension is published as **Noeta** on the
+[Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=noeta.noeta), and
+`noeta ide --vscode` installs the build matching your toolchain from that release's `.vsix`.
+
+### From source
+
+The extension is not bundled, so install its runtime dependency first, then load it:
 
 ```sh
 cd editors/vscode-noeta

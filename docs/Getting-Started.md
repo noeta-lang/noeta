@@ -148,7 +148,7 @@ The scaffold works before you edit a line:
 `noeta init` never overwrites an existing file, so it is safe to run in a directory that already has code, and safe to re-run inside a project it already scaffolded, where it fills in whatever is missing. Delete `SYNTAX.md` after a toolchain upgrade and re-run to regenerate it. The full scaffold is documented at [The CLI](The-CLI#noeta-init), and the manifest it writes on the [`noeta.toml` Manifest](Manifest) page.
 
 > [!TIP]
-> Those `.vscode/` files assume the Noeta VS Code extension. Install it for syntax highlighting, live diagnostics, hover types, and one-click debugging straight out of the scaffold: [Editor & AI Tooling](Editor-and-AI-Tooling).
+> Those `.vscode/` files assume the [Noeta VS Code extension](https://marketplace.visualstudio.com/items?itemName=noeta.noeta). Install it with `noeta ide --vscode` for syntax highlighting, live diagnostics, hover types, and one-click debugging straight out of the scaffold: [Editor & AI Tooling](Editor-and-AI-Tooling).
 
 ## 6 · The rest of the toolchain
 

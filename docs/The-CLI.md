@@ -33,7 +33,7 @@ Every verb below is built into the binary and available in any directory.
 | [`noeta advisory`](#noeta-advisory) | Issue a publisher advisory for a scope you own, file a public report, list or promote the report queue, or `watch` a scope's transparency log for silent suppression. |
 | [`noeta key`](#noeta-key) | Manage the Ed25519 signing key (the key-based provenance path). |
 | [`noeta upgrade`](#noeta-upgrade) | Self-update the toolchain binary to the latest release. |
-| [`noeta ide`](#noeta-ide) | Install the VS Code or VSCodium `.vsix` matching this binary's version. |
+| [`noeta ide`](#noeta-ide) | Install the [Noeta VS Code extension](https://marketplace.visualstudio.com/items?itemName=noeta.noeta) at the `.vsix` matching this binary's version. |
 
 Run `noeta --help` or `noeta <command> --help` for the authoritative flag list.
 
@@ -835,4 +835,4 @@ The version pinning keeps the extension's grammar and language-server integratio
 
 The editor is auto-detected as the first of `code`, `codium` and `code-insiders` found on PATH, and `--bin <name-or-path>` overrides the pick with any binary that speaks `--install-extension`. The `.vsix` is staged in the noeta cache and removed after a successful install. When the editor's install invocation fails, the file is kept and its path printed so you can install it by hand.
 
-The GitHub release asset is the extension's distribution channel, so this verb is the install path for VS Code, for VSCodium, and for offline or version-pinned setups. A cargo-installed or source-built `noeta` has no matching release asset and is refused; install from the source tree at [`editors/vscode-noeta`](https://github.com/noeta-lang/noeta/tree/main/editors/vscode-noeta) instead. Bare `noeta ide` prints a short pointer at `--vscode`.
+The extension is published on the [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=noeta.noeta), and this verb installs the GitHub release asset instead, which is what makes it the path for VSCodium and for offline or version-pinned setups. A cargo-installed or source-built `noeta` has no matching release asset and is refused; install from the source tree at [`editors/vscode-noeta`](https://github.com/noeta-lang/noeta/tree/main/editors/vscode-noeta) instead. Bare `noeta ide` prints a short pointer at `--vscode`.

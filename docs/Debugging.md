@@ -8,7 +8,7 @@ The debugger is **launch-only**: it always starts the program itself, and there 
 
 ## Quick start (VS Code / VSCodium)
 
-The bundled extension in [`editors/vscode-noeta/`](https://github.com/noeta-lang/noeta/tree/main/editors/vscode-noeta) registers the `noeta` debugger type alongside highlighting and the language server. With it installed, open a `.noe` file and press **F5** to launch the active file under the debugger. Or add a `launch.json`:
+The [Noeta extension](https://marketplace.visualstudio.com/items?itemName=noeta.noeta) registers the `noeta` debugger type alongside highlighting and the language server. With it installed, open a `.noe` file and press **F5** to launch the active file under the debugger. Or add a `launch.json`:
 
 ```json
 {
