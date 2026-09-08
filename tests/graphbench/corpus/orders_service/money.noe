@@ -64,3 +64,7 @@ pub fn format_cents(cents: int): string {
 pub fn rounded_label(m: Money): string {
     return format_cents(m.cents - m.cents % 5)
 }
+
+pub fn money_label(amount: Money): string {
+    return format_cents(amount.cents)
+}

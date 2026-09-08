@@ -29,6 +29,7 @@ noeta-loader = { workspace = true }
 # Package-root discovery, so a corpus directory becomes a package the way a real one does.
 noeta-pm = { workspace = true }
 noeta-span = { workspace = true }
+noeta-diagnostics = { workspace = true }
 noeta-lexer = { workspace = true }
 # The native role vocabulary `reflect::build` joins against.
 noeta-stdlib = { workspace = true }
