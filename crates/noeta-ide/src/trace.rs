@@ -7,6 +7,10 @@
 //! guesses. The `boundaries` list is the architectural answer on its own: every `(function,
 //! role)` binding the walk reached.
 //!
+//! Each function is expanded **once** per walk. A second arrival marks the node `shared` and
+//! stops, the way a back edge marks `cycle`, so the answer grows with the reachable functions
+//! rather than with the paths through them.
+//!
 //! Wire-protocol-free like the rest of the engine: nodes carry **spans**; the MCP tool and the
 //! LSP trace document resolve them to file/line their own way, over one shared walk that can
 //! never disagree.
@@ -16,7 +20,10 @@ use std::collections::{HashMap, HashSet};
 use noeta_ast::reflect::ReflectionInfo;
 use noeta_span::Span;
 
-use crate::callgraph::{CallEdge, CallGraph, Callee};
+use crate::callgraph::{CallEdge, CallGraph, Callee, NameLookup};
+
+/// How many near matches a not-found report offers.
+pub const NEAR_MATCHES: usize = 6;
 
 /// Walks deeper than this are cut (per-node `truncated`), whatever the caller asks for.
 pub const MAX_DEPTH_CAP: usize = 16;
@@ -64,6 +71,10 @@ pub struct TraceNode {
     pub dynamic: bool,
     /// This function is already on the current path (recursion) — expanded once, marked here.
     pub cycle: bool,
+    /// This function was already expanded elsewhere in the walk — its subtree is written once and
+    /// every later arrival is this reference, so the answer is linear in the reachable functions
+    /// rather than in the paths to them.
+    pub shared: bool,
     /// Children were cut by the depth or node budget.
     pub truncated: bool,
     pub children: Vec<TraceNode>,
@@ -86,8 +97,10 @@ pub enum Roots {
     /// No spec — every role-bearing function is a root (the program's architectural surface).
     /// Empty when the program has no `@role` bindings on functions.
     AllRoleBearers(Vec<usize>),
-    /// The spec matched no role binding and no function.
-    NotFound,
+    /// The spec is a bare name several qualified functions carry; the candidates to pick from.
+    Ambiguous(Vec<String>),
+    /// The spec matched no role binding and no function, with the closest declared names.
+    NotFound { near: Vec<String> },
 }
 
 /// The role index keyed the way the graph names functions: declaration name (`Type.method` for
@@ -119,11 +132,14 @@ pub fn resolve_roots(graph: &CallGraph, info: &ReflectionInfo, from: Option<&str
                 .filter_map(|r| graph.function_named(&r.target))
                 .collect();
             if !role_targets.is_empty() {
-                Roots::Functions(dedup(role_targets))
-            } else if let Some(idx) = graph.function_named(spec.trim()) {
-                Roots::Functions(vec![idx])
-            } else {
-                Roots::NotFound
+                return Roots::Functions(dedup(role_targets));
+            }
+            match graph.lookup_named(spec) {
+                NameLookup::Found(idx) => Roots::Functions(vec![idx]),
+                NameLookup::Ambiguous(candidates) => Roots::Ambiguous(candidates),
+                NameLookup::Missing => Roots::NotFound {
+                    near: graph.near_matches(spec, NEAR_MATCHES),
+                },
             }
         }
         None => Roots::AllRoleBearers(dedup(
@@ -149,6 +165,7 @@ pub fn walk(
         roles_by_target,
         boundaries: Vec::new(),
         seen_boundaries: HashSet::new(),
+        seen: HashSet::new(),
         nodes_left: node_budget,
         max_depth: max_depth.clamp(1, MAX_DEPTH_CAP),
     };
@@ -176,6 +193,10 @@ struct Tracer<'a> {
     roles_by_target: &'a HashMap<String, Vec<String>>,
     boundaries: Vec<Boundary>,
     seen_boundaries: HashSet<(String, String)>,
+    /// Every function already expanded anywhere in this walk. A second arrival is a `shared`
+    /// reference rather than a second copy of the subtree, so a wide fan-in costs one node per
+    /// occurrence instead of one subtree.
+    seen: HashSet<usize>,
     nodes_left: usize,
     max_depth: usize,
 }
@@ -207,12 +228,16 @@ impl Tracer<'_> {
         }
 
         let cycle = path.contains(&idx);
+        // A root always expands: asking to trace from a function must show its flow even when
+        // another root already reached it.
+        let shared = kind != TraceKind::Root && !cycle && self.seen.contains(&idx);
         let at_depth_limit = depth >= self.max_depth;
         let mut truncated = false;
-        let children = if cycle || at_depth_limit || self.nodes_left == 0 {
-            truncated = !cycle && self.graph.edges_from(Some(idx)).next().is_some();
+        let children = if cycle || shared || at_depth_limit || self.nodes_left == 0 {
+            truncated = !cycle && !shared && self.graph.edges_from(Some(idx)).next().is_some();
             Vec::new()
         } else {
+            self.seen.insert(idx);
             path.push(idx);
             let edges: Vec<CallEdge> = self.graph.edges_from(Some(idx)).cloned().collect();
             let mut children = Vec::new();
@@ -236,6 +261,7 @@ impl Tracer<'_> {
             external: false,
             dynamic: false,
             cycle,
+            shared,
             // `truncated` is already exact: the cut-children branch above sets it only when
             // there *were* edges to cut (a leaf at the depth limit is a leaf, not a truncation —
             // the MCP original over-reported here), and the budget loop sets it on a mid-list cut.
@@ -274,6 +300,7 @@ fn leaf(name: &str, kind: TraceKind, site: Span, external: bool, dynamic: bool) 
         external,
         dynamic,
         cycle: false,
+        shared: false,
         truncated: false,
         children: Vec::new(),
     }
@@ -364,11 +391,47 @@ fn save(n: int): int {
     #[test]
     fn unknown_spec_is_not_found_and_no_spec_takes_all_bearers() {
         let (graph, info) = setup(SRC);
-        assert_eq!(resolve_roots(&graph, &info, Some("nope")), Roots::NotFound);
+        assert_eq!(
+            resolve_roots(&graph, &info, Some("nope")),
+            Roots::NotFound { near: Vec::new() }
+        );
         let Roots::AllRoleBearers(all) = resolve_roots(&graph, &info, None) else {
             panic!("no spec resolves to bearers");
         };
         assert_eq!(all.len(), 1);
+    }
+
+    #[test]
+    fn a_function_reached_twice_is_expanded_once_and_shared_after() {
+        // `entry` calls `a` and `b`, and both call `deep` — which calls `leaf`. `deep` unfolds
+        // under `a` and comes back as a `shared` reference under `b`.
+        let (graph, info) = setup(
+            "fn leaf(): int { return 1 }\n\
+             fn deep(): int { return leaf() }\n\
+             fn a(): int { return deep() }\n\
+             fn b(): int { return deep() }\n\
+             fn entry(): int { return a() + b() }\n\
+             echo entry()\n",
+        );
+        let Roots::Functions(roots) = resolve_roots(&graph, &info, Some("entry")) else {
+            panic!("fn name resolves");
+        };
+        let trace = walk(
+            &graph,
+            &HashMap::new(),
+            &roots,
+            DEFAULT_MAX_DEPTH,
+            NODE_BUDGET,
+        );
+        let root = &trace.roots[0];
+        let under_a = &root.children[0].children[0];
+        assert_eq!(under_a.name, "deep");
+        assert!(!under_a.shared && !under_a.truncated);
+        assert_eq!(under_a.children[0].name, "leaf");
+        let under_b = &root.children[1].children[0];
+        assert_eq!(under_b.name, "deep");
+        assert!(under_b.shared, "the second arrival is a reference");
+        assert!(under_b.children.is_empty() && !under_b.truncated);
     }
 
     #[test]
@@ -389,6 +452,20 @@ fn save(n: int): int {
         assert!(root.children[0].cycle, "self-call marked, not expanded");
         assert!(root.children[0].children.is_empty());
     }
+
+    #[test]
+    fn a_bare_name_resolves_and_an_unknown_one_offers_near_matches() {
+        let (graph, info) = setup(SRC);
+        // `validate` is the name `symbols` and the source both report; it resolves as-is.
+        assert!(matches!(
+            resolve_roots(&graph, &info, Some("validate")),
+            Roots::Functions(_)
+        ));
+        let Roots::NotFound { near } = resolve_roots(&graph, &info, Some("valid")) else {
+            panic!("an unknown name is not found");
+        };
+        assert_eq!(near, vec!["validate".to_string()]);
+    }
 }
 
 /// Why a [`LocatedTrace`] has the shape it has.
@@ -399,6 +476,8 @@ pub enum TraceStatus {
     NoRoles,
     /// The `from` spec matched no role binding and no function.
     NotFound,
+    /// The `from` spec is a bare name several qualified functions carry.
+    Ambiguous,
 }
 
 impl TraceStatus {
@@ -408,6 +487,7 @@ impl TraceStatus {
             TraceStatus::Ok => "ok",
             TraceStatus::NoRoles => "noRoles",
             TraceStatus::NotFound => "notFound",
+            TraceStatus::Ambiguous => "ambiguous",
         }
     }
 }
@@ -430,6 +510,7 @@ pub struct LocatedTraceNode {
     pub external: bool,
     pub dynamic: bool,
     pub cycle: bool,
+    pub shared: bool,
     pub truncated: bool,
     pub children: Vec<LocatedTraceNode>,
 }
