@@ -1,0 +1,24 @@
+// The entry: feed one CSV document and one key-value document through the pipeline.
+
+use Feed.run.ingest_csv;
+use Feed.run.ingest_lines;
+use Feed.store.RecordStore;
+use Feed.publish.topics;
+
+fn csv_text(): string {
+    return "id,name\n1,ada\n2,grace\n"
+}
+
+fn lines_text(): string {
+    return "id=3;name=alan\nid=4;name=edsger\n"
+}
+
+fn run_all(): string {
+    store = RecordStore.new()
+    first = ingest_csv(store, csv_text())
+    second = ingest_lines(store, lines_text())
+    return "${first}\n${second}\n${store.describe()}"
+}
+
+echo run_all()
+echo topics().len()

@@ -1,0 +1,32 @@
+// The project's architectural vocabulary: five attributes, each tagged with the `Semantic` role it
+// confers. Every other module applies these, so `reflect` and `trace` have something to join on.
+
+@attribute(Function)
+@role(Semantic.EntryPoint)
+pub struct Route {
+    path: string
+}
+
+@attribute(Function)
+@role(Semantic.TrustBoundary)
+pub struct Guarded {
+    policy: string
+}
+
+@attribute(Function)
+@role(Semantic.PersistenceBoundary)
+pub struct Persists {
+    table: string
+}
+
+@attribute(Function)
+@role(Semantic.Sink)
+pub struct Emits {
+    channel: string
+}
+
+@attribute
+@role(Semantic.Layer)
+pub struct Layered {
+    name: string
+}

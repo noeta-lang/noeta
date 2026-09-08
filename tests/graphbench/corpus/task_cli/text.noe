@@ -1,0 +1,74 @@
+// Output formatting. `Renderer` is a trait with a default that composes the required method, and
+// the two implementors are one in-body and one standalone.
+
+use Tasks.model.Task;
+use Tasks.roles.Prints;
+
+pub trait Renderer {
+    fn line(task: Task): string
+    fn block(tasks: List<Task>): string {
+        mut out = ""
+        for task in tasks {
+            out = out ~ self.line(task) ~ "\n"
+        }
+        return out
+    }
+}
+
+pub struct Plain {
+    prefix: string
+
+    impl Renderer {
+        pub fn line(task: Task): string {
+            return self.prefix ~ task.render()
+        }
+    }
+}
+
+pub struct Wide {
+    width: int
+}
+
+impl Renderer for Wide {
+    pub fn line(task: Task): string {
+        return pad(task.render(), self.width)
+    }
+}
+
+pub fn pad(text: string, width: int): string {
+    mut out = text
+    while out.len() < width {
+        out = out ~ " "
+    }
+    return out
+}
+
+pub fn renderer_for(format: string): Plain {
+    if format == "wide" {
+        return Plain { prefix: "  " }
+    }
+    return Plain { prefix: "" }
+}
+
+#[Prints("stdout")]
+pub fn emit(text: string): string {
+    echo text
+    return text
+}
+
+#[Prints("stderr")]
+pub fn emit_error(text: string): string {
+    echo "error: " ~ text
+    return text
+}
+
+// Nothing reaches this sink.
+#[Prints("stdout")]
+pub fn emit_banner(): string {
+    echo "tasks"
+    return "tasks"
+}
+
+pub fn render_with<R: Renderer>(renderer: R, tasks: List<Task>): string {
+    return renderer.block(tasks)
+}

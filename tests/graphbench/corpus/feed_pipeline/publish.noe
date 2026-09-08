@@ -1,0 +1,46 @@
+// The outbound side. A topic holds its formatter as a value, so the call from `announce` to the
+// function that formats is an indirection.
+
+use Feed.model.Batch;
+use Feed.model.Record;
+use Feed.roles.Publishes;
+
+pub struct Topic {
+    name: string
+    format: (Batch) -> string
+}
+
+pub fn summary_line(batch: Batch): string {
+    return batch.describe()
+}
+
+pub fn verbose_line(batch: Batch): string {
+    heads = batch.records.map(fn(record: Record) => record.describe())
+    return "${batch.describe()} [${heads.join("|")}]"
+}
+
+pub fn summary_topic(): Topic {
+    return Topic { name: "summary", format: summary_line }
+}
+
+pub fn verbose_topic(): Topic {
+    return Topic { name: "verbose", format: verbose_line }
+}
+
+#[Publishes("feed")]
+pub fn announce(topic: Topic, batch: Batch): string {
+    body = topic.format(batch)
+    echo "${topic.name}: ${body}"
+    return body
+}
+
+// Nothing reaches this sink.
+#[Publishes("dead-letter")]
+pub fn announce_failure(topic: Topic, reason: string): string {
+    echo "${topic.name}!: ${reason}"
+    return reason
+}
+
+pub fn topics(): List<Topic> {
+    return [summary_topic(), verbose_topic()]
+}

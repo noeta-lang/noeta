@@ -1,0 +1,73 @@
+// The stage contract and the generic runner. `Checker` carries two defaults, so a caller reaching
+// `report()` lands on a body the implementors never wrote.
+
+use Feed.model.Record;
+use Feed.model.Batch;
+use Feed.roles.Stage;
+
+pub trait Checker {
+    fn check(record: Record): bool
+    fn name(): string
+    fn report(batch: Batch): string {
+        return "${self.name()}: ${self.passing(batch)}/${batch.size()}"
+    }
+    fn passing(batch: Batch): int {
+        return batch.records.filter(fn(record: Record) => self.check(record)).len()
+    }
+}
+
+#[Stage("required-field")]
+pub struct RequiredField {
+    field: string
+
+    impl Checker {
+        pub fn check(record: Record): bool {
+            return record.field(self.field) != none
+        }
+        pub fn name(): string {
+            return "requires ${self.field}"
+        }
+    }
+}
+
+pub struct MinWidth {
+    least: int
+}
+
+impl Checker for MinWidth {
+    pub fn check(record: Record): bool {
+        return record.fields.len() >= self.least
+    }
+    pub fn name(): string {
+        return "at least ${self.least} fields"
+    }
+}
+
+pub fn run_check<C: Checker>(checker: C, batch: Batch): string {
+    return checker.report(batch)
+}
+
+pub fn keep_passing<C: Checker>(checker: C, records: List<Record>): List<Record> {
+    return records.filter(fn(record: Record) => checker.check(record))
+}
+
+pub struct Transform {
+    label: string
+    apply: (Record) -> Record
+}
+
+pub fn tag_source(record: Record): Record {
+    return Record.new(record.source ~ "*", record.fields)
+}
+
+pub fn tagging(): Transform {
+    return Transform { label: "tag", apply: tag_source }
+}
+
+pub fn identity(): Transform {
+    return Transform { label: "identity", apply: fn(record: Record) => record }
+}
+
+pub fn apply_all(transform: Transform, records: List<Record>): List<Record> {
+    return records.map(fn(record: Record) => transform.apply(record))
+}

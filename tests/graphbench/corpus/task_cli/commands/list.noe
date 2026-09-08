@@ -1,0 +1,39 @@
+// `tasks list [word]`: filter the store and render the survivors.
+
+use Tasks.args.Invocation;
+use Tasks.args.first_arg;
+use Tasks.model.Task;
+use Tasks.model.Filter;
+use Tasks.model.open_filter;
+use Tasks.model.any_filter;
+use Tasks.store.TaskStore;
+use Tasks.store.store_summary;
+use Tasks.text.emit;
+use Tasks.text.Plain;
+use Tasks.text.Renderer;
+use Tasks.text.render_with;
+use Tasks.roles.Sub;
+
+pub fn filter_for(invocation: Invocation): Filter {
+    word = first_arg(invocation)
+    return match word {
+        some(text) => open_filter(text),
+        none => any_filter(),
+    }
+}
+
+pub fn keep_all(tasks: List<Task>, filter: Filter): List<Task> {
+    return tasks.filter(fn(task: Task) => filter.keeps(task))
+}
+
+#[Sub("list")]
+pub fn run(store: TaskStore, invocation: Invocation): string {
+    filter = filter_for(invocation)
+    kept = keep_all(store.all(), filter)
+    body = render_with(Plain { prefix: "" }, kept)
+    return emit("${filter.render()}\n${body}${store_summary(store)}")
+}
+
+pub fn count_open(store: TaskStore): int {
+    return store.all().filter(fn(task: Task) => task.is_open()).len()
+}

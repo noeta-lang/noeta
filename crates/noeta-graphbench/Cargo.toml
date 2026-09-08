@@ -1,0 +1,43 @@
+[package]
+name = "noeta-graphbench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+# Internal: not a contract crate, so it never goes to crates.io. Only the `*-abi` crates
+# carry a stability promise (docs/Extension-Compatibility.md).
+publish = false
+
+[dependencies]
+# The service under measurement. The harness drives the REAL `NoetaMcp` over an in-process
+# `tokio::io::duplex`, exactly as the crate's own round-trip tests do, so every arm exercises the
+# wire shapes an agent sees rather than a Rust call the wire could disagree with.
+noeta-mcp = { workspace = true }
+# The gold side: the compiler's own indices. `callgraph::build` is the same join `trace` reads, and
+# the reverse walk over it is what "callers" and "impact" mean exactly.
+noeta-ide = { workspace = true }
+# `reflect::build` (the role index) and the `Program`/`Stmt` walk the import gold reads.
+noeta-ast = { workspace = true }
+# The salsa graph: `workspace_with_deps`, `linked`, `linked_checked_ide` — the same construction the
+# MCP surface builds per call, so gold and arms see one program.
+noeta-db = { workspace = true }
+# `project_check` — the corpus gate ("every corpus project links with zero diagnostics").
+noeta-project = { workspace = true }
+# `read_workspace` + `workspace_sources`: the one ordering authority for `SourceId` assignment.
+noeta-loader = { workspace = true }
+# Package-root discovery, so a corpus directory becomes a package the way a real one does.
+noeta-pm = { workspace = true }
+noeta-span = { workspace = true }
+noeta-lexer = { workspace = true }
+# The native role vocabulary `reflect::build` joins against.
+noeta-stdlib = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# The duplex transport and the client half of MCP: the harness is a real MCP client.
+rmcp = { workspace = true, features = ["client", "transport-async-rw"] }
+tokio = { workspace = true, features = ["io-util", "rt-multi-thread", "macros", "sync"] }
+
+[lints]
+workspace = true

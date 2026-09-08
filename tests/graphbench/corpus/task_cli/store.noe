@@ -1,0 +1,72 @@
+// The task store, behind a trait so a caller reaches `count()` through a default body.
+
+use Tasks.model.Task;
+use Tasks.model.TaskError;
+use Tasks.roles.Writes;
+use Tasks.roles.Layer;
+
+pub trait Collection {
+    fn items(): List<Task>
+    fn count(): int {
+        return self.items().len()
+    }
+    fn summary(): string {
+        return "${self.count()} tasks"
+    }
+}
+
+#[Layer("storage")]
+pub class TaskStore {
+    mut tasks: List<Task>
+    mut next_id: int
+
+    pub fn new(): TaskStore {
+        return TaskStore { tasks: [], next_id: 1 }
+    }
+
+    pub fn take_id(): int {
+        id = self.next_id
+        self.next_id = self.next_id + 1
+        return id
+    }
+
+    pub fn append(task: Task): void {
+        self.tasks = self.tasks ~ [task]
+    }
+
+    pub fn all(): List<Task> {
+        return self.tasks
+    }
+
+    pub fn find(id: int): Result<Task, TaskError> {
+        for task in self.tasks {
+            if task.id == id {
+                return Ok(task)
+            }
+        }
+        return Err(TaskError.NotFound(id: id))
+    }
+}
+
+impl Collection for TaskStore {
+    pub fn items(): List<Task> {
+        return self.all()
+    }
+}
+
+#[Writes("tasks.json")]
+pub fn persist(store: TaskStore, task: Task): int {
+    store.append(task)
+    return task.id
+}
+
+#[Writes("tasks.json")]
+pub fn persist_done(store: TaskStore, id: int): Result<Task, TaskError> {
+    found = store.find(id)?
+    found.finish()
+    return Ok(found)
+}
+
+pub fn store_summary<C: Collection>(collection: C): string {
+    return collection.summary()
+}

@@ -1,0 +1,34 @@
+// The entry: build a store, place one order, pay it, and print the read side.
+
+use Shop.models.Customer;
+use Shop.models.item_of;
+use Shop.store.OrderStore;
+use Shop.notify.email_channel;
+use Shop.notify.log_channel;
+use Shop.notify.channel_names;
+use Shop.report.render_all;
+use Shop.repository.describe_repo;
+use Shop.handlers.orders.Request;
+use Shop.handlers.orders.place_order;
+use Shop.handlers.orders.list_orders;
+
+fn demo_request(): Request {
+    return Request {
+        customer: Customer.new("Ada Lovelace", "ada@example.com"),
+        items: [item_of("sku-1", 999, 2), item_of("sku-2", 450, 1)],
+        scopes: ["orders:write", "orders:read"],
+    }
+}
+
+fn run_demo(): string {
+    store = OrderStore.new()
+    channel = email_channel()
+    request = demo_request()
+    placed = place_order(store, channel, request)
+    listed = list_orders(store, request)
+    return "${placed}\n${listed}\n${describe_repo(store)}"
+}
+
+echo run_demo()
+echo channel_names([email_channel(), log_channel()])
+echo render_all([])

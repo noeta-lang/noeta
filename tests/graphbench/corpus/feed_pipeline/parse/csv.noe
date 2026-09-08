@@ -1,0 +1,55 @@
+// The delimited parser. `parse_rows` and its twin in `Feed.parse.lines` share a leaf name with the
+// other parser's entry, so a search on `decode` alone cannot pick the right one.
+
+use Feed.model.Field;
+use Feed.model.Record;
+use Feed.model.FeedError;
+use Feed.model.field_of;
+use Feed.roles.Trusted;
+
+pub struct Header {
+    names: List<string>
+}
+
+pub fn header_of(line: string): Header {
+    return Header { names: line.split(",").map(fn(cell: string) => cell.trim()) }
+}
+
+pub fn parse_rows(text: string): List<string> {
+    return text.lines().filter(fn(line: string) => line.len() > 0)
+}
+
+fn cells(line: string): List<string> {
+    return line.split(",").map(fn(cell: string) => cell.trim())
+}
+
+pub fn decode(header: Header, line: string, index: int): Result<Record, FeedError> {
+    values = cells(line)
+    if values.len() != header.names.len() {
+        return Err(FeedError.BadRow(line: index))
+    }
+    mut fields: List<Field> = []
+    for (i, name) in header.names.enumerate() {
+        fields = fields ~ [field_of(name, values[i])]
+    }
+    return Ok(Record.new("csv", fields))
+}
+
+#[Trusted("csv")]
+pub fn decode_all(text: string): Result<List<Record>, FeedError> {
+    rows = parse_rows(text)
+    if rows.len() < 2 {
+        return Err(FeedError.EmptyFeed)
+    }
+    header = header_of(rows[0])
+    mut out: List<Record> = []
+    for (i, line) in rows.slice(1).enumerate() {
+        out = out ~ [decode(header, line, i)?]
+    }
+    return Ok(out)
+}
+
+// No caller: the column-count probe the pipeline does not use.
+pub fn width(header: Header): int {
+    return header.names.len()
+}

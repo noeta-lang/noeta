@@ -1,0 +1,65 @@
+// The two ingest entry points and the shared middle of the pipeline.
+
+use Feed.model.Record;
+use Feed.model.FeedError;
+use Feed.model.error_label;
+use Feed.parse.csv;
+use Feed.parse.lines;
+use Feed.stages.Checker;
+use Feed.stages.RequiredField;
+use Feed.stages.MinWidth;
+use Feed.stages.Transform;
+use Feed.stages.tagging;
+use Feed.stages.apply_all;
+use Feed.stages.keep_passing;
+use Feed.stages.run_check;
+use Feed.store.RecordStore;
+use Feed.store.commit;
+use Feed.publish.summary_topic;
+use Feed.publish.announce;
+use Feed.roles.Ingest;
+
+pub fn required(): RequiredField {
+    return RequiredField { field: "id" }
+}
+
+pub fn wide_enough(): MinWidth {
+    return MinWidth { least: 2 }
+}
+
+fn shared_middle(store: RecordStore, records: List<Record>): string {
+    tagged = apply_all(tagging(), records)
+    kept = keep_passing(required(), tagged)
+    commit(store, kept)
+    batch = store.batch("feed")
+    announce(summary_topic(), batch)
+    return run_check(wide_enough(), batch)
+}
+
+#[Ingest("csv")]
+pub fn ingest_csv(store: RecordStore, text: string): string {
+    decoded = csv.decode_all(text)
+    return match decoded {
+        Ok(records) => shared_middle(store, records),
+        Err(problem) => error_label(problem),
+    }
+}
+
+#[Ingest("lines")]
+pub fn ingest_lines(store: RecordStore, text: string): string {
+    decoded = lines.decode_all(text)
+    return match decoded {
+        Ok(records) => shared_middle(store, records),
+        Err(problem) => error_label(problem),
+    }
+}
+
+// Declared and never wired in: the third feed nothing calls.
+#[Ingest("replay")]
+pub fn ingest_replay(store: RecordStore, records: List<Record>): string {
+    return shared_middle(store, records)
+}
+
+pub fn describe_error(problem: FeedError): string {
+    return error_label(problem)
+}

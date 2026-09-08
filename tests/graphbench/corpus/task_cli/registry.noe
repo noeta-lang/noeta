@@ -1,0 +1,66 @@
+// Dispatch. Each subcommand is stored as a closure in a struct field, so the edge from `dispatch`
+// to the command that runs is an indirection through a value.
+
+use Tasks.args.Invocation;
+use Tasks.store.TaskStore;
+use Tasks.commands.add;
+use Tasks.commands.list;
+use Tasks.commands.done;
+use Tasks.text.emit_error;
+
+pub struct Entry {
+    verb: string
+    run: (TaskStore, Invocation) -> string
+}
+
+pub fn entries(): List<Entry> {
+    return [
+        Entry { verb: "add", run: add.run },
+        Entry { verb: "list", run: list.run },
+        Entry { verb: "done", run: done.run },
+    ]
+}
+
+pub fn find_entry(verb: string): ?Entry {
+    return entries().filter(fn(entry: Entry) => entry.verb == verb).first()
+}
+
+pub fn dispatch(store: TaskStore, invocation: Invocation): string {
+    chosen = find_entry(invocation.verb)
+    return match chosen {
+        some(entry) => entry.run(store, invocation),
+        none => emit_error("unknown command ${invocation.verb}"),
+    }
+}
+
+pub fn verbs(): string {
+    return entries().map(fn(entry: Entry) => entry.verb).join(", ")
+}
+
+@test {
+    use Tasks.model.Task;
+    use Tasks.model.Priority;
+    use Tasks.store.persist;
+
+    fn seeded_store(): TaskStore {
+        store = TaskStore.new()
+        persist(store, Task.new(store.take_id(), "write the report", Priority.High))
+        return store
+    }
+
+    fn dispatch_lists(): void {
+        store = seeded_store()
+        out = dispatch(store, Invocation { verb: "list", rest: [] })
+        assert(out.contains("write the report"))
+    }
+
+    fn dispatch_rejects_an_unknown_verb(): void {
+        store = seeded_store()
+        out = dispatch(store, Invocation { verb: "nope", rest: [] })
+        assert(out.contains("unknown command"))
+    }
+
+    fn verbs_are_listed(): void {
+        assert(verbs().contains("done"))
+    }
+}

@@ -1,0 +1,29 @@
+// The storage contract. `Repository` carries one required method and two defaults, so a caller of
+// `count()` reaches a body that lives on the trait rather than on the implementor.
+
+use Shop.models.Order;
+
+pub trait Repository {
+    fn all(): List<Order>
+    fn count(): int {
+        return self.all().len()
+    }
+    fn is_empty(): bool {
+        return self.count() == 0
+    }
+}
+
+pub trait Auditable {
+    fn audit_name(): string
+    fn audit_line(): string {
+        return "audit:${self.audit_name()}"
+    }
+}
+
+pub fn describe_repo<R: Repository>(repo: R): string {
+    return "${repo.count()} orders"
+}
+
+pub fn first_or_none<R: Repository>(repo: R): ?Order {
+    return repo.all().first()
+}

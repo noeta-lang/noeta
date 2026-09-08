@@ -1,0 +1,21 @@
+// The entry: read a fixed argv, dispatch it, print the config summary.
+
+use Tasks.args.parse;
+use Tasks.config.default_config;
+use Tasks.config.format_of;
+use Tasks.registry.dispatch;
+use Tasks.registry.verbs;
+use Tasks.store.TaskStore;
+use Tasks.roles.Command;
+
+#[Command("tasks")]
+pub fn main_entry(argv: List<string>): string {
+    store = TaskStore.new()
+    config = default_config()
+    invocation = parse(argv)
+    out = dispatch(store, invocation)
+    return "${out}\nformat=${format_of(config)}"
+}
+
+echo main_entry(["add", "write", "the", "report"])
+echo verbs()

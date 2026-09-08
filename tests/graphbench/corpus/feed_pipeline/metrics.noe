@@ -1,0 +1,98 @@
+// Counters over a finished batch, and this project's tests.
+
+use Feed.model.Batch;
+use Feed.model.Record;
+use Feed.model.Severity;
+
+pub struct Counts {
+    info: int
+    warn: int
+    fatal: int
+}
+
+pub fn tally(batch: Batch): Counts {
+    fn is_level(record: Record, level: Severity): bool {
+        return record.severity == level
+    }
+    mut info = 0
+    mut warn = 0
+    mut fatal = 0
+    for record in batch.records {
+        if is_level(record, Severity.Info) {
+            info = info + 1
+        }
+        if is_level(record, Severity.Warn) {
+            warn = warn + 1
+        }
+        if is_level(record, Severity.Fatal) {
+            fatal = fatal + 1
+        }
+    }
+    return Counts { info: info, warn: warn, fatal: fatal }
+}
+
+pub fn render_counts(counts: Counts): string {
+    return "info=${counts.info} warn=${counts.warn} fatal=${counts.fatal}"
+}
+
+pub fn worst(batch: Batch): Severity {
+    counts = tally(batch)
+    if counts.fatal > 0 {
+        return Severity.Fatal
+    }
+    if counts.warn > 0 {
+        return Severity.Warn
+    }
+    return Severity.Info
+}
+
+// No caller.
+pub fn ratio(counts: Counts): int {
+    total = counts.info + counts.warn + counts.fatal
+    if total == 0 {
+        return 0
+    }
+    return counts.info * 100 / total
+}
+
+@test {
+    use Feed.model.batch_of;
+    use Feed.model.field_of;
+    use Feed.parse.csv;
+    use Feed.stages.RequiredField;
+    use Feed.stages.Checker;
+
+    struct Sample {
+        source: string
+
+        fn batch(): Batch {
+            record = Record.new(self.source, [field_of("id", "1"), field_of("name", "ada")])
+            return batch_of("sample", [record])
+        }
+    }
+
+    fn sample(): Sample {
+        return Sample { source: "csv" }
+    }
+
+    fn tallies_one_info_record(): void {
+        assert(render_counts(tally(sample().batch())) == "info=1 warn=0 fatal=0")
+    }
+
+    fn worst_of_an_info_batch_is_info(): void {
+        assert(worst(sample().batch()) == Severity.Info)
+    }
+
+    fn csv_decodes_two_rows(): void {
+        decoded = csv.decode_all("id,name\n1,ada\n2,grace\n")
+        assert(match decoded {
+            Ok(records) => records.len() == 2,
+            Err(_) => false,
+        })
+    }
+
+    fn required_field_passes(): void {
+        checker = RequiredField { field: "id" }
+        assert(checker.report(sample().batch()).contains("1/1"))
+    }
+}

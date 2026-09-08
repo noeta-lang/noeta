@@ -1,0 +1,7 @@
+# Makes this corpus project a package, so its modules derive `Tasks.…` from where their files sit.
+[package]
+name = "local/Tasks"
+version = "0.1.0"
+
+[directives]
+test = "std"

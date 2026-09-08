@@ -1,0 +1,31 @@
+// The pipeline's role vocabulary: one attribute per architectural position.
+
+@attribute(Function)
+@role(Semantic.EntryPoint)
+pub struct Ingest {
+    feed: string
+}
+
+@attribute(Function)
+@role(Semantic.TrustBoundary)
+pub struct Trusted {
+    source: string
+}
+
+@attribute(Function)
+@role(Semantic.PersistenceBoundary)
+pub struct Stores {
+    table: string
+}
+
+@attribute(Function)
+@role(Semantic.Sink)
+pub struct Publishes {
+    topic: string
+}
+
+@attribute
+@role(Semantic.Layer)
+pub struct Stage {
+    name: string
+}

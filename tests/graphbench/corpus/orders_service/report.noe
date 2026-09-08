@@ -1,0 +1,63 @@
+// Read-side rendering, plus this project's tests. `format_line` here and `format_line` in
+// `Shop.notify` are two different functions under one leaf name.
+
+use Shop.models.Order;
+use Shop.models.Item;
+use Shop.money.format_cents;
+use Shop.money.Line;
+use Shop.money.total_of;
+
+pub fn format_line(item: Item): string {
+    return "${item.sku} x${item.qty} @ ${format_cents(item.price.cents)}"
+}
+
+pub fn render_order(order: Order): string {
+    lines = order.items.map(format_line)
+    return "${order.describe()}\n${lines.join("\n")}"
+}
+
+pub fn render_all(orders: List<Order>): string {
+    return orders.map(render_order).join("\n---\n")
+}
+
+pub fn lines_of(order: Order): List<Line> {
+    return order.items.map(fn(it: Item) => Line { sku: it.sku, unit_cents: it.price.cents, qty: it.qty })
+}
+
+pub fn order_total_label(order: Order): string {
+    return format_cents(total_of(lines_of(order)).cents)
+}
+
+// Nothing calls this: the read side ships one summary and this is the other one.
+pub fn unused_summary(orders: List<Order>): string {
+    return "${orders.len()} orders"
+}
+
+@test {
+    use Shop.models.Customer;
+    use Shop.models.item_of;
+
+    struct Fixture {
+        customer: Customer
+
+        fn order(): Order {
+            return Order.new(1, self.customer, [item_of("sku-1", 250, 2)])
+        }
+    }
+
+    fn fixture(): Fixture {
+        return Fixture { customer: Customer.new("Ada", "ada@example.com") }
+    }
+
+    fn renders_a_line(): void {
+        assert(format_line(item_of("sku-1", 250, 2)).contains("sku-1"))
+    }
+
+    fn renders_an_order(): void {
+        assert(render_order(fixture().order()).contains("order 1"))
+    }
+
+    fn totals_an_order(): void {
+        assert(order_total_label(fixture().order()) == "5.0")
+    }
+}

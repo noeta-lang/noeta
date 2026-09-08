@@ -1,0 +1,36 @@
+// The trust boundary. Every handler passes through `authorize`, so a path question from a route to
+// the store crosses this module or the answer is wrong.
+
+use Shop.models.Customer;
+use Shop.roles.Guarded;
+
+pub struct Principal {
+    email: string
+    scopes: List<string>
+}
+
+pub fn principal_of(customer: Customer, scopes: List<string>): Principal {
+    return Principal { email: customer.email, scopes: scopes }
+}
+
+#[Guarded("scope")]
+pub fn authorize(who: Principal, scope: string): bool {
+    if who.scopes.contains("admin") {
+        return true
+    }
+    return who.scopes.contains(scope)
+}
+
+#[Guarded("tenant")]
+pub fn authorize_tenant(who: Principal, tenant: string): bool {
+    return who.email.ends_with("@" ~ tenant)
+}
+
+pub fn scope_label(who: Principal): string {
+    return who.scopes.join(",")
+}
+
+// Reachable from nothing: the negative case for "which functions have no callers".
+pub fn revoke(who: Principal): Principal {
+    return Principal { email: who.email, scopes: [] }
+}

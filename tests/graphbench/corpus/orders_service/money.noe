@@ -1,0 +1,66 @@
+// Pricing. A trait with a required method and two defaults, implemented in-body by `Line` and
+// standalone by `Surcharge` — the two spellings of the same contract, so a graph question about
+// `price()` has to reach both.
+
+use Shop.models.Money;
+use Shop.models.money_of;
+
+pub trait Priced {
+    fn price(): Money
+    fn price_cents(): int {
+        return self.price().cents
+    }
+    fn price_label(): string {
+        return "${self.price_cents()}c"
+    }
+}
+
+pub struct Line {
+    sku: string
+    unit_cents: int
+    qty: int
+
+    impl Priced {
+        pub fn price(): Money {
+            return money_of(self.unit_cents * self.qty)
+        }
+    }
+}
+
+pub struct Surcharge {
+    reason: string
+    cents: int
+}
+
+impl Priced for Surcharge {
+    pub fn price(): Money {
+        return money_of(self.cents)
+    }
+}
+
+pub fn total_of<T: Priced>(parts: List<T>): Money {
+    mut cents = 0
+    for part in parts {
+        cents = cents + part.price_cents()
+    }
+    return money_of(cents)
+}
+
+pub fn label_of<T: Priced>(part: T): string {
+    return part.price_label()
+}
+
+pub fn add(left: Money, right: Money): Money {
+    return money_of(left.cents + right.cents)
+}
+
+pub fn format_cents(cents: int): string {
+    whole = cents / 100
+    rest = cents % 100
+    return "${whole}.${rest}"
+}
+
+// No caller anywhere in the project: a negative case for "what calls this".
+pub fn rounded_label(m: Money): string {
+    return format_cents(m.cents - m.cents % 5)
+}

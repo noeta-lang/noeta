@@ -1,0 +1,15 @@
+// A second entry point that the wiring in `Shop.main` never reaches. Its role is declared and
+// nothing calls it, which is the negative case for role reachability.
+
+use Shop.roles.Route;
+use Shop.store.OrderStore;
+
+#[Route("/health")]
+pub fn health_check(store: OrderStore): string {
+    return "ok:${store.snapshot().len()}"
+}
+
+#[Route("/version")]
+pub fn version(): string {
+    return "1"
+}

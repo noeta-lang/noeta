@@ -1,0 +1,44 @@
+// This project's role vocabulary. `CliRole` is a project enum promoted to a role source alongside
+// the built-in `Semantic`, so the role index carries two enums.
+
+@semantic
+enum CliRole {
+    Subcommand;
+    Formatter;
+}
+
+@attribute(Function)
+@role(Semantic.EntryPoint)
+pub struct Command {
+    name: string
+}
+
+@attribute(Function)
+@role(CliRole.Subcommand)
+pub struct Sub {
+    verb: string
+}
+
+@attribute(Function)
+@role(Semantic.TrustBoundary)
+pub struct Confirms {
+    prompt: string
+}
+
+@attribute(Function)
+@role(Semantic.PersistenceBoundary)
+pub struct Writes {
+    file: string
+}
+
+@attribute(Function)
+@role(Semantic.Sink)
+pub struct Prints {
+    stream: string
+}
+
+@attribute
+@role(Semantic.Layer)
+pub struct Layer {
+    name: string
+}

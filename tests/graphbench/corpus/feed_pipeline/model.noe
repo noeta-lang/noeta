@@ -1,0 +1,73 @@
+// What flows through the pipeline.
+
+pub enum Severity: string {
+    Info = "info";
+    Warn = "warn";
+    Fatal = "fatal";
+}
+
+pub enum FeedError {
+    BadRow(line: int);
+    MissingField(name: string);
+    EmptyFeed;
+}
+
+pub struct Field {
+    name: string
+    value: string
+}
+
+pub class Record {
+    pub source: string
+    pub fields: List<Field>
+    pub mut severity: Severity
+
+    pub fn new(source: string, fields: List<Field>): Record {
+        return Record { source: source, fields: fields, severity: Severity.Info }
+    }
+
+    pub fn field(name: string): ?string {
+        hit = self.fields.filter(fn(f: Field) => f.name == name).first()
+        return match hit {
+            some(found) => some(found.value),
+            none => none,
+        }
+    }
+
+    pub fn describe(): string {
+        return "${self.source}/${self.fields.len()} (${self.severity})"
+    }
+
+    pub fn raise(level: Severity): void {
+        self.severity = level
+    }
+}
+
+pub struct Batch {
+    label: string
+    records: List<Record>
+
+    pub fn describe(): string {
+        return "${self.label}: ${self.records.len()} records"
+    }
+
+    pub fn size(): int {
+        return self.records.len()
+    }
+}
+
+pub fn field_of(name: string, value: string): Field {
+    return Field { name: name, value: value }
+}
+
+pub fn batch_of(label: string, records: List<Record>): Batch {
+    return Batch { label: label, records: records }
+}
+
+pub fn error_label(problem: FeedError): string {
+    return match problem {
+        FeedError.BadRow(line) => "bad row ${line}",
+        FeedError.MissingField(name) => "missing ${name}",
+        FeedError.EmptyFeed => "empty feed",
+    }
+}
