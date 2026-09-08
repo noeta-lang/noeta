@@ -4,6 +4,12 @@
 //! that works. So each ablation stubs one tool to its empty answer, re-runs the arms, and reports
 //! which (arm, category) rows fell. A category no ablation moves is a category whose questions are
 //! being answered by something other than the tools, and `--ablate all` fails when one is found.
+//!
+//! The summary separates two verdicts, because they mean different things. A category reached by
+//! stubbing a **Noeta graph tool** is one the graph surface is really answering. A category reached
+//! only by stubbing the **file read** is one where the lexical control carries the score and the
+//! graph tools contribute nothing an ablation can take away, which is a finding about the tools
+//! rather than about the benchmark.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::process::ExitCode;
@@ -48,6 +54,7 @@ pub async fn run(
         "ablated", "arm", "category", "before", "after", "verdict"
     );
     let mut reached: BTreeSet<Category> = BTreeSet::new();
+    let mut by_graph_tool: BTreeSet<Category> = BTreeSet::new();
     for tool in &tools {
         service.ablate(Some(*tool));
         let run = harness::measure(service, prepared, wanted, categories).await;
@@ -61,6 +68,9 @@ pub async fn run(
                 continue;
             }
             reached.insert(row.category);
+            if *tool != Tool::FileRead {
+                by_graph_tool.insert(row.category);
+            }
             println!(
                 "{:<12} {:<4} {:<14} {:>8.3} {:>8.3}  fell {:.3}",
                 tool.as_str(),
@@ -74,22 +84,40 @@ pub async fn run(
     }
     service.ablate(None);
 
-    let unreached: Vec<Category> = categories
+    let scored: Vec<Category> = categories
+        .iter()
+        .copied()
+        .filter(|c| base.keys().any(|(_, category)| category == c))
+        .collect();
+    let unreached: Vec<Category> = scored
         .iter()
         .copied()
         .filter(|c| !reached.contains(c))
-        .filter(|c| base.keys().any(|(_, category)| category == c))
+        .collect();
+    let lexical_only: Vec<Category> = scored
+        .iter()
+        .copied()
+        .filter(|c| reached.contains(c) && !by_graph_tool.contains(c))
         .collect();
     println!(
-        "\ngraphbench: {} of {} categories reached by an ablation",
+        "\ngraphbench: {} of {} scored categories reached by an ablation, {} of them by a Noeta \
+         graph tool",
         reached.len(),
-        categories.len()
+        scored.len(),
+        by_graph_tool.len(),
     );
+    for category in &lexical_only {
+        println!(
+            "  {} moves only when the file read is stubbed — the lexical arm carries that score and \
+             the graph tools add nothing an ablation can take away",
+            category.as_str()
+        );
+    }
     if which != "all" {
         return Ok(ExitCode::SUCCESS);
     }
     if unreached.is_empty() {
-        println!("graphbench: every category is reachable by at least one ablation.");
+        println!("graphbench: every scored category is reachable by at least one ablation.");
         return Ok(ExitCode::SUCCESS);
     }
     for category in &unreached {

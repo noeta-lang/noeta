@@ -93,10 +93,17 @@ Each row below is a separate claim about the implementation, with the command th
 | **miri** | the `unsafe` in `noeta-value` and `noeta-gc` executes under the miri interpreter without undefined behavior | `cargo +nightly miri test -p noeta-value -p noeta-gc --locked` |
 | **The hot-reload end-to-end suites** | a swap lands in a server that is actually serving | `scripts/hot-e2e.sh` |
 | **The docs oracles** | every ` ```noeta ` block runs through the real binary, and every ` ```toml ` block parses as a manifest the toolchain accepts | `cargo test -p noeta-cli --test doc_samples` |
+| **The graph-retrieval benchmark** (`noeta-graphbench`) | fixed compositions of `noeta mcp` tool calls answer graph questions about a corpus of Noeta projects, scored against gold the compiler's own indices produce | `cargo run -p noeta-graphbench` |
 | **Coverage** | which lines a change left unexercised | `cargo llvm-cov --workspace --summary-only` |
 | **Benchmarks** | the VM hot paths (dispatch loop, inline-cached property access, allocation) | `cargo bench -p noeta-vm` |
 
 Coverage is measured with `cargo-llvm-cov` rather than tarpaulin, which cannot see across a process boundary and reports the subprocess-driven CLI tests as 0% coverage of the `noeta` binary. Treat a coverage drop on a file you touched as a regression.
+
+### What the graph-retrieval benchmark adds
+
+The oracles above ask whether the compiler is right. `noeta-graphbench` asks a different question: given the graph the compiler already holds, how well does a composition of `noeta mcp` tool calls put an agent on the answer. Each arm is a fixed strategy over a corpus of hand-written Noeta projects, driven through the real MCP service on an in-process duplex, and scored against gold that `noeta_ide::callgraph`, the reflection role index and the linker's module paths produce directly. Both sides therefore read one graph, which bounds what the benchmark can find: it measures retrieval, ranking and mapping a question onto a node, never whether the graph is right. That stays the conformance corpus's job.
+
+Nothing in the measurement varies, so `tests/graphbench/baseline.txt` pins every row exactly and a drop in any F1 fails the run. The crate's own [README](https://github.com/noeta-lang/noeta/blob/main/crates/noeta-graphbench/README.md) carries the arm table, the question categories, and how to add a project or a seed question.
 
 ### What structured fuzzing adds
 

@@ -48,6 +48,10 @@ An arm is given what a developer types: a leaf name and the file it sits in, a m
 
 Every row also records the output size in tokens (characters over four), the number of logical tool calls, the wall time, and which tool supplied the evidence. Wall time is recorded and gated nowhere: this machine carries several concurrent builds, so a millisecond column measures the afternoon.
 
+A ranked category's F1 is dominated by the candidate depth an arm returns, since ten candidates against one gold answer cap precision at 0.1. Read `Acc@1` and MRR there, and read F1 on the set categories.
+
+Responses are cached per (tool, arguments) within a run, because every MCP call builds a fresh `LangDatabase` and re-links the project. The **logical** call count is still what the arm issued, so the calls column stays the number an agent would pay; the milliseconds column is what the cache left.
+
 ## Sampling rules
 
 A structural question is emitted only when it needs two files, or two hops, or turns on a leaf name that names more than one declaration, or ends at a labeled `external`/`dynamic` leaf. A question a single `grep` answers measures nothing.

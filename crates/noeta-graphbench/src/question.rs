@@ -680,12 +680,19 @@ fn seed_mapping(project: &str, facts: &Facts, dir: &Path) -> Result<Vec<Question
     Ok(out)
 }
 
-/// Resolve a hand-written label (`store.noe#save_order`, or a unique bare `save_order`).
+/// Resolve a hand-written label to exactly one declaration.
+///
+/// Three spellings, in the order a label gets more specific: a bare `save_order`, a file plus a name
+/// (`store.noe#save_order`), and a file plus a qualified tail (`model.noe#Task.render`), which is
+/// what a method whose name is shared with another type's needs. Anything that still resolves to
+/// more than one declaration is refused, so a seed question can never be scored against a
+/// declaration its author did not mean.
 fn resolve_label(facts: &Facts, label: &str) -> Option<usize> {
-    let (file, leaf) = match label.split_once('#') {
-        Some((file, leaf)) => (Some(normalize_file(file)), leaf),
+    let (file, name) = match label.split_once('#') {
+        Some((file, name)) => (Some(normalize_file(file)), name),
         None => (None, label),
     };
+    let leaf = name.rsplit('.').next().unwrap_or(name);
     let candidates: Vec<usize> = facts
         .by_leaf(leaf)
         .iter()
@@ -693,6 +700,12 @@ fn resolve_label(facts: &Facts, label: &str) -> Option<usize> {
         .filter(|id| match &file {
             Some(want) => normalize_file(&facts.node(*id).file).ends_with(want.as_str()),
             None => true,
+        })
+        .filter(|id| {
+            name == leaf || {
+                let qualified = &facts.node(*id).qualified;
+                qualified == name || qualified.ends_with(&format!(".{name}"))
+            }
         })
         .collect();
     match candidates.as_slice() {

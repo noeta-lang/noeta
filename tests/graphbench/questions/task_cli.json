@@ -1,1 +1,23 @@
-{ "comment": "placeholder", "seeds": [] }
+{
+  "comment": "Hand-labeled seed questions: a developer's sentence, and the declarations that answer it. No query names an identifier the code uses, because the point is mapping words onto nodes. Label a declaration `<file>#<name>`, or `<file>#<Type>.<method>` when a method name is shared.",
+  "seeds": [
+    { "query": "where does a task get written to storage?", "answers": ["store.noe#persist"] },
+    { "query": "what turns the words typed on the command line into a verb and its arguments?", "answers": ["args.noe#parse"] },
+    { "query": "where is the table of subcommands?", "answers": ["registry.noe#entries"] },
+    { "query": "which function decides which subcommand runs?", "answers": ["registry.noe#dispatch"] },
+    { "query": "what asks the user to confirm before a task is closed?", "answers": ["done.noe#confirm_close"] },
+    { "query": "where is one task turned into a line of output?", "answers": ["model.noe#Task.render"] },
+    { "query": "what reads settings out of lines of text?", "answers": ["config.noe#load_lines"] },
+    { "query": "where are the settings a fresh run starts with?", "answers": ["config.noe#default_config"] },
+    { "query": "which function writes to standard output?", "answers": ["text.noe#emit"] },
+    { "query": "where do failure messages go?", "answers": ["text.noe#emit_error"] },
+    { "query": "what decides whether a task matches the word the user asked for?", "answers": ["model.noe#Filter.keeps"] },
+    { "query": "where is a task found by its number?", "answers": ["store.noe#TaskStore.find"] },
+    { "query": "which type describes one invocation of the program?", "answers": ["args.noe#Invocation"] },
+    { "query": "what marks a task as finished?", "answers": ["model.noe#Task.finish"] },
+    { "query": "where does the program start?", "answers": ["main.noe#main_entry"] },
+    { "query": "which function turns a word like high into an importance level?", "answers": ["model.noe#priority_of"] },
+    { "query": "what widens a string out to a fixed column width?", "answers": ["text.noe#pad"] },
+    { "query": "where does the subcommand that creates a task live?", "answers": ["add.noe#run"] }
+  ]
+}
