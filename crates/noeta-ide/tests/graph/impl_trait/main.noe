@@ -1,0 +1,28 @@
+// A standalone `impl Trait for T` method is a node like an in-body one: its call site resolves to
+// it, and its own body's calls leave it. A trait DEFAULT method is not declared on the type, so a
+// call to one is labeled `dynamic` rather than dropped.
+trait Speak {
+    fn say(): string
+    fn twice(): string { return "${self.say()}${self.say()}" }
+}
+
+struct ViaImpl { tag: string }
+
+impl Speak for ViaImpl {
+    pub fn say(): string { return sink() }
+}
+
+struct ViaBody {
+    tag: string
+    impl Speak { pub fn say(): string { return sink() } }
+}
+
+fn sink(): string { return "x" }
+
+fn caller(): string {
+    a = ViaImpl { tag: "a" }
+    b = ViaBody { tag: "b" }
+    return a.say() ~ b.say() ~ b.twice()
+}
+
+echo caller()

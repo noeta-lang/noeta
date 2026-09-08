@@ -1,0 +1,13 @@
+node impl_trait.main.Speak.twice method main.noe:6
+node impl_trait.main.ViaBody.say method main.noe:17
+node impl_trait.main.ViaImpl.say method main.noe:12
+node impl_trait.main.caller fn main.noe:22
+node impl_trait.main.sink fn main.noe:20
+edge <top> -> impl_trait.main.caller call function
+edge impl_trait.main.Speak.twice -> self.say call dynamic
+edge impl_trait.main.Speak.twice -> self.say call dynamic
+edge impl_trait.main.ViaBody.say -> impl_trait.main.sink call function
+edge impl_trait.main.ViaImpl.say -> impl_trait.main.sink call function
+edge impl_trait.main.caller -> impl_trait.main.ViaBody.say call function
+edge impl_trait.main.caller -> impl_trait.main.ViaBody.twice call dynamic
+edge impl_trait.main.caller -> impl_trait.main.ViaImpl.say call function

@@ -1,0 +1,20 @@
+// A method call on a typed receiver the program does not declare (`List`, `string`, a numeric)
+// resolves against the stdlib registry and is labeled `external` under the method's own identity —
+// never the receiver's source text.
+use std.math
+
+struct Wrap { xs: List<int> }
+
+fn helper(n: int): int { return n }
+
+fn typed_receivers(): int {
+    xs = [1, 2, 3]
+    a = xs.len()
+    s = "hi".len()
+    w = Wrap { xs: xs }
+    b = w.xs.len()
+    c = math.sqrt(4.0)
+    return a + b + s + helper(1) + c.to_int()
+}
+
+echo typed_receivers()

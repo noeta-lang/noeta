@@ -1,0 +1,8 @@
+node assoc_call.main.Counter.bump method main.noe:8
+node assoc_call.main.Counter.new method main.noe:6
+node assoc_call.main.build fn main.noe:14
+node assoc_call.main.run fn main.noe:16
+edge <top> -> assoc_call.main.run call function
+edge assoc_call.main.build -> assoc_call.main.Counter.new call function
+edge assoc_call.main.run -> assoc_call.main.Counter.bump call function
+edge assoc_call.main.run -> assoc_call.main.build call function

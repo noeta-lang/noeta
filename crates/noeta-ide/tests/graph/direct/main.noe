@@ -1,0 +1,14 @@
+use std.math
+
+fn helper(): int { return 1 }
+
+fn work(): int { return helper() + helper() }
+
+fn area(r: float): float { return math.sqrt(r) }
+
+fn apply(f: (int) -> int, n: int): int { return f(n) }
+
+fn cb(n: int): int { return n }
+
+echo work() + apply(cb, 1)
+echo area(4.0)

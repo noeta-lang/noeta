@@ -1,0 +1,9 @@
+node stdlib_methods.main.helper fn main.noe:8
+node stdlib_methods.main.typed_receivers fn main.noe:10
+edge <top> -> stdlib_methods.main.typed_receivers call function
+edge stdlib_methods.main.typed_receivers -> List.len call external
+edge stdlib_methods.main.typed_receivers -> List.len call external
+edge stdlib_methods.main.typed_receivers -> float.to_int call external
+edge stdlib_methods.main.typed_receivers -> math.sqrt call external
+edge stdlib_methods.main.typed_receivers -> stdlib_methods.main.helper call function
+edge stdlib_methods.main.typed_receivers -> string.len call external
