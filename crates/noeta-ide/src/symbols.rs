@@ -66,6 +66,10 @@ pub struct SymbolNode {
     /// tool's convention omits types (`fn add(a, b)` — precise types come from its `type_at`), so
     /// the one shared walk carries the names and each adapter renders its own detail.
     pub param_names: Vec<String>,
+    /// The `@tier` block this declaration was written inside (`test`, `bench`), when it was. A
+    /// fixture type declared in `@test { … }` is part of what the file declares, and the tier says
+    /// which pass compiles it.
+    pub tier: Option<String>,
     pub children: Vec<SymbolNode>,
 }
 
@@ -73,47 +77,77 @@ pub struct SymbolNode {
 /// fields/variants and methods as children) plus standalone `impl` blocks, in source order.
 pub fn outline(program: &Program) -> Vec<SymbolNode> {
     let mut symbols = Vec::new();
-    for stmt in &program.stmts {
-        match stmt {
-            Stmt::Fn(decl) => symbols.push(fn_symbol(decl, SymbolKind::Function)),
-            Stmt::Struct(decl) => symbols.push(SymbolNode {
+    collect(&program.stmts, None, &mut symbols);
+    symbols
+}
+
+/// Outline one statement list, tagging what it finds with the `@tier` block it sits inside.
+fn collect(stmts: &[Stmt], tier: Option<&str>, symbols: &mut Vec<SymbolNode>) {
+    for stmt in stmts {
+        let node = match stmt {
+            Stmt::Fn(decl) => fn_symbol(decl, SymbolKind::Function),
+            Stmt::Struct(decl) => SymbolNode {
                 name: decl.name.to_string(),
                 detail: None,
                 kind: SymbolKind::Struct,
                 full_span: decl.span,
                 name_span: decl.name_span,
                 param_names: Vec::new(),
+                tier: None,
                 children: type_members(&decl.fields, &decl.methods),
-            }),
-            Stmt::Class(decl) => symbols.push(SymbolNode {
+            },
+            Stmt::Class(decl) => SymbolNode {
                 name: decl.name.to_string(),
                 detail: None,
                 kind: SymbolKind::Class,
                 full_span: decl.span,
                 name_span: decl.name_span,
                 param_names: Vec::new(),
+                tier: None,
                 children: type_members(&decl.fields, &decl.methods),
-            }),
-            Stmt::Enum(decl) => symbols.push(enum_symbol(decl)),
-            Stmt::Impl(decl) => symbols.push(impl_symbol(decl)),
-            Stmt::Trait(decl) => symbols.push(SymbolNode {
+            },
+            Stmt::Enum(decl) => enum_symbol(decl),
+            Stmt::Impl(decl) => impl_symbol(decl),
+            Stmt::Trait(decl) => SymbolNode {
                 name: decl.name.to_string(),
                 detail: None,
                 kind: SymbolKind::Trait,
                 full_span: decl.span,
                 name_span: decl.name_span,
                 param_names: Vec::new(),
+                tier: None,
                 // The trait's method signatures, as `METHOD` children (bodiless required or default).
                 children: decl
                     .methods
                     .iter()
                     .map(|m| fn_symbol(&m.sig, SymbolKind::Method))
                     .collect(),
-            }),
-            _ => {}
-        }
+            },
+            Stmt::TierBlock {
+                tier: name, items, ..
+            } => {
+                collect(items, Some(name), symbols);
+                continue;
+            }
+            _ => continue,
+        };
+        symbols.push(node.in_tier(tier));
     }
-    symbols
+}
+
+impl SymbolNode {
+    /// Tag this node, and every member under it, with the tier it was declared in.
+    fn in_tier(mut self, tier: Option<&str>) -> SymbolNode {
+        if let Some(tier) = tier {
+            self.tier = Some(tier.to_string());
+            self.children = self
+                .children
+                .into_iter()
+                .map(|child| child.in_tier(Some(tier)))
+                .collect();
+        }
+        self
+    }
 }
 
 /// A function or method symbol, with its signature as detail.
@@ -125,6 +159,7 @@ fn fn_symbol(decl: &FnDecl, kind: SymbolKind) -> SymbolNode {
         full_span: decl.span,
         name_span: decl.name_span,
         param_names: decl.params.iter().map(|p| p.name.clone()).collect(),
+        tier: None,
         children: Vec::new(),
     }
 }
@@ -141,6 +176,7 @@ fn type_members(fields: &[FieldDecl], methods: &[FnDecl]) -> Vec<SymbolNode> {
             full_span: field.span,
             name_span: field.name_span,
             param_names: Vec::new(),
+            tier: None,
             children: Vec::new(),
         });
     }
@@ -162,6 +198,7 @@ fn enum_symbol(decl: &EnumDecl) -> SymbolNode {
             full_span: variant.span,
             name_span: variant.name_span,
             param_names: Vec::new(),
+            tier: None,
             children: Vec::new(),
         });
     }
@@ -175,6 +212,7 @@ fn enum_symbol(decl: &EnumDecl) -> SymbolNode {
         full_span: decl.span,
         name_span: decl.name_span,
         param_names: Vec::new(),
+        tier: None,
         children,
     }
 }
@@ -189,6 +227,7 @@ fn impl_symbol(decl: &ImplDecl) -> SymbolNode {
         full_span: decl.span,
         name_span: decl.trait_span,
         param_names: Vec::new(),
+        tier: None,
         children: decl
             .methods
             .iter()
@@ -349,6 +388,32 @@ mod tests {
     fn generic_and_optional_types_render_in_detail() {
         let syms = outline_of("fn find(xs: List<int>): ?int { return none }");
         assert_eq!(syms[0].detail.as_deref(), Some("(xs: List<int>) -> ?int"));
+    }
+
+    /// A declaration written inside a `@test { … }` block is outlined in place, tagged with its
+    /// tier, and its members inherit the tag. The outline is what `symbols` and the editor's
+    /// document outline serve, so a fixture type declared in a tier block was invisible to both.
+    #[test]
+    fn tier_block_declarations_are_outlined_with_their_tier() {
+        let syms = outline_of(
+            "fn helper(): int { return 1 }\n\
+             @test {\n  struct Fixture {\n    n: int\n    fn build(): int { return helper() }\n  }\n\
+               fn uses_fixture(): void { assert(true) }\n}\n",
+        );
+        let named = |name: &str| syms.iter().find(|s| s.name == name).expect(name);
+        assert_eq!(named("helper").tier, None);
+        let fixture = named("Fixture");
+        assert_eq!(fixture.kind, SymbolKind::Struct);
+        assert_eq!(fixture.tier.as_deref(), Some("test"));
+        assert_eq!(
+            fixture
+                .children
+                .iter()
+                .find(|c| c.name == "build")
+                .and_then(|c| c.tier.as_deref()),
+            Some("test"),
+        );
+        assert_eq!(named("uses_fixture").tier.as_deref(), Some("test"));
     }
 
     #[test]

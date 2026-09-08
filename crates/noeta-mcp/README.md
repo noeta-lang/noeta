@@ -13,4 +13,14 @@ Every tool taking a `source`/`file` pair funnels through `resolve_workspace` →
 
 Funnelling matters because the failure mode is silent: while the workspace was siblings-only, `check` reported errors on programs `noeta run` compiles cleanly, and `reflect` listed a dependency's attribute on its target while reporting no role for it — the `@role` tag lives in the package, which was never linked.
 
+## One identity across the graph tools
+
+`analyze::NodeId` is the identity every graph answer carries: the post-link `name`, a `kind` from the shared `NodeKind` enum, the declaring `file` relative to the project root, and the declared name's `span` (byte range plus line/column). `symbols`, `trace`, `reflect`, `module_graph`, `definition`, `references`, `impact` and `callers` all emit it, and `(file, span.start, span.end)` joins two answers exactly.
+
+`graph::DeclIndex` is the one walk behind it. It inventories the linked program's declarations under their post-link names, descends into `@tier { … }` blocks, and answers by exact name, by unique leaf (with the candidate list on a tie), and by span. A tool that needs "which declaration is this?" asks it rather than re-deriving an answer.
+
+## Link status is part of the answer
+
+A graph tool falls back to the entry file's own parse when the workspace does not link, so `analyze::LinkStatus` rides on `trace`, `reflect` and `module_graph` as `linked` plus `link_diagnostics` in `check`'s JSON shape. The fallback changes what the answer means: names lose their qualification and a call into a sibling module resolves to nothing, so `trace` marks every node `unverified` and degrades a callee naming one of the project's own modules to `unresolved` rather than calling it external.
+
 Part of the `noeta` compilation pipeline (see the repository `ARCHITECTURE.md` and `AGENTS.md`).

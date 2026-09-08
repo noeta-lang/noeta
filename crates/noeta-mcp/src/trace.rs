@@ -19,7 +19,8 @@ use noeta_ide::trace as engine;
 use rmcp::schemars;
 use serde::Serialize;
 
-use crate::analyze::{self, Loc, Prepared};
+use crate::analyze::{self, LinkStatus, Loc, NodeId, NodeKind, Prepared};
+use crate::graph::DeclIndex;
 
 /// The `trace` result.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -32,12 +33,22 @@ pub struct TraceOutput {
     pub boundaries: Vec<BoundaryHit>,
     /// True when the node budget cut the answer short.
     pub truncated: bool,
+    /// Whether the walk ran over the merged workspace program. When false the graph came from the
+    /// entry file's own parse: names are unqualified, and a call into a sibling module is reported
+    /// as an external leaf. Every node of such a walk carries `unverified`.
+    pub linked: bool,
+    /// What stopped the link, in `check`'s diagnostic shape. Empty when `linked`.
+    pub link_diagnostics: Vec<noeta_diagnostics::JsonDiagnostic>,
     pub note: Option<String>,
 }
 
 /// One node of a trace: a function (or external/dynamic callee) and everything it leads to.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct TraceNode {
+    /// The node's stable identity — the same `id` `symbols`, `reflect`, `impact` and `callers`
+    /// report for this declaration. An external or dynamic callee has a name and a kind and no
+    /// file or span, because it has no declaration here.
+    pub id: NodeId,
     /// The function's name (`handle`, `Counter.bump`), or the external/dynamic callee's label
     /// (`http.response`, `f.call`).
     pub name: String,
@@ -51,7 +62,8 @@ pub struct TraceNode {
     pub line: Option<u32>,
     /// Where the call/reference happened (in the caller), absent on roots.
     pub site: Option<Loc>,
-    /// A native/module target outside the program — a leaf.
+    /// A native/module target outside the program — a leaf. False for a target that names one of
+    /// this project's own modules, which is `unresolved` in `id.kind` instead.
     pub external: bool,
     /// A call through a closure-valued binding — statically unresolvable, a leaf.
     pub dynamic: bool,
@@ -59,6 +71,9 @@ pub struct TraceNode {
     pub cycle: bool,
     /// Children were cut by `max_depth` or the node budget.
     pub truncated: bool,
+    /// This node comes from an unlinked program, so its `external`/`dynamic` classification is
+    /// unproven — a real intra-project call can land here as an external leaf.
+    pub unverified: bool,
     pub children: Vec<TraceNode>,
 }
 
@@ -74,6 +89,7 @@ pub struct BoundaryHit {
 /// `Semantic.EntryPoint`, starting at every function bearing it) or a function name. With no
 /// `from`, every role-bearing function is a root (the program's architectural surface).
 pub fn trace(p: &Prepared, from: Option<&str>, max_depth: Option<usize>) -> TraceOutput {
+    let status = LinkStatus::of(p);
     let linked = noeta_db::linked(&p.db, p.ws);
     let entry = noeta_db::ast(&p.db, analyze::entry_program(p));
     let program: &Program = match &linked.program {
@@ -85,16 +101,22 @@ pub fn trace(p: &Prepared, from: Option<&str>, max_depth: Option<usize>) -> Trac
     let graph = callgraph::build(program, &checked.expr_types, &checked.sites, &texts);
     let native_roles = noeta_stdlib::registry::single_registry_process().native_roles();
     let info = noeta_ast::reflect::build(program, &native_roles, &Default::default());
+    // The declaration inventory over the same program: a trace node's identity is the declaration
+    // it names, so a trace joins `symbols` and `callers` on `id` rather than on (name, file, line).
+    let decls = DeclIndex::build(program);
 
-    let (roots, note): (Vec<usize>, Option<String>) =
+    let (roots, walk_note): (Vec<usize>, Option<String>) =
         match engine::resolve_roots(&graph, &info, from) {
             engine::Roots::Functions(roots) => (roots, None),
             engine::Roots::NotFound => {
                 let spec = from.unwrap_or_default();
-                return not_found(format!(
-                    "`{spec}` matches no role binding and no function — try `reflect` for the \
-                     role index or `symbols` for the declarations"
-                ));
+                return not_found(
+                    format!(
+                        "`{spec}` matches no role binding and no function — try `reflect` for the \
+                         role index or `symbols` for the declarations"
+                    ),
+                    &status,
+                );
             }
             engine::Roots::AllRoleBearers(all) => {
                 if all.is_empty() {
@@ -102,6 +124,7 @@ pub fn trace(p: &Prepared, from: Option<&str>, max_depth: Option<usize>) -> Trac
                         "no `@role` bindings on any function — pass `from` (a function name) to \
                          trace from a specific start"
                             .to_string(),
+                        &status,
                     );
                 }
                 (
@@ -120,7 +143,11 @@ pub fn trace(p: &Prepared, from: Option<&str>, max_depth: Option<usize>) -> Trac
     );
     TraceOutput {
         found: true,
-        traces: walked.roots.iter().map(|n| to_wire(p, n)).collect(),
+        traces: walked
+            .roots
+            .iter()
+            .map(|n| to_wire(p, n, &decls, status.linked))
+            .collect(),
         boundaries: walked
             .boundaries
             .iter()
@@ -135,24 +162,60 @@ pub fn trace(p: &Prepared, from: Option<&str>, max_depth: Option<usize>) -> Trac
             })
             .collect(),
         truncated: walked.truncated,
-        note,
+        // The link note comes first: a walk over an unlinked program is a different answer, and
+        // saying so has to outrank "no `from` given".
+        note: match (status.note(), walk_note) {
+            (Some(link), Some(walk)) => Some(format!("{link}; {walk}")),
+            (Some(link), None) => Some(link),
+            (None, walk) => walk,
+        },
+        linked: status.linked,
+        link_diagnostics: status.link_diagnostics.clone(),
     }
 }
 
-fn not_found(note: String) -> TraceOutput {
+fn not_found(note: String, status: &LinkStatus) -> TraceOutput {
     TraceOutput {
         found: false,
         traces: Vec::new(),
         boundaries: Vec::new(),
         truncated: false,
-        note: Some(note),
+        note: Some(match status.note() {
+            Some(link) => format!("{link}; {note}"),
+            None => note,
+        }),
+        linked: status.linked,
+        link_diagnostics: status.link_diagnostics.clone(),
     }
 }
 
 /// Resolve an engine node's spans to the tool's file/line wire shape, recursing into children.
-fn to_wire(p: &Prepared, n: &engine::TraceNode) -> TraceNode {
+fn to_wire(p: &Prepared, n: &engine::TraceNode, decls: &DeclIndex, linked: bool) -> TraceNode {
     let at = n.decl_span.and_then(|span| analyze::locate_span(p, span));
+    // An `external` target that names one of this project's own modules is not external: it is a
+    // real intra-project call the unlinked program could not resolve. Reporting it as external is
+    // a wrong architecture an agent cannot detect, so it degrades to `unresolved` instead.
+    let unresolved = n.external && p.names_a_project_module(&n.name);
+    let kind = if unresolved {
+        NodeKind::Unresolved
+    } else if n.external {
+        NodeKind::External
+    } else if n.dynamic {
+        NodeKind::Dynamic
+    } else if n.name.contains('.') && n.decl_span.is_some() {
+        NodeKind::Method
+    } else {
+        NodeKind::Function
+    };
+    let id = match n.decl_span.and_then(|span| decls.at_name_span(span)) {
+        Some(decl) => decl.id(p),
+        None => match n.decl_span {
+            Some(span) => p.node_id(&n.name, kind, span),
+            None => p.unlocated_id(&n.name, kind),
+        },
+    };
     TraceNode {
+        id,
         name: n.name.clone(),
         kind: match n.kind {
             engine::TraceKind::Root => "root",
@@ -167,11 +230,16 @@ fn to_wire(p: &Prepared, n: &engine::TraceNode) -> TraceNode {
             .site_span
             .and_then(|span| analyze::locate_span(p, span))
             .map(|(_, loc)| loc.start),
-        external: n.external,
+        external: n.external && !unresolved,
         dynamic: n.dynamic,
         cycle: n.cycle,
         truncated: n.truncated,
-        children: n.children.iter().map(|c| to_wire(p, c)).collect(),
+        unverified: !linked,
+        children: n
+            .children
+            .iter()
+            .map(|c| to_wire(p, c, decls, linked))
+            .collect(),
     }
 }
 #[cfg(test)]
@@ -281,6 +349,83 @@ fn save(n: int): int {
         let out = trace(&prep(), Some("ghost"), None);
         assert!(!out.found);
         assert!(out.note.unwrap().contains("ghost"));
+    }
+
+    /// **D5.** One unresolvable `use` breaks the link, and every graph tool then answers off the
+    /// entry file's own parse. The walk stayed `found: true` with a `null` note, silently swapped
+    /// every node's identity from qualified to bare, and rendered a real call into a sibling
+    /// module as `external: true` with no file — a wrong architecture an agent cannot detect.
+    #[test]
+    fn a_broken_use_reports_the_failed_link_and_never_calls_a_sibling_external() {
+        noeta_stdlib::registry::default_seeded();
+        let root = noeta_test_temp::TempDir::new("mcp-trace-link-status");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("noeta.toml"),
+            "[package]\nname = \"local/broken\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src").join("alpha.noe"),
+            "pub fn alpha_only(): int { return 1 }\n",
+        )
+        .unwrap();
+        let main = "use broken.alpha\n\
+                    fn entry(): int { return alpha.alpha_only() }\n\
+                    echo entry()\n";
+
+        // The control: the same project links, and the call resolves to a located function.
+        std::fs::write(root.join("src").join("main.noe"), main).unwrap();
+        let entry = root.join("src").join("main.noe").display().to_string();
+        // Addressed by the post-link name, which is what a linked walk speaks.
+        let clean = trace(
+            &prepare(&None, &Some(entry.clone())).unwrap(),
+            Some("broken.main.entry"),
+            None,
+        );
+        assert!(clean.linked, "note: {:?}", clean.note);
+        assert!(clean.link_diagnostics.is_empty());
+        let child = &clean.traces[0].children[0];
+        assert_eq!(child.name, "broken.alpha.alpha_only");
+        assert!(!child.external && !child.unverified, "{child:?}");
+
+        // Now break the link with one import of a module that does not exist.
+        std::fs::write(
+            root.join("src").join("main.noe"),
+            format!("use broken.nonexistent\n{main}"),
+        )
+        .unwrap();
+        // The fallback speaks bare names, which is itself part of what `linked: false` warns about.
+        let out = trace(&prepare(&None, &Some(entry)).unwrap(), Some("entry"), None);
+        assert!(!out.linked, "a broken `use` must flip `linked` to false");
+        assert!(
+            !out.link_diagnostics.is_empty(),
+            "the diagnostics that stopped the link are reported"
+        );
+        assert!(
+            out.note
+                .as_deref()
+                .is_some_and(|n| n.contains("did not link")),
+            "note: {:?}",
+            out.note
+        );
+        assert!(out.found, "the fallback still answers");
+        let root_node = &out.traces[0];
+        assert!(
+            root_node.unverified,
+            "every node of a fallback walk is marked"
+        );
+        let child = &root_node.children[0];
+        assert!(
+            !child.external,
+            "an intra-project function must never be reported external: {child:?}"
+        );
+        assert_eq!(
+            child.id.kind.as_str(),
+            "unresolved",
+            "it degrades to `unresolved` instead: {child:?}"
+        );
+        assert!(child.unverified);
     }
 
     #[test]

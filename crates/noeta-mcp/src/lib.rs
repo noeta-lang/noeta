@@ -17,6 +17,7 @@ mod corpus;
 mod debug;
 mod execute;
 mod format;
+mod graph;
 mod introspect;
 mod navigate;
 mod stdlib;
@@ -206,6 +207,18 @@ pub struct AnalyzeArgs {
     /// Path to a `.noe` file to analyze. Sibling `.noe` modules are resolved. Provide this or `source`.
     #[serde(default)]
     pub file: Option<String>,
+}
+
+/// Arguments to `symbols`: a source, plus how much of the program to outline.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct SymbolsArgs {
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub file: Option<String>,
+    /// `file` (the entry alone, the default) or `workspace` (every module of the project).
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 /// Arguments to `type_at`: a source, plus a site addressed by `symbol` name or `line`/`column`.
@@ -608,16 +621,19 @@ the tightest typed expression's type in surface syntax. Ground truth from the ty
         description = "Find where a symbol in Noeta code is declared. Address the site by `symbol` \
 (a name) or 1-based `line`+`column`. Resolves through the same engine the editor uses — \
 shadowing-correct locals, members via the receiver's type, imports into sibling modules and \
-dependency packages (pass `file` for cross-file resolution). Returns the location and its source \
-line."
+dependency packages (pass `file` for cross-file resolution). A `symbol` the entry file does not \
+contain resolves across the workspace by qualified name or unique leaf, and an ambiguous leaf \
+comes back as a candidate list. Returns the declaration's `id`, its location and its source line."
     )]
     async fn definition(
         &self,
         Parameters(args): Parameters<NavigateArgs>,
     ) -> Result<Json<navigate::DefinitionOutput>, ErrorData> {
-        let opened = navigate::open(&args.source, &args.file)?;
+        let mut opened = navigate::open(&args.source, &args.file)?;
+        let prepared = analyze::prepare(&args.source, &args.file)?;
         Ok(Json(navigate::definition(
-            &opened,
+            &mut opened,
+            &prepared,
             args.symbol.as_deref(),
             args.line,
             args.column,
@@ -629,15 +645,19 @@ line."
         description = "List every reference to a symbol in Noeta code — each use plus the \
 declaration (set `include_declaration: false` to drop it). Address the site by `symbol` or \
 1-based `line`+`column`. Value symbols resolve scope-aware; member symbols match by the \
-receiver's type, so a same-named member on another type is not swept in. Cross-file with `file`."
+receiver's type, so a same-named member on another type is not swept in. Cross-file with `file`; \
+a `symbol` outside the entry file resolves across the workspace and is queried at its own \
+declaration."
     )]
     async fn references(
         &self,
         Parameters(args): Parameters<NavigateArgs>,
     ) -> Result<Json<navigate::ReferencesOutput>, ErrorData> {
-        let opened = navigate::open(&args.source, &args.file)?;
+        let mut opened = navigate::open(&args.source, &args.file)?;
+        let prepared = analyze::prepare(&args.source, &args.file)?;
         Ok(Json(navigate::references(
-            &opened,
+            &mut opened,
+            &prepared,
             args.symbol.as_deref(),
             args.line,
             args.column,
@@ -674,18 +694,24 @@ an unclosed call; method calls resolve the receiver's type."
         Ok(Json(navigate::signature(&opened, args.line, args.column)))
     }
 
-    /// The declaration outline of a file — functions, types, and their members.
+    /// The declaration outline of a file, or of every module in the workspace.
     #[tool(
         description = "Outline the declarations in Noeta code — top-level functions, structs, \
-classes, enums, and impls, with their fields, variants, and methods as children (each with its \
-source span). The map an agent reads before navigating a file."
+classes, enums, and impls, with their fields, variants, and methods as children. Declarations \
+written inside a `@test`/`@bench` block are outlined too, tagged with their tier. Each node \
+carries an `id` (post-link name, kind, file, name span) that joins it to `trace`, `impact`, \
+`callers` and `reflect`. Pass `scope: \"workspace\"` for every module of the project. The map an \
+agent reads before navigating."
     )]
     async fn symbols(
         &self,
-        Parameters(args): Parameters<AnalyzeArgs>,
+        Parameters(args): Parameters<SymbolsArgs>,
     ) -> Result<Json<understand::SymbolsOutput>, ErrorData> {
         let prepared = analyze::prepare(&args.source, &args.file)?;
-        Ok(Json(understand::symbols(&prepared)))
+        Ok(Json(understand::symbols(
+            &prepared,
+            understand::SymbolScope::parse(args.scope.as_deref()),
+        )))
     }
 
     /// The project's own `@doc` documentation, adjacency-resolved.
@@ -2092,6 +2118,139 @@ echo handle(1)
         assert_eq!(
             structured["traces"][0]["children"][0]["name"],
             serde_json::json!("helper")
+        );
+
+        client.cancel().await.expect("client shuts down");
+        server.abort();
+    }
+
+    /// A three-module project on disk, the shape every cross-module claim is measured against:
+    /// `main.noe` calls into `alpha.noe` and `beta.noe`, each of which declares its own `shared`.
+    /// Returns the entry path (the guard rides along, so the tree outlives this call).
+    fn three_module_project(name: &str) -> noeta_test_temp::TempPath {
+        let root = noeta_test_temp::TempDir::new(&format!("mcp-{name}"));
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            root.join("noeta.toml"),
+            "[package]\nname = \"local/joined\"\nversion = \"0.1.0\"\n\n[directives]\ntest = \"std\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            src.join("alpha.noe"),
+            "pub fn shared(): int { return 1 }\npub fn alpha_only(): int { return shared() }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            src.join("beta.noe"),
+            "pub fn shared(): int { return 2 }\npub fn beta_only(): int { return shared() }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            src.join("main.noe"),
+            "use joined.alpha\n\
+             use joined.beta\n\
+             @attribute(Function)\n@role(Semantic.EntryPoint)\nstruct Entry { name: string }\n\
+             #[Entry(\"m\")]\n\
+             fn entry(): int { return alpha.alpha_only() + beta.beta_only() }\n\
+             echo entry()\n",
+        )
+        .unwrap();
+        root.into_child("src/main.noe")
+    }
+
+    /// **The join gate.** Two tools, one multi-file project, one vocabulary: every node `trace`
+    /// walks must be findable in the workspace outline by its `id`, byte for byte. Before the id,
+    /// `symbols` spoke bare names over the entry file and `trace` spoke post-link qualified names,
+    /// so there was no key an agent could join the two answers on at all.
+    #[tokio::test]
+    async fn two_tools_join_on_the_same_node_id_over_a_multi_file_project() {
+        use rmcp::model::CallToolRequestParams;
+
+        noeta_stdlib::registry::default_seeded();
+        let entry = three_module_project("mcp_join_ids");
+        let file = entry.display().to_string();
+
+        let (client_io, server_io) = tokio::io::duplex(1 << 16);
+        let server = tokio::spawn(async move {
+            if let Ok(svc) = NoetaMcp::new().serve(server_io).await {
+                let _ = svc.waiting().await;
+            }
+        });
+        let client = ().serve(client_io).await.expect("client initializes");
+
+        let call = async |name: &str, args: serde_json::Map<String, serde_json::Value>| {
+            let mut params = CallToolRequestParams::default();
+            params.name = name.to_string().into();
+            params.arguments = Some(args);
+            client
+                .call_tool(params)
+                .await
+                .expect("tools/call")
+                .structured_content
+                .expect("structured content")
+        };
+
+        let mut args = serde_json::Map::new();
+        args.insert("file".to_string(), serde_json::json!(file));
+        args.insert("scope".to_string(), serde_json::json!("workspace"));
+        let outline = call("symbols", args).await;
+        assert_eq!(outline["scope"], serde_json::json!("workspace"));
+
+        let mut args = serde_json::Map::new();
+        args.insert("file".to_string(), serde_json::json!(file));
+        args.insert("from".to_string(), serde_json::json!("EntryPoint"));
+        let traced = call("trace", args).await;
+        assert_eq!(traced["found"], serde_json::json!(true), "{traced}");
+        assert_eq!(traced["linked"], serde_json::json!(true), "{traced}");
+
+        // Collect every id the outline offers, then every FUNCTION id the trace walked.
+        fn ids(node: &serde_json::Value, key: &str, into: &mut Vec<serde_json::Value>) {
+            if let Some(id) = node.get("id") {
+                into.push(id.clone());
+            }
+            for child in node[key].as_array().into_iter().flatten() {
+                ids(child, key, into);
+            }
+        }
+        let mut declared = Vec::new();
+        for node in outline["symbols"].as_array().unwrap() {
+            ids(node, "children", &mut declared);
+        }
+        let mut walked = Vec::new();
+        for node in traced["traces"].as_array().unwrap() {
+            ids(node, "children", &mut walked);
+        }
+        let reachable: Vec<&serde_json::Value> = walked
+            .iter()
+            .filter(|id| id["kind"] == serde_json::json!("function"))
+            .collect();
+        assert!(reachable.len() >= 3, "trace walked: {walked:?}");
+        for id in &reachable {
+            assert!(
+                declared.contains(id),
+                "trace node {id} has no matching `symbols` node: {declared:?}"
+            );
+        }
+
+        // The join is exact enough to keep the two same-named functions apart: the outline holds
+        // both `shared`s, the trace reached both, and each joined to the one in its own file.
+        let shared: Vec<&serde_json::Value> = reachable
+            .iter()
+            .copied()
+            .filter(|id| id["name"].as_str().is_some_and(|n| n.ends_with(".shared")))
+            .collect();
+        let files: std::collections::BTreeSet<&str> =
+            shared.iter().filter_map(|id| id["file"].as_str()).collect();
+        assert_eq!(
+            files.len(),
+            2,
+            "two distinct `shared` declarations: {shared:?}"
+        );
+        assert!(
+            files.iter().any(|f| f.ends_with("alpha.noe"))
+                && files.iter().any(|f| f.ends_with("beta.noe")),
+            "files: {files:?}"
         );
 
         client.cancel().await.expect("client shuts down");

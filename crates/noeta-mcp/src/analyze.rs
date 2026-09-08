@@ -17,6 +17,25 @@ pub struct Prepared {
     pub db: LangDatabase,
     pub ws: Workspace,
     pub sources: Vec<Source>,
+    /// One entry per [`Self::sources`] index: the module identity that source's *location* derives
+    /// and the dependency package it belongs to. The graph tools' node identity reads from here, so
+    /// a module's namespace is the linker's answer rather than a re-derivation.
+    pub modules: Vec<ModuleIdentity>,
+    /// The root package's directory, when the request named a file inside one — what a node id's
+    /// `file` is reported relative to.
+    pub root: Option<std::path::PathBuf>,
+}
+
+/// What a source's location says about it: the dotted module path it derives, and the dependency
+/// package it belongs to (`None` for a workspace member).
+#[derive(Debug, Clone, Default)]
+pub struct ModuleIdentity {
+    /// The dotted module path the file's location derives, empty when its location derives none
+    /// (an inline source, or a file whose name cannot spell a path).
+    pub namespace: String,
+    /// The dependency package's module prefix (`toolkit`, `para.db`), for a module outside the
+    /// workspace members.
+    pub package: Option<String>,
 }
 
 impl Prepared {
@@ -25,6 +44,159 @@ impl Prepared {
     pub fn entry_text(&self) -> &str {
         self.sources[0].text()
     }
+
+    /// Whether `target` (a dotted callee label like `alpha.alpha_only`) leads with a module this
+    /// **project** declares. A call graph built over an unlinked program classifies such a target
+    /// as external, which is a lie an agent has no way to catch: it reads as "this leaves your
+    /// code" when the declaration is two files away.
+    pub fn names_a_project_module(&self, target: &str) -> bool {
+        let head = target.split('.').next().unwrap_or(target);
+        self.modules.iter().any(|m| {
+            m.package.is_none()
+                && !m.namespace.is_empty()
+                && (m.namespace == head || m.namespace.ends_with(&format!(".{head}")))
+        })
+    }
+
+    /// A source's reported file name: relative to the root package's directory when it sits inside
+    /// one, so two tools name the same file identically regardless of how the request spelled it.
+    pub fn file_name(&self, index: usize) -> Option<String> {
+        let source = self.sources.get(index)?;
+        Some(self.relative(source.name()))
+    }
+
+    /// `name` relative to the root package directory, or `name` unchanged when it sits outside it.
+    fn relative(&self, name: &str) -> String {
+        let Some(root) = &self.root else {
+            return name.to_string();
+        };
+        std::path::Path::new(name)
+            .strip_prefix(root)
+            .map(|rel| rel.display().to_string())
+            .unwrap_or_else(|_| name.to_string())
+    }
+
+    /// The stable identity of a declaration: its post-link name, its kind, the file it is declared
+    /// in, and its declared name's span. Two tools that report the same declaration report an equal
+    /// [`NodeId`], which is what lets an agent join their answers.
+    pub fn node_id(&self, name: &str, kind: NodeKind, span: noeta_span::Span) -> NodeId {
+        let index = span.source.0 as usize;
+        let (file, at) = match self.sources.get(index) {
+            Some(source) => {
+                let loc = LineIndex::new(source.text()).loc(span.start);
+                (
+                    Some(self.relative(source.name())),
+                    Some(NodeSpan {
+                        start: span.start,
+                        end: span.end,
+                        line: loc.line,
+                        column: loc.column,
+                    }),
+                )
+            }
+            None => (None, None),
+        };
+        NodeId {
+            name: name.to_string(),
+            kind,
+            file,
+            span: at,
+        }
+    }
+
+    /// The identity of a node with no declaration in this program — an external module target or a
+    /// dynamic callee. It carries a name and a kind and nothing to open.
+    pub fn unlocated_id(&self, name: &str, kind: NodeKind) -> NodeId {
+        NodeId {
+            name: name.to_string(),
+            kind,
+            file: None,
+            span: None,
+        }
+    }
+}
+
+/// What a graph node **is**. One vocabulary across every tool, so a node's kind means the same
+/// thing whether `symbols`, `trace`, `reflect`, `module_graph`, `impact` or `callers` reported it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeKind {
+    /// A top-level `fn`.
+    Function,
+    /// A method declared inside a type or an `impl` block.
+    Method,
+    Struct,
+    Class,
+    Enum,
+    /// One variant of an enum.
+    Variant,
+    /// One field of a struct or class.
+    Field,
+    Trait,
+    /// A standalone `impl Trait for Type` block.
+    Impl,
+    /// A source file's module.
+    Module,
+    /// A native/module target outside the program (`math.sqrt`).
+    External,
+    /// A callee reached through a value — statically unresolvable.
+    Dynamic,
+    /// A target this project declares that the analysis could not resolve — what an external
+    /// classification degrades to when the workspace did not link.
+    Unresolved,
+}
+
+impl NodeKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            NodeKind::Function => "function",
+            NodeKind::Method => "method",
+            NodeKind::Struct => "struct",
+            NodeKind::Class => "class",
+            NodeKind::Enum => "enum",
+            NodeKind::Variant => "variant",
+            NodeKind::Field => "field",
+            NodeKind::Trait => "trait",
+            NodeKind::Impl => "impl",
+            NodeKind::Module => "module",
+            NodeKind::External => "external",
+            NodeKind::Dynamic => "dynamic",
+            NodeKind::Unresolved => "unresolved",
+        }
+    }
+}
+
+impl std::fmt::Display for NodeKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A declared name's span: the byte range plus the 1-based line and (UTF-8 byte) column of its
+/// start. Byte offsets are what the engine keys declarations by; the line/column is what an agent
+/// opens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, schemars::JsonSchema)]
+pub struct NodeSpan {
+    pub start: u32,
+    pub end: u32,
+    pub line: u32,
+    pub column: u32,
+}
+
+/// The identity every graph tool emits alongside its own fields. `(file, span.start, span.end)` is
+/// the join key — the declaration's name span, the one thing the engine itself keys nodes by —
+/// while `name` is how `trace`, `impact` and `callers` are addressed.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, schemars::JsonSchema)]
+pub struct NodeId {
+    /// The post-link name: namespace-qualified for a declaration in a package (`app.main.handle`),
+    /// `Type.method` for a method.
+    pub name: String,
+    pub kind: NodeKind,
+    /// The declaring file, relative to the project root. `null` for a node with no declaration in
+    /// this program (an external or dynamic callee).
+    pub file: Option<String>,
+    /// The declared name's span. `null` alongside a `null` file.
+    pub span: Option<NodeSpan>,
 }
 
 /// Build a workspace from a `check`-style request. `source` is a lone inline entry; `file` pulls in
@@ -43,11 +215,101 @@ pub fn prepare(
     let resolved = crate::resolve_workspace(source, file)?;
     let db = LangDatabase::default();
     let ws = resolved.workspace(&db);
+    let modules = module_identities(&resolved);
+    let root = file
+        .as_deref()
+        .map(std::path::Path::new)
+        .and_then(noeta_pm::sources::package_root)
+        .map(|root| root.dir);
     Ok(Prepared {
         db,
         ws,
         sources: resolved.sources,
+        modules,
+        root,
     })
+}
+
+/// The per-source module identity table, in [`Prepared::sources`] order: each member's derived
+/// module path, then each dependency package's modules tagged with the package's prefix.
+fn module_identities(resolved: &crate::ResolvedWorkspace) -> Vec<ModuleIdentity> {
+    let dotted = |path: &noeta_loader::ModulePath| {
+        path.derived()
+            .map(|segments| segments.join("."))
+            .unwrap_or_default()
+    };
+    let members = resolved.members().len();
+    let mut identities: Vec<ModuleIdentity> = (0..members)
+        .map(|i| ModuleIdentity {
+            namespace: resolved.paths.get(i).map(dotted).unwrap_or_default(),
+            package: None,
+        })
+        .collect();
+    for dep in &resolved.deps {
+        let package = dep.prefix.join(".");
+        for (i, _) in dep.modules.iter().enumerate() {
+            identities.push(ModuleIdentity {
+                namespace: dep.paths.get(i).map(dotted).unwrap_or_default(),
+                package: Some(package.clone()),
+            });
+        }
+    }
+    identities
+}
+
+/// Whether the workspace linked, and what stopped it when it did not.
+///
+/// Every graph tool falls back to the entry file's own parse when the link fails, because half an
+/// answer beats none. The fallback changes what the answer *means*: names lose their qualification,
+/// and a call into a sibling module resolves to nothing, which the call graph then labels
+/// `external`. So the status rides on the answer, and the tools mark their nodes with it.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct LinkStatus {
+    /// True when the answer was computed over the merged workspace program.
+    pub linked: bool,
+    /// The diagnostics that stopped the link, in the same JSON shape `check` reports. Empty when
+    /// `linked`.
+    pub link_diagnostics: Vec<noeta_diagnostics::JsonDiagnostic>,
+}
+
+impl LinkStatus {
+    /// The workspace's link status, with the diagnostics resolved against its sources.
+    pub fn of(p: &Prepared) -> LinkStatus {
+        match &noeta_db::linked(&p.db, p.ws).program {
+            Ok(_) => LinkStatus {
+                linked: true,
+                link_diagnostics: Vec::new(),
+            },
+            Err(diagnostics) => {
+                let sources = noeta_span::SourceMap::new(p.sources.clone());
+                LinkStatus {
+                    linked: false,
+                    link_diagnostics: diagnostics
+                        .iter()
+                        .map(|d| noeta_diagnostics::to_json(&sources, d))
+                        .collect(),
+                }
+            }
+        }
+    }
+
+    /// The sentence a tool puts in its `note` when it answered from the fallback, naming the first
+    /// diagnostic. `None` when the workspace linked.
+    pub fn note(&self) -> Option<String> {
+        if self.linked {
+            return None;
+        }
+        let first = self
+            .link_diagnostics
+            .first()
+            .map(|d| format!("{}: {}", d.code, d.message))
+            .unwrap_or_else(|| "the modules could not be merged".to_string());
+        Some(format!(
+            "the workspace did not link ({first}) — this answer comes from the entry file's own \
+             parse, so names are unqualified and a call into a sibling module can be reported as \
+             an external target"
+        ))
+    }
 }
 
 /// A resolved source location: 1-based line and column plus the raw byte offset. The column counts

@@ -97,6 +97,24 @@ claude mcp add noeta -- noeta mcp
 
 In **VS Code 1.101+** the Noeta extension registers the server automatically through the editor's MCP provider API, so agents running in the editor discover it with no configuration. The extension's `noeta.server.path` setting points at the binary for `lsp`, `dap`, and `mcp` alike.
 
+### Node identity
+
+Every graph tool emits an `id` on each node, and two tools' answers join on it exactly.
+
+| Field | What it holds |
+|---|---|
+| `name` | The post-link name, namespace-qualified in a package (`app.main.handle`), `Type.method` for a method. What `trace`, `impact` and `callers` are addressed by. |
+| `kind` | `function`, `method`, `struct`, `class`, `enum`, `variant`, `field`, `trait`, `impl`, `module`, `external`, `dynamic`, `unresolved`. |
+| `file` | The declaring file, relative to the project root. `null` for a callee with no declaration here. |
+| `span` | The declared name's `start`/`end` byte offsets plus its 1-based `line` and `column`. `null` alongside a `null` file. |
+
+`(file, span.start, span.end)` is the join key: it is the declaration's name span, which is what the engine itself keys nodes by. `symbols`, `trace`, `reflect`, `module_graph`, `definition`, `references`, `impact` and `callers` all carry it.
+
+```json
+{ "name": "joined.alpha.shared", "kind": "function", "file": "src/alpha.noe",
+  "span": { "start": 7, "end": 13, "line": 1, "column": 8 } }
+```
+
 ### Ground
 
 Orient before writing a line.
@@ -121,16 +139,18 @@ The compiler's semantic answers.
 |---|---|
 | `check` | Type-checks code, returning the same JSON diagnostics `noeta check --format json` emits, over the same shapes: once as the source ships, then once per dev-tier block it declares, with `tiers_checked` naming which. A `@test` body that does not compile is an error here rather than a surprise at `noeta test`. `file` takes a **project directory** as readily as a single `.noe`, running the same walk `noeta check` runs, so the agent and the command line cannot disagree about whether a project is clean. |
 | `type_at` | The inferred type at a symbol or position, plus a `layout` storage fact for `@packed` and flat-list types, worded as editor hover words it. |
-| `symbols` | A file's declaration outline, carrying each node's `@role` bindings. |
-| `definition` / `references` / `completions` / `signature` | Navigation over the **same `noeta-ide` engine the language server serves**, so agent and editor cannot disagree. A `file` entry resolves cross-file through sibling modules and dependency packages. |
+| `symbols` | A declaration outline, carrying each node's `@role` bindings and, for a declaration written inside a `@test`/`@bench` block, its `tier`. `scope: "workspace"` outlines every module of the project; the default `scope: "file"` outlines the entry alone. |
+| `definition` / `references` / `completions` / `signature` | Navigation over the **same `noeta-ide` engine the language server serves**, so agent and editor cannot disagree. A `file` entry resolves cross-file through sibling modules and dependency packages. `definition` and `references` also take a `symbol` the entry file does not contain, resolving it across the workspace by post-link name or unique leaf; a leaf naming several declarations comes back as a `candidates` list. |
 
 ### Introspect
 
 The compiler's artifacts.
 
+`trace`, `reflect` and `module_graph` read the merged workspace program, and each reports a `linked` flag with `link_diagnostics` in `check`'s JSON shape. Under a failed link the answer comes from the entry file's own parse: names lose their qualification, so `trace` marks every node `unverified`, and a callee that names one of the project's own modules is reported with `id.kind` of `unresolved` rather than as an external target.
+
 | Tool | Answers |
 |---|---|
-| `ast` / `bytecode` / `pipeline` / `module_graph` | The syntax tree, the VM disassembly, a per-stage health summary, and the `use` import graph with each module labeled by the `@role` bindings it declares. |
+| `ast` / `bytecode` / `pipeline` / `module_graph` | The syntax tree, the VM disassembly, a per-stage health summary, and the `use` import graph. A module node's `namespace` is the module path its file's location derives, each import edge carries the `targets` it resolves onto, and a dependency package's imported module is a node marked `external` with its `package`. |
 | `reflect` | The [attributes and `@role` reflection manifest](Attributes-and-Reflection): which declarations are entry points, trust boundaries, persistence boundaries, sinks, or layers, each with its source location and joinable with every other tool. A role conferred by a **dependency package's** `@role`-bearing attribute is indexed exactly like one declared in the file at hand, and the answer matches what `roles_of()` gives in-language. Tagging a package's tool attribute `@role(Semantic.TrustBoundary)` is what makes "what can a language model reach in this program?" answerable off the architecture graph. |
 | `trace` | The **static call path from a role**. `trace(from: "EntryPoint")` starts at every function bearing the role and walks the call graph; each node is a function with its own roles, declaration and call sites. External module calls and dynamic callees are labeled leaves, and passed-function references such as handler registrations are followed as `reference` edges. The `boundaries` summary answers which persistence and trust boundaries the entry point reaches. |
 

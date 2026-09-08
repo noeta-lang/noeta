@@ -2,7 +2,8 @@
 //! the public salsa graph + parsed AST — the shared IDE engine's resolver backs the navigation
 //! tools instead (see [`crate::navigate`]).
 
-use crate::analyze::{self, LineIndex, Prepared, SpanLoc};
+use crate::analyze::{self, LineIndex, NodeId, NodeKind, Prepared, SpanLoc};
+use crate::graph::DeclIndex;
 use noeta_ast::Program;
 use noeta_ide::docs as model;
 use rmcp::schemars;
@@ -108,18 +109,44 @@ fn not_found(note: String, offset: Option<u32>) -> TypeAtOutput {
     }
 }
 
-/// The `symbols` result: the entry file's declaration outline.
+/// How much of the program `symbols` outlines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SymbolScope {
+    /// The entry file alone.
+    #[default]
+    File,
+    /// Every module of the workspace, in link order.
+    Workspace,
+}
+
+impl SymbolScope {
+    /// Parse the tool argument; anything else falls back to the file scope.
+    pub fn parse(scope: Option<&str>) -> SymbolScope {
+        match scope.map(str::trim) {
+            Some("workspace") => SymbolScope::Workspace,
+            _ => SymbolScope::File,
+        }
+    }
+}
+
+/// The `symbols` result: the declaration outline of the entry file, or of the whole workspace.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct SymbolsOutput {
+    /// What was outlined.
+    pub scope: SymbolScope,
     pub symbols: Vec<SymbolNode>,
 }
 
 /// One outline node: a declaration with its kind, a short detail, its span, and its members.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct SymbolNode {
+    /// The declaration's stable identity: its post-link name, kind, file and name span. Every
+    /// graph tool emits the same shape, so an outline node joins a `trace`, `impact` or `callers`
+    /// node exactly.
+    pub id: NodeId,
     pub name: String,
-    /// `function` / `struct` / `class` / `enum` / `impl` / `field` / `variant` / `method`.
-    pub kind: String,
+    pub kind: NodeKind,
     /// A short signature-ish detail (a function's parameter names, an `impl`'s trait+target), when
     /// useful. Parameter *types* are omitted here — call `type_at` or `ast` for precise types.
     pub detail: Option<String>,
@@ -127,6 +154,8 @@ pub struct SymbolNode {
     /// The architectural roles this declaration bears (`Enum.Variant`, from `@role`-tagged
     /// attributes it carries) — the same index `reflect` serves, placed on the map itself.
     pub roles: Vec<String>,
+    /// The `@tier` block this declaration was written inside (`test`, `bench`), when it was.
+    pub tier: Option<String>,
     pub children: Vec<SymbolNode>,
 }
 
@@ -384,88 +413,92 @@ pub fn doc_page(p: &Prepared, id: &str) -> DocPageOutput {
 /// document-symbols serves — so the agent's outline and the editor's outline can never drift
 /// (audit-4 finding 8). This adapter only reshapes onto the MCP wire: kind strings, the
 /// types-omitted `fn name(a, b)` detail convention, 1-based locations, and the `@role` post-pass.
-pub fn symbols(p: &Prepared) -> SymbolsOutput {
-    let parsed = noeta_db::ast(&p.db, analyze::entry_program(p));
-    let program: &Program = &parsed.0.program;
-    let index = LineIndex::new(p.entry_text());
-    let mut symbols: Vec<SymbolNode> = noeta_ide::symbols::outline(program)
-        .iter()
-        .map(|node| from_outline(node, &index))
-        .collect();
-
-    // Annotate the outline with the `@role` index (over the merged program, so a role conferred by
-    // an attribute declared in a sibling module still lands; entry-file targets only, since the
-    // outline is entry-file only). Nested members key as `Type.member`, matching the index.
+pub fn symbols(p: &Prepared, scope: SymbolScope) -> SymbolsOutput {
+    // The linked program names declarations the way every other graph tool names them, so the
+    // outline's ids carry the post-link identity even though the outline itself walks each file's
+    // own parse (which is what keeps it available on a program that does not link).
     let linked = noeta_db::linked(&p.db, p.ws);
-    let role_program: &Program = match &linked.program {
-        Ok(prog) => prog,
-        Err(_) => program,
+    let entry_ast = noeta_db::ast(&p.db, analyze::entry_program(p));
+    let program: &Program = match &linked.program {
+        Ok(program) => program,
+        Err(_) => &entry_ast.0.program,
     };
+    let decls = DeclIndex::build(program);
+
+    // The `@role` index over the merged program, keyed by each target's declaration SPAN. A span
+    // is the one key both sides agree on: a role target is namespace-qualified in a package while
+    // an outline node carries the name the author wrote.
     let native_roles = noeta_stdlib::registry::single_registry_process().native_roles();
-    let info = noeta_ast::reflect::build(role_program, &native_roles, &Default::default());
-    let mut role_map: std::collections::HashMap<&str, Vec<String>> =
+    let info = noeta_ast::reflect::build(program, &native_roles, &Default::default());
+    let mut roles: std::collections::HashMap<noeta_span::Span, Vec<String>> =
         std::collections::HashMap::new();
     for r in &info.roles {
-        if analyze::in_entry(r.target_span) {
-            role_map
-                .entry(r.target.as_str())
-                .or_default()
-                .push(format!("{}.{}", r.enum_name, r.variant));
-        }
+        roles
+            .entry(r.target_span)
+            .or_default()
+            .push(format!("{}.{}", r.enum_name, r.variant));
     }
-    annotate_roles(&mut symbols, None, &role_map);
-    SymbolsOutput { symbols }
-}
 
-/// Attach roles to each node: a top-level node keys by its name, a member by `Parent.name` (the
-/// index's `Type.member` convention). `impl` nodes have no single name and never match.
-fn annotate_roles(
-    nodes: &mut [SymbolNode],
-    parent: Option<&str>,
-    role_map: &std::collections::HashMap<&str, Vec<String>>,
-) {
-    for node in nodes {
-        let key = match parent {
-            Some(parent) => format!("{parent}.{}", node.name),
-            None => node.name.clone(),
-        };
-        if let Some(roles) = role_map.get(key.as_str()) {
-            node.roles = roles.clone();
-        }
-        let name = node.name.clone();
-        annotate_roles(&mut node.children, Some(&name), role_map);
+    let members = p.ws.members(&p.db);
+    let outlined = match scope {
+        SymbolScope::File => 1,
+        SymbolScope::Workspace => members.len().min(p.sources.len()),
+    };
+    let mut symbols: Vec<SymbolNode> = Vec::new();
+    for (i, member) in members.iter().take(outlined).enumerate() {
+        let parsed = noeta_db::ast(&p.db, *member);
+        let line_index = LineIndex::new(p.sources[i].text());
+        symbols.extend(
+            noeta_ide::symbols::outline(&parsed.0.program)
+                .iter()
+                .map(|node| from_outline(p, node, &line_index, &decls, &roles)),
+        );
     }
+    SymbolsOutput { scope, symbols }
 }
 
 /// Reshape one shared-outline node onto the MCP wire. The location is the whole declaration's
 /// span (the shared walk's `full_span`); the detail keeps this tool's convention — `fn name(p0,
 /// p1)` for callables (parameter names only; precise types come from `type_at` / `ast`), nothing
-/// for the other kinds (whose LSP-facing detail carries types the tool deliberately omits).
-fn from_outline(node: &noeta_ide::symbols::SymbolNode, index: &LineIndex) -> SymbolNode {
+/// for the other kinds (whose LSP-facing detail carries types the tool deliberately omits). The
+/// id comes from the linked program's declaration at the same name span, so it is qualified.
+fn from_outline(
+    p: &Prepared,
+    node: &noeta_ide::symbols::SymbolNode,
+    index: &LineIndex,
+    decls: &DeclIndex,
+    roles: &std::collections::HashMap<noeta_span::Span, Vec<String>>,
+) -> SymbolNode {
     use noeta_ide::symbols::SymbolKind as K;
     let kind = match node.kind {
-        K::Function => "function",
-        K::Struct => "struct",
-        K::Class => "class",
-        K::Enum => "enum",
-        K::EnumMember => "variant",
-        K::Field => "field",
-        K::Method => "method",
-        K::Interface => "impl",
-        K::Trait => "trait",
+        K::Function => NodeKind::Function,
+        K::Struct => NodeKind::Struct,
+        K::Class => NodeKind::Class,
+        K::Enum => NodeKind::Enum,
+        K::EnumMember => NodeKind::Variant,
+        K::Field => NodeKind::Field,
+        K::Method => NodeKind::Method,
+        K::Interface => NodeKind::Impl,
+        K::Trait => NodeKind::Trait,
     };
     let detail = matches!(node.kind, K::Function | K::Method)
         .then(|| format!("fn {}({})", node.name, node.param_names.join(", ")));
+    let id = match decls.at_name_span(node.name_span) {
+        Some(decl) => decl.id(p),
+        None => p.node_id(&node.name, kind, node.name_span),
+    };
     SymbolNode {
+        id,
         name: node.name.clone(),
-        kind: kind.to_string(),
+        kind,
         detail,
         location: index.span_loc(node.full_span),
-        roles: Vec::new(),
+        roles: roles.get(&node.name_span).cloned().unwrap_or_default(),
+        tier: node.tier.clone(),
         children: node
             .children
             .iter()
-            .map(|child| from_outline(child, index))
+            .map(|child| from_outline(p, child, index, decls, roles))
             .collect(),
     }
 }
@@ -643,58 +676,86 @@ impl Show for Point {
 }
 ";
         let p = prepare(&Some(src.to_string()), &None).unwrap();
-        let out = serde_json::to_value(symbols(&p)).unwrap();
+        let out = serde_json::to_value(symbols(&p, SymbolScope::File)).unwrap();
         let loc = |sl: u32, sc: u32, so: u32, el: u32, ec: u32, eo: u32| {
             serde_json::json!({
                 "start": {"line": sl, "column": sc, "offset": so},
                 "end": {"line": el, "column": ec, "offset": eo},
             })
         };
+        // The stable identity: the post-link name, the kind, the file, and the DECLARED NAME's
+        // byte range plus its line/column. Two tools reporting this declaration report this
+        // object, byte for byte.
+        let id = |name: &str, kind: &str, start: u32, end: u32, line: u32, column: u32| {
+            serde_json::json!({
+                "name": name, "kind": kind, "file": "<inline>",
+                "span": {"start": start, "end": end, "line": line, "column": column},
+            })
+        };
         let expected = serde_json::json!({
+            "scope": "file",
             "symbols": [
                 {
+                    "id": id("add", "function", 3, 6, 1, 4),
                     "name": "add", "kind": "function", "detail": "fn add(a, b)",
-                    "location": loc(1, 1, 0, 1, 45, 44), "roles": [], "children": [],
+                    "location": loc(1, 1, 0, 1, 45, 44), "roles": [], "tier": null, "children": [],
                 },
                 {
+                    "id": id("Point", "struct", 53, 58, 3, 8),
                     "name": "Point", "kind": "struct", "detail": null,
-                    "location": loc(3, 1, 46, 6, 2, 106), "roles": [],
+                    "location": loc(3, 1, 46, 6, 2, 106), "roles": [], "tier": null,
                     "children": [
                         {
+                            "id": id("Point.x", "field", 63, 64, 4, 3),
                             "name": "x", "kind": "field", "detail": null,
-                            "location": loc(4, 3, 63, 4, 9, 69), "roles": [], "children": [],
+                            "location": loc(4, 3, 63, 4, 9, 69), "roles": [], "tier": null,
+                            "children": [],
                         },
                         {
+                            "id": id("Point.norm", "method", 75, 79, 5, 6),
                             "name": "norm", "kind": "method", "detail": "fn norm()",
-                            "location": loc(5, 3, 72, 5, 35, 104), "roles": [], "children": [],
+                            "location": loc(5, 3, 72, 5, 35, 104), "roles": [], "tier": null,
+                            "children": [],
                         },
                     ],
                 },
                 {
+                    "id": id("Shape", "enum", 113, 118, 8, 6),
                     "name": "Shape", "kind": "enum", "detail": null,
-                    "location": loc(8, 1, 108, 12, 2, 180), "roles": [],
+                    "location": loc(8, 1, 108, 12, 2, 180), "roles": [], "tier": null,
                     "children": [
                         {
+                            "id": id("Shape.Dot", "variant", 123, 126, 9, 3),
                             "name": "Dot", "kind": "variant", "detail": null,
-                            "location": loc(9, 3, 123, 9, 6, 126), "roles": [], "children": [],
+                            "location": loc(9, 3, 123, 9, 6, 126), "roles": [], "tier": null,
+                            "children": [],
                         },
                         {
+                            "id": id("Shape.Circle", "variant", 129, 135, 10, 3),
                             "name": "Circle", "kind": "variant", "detail": null,
-                            "location": loc(10, 3, 129, 10, 22, 148), "roles": [], "children": [],
+                            "location": loc(10, 3, 129, 10, 22, 148), "roles": [], "tier": null,
+                            "children": [],
                         },
                         {
+                            "id": id("Shape.area", "method", 154, 158, 11, 6),
                             "name": "area", "kind": "method", "detail": "fn area()",
-                            "location": loc(11, 3, 151, 11, 30, 178), "roles": [], "children": [],
+                            "location": loc(11, 3, 151, 11, 30, 178), "roles": [], "tier": null,
+                            "children": [],
                         },
                     ],
                 },
                 {
+                    "id": id("Show for Point", "impl", 187, 191, 14, 6),
                     "name": "Show for Point", "kind": "impl", "detail": null,
-                    "location": loc(14, 1, 182, 16, 2, 235), "roles": [],
+                    "location": loc(14, 1, 182, 16, 2, 235), "roles": [], "tier": null,
                     "children": [
                         {
+                            // A standalone impl's method is named the way the CALL GRAPH names it
+                            // (`Target.method`), so `symbols` and `trace` report one identity.
+                            "id": id("Point.show", "method", 209, 213, 15, 6),
                             "name": "show", "kind": "method", "detail": "fn show()",
-                            "location": loc(15, 3, 206, 15, 30, 233), "roles": [], "children": [],
+                            "location": loc(15, 3, 206, 15, 30, 233), "roles": [], "tier": null,
+                            "children": [],
                         },
                     ],
                 },
@@ -733,7 +794,7 @@ impl Show for Point {
     #[test]
     fn symbols_outlines_declarations_and_members() {
         let p = prep();
-        let out = symbols(&p);
+        let out = symbols(&p, SymbolScope::File);
         let kinds: Vec<(&str, &str)> = out
             .symbols
             .iter()
@@ -751,6 +812,80 @@ impl Show for Point {
         assert_eq!(handle.detail.as_deref(), Some("fn handle(n)"));
     }
 
+    /// **D9.** A declaration written inside a `@test` block is in the outline, tagged with its
+    /// tier. A real 78-line file whose code all sat in top-level statements plus one `@test` block
+    /// answered `{"symbols":[]}` — fifteen bytes for a file full of declarations.
+    #[test]
+    fn symbols_outlines_tier_block_declarations_with_their_tier() {
+        let src = "fn helper(): int { return 1 }\n\
+                   @test {\n  struct Fixture {\n    n: int\n    fn build(): int { return helper() }\n  }\n\
+                     fn uses_fixture(): void { assert(true) }\n}\n";
+        let p = prepare(&Some(src.to_string()), &None).unwrap();
+        let out = symbols(&p, SymbolScope::File);
+        let named = |name: &str| {
+            out.symbols
+                .iter()
+                .find(|s| s.name == name)
+                .unwrap_or_else(|| panic!("{name} is missing: {:?}", out.symbols))
+        };
+        assert_eq!(named("helper").tier, None);
+        let fixture = named("Fixture");
+        assert_eq!(fixture.kind, NodeKind::Struct);
+        assert_eq!(fixture.tier.as_deref(), Some("test"));
+        assert_eq!(fixture.id.name, "Fixture");
+        let build = fixture.children.iter().find(|c| c.name == "build").unwrap();
+        assert_eq!(build.id.name, "Fixture.build");
+        assert_eq!(build.tier.as_deref(), Some("test"));
+        assert_eq!(named("uses_fixture").tier.as_deref(), Some("test"));
+    }
+
+    /// **D13.** `scope: "workspace"` outlines every member module, so a project map is one call
+    /// rather than one call per file plus a file list nothing supplies.
+    #[test]
+    fn workspace_scope_outlines_every_member_module() {
+        noeta_stdlib::registry::default_seeded();
+        let root = noeta_test_temp::TempDir::new("mcp-symbols-workspace");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("noeta.toml"),
+            "[package]\nname = \"local/joined\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src").join("alpha.noe"),
+            "pub fn alpha_only(): int { return 1 }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src").join("main.noe"),
+            "use joined.alpha\nfn entry(): int { return alpha.alpha_only() }\necho entry()\n",
+        )
+        .unwrap();
+        let entry = root.join("src").join("main.noe").display().to_string();
+        let p = prepare(&None, &Some(entry)).unwrap();
+
+        let file_only = symbols(&p, SymbolScope::File);
+        assert_eq!(file_only.scope, SymbolScope::File);
+        let entry_names: Vec<&str> = file_only.symbols.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(entry_names, vec!["entry"]);
+
+        let whole = symbols(&p, SymbolScope::Workspace);
+        assert_eq!(whole.scope, SymbolScope::Workspace);
+        let ids: Vec<(&str, &str)> = whole
+            .symbols
+            .iter()
+            .map(|s| (s.id.name.as_str(), s.id.file.as_deref().unwrap_or("")))
+            .collect();
+        assert!(
+            ids.contains(&("joined.main.entry", "src/main.noe")),
+            "{ids:?}"
+        );
+        assert!(
+            ids.contains(&("joined.alpha.alpha_only", "src/alpha.noe")),
+            "{ids:?}"
+        );
+    }
+
     #[test]
     fn symbols_carries_architectural_roles() {
         // `@role(Semantic.EntryPoint)` rides the `Route` attribute; `handle` bears `#[Route]`, so
@@ -766,7 +901,7 @@ fn handle(n: int): int { return n }
 fn helper(): int { return 1 }
 ";
         let p = prepare(&Some(src.to_string()), &None).unwrap();
-        let out = symbols(&p);
+        let out = symbols(&p, SymbolScope::File);
         let handle = out.symbols.iter().find(|s| s.name == "handle").unwrap();
         assert_eq!(handle.roles, vec!["Semantic.EntryPoint"]);
         let helper = out.symbols.iter().find(|s| s.name == "helper").unwrap();
