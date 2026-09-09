@@ -1,19 +1,45 @@
 //! The one module that reads MCP tool output.
 //!
 //! Every arm speaks [`NodeRef`] and [`Located`]; nothing outside this file touches a tool's JSON.
-//! That boundary is the whole point: the graph tools' wire shapes are changing, and re-targeting
-//! the benchmark to a new shape has to be an edit here rather than a sweep of the strategies.
+//! That boundary is the whole point: the graph tools' wire shapes change, and re-targeting the
+//! benchmark to a new shape has to be an edit here rather than a sweep of the strategies.
 //!
-//! Each reader **prefers a node's `id` object when the tool emits one** — a qualified name, a kind,
-//! a file, and a byte span, which is the identity the engine has always had and no wire shape used
-//! to expose. Absent an `id`, it falls back to today's per-tool fields: bare names and 1-based
-//! line/column from `symbols`, `definition` and `references`; qualified names with a line and no
-//! column from `trace`; a target name and a `SpanLoc` from `reflect`. Byte spans are what scoring
-//! matches on, so a line/column answer is resolved against the file's own text here.
+//! **The `id` object is the primary key.** `symbols`, `definition`, `references`, `trace`,
+//! `reflect`, `module_graph`, `impact` and `callers` each carry `{name, kind, file, span}` on every
+//! node they report, and `(file, span.start, span.end)` joins two answers exactly. [`read_id`] is
+//! the one place that reads it.
+//!
+//! Two shapes still report a position without an id, and only those keep a fallback:
+//!
+//! | Shape | What it carries instead |
+//! |---|---|
+//! | `references[]` | an absolute `file` and a 1-based line/column `range`, resolved to a byte offset here |
+//! | `trace.boundaries[]` | a `target` name, an absolute `file` and a `line` |
+//!
+//! **A path on the wire comes in two anchorings.** An `id.file` is relative to the project root
+//! (`auth.noe`, `handlers/orders.noe`), while the sibling `file` fields that predate the id are
+//! absolute. Gold is keyed off the corpus's own absolute paths, so a root-relative path has to be
+//! joined onto the project root before it can be compared: [`anchored`] is where that happens, and
+//! scoring calls it on every path an arm names. Comparing the two anchorings directly is not a
+//! near-miss — it silently matches every file in a subdirectory and no file at the root.
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use serde_json::Value;
+
+/// Anchor a path a tool reported onto the project it belongs to.
+///
+/// A node id's `file` is relative to the project root; the pre-id `file` fields are absolute. One
+/// of the two has to move before a path can be compared with anything, and joining the relative one
+/// onto the root is the direction that keeps every absolute path already in hand untouched.
+pub fn anchored(root: &Path, file: &str) -> String {
+    let path = Path::new(file);
+    if path.is_absolute() {
+        return file.to_string();
+    }
+    root.join(path).display().to_string()
+}
 
 /// A declaration an arm named, in whatever identity the tool it came from could give.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
@@ -88,51 +114,33 @@ impl Default for LineIndexes {
     }
 }
 
-/// Read a node's `id` object, when the tool emits one.
+/// Read a node's `id` object.
 ///
-/// Accepts the spellings a stable id can plausibly land under, because a reader that insists on one
-/// of them silently degrades to the fallback the day the shape settles. Everything else in this
-/// crate reads what this returns.
+/// `{name, kind, file, span{start, end, line, column}}` — the post-link name, the shared kind
+/// vocabulary, the declaring file relative to the project root, and the declared name's byte span.
+/// `file` and `span` are both null for a node with no declaration in the program (an external or
+/// dynamic callee), which is a node an arm can name but scoring cannot pin.
+///
+/// This reads exactly the shape the tools emit. It does not accept alternative spellings: a node
+/// that stops carrying an id has to be visible as an unresolved answer rather than as a quiet
+/// degrade to a bare name, because the second is indistinguishable from the tool being wrong.
 fn read_id(value: &Value) -> Option<NodeRef> {
-    let id = value.get("id")?;
-    if !id.is_object() {
-        return None;
-    }
-    let name = id
-        .get("qualified")
-        .or_else(|| id.get("qualified_name"))
-        .or_else(|| id.get("name"))
-        .and_then(Value::as_str)?;
-    let file = id.get("file").and_then(Value::as_str).map(str::to_string);
-    let span = read_span(id.get("span")).or_else(|| read_span(Some(id)));
+    let id = value.get("id")?.as_object()?;
+    let name = id.get("name").and_then(Value::as_str)?;
     Some(NodeRef {
         qualified: Some(name.to_string()),
         leaf: name.rsplit('.').next().unwrap_or(name).to_string(),
-        file,
-        span,
+        file: id.get("file").and_then(Value::as_str).map(str::to_string),
+        span: read_span(id.get("span")),
         kind: id.get("kind").and_then(Value::as_str).map(str::to_string),
     })
 }
 
-/// A byte span written as `{start, end}`, `{byte_start, byte_end}`, or `{start: {offset}, end: {offset}}`.
+/// A node id's byte span: `{start, end}`, alongside the line and column an editor opens.
 fn read_span(value: Option<&Value>) -> Option<(u32, u32)> {
     let span = value?;
-    let field = |names: [&str; 2]| -> Option<u32> {
-        for name in names {
-            if let Some(number) = span.get(name).and_then(Value::as_u64) {
-                return Some(number as u32);
-            }
-            if let Some(number) = span
-                .get(name)
-                .and_then(|v| v.get("offset"))
-                .and_then(Value::as_u64)
-            {
-                return Some(number as u32);
-            }
-        }
-        None
-    };
-    Some((field(["start", "byte_start"])?, field(["end", "byte_end"])?))
+    let field = |name: &str| span.get(name).and_then(Value::as_u64).map(|n| n as u32);
+    Some((field("start")?, field("end")?))
 }
 
 /// One entry of a `symbols` outline, flattened.
@@ -341,6 +349,62 @@ pub fn boundaries(value: &Value) -> Vec<(NodeRef, String)> {
         .collect()
 }
 
+/// Whether a tool that resolves a symbol found one.
+pub fn found(value: &Value) -> bool {
+    value.get("found").and_then(Value::as_bool) == Some(true)
+}
+
+/// Every declaration a tool listed as a candidate for an ambiguous leaf.
+pub fn candidates(value: &Value) -> Vec<NodeRef> {
+    let Some(list) = value.get("candidates").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    list.iter().filter_map(read_bare_id).collect()
+}
+
+/// A `candidates` entry is a node id written inline rather than under an `id` key.
+fn read_bare_id(id: &Value) -> Option<NodeRef> {
+    let name = id.get("name").and_then(Value::as_str)?;
+    Some(NodeRef {
+        qualified: Some(name.to_string()),
+        leaf: name.rsplit('.').next().unwrap_or(name).to_string(),
+        file: id.get("file").and_then(Value::as_str).map(str::to_string),
+        span: read_span(id.get("span")),
+        kind: id.get("kind").and_then(Value::as_str).map(str::to_string),
+    })
+}
+
+/// The using declarations `callers` reported at one hop of the reverse walk.
+pub fn caller_edges(value: &Value, depth: usize) -> Vec<NodeRef> {
+    let Some(levels) = value.get("levels").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    levels
+        .iter()
+        .filter(|level| level.get("depth").and_then(Value::as_u64) == Some(depth as u64))
+        .filter_map(|level| level.get("callers").and_then(Value::as_array))
+        .flatten()
+        .filter_map(read_id)
+        .collect()
+}
+
+/// The tier functions an `impact` answer reached, each with the tier block it was declared in.
+pub fn tier_functions(value: &Value) -> Vec<(NodeRef, String)> {
+    let Some(list) = value.get("tier_functions").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    list.iter()
+        .filter_map(|entry| {
+            let tier = entry
+                .get("tier")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            Some((read_id(entry)?, tier))
+        })
+        .collect()
+}
+
 /// One file of a `module_graph` answer.
 #[derive(Debug, Clone)]
 pub struct ModuleNode {
@@ -517,12 +581,12 @@ mod tests {
     fn an_id_object_wins_over_the_legacy_fields() {
         let value = serde_json::json!({
             "name": "place_order",
-            "file": "old.noe",
+            "file": "/abs/orders_service/handlers/orders.noe",
             "id": {
-                "qualified": "Shop.handlers.orders.place_order",
+                "name": "Shop.handlers.orders.place_order",
                 "kind": "function",
                 "file": "handlers/orders.noe",
-                "span": { "start": 120, "end": 131 }
+                "span": { "start": 120, "end": 131, "line": 34, "column": 8 }
             }
         });
         let node = read_id(&value).expect("an id object");
@@ -533,6 +597,23 @@ mod tests {
         assert_eq!(node.leaf, "place_order");
         assert_eq!(node.file.as_deref(), Some("handlers/orders.noe"));
         assert_eq!(node.span, Some((120, 131)));
+    }
+
+    #[test]
+    fn a_root_relative_path_is_anchored_and_an_absolute_one_is_left_alone() {
+        let root = Path::new("/corpus/orders_service");
+        assert_eq!(
+            anchored(root, "handlers/orders.noe"),
+            "/corpus/orders_service/handlers/orders.noe"
+        );
+        assert_eq!(
+            anchored(root, "main.noe"),
+            "/corpus/orders_service/main.noe"
+        );
+        assert_eq!(
+            anchored(root, "/corpus/orders_service/main.noe"),
+            "/corpus/orders_service/main.noe"
+        );
     }
 
     #[test]

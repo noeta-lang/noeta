@@ -8,8 +8,9 @@ graphbench: corpus
   orders_service      12 files  linked=true  errors=0  warnings=0
   ...
 arm  category          n      P      R     F1  Acc@1  Acc@5    MRR   tokens  calls      ms  evidence
-A0   callees          26  1.000  1.000  1.000  0.846  0.846  0.846     1378    2.3    5182  trace
-A5   callees          26  0.235  0.885  0.333  0.077  0.462  0.285     8724   21.4       0  file_read
+A0   callers          25  0.740  0.667  0.687  0.520  0.520  0.520      758    1.7    3503  references
+A3   callers          25  1.000  1.000  1.000  0.720  0.720  0.720      210    1.2    2296  callers
+A5   callers          25  0.569  0.740  0.603  0.560  0.680  0.607     8746   21.7       0  file_read
 
 graphbench: every row holds its baseline.
 ```
@@ -29,7 +30,7 @@ Each **arm** is a fixed strategy: for one question category, a composition of to
 | A4 | a fixed 4k-token repo map, no navigation | whether precomputation alone suffices |
 | A5 | a lexical scan of the files, no Noeta tools | whether any of this beats grep |
 
-An arm whose tools the service does not advertise reports **SKIP** naming the missing tool. A SKIP prints in its own column, holds no baseline row, and is never a pass.
+**A requirement is per category, not per arm.** An arm's strategy for `callers` and its strategy for `path` need different tools, so each (arm, category) row is measured as soon as *its* tools are advertised and reports **SKIP** naming the missing tool otherwise. A3 measures `callers` and `impact` today; its `path` and `role_reach` rows name `path` and `architecture` and wait. A SKIP prints in its own column, holds no baseline row, and is never a pass.
 
 An arm is given what a developer types: a leaf name and the file it sits in, a module path, or a sentence. It never sees the question's gold, and it never sees the qualified name the graph knows a declaration by, because obtaining that name is part of what is measured.
 
@@ -51,6 +52,16 @@ Every row also records the output size in tokens (characters over four), the num
 A ranked category's F1 is dominated by the candidate depth an arm returns, since ten candidates against one gold answer cap precision at 0.1. Read `Acc@1` and MRR there, and read F1 on the set categories.
 
 Responses are cached per (tool, arguments) within a run, because every MCP call builds a fresh `LangDatabase` and re-links the project. The **logical** call count is still what the arm issued, so the calls column stays the number an agent would pay; the milliseconds column is what the cache left.
+
+## What the identity costs
+
+```console
+$ cargo run -p noeta-graphbench -- --token-cost
+```
+
+Every graph tool carries an `id` object on each node — `{name, kind, file, span}` — and most of them still carry the pre-id fields beside it. `--token-cost` calls each tool once per corpus project and splits the answer three ways: the whole response, the `id` objects, and the fields that state a fact the sibling `id` already states. A field counts as a repeat only when its value matches the id's, so `trace`'s `kind` of `call` is not counted against the id's `function`.
+
+The measurement changes nothing on the wire. It says what a trimming pass would be worth.
 
 ## Sampling rules
 
@@ -127,6 +138,9 @@ It is nightly-only and never gated. An answer costs money, and the same question
 | `src/arms.rs` | the strategies |
 | `src/metrics.rs` | resolution and scoring |
 | `src/baseline.rs` | the floors and ceilings |
+| `src/tokens.rs` | what the node identity weighs, and what is stated twice |
 | `src/generate.rs` | the synthetic tier |
+
+`--dump-tool <TOOL>` prints one tool's raw JSON for the first selected project, with `--dump-symbol` and repeatable `--dump-arg key=value`. It is the evidence half of a diagnosis: a wrong answer and a misread answer look identical from the report, and the wire says which one it is.
 
 `src/adapter.rs` is the boundary that matters. Every reader there prefers a node's `id` object when a tool emits one, and falls back to today's per-tool fields when it does not, so re-targeting the benchmark to a new wire shape is an edit in one file.

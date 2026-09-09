@@ -13,7 +13,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::adapter::NodeRef;
+use crate::adapter::{self, NodeRef};
 use crate::gold::Facts;
 use crate::question::{Question, node_key, normalize_file};
 
@@ -38,8 +38,22 @@ impl Prediction {
 /// Resolve one prediction to a canonical key, or to a key nothing in gold can carry.
 pub fn resolve(facts: &Facts, prediction: &Prediction) -> String {
     match prediction {
-        Prediction::File(file) => crate::question::file_key(file),
+        Prediction::File(file) => crate::question::file_key(&adapter::anchored(&facts.root, file)),
         Prediction::Node(node) => {
+            // `callers` reports a use written in a module's top-level statements as that module, so
+            // a `module` node names the file's top level rather than a declaration inside it. The
+            // universe carries one top-level node per file; joining them on the file is what makes
+            // "the entry calls this" an answer rather than an unresolvable name.
+            if node.kind.as_deref() == Some("module")
+                && let Some(file) = &node.file
+            {
+                let want = normalize_file(&adapter::anchored(&facts.root, file));
+                if let Some(id) = facts.nodes.iter().find(|n| {
+                    n.kind == crate::gold::NodeKind::TopLevel && normalize_file(&n.file) == want
+                }) {
+                    return node_key(facts, id.id);
+                }
+            }
             let mut candidates: Vec<usize> = facts.by_leaf(&node.leaf).to_vec();
             if let Some(span) = node.span {
                 let pinned: Vec<usize> = candidates
@@ -52,7 +66,7 @@ pub fn resolve(facts: &Facts, prediction: &Prediction) -> String {
                 }
             }
             if let Some(file) = &node.file {
-                let want = normalize_file(file);
+                let want = normalize_file(&adapter::anchored(&facts.root, file));
                 let pinned: Vec<usize> = candidates
                     .iter()
                     .copied()
@@ -93,6 +107,12 @@ pub struct Outcome {
     pub first_hit: Option<usize>,
     pub predicted: usize,
     pub gold: usize,
+    /// The keys the arm's answer resolved to, in the order it named them, and the keys the
+    /// question wanted. A row that moves is diagnosed by reading these two beside each other; a
+    /// count alone cannot say whether an arm named the wrong node or named the right one under a
+    /// path nothing could match.
+    pub answered: Vec<String>,
+    pub wanted: Vec<String>,
 }
 
 /// Score one answer against one question.
@@ -135,6 +155,8 @@ pub fn score(facts: &Facts, question: &Question, predictions: &[Prediction]) -> 
         first_hit,
         predicted: ordered.len(),
         gold: gold.len(),
+        wanted: question.gold.clone(),
+        answered: ordered,
     }
 }
 
@@ -185,6 +207,8 @@ mod tests {
             first_hit,
             predicted: 1,
             gold: 1,
+            answered: Vec::new(),
+            wanted: Vec::new(),
         }
     }
 

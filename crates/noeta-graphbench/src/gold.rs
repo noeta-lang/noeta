@@ -11,6 +11,7 @@
 //! same on every run and on every machine.
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
 
 use noeta_ast::{Program, Stmt};
 use noeta_ide::callgraph::{CallGraph, Callee};
@@ -78,6 +79,9 @@ pub struct Node {
 /// The whole gold side of one project.
 #[derive(Debug)]
 pub struct Facts {
+    /// The project's own directory. A tool reports a node's file relative to it, so this is what
+    /// anchors an answer's path against gold's absolute one.
+    pub root: PathBuf,
     pub nodes: Vec<Node>,
     /// Every `use` edge: `(importing file, imported module path)`.
     pub imports: Vec<(String, String)>,
@@ -374,6 +378,7 @@ pub fn facts(analysis: &Analysis) -> Result<Facts, String> {
 
     let (imports, modules) = import_edges(analysis);
     Ok(Facts {
+        root: analysis.root.clone(),
         nodes,
         imports,
         modules,
