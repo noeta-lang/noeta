@@ -27,6 +27,8 @@ packages now extracted to their own repos (locally at `/home/niklas/Code/para/`,
 
 ## The frontier — good next picks
 
+The code graph an agent reads over `noeta mcp` is now measured: `noeta-graphbench` pins a deterministic retrieval baseline per (arm, category) at the merge gate, the call graph has a fixture oracle, every graph tool shares one `id`, and the retrieval layer the evidence supports (`code_search`, PPR `context_map`, `path`, `architecture`, `impact`, `callers`) ships with its ablations. The follow-ons (session-scoped workspace cache, the nightly agent-layer arm, scaling curves, the seed-mapping ceiling) are rows under Tooling in the backlog.
+
 The 2026-07-19/20 burndown + the owner-commissioned arcs that followed closed every implementable
 row: the deferred-item long tail (small language follow-ups, `.await` positions, channels I.4c,
 isolate env limits I.4b, nested `concurrent` A.7, safepoint cycle GC, keyed-list LiveView,
