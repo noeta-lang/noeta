@@ -405,12 +405,36 @@ impl ImpactSession {
     /// linked program's qualified vocabulary — exactly what the runners' `--name` filter and
     /// their `TierFn` names speak. Everything unattributable degrades to [`Impact::All`].
     pub fn impact_of_changes(&mut self, changed: &[PathBuf]) -> Impact {
+        let mut edits: Vec<(PathBuf, String)> = Vec::with_capacity(changed.len());
+        for path in changed {
+            let canon = path.canonicalize().unwrap_or_else(|_| path.clone());
+            // A spec an expanding directive read is not a member and carries no `.noe` text; hand
+            // it through unread so the valve below names it.
+            if self.reads.contains(&canon) {
+                edits.push((canon, String::new()));
+                continue;
+            }
+            let Some(text) = std::fs::read_to_string(&canon).ok() else {
+                return Impact::All {
+                    reason: format!("cannot read {}", canon.display()),
+                };
+            };
+            edits.push((canon, text));
+        }
+        self.impact_of_sources(&edits)
+    }
+
+    /// [`impact_of_changes`](Self::impact_of_changes) for edits held **in memory**: the caller
+    /// supplies each edited file's new text rather than the engine reading it back off disk. The
+    /// same pipeline, so a consumer that has not written the edit yet (an agent asking "what would
+    /// this break?") gets the answer the watch loop would give after the save.
+    pub fn impact_of_sources(&mut self, edits: &[(PathBuf, String)]) -> Impact {
         let Some(cache) = &self.cache else {
             return Impact::All {
                 reason: "the project's members cannot be read".into(),
             };
         };
-        if changed.is_empty() {
+        if edits.is_empty() {
             return Impact::All {
                 reason: "the change could not be attributed to a file".into(),
             };
@@ -435,7 +459,7 @@ impl ImpactSession {
         // whose meaning depends on which table it came from.
         let mut edited: Vec<(SourceId, String)> = Vec::new(); // (member id, new text)
         let mut seen = BTreeSet::new();
-        for path in changed {
+        for (path, text) in edits {
             let canon = path.canonicalize().unwrap_or_else(|_| path.clone());
             // A file an expansion hook read (an `@openapi` spec) is not a project member, but its
             // change still invalidates the generated members. The impact diff speaks the `.noe`
@@ -461,12 +485,7 @@ impl ImpactSession {
             if !seen.insert(source) {
                 continue;
             }
-            let Some(text) = uri_to_path(&uri).and_then(|p| std::fs::read_to_string(p).ok()) else {
-                return Impact::All {
-                    reason: format!("cannot read {}", canon.display()),
-                };
-            };
-            edited.push((source, text));
+            edited.push((source, text.clone()));
         }
 
         // Push the new texts into the salsa inputs first (unchanged members backdate), so the
@@ -515,6 +534,24 @@ impl ImpactSession {
                     };
                 }
                 FileDiff::Names { names, namespace } => {
+                    // A package refuses a `namespace` statement (E0072) — its modules derive
+                    // their identity from the filesystem — so the file's own text names no
+                    // prefix while the linked program qualifies every declaration with one. The
+                    // derived path is the linker's answer and takes precedence; a manifest-less
+                    // script that writes `namespace A.B;` keeps that. Without this the seeds were
+                    // bare in every real package, matched no graph node, and the closure came back
+                    // holding only the edited declaration, so `--watch` reran one test instead of
+                    // the suite the edit reaches.
+                    let namespace = src
+                        .input()
+                        .and_then(|program| {
+                            program
+                                .module_path(&self.db)
+                                .0
+                                .derived()
+                                .map(|p| p.join("."))
+                        })
+                        .or(namespace);
                     for name in names {
                         // A dotted per-file name is `Type.method` (qualification is the
                         // linker's); its member seeds the dynamic-edge fallback.
@@ -533,6 +570,35 @@ impl ImpactSession {
             return Impact::Decls(Vec::new());
         }
 
+        self.closure_from(seeds, members)
+    }
+
+    /// The impact of changing the **named declarations** themselves, with no edit to diff: the
+    /// same reverse closure over the linked program's call graph, seeded directly. What answers
+    /// "what breaks if I change `X`" for a consumer holding a name rather than a diff. `names` are
+    /// post-link names (`app.main.handle`, `app.main.Counter.bump`).
+    pub fn impact_of_decls(&mut self, names: &[String]) -> Impact {
+        if names.is_empty() {
+            return Impact::Decls(Vec::new());
+        }
+        // A dotted name's LAST segment seeds the dynamic-edge fallback the same way a diff name's
+        // does: an untyped receiver's `c.bump()` resolves to no node, and matching the member name
+        // is what keeps a missed static method call out of the false-negative budget.
+        let members: BTreeSet<String> = names
+            .iter()
+            .filter_map(|n| n.rsplit_once('.').map(|(_, m)| m.to_string()))
+            .collect();
+        self.closure_from(names.iter().cloned().collect(), members)
+    }
+
+    /// Link, activate every declared tier, check, build the call graph, and walk the reverse
+    /// closure from `seeds`. The half both impact doors share.
+    fn closure_from(&self, seeds: BTreeSet<String>, members: BTreeSet<String>) -> Impact {
+        let Some(cache) = &self.cache else {
+            return Impact::All {
+                reason: "the project's members cannot be read".into(),
+            };
+        };
         // The linked program — what the runner executes — then tiers, check, graph, closure.
         // The entry was a member at construction, but a deletion + rebaseline can remove it.
         let Some(entry_program) = cache

@@ -5,7 +5,8 @@
 //!
 //! Two rules make the tools joinable. Every declaration is named exactly once, so `symbols`,
 //! `trace`, `impact` and `callers` cannot report the same function under different spellings, and
-//! a declaration inside a `@test`/`@bench` block is in the inventory like any other.
+//! a declaration inside a `@test`/`@bench` block is in the inventory like any other, carrying
+//! the tier it was declared in.
 
 use noeta_ast::{Program, Stmt};
 use noeta_span::Span;
@@ -23,6 +24,9 @@ pub struct Decl {
     pub name_span: Span,
     /// The whole declaration's span.
     pub decl_span: Span,
+    /// The `@tier` block this declaration was written inside (`test`, `bench`), when it was —
+    /// what tells an impact answer which of the declarations it names a runner will execute.
+    pub tier: Option<String>,
 }
 
 impl Decl {
@@ -51,7 +55,7 @@ impl DeclIndex {
     /// qualification — into the inventory.
     pub fn build(program: &Program) -> DeclIndex {
         let mut index = DeclIndex::default();
-        index.collect(&program.stmts);
+        index.collect(&program.stmts, None);
         index
     }
 
@@ -97,114 +101,113 @@ impl DeclIndex {
         })
     }
 
-    /// Recurse a statement list, descending into `@tier { … }` blocks so a fixture type or a
-    /// test function is in the inventory like any other declaration.
-    fn collect(&mut self, stmts: &[Stmt]) {
+    /// Recurse a statement list, descending into `@tier { … }` blocks so a fixture type or a test
+    /// function is in the inventory like any other declaration, tagged with its tier.
+    fn collect(&mut self, stmts: &[Stmt], tier: Option<&str>) {
         for stmt in stmts {
             match stmt {
-                Stmt::Fn(decl) => self.push(
-                    decl.name.to_string(),
-                    NodeKind::Function,
-                    decl.name_span,
-                    decl.span,
-                ),
+                Stmt::Fn(decl) => {
+                    let at = At::new(decl.name_span, decl.span, tier);
+                    self.push(decl.name.to_string(), NodeKind::Function, at);
+                }
                 Stmt::Struct(decl) => {
                     let name = decl.name.to_string();
-                    self.push(name.clone(), NodeKind::Struct, decl.name_span, decl.span);
-                    self.members(&name, &decl.fields, &decl.methods);
+                    let at = At::new(decl.name_span, decl.span, tier);
+                    self.push(name.clone(), NodeKind::Struct, at);
+                    self.members(&name, &decl.fields, &decl.methods, tier);
                 }
                 Stmt::Class(decl) => {
                     let name = decl.name.to_string();
-                    self.push(name.clone(), NodeKind::Class, decl.name_span, decl.span);
-                    self.members(&name, &decl.fields, &decl.methods);
+                    let at = At::new(decl.name_span, decl.span, tier);
+                    self.push(name.clone(), NodeKind::Class, at);
+                    self.members(&name, &decl.fields, &decl.methods, tier);
                 }
                 Stmt::Enum(decl) => {
                     let name = decl.name.to_string();
-                    self.push(name.clone(), NodeKind::Enum, decl.name_span, decl.span);
+                    let at = At::new(decl.name_span, decl.span, tier);
+                    self.push(name.clone(), NodeKind::Enum, at);
                     for variant in &decl.variants {
-                        self.push(
-                            format!("{name}.{}", variant.name),
-                            NodeKind::Variant,
-                            variant.name_span,
-                            variant.span,
-                        );
+                        let at = At::new(variant.name_span, variant.span, tier);
+                        self.push(format!("{name}.{}", variant.name), NodeKind::Variant, at);
                     }
-                    for method in &decl.methods {
-                        self.push(
-                            format!("{name}.{}", method.name),
-                            NodeKind::Method,
-                            method.name_span,
-                            method.span,
-                        );
-                    }
+                    self.methods(&name, &decl.methods, tier);
                 }
                 Stmt::Trait(decl) => {
                     let name = decl.name.to_string();
-                    self.push(name.clone(), NodeKind::Trait, decl.name_span, decl.span);
+                    let at = At::new(decl.name_span, decl.span, tier);
+                    self.push(name.clone(), NodeKind::Trait, at);
                     for method in &decl.methods {
-                        self.push(
-                            format!("{name}.{}", method.sig.name),
-                            NodeKind::Method,
-                            method.sig.name_span,
-                            method.sig.span,
-                        );
+                        let at = At::new(method.sig.name_span, method.sig.span, tier);
+                        self.push(format!("{name}.{}", method.sig.name), NodeKind::Method, at);
                     }
                 }
                 Stmt::Impl(decl) => {
-                    // Named the way the call graph names a standalone impl's methods
+                    // A standalone impl's methods are named the way the CALL GRAPH names them
                     // (`Target.method`), so an impl method has one identity across both.
+                    let name = format!("{} for {}", decl.trait_name, decl.target);
                     self.push(
-                        format!("{} for {}", decl.trait_name, decl.target),
+                        name,
                         NodeKind::Impl,
-                        decl.trait_span,
-                        decl.span,
+                        At::new(decl.trait_span, decl.span, tier),
                     );
-                    for method in &decl.methods {
-                        self.push(
-                            format!("{}.{}", decl.target, method.name),
-                            NodeKind::Method,
-                            method.name_span,
-                            method.span,
-                        );
-                    }
+                    self.methods(decl.target.as_str(), &decl.methods, tier);
                 }
-                Stmt::TierBlock { items, .. } => self.collect(items),
+                Stmt::TierBlock {
+                    tier: name, items, ..
+                } => self.collect(items, Some(name)),
                 _ => {}
             }
         }
     }
 
+    /// A type's fields followed by its methods, each named `Owner.member`.
     fn members(
         &mut self,
         owner: &str,
         fields: &[noeta_ast::FieldDecl],
         methods: &[noeta_ast::FnDecl],
+        tier: Option<&str>,
     ) {
         for field in fields {
-            self.push(
-                format!("{owner}.{}", field.name),
-                NodeKind::Field,
-                field.name_span,
-                field.span,
-            );
+            let at = At::new(field.name_span, field.span, tier);
+            self.push(format!("{owner}.{}", field.name), NodeKind::Field, at);
         }
+        self.methods(owner, methods, tier);
+    }
+
+    fn methods(&mut self, owner: &str, methods: &[noeta_ast::FnDecl], tier: Option<&str>) {
         for method in methods {
-            self.push(
-                format!("{owner}.{}", method.name),
-                NodeKind::Method,
-                method.name_span,
-                method.span,
-            );
+            let at = At::new(method.name_span, method.span, tier);
+            self.push(format!("{owner}.{}", method.name), NodeKind::Method, at);
         }
     }
 
-    fn push(&mut self, name: String, kind: NodeKind, name_span: Span, decl_span: Span) {
+    fn push(&mut self, name: String, kind: NodeKind, at: At<'_>) {
         self.decls.push(Decl {
             name,
             kind,
+            name_span: at.name_span,
+            decl_span: at.decl_span,
+            tier: at.tier.map(str::to_string),
+        });
+    }
+}
+
+/// Where a declaration sits: its two spans and the tier block enclosing it. Carried as one value
+/// so the walk above reads as "this name, this kind, here".
+struct At<'a> {
+    name_span: Span,
+    decl_span: Span,
+    tier: Option<&'a str>,
+}
+
+impl<'a> At<'a> {
+    fn new(name_span: Span, decl_span: Span, tier: Option<&'a str>) -> At<'a> {
+        At {
             name_span,
             decl_span,
-        });
+            tier,
+        }
     }
 }
 
@@ -252,9 +255,10 @@ mod tests {
         );
     }
 
-    /// D9: a declaration written inside a `@test` block is in the inventory like any other.
+    /// D9: a declaration written inside a `@test` block is in the inventory like any other,
+    /// carrying the tier that says which pass compiles it.
     #[test]
-    fn tier_block_declarations_are_indexed() {
+    fn tier_block_declarations_are_indexed_with_their_tier() {
         let index = index_of(
             "fn helper(): int { return 1 }\n\
              @test {\n  struct Fixture { n: int\n    fn build(): int { return helper() } }\n\
@@ -264,6 +268,10 @@ mod tests {
         assert!(got.contains(&("Fixture", "struct")), "{got:?}");
         assert!(got.contains(&("Fixture.build", "method")), "{got:?}");
         assert!(got.contains(&("uses_fixture", "function")), "{got:?}");
+        let fixture = index.decls().iter().find(|d| d.name == "Fixture").unwrap();
+        assert_eq!(fixture.tier.as_deref(), Some("test"));
+        let helper = index.decls().iter().find(|d| d.name == "helper").unwrap();
+        assert_eq!(helper.tier, None, "a top-level fn carries no tier");
     }
 
     #[test]

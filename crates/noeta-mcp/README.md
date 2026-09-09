@@ -19,6 +19,12 @@ Funnelling matters because the failure mode is silent: while the workspace was s
 
 `graph::DeclIndex` is the one walk behind it. It inventories the linked program's declarations under their post-link names, descends into `@tier { … }` blocks, and answers by exact name, by unique leaf (with the candidate list on a tie), and by span. A tool that needs "which declaration is this?" asks it rather than re-deriving an answer.
 
+## Walking the graph backwards
+
+`impact` and `callers` are the reverse direction of the walk `trace` runs forward. `callers` is one hop at a time over `noeta_ide::callgraph`, reporting each use with its site and whether it is a call or a passed reference. `impact` is the transitive closure `noeta test --watch` narrows on, driven through `noeta_ide::impact::ImpactSession`.
+
+The session grew two in-memory doors for it. `impact_of_sources` takes each edited file's new text from the caller instead of reading it back off disk, so an agent can ask what an unsaved edit would break; `impact_of_decls` seeds the closure from declaration names, which is the question an agent holding a name rather than a diff is asking.
+
 ## Link status is part of the answer
 
 A graph tool falls back to the entry file's own parse when the workspace does not link, so `analyze::LinkStatus` rides on `trace`, `reflect` and `module_graph` as `linked` plus `link_diagnostics` in `check`'s JSON shape. The fallback changes what the answer means: names lose their qualification and a call into a sibling module resolves to nothing, so `trace` marks every node `unverified` and degrades a callee naming one of the project's own modules to `unresolved` rather than calling it external.

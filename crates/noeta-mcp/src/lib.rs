@@ -18,6 +18,7 @@ mod debug;
 mod execute;
 mod format;
 mod graph;
+mod impact;
 mod introspect;
 mod navigate;
 mod stdlib;
@@ -367,6 +368,40 @@ pub struct TraceArgs {
     /// How many call levels to unfold (default 6, max 16).
     #[serde(default)]
     pub max_depth: Option<usize>,
+}
+
+/// Arguments to `impact`: the project, plus either a `symbol` or an in-memory `edit`.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct ImpactArgs {
+    /// Path to a `.noe` file in the project to analyze. Required: impact is a whole-project
+    /// question.
+    pub file: String,
+    /// A declaration to treat as changed (`app.main.handle`, or a unique leaf such as `handle`).
+    /// Provide this or `edit_file` + `new_source`.
+    #[serde(default)]
+    pub symbol: Option<String>,
+    /// The file an edit applies to. Nothing is written; the new text is diffed in memory against
+    /// what is on disk.
+    #[serde(default)]
+    pub edit_file: Option<String>,
+    /// The edited file's new source.
+    #[serde(default)]
+    pub new_source: Option<String>,
+}
+
+/// Arguments to `callers`: a source, the declaration to walk back from, and how many levels.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct CallersArgs {
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub file: Option<String>,
+    /// The declaration to walk back from: a post-link name (`app.main.handle`, `Counter.bump`) or
+    /// a unique leaf.
+    pub symbol: String,
+    /// How many levels to walk back (default 3, max 16).
+    #[serde(default)]
+    pub depth: Option<usize>,
 }
 
 /// Arguments to `reflect`: a source, plus an optional architectural-role filter.
@@ -836,6 +871,45 @@ callbacks) as `reference` edges."
             args.from.as_deref(),
             args.max_depth,
         )))
+    }
+
+    /// What an edit or a changed declaration reaches.
+    #[tool(
+        description = "Answer \"what breaks if I change this?\" — the reverse transitive closure \
+over the project's call graph. Address the change by `symbol` (a declaration name) or by an \
+`edit` (`edit_file` plus `new_source`, diffed in memory against what is on disk; nothing is \
+written). Returns the declarations whose behavior may change, each with its `id`, and the \
+`@test`/`@bench` functions among them — or `attributed: false` with the reason the edit cannot be \
+attributed and everything must rerun."
+    )]
+    async fn impact(
+        &self,
+        Parameters(args): Parameters<ImpactArgs>,
+    ) -> Result<Json<impact::ImpactOutput>, ErrorData> {
+        let prepared = analyze::prepare(&None, &Some(args.file.clone()))?;
+        Ok(Json(impact::impact(
+            &prepared,
+            Some(args.file.as_str()),
+            args.symbol.as_deref(),
+            args.edit_file.as_deref(),
+            args.new_source.as_deref(),
+        )))
+    }
+
+    /// Who uses a declaration, level by level.
+    #[tool(
+        description = "Walk the call graph BACKWARDS from a declaration: level 1 is its direct \
+callers, level 2 theirs, and so on. Each edge carries the using declaration's `id`, the node it \
+uses, the call site, and whether it is a `call` or a `reference` (the function passed as a \
+value). A use written in a module's top-level statements is reported as that module. Pair it with \
+`trace`, which walks the same graph forward."
+    )]
+    async fn callers(
+        &self,
+        Parameters(args): Parameters<CallersArgs>,
+    ) -> Result<Json<impact::CallersOutput>, ErrorData> {
+        let prepared = analyze::prepare(&args.source, &args.file)?;
+        Ok(Json(impact::callers(&prepared, &args.symbol, args.depth)))
     }
 
     /// The `@role`/`@semantic` architectural graph plus the attribute manifest and declared types.
