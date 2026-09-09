@@ -112,11 +112,11 @@ impl DeclIndex {
     /// Recurse a statement list, descending into `@tier { … }` blocks so a fixture type or a test
     /// function is in the inventory like any other declaration, tagged with its tier and named
     /// under its source's module prefix.
-    fn collect<'a>(
+    fn collect(
         &mut self,
         stmts: &[Stmt],
         tier: Option<&str>,
-        prefixes: &'a std::collections::HashMap<noeta_span::SourceId, String>,
+        prefixes: &std::collections::HashMap<noeta_span::SourceId, String>,
     ) {
         for stmt in stmts {
             let prefix = callgraph::effective_prefix(None, stmt, prefixes);
