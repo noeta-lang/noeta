@@ -74,9 +74,9 @@ Responses are cached per (tool, arguments) within a run, because every MCP call 
 $ cargo run -p noeta-graphbench -- --token-cost
 ```
 
-Every graph tool carries an `id` object on each node — `{name, kind, file, span}` — and most of them still carry the pre-id fields beside it. `--token-cost` calls each tool once per corpus project and splits the answer three ways: the whole response, the `id` objects, and the fields that state a fact the sibling `id` already states. A field counts as a repeat only when its value matches the id's, so `trace`'s `kind` of `call` is not counted against the id's `function`.
+Every graph tool carries an `id` object (`{name, kind, file, span}`) on each node. `--token-cost` calls each tool once per corpus project and splits the answer three ways: the whole response, the `id` objects, and any field that restates a fact the sibling `id` already states. A field counts as a repeat only when its value matches the id's, so `trace`'s `kind` of `call` is a different fact from the id's `function`.
 
-The measurement changes nothing on the wire. It says what a trimming pass would be worth.
+The measurement changes nothing on the wire. The ledger is what keeps the repeat share at zero.
 
 ## Sampling rules
 
@@ -84,11 +84,11 @@ A structural question is emitted only when it needs two files, or two hops, or t
 
 Every category also carries **negatives**, where the empty set is right: a function nothing calls, a module nothing imports, an entry point that reaches no boundary, a pair with no path between them. Answering nothing scores 1.0 there, and answering confidently scores 0.
 
-## The circularity, stated plainly
+## What gold can measure
 
 Gold comes from the compiler's own indices: `noeta_ide::callgraph::build`, the reflection role index, the linker's module paths. Both sides therefore read one graph.
 
-That bounds what the benchmark can find. It measures **retrieval, ranking, and mapping a question onto a node** — whether a tool composition can reach an answer the graph already holds. It cannot measure whether the graph is right, and a question here can never fail for a reason the conformance corpus should have caught. Graph correctness stays the conformance corpus's job.
+That bounds what the benchmark can find. It measures **retrieval, ranking, and mapping a question onto a node**: whether a tool composition can reach an answer the graph already holds. It cannot measure whether the graph is right, and a question here can never fail for a reason the conformance corpus should have caught. Graph correctness stays the conformance corpus's job.
 
 ## The corpus
 

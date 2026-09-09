@@ -23,7 +23,7 @@ Funnelling matters because the failure mode is silent: while the workspace was s
 
 `code_search` ranks the project's own declarations against a query that may be a name, a qualified path, or a sentence with no identifier in it. It is the entry to the graph: every other tool here needs an address already, and this is what produces one.
 
-The ranking is `noeta_ide::search`'s BM25F over eight fields — leaf name, qualified path, kind and tier, `@role` bindings and attributes, `@doc` prose, signature, body identifiers, and file path — with an exact-name and a prefix-name boost on top, so typing `place_order` returns the declaration rather than the prose about it. `matched_fields` reports which fields earned a hit, `kind` and `roles` narrow the set before scoring, and the result carries the shared `NodeId`. The index is built per call from the prepared workspace and the whole thing is deterministic: no model, no randomness, ties broken by name.
+The ranking is `noeta_ide::search`'s BM25F over eight fields (leaf name, qualified path, kind and tier, `@role` bindings and attributes, `@doc` prose, signature, body identifiers, and file path) with an exact-name and a prefix-name boost on top, so typing `place_order` returns the declaration rather than the prose about it. `matched_fields` reports which fields earned a hit, `kind` and `roles` narrow the set before scoring, and the result carries the shared `NodeId`. The index is built per call from the prepared workspace and the whole thing is deterministic: no model, no randomness, ties broken by name.
 
 ## Walking the graph backwards
 
@@ -41,9 +41,9 @@ The session grew two in-memory doors for it. `impact_of_sources` takes each edit
 
 ## The graph is the linked program
 
-`graph::DeclIndex` is built over the merged program, which is the reachable closure from the entry. `graph::source_index` is the larger set every module's own parse holds, and the two differ by exactly what nothing imports — a module's `@test` block above all, since a tier block is referenced by nothing and so is never merged. `symbols` reports `in_graph` per node from the first index, and `graph::outside_graph_note` is what `trace`, `callers` and `impact` say instead of "no such name" when the second index holds it.
+`graph::DeclIndex` is built over the merged program, which is the reachable closure from the entry. `graph::source_index` is the larger set every module's own parse holds, and the two differ by exactly what nothing imports, a module's `@test` block above all, since a tier block is referenced by nothing and so is never merged. `symbols` reports `in_graph` per node from the first index, and `graph::outside_graph_note` is what `trace`, `callers` and `impact` say instead of "no such name" when the second index holds it.
 
-Widening the graph would mean linking a program nothing compiles and nothing runs, and `noeta test` would then disagree with the tool describing it. The boundary is reported rather than moved.
+The graph stays the program `noeta test` and `noeta run` compile, and the boundary is reported.
 
 ## One walk, two readers
 

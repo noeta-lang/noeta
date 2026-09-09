@@ -1,6 +1,6 @@
 # noeta-ide
 
-The shared Noeta IDE engine (MCP arc, slice M5 — extracted from `noeta-lsp`).
+The shared Noeta IDE engine, extracted from `noeta-lsp`.
 
 - **Takes in:** open buffers over a `LangDatabase` (`noeta-db`'s salsa query graph), grouped into a [`Workspace`] per directory.
 - **Emits:** every editor-facing language feature with **no wire protocol**: live diagnostics, hover types, go-to-definition, find-references, rename, document symbols, signature help, semantic tokens, completion (member/bare-dot/type-position/identifier), inlay type hints, formatting, and call hierarchy.
@@ -26,7 +26,7 @@ A leaf name that **is** one of the query's terms multiplies the score by 4, a le
 
 ## The call graph
 
-`callgraph::build` joins the existing indices — `resolve::DefUse` for value uses and member accesses, `resolve::MemberTable` for what each type declares, and the checker's `expr_types` for receiver types — into the graph the `trace` tool walks and the editor's call hierarchy serves.
+`callgraph::build` joins the existing indices (`resolve::DefUse` for value uses and member accesses, `resolve::MemberTable` for what each type declares, and the checker's `expr_types` for receiver types) into the graph the `trace` tool walks and the editor's call hierarchy serves.
 
 A **node** is a function-like declaration: a top-level `fn`, a `Type.method` (from the type's body, a standalone `impl Trait for T`, or a trait's default method), anything a tier block declares, and a `fn` nested in another body, named `<enclosing>.<name>`. Tier-block declarations carry the same qualification as their top-level siblings, so one graph speaks one vocabulary.
 
