@@ -1319,29 +1319,33 @@ pub struct Receipt { total: int }
         );
     }
 
-    /// The declaration that **is** the name beats the one whose prose is about it, even when that
-    /// prose repeats the name and the body calls it — what the exact-name boost is for.
+    /// A name written **inside a sentence** still returns the declaration that bears it, against a
+    /// declaration whose prose answers more of the sentence's other words.
+    ///
+    /// This is what the exact-name boost buys. BM25 saturates each term, so a document matching
+    /// four of the query's words outscores one matching a single word however strongly, and the
+    /// declaration the reader actually named would come second.
     #[test]
-    fn the_named_declaration_beats_prose_that_repeats_the_name() {
+    fn a_name_inside_a_sentence_still_returns_its_declaration() {
         let index = index_of(&[
-            (
-                "main.noe",
-                "use orders\n\
-                 @doc { Calls place_order, retries place_order when it fails, logs place_order, \
-                 and reports what place_order returned. }\n\
-                 fn retry_wrapper(id: int): int { return orders.place_order(id) }\n",
-            ),
+            ("main.noe", "fn run(id: int): int { return id }\n"),
             (
                 "orders.noe",
-                "pub fn place_order(id: int): int { return id }\n",
+                "pub fn checkout(id: int): int { return id }\n",
+            ),
+            (
+                "mail.noe",
+                "@doc { Emails the buyer about the pending basket. }\n\
+                 pub fn notify(id: int): int { return id }\n",
             ),
         ]);
-        let hits = ranked(&index, "place_order", &SearchFilter::default(), 5);
-        assert_eq!(
-            hits.first().map(String::as_str),
-            Some("orders.place_order"),
-            "{hits:?}"
+        let hits = ranked(
+            &index,
+            "checkout the pending basket and email the buyer",
+            &SearchFilter::default(),
+            5,
         );
+        assert_eq!(hits.first().map(String::as_str), Some("checkout"), "{hits:?}");
     }
 
     /// `kind` narrows to one shape of declaration, and drops the functions a bare query returns.
