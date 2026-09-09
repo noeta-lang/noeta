@@ -106,7 +106,8 @@ Dependency edges form a strict DAG (no back-edges): `noeta-span` is depended on 
 | `noeta-ide` | Shared IDE engine (hover, go-to-def, outline, references, call/role graph) over the salsa db, reused by both the LSP and the MCP server. Everything here needs a cursor or a buffer; the project model it used to contain is `noeta-project`. |
 | `noeta-lsp` | `noeta lsp`: tower-lsp language server (diagnostics/hover/def/refs/rename/completion/semantic-tokens/inlay-hints/formatting). |
 | `noeta-dap` | `noeta dap`: debug adapter driving the production VM (breakpoints/stepping/scopes/variables) via a per-op debug hook. |
-| `noeta-mcp` | `noeta mcp`: agent-native MCP server serving the reflection manifest + ~27 tools over stdio. |
+| `noeta-mcp` | `noeta mcp`: agent-native MCP server serving the reflection manifest + 36 tools over stdio, every graph answer carrying one `id`; the retrieval layer (`code_search`, `context_map`, `path`, `architecture`, `impact`, `callers`) runs on `noeta-ide`'s call graph. |
+| `noeta-graphbench` | The dev-only graph-retrieval benchmark: fixed compositions of `noeta mcp` tool calls over hand-written Noeta projects, scored against gold from the compiler's own indices and pinned in `tests/graphbench/baseline.txt` at the merge gate. |
 | `noeta-fmt` | `noeta fmt`: the canonical formatter (lex+trivia → AST → Doc → text), also driving LSP formatting. |
 | `noeta-prof` | `noeta profile`: the dev profiler/flamegraph (tier-0 VM), folded/inferno-SVG/speedscope output. |
 | `noeta-pm` | The package manager: manifest/lockfile, dependency resolution (path/git/registry), keyless Sigstore signing + provenance verification, native-package toolchain composition. |
