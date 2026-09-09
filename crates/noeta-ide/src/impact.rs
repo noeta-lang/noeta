@@ -873,6 +873,44 @@ mod tests {
         );
     }
 
+    /// A tier declaration written **first** in its file still carries the file's module prefix.
+    ///
+    /// The prefix a source's declarations carry is read off those declarations, and tier
+    /// activation hoists an unqualified one into the top-level list. Reading the prefix from
+    /// whichever declaration came first would take "no prefix" from the hoisted `t` and leave the
+    /// whole source unqualified, so the closure would name `touch` bare too.
+    #[test]
+    fn a_tier_declaration_written_first_still_carries_its_module() {
+        seed();
+        let dir = noeta_test_temp::TempDir::new("impact-tier-first");
+        std::fs::write(
+            dir.join("noeta.toml"),
+            "[package]\nname = \"test/tierfirst\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("write the manifest");
+        let entry = dir.join("main.noe");
+        std::fs::write(
+            &entry,
+            "@test fn t(): void { assert(touch() == 1); }\n\
+             fn touch(): int { return 1; }\n",
+        )
+        .expect("write the entry");
+        let mut session = ImpactSession::new(&entry).expect("session builds");
+        std::fs::write(
+            &entry,
+            "@test fn t(): void { assert(touch() == 1); }\n\
+             fn touch(): int { return 2 - 1; }\n",
+        )
+        .expect("rewrite the entry");
+        assert_eq!(
+            decls(session.impact_of_changes(std::slice::from_ref(&entry))),
+            vec![
+                "tierfirst.main.t".to_string(),
+                "tierfirst.main.touch".to_string()
+            ]
+        );
+    }
+
     #[test]
     fn an_inert_lib_edit_impacts_nothing() {
         seed();

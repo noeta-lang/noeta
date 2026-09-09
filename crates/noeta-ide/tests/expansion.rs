@@ -617,10 +617,14 @@ fn a_renamed_directive_checks_clean_through_the_impact_path() {
         noeta_ide::impact::Impact::All { reason } => panic!(
             "the project checks clean under `noeta check`; the editor must not disagree: {reason}"
         ),
-        // Narrowed, which is only reachable at all once the check comes back clean. (`t` is not in
-        // the closure: `@test` is a std tier, and the impact path activates only the program's own
-        // declared tiers, so the block is stripped before the graph is built.)
-        noeta_ide::impact::Impact::Decls(decls) => assert_eq!(decls, vec!["touch".to_string()]),
+        // Narrowed, which is only reachable at all once the check comes back clean. The edited
+        // `touch` and the `@test fn t` that calls it, both under the module path the entry's
+        // location derives: every name an impact answer reports is the one `symbols` and `trace`
+        // report for that declaration, so a consumer can join them.
+        noeta_ide::impact::Impact::Decls(decls) => assert_eq!(
+            decls,
+            vec!["app.main.t".to_string(), "app.main.touch".to_string()]
+        ),
     }
 
     let _ = std::fs::remove_dir_all(&root);

@@ -258,9 +258,10 @@ pub fn build(
     sites: &noeta_check::Sites,
     texts: &[&str],
 ) -> CallGraph {
-    // 1. The function inventory. Tier-block declarations qualify like their top-level siblings, so
-    //    one graph speaks one vocabulary; a nested `fn` is named under the function that declares
-    //    it.
+    // 1. The function inventory. Every declaration is named under its source's module prefix, so
+    //    one graph speaks one vocabulary whether a declaration is written at the top level, inside
+    //    a tier block, or hoisted out of one by tier activation; a nested `fn` is named under the
+    //    function that declares it.
     let prefixes = module_prefixes(program);
     let mut functions: Vec<FnNode> = Vec::new();
     collect_stmts(&program.stmts, None, &prefixes, &mut functions);
@@ -425,13 +426,14 @@ pub fn build(
 /// Walk `stmts` for every function-like declaration, appending each as a node. `prefix` is the
 /// qualification a tier block's declarations inherit from their top-level siblings (`None` at top
 /// level, where the linker has already qualified each name).
-fn collect_stmts(
+fn collect_stmts<'a>(
     stmts: &[Stmt],
-    prefix: Option<&str>,
-    prefixes: &HashMap<SourceId, String>,
+    inherited: Option<&'a str>,
+    prefixes: &'a HashMap<SourceId, String>,
     out: &mut Vec<FnNode>,
 ) {
     for stmt in stmts {
+        let prefix = effective_prefix(inherited, stmt, prefixes);
         match stmt {
             Stmt::Fn(decl) => {
                 let name = qualified(prefix, decl.name.as_str());
@@ -470,17 +472,8 @@ fn collect_stmts(
             }
             // A tier block's declarations (`@test { … }`) are the program's declarations: the
             // impact engine's reverse closure walks from a changed fn to the tests that call it,
-            // and the editor's call hierarchy works inside tier bodies. They qualify like their
-            // top-level siblings so one graph does not mix two vocabularies.
-            Stmt::TierBlock { items, span, .. } => {
-                let inherited = prefix.map(str::to_string).or_else(|| {
-                    prefixes
-                        .get(&span.source)
-                        .filter(|p| !p.is_empty())
-                        .cloned()
-                });
-                collect_stmts(items, inherited.as_deref(), prefixes, out);
-            }
+            // and the editor's call hierarchy works inside tier bodies.
+            Stmt::TierBlock { items, .. } => collect_stmts(items, prefix, prefixes, out),
             _ => {}
         }
     }
@@ -534,8 +527,30 @@ fn collect_nested(body: &[Stmt], enclosing_name: &str, out: &mut Vec<FnNode>) {
     }
 }
 
+/// The qualification prefix one declaration carries: the one inherited from an enclosing tier
+/// block, else the module prefix its own source's declarations carry.
+///
+/// Every walk that names a declaration asks this — the three inventory walks here, and the MCP
+/// server's declaration index — so they cannot drift apart on what a declaration is called. Resolving it per statement rather than only inside
+/// a tier block is what names a **hoisted** tier declaration: activating `@test` lifts its
+/// declarations to the top level, where they arrive unqualified beside linker-qualified siblings,
+/// and the impact engine then reported one closure in two vocabularies (`app.main.touch` next to a
+/// bare `t`).
+pub fn effective_prefix<'a>(
+    inherited: Option<&'a str>,
+    stmt: &Stmt,
+    prefixes: &'a HashMap<SourceId, String>,
+) -> Option<&'a str> {
+    inherited.or_else(|| {
+        prefixes
+            .get(&stmt.span().source)
+            .map(String::as_str)
+            .filter(|prefix| !prefix.is_empty())
+    })
+}
+
 /// `name` under `prefix`, unless the linker already qualified it that way.
-fn qualified(prefix: Option<&str>, name: &str) -> String {
+pub fn qualified(prefix: Option<&str>, name: &str) -> String {
     match prefix {
         Some(p) if !name.starts_with(&format!("{p}.")) => format!("{p}.{name}"),
         _ => name.to_string(),
@@ -545,7 +560,7 @@ fn qualified(prefix: Option<&str>, name: &str) -> String {
 /// The qualification prefix each source's top-level declarations carry (`App.Lib` for a declaration
 /// the linker rewrote to `App.Lib.add`), so a tier block in that file can inherit it. A source whose
 /// declarations are unqualified — a lone buffer, an unlinked workspace — maps to the empty string.
-fn module_prefixes(program: &Program) -> HashMap<SourceId, String> {
+pub fn module_prefixes(program: &Program) -> HashMap<SourceId, String> {
     let mut prefixes: HashMap<SourceId, String> = HashMap::new();
     for stmt in &program.stmts {
         let (name, span) = match stmt {
@@ -557,9 +572,13 @@ fn module_prefixes(program: &Program) -> HashMap<SourceId, String> {
             _ => continue,
         };
         let prefix = name.rsplit_once('.').map_or("", |(head, _)| head);
-        prefixes
-            .entry(span.source)
-            .or_insert_with(|| prefix.to_string());
+        // The first NON-EMPTY prefix wins: tier activation hoists unqualified declarations into
+        // the top-level list, and taking whichever came first would latch the whole source to "no
+        // prefix" whenever one of those sorted ahead of a qualified sibling.
+        let slot = prefixes.entry(span.source).or_default();
+        if slot.is_empty() {
+            *slot = prefix.to_string();
+        }
     }
     prefixes
 }
@@ -642,21 +661,21 @@ impl TypeNames {
         names
     }
 
-    fn walk(&mut self, stmts: &[Stmt], prefix: Option<&str>, prefixes: &HashMap<SourceId, String>) {
+    fn walk<'a>(
+        &mut self,
+        stmts: &[Stmt],
+        inherited: Option<&'a str>,
+        prefixes: &'a HashMap<SourceId, String>,
+    ) {
         for stmt in stmts {
+            let prefix = effective_prefix(inherited, stmt, prefixes);
             let name = match stmt {
                 Stmt::Struct(d) => qualified(prefix, d.name.as_str()),
                 Stmt::Class(d) => qualified(prefix, d.name.as_str()),
                 Stmt::Enum(d) => qualified(prefix, d.name.as_str()),
                 Stmt::Trait(d) => qualified(prefix, d.name.as_str()),
-                Stmt::TierBlock { items, span, .. } => {
-                    let inherited = prefix.map(str::to_string).or_else(|| {
-                        prefixes
-                            .get(&span.source)
-                            .filter(|p| !p.is_empty())
-                            .cloned()
-                    });
-                    self.walk(items, inherited.as_deref(), prefixes);
+                Stmt::TierBlock { items, .. } => {
+                    self.walk(items, prefix, prefixes);
                     continue;
                 }
                 _ => continue,
@@ -704,8 +723,14 @@ impl TraitImpls {
         impls
     }
 
-    fn walk(&mut self, stmts: &[Stmt], prefix: Option<&str>, prefixes: &HashMap<SourceId, String>) {
+    fn walk<'a>(
+        &mut self,
+        stmts: &[Stmt],
+        inherited: Option<&'a str>,
+        prefixes: &'a HashMap<SourceId, String>,
+    ) {
         for stmt in stmts {
+            let prefix = effective_prefix(inherited, stmt, prefixes);
             match stmt {
                 Stmt::Impl(d) => self.add(
                     qualified(prefix, d.target.as_str()),
@@ -714,15 +739,7 @@ impl TraitImpls {
                 Stmt::Struct(d) => self.add_blocks(prefix, d.name.as_str(), &d.impls),
                 Stmt::Class(d) => self.add_blocks(prefix, d.name.as_str(), &d.impls),
                 Stmt::Enum(d) => self.add_blocks(prefix, d.name.as_str(), &d.impls),
-                Stmt::TierBlock { items, span, .. } => {
-                    let inherited = prefix.map(str::to_string).or_else(|| {
-                        prefixes
-                            .get(&span.source)
-                            .filter(|p| !p.is_empty())
-                            .cloned()
-                    });
-                    self.walk(items, inherited.as_deref(), prefixes);
-                }
+                Stmt::TierBlock { items, .. } => self.walk(items, prefix, prefixes),
                 _ => {}
             }
         }

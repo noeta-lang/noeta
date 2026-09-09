@@ -461,8 +461,10 @@ mod tests {
             out.decls.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains("chain.service.fetch"), "{names:?}");
         assert!(names.contains("chain.main.handle"), "{names:?}");
+        // The `@test` fn carries its source's module prefix like every other declaration, so the
+        // name an impact answer reports is the one `symbols` and `trace` report for it.
         assert!(
-            names.contains("handles"),
+            names.contains("chain.main.handles"),
             "the `@test` is impacted: {names:?}"
         );
         assert!(
@@ -475,7 +477,7 @@ mod tests {
             .iter()
             .map(|t| (t.id.name.as_str(), t.tier.as_str()))
             .collect();
-        assert_eq!(tiers, vec![("handles", "test")]);
+        assert_eq!(tiers, vec![("chain.main.handles", "test")]);
         // The ids join with the outline.
         let outlined = crate::understand::symbols(&p, crate::understand::SymbolScope::Workspace);
         let fetch = out
@@ -487,6 +489,20 @@ mod tests {
             outlined.symbols.iter().any(|s| &s.id == fetch),
             "the impact id joins the workspace outline"
         );
+        // And so does the `@test` fn, which is the case one vocabulary is easiest to lose: the
+        // linker qualifies the top level, tier activation hoists a tier declaration into it, and
+        // naming it bare there would leave `impact` reporting a node `symbols` never mentions.
+        let handles = out
+            .decls
+            .iter()
+            .find(|d| d.name == "chain.main.handles")
+            .expect("the impacted test");
+        let outlined_test = outlined
+            .symbols
+            .iter()
+            .find(|s| &s.id == handles)
+            .expect("the impact id joins the outline's `@test` node");
+        assert_eq!(outlined_test.tier.as_deref(), Some("test"));
     }
 
     /// The negative: an edit that touches nothing the chain reaches impacts nothing.
