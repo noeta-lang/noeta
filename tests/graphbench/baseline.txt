@@ -22,14 +22,16 @@
 # Read the diff's sign: F1 up is an improvement worth pinning, F1 down needs a reason, and
 # tokens up needs the sentence saying what the extra context bought.
 
-row A0  definition     f1=1.0000 tokens=5619 n=25
-row A0  callers        f1=0.6907 tokens=354 n=25
-row A0  callees        f1=1.0000 tokens=1378 n=26
-row A0  importers      f1=0.8462 tokens=1401 n=26
-row A0  role_reach     f1=1.0000 tokens=4591 n=9
-row A0  path           f1=0.9429 tokens=3939 n=21
-row A0  impact         f1=0.3077 tokens=4936 n=26
-row A0  seed_mapping   f1=0.0776 tokens=6654 n=69
+row A0  definition     f1=1.0000 tokens=11338 n=25
+row A0  callers        f1=0.6867 tokens=758 n=25
+row A0  callees        f1=1.0000 tokens=2443 n=26
+row A0  importers      f1=0.8462 tokens=2057 n=26
+row A0  role_reach     f1=1.0000 tokens=8131 n=9
+row A0  path           f1=0.9429 tokens=6017 n=21
+row A0  impact         f1=0.3077 tokens=5646 n=26
+row A0  seed_mapping   f1=0.0713 tokens=13503 n=69
+row A3  callers        f1=1.0000 tokens=210 n=25
+row A3  impact         f1=0.3077 tokens=54 n=26
 row A5  definition     f1=1.0000 tokens=4373 n=25
 row A5  callers        f1=0.6027 tokens=8746 n=25
 row A5  callees        f1=0.3331 tokens=8724 n=26

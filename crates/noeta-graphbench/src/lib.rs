@@ -27,6 +27,7 @@ pub mod metrics;
 pub mod question;
 pub mod report;
 pub mod service;
+pub mod tokens;
 
 /// The repository-relative home of everything the benchmark reads and writes.
 pub const DATA_DIR: &str = "tests/graphbench";

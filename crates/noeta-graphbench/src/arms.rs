@@ -15,8 +15,11 @@
 //! | A4 | a fixed repo map at a token budget, no navigation | whether precomputation alone suffices |
 //! | A5 | a lexical scan of the files, no Noeta tools | whether any of this beats grep |
 //!
-//! A1 through A4 name tools the service does not advertise yet. Each reports **SKIP** with the tool
-//! it is missing, which the report prints as its own status and never as a pass.
+//! **An arm's requirement is per category, not per arm.** A0's `callers` strategy and A3's need
+//! different tools, so A3 measures `callers` and `impact` the day those two tools ship and keeps
+//! reporting SKIP for `path` and `role_reach` until `path` and `architecture` do. A whole arm
+//! blocked on the one tool its weakest category needs would hide a tool that already works.
+//! A SKIP names the missing tool, prints as its own status, and is never a pass.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -72,15 +75,45 @@ impl Arm {
         }
     }
 
-    /// The tools this arm cannot run without.
-    pub fn requires(self) -> &'static [Tool] {
+    /// The tools this arm's strategy for one category cannot run without.
+    ///
+    /// Per category on purpose. A3 is A2 plus the reverse-direction tools, and those arrived one at
+    /// a time: `callers` and `impact` exist, `path` and `architecture` do not. Asking the question
+    /// per category is what lets the two that shipped be measured today instead of waiting behind
+    /// the two that have not.
+    pub fn requires(self, category: Category) -> &'static [Tool] {
         match self {
             Arm::A0Today | Arm::A5Lexical => &[],
             Arm::A1CodeSearch => &[Tool::CodeSearch],
             Arm::A2ContextMap => &[Tool::CodeSearch, Tool::ContextMap],
-            Arm::A3GraphTools => &[Tool::Path, Tool::Impact, Tool::Architecture, Tool::Callers],
             Arm::A4RepoMap => &[Tool::ContextMap],
+            Arm::A3GraphTools => match category {
+                Category::Callers => &[Tool::Callers],
+                Category::Impact => &[Tool::Impact],
+                Category::Path => &[Tool::Path],
+                Category::RoleReach => &[Tool::Architecture],
+                // The categories A3 inherits from A2 unchanged: it adds no tool for them, so it
+                // waits on the ranking tools A2 waits on.
+                Category::Definition
+                | Category::Callees
+                | Category::Importers
+                | Category::SeedMapping => &[Tool::CodeSearch, Tool::ContextMap],
+            },
         }
+    }
+
+    /// Every tool any of this arm's strategies needs, for the plan listing.
+    pub fn every_requirement(self) -> Vec<Tool> {
+        let mut out: Vec<Tool> = Vec::new();
+        for category in Category::ALL {
+            for tool in self.requires(category) {
+                if !out.contains(tool) {
+                    out.push(*tool);
+                }
+            }
+        }
+        out.sort();
+        out
     }
 }
 
@@ -235,10 +268,9 @@ pub async fn answer(
     let _ = service.take_spend();
     let predictions_and_evidence = match arm {
         Arm::A0Today => today(service, context, question).await,
+        Arm::A3GraphTools => reverse_walk(service, context, question).await,
         Arm::A5Lexical => lexical(service, context, question),
-        Arm::A1CodeSearch | Arm::A2ContextMap | Arm::A3GraphTools | Arm::A4RepoMap => {
-            (Vec::new(), None)
-        }
+        Arm::A1CodeSearch | Arm::A2ContextMap | Arm::A4RepoMap => (Vec::new(), None),
     };
     Answer {
         predictions: predictions_and_evidence.0,
@@ -729,6 +761,106 @@ fn overlap(wanted: &BTreeMap<String, usize>, have: &BTreeMap<String, usize>) -> 
         }
     }
     score
+}
+
+// ----------------------------------------------------------------------------------------- A3
+
+/// A3 answers the two reverse-direction categories with the two reverse-direction tools.
+///
+/// The other six categories report SKIP: A3 is A2 plus these tools, and it adds nothing of its own
+/// to a category whose strategy is A2's.
+async fn reverse_walk(
+    service: &mut Service,
+    context: &ProjectContext,
+    question: &Question,
+) -> (Vec<Prediction>, Option<Tool>) {
+    match question.category {
+        Category::Callers => a3_callers(service, context, question).await,
+        Category::Impact => a3_impact(service, context, question).await,
+        _ => (Vec::new(), None),
+    }
+}
+
+/// Which declaration a tool's `candidates` list means, given the file the developer typed.
+///
+/// A leaf several declarations answer to comes back as a candidate list rather than an answer, and
+/// the disambiguation an agent has in hand is the file it read the name in. Picking by file is what
+/// it would do; picking the first would be scoring a coin flip.
+fn candidate_in_file(value: &Value, context: &ProjectContext, handle: &Handle) -> Option<String> {
+    let file = handle.file.as_ref()?;
+    let candidates = adapter::candidates(value);
+    let wanted = Path::new(file);
+    candidates
+        .into_iter()
+        .find(|node| {
+            node.file.as_ref().is_some_and(|f| {
+                Path::new(&adapter::anchored(&context.root, f)) == wanted
+                    || f.ends_with(
+                        wanted
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .as_ref(),
+                    )
+            })
+        })
+        .and_then(|node| node.qualified)
+}
+
+/// Who calls this declaration: `callers` at depth 1, disambiguating by file when the leaf collides.
+async fn a3_callers(
+    service: &mut Service,
+    context: &ProjectContext,
+    question: &Question,
+) -> (Vec<Prediction>, Option<Tool>) {
+    let Some(handle) = Handle::of(&question.subject) else {
+        return (Vec::new(), None);
+    };
+    let ask = |symbol: String| {
+        args([
+            ("file", json!(context.entry_arg())),
+            ("symbol", json!(symbol)),
+            ("depth", json!(1)),
+        ])
+    };
+    let mut value = service.call(Tool::Callers, ask(handle.leaf.clone())).await;
+    if !adapter::found(&value)
+        && let Some(qualified) = candidate_in_file(&value, context, &handle)
+    {
+        value = service.call(Tool::Callers, ask(qualified)).await;
+    }
+    let out = adapter::caller_edges(&value, 1)
+        .into_iter()
+        .map(Prediction::node)
+        .collect();
+    (out, Some(Tool::Callers))
+}
+
+/// Which `@test` functions a change reaches: `impact` by symbol, reading its `tier_functions`.
+async fn a3_impact(
+    service: &mut Service,
+    context: &ProjectContext,
+    question: &Question,
+) -> (Vec<Prediction>, Option<Tool>) {
+    let Some(handle) = Handle::of(&question.subject) else {
+        return (Vec::new(), None);
+    };
+    let ask = |symbol: String| {
+        args([
+            ("file", json!(context.entry_arg())),
+            ("symbol", json!(symbol)),
+        ])
+    };
+    let mut value = service.call(Tool::Impact, ask(handle.leaf.clone())).await;
+    if let Some(qualified) = candidate_in_file(&value, context, &handle) {
+        value = service.call(Tool::Impact, ask(qualified)).await;
+    }
+    let out = adapter::tier_functions(&value)
+        .into_iter()
+        .filter(|(_, tier)| tier == "test")
+        .map(|(node, _)| Prediction::node(node))
+        .collect();
+    (out, Some(Tool::Impact))
 }
 
 // ----------------------------------------------------------------------------------------- A5
