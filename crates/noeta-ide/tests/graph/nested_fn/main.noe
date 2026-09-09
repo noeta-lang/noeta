@@ -1,0 +1,25 @@
+// A `fn` declared inside a function body is its own node, named `<enclosing>.<name>`: the call
+// from the enclosing function reaches it, and its own body's calls leave it rather than collapsing
+// onto the parent.
+fn leaf(): int { return 1 }
+
+fn host(): int {
+    fn inner(): int { return leaf() }
+    return inner() + inner()
+}
+
+struct Box {
+    n: int
+
+    pub fn measure(): int {
+        fn twice(v: int): int { return leaf() + v }
+        return twice(self.n)
+    }
+}
+
+fn entry(): int {
+    b = Box { n: 1 }
+    return host() + b.measure()
+}
+
+echo entry()

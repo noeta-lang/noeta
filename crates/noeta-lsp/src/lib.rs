@@ -305,6 +305,8 @@ struct TraceNodeTreeWire {
     external: bool,
     dynamic: bool,
     cycle: bool,
+    /// Expanded earlier in this answer; the subtree is written once.
+    shared: bool,
     truncated: bool,
     children: Vec<TraceNodeTreeWire>,
 }
@@ -325,6 +327,7 @@ impl From<noeta_ide::trace::LocatedTraceNode> for TraceNodeTreeWire {
             external: n.external,
             dynamic: n.dynamic,
             cycle: n.cycle,
+            shared: n.shared,
             truncated: n.truncated,
             children: n
                 .children

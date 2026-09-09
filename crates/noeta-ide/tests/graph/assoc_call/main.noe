@@ -1,0 +1,21 @@
+// An associated call through a type name (`Counter.new()`) resolves to the declared method node,
+// the same way an instance call does. A member the type does not declare is `dynamic`.
+class Counter {
+    mut n: int
+
+    pub fn new(): Counter { return Counter { n: 0 } }
+
+    pub fn bump(): int {
+        self.n = self.n + 1
+        return self.n
+    }
+}
+
+fn build(): Counter { return Counter.new() }
+
+fn run(): int {
+    c = build()
+    return c.bump()
+}
+
+echo run()

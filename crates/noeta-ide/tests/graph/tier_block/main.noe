@@ -1,0 +1,21 @@
+// Declarations inside a tier block are inventory nodes qualified like their top-level siblings:
+// the block's fns, the types it declares, and those types' methods.
+fn helper(): int { return 1 }
+
+echo helper()
+
+@test {
+    struct Fixture {
+        n: int
+
+        pub fn build(): int { return self.n + helper() }
+    }
+
+    fn doubled(): int { return helper() + helper() }
+
+    fn uses_fixture(): void {
+        f = Fixture { n: 1 }
+        assert(f.build() == 2)
+        assert(doubled() == 2)
+    }
+}

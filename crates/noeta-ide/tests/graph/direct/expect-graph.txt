@@ -1,0 +1,13 @@
+node direct.main.apply fn main.noe:9
+node direct.main.area fn main.noe:7
+node direct.main.cb fn main.noe:11
+node direct.main.helper fn main.noe:3
+node direct.main.work fn main.noe:5
+edge <top> -> direct.main.apply call function
+edge <top> -> direct.main.area call function
+edge <top> -> direct.main.cb reference function
+edge <top> -> direct.main.work call function
+edge direct.main.apply -> f call dynamic
+edge direct.main.area -> math.sqrt call external
+edge direct.main.work -> direct.main.helper call function
+edge direct.main.work -> direct.main.helper call function

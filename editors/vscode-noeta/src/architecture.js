@@ -70,6 +70,7 @@ function describe(node) {
   if (node.external) parts.push("external");
   if (node.dynamic) parts.push("dynamic");
   if (node.cycle) parts.push("cycle");
+  if (node.shared) parts.push("shared");
   return parts.join(" · ");
 }
 
@@ -77,6 +78,7 @@ function icon(node) {
   if (node.external) return new ThemeIcon("globe");
   if (node.dynamic) return new ThemeIcon("question");
   if (node.cycle) return new ThemeIcon("sync");
+  if (node.shared) return new ThemeIcon("link");
   if (node.uri == null) return new ThemeIcon("symbol-misc");
   return new ThemeIcon(node.name.includes(".") ? "symbol-method" : "symbol-function");
 }

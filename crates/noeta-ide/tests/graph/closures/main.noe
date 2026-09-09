@@ -1,0 +1,24 @@
+// A call through a closure value is an indirection, not a leaf: invoking a function-typed
+// parameter, a local holding a function, or a closure-valued field is labeled `dynamic` so a trace
+// says "the flow continues here, statically unresolvable" instead of stopping silently.
+struct Holder {
+    cb: (int) -> int
+
+    pub fn fire(n: int): int { return self.cb(n) }
+}
+
+fn target(n: int): int { return n * 2 }
+
+fn apply(f: (int) -> int, n: int): int { return f(n) }
+
+fn via_local(n: int): int {
+    g = target
+    return g(n)
+}
+
+fn entry(): int {
+    h = Holder { cb: target }
+    return apply(target, 1) + h.fire(2) + via_local(3)
+}
+
+echo entry()

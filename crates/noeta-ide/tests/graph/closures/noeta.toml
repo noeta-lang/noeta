@@ -1,0 +1,6 @@
+[package]
+name = "local/closures"
+version = "0.1.0"
+
+[directives]
+test = "std"

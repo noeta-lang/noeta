@@ -5,6 +5,9 @@
 //! registration or callback is part of the flow too). External module calls (`http.response`,
 //! `fs.read`) and dynamic callees appear as labeled leaves, never guesses.
 //!
+//! Each function unfolds **once**: a second arrival marks the node `shared` and stops, so the
+//! answer stays proportional to the reachable functions rather than to the paths through them.
+//!
 //! The `boundaries` summary is the architectural answer on its own: every `(function, role)`
 //! binding the trace reached — "this entry point crosses into these persistence/trust
 //! boundaries".
@@ -69,6 +72,9 @@ pub struct TraceNode {
     pub dynamic: bool,
     /// This function is already on the current path (recursion) — expanded once, marked here.
     pub cycle: bool,
+    /// This function was expanded earlier in the answer — its subtree is written once, and every
+    /// later arrival is this reference.
+    pub shared: bool,
     /// Children were cut by `max_depth` or the node budget.
     pub truncated: bool,
     /// This node comes from an unlinked program, so its `external`/`dynamic` classification is
@@ -108,13 +114,26 @@ pub fn trace(p: &Prepared, from: Option<&str>, max_depth: Option<usize>) -> Trac
     let (roots, walk_note): (Vec<usize>, Option<String>) =
         match engine::resolve_roots(&graph, &info, from) {
             engine::Roots::Functions(roots) => (roots, None),
-            engine::Roots::NotFound => {
+            engine::Roots::Ambiguous(candidates) => {
                 let spec = from.unwrap_or_default();
                 return not_found(
                     format!(
-                        "`{spec}` matches no role binding and no function — try `reflect` for the \
-                         role index or `symbols` for the declarations"
+                        "`{spec}` names {} functions — pass one of: {}",
+                        candidates.len(),
+                        candidates.join(", ")
                     ),
+                    &status,
+                );
+            }
+            engine::Roots::NotFound { near } => {
+                let spec = from.unwrap_or_default();
+                let hint = if near.is_empty() {
+                    "try `reflect` for the role index or `symbols` for the declarations".to_string()
+                } else {
+                    format!("did you mean {}?", near.join(", "))
+                };
+                return not_found(
+                    format!("`{spec}` matches no role binding and no function — {hint}"),
                     &status,
                 );
             }
@@ -233,6 +252,7 @@ fn to_wire(p: &Prepared, n: &engine::TraceNode, decls: &DeclIndex, linked: bool)
         external: n.external && !unresolved,
         dynamic: n.dynamic,
         cycle: n.cycle,
+        shared: n.shared,
         truncated: n.truncated,
         unverified: !linked,
         children: n
@@ -426,6 +446,34 @@ fn save(n: int): int {
             "it degrades to `unresolved` instead: {child:?}"
         );
         assert!(child.unverified);
+    }
+
+    #[test]
+    fn a_near_miss_names_the_declaration_it_almost_matched() {
+        let out = trace(&prep(), Some("valid"), None);
+        assert!(!out.found);
+        let note = out.note.unwrap();
+        assert!(note.contains("did you mean validate?"), "{note}");
+    }
+
+    #[test]
+    fn a_function_reached_twice_is_expanded_once() {
+        let src = "fn leaf(): int { return 1 }\n\
+                   fn deep(): int { return leaf() }\n\
+                   fn a(): int { return deep() }\n\
+                   fn b(): int { return deep() }\n\
+                   fn entry(): int { return a() + b() }\n\
+                   echo entry()\n";
+        let p = prepare(&Some(src.to_string()), &None).unwrap();
+        let out = trace(&p, Some("entry"), None);
+        assert!(out.found);
+        let root = &out.traces[0];
+        let under_a = &root.children[0].children[0];
+        assert_eq!(under_a.name, "deep");
+        assert_eq!(under_a.children.len(), 1, "expanded on first arrival");
+        let under_b = &root.children[1].children[0];
+        assert_eq!(under_b.name, "deep");
+        assert!(under_b.shared && under_b.children.is_empty());
     }
 
     #[test]
