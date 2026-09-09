@@ -28,6 +28,10 @@ pub struct ArchitectureOutput {
     pub roles: Vec<RoleNode>,
     /// The aggregated edges between them, sorted by `from` then `to`.
     pub edges: Vec<RoleEdge>,
+    /// The graph the aggregation was taken over: one entry per pair of role-bearing declarations
+    /// joined by a chain of calls through declarations bearing no role. Walk it to answer which
+    /// boundaries one entry point reaches.
+    pub connections: Vec<Connection>,
     /// Every `(declaration, role)` binding — the same summary `trace` reports.
     pub boundaries: Vec<BoundaryHit>,
     /// The declarations bearing no role.
@@ -71,6 +75,15 @@ pub struct RoleEdge {
 pub struct Exemplar {
     pub caller: NodeId,
     pub callee: NodeId,
+}
+
+/// One role-bearing declaration reaching another, with everything between them collapsed away.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct Connection {
+    pub from: NodeId,
+    pub to: NodeId,
+    /// True when every chain joining the two runs through a passed reference.
+    pub via_reference: bool,
 }
 
 /// The declarations bearing no role.
@@ -135,6 +148,16 @@ pub fn architecture(p: &Prepared) -> ArchitectureOutput {
                         callee: id(callee),
                     })
                     .collect(),
+                via_reference: edge.via_reference,
+            })
+            .collect(),
+        connections: arch
+            .bearer_graph
+            .edges
+            .iter()
+            .map(|edge| Connection {
+                from: id(edge.from),
+                to: id(edge.to),
                 via_reference: edge.via_reference,
             })
             .collect(),
@@ -224,6 +247,14 @@ echo handle(1)
         assert_eq!(exemplar.callee.kind.as_str(), "function");
         assert!(exemplar.callee.file.is_some() && exemplar.callee.span.is_some());
         assert!(out.linked && out.link_diagnostics.is_empty());
+        // The bearer graph the aggregation was taken over is on the wire too, which is what lets a
+        // reader ask which boundaries *this* entry point reaches rather than which roles do.
+        let connections: Vec<(&str, &str)> = out
+            .connections
+            .iter()
+            .map(|c| (c.from.name.as_str(), c.to.name.as_str()))
+            .collect();
+        assert_eq!(connections, vec![("handle", "notify"), ("handle", "save")]);
     }
 
     #[test]

@@ -31,7 +31,7 @@ The session grew two in-memory doors for it. `impact_of_sources` takes each edit
 
 `path` answers "how does A reach B?" with Yen's k shortest simple paths over the same edges. External and dynamic callees are nodes and they are sinks, so a route can end on `math.sqrt` honestly and none runs through it. When the graph offers more routes than `k`, a decayed resource flow scores each route by the mean resource its nodes carry, prunes the weakest, and emits the survivors ascending.
 
-`architecture` collapses the graph to its `@role` bearers, then quotients that by role. `noeta_ide::architecture::role_graph` is the same collapse the editor's swimlane view performs in `editors/vscode-noeta/media/trace.js`, and the two must agree; the Rust side's `bearer_edges_collapse_non_role_intermediates` pins the shape. Declarations bearing no role are counted as `unassigned` with exemplars, so a project with no bindings gets what it holds rather than an empty graph.
+`architecture` collapses the graph to its `@role` bearers, then quotients that by role. `noeta_ide::architecture::role_graph` is the same collapse the editor's swimlane view performs in `editors/vscode-noeta/media/trace.js`, and the two must agree; the Rust side's `bearer_edges_collapse_non_role_intermediates` pins the shape. The bearer graph rides along as `connections`, so a reader can walk from one entry point to the boundaries it reaches rather than only reading the role-level summary. Declarations bearing no role are counted as `unassigned` with exemplars, so a project with no bindings gets what it holds rather than an empty graph.
 
 ## Link status is part of the answer
 

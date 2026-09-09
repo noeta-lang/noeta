@@ -253,7 +253,12 @@ impl Node {
     /// it, so `store.noe` finds `src/store.noe`.
     fn file_matches(&self, want: &str) -> bool {
         let file = self.file.as_str();
-        file == want || (!want.is_empty() && file.ends_with(&format!("/{want}")))
+        if file.is_empty() || want.is_empty() {
+            return false;
+        }
+        // Either spelling may be the longer one: a caller naming `store.noe` for `src/store.noe`,
+        // or naming an absolute path for the project-relative name the map reports.
+        file == want || file.ends_with(&format!("/{want}")) || want.ends_with(&format!("/{file}"))
     }
 }
 
@@ -426,6 +431,12 @@ pub fn score(
 
 /// Personalized PageRank: mass teleports to the seeds rather than to the whole graph, so the
 /// ranking reads "close to what was asked for" instead of "important overall".
+///
+/// Mass flows **both ways along an edge**, because proximity is symmetric: a declaration's callers
+/// are as much a part of what a reader needs as its callees, and a map that ranked only forward
+/// would score every caller at zero and then drop it under the same rule that keeps the map
+/// connected. The edge's kind still weights it, so a call pulls harder than an import in either
+/// direction.
 fn personalized_pagerank(graph: &RankGraph, seeds: &[usize], kinds: &[EdgeKind]) -> Vec<f64> {
     let n = graph.nodes.len();
     if n == 0 || seeds.is_empty() {
@@ -444,6 +455,7 @@ fn personalized_pagerank(graph: &RankGraph, seeds: &[usize], kinds: &[EdgeKind])
         .map(|i| {
             graph.out[i]
                 .iter()
+                .chain(graph.incoming[i].iter())
                 .filter(|a| kinds.contains(&a.kind))
                 .map(|a| (a.to, a.kind.weight()))
                 .collect()
