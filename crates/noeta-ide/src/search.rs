@@ -880,7 +880,7 @@ impl Walk<'_> {
                         DeclKind::Struct,
                         decl.name_span,
                         decl.span,
-                        format!("struct {name}"),
+                        format!("struct {}", leaf_of(&name)),
                         &member_spans(&decl.fields, &decl.methods),
                         tier,
                     );
@@ -893,7 +893,7 @@ impl Walk<'_> {
                         DeclKind::Class,
                         decl.name_span,
                         decl.span,
-                        format!("class {name}"),
+                        format!("class {}", leaf_of(&name)),
                         &member_spans(&decl.fields, &decl.methods),
                         tier,
                     );
@@ -908,7 +908,7 @@ impl Walk<'_> {
                         DeclKind::Trait,
                         decl.name_span,
                         decl.span,
-                        format!("trait {name}"),
+                        format!("trait {}", leaf_of(&name)),
                         &children,
                         tier,
                     );
@@ -994,7 +994,7 @@ impl Walk<'_> {
             DeclKind::Enum,
             decl.name_span,
             decl.span,
-            format!("enum {name}"),
+            format!("enum {}", leaf_of(&name)),
             &children,
             tier,
         );
@@ -1025,7 +1025,13 @@ impl Walk<'_> {
     }
 
     fn function(&mut self, decl: &FnDecl, name: String, kind: DeclKind, tier: Option<&str>) {
-        let signature = format!("fn {}{}", decl.name, crate::symbols::fn_signature(decl));
+        // The signature reads with the leaf name, the way the author wrote it; the qualified name
+        // is the `name` field's job and repeating it here only adds noise to a result.
+        let signature = format!(
+            "fn {}{}",
+            leaf_of(&name),
+            crate::symbols::fn_signature(decl)
+        );
         self.push(name, kind, decl.name_span, decl.span, signature, &[], tier);
     }
 
@@ -1067,7 +1073,7 @@ impl Walk<'_> {
         if !self.seen.insert(name_span) {
             return;
         }
-        let leaf = name.rsplit('.').next().unwrap_or(&name).to_string();
+        let leaf = leaf_of(&name).to_string();
         let file = self
             .sources
             .get(name_span.source.0 as usize)
@@ -1088,6 +1094,11 @@ impl Walk<'_> {
             name,
         });
     }
+}
+
+/// The last segment of a dotted name — what the author typed.
+fn leaf_of(name: &str) -> &str {
+    name.rsplit('.').next().unwrap_or(name)
 }
 
 /// The declaration spans of a type's members, for the hole list its own body text skips.
@@ -1345,7 +1356,11 @@ pub struct Receipt { total: int }
             &SearchFilter::default(),
             5,
         );
-        assert_eq!(hits.first().map(String::as_str), Some("checkout"), "{hits:?}");
+        assert_eq!(
+            hits.first().map(String::as_str),
+            Some("checkout"),
+            "{hits:?}"
+        );
     }
 
     /// `kind` narrows to one shape of declaration, and drops the functions a bare query returns.
