@@ -9,6 +9,7 @@
 //! the tier it was declared in.
 
 use noeta_ast::{Program, Stmt};
+use noeta_ide::callgraph;
 use noeta_span::Span;
 
 use crate::analyze::{NodeId, NodeKind, Prepared};
@@ -53,9 +54,16 @@ pub struct DeclIndex {
 impl DeclIndex {
     /// Walk `program` — the linked one where there is one, so names carry their post-link
     /// qualification — into the inventory.
+    ///
+    /// A declaration the linker did not reach carries the module prefix of its own source, through
+    /// the same [`callgraph::effective_prefix`] rule the call graph's inventory uses. That is what
+    /// a tier block's declarations need: the linker qualifies the top level, so a `@test fn` would
+    /// otherwise sit in the index under a bare name while everything around it is qualified, and an
+    /// `impact` answer naming it could not be joined to a `symbols` node.
     pub fn build(program: &Program) -> DeclIndex {
         let mut index = DeclIndex::default();
-        index.collect(&program.stmts, None);
+        let prefixes = callgraph::module_prefixes(program);
+        index.collect(&program.stmts, None, &prefixes);
         index
     }
 
@@ -102,28 +110,36 @@ impl DeclIndex {
     }
 
     /// Recurse a statement list, descending into `@tier { … }` blocks so a fixture type or a test
-    /// function is in the inventory like any other declaration, tagged with its tier.
-    fn collect(&mut self, stmts: &[Stmt], tier: Option<&str>) {
+    /// function is in the inventory like any other declaration, tagged with its tier and named
+    /// under its source's module prefix.
+    fn collect<'a>(
+        &mut self,
+        stmts: &[Stmt],
+        tier: Option<&str>,
+        prefixes: &'a std::collections::HashMap<noeta_span::SourceId, String>,
+    ) {
         for stmt in stmts {
+            let prefix = callgraph::effective_prefix(None, stmt, prefixes);
+            let named = |name: &str| callgraph::qualified(prefix, name);
             match stmt {
                 Stmt::Fn(decl) => {
                     let at = At::new(decl.name_span, decl.span, tier);
-                    self.push(decl.name.to_string(), NodeKind::Function, at);
+                    self.push(named(decl.name.as_str()), NodeKind::Function, at);
                 }
                 Stmt::Struct(decl) => {
-                    let name = decl.name.to_string();
+                    let name = named(decl.name.as_str());
                     let at = At::new(decl.name_span, decl.span, tier);
                     self.push(name.clone(), NodeKind::Struct, at);
                     self.members(&name, &decl.fields, &decl.methods, tier);
                 }
                 Stmt::Class(decl) => {
-                    let name = decl.name.to_string();
+                    let name = named(decl.name.as_str());
                     let at = At::new(decl.name_span, decl.span, tier);
                     self.push(name.clone(), NodeKind::Class, at);
                     self.members(&name, &decl.fields, &decl.methods, tier);
                 }
                 Stmt::Enum(decl) => {
-                    let name = decl.name.to_string();
+                    let name = named(decl.name.as_str());
                     let at = At::new(decl.name_span, decl.span, tier);
                     self.push(name.clone(), NodeKind::Enum, at);
                     for variant in &decl.variants {
@@ -133,7 +149,7 @@ impl DeclIndex {
                     self.methods(&name, &decl.methods, tier);
                 }
                 Stmt::Trait(decl) => {
-                    let name = decl.name.to_string();
+                    let name = named(decl.name.as_str());
                     let at = At::new(decl.name_span, decl.span, tier);
                     self.push(name.clone(), NodeKind::Trait, at);
                     for method in &decl.methods {
@@ -144,17 +160,17 @@ impl DeclIndex {
                 Stmt::Impl(decl) => {
                     // A standalone impl's methods are named the way the CALL GRAPH names them
                     // (`Target.method`), so an impl method has one identity across both.
-                    let name = format!("{} for {}", decl.trait_name, decl.target);
+                    let name = format!("{} for {}", decl.trait_name, named(decl.target.as_str()));
                     self.push(
                         name,
                         NodeKind::Impl,
                         At::new(decl.trait_span, decl.span, tier),
                     );
-                    self.methods(decl.target.as_str(), &decl.methods, tier);
+                    self.methods(&named(decl.target.as_str()), &decl.methods, tier);
                 }
                 Stmt::TierBlock {
                     tier: name, items, ..
-                } => self.collect(items, Some(name)),
+                } => self.collect(items, Some(name), prefixes),
                 _ => {}
             }
         }
