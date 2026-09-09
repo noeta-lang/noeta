@@ -18,7 +18,8 @@ anything.
 ./scripts/gate.sh --full                       # full CI parity — see CONTRIBUTING.md
 $EDITOR Cargo.toml                             # [workspace.package] version = "X.Y.Z"
 cargo metadata --format-version 1 >/dev/null   # refreshes Cargo.lock, no build
-git add Cargo.toml Cargo.lock
+cargo test -p noeta-cli --test docs_style      # the version moved; the wiki's pins must follow
+git add Cargo.toml Cargo.lock docs
 git commit -m "chore(release): bump workspace version to X.Y.Z"
 
 git push origin main                           # ← branch FIRST, no tag
@@ -40,6 +41,8 @@ CI cycle and removes that failure mode entirely.
 
 Tag the commit CI actually verified, which means the **version bump goes in before the push**, not
 between the green run and the tag.
+
+The bump moves the version the wiki's dependency snippets name, so `docs_style` fails until every `tag =` pin on the toolchain's own repository follows it. Run that test after the bump, not before: the full gate ran against the old version and cannot see this.
 
 The lock diff should be **version lines only** — one per workspace crate, nothing else. Anything
 more means a dependency moved and you are shipping more than you think:
@@ -329,7 +332,7 @@ in full for that reason.
 
 ```
 [ ] scripts/gate.sh --full green on main
-[ ] version bumped, Cargo.lock diff is version lines only
+[ ] version bumped, Cargo.lock diff is version lines only, wiki pins follow the new version
 [ ] committed and pushed to main — WITHOUT the tag
 [ ] CI green on that push, in the real environment, on the exact commit to be tagged
 [ ] only then: tag pushed
