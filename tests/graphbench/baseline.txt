@@ -22,19 +22,19 @@
 # Read the diff's sign: F1 up is an improvement worth pinning, F1 down needs a reason, and
 # tokens up needs the sentence saying what the extra context bought.
 
-row A0  definition     f1=0.9867 tokens=5615 n=25
-row A0  callers        f1=0.6385 tokens=309 n=26
-row A0  callees        f1=1.0000 tokens=1300 n=26
+row A0  definition     f1=1.0000 tokens=5619 n=25
+row A0  callers        f1=0.6907 tokens=354 n=25
+row A0  callees        f1=1.0000 tokens=1378 n=26
 row A0  importers      f1=0.8462 tokens=1401 n=26
-row A0  role_reach     f1=1.0000 tokens=4431 n=9
-row A0  path           f1=0.9202 tokens=3642 n=21
-row A0  impact         f1=0.3077 tokens=4888 n=26
+row A0  role_reach     f1=1.0000 tokens=4591 n=9
+row A0  path           f1=0.9429 tokens=3939 n=21
+row A0  impact         f1=0.3077 tokens=4936 n=26
 row A0  seed_mapping   f1=0.0776 tokens=6654 n=69
 row A5  definition     f1=1.0000 tokens=4373 n=25
-row A5  callers        f1=0.5468 tokens=8724 n=26
-row A5  callees        f1=0.3495 tokens=8724 n=26
+row A5  callers        f1=0.6027 tokens=8746 n=25
+row A5  callees        f1=0.3331 tokens=8724 n=26
 row A5  importers      f1=0.9821 tokens=8724 n=26
 row A5  role_reach     f1=0.4638 tokens=8874 n=9
 row A5  path           f1=0.7468 tokens=8722 n=21
-row A5  impact         f1=0.7258 tokens=8724 n=26
+row A5  impact         f1=0.7396 tokens=8724 n=26
 row A5  seed_mapping   f1=0.0409 tokens=4318 n=69

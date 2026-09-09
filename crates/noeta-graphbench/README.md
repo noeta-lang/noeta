@@ -8,8 +8,8 @@ graphbench: corpus
   orders_service      12 files  linked=true  errors=0  warnings=0
   ...
 arm  category          n      P      R     F1  Acc@1  Acc@5    MRR   tokens  calls      ms  evidence
-A0   callees          26  1.000  1.000  1.000  0.846  0.846  0.846     1300    2.9    4081  trace
-A5   callees          26  0.243  0.885  0.350  0.192  0.423  0.332     8724   21.4       0  file_read
+A0   callees          26  1.000  1.000  1.000  0.846  0.846  0.846     1378    2.3    5182  trace
+A5   callees          26  0.235  0.885  0.333  0.077  0.462  0.285     8724   21.4       0  file_read
 
 graphbench: every row holds its baseline.
 ```
