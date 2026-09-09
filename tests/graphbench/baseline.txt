@@ -22,21 +22,21 @@
 # Read the diff's sign: F1 up is an improvement worth pinning, F1 down needs a reason, and
 # tokens up needs the sentence saying what the extra context bought.
 
-row A0  definition     f1=1.0000 tokens=11380 n=25
-row A0  callers        f1=0.6867 tokens=762 n=25
-row A0  callees        f1=1.0000 tokens=2451 n=26
+row A0  definition     f1=1.0000 tokens=10711 n=25
+row A0  callers        f1=0.6867 tokens=703 n=25
+row A0  callees        f1=1.0000 tokens=1999 n=26
 row A0  importers      f1=0.8462 tokens=2057 n=26
-row A0  role_reach     f1=1.0000 tokens=8118 n=9
-row A0  path           f1=0.9429 tokens=6017 n=21
-row A0  impact         f1=0.3077 tokens=5655 n=26
-row A0  seed_mapping   f1=0.0713 tokens=13529 n=69
+row A0  role_reach     f1=1.0000 tokens=4616 n=9
+row A0  path           f1=0.9429 tokens=4575 n=21
+row A0  impact         f1=0.3077 tokens=5530 n=26
+row A0  seed_mapping   f1=0.0713 tokens=10813 n=69
 row A1  definition     f1=1.0000 tokens=735 n=25
-row A1  callers        f1=0.6867 tokens=762 n=25
-row A1  callees        f1=1.0000 tokens=2451 n=26
+row A1  callers        f1=0.6867 tokens=703 n=25
+row A1  callees        f1=1.0000 tokens=1999 n=26
 row A1  importers      f1=0.8462 tokens=2057 n=26
-row A1  role_reach     f1=1.0000 tokens=8118 n=9
-row A1  path           f1=0.9429 tokens=6017 n=21
-row A1  impact         f1=0.3077 tokens=5655 n=26
+row A1  role_reach     f1=1.0000 tokens=4616 n=9
+row A1  path           f1=0.9429 tokens=4575 n=21
+row A1  impact         f1=0.3077 tokens=5530 n=26
 row A1  seed_mapping   f1=0.1078 tokens=786 n=69
 row A2  definition     f1=1.0000 tokens=735 n=25
 row A2  callers        f1=0.0313 tokens=6842 n=25
@@ -50,9 +50,9 @@ row A3  definition     f1=1.0000 tokens=735 n=25
 row A3  callers        f1=1.0000 tokens=210 n=25
 row A3  callees        f1=0.1885 tokens=6615 n=26
 row A3  importers      f1=0.8462 tokens=2057 n=26
-row A3  role_reach     f1=1.0000 tokens=2417 n=9
+row A3  role_reach     f1=1.0000 tokens=2350 n=9
 row A3  path           f1=0.9048 tokens=321 n=21
-row A3  impact         f1=0.3077 tokens=55 n=26
+row A3  impact         f1=0.9615 tokens=338 n=26
 row A3  seed_mapping   f1=0.1078 tokens=786 n=69
 row A4  definition     f1=0.0209 tokens=6812 n=25
 row A4  callers        f1=0.0313 tokens=6812 n=25

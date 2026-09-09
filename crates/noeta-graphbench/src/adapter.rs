@@ -102,9 +102,30 @@ impl LineIndexes {
 
     /// A 1-based line and byte column in `file`, as a byte offset.
     pub fn offset(&self, file: &str, line: u32, column: u32) -> Option<u32> {
-        let starts = self.lines.get(file)?;
+        let starts = self.lines.get(self.resolve(file)?.as_str())?;
         let start = *starts.get(line.saturating_sub(1) as usize)?;
         Some(start + column.saturating_sub(1))
+    }
+
+    /// The indexed path a reported `file` names. The tools report a file **relative to the project
+    /// root** — the spelling `id.file` uses, and the only one stable across checkouts — while this
+    /// index is keyed by the absolute paths the corpus walk found, so a reported name resolves by
+    /// its suffix. An ambiguous suffix resolves to nothing rather than to a guess.
+    pub fn resolve(&self, file: &str) -> Option<String> {
+        if self.lines.contains_key(file) {
+            return Some(file.to_string());
+        }
+        let suffix = format!("/{file}");
+        let mut hit = None;
+        for indexed in self.lines.keys() {
+            if indexed.ends_with(&suffix) {
+                if hit.is_some() {
+                    return None;
+                }
+                hit = Some(indexed.clone());
+            }
+        }
+        hit
     }
 }
 
@@ -168,14 +189,28 @@ pub fn symbols(value: &Value, file: &str) -> Vec<Symbol> {
 }
 
 fn flatten_symbol(value: &Value, file: &str, owner: Option<&str>, out: &mut Vec<Symbol>) {
-    let name = value
-        .get("name")
-        .and_then(Value::as_str)
+    // The id is the identity: the authored name is its last dotted segment, and the node kind is
+    // its `kind`. The outline used to repeat both beside it.
+    let identity = read_id(value);
+    let name = identity
+        .as_ref()
+        .map(|id| id.leaf.clone())
+        .or_else(|| {
+            value
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
         .unwrap_or_default();
-    let kind = value
-        .get("kind")
-        .and_then(Value::as_str)
-        .map(str::to_string);
+    let kind = identity
+        .as_ref()
+        .and_then(|id| id.kind.clone())
+        .or_else(|| {
+            value
+                .get("kind")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
     let start = value
         .get("location")
         .and_then(|l| l.get("start"))
@@ -188,9 +223,9 @@ fn flatten_symbol(value: &Value, file: &str, owner: Option<&str>, out: &mut Vec<
         .and_then(|l| l.get("offset"))
         .and_then(Value::as_u64)
         .unwrap_or(0) as u32;
-    let node = read_id(value).unwrap_or(NodeRef {
+    let node = identity.unwrap_or(NodeRef {
         qualified: owner.map(|o| format!("{o}.{name}")),
-        leaf: name.to_string(),
+        leaf: name.clone(),
         file: Some(file.to_string()),
         // The outline's `location` is the whole declaration, so the name span is unknown; scoring
         // falls back to containment against the declaration range.
@@ -208,8 +243,10 @@ fn flatten_symbol(value: &Value, file: &str, owner: Option<&str>, out: &mut Vec<
         owner: owner.map(str::to_string),
     });
     if let Some(children) = value.get("children").and_then(Value::as_array) {
+        let owned;
         let next_owner = if matches!(kind.as_deref(), Some("struct" | "class" | "enum" | "impl")) {
-            Some(name)
+            owned = name.clone();
+            Some(owned.as_str())
         } else {
             owner
         };
@@ -247,11 +284,10 @@ pub fn references(value: &Value, entry: &str, indexes: &LineIndexes) -> Vec<Loca
 }
 
 fn location(value: &Value, entry: &str, indexes: &LineIndexes) -> Option<Located> {
-    let file = value
-        .get("file")
-        .and_then(Value::as_str)
-        .unwrap_or(entry)
-        .to_string();
+    let reported = value.get("file").and_then(Value::as_str).unwrap_or(entry);
+    let file = indexes
+        .resolve(reported)
+        .unwrap_or_else(|| reported.to_string());
     let range = value.get("range")?;
     let read = |end: &str| -> Option<u32> {
         let at = range.get(end)?;

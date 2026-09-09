@@ -164,14 +164,12 @@ pub fn architecture(p: &Prepared) -> ArchitectureOutput {
         boundaries: arch
             .boundaries
             .iter()
-            .map(|b| {
-                let at = analyze::locate_span(p, b.decl_span);
-                BoundaryHit {
-                    target: b.target.clone(),
-                    role: b.role.clone(),
-                    file: at.as_ref().map(|(file, _)| file.clone()),
-                    line: at.map(|(_, loc)| loc.start.line),
-                }
+            .map(|b| BoundaryHit {
+                id: match decls.at_name_span(b.decl_span) {
+                    Some(decl) => decl.id(p),
+                    None => p.node_id(&b.target, crate::analyze::NodeKind::Function, b.decl_span),
+                },
+                role: b.role.clone(),
             })
             .collect(),
         unassigned: Unassigned {
@@ -280,7 +278,7 @@ echo handle(1)
         let hits: Vec<(&str, &str)> = out
             .boundaries
             .iter()
-            .map(|b| (b.role.as_str(), b.target.as_str()))
+            .map(|b| (b.role.as_str(), b.id.name.as_str()))
             .collect();
         assert_eq!(
             hits,
@@ -290,7 +288,7 @@ echo handle(1)
                 ("Semantic.Sink", "notify"),
             ]
         );
-        assert!(out.boundaries[0].line.is_some());
+        assert!(out.boundaries[0].id.span.is_some());
     }
 
     #[test]

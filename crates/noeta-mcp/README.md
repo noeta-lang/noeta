@@ -39,6 +39,16 @@ The session grew two in-memory doors for it. `impact_of_sources` takes each edit
 
 `architecture` collapses the graph to its `@role` bearers, then quotients that by role. `noeta_ide::architecture::role_graph` is the same collapse the editor's swimlane view performs in `editors/vscode-noeta/media/trace.js`, and the two must agree; the Rust side's `bearer_edges_collapse_non_role_intermediates` pins the shape. The bearer graph rides along as `connections`, so a reader can walk from one entry point to the boundaries it reaches rather than only reading the role-level summary. Declarations bearing no role are counted as `unassigned` with exemplars, so a project with no bindings gets what it holds rather than an empty graph.
 
+## The graph is the linked program
+
+`graph::DeclIndex` is built over the merged program, which is the reachable closure from the entry. `graph::source_index` is the larger set every module's own parse holds, and the two differ by exactly what nothing imports — a module's `@test` block above all, since a tier block is referenced by nothing and so is never merged. `symbols` reports `in_graph` per node from the first index, and `graph::outside_graph_note` is what `trace`, `callers` and `impact` say instead of "no such name" when the second index holds it.
+
+Widening the graph would mean linking a program nothing compiles and nothing runs, and `noeta test` would then disagree with the tool describing it. The boundary is reported rather than moved.
+
+## One walk, two readers
+
+`noeta_ide::impact::Reach` is the reverse walk: the declarations a change reaches, plus each module whose top-level statements use one of them. `Reach::verdict` turns it into the runner's `Impact`, collapsing to `All` on any such use, because every run executes the top level. `noeta test --watch` reads the verdict; the MCP `impact` tool reads the walk and reports the module as a node of the answer.
+
 ## Link status is part of the answer
 
 A graph tool falls back to the entry file's own parse when the workspace does not link, so `analyze::LinkStatus` rides on `trace`, `reflect` and `module_graph` as `linked` plus `link_diagnostics` in `check`'s JSON shape. The fallback changes what the answer means: names lose their qualification and a call into a sibling module resolves to nothing, so `trace` marks every node `unverified` and degrades a callee naming one of the project's own modules to `unresolved` rather than calling it external.
