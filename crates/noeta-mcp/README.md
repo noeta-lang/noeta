@@ -25,6 +25,14 @@ Funnelling matters because the failure mode is silent: while the workspace was s
 
 The session grew two in-memory doors for it. `impact_of_sources` takes each edited file's new text from the caller instead of reading it back off disk, so an agent can ask what an unsaved edit would break; `impact_of_decls` seeds the closure from declaration names, which is the question an agent holding a name rather than a diff is asking.
 
+## Ranking, routing and quotienting the graph
+
+`context_map` answers "what should I read about this?". It ranks the call graph and the `use` import relation from the request's seeds with personalized PageRank, then grows a connected subgraph outward, taking the strongest reachable declaration each step until the token budget is full. The result is signatures grouped by file, each node carrying its rank, its score and the `via` edge that reached it, so the map reads as a structure. `ranker` is the knob a measurement turns: `degree` scores importance blind to the seeds and `random` scores from a seeded PRNG, over the same selection, the same budget and the same connectivity rule.
+
+`path` answers "how does A reach B?" with Yen's k shortest simple paths over the same edges. External and dynamic callees are nodes and they are sinks, so a route can end on `math.sqrt` honestly and none runs through it. When the graph offers more routes than `k`, a decayed resource flow scores each route by the mean resource its nodes carry, prunes the weakest, and emits the survivors ascending.
+
+`architecture` collapses the graph to its `@role` bearers, then quotients that by role. `noeta_ide::architecture::role_graph` is the same collapse the editor's swimlane view performs in `editors/vscode-noeta/media/trace.js`, and the two must agree; the Rust side's `bearer_edges_collapse_non_role_intermediates` pins the shape. Declarations bearing no role are counted as `unassigned` with exemplars, so a project with no bindings gets what it holds rather than an empty graph.
+
 ## Link status is part of the answer
 
 A graph tool falls back to the entry file's own parse when the workspace does not link, so `analyze::LinkStatus` rides on `trace`, `reflect` and `module_graph` as `linked` plus `link_diagnostics` in `check`'s JSON shape. The fallback changes what the answer means: names lose their qualification and a call into a sibling module resolves to nothing, so `trace` marks every node `unverified` and degrades a callee naming one of the project's own modules to `unresolved` rather than calling it external.

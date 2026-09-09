@@ -25,4 +25,24 @@ An **edge** is a use: `call` when the site is followed by `(`, `reference` when 
 
 `tests/graph/<case>/` is the oracle: each case is a small project with an `expect-graph.txt` manifest of every node and labeled edge, rendered by `callgraph::render` and compared byte for byte through the same linked-and-checked pipeline `trace` runs. `NOETA_GRAPH_DUMP=1 cargo test -p noeta-ide --test graph -- --nocapture` prints what a case currently renders, to read before pinning it.
 
+## Ranking the graph
+
+`rank::build` joins the call graph with the `use` import relation into one ranked graph: nodes are the program's functions and its modules, and an edge is a `call`, a `reference` or an `import`, weighted in that order. The import kind carries both halves of the module relation, a `use` edge between two modules and the membership edge between a module and each declaration it holds, so filtering it out leaves the pure call graph.
+
+`rank::context_map` scores that graph from a set of seeds and grows a connected subgraph under a token budget, taking the highest-scoring reachable declaration each step. A declaration nothing connects to a seed is never emitted, and each emitted node carries the edge that reached it. The first seed is emitted whatever it costs, so a small budget still answers.
+
+`Ranker` chooses the scoring. `Ppr` is personalized PageRank teleporting to the seeds, `Degree` is weighted degree in both directions, and `Random` is a splitmix64 draw from a caller-supplied seed. Selection, budget and connectivity are identical under all three, so a comparison between them measures the ranking alone.
+
+## Paths between two declarations
+
+`paths::find` returns the k shortest simple routes from one node to another with Yen's algorithm over hop count, deterministic down to the adjacency order. Labeled leaves are nodes and they are sinks: a route may end on `math.sqrt` or on a dynamic callee, and no route passes through one.
+
+When the search finds more routes than `k`, `PathRanker::Flow` scores each with PathRAG's residue: a unit of resource leaves the source, decays by `DECAY_ALPHA` per hop and splits across the node's out-edges, and a route scores the mean resource over its nodes. Routes below `PRUNE_THRESHOLD` drop, the strongest is never pruned, and the survivors come back ascending so the strongest route is last. `PathRanker::Shortest` takes hop count alone.
+
+## The role graph
+
+`architecture::role_graph` collapses the call graph to its `@role` bearers: a node per bearing declaration, an edge to each nearest bearer it reaches, and every non-bearing declaration between them collapsed away. A connection that exists only through a passed reference is marked, the way the swimlane view draws it dashed. This is a port of the derivation in `editors/vscode-noeta/media/trace.js`, and the two must agree; `bearer_edges_collapse_non_role_intermediates` pins the shape the port has to keep.
+
+`architecture::architecture` quotients that by role: one node per role with its bearers and its in- and out-degree, one edge per role pair with a count and up to `EXEMPLARS` real declaration pairs, the `(declaration, role)` boundary summary, and an `unassigned` count with exemplars for everything bearing no role.
+
 Part of the `noeta` compilation pipeline (see the repository `ARCHITECTURE.md` and `AGENTS.md`).
