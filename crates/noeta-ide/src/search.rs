@@ -754,7 +754,18 @@ impl CodeIndex {
             return Vec::new();
         }
         let phrase = phrase_needle(query);
-        let mut hits: Vec<CodeHit> = Vec::new();
+        // A dev-tier declaration is demoted below every shipping one unless the query names its
+        // tier. A test's name is a sentence — `the_read_side_totals_an_order` — so it answers a
+        // prose question better than the function it exercises; a question about what a program
+        // does is about the program. Demoting rather than scoring keeps the tests in the answer
+        // (and first the moment a query says `test`), where a multiplier would still lose to a
+        // name that happens to match one more of the query's words.
+        let demoted = |decl: &CodeDecl| {
+            decl.tier
+                .as_ref()
+                .is_some_and(|tier| !terms.iter().any(|t| t == tier))
+        };
+        let mut hits: Vec<(bool, CodeHit)> = Vec::new();
         for (i, decl) in self.decls.iter().enumerate() {
             if !filter.keeps(decl) {
                 continue;
@@ -781,21 +792,25 @@ impl CodeIndex {
             } else {
                 &decl.doc
             };
-            hits.push(CodeHit {
-                decl: i,
-                score,
-                matched,
-                snippet: snippet(evidence, &terms),
-            });
+            hits.push((
+                demoted(decl),
+                CodeHit {
+                    decl: i,
+                    score,
+                    matched,
+                    snippet: snippet(evidence, &terms),
+                },
+            ));
         }
-        hits.sort_by(|a, b| {
-            b.score
-                .total_cmp(&a.score)
+        hits.sort_by(|(a_demoted, a), (b_demoted, b)| {
+            a_demoted
+                .cmp(b_demoted)
+                .then_with(|| b.score.total_cmp(&a.score))
                 .then_with(|| self.decls[a.decl].name.cmp(&self.decls[b.decl].name))
                 .then(a.decl.cmp(&b.decl))
         });
         hits.truncate(limit);
-        hits
+        hits.into_iter().map(|(_, hit)| hit).collect()
     }
 }
 
@@ -1417,6 +1432,40 @@ pub struct Receipt { total: int }
             10,
         );
         assert_eq!(qualified, entry, "a qualified role names the same set");
+    }
+
+    /// A test's name reads like a sentence, so it answers a prose question better than the code it
+    /// exercises. The shipping declaration leads anyway, and naming the tier brings the test back.
+    #[test]
+    fn a_dev_tier_declaration_ranks_below_the_code_it_exercises() {
+        let index = index_of(&[(
+            "main.noe",
+            "fn place_order(id: int): int { return id }\n\
+                 @test {\n  fn placing_an_order_marks_it_paid(): void { assert(true) }\n}\n",
+        )]);
+        let hits = ranked(
+            &index,
+            "where does placing an order mark it paid",
+            &SearchFilter::default(),
+            5,
+        );
+        assert_eq!(
+            hits.first().map(String::as_str),
+            Some("main.place_order"),
+            "{hits:?}"
+        );
+        // Naming the tier is a question about the tests, and answers with one.
+        let tests = ranked(
+            &index,
+            "which test covers placing an order marks it paid",
+            &SearchFilter::default(),
+            5,
+        );
+        assert_eq!(
+            tests.first().map(String::as_str),
+            Some("placing_an_order_marks_it_paid"),
+            "{tests:?}"
+        );
     }
 
     /// A hit says which fields earned it, so a reader can tell a name match from a prose one.
