@@ -913,6 +913,58 @@ mod tests {
         );
     }
 
+    /// **The runner still widens.** A module's top-level statements run on every pass, so a top
+    /// level that uses an impacted declaration means no runner can narrow — `noeta test --watch`
+    /// must rerun everything. The walk keeps its closure for a consumer that asks a question
+    /// ([`ImpactSession::reach_of_decls`]); the verdict a runner reads is unchanged.
+    #[test]
+    fn a_top_level_use_still_widens_the_runners_verdict() {
+        seed();
+        let dir = noeta_test_temp::TempDir::new("impact-toplevel-widens");
+        std::fs::write(
+            dir.join("noeta.toml"),
+            "[package]\nname = \"test/topwiden\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("write the manifest");
+        std::fs::write(dir.join("store.noe"), "pub fn load(): int { return 7 }\n")
+            .expect("write the module");
+        let entry = dir.join("main.noe");
+        std::fs::write(
+            &entry,
+            "use topwiden.store\n\
+             fn handle(): int { return store.load() }\n\
+             echo handle()\n\
+             @test fn t(): void { assert(handle() == 7) }\n",
+        )
+        .expect("write the entry");
+        let mut session = ImpactSession::new(&entry).expect("session builds");
+        let seeds = vec!["topwiden.store.load".to_string()];
+
+        // The runner's verdict: everything, with the reason.
+        match session.impact_of_decls(&seeds) {
+            Impact::All { reason } => {
+                assert!(reason.contains("the top level uses"), "reason: {reason}")
+            }
+            Impact::Decls(decls) => {
+                panic!("a top-level use must widen a runner's verdict, got {decls:?}")
+            }
+        }
+
+        // The same walk, asked as a question: the closure is there, and so is the caveat.
+        let reach = session.reach_of_decls(&seeds).expect("the project links");
+        assert!(
+            reach.decls.contains(&"topwiden.main.handle".to_string()),
+            "the walk keeps what it found: {:?}",
+            reach.decls
+        );
+        assert_eq!(
+            reach.top_level_uses.len(),
+            1,
+            "one module's top level used it: {:?}",
+            reach.top_level_uses
+        );
+    }
+
     /// A tier declaration written **first** in its file still carries the file's module prefix.
     ///
     /// The prefix a source's declarations carry is read off those declarations, and tier
