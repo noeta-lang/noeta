@@ -471,8 +471,10 @@ pub fn references(
             decl.name
         ));
     };
+    // `file` is the source's own (absolute) name, which is what opens it; every path this
+    // function *reports* goes out relative, the way `id.file` does.
     let Some((uri, _)) = opened.open_file(&file) else {
-        return not_found_references(format!("cannot read {file}"));
+        return not_found_references(format!("cannot read {}", p.relative(&file)));
     };
     let position = noeta_ide::Position {
         line: at.start.line.saturating_sub(1),
@@ -497,8 +499,9 @@ pub fn references(
             }
         }
         None => not_found_references(format!(
-            "`{}` is declared at {file}, and the engine found no occurrences of it",
-            decl.name
+            "`{}` is declared at {}, and the engine found no occurrences of it",
+            decl.name,
+            p.relative(&file)
         )),
     }
 }

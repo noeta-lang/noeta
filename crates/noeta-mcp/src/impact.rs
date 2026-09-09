@@ -67,7 +67,8 @@ pub fn impact(
     let Some(mut session) = noeta_ide::impact::ImpactSession::new(std::path::Path::new(entry))
     else {
         return note(format!(
-            "{entry} does not anchor a project the impact engine can analyze"
+            "{} does not anchor a project the impact engine can analyze",
+            p.relative(entry)
         ));
     };
 
@@ -101,7 +102,7 @@ pub fn impact(
             let path = std::path::Path::new(file);
             let canonical = match path.canonicalize() {
                 Ok(canonical) => canonical,
-                Err(e) => return note(format!("cannot open {file}: {e}")),
+                Err(e) => return note(format!("cannot open {}: {e}", p.relative(file))),
             };
             session.reach_of_sources(&[(canonical, source.to_string())])
         }
