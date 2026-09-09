@@ -379,7 +379,7 @@ echo leaf() + caller_a() + caller_b()
         let at = |name: &str| order.iter().position(|n| n == name).unwrap_or(usize::MAX);
         assert!(at("helper") < at("hub"), "{order:?}");
         assert!(at("deep") < at("far_one"), "{order:?}");
-        // Every node carries the identity the other graph tools report.
+        // Every node carries an identity, and it is the one the other graph tools report.
         let first = &out.files[0].nodes[0];
         assert_eq!(first.id.name, "leaf");
         assert_eq!(first.id.kind.as_str(), "function");
@@ -400,6 +400,60 @@ echo leaf() + caller_a() + caller_b()
 
     /// The ablation knob is real: `degree` takes the most-connected declaration where `ppr` takes
     /// the seed's own neighbor, and `random` is reproducible from its seed.
+    /// The identity is joinable: the id a map node carries for a declaration is byte for byte the
+    /// id `callers` reports for the same declaration, over a real package where names are
+    /// namespace-qualified. Nothing in the map is worth much if an agent cannot join it.
+    #[test]
+    fn a_map_node_and_callers_report_one_identity() {
+        noeta_stdlib::registry::default_seeded();
+        let root = noeta_test_temp::TempDir::new("mcp-context-identity");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("noeta.toml"),
+            "[package]\nname = \"local/mapped\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src").join("store.noe"),
+            "pub fn load(): int { return 7 }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src").join("main.noe"),
+            "use mapped.store\nfn entry(): int { return store.load() }\necho entry()\n",
+        )
+        .unwrap();
+        let entry = root.join("src").join("main.noe").display().to_string();
+
+        let out = context_map(
+            &prepare(&None, &Some(entry.clone())).unwrap(),
+            &["entry".to_string()],
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(out.linked, "note: {:?}", out.note);
+        let load = out
+            .files
+            .iter()
+            .flat_map(|f| f.nodes.iter())
+            .find(|n| n.name.ends_with(".load"))
+            .expect("the map reaches the imported module's declaration");
+        assert_eq!(load.name, "mapped.store.load", "the post-link name");
+
+        let walked = crate::impact::callers(
+            &prepare(&None, &Some(entry)).unwrap(),
+            "mapped.store.load",
+            None,
+        );
+        assert_eq!(
+            load.id,
+            walked.target.expect("callers found it"),
+            "one declaration, one identity"
+        );
+    }
+
     #[test]
     fn the_ranker_argument_changes_the_ranking() {
         let by_degree = context_map(
