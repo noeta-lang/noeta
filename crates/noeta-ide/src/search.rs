@@ -1252,23 +1252,37 @@ pub struct Receipt { total: int }
         );
     }
 
-    /// Two modules declare `place_order`. Of those two, the one whose module the query names is
-    /// the one that ranks first, which is the qualified-name field doing its job.
+    /// Two modules declare `place_order` and two types declare `total`. In both cases the owner
+    /// the query names decides which one leads.
+    ///
+    /// The two halves reach different fields. A module name is in the qualified name *and* in the
+    /// file path, so either can carry it; a type name is in the qualified name alone, which is
+    /// what the `total` half pins.
     #[test]
-    fn a_colliding_leaf_ranks_by_the_qualified_path() {
+    fn a_colliding_leaf_ranks_by_the_owner_the_query_names() {
         let index = fixture();
-        let leading = |query: &str| -> Option<String> {
+        let leading = |query: &str, leaf: &str| -> Option<String> {
+            let suffix = format!(".{leaf}");
             ranked(&index, query, &SearchFilter::default(), 10)
                 .into_iter()
-                .find(|n| n.ends_with(".place_order"))
+                .find(|n| n.ends_with(&suffix))
         };
         assert_eq!(
-            leading("billing place_order").as_deref(),
+            leading("billing place_order", "place_order").as_deref(),
             Some("billing.place_order")
         );
         assert_eq!(
-            leading("orders place_order").as_deref(),
+            leading("orders place_order", "place_order").as_deref(),
             Some("orders.place_order")
+        );
+        // `Receipt` names no file, so only the qualified name can put its member first.
+        assert_eq!(
+            leading("receipt total", "total").as_deref(),
+            Some("billing.Receipt.total")
+        );
+        assert_eq!(
+            leading("order total", "total").as_deref(),
+            Some("orders.Order.total")
         );
     }
 
