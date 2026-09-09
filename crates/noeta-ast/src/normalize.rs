@@ -59,6 +59,16 @@ pub struct Normalization {
     /// with this set. Everything else, the `${…}` holes between the statics included, is still
     /// compared exactly.
     pub clear_tier_statics: bool,
+
+    /// Also put **imports into a canonical order**: every contiguous run of [`Stmt::Use`] in every
+    /// statement list is sorted, and the names inside each `use A.{…}` are sorted with it.
+    ///
+    /// `noeta fmt`'s `sort_imports` reorders imports, and it does so in every statement list it
+    /// prints — a module's top level, a function body, a `@test { … }` block. Reordering imports
+    /// binds the same names, so canonicalizing the order on both compared sides is sound, and
+    /// applying it at every depth is what keeps the two in step. Everything else about a `use`, its
+    /// path and its aliases included, is still compared exactly.
+    pub canonical_imports: bool,
 }
 
 /// Set every span in `program` to [`ZERO`], so two programs that differ only in byte offsets compare
@@ -79,6 +89,19 @@ pub fn normalize(program: &mut Program, how: &Normalization) {
 /// implementation destructures exhaustively — is only checkable while they all live here.
 trait Normalize {
     fn normalize(&mut self, how: &Normalization);
+
+    /// How a whole **sequence** of these nodes normalizes. The default visits each element, which is
+    /// all any node needs; [`Stmt`] overrides it because a canonicalization that reorders siblings
+    /// can only be expressed over the list. Routing it through the trait is what makes it reach
+    /// every `Vec<Stmt>` in the AST, at every nesting depth, with no list enumerated by hand.
+    fn normalize_seq(seq: &mut Vec<Self>, how: &Normalization)
+    where
+        Self: Sized,
+    {
+        for item in seq {
+            item.normalize(how);
+        }
+    }
 }
 
 // --- the two ends of the recursion -------------------------------------------------------------
@@ -122,9 +145,7 @@ leaf!(
 
 impl<T: Normalize> Normalize for Vec<T> {
     fn normalize(&mut self, how: &Normalization) {
-        for item in self {
-            item.normalize(how);
-        }
+        T::normalize_seq(self, how);
     }
 }
 
@@ -270,6 +291,58 @@ impl Normalize for Stmt {
                 span.normalize(how);
             }
         }
+    }
+
+    /// Statement lists are the one place a normalization reorders rather than erases: under
+    /// [`Normalization::canonical_imports`], each contiguous run of `use` statements is sorted and
+    /// so are the names inside each one. Every statement list in the AST reaches this, so an import
+    /// run inside a `@test { … }` block or a function body canonicalizes the same way a module's
+    /// top-level run does.
+    fn normalize_seq(seq: &mut Vec<Self>, how: &Normalization) {
+        if how.canonical_imports {
+            canonicalize_import_runs(seq);
+        }
+        for item in seq {
+            item.normalize(how);
+        }
+    }
+}
+
+/// Sort the names inside every `use` in `stmts`, then sort each contiguous run of `use` statements.
+/// Deterministic and idempotent, so applying it to two programs that differ only in import order
+/// makes them equal.
+fn canonicalize_import_runs(stmts: &mut [Stmt]) {
+    for stmt in stmts.iter_mut() {
+        if let Stmt::Use { names, .. } = stmt {
+            names.sort_by(|x, y| (&x.name, &x.alias).cmp(&(&y.name, &y.alias)));
+        }
+    }
+    let mut i = 0;
+    while i < stmts.len() {
+        if matches!(stmts[i], Stmt::Use { .. }) {
+            let start = i;
+            while i < stmts.len() && matches!(stmts[i], Stmt::Use { .. }) {
+                i += 1;
+            }
+            stmts[start..i].sort_by_key(use_sort_key);
+        } else {
+            i += 1;
+        }
+    }
+}
+
+/// A deterministic sort key for a `use` statement: its path, then its (already-sorted) leaf names
+/// with their aliases, so two imports that bind different local names never compare equal.
+fn use_sort_key(stmt: &Stmt) -> (Vec<String>, Vec<(String, Option<String>)>) {
+    match stmt {
+        Stmt::Use { path, names, .. } => (
+            path.clone(),
+            names
+                .iter()
+                .map(|n| (n.name.clone(), n.alias.clone()))
+                .collect(),
+        ),
+        _ => (Vec::new(), Vec::new()),
     }
 }
 

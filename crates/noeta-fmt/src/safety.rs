@@ -11,15 +11,24 @@
 //! completeness here is what `#[derive(PartialEq)]` is, and two different node kinds cannot collapse
 //! onto one rendering because there is no rendering.
 
+use noeta_ast::Program;
 use noeta_ast::normalize::{Normalization, normalize};
-use noeta_ast::{Program, Stmt};
 
 /// Whether `a` and `b` are the same program up to span positions **and up to import ordering**. The
 /// latter lets the import-sorting formatter reorder `use` statements (and the names inside a `use`)
 /// without tripping the gate — reordering imports is semantics-neutral, so canonicalizing it away on
-/// both sides is sound and keeps every other structural difference caught.
+/// both sides is sound and keeps every other structural difference caught. The canonicalization
+/// reaches every statement list, because so does the printer: a `use` run inside a `@test { … }`
+/// block or a function body is sorted exactly like a module's top-level one.
 pub fn ast_equal_modulo_spans(a: &Program, b: &Program) -> bool {
-    equal_under(a, b, &Normalization::default())
+    equal_under(
+        a,
+        b,
+        &Normalization {
+            canonical_imports: true,
+            ..Normalization::default()
+        },
+    )
 }
 
 /// As [`ast_equal_modulo_spans`], but also ignoring the **static text of tier bodies** — the relaxed
@@ -34,51 +43,17 @@ pub fn ast_equal_ignoring_tier_statics(a: &Program, b: &Program) -> bool {
         b,
         &Normalization {
             clear_tier_statics: true,
+            canonical_imports: true,
         },
     )
 }
 
 /// Canonicalize both programs under `how` and compare them structurally.
 fn equal_under(a: &Program, b: &Program, how: &Normalization) -> bool {
-    let (mut a, mut b) = (canonical_imports(a), canonical_imports(b));
+    let (mut a, mut b) = (a.clone(), b.clone());
     normalize(&mut a, how);
     normalize(&mut b, how);
     a == b
-}
-
-/// A clone of `program` with import order canonicalized: every contiguous run of `use` statements is
-/// sorted, and the names inside each `use A.{…}` are sorted. Deterministic, so applying it to both
-/// compared programs makes the comparison invariant to import ordering.
-fn canonical_imports(program: &Program) -> Program {
-    let mut out = program.clone();
-    for stmt in &mut out.stmts {
-        if let Stmt::Use { names, .. } = stmt {
-            names.sort_by(|x, y| x.name.cmp(&y.name));
-        }
-    }
-    let mut i = 0;
-    while i < out.stmts.len() {
-        if matches!(out.stmts[i], Stmt::Use { .. }) {
-            let start = i;
-            while i < out.stmts.len() && matches!(out.stmts[i], Stmt::Use { .. }) {
-                i += 1;
-            }
-            out.stmts[start..i].sort_by_key(use_sort_key);
-        } else {
-            i += 1;
-        }
-    }
-    out
-}
-
-/// A deterministic sort key for a `use` statement: `path` then its (already-sorted) names.
-fn use_sort_key(stmt: &Stmt) -> (Vec<String>, Vec<String>) {
-    match stmt {
-        Stmt::Use { path, names, .. } => {
-            (path.clone(), names.iter().map(|n| n.name.clone()).collect())
-        }
-        _ => (Vec::new(), Vec::new()),
-    }
 }
 
 #[cfg(test)]
@@ -153,6 +128,41 @@ mod tests {
         assert!(!ast_equal_modulo_spans(
             &program("echo 1\necho 2\n"),
             &program("echo 2\necho 1\n"),
+        ));
+    }
+
+    #[test]
+    fn imports_are_compared_up_to_order_at_every_depth() {
+        // **The regression test for a defect that shipped.** The printer sorts imports in every
+        // statement list it prints, and the gate canonicalized only the module's top level — so a
+        // `use` run inside a `@test { … }` block or a function body was sorted by the printer,
+        // seen as a reordering by the gate, and the file was refused as a printer bug.
+        assert!(ast_equal_modulo_spans(
+            &program("@test {\n    use A.b\n    use A.a\n}\n"),
+            &program("@test {\n    use A.a\n    use A.b\n}\n"),
+        ));
+        assert!(ast_equal_modulo_spans(
+            &program("fn f(): void {\n    use A.{b, a}\n}\n"),
+            &program("fn f(): void {\n    use A.{a, b}\n}\n"),
+        ));
+        // The relaxation stays confined to imports at depth, too.
+        assert!(!ast_equal_modulo_spans(
+            &program("@test {\n    echo 1\n    echo 2\n}\n"),
+            &program("@test {\n    echo 2\n    echo 1\n}\n"),
+        ));
+    }
+
+    #[test]
+    fn an_alias_is_part_of_the_import() {
+        // Canonicalizing order must not canonicalize away *which* name each import binds: two
+        // `use`s of the same path differing only in alias bind different locals.
+        assert!(!ast_equal_modulo_spans(
+            &program("use A.b as x\n"),
+            &program("use A.b as y\n"),
+        ));
+        assert!(!ast_equal_modulo_spans(
+            &program("use A.{b as x, c}\n"),
+            &program("use A.{b as y, c}\n"),
         ));
     }
 

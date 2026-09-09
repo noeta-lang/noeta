@@ -4035,6 +4035,10 @@ fn compound_assign_op(op: BinaryOp) -> bool {
 
 /// A deterministic sort key for a `use` statement (`path`, then names) — the import-sort order.
 /// Non-`use` statements sort as empty (never mixed into a run in practice).
+///
+/// The safety gate does not read this key: it canonicalizes imports by sorting them with a key of
+/// its own, which collapses *any* permutation of a run onto one form. So the presented order chosen
+/// here and the canonical order the gate compares under are free to differ.
 fn use_sort_key(stmt: &Stmt) -> (Vec<String>, Vec<String>) {
     match stmt {
         Stmt::Use { path, names, .. } => {

@@ -1524,6 +1524,22 @@ mod tests {
     }
 
     #[test]
+    fn sort_imports_orders_a_nested_run() {
+        // **The regression test for a defect that shipped.** A `use` run inside a `@test { … }`
+        // block sorts like any other, and the safety gate — which compared imports up to order only
+        // at the module's top level — refused the whole file as a printer bug.
+        assert_eq!(
+            fmt_sorted("@test {\n    use App.Zebra\n    use App.Alpha\n}\n").unwrap(),
+            "@test {\n    use App.Alpha\n    use App.Zebra\n}\n"
+        );
+        // The same at a function-body depth, and for the names inside one `use`.
+        assert_eq!(
+            fmt_sorted("fn f(): void {\n    use std.math.{sqrt, abs}\n}\n").unwrap(),
+            "fn f(): void {\n    use std.math.{abs, sqrt}\n}\n"
+        );
+    }
+
+    #[test]
     fn sort_imports_leaves_a_commented_run_alone() {
         // A comment anywhere in the run pins its order (never scramble a hand-grouped block).
         let src = "use App.Zebra // pinned\nuse App.Alpha\n";
