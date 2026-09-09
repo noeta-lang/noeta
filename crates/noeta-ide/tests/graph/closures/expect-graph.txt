@@ -1,0 +1,15 @@
+node closures.main.Holder.fire method main.noe:7
+node closures.main.apply fn main.noe:12
+node closures.main.entry fn main.noe:19
+node closures.main.target fn main.noe:10
+node closures.main.via_local fn main.noe:14
+edge <top> -> closures.main.entry call function
+edge closures.main.Holder.fire -> closures.main.Holder.cb call dynamic
+edge closures.main.apply -> f call dynamic
+edge closures.main.entry -> closures.main.Holder.fire call function
+edge closures.main.entry -> closures.main.apply call function
+edge closures.main.entry -> closures.main.target reference function
+edge closures.main.entry -> closures.main.target reference function
+edge closures.main.entry -> closures.main.via_local call function
+edge closures.main.via_local -> closures.main.target reference function
+edge closures.main.via_local -> g call dynamic

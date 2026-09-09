@@ -1,0 +1,42 @@
+// A standalone `impl Trait for T` method is a node like an in-body one: its call site resolves to
+// it, and its own body's calls leave it. A trait's DEFAULT method is a node under the trait, and a
+// call to one resolves through the traits the receiver's type implements — so `twice` on a `Speak`
+// implementor reaches `Speak.twice` and never the same-named default on a trait it does not
+// implement.
+trait Speak {
+    fn say(): string
+    fn twice(): string { return "${self.say()}${self.say()}" }
+}
+
+trait Quiet {
+    fn hush(): string
+    fn twice(): string { return hush_marker() }
+}
+
+struct ViaImpl { tag: string }
+
+impl Speak for ViaImpl {
+    pub fn say(): string { return sink() }
+}
+
+struct ViaBody {
+    tag: string
+    impl Speak { pub fn say(): string { return sink() } }
+}
+
+struct Hummer {
+    tag: string
+    impl Quiet { pub fn hush(): string { return sink() } }
+}
+
+fn sink(): string { return "x" }
+fn hush_marker(): string { return "-" }
+
+fn caller(): string {
+    a = ViaImpl { tag: "a" }
+    b = ViaBody { tag: "b" }
+    h = Hummer { tag: "h" }
+    return a.say() ~ b.say() ~ a.twice() ~ b.twice() ~ h.twice()
+}
+
+echo caller()

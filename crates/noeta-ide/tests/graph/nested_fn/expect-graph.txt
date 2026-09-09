@@ -1,0 +1,14 @@
+node nested_fn.main.Box.measure method main.noe:14
+node nested_fn.main.Box.measure.twice fn main.noe:15
+node nested_fn.main.entry fn main.noe:20
+node nested_fn.main.host fn main.noe:6
+node nested_fn.main.host.inner fn main.noe:7
+node nested_fn.main.leaf fn main.noe:4
+edge <top> -> nested_fn.main.entry call function
+edge nested_fn.main.Box.measure -> nested_fn.main.Box.measure.twice call function
+edge nested_fn.main.Box.measure.twice -> nested_fn.main.leaf call function
+edge nested_fn.main.entry -> nested_fn.main.Box.measure call function
+edge nested_fn.main.entry -> nested_fn.main.host call function
+edge nested_fn.main.host -> nested_fn.main.host.inner call function
+edge nested_fn.main.host -> nested_fn.main.host.inner call function
+edge nested_fn.main.host.inner -> nested_fn.main.leaf call function

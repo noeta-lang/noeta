@@ -2213,9 +2213,32 @@ impl DocumentStore {
                         .to_string(),
                 );
             }
-            trace::Roots::NotFound => {
+            trace::Roots::Ambiguous(candidates) => {
                 return Some(format!(
-                    "noeta trace\n\n`{}` matches no role binding and no function\n",
+                    "noeta trace\n\n`{}` names {} functions — trace one of them\n{}\n",
+                    from.unwrap_or_default(),
+                    candidates.len(),
+                    candidates
+                        .iter()
+                        .map(|c| format!("  {c}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                ));
+            }
+            trace::Roots::NotFound { near } => {
+                let near = if near.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "\n\nclosest declarations\n{}\n",
+                        near.iter()
+                            .map(|c| format!("  {c}"))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    )
+                };
+                return Some(format!(
+                    "noeta trace\n\n`{}` matches no role binding and no function{near}\n",
                     from.unwrap_or_default()
                 ));
             }
@@ -2252,7 +2275,13 @@ impl DocumentStore {
                     trace::TraceStatus::NoRoles,
                 ));
             }
-            trace::Roots::NotFound => {
+            trace::Roots::Ambiguous(_) => {
+                return Some(trace::LocatedTrace::empty(
+                    from,
+                    trace::TraceStatus::Ambiguous,
+                ));
+            }
+            trace::Roots::NotFound { .. } => {
                 return Some(trace::LocatedTrace::empty(
                     from,
                     trace::TraceStatus::NotFound,
@@ -2288,6 +2317,7 @@ impl DocumentStore {
                 external: node.external,
                 dynamic: node.dynamic,
                 cycle: node.cycle,
+                shared: node.shared,
                 truncated: node.truncated,
                 children: node.children.iter().map(|c| convert(c, locate)).collect(),
             }
@@ -2390,6 +2420,9 @@ impl DocumentStore {
         }
         if node.cycle {
             line.push_str("  (cycle)");
+        }
+        if node.shared {
+            line.push_str("  (shared — expanded above)");
         }
         if node.truncated {
             line.push_str("  …");

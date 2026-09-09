@@ -1,0 +1,3 @@
+pub fn shared(): int { return 2 }
+
+pub fn beta_only(): int { return shared() }

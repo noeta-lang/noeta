@@ -1,0 +1,10 @@
+node tier_block.main.Fixture.build method main.noe:11
+node tier_block.main.doubled fn main.noe:14
+node tier_block.main.helper fn main.noe:3
+node tier_block.main.uses_fixture fn main.noe:16
+edge <top> -> tier_block.main.helper call function
+edge tier_block.main.Fixture.build -> tier_block.main.helper call function
+edge tier_block.main.doubled -> tier_block.main.helper call function
+edge tier_block.main.doubled -> tier_block.main.helper call function
+edge tier_block.main.uses_fixture -> f.build call dynamic
+edge tier_block.main.uses_fixture -> tier_block.main.doubled call function

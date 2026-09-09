@@ -1,0 +1,8 @@
+// Two modules each declare `shared`; the linked graph carries two distinct nodes, and each
+// module's own call resolves to its own.
+use cross_module.alpha
+use cross_module.beta
+
+fn entry(): int { return alpha.alpha_only() + beta.beta_only() }
+
+echo entry()

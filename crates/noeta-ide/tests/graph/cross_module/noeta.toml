@@ -1,0 +1,6 @@
+[package]
+name = "local/cross_module"
+version = "0.1.0"
+
+[directives]
+test = "std"

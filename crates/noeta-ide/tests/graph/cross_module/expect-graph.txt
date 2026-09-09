@@ -1,0 +1,10 @@
+node cross_module.alpha.alpha_only fn src/alpha.noe:3
+node cross_module.alpha.shared fn src/alpha.noe:1
+node cross_module.beta.beta_only fn src/beta.noe:3
+node cross_module.beta.shared fn src/beta.noe:1
+node cross_module.main.entry fn src/main.noe:6
+edge <top> -> cross_module.main.entry call function
+edge cross_module.alpha.alpha_only -> cross_module.alpha.shared call function
+edge cross_module.beta.beta_only -> cross_module.beta.shared call function
+edge cross_module.main.entry -> cross_module.alpha.alpha_only call function
+edge cross_module.main.entry -> cross_module.beta.beta_only call function

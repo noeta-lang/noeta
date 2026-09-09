@@ -135,8 +135,8 @@ pub fn import_targets(program: &Program) -> HashMap<String, String> {
 /// The members (fields, enum variants, and methods) each top-level type declares, keyed by
 /// `(type name, member name)` → the span of the member's declared name. Powers go-to-definition on a
 /// member access `x.foo` once the receiver `x`'s type is known (from the checker's `expr_types`).
-/// Methods flattened out of in-body `impl` blocks are already present in each decl's `methods`, so
-/// no separate `impl` walk is needed.
+/// Methods flattened out of in-body `impl` blocks are already present in each decl's `methods`; a
+/// standalone `impl Trait for T { … }` and a tier block's declarations are collected here.
 #[derive(Debug, Default)]
 pub struct MemberTable {
     by_type_member: HashMap<(String, String), Span>,
@@ -145,7 +145,15 @@ pub struct MemberTable {
 impl MemberTable {
     pub fn collect(program: &Program) -> MemberTable {
         let mut table = MemberTable::default();
-        for stmt in &program.stmts {
+        table.collect_stmts(&program.stmts);
+        table
+    }
+
+    /// Collect every type declared among `stmts` — the recursive half of
+    /// [`collect`](Self::collect), so a tier block's declarations land in the same table.
+    fn collect_stmts(&mut self, stmts: &[Stmt]) {
+        let table = self;
+        for stmt in stmts {
             match stmt {
                 Stmt::Struct(decl) => {
                     table.add_fields(
@@ -174,10 +182,16 @@ impl MemberTable {
                     let sigs: Vec<FnDecl> = decl.methods.iter().map(|m| m.sig.clone()).collect();
                     table.add_methods(decl.name.as_str(), &sigs);
                 }
+                // A standalone `impl Trait for T { … }` declares methods on `T` exactly as an
+                // in-body `impl` does; the parser flattens only the in-body form into the type's
+                // own `methods`, so without this arm `x.method()` resolves to nothing.
+                Stmt::Impl(decl) => table.add_methods(decl.target.as_str(), &decl.methods),
+                // A tier block's declarations are the program's declarations: a `@test`-declared
+                // fixture type's fields and methods resolve like any other type's.
+                Stmt::TierBlock { items, .. } => table.collect_stmts(items),
                 _ => {}
             }
         }
-        table
     }
 
     fn add_fields<'a>(&mut self, ty: &str, members: impl Iterator<Item = (&'a String, Span)>) {
@@ -230,7 +244,8 @@ struct MemberRef {
 /// bindings, and the bare-assignment locality rule (`x = v` reassigns an enclosing binding if one
 /// exists, else declares a fresh local). It also records every `receiver.member` access for the
 /// [`MemberTable`] step. Method bodies inside `struct`/`class`/`enum` declarations are walked (so
-/// their parameters and locals resolve); `@tier` blocks are not.
+/// their parameters and locals resolve), as are a standalone `impl Trait for T`'s and a `@tier`
+/// block's.
 #[derive(Debug, Default)]
 pub struct DefUse {
     /// `(use span, definition span)` for each value identifier that resolves to a binding.
@@ -241,6 +256,9 @@ pub struct DefUse {
     /// closure variables) — including ones never referenced. For semantic-token classification of
     /// declarations, which the use→def `refs` alone would miss.
     bindings: Vec<Span>,
+    /// Every expression-tier block written in the program, as `(tier name, block span)` — a call
+    /// of that tier's handler, which the call graph resolves.
+    tier_exprs: Vec<(String, Span)>,
 }
 
 impl DefUse {
@@ -252,14 +270,7 @@ impl DefUse {
         let mut resolver = Resolver::new(sites);
         // Top-level functions resolve regardless of textual order (mutual recursion), so seed them
         // before walking any body.
-        for stmt in &program.stmts {
-            if let Stmt::Fn(decl) = stmt {
-                resolver
-                    .functions
-                    .entry(decl.name.to_string())
-                    .or_insert(decl.name_span);
-            }
-        }
+        seed_statics(&program.stmts, &mut resolver.functions);
         resolver.scopes.push(HashMap::new()); // the module scope, for top-level bindings
         for stmt in &program.stmts {
             resolver.walk_stmt(stmt);
@@ -268,7 +279,14 @@ impl DefUse {
             refs: resolver.refs,
             member_refs: resolver.member_refs,
             bindings: resolver.bindings,
+            tier_exprs: resolver.tier_exprs,
         }
+    }
+
+    /// Every expression-tier block the program writes, as `(tier name, block span)` — for the call
+    /// graph's edge from the function containing the block to the tier's handler.
+    pub fn tier_expr_occurrences(&self) -> impl Iterator<Item = (&str, Span)> {
+        self.tier_exprs.iter().map(|(t, s)| (t.as_str(), *s))
     }
 
     /// The definition span for the value reference in file `source` whose use-span contains
@@ -377,14 +395,7 @@ pub fn visible_at(
     // Seed top-level functions (mutual recursion) exactly as `DefUse::build` does, so a snapshot
     // taken inside a function body sees the same scope shape; the functions themselves live outside
     // the scope stack and so are excluded from the snapshot.
-    for stmt in &program.stmts {
-        if let Stmt::Fn(decl) = stmt {
-            resolver
-                .functions
-                .entry(decl.name.to_string())
-                .or_insert(decl.name_span);
-        }
-    }
+    seed_statics(&program.stmts, &mut resolver.functions);
     resolver.scopes.push(HashMap::new()); // the module scope
     // The module region spans the whole file (offsets 0..∞ in the cursor's source), so a cursor on a
     // blank top-level line still captures the module-level bindings declared before it.
@@ -396,6 +407,24 @@ pub fn visible_at(
         .unwrap_or_default()
 }
 
+/// Seed the module's **statics** — the functions a sealed body may call regardless of textual
+/// order. A named function is sealed (its body sees its parameters, its captures, and the module's
+/// statics), so a function that is not here resolves to nothing inside any body. A tier block's
+/// `fn`s are statics like any other: a `@test` fn calls its sibling helper in the same block.
+fn seed_statics(stmts: &[Stmt], functions: &mut HashMap<String, Span>) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Fn(decl) => {
+                functions
+                    .entry(decl.name.to_string())
+                    .or_insert(decl.name_span);
+            }
+            Stmt::TierBlock { items, .. } => seed_statics(items, functions),
+            _ => {}
+        }
+    }
+}
+
 /// The mutable state of one [`DefUse::build`] walk: the top-level function table, the lexical scope
 /// stack of value bindings (innermost last), and the accumulating use→def references.
 struct Resolver<'a> {
@@ -405,6 +434,8 @@ struct Resolver<'a> {
     member_refs: Vec<MemberRef>,
     /// Every declared-name span passed to [`bind`](Self::bind), for [`DefUse::binding_spans`].
     bindings: Vec<Span>,
+    /// Every expression-tier block written, for [`DefUse::tier_expr_occurrences`].
+    tier_exprs: Vec<(String, Span)>,
     /// The `match`-arm [`Pattern::Binding`] spans the checker **resolved to a payload-free variant**
     /// of the scrutinee's enum (`noeta_check::Sites::variant_pattern_sites`). Those bind nothing —
     /// the name is a case test, not a local — and the walk must skip them, because whether a bare
@@ -431,6 +462,7 @@ impl<'a> Resolver<'a> {
             refs: Vec::new(),
             member_refs: Vec::new(),
             bindings: Vec::new(),
+            tier_exprs: Vec::new(),
             cursor: None,
             snapshot: None,
             variant_patterns: &sites.variant_pattern_sites,
@@ -723,9 +755,12 @@ impl<'a> Resolver<'a> {
                 let sigs: Vec<FnDecl> = decl.methods.iter().map(|m| m.sig.clone()).collect();
                 self.walk_methods(&sigs);
             }
+            // A standalone `impl Trait for T { … }` holds real method bodies: walk them so their
+            // parameters and locals resolve and their calls reach the graph, exactly as an in-body
+            // `impl`'s (which the parser has already flattened into the type's `methods`) do.
+            Stmt::Impl(decl) => self.walk_methods(&decl.methods),
             // Control-flow leaves and module statements bind and reference nothing.
-            Stmt::Impl(_)
-            | Stmt::Namespace { .. }
+            Stmt::Namespace { .. }
             | Stmt::Use { .. }
             | Stmt::Break { .. }
             | Stmt::Continue { .. } => {}
@@ -810,8 +845,13 @@ impl<'a> Resolver<'a> {
                     }
                 }
             }
-            // An expression-tier block's holes are ordinary expressions (its statics are text).
-            Expr::TierExpr { holes, .. } => {
+            // An expression-tier block is a call of the tier's handler; its holes are ordinary
+            // expressions (its statics are text). Both halves are recorded: the block so the call
+            // graph can join it to the handler, the holes so their own uses resolve.
+            Expr::TierExpr {
+                tier, holes, span, ..
+            } => {
+                self.tier_exprs.push((tier.clone(), *span));
                 for hole in holes {
                     self.walk_expr(hole);
                 }

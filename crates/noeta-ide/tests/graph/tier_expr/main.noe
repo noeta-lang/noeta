@@ -1,0 +1,25 @@
+// An expression tier's block is a call of the tier's handler, and the `${…}` holes are ordinary
+// expressions: a function whose body writes `@greet { … }` reaches `render`, and the calls inside
+// the holes leave that function too.
+@tier(greet, text: "text", expr: string)
+fn render(statics: List<string>, holes: List<() -> string>): string {
+    mut out = ""
+    mut i = 0
+    for s in statics {
+        out = out ~ s
+        if i < holes.len() {
+            h = holes[i]
+            out = out ~ h()
+        }
+        i = i + 1
+    }
+    return out
+}
+
+fn subject(): string { return "world" }
+
+fn page(): string {
+    return @greet { hello ${subject()}! }
+}
+
+echo page()
