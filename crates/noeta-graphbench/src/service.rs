@@ -71,6 +71,7 @@ impl Tool {
             Tool::Trace,
             Tool::ModuleGraph,
             Tool::Reflect,
+            Tool::CodeSearch,
             Tool::Impact,
             Tool::Callers,
             Tool::FileRead,

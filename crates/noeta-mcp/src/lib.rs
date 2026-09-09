@@ -21,6 +21,7 @@ mod graph;
 mod impact;
 mod introspect;
 mod navigate;
+mod search;
 mod stdlib;
 mod trace;
 mod understand;
@@ -58,6 +59,9 @@ resolved so imports type-check). Run this before claiming any Noeta code compile
 - `explain_diagnostic` — when `check` returns an `E0xxx` code, look up what it means and see the \
 real programs that trigger and fix it.
 - `type_at` / `symbols` — the inferred type at a symbol/position, and a file's declaration outline.
+- `code_search` — find declarations across the whole project by name or by plain description \
+(\"where does an order get persisted?\"). The first move when you have a question but not a name; \
+each result carries an `id` the other graph tools take.
 - `definition` / `references` / `completions` / `signature` — navigate code with the same engine \
 the editor uses: where a symbol is declared (cross-file), every place it is used, what completes \
 at a position, and the signature of the call under a position.
@@ -747,6 +751,27 @@ agent reads before navigating."
             &prepared,
             understand::SymbolScope::parse(args.scope.as_deref()),
         )))
+    }
+
+    /// Rank the project's declarations against a name or a description.
+    #[tool(
+        description = "Search the PROJECT'S OWN code: rank every declaration of the workspace — \
+functions, methods, types, variants, fields, traits, and anything a `@test`/`@bench` block \
+declares — against a `query` that can be a name (`place_order`), a qualified path \
+(`orders.place_order`), or a plain sentence (`where does an order get written to the database`). \
+Ranking is over the declared name, its qualified path, its `@doc` prose, its signature, its \
+`@role` bindings and attributes, its file path, and the identifiers its body mentions; \
+`matched_fields` says which of those earned each hit. Narrow with `kind` and `roles`. Every \
+result carries the same `id` that addresses `trace`, `impact`, `callers` and `definition`, so \
+this is the first call when you have a question but not a name. (For the LANGUAGE's own \
+documentation, use `docs_search`.)"
+    )]
+    async fn code_search(
+        &self,
+        Parameters(args): Parameters<search::CodeSearchArgs>,
+    ) -> Result<Json<search::CodeSearchOutput>, ErrorData> {
+        let prepared = analyze::prepare(&args.source, &args.file)?;
+        Ok(Json(search::code_search(&prepared, &args)))
     }
 
     /// The project's own `@doc` documentation, adjacency-resolved.
@@ -2326,6 +2351,91 @@ echo handle(1)
                 && files.iter().any(|f| f.ends_with("beta.noe")),
             "files: {files:?}"
         );
+
+        client.cancel().await.expect("client shuts down");
+        server.abort();
+    }
+
+    /// **The seed gate.** `code_search` answers a question that names no symbol, over a real
+    /// multi-file project, and the `id` it hands back is byte for byte the one the workspace
+    /// outline reports — which is what makes a search result an address the other tools accept.
+    #[tokio::test]
+    async fn round_trip_code_search_over_a_duplex() {
+        use rmcp::model::CallToolRequestParams;
+
+        noeta_stdlib::registry::default_seeded();
+        let entry = three_module_project("mcp_code_search");
+        let file = entry.display().to_string();
+
+        let (client_io, server_io) = tokio::io::duplex(1 << 16);
+        let server = tokio::spawn(async move {
+            if let Ok(svc) = NoetaMcp::new().serve(server_io).await {
+                let _ = svc.waiting().await;
+            }
+        });
+        let client = ().serve(client_io).await.expect("client initializes");
+        let tools = client
+            .list_tools(Default::default())
+            .await
+            .expect("tools/list");
+        assert!(tools.tools.iter().any(|t| t.name == "code_search"));
+
+        let call = async |name: &str, args: serde_json::Map<String, serde_json::Value>| {
+            let mut params = CallToolRequestParams::default();
+            params.name = name.to_string().into();
+            params.arguments = Some(args);
+            client
+                .call_tool(params)
+                .await
+                .expect("tools/call")
+                .structured_content
+                .expect("structured content")
+        };
+
+        let mut args = serde_json::Map::new();
+        args.insert("file".to_string(), serde_json::json!(file));
+        args.insert("query".to_string(), serde_json::json!("the entry point"));
+        args.insert("roles".to_string(), serde_json::json!(["EntryPoint"]));
+        let found = call("code_search", args).await;
+        assert_eq!(found["linked"], serde_json::json!(true), "{found}");
+        let hits = found["results"].as_array().expect("results");
+        assert_eq!(hits.len(), 1, "one declaration bears the role: {found}");
+        let hit = &hits[0];
+        assert_eq!(hit["id"]["name"], serde_json::json!("joined.main.entry"));
+        assert_eq!(hit["kind"], serde_json::json!("function"));
+        assert_eq!(hit["roles"], serde_json::json!(["Semantic.EntryPoint"]));
+        assert!(
+            found["indexed"].as_u64().unwrap_or(0) >= 6,
+            "the whole workspace is indexed: {found}"
+        );
+
+        // The id is the join key, so it must equal the outline's for the same declaration.
+        let mut args = serde_json::Map::new();
+        args.insert("file".to_string(), serde_json::json!(file));
+        args.insert("scope".to_string(), serde_json::json!("workspace"));
+        let outline = call("symbols", args).await;
+        let mut declared = Vec::new();
+        for node in outline["symbols"].as_array().unwrap() {
+            declared.push(node["id"].clone());
+        }
+        assert!(
+            declared.contains(&hit["id"]),
+            "search id {} is not one the outline reports: {declared:?}",
+            hit["id"]
+        );
+
+        // A plain-word query with no identifier in it reaches a function in a sibling module.
+        let mut args = serde_json::Map::new();
+        args.insert("file".to_string(), serde_json::json!(file));
+        args.insert("query".to_string(), serde_json::json!("alpha only"));
+        let searched = call("code_search", args).await;
+        let names: Vec<&str> = searched["results"]
+            .as_array()
+            .expect("results")
+            .iter()
+            .filter_map(|h| h["id"]["name"].as_str())
+            .collect();
+        assert_eq!(names.first(), Some(&"joined.alpha.alpha_only"), "{names:?}");
 
         client.cancel().await.expect("client shuts down");
         server.abort();
