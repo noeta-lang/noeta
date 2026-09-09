@@ -73,13 +73,15 @@ pub async fn measure(
 ) -> Report {
     let mut rows = Vec::new();
     for arm in wanted {
-        let missing: Vec<Tool> = arm
-            .requires()
-            .iter()
-            .copied()
-            .filter(|tool| !service.advertises(*tool))
-            .collect();
         for category in categories {
+            // Per category, because an arm's strategies do not all need the same tools and the two
+            // that shipped should not wait behind the two that have not.
+            let missing: Vec<Tool> = arm
+                .requires(*category)
+                .iter()
+                .copied()
+                .filter(|tool| !service.advertises(*tool))
+                .collect();
             if !missing.is_empty() {
                 rows.push(Row {
                     arm: *arm,

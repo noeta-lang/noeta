@@ -103,7 +103,7 @@ Coverage is measured with `cargo-llvm-cov` rather than tarpaulin, which cannot s
 
 The oracles above ask whether the compiler is right. `noeta-graphbench` asks a different question: given the graph the compiler already holds, how well does a composition of `noeta mcp` tool calls put an agent on the answer. Each arm is a fixed strategy over a corpus of hand-written Noeta projects, driven through the real MCP service on an in-process duplex, and scored against gold that `noeta_ide::callgraph`, the reflection role index and the linker's module paths produce directly. Both sides therefore read one graph, which bounds what the benchmark can find: it measures retrieval, ranking and mapping a question onto a node, never whether the graph is right. That stays the conformance corpus's job.
 
-Nothing in the measurement varies, so `tests/graphbench/baseline.txt` pins every row exactly and a drop in any F1 fails the run. The crate's own [README](https://github.com/noeta-lang/noeta/blob/main/crates/noeta-graphbench/README.md) carries the arm table, the question categories, and how to add a project or a seed question.
+Nothing in the measurement varies, so `tests/graphbench/baseline.txt` pins every row exactly and a drop in any F1 fails the run. Each (arm, category) row is measured as soon as the tools that row's strategy needs are advertised, and reports SKIP naming the missing tool otherwise, so a tool that ships is measured without waiting for the rest of its arm. The crate's own [README](https://github.com/noeta-lang/noeta/blob/main/crates/noeta-graphbench/README.md) carries the arm table, the question categories, and how to add a project or a seed question.
 
 ### What structured fuzzing adds
 

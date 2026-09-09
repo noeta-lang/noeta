@@ -71,6 +71,8 @@ impl Tool {
             Tool::Trace,
             Tool::ModuleGraph,
             Tool::Reflect,
+            Tool::Impact,
+            Tool::Callers,
             Tool::FileRead,
         ]
     }
@@ -91,11 +93,14 @@ impl Tool {
             Tool::ModuleGraph => serde_json::json!({ "modules": [] }),
             Tool::Reflect => serde_json::json!({ "roles": [], "attributes": [], "types": [] }),
             Tool::FileRead => serde_json::json!({ "text": "" }),
-            Tool::CodeSearch | Tool::ContextMap | Tool::Callers => {
-                serde_json::json!({ "results": [] })
-            }
+            Tool::CodeSearch | Tool::ContextMap => serde_json::json!({ "results": [] }),
             Tool::Path => serde_json::json!({ "paths": [] }),
-            Tool::Impact => serde_json::json!({ "tests": [], "decls": [] }),
+            Tool::Callers => {
+                serde_json::json!({ "found": false, "levels": [], "candidates": [] })
+            }
+            Tool::Impact => serde_json::json!({
+                "attributed": false, "decls": [], "tier_functions": [], "candidates": []
+            }),
             Tool::Architecture => serde_json::json!({ "roles": [], "edges": [] }),
         }
     }
