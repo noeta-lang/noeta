@@ -50,14 +50,22 @@ pub async fn run(
         "graphbench: ablation (a category must fall by {REACHED:.2} F1 to count as reached)\n"
     );
     println!(
-        "{:<12} {:<4} {:<14} {:>8} {:>8}  {}",
-        "ablated", "arm", "category", "before", "after", "verdict"
+        "{:<12} {:<4} {:<14} {:>8} {:>8}  verdict",
+        "ablated", "arm", "category", "before", "after"
     );
     let mut reached: BTreeSet<Category> = BTreeSet::new();
     let mut by_graph_tool: BTreeSet<Category> = BTreeSet::new();
     for tool in &tools {
+        // Only the arms that can call the stubbed tool are re-measured. A pass that re-ran the
+        // lexical arm while a Noeta tool was stubbed would spend the same minutes to reproduce the
+        // row it already has.
+        let affected: Vec<Arm> = wanted
+            .iter()
+            .copied()
+            .filter(|arm| *tool == Tool::FileRead || *arm != Arm::A5Lexical)
+            .collect();
         service.ablate(Some(*tool));
-        let run = harness::measure(service, prepared, wanted, categories).await;
+        let run = harness::measure(service, prepared, &affected, categories).await;
         for row in &run.rows {
             let Status::Scored = row.status else { continue };
             let Some(before) = base.get(&(row.arm, row.category)) else {

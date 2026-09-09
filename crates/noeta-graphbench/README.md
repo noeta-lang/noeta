@@ -7,9 +7,9 @@ $ cargo run -p noeta-graphbench
 graphbench: corpus
   orders_service      12 files  linked=true  errors=0  warnings=0
   ...
-arm  category         n      P      R     F1  Acc@1  Acc@5    MRR   tokens  calls       ms  evidence
-A0   definition      27  0.512  0.938  0.641  0.741  0.926  0.812     4120   13.0     1180  symbols
-A5   definition      27  0.480  1.000  0.628  0.630  0.926  0.746     9440   12.0       31  file_read
+arm  category          n      P      R     F1  Acc@1  Acc@5    MRR   tokens  calls      ms  evidence
+A0   callees          26  1.000  1.000  1.000  0.846  0.846  0.846     1300    2.9    4081  trace
+A5   callees          26  0.243  0.885  0.350  0.192  0.423  0.332     8724   21.4       0  file_read
 
 graphbench: every row holds its baseline.
 ```
@@ -106,6 +106,8 @@ $ cargo run -p noeta-graphbench -- --ablate all
 ```
 
 Each pass stubs one tool to its empty answer and re-runs the arms, reporting which (arm, category) rows fell. A category no ablation moves is a category whose questions are not reaching the tools they name, and `--ablate all` exits non-zero when it finds one.
+
+The summary separates two verdicts. A category reached by stubbing a Noeta graph tool is one the graph surface really answers. A category reached only by stubbing the file read is one where the lexical arm carries the score and the graph tools have nothing an ablation can take away, which is a finding about the tools rather than about the benchmark.
 
 ## The agent layer
 

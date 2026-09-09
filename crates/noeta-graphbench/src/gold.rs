@@ -156,13 +156,13 @@ impl Facts {
                 continue;
             }
             for edge in self.graph.edges_from(Some(at)) {
-                if let Callee::Function(next) = edge.callee {
-                    if seen.insert(next) {
-                        if let Some(universe) = self.universe_of(next) {
-                            out.insert(universe);
-                        }
-                        queue.push_back((next, hops + 1));
+                if let Callee::Function(next) = edge.callee
+                    && seen.insert(next)
+                {
+                    if let Some(universe) = self.universe_of(next) {
+                        out.insert(universe);
                     }
+                    queue.push_back((next, hops + 1));
                 }
             }
         }
@@ -454,11 +454,15 @@ fn collect_test_spans(stmts: &[Stmt], inside: bool, out: &mut HashSet<Span>) {
     }
 }
 
+/// The `use` graph and the module roster: `(importing file, imported module)` edges, and
+/// `(module path, declaring file)` pairs.
+type ImportGraph = (Vec<(String, String)>, Vec<(String, String)>);
+
 /// Read the `use` graph off each member file's **own** AST, and the module path it derives.
 ///
 /// Per file rather than off the merged program, because the linker resolves imports away: the
 /// merged program is what every declaration became, not what any file wrote.
-fn import_edges(analysis: &Analysis) -> (Vec<(String, String)>, Vec<(String, String)>) {
+fn import_edges(analysis: &Analysis) -> ImportGraph {
     let mut modules: Vec<(String, String)> = Vec::new();
     for (index, source) in analysis.sources.iter().enumerate() {
         if let Some(module) = analysis.module_of(noeta_span::SourceId(index as u32))

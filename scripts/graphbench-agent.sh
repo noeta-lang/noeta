@@ -98,9 +98,13 @@ EOF
 
 # The allowlist is the arm. A0 gets the Noeta graph tools and a file read; A5 gets the file tools
 # only, which is the grep control the literature calls for.
+#
+# Comma-separated, not space-separated: `--allowedTools` and `--mcp-config` are both variadic, so a
+# space-separated list swallows the prompt that follows it and `claude` exits 1 reporting no input.
+# The `--` before the prompt is the other half of that fix.
 case "$ARM" in
-    A0) ALLOWED="mcp__noeta__symbols mcp__noeta__definition mcp__noeta__references mcp__noeta__trace mcp__noeta__module_graph mcp__noeta__reflect Read" ;;
-    A5) ALLOWED="Read Grep Glob" ;;
+    A0) ALLOWED="mcp__noeta__symbols,mcp__noeta__definition,mcp__noeta__references,mcp__noeta__trace,mcp__noeta__module_graph,mcp__noeta__reflect,Read" ;;
+    A5) ALLOWED="Read,Grep,Glob" ;;
     *)  echo "graphbench-agent: arm $ARM has no allowlist (A0 and A5 are the two that exist today)" >&2; exit 2 ;;
 esac
 
@@ -144,9 +148,9 @@ Question: $prompt_text
 Answer with ONE line of JSON and nothing else:
 {"answer": ["<file>#<name>", ...]}
 
-Each element names one declaration: the path of the file it is declared in, relative to the project
-root and at most two segments deep, then '#', then the declaration's own name. Order the list best
-first. An empty list is the right answer when nothing satisfies the question.
+Each element names one declaration: the name of the file it is declared in, then '#', then the
+declaration's own name. Order the list best first. An empty list is the right answer when nothing
+satisfies the question.
 EOF
 
     started=$(date +%s)
@@ -158,8 +162,8 @@ EOF
         --mcp-config "$WORK/mcp.json" \
         --strict-mcp-config \
         --add-dir "$root" \
-        --allowedTools $ALLOWED \
-        "$PROMPT" > "$WORK/raw.json" 2> "$WORK/raw.err"
+        --allowedTools "$ALLOWED" \
+        -- "$PROMPT" < /dev/null > "$WORK/raw.json" 2> "$WORK/raw.err"
     rc=$?
     elapsed=$(( $(date +%s) - started ))
 
@@ -200,10 +204,12 @@ if match:
 record["answer"] = answer
 
 def normalize(label):
+    # The file's own name, not its path: an answer may spell a file relative to the project root, to
+    # the repository, or not at all, and one project never has two files with the same name.
     label = label.strip().replace("\\", "/")
     head, _, name = label.rpartition("#")
     parts = [p for p in head.split("/") if p]
-    return "/".join(parts[-2:]) + "#" + name
+    return (parts[-1] if parts else "") + "#" + name.strip()
 
 predicted = {normalize(a) for a in answer if "#" in a}
 gold = {normalize(g) for g in question["gold"]}
@@ -215,12 +221,16 @@ record["f1"] = 0.0 if p + r == 0 else 2 * p * r / (p + r)
 print(json.dumps(record))
 PY
 
-    tail -1 "$OUT" | python3 -c '
-import json, sys
-row = json.loads(sys.stdin.read())
-print(f"  {row[\"id\"]:<34} F1={row[\"f1\"]:.3f}  turns={row[\"turns\"]}  "
-      f"tokens={row[\"input_tokens\"]}/{row[\"output_tokens\"]}  ${row[\"cost_usd\"]:.4f}  {row[\"seconds\"]}s")
-'
+    # The row travels as an argument, not on stdin: a `python3 - <<'PY'` here would take the
+    # heredoc as stdin and read nothing from the pipe.
+    GRAPHBENCH_ROW="$(tail -1 "$OUT")" python3 - <<'PY'
+import json, os
+row = json.loads(os.environ["GRAPHBENCH_ROW"])
+note = "  " + row["error"] if row.get("error") else ""
+print("  {id:<34} F1={f1:.3f}  turns={turns}  tokens={i}/{o}  ${cost:.4f}  {sec}s{note}".format(
+    id=row["id"], f1=row["f1"], turns=row["turns"], i=row["input_tokens"],
+    o=row["output_tokens"], cost=row["cost_usd"], sec=row["seconds"], note=note))
+PY
 done
 
 echo

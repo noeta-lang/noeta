@@ -101,7 +101,9 @@ impl std::str::FromStr for Arm {
     }
 }
 
-/// The token budget the fixed repo-map arm is defined at.
+/// The token budget the fixed repo-map arm is defined at, and the ceiling its row is read against
+/// once a tool can build one. Named here rather than in the arm's body so the arm's definition does
+/// not move when the strategy is written.
 pub const REPO_MAP_BUDGET: usize = 4_000;
 
 /// What an arm produced for one question.
@@ -716,7 +718,7 @@ fn tokens(text: &str) -> BTreeMap<String, usize> {
 /// How much of the question's vocabulary a candidate carries, with a longer shared word worth more.
 fn overlap(wanted: &BTreeMap<String, usize>, have: &BTreeMap<String, usize>) -> i64 {
     let mut score = 0i64;
-    for (word, _) in wanted {
+    for word in wanted.keys() {
         if have.contains_key(word) {
             score += 2 + word.len() as i64;
         } else if have
