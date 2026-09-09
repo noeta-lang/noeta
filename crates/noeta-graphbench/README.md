@@ -30,7 +30,9 @@ Each **arm** is a fixed strategy: for one question category, a composition of to
 | A4 | a fixed 4k-token repo map, no navigation | whether precomputation alone suffices |
 | A5 | a lexical scan of the files, no Noeta tools | whether any of this beats grep |
 
-**A requirement is per category, not per arm.** An arm's strategy for `callers` and its strategy for `path` need different tools, so each (arm, category) row is measured as soon as *its* tools are advertised and reports **SKIP** naming the missing tool otherwise. A3 measures `callers` and `impact` today; its `path` and `role_reach` rows name `path` and `architecture` and wait. A SKIP prints in its own column, holds no baseline row, and is never a pass.
+**A requirement is per category, not per arm.** An arm's strategy for `callers` and its strategy for `path` need different tools, so each (arm, category) row is measured as soon as *its* tools are advertised and reports **SKIP** naming the missing tool otherwise. A1 measures every category, and A3 measures `callers` and `impact`; A3's `path` and `role_reach` rows name `path` and `architecture` and wait. A SKIP prints in its own column, holds no baseline row, and is never a pass.
+
+A1 changes two of A0's strategies and inherits the other six. `seed_mapping` becomes one `code_search` call on the question itself, and `definition` becomes one on the name, falling back to A0's outline sweep when the search reaches nothing. A1 drops a hit whose kind the declaration universe does not hold, because a field and an enum variant are not nodes the call graph carries an edge for.
 
 An arm is given what a developer types: a leaf name and the file it sits in, a module path, or a sentence. It never sees the question's gold, and it never sees the qualified name the graph knows a declaration by, because obtaining that name is part of what is measured.
 
