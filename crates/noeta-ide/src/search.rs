@@ -1286,12 +1286,20 @@ pub struct Receipt { total: int }
             leading("orders place_order", "place_order").as_deref(),
             Some("orders.place_order")
         );
-        // `Receipt` and `Order` name no file, so only the qualified name separates their members.
-        let receipt = score_of(&index, "receipt total", "billing.Receipt.total");
-        let rival = score_of(&index, "receipt total", "orders.Order.total");
+        // `Receipt` names no file and appears in no member's own text, so the qualified name is
+        // the only field that can carry it. Naming the owner must raise that member's score, and
+        // must leave the same-named member of another type where it was.
+        let named = score_of(&index, "receipt total", "billing.Receipt.total");
+        let bare = score_of(&index, "total", "billing.Receipt.total");
         assert!(
-            receipt > rival,
-            "the named type's member must score higher: {receipt} vs {rival}"
+            named > bare,
+            "naming the owner must reach its member: {named} vs {bare}"
+        );
+        let rival = score_of(&index, "receipt total", "orders.Order.total");
+        assert_eq!(
+            rival,
+            score_of(&index, "total", "orders.Order.total"),
+            "another type's member must not move when `Receipt` is named"
         );
         assert_eq!(
             leading("order total", "total").as_deref(),
