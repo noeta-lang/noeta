@@ -63,6 +63,35 @@ pub enum Impact {
     All { reason: String },
 }
 
+/// What a reverse walk found, before a consumer decides what to do about it.
+///
+/// [`Impact`] is the *runner's* verdict, which collapses to [`Impact::All`] the moment a module's
+/// top-level statements use an impacted declaration. `Reach` is the walk itself: the same
+/// declarations, plus the top-level uses that force that verdict, so a consumer asking "what does
+/// changing this reach?" gets the answer and the caveat instead of only the caveat.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Reach {
+    /// The declarations whose behavior may change — the seeds plus the reverse closure of their
+    /// callers and referencers.
+    pub decls: Vec<String>,
+    /// Each `(module source, impacted declaration)` pair where the module's **top-level
+    /// statements** use the declaration. Non-empty means no runner can narrow.
+    pub top_level_uses: Vec<(SourceId, String)>,
+}
+
+impl Reach {
+    /// The runner's verdict for this walk: narrowed to the declarations, or everything with the
+    /// reason. The one place a `Reach` becomes an [`Impact`], so the two cannot disagree.
+    pub fn verdict(self) -> Impact {
+        match self.top_level_uses.first() {
+            Some((_, used)) => Impact::All {
+                reason: format!("the top level uses changed `{used}`"),
+            },
+            None => Impact::Decls(self.decls),
+        }
+    }
+}
+
 /// Compute the impact of editing `old_src` into `new_src` (one file — the entry the runner was
 /// pointed at, with no project context; [`ImpactSession`] is the multi-file engine).
 pub fn impact_of_edit(old_src: &str, new_src: &str, edition: noeta_lexer::Edition) -> Impact {
@@ -114,10 +143,7 @@ pub fn impact_of_edit(old_src: &str, new_src: &str, edition: noeta_lexer::Editio
         .iter()
         .filter_map(|n| n.split_once('.').map(|(_, m)| m.to_string()))
         .collect();
-    match reverse_closure(&graph, names.into_iter().collect(), members) {
-        Ok(impacted) => Impact::Decls(impacted.into_iter().collect()),
-        Err(reason) => Impact::All { reason },
-    }
+    reverse_closure(&graph, names.into_iter().collect(), members).verdict()
 }
 
 // --------------------------------------------------------------------- the shared pipeline
@@ -233,7 +259,8 @@ fn reverse_closure(
     graph: &callgraph::CallGraph,
     mut impacted: BTreeSet<String>,
     mut members: BTreeSet<String>,
-) -> Result<BTreeSet<String>, String> {
+) -> Reach {
+    let mut top_level_uses: BTreeSet<(SourceId, String)> = BTreeSet::new();
     loop {
         let mut grew = false;
         for edge in &graph.edges {
@@ -260,13 +287,21 @@ fn reverse_closure(
                         grew = true;
                     }
                 }
+                // A module's top-level statements are every run's setup, so a *runner* cannot
+                // narrow past one that uses an impacted declaration. The walk records which
+                // module it was and carries on: the reachability question ("what does changing
+                // this reach?") has an answer here, and abandoning the half-built closure threw
+                // it away along with the widening verdict.
                 None => {
-                    return Err(format!("the top level uses changed `{used}`"));
+                    top_level_uses.insert((edge.site.source, used));
                 }
             }
         }
         if !grew {
-            return Ok(impacted);
+            return Reach {
+                decls: impacted.into_iter().collect(),
+                top_level_uses: top_level_uses.into_iter().collect(),
+            };
         }
     }
 }
@@ -429,15 +464,21 @@ impl ImpactSession {
     /// same pipeline, so a consumer that has not written the edit yet (an agent asking "what would
     /// this break?") gets the answer the watch loop would give after the save.
     pub fn impact_of_sources(&mut self, edits: &[(PathBuf, String)]) -> Impact {
+        match self.reach_of_sources(edits) {
+            Ok(reach) => reach.verdict(),
+            Err(reason) => Impact::All { reason },
+        }
+    }
+
+    /// [`impact_of_sources`](Self::impact_of_sources) without the runner's verdict — the walk the
+    /// edit reaches, plus the top-level uses that stop a runner narrowing. See
+    /// [`reach_of_decls`](Self::reach_of_decls) for why a question wants the walk.
+    pub fn reach_of_sources(&mut self, edits: &[(PathBuf, String)]) -> Result<Reach, String> {
         let Some(cache) = &self.cache else {
-            return Impact::All {
-                reason: "the project's members cannot be read".into(),
-            };
+            return Err("the project's members cannot be read".into());
         };
         if edits.is_empty() {
-            return Impact::All {
-                reason: "the change could not be attributed to a file".into(),
-            };
+            return Err("the change could not be attributed to a file".into());
         }
         // The member set must be exactly the baseline's: a new or deleted `.noe` file re-links
         // the world (and re-baselines at the next run).
@@ -449,9 +490,7 @@ impl ImpactSession {
             .map(|(_, src)| src.uri)
             .eq(now.iter().map(String::as_str))
         {
-            return Impact::All {
-                reason: "the project's module set changed".into(),
-            };
+            return Err("the project's module set changed".into());
         }
 
         // Attribute every changed path to a member, and read its current text. Keyed by the
@@ -466,21 +505,17 @@ impl ImpactSession {
             // vocabulary and cannot narrow a spec change, so rerun everything — the honest,
             // correct answer, and the whole reason the watcher was taught to watch this file.
             if self.reads.contains(&canon) {
-                return Impact::All {
-                    reason: format!(
-                        "a spec read by an expanding directive changed ({})",
-                        canon.display()
-                    ),
-                };
+                return Err(format!(
+                    "a spec read by an expanding directive changed ({})",
+                    canon.display()
+                ));
             }
             let uri = path_to_uri(&canon);
             let Some((source, _)) = cache.find_member(&uri) else {
-                return Impact::All {
-                    reason: format!(
-                        "a change outside the project's modules ({})",
-                        canon.display()
-                    ),
-                };
+                return Err(format!(
+                    "a change outside the project's modules ({})",
+                    canon.display()
+                ));
             };
             if !seen.insert(source) {
                 continue;
@@ -517,9 +552,7 @@ impl ImpactSession {
                 .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
                 .unwrap_or_else(|| uri.to_string());
             let Some(old_text) = self.baselines.get(uri) else {
-                return Impact::All {
-                    reason: format!("{file}: no baseline to diff against"),
-                };
+                return Err(format!("{file}: no baseline to diff against"));
             };
             if old_text == new_text {
                 continue; // an event without a byte change (editors touch files)
@@ -529,9 +562,7 @@ impl ImpactSession {
             };
             match diff_file(old_text, new_text, edition, &tier_set) {
                 FileDiff::All(reason) => {
-                    return Impact::All {
-                        reason: format!("{file}: {reason}"),
-                    };
+                    return Err(format!("{file}: {reason}"));
                 }
                 FileDiff::Names { names, namespace } => {
                     // A package refuses a `namespace` statement (E0072) — its modules derive
@@ -567,10 +598,10 @@ impl ImpactSession {
             }
         }
         if seeds.is_empty() {
-            return Impact::Decls(Vec::new());
+            return Ok(Reach::default());
         }
 
-        self.closure_from(seeds, members)
+        self.reach_from(seeds, members)
     }
 
     /// The impact of changing the **named declarations** themselves, with no edit to diff: the
@@ -578,8 +609,24 @@ impl ImpactSession {
     /// "what breaks if I change `X`" for a consumer holding a name rather than a diff. `names` are
     /// post-link names (`app.main.handle`, `app.main.Counter.bump`).
     pub fn impact_of_decls(&mut self, names: &[String]) -> Impact {
+        match self.reach_of_decls(names) {
+            Ok(reach) => reach.verdict(),
+            Err(reason) => Impact::All { reason },
+        }
+    }
+
+    /// The reverse walk from the named declarations, **without** the runner's verdict: the
+    /// declarations changing them reaches, and the top-level uses that stop a runner narrowing.
+    /// `Err` is a project-shaped valve (unreadable members, a project that does not link or
+    /// check), where there is no walk to report.
+    ///
+    /// [`impact_of_decls`](Self::impact_of_decls) is this plus [`Reach::verdict`]. A consumer that
+    /// asks a *question* rather than filtering a run wants the walk: collapsing to `All` throws
+    /// away the closure it just computed, and "rerun everything" is no answer to "what does this
+    /// reach?".
+    pub fn reach_of_decls(&mut self, names: &[String]) -> Result<Reach, String> {
         if names.is_empty() {
-            return Impact::Decls(Vec::new());
+            return Ok(Reach::default());
         }
         // A dotted name's LAST segment seeds the dynamic-edge fallback the same way a diff name's
         // does: an untyped receiver's `c.bump()` resolves to no node, and matching the member name
@@ -588,16 +635,18 @@ impl ImpactSession {
             .iter()
             .filter_map(|n| n.rsplit_once('.').map(|(_, m)| m.to_string()))
             .collect();
-        self.closure_from(names.iter().cloned().collect(), members)
+        self.reach_from(names.iter().cloned().collect(), members)
     }
 
     /// Link, activate every declared tier, check, build the call graph, and walk the reverse
-    /// closure from `seeds`. The half both impact doors share.
-    fn closure_from(&self, seeds: BTreeSet<String>, members: BTreeSet<String>) -> Impact {
+    /// closure from `seeds`. The half every impact door shares.
+    fn reach_from(
+        &self,
+        seeds: BTreeSet<String>,
+        members: BTreeSet<String>,
+    ) -> Result<Reach, String> {
         let Some(cache) = &self.cache else {
-            return Impact::All {
-                reason: "the project's members cannot be read".into(),
-            };
+            return Err("the project's members cannot be read".into());
         };
         // The linked program — what the runner executes — then tiers, check, graph, closure.
         // The entry was a member at construction, but a deletion + rebaseline can remove it.
@@ -605,17 +654,13 @@ impl ImpactSession {
             .find_member(&self.entry_uri)
             .and_then(|(_, src)| src.input())
         else {
-            return Impact::All {
-                reason: "the entry left the project".into(),
-            };
+            return Err("the entry left the project".into());
         };
         let link = noeta_db::linked_from(&self.db, cache.workspace, entry_program);
         let linked = match &link.program {
             Ok(program) => program,
             Err(_) => {
-                return Impact::All {
-                    reason: "the project does not link".into(),
-                };
+                return Err("the project does not link".into());
             }
         };
         let tier_names = declared_tiers(linked);
@@ -638,9 +683,7 @@ impl ImpactSession {
                 .iter()
                 .chain(checked.diagnostics.iter()),
         ) {
-            return Impact::All {
-                reason: "the edit does not check".into(),
-            };
+            return Err("the edit does not check".into());
         }
         // Every source's text by SourceId — `WorkspaceCache::sources_with` yields in SourceId order,
         // the same assignment `workspace::sync` made — for the graph's call-site syntax probes. This
@@ -656,10 +699,7 @@ impl ImpactSession {
             &checked.sites,
             &texts,
         );
-        match reverse_closure(&graph, seeds, members) {
-            Ok(impacted) => Impact::Decls(impacted.into_iter().collect()),
-            Err(reason) => Impact::All { reason },
-        }
+        Ok(reverse_closure(&graph, seeds, members))
     }
 
     /// The ordered `(uri, text)` scan of the watched directory (unreadable files read as

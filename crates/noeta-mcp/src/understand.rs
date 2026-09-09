@@ -143,10 +143,8 @@ pub struct SymbolsOutput {
 pub struct SymbolNode {
     /// The declaration's stable identity: its post-link name, kind, file and name span. Every
     /// graph tool emits the same shape, so an outline node joins a `trace`, `impact` or `callers`
-    /// node exactly.
+    /// node exactly. The authored name is `id.name`'s last dotted segment.
     pub id: NodeId,
-    pub name: String,
-    pub kind: NodeKind,
     /// A short signature-ish detail (a function's parameter names, an `impl`'s trait+target), when
     /// useful. Parameter *types* are omitted here — call `type_at` or `ast` for precise types.
     pub detail: Option<String>,
@@ -156,6 +154,11 @@ pub struct SymbolNode {
     pub roles: Vec<String>,
     /// The `@tier` block this declaration was written inside (`test`, `bench`), when it was.
     pub tier: Option<String>,
+    /// Whether this declaration is in the program the entry links, and so reachable by `trace`,
+    /// `callers`, `impact` and `path`. The outline reads every module's own source; the graph
+    /// reads the merged program, which holds only what the entry imports, so a module's `@test`
+    /// block (referenced by nothing) is outlined here and absent there.
+    pub in_graph: bool,
     pub children: Vec<SymbolNode>,
 }
 
@@ -424,6 +427,8 @@ pub fn symbols(p: &Prepared, scope: SymbolScope) -> SymbolsOutput {
         Err(_) => &entry_ast.0.program,
     };
     let decls = DeclIndex::build(program);
+    // Every module's own declarations, for the nodes the linked program does not hold.
+    let sources = crate::graph::source_index(p);
 
     // The `@role` index over the merged program, keyed by each target's declaration SPAN. A span
     // is the one key both sides agree on: a role target is namespace-qualified in a package while
@@ -451,7 +456,7 @@ pub fn symbols(p: &Prepared, scope: SymbolScope) -> SymbolsOutput {
         symbols.extend(
             noeta_ide::symbols::outline(&parsed.0.program)
                 .iter()
-                .map(|node| from_outline(p, node, &line_index, &decls, &roles)),
+                .map(|node| from_outline(p, node, &line_index, &decls, &sources, &roles)),
         );
     }
     SymbolsOutput { scope, symbols }
@@ -467,6 +472,7 @@ fn from_outline(
     node: &noeta_ide::symbols::SymbolNode,
     index: &LineIndex,
     decls: &DeclIndex,
+    sources: &DeclIndex,
     roles: &std::collections::HashMap<noeta_span::Span, Vec<String>>,
 ) -> SymbolNode {
     use noeta_ide::symbols::SymbolKind as K;
@@ -483,14 +489,19 @@ fn from_outline(
     };
     let detail = matches!(node.kind, K::Function | K::Method)
         .then(|| format!("fn {}({})", node.name, node.param_names.join(", ")));
-    let id = match decls.at_name_span(node.name_span) {
+    let linked = decls.at_name_span(node.name_span);
+    let id = match linked {
         Some(decl) => decl.id(p),
-        None => p.node_id(&node.name, kind, node.name_span),
+        None => match sources.at_name_span(node.name_span) {
+            // Outside the graph, so the linker never named it: the source index carries the name
+            // the linker WOULD have given it, which is what keeps one spelling across the tools.
+            Some(decl) => decl.id(p),
+            None => p.node_id(&node.name, kind, node.name_span),
+        },
     };
     SymbolNode {
         id,
-        name: node.name.clone(),
-        kind,
+        in_graph: linked.is_some(),
         detail,
         location: index.span_loc(node.full_span),
         roles: roles.get(&node.name_span).cloned().unwrap_or_default(),
@@ -498,7 +509,7 @@ fn from_outline(
         children: node
             .children
             .iter()
-            .map(|child| from_outline(p, child, index, decls, roles))
+            .map(|child| from_outline(p, child, index, decls, sources, roles))
             .collect(),
     }
 }
@@ -697,64 +708,64 @@ impl Show for Point {
             "symbols": [
                 {
                     "id": id("add", "function", 3, 6, 1, 4),
-                    "name": "add", "kind": "function", "detail": "fn add(a, b)",
-                    "location": loc(1, 1, 0, 1, 45, 44), "roles": [], "tier": null, "children": [],
+                    "detail": "fn add(a, b)",
+                    "location": loc(1, 1, 0, 1, 45, 44), "roles": [], "tier": null, "in_graph": true, "children": [],
                 },
                 {
                     "id": id("Point", "struct", 53, 58, 3, 8),
-                    "name": "Point", "kind": "struct", "detail": null,
-                    "location": loc(3, 1, 46, 6, 2, 106), "roles": [], "tier": null,
+                    "detail": null,
+                    "location": loc(3, 1, 46, 6, 2, 106), "roles": [], "tier": null, "in_graph": true,
                     "children": [
                         {
                             "id": id("Point.x", "field", 63, 64, 4, 3),
-                            "name": "x", "kind": "field", "detail": null,
-                            "location": loc(4, 3, 63, 4, 9, 69), "roles": [], "tier": null,
+                    "detail": null,
+                            "location": loc(4, 3, 63, 4, 9, 69), "roles": [], "tier": null, "in_graph": true,
                             "children": [],
                         },
                         {
                             "id": id("Point.norm", "method", 75, 79, 5, 6),
-                            "name": "norm", "kind": "method", "detail": "fn norm()",
-                            "location": loc(5, 3, 72, 5, 35, 104), "roles": [], "tier": null,
+                    "detail": "fn norm()",
+                            "location": loc(5, 3, 72, 5, 35, 104), "roles": [], "tier": null, "in_graph": true,
                             "children": [],
                         },
                     ],
                 },
                 {
                     "id": id("Shape", "enum", 113, 118, 8, 6),
-                    "name": "Shape", "kind": "enum", "detail": null,
-                    "location": loc(8, 1, 108, 12, 2, 180), "roles": [], "tier": null,
+                    "detail": null,
+                    "location": loc(8, 1, 108, 12, 2, 180), "roles": [], "tier": null, "in_graph": true,
                     "children": [
                         {
                             "id": id("Shape.Dot", "variant", 123, 126, 9, 3),
-                            "name": "Dot", "kind": "variant", "detail": null,
-                            "location": loc(9, 3, 123, 9, 6, 126), "roles": [], "tier": null,
+                    "detail": null,
+                            "location": loc(9, 3, 123, 9, 6, 126), "roles": [], "tier": null, "in_graph": true,
                             "children": [],
                         },
                         {
                             "id": id("Shape.Circle", "variant", 129, 135, 10, 3),
-                            "name": "Circle", "kind": "variant", "detail": null,
-                            "location": loc(10, 3, 129, 10, 22, 148), "roles": [], "tier": null,
+                    "detail": null,
+                            "location": loc(10, 3, 129, 10, 22, 148), "roles": [], "tier": null, "in_graph": true,
                             "children": [],
                         },
                         {
                             "id": id("Shape.area", "method", 154, 158, 11, 6),
-                            "name": "area", "kind": "method", "detail": "fn area()",
-                            "location": loc(11, 3, 151, 11, 30, 178), "roles": [], "tier": null,
+                    "detail": "fn area()",
+                            "location": loc(11, 3, 151, 11, 30, 178), "roles": [], "tier": null, "in_graph": true,
                             "children": [],
                         },
                     ],
                 },
                 {
                     "id": id("Show for Point", "impl", 187, 191, 14, 6),
-                    "name": "Show for Point", "kind": "impl", "detail": null,
-                    "location": loc(14, 1, 182, 16, 2, 235), "roles": [], "tier": null,
+                    "detail": null,
+                    "location": loc(14, 1, 182, 16, 2, 235), "roles": [], "tier": null, "in_graph": true,
                     "children": [
                         {
                             // A standalone impl's method is named the way the CALL GRAPH names it
                             // (`Target.method`), so `symbols` and `trace` report one identity.
                             "id": id("Point.show", "method", 209, 213, 15, 6),
-                            "name": "show", "kind": "method", "detail": "fn show()",
-                            "location": loc(15, 3, 206, 15, 30, 233), "roles": [], "tier": null,
+                    "detail": "fn show()",
+                            "location": loc(15, 3, 206, 15, 30, 233), "roles": [], "tier": null, "in_graph": true,
                             "children": [],
                         },
                     ],
@@ -798,17 +809,18 @@ impl Show for Point {
         let kinds: Vec<(&str, &str)> = out
             .symbols
             .iter()
-            .map(|s| (s.name.as_str(), s.kind.as_str()))
+            .map(|s| (s.id.name.as_str(), s.id.kind.as_str()))
             .collect();
         assert!(kinds.contains(&("handle", "function")));
         assert!(kinds.contains(&("Point", "struct")));
         assert!(kinds.contains(&("Color", "enum")));
         // The struct carries its fields as children.
-        let point = out.symbols.iter().find(|s| s.name == "Point").unwrap();
-        let fields: Vec<&str> = point.children.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(fields, vec!["x", "y"]);
+        let point = out.symbols.iter().find(|s| s.id.name == "Point").unwrap();
+        // A member's id is `Owner.member`; the authored name is its last segment.
+        let fields: Vec<&str> = point.children.iter().map(|c| c.id.name.as_str()).collect();
+        assert_eq!(fields, vec!["Point.x", "Point.y"]);
         // The function detail lists parameter names.
-        let handle = out.symbols.iter().find(|s| s.name == "handle").unwrap();
+        let handle = out.symbols.iter().find(|s| s.id.name == "handle").unwrap();
         assert_eq!(handle.detail.as_deref(), Some("fn handle(n)"));
     }
 
@@ -825,15 +837,19 @@ impl Show for Point {
         let named = |name: &str| {
             out.symbols
                 .iter()
-                .find(|s| s.name == name)
+                .find(|s| s.id.name == name)
                 .unwrap_or_else(|| panic!("{name} is missing: {:?}", out.symbols))
         };
         assert_eq!(named("helper").tier, None);
         let fixture = named("Fixture");
-        assert_eq!(fixture.kind, NodeKind::Struct);
+        assert_eq!(fixture.id.kind, NodeKind::Struct);
         assert_eq!(fixture.tier.as_deref(), Some("test"));
         assert_eq!(fixture.id.name, "Fixture");
-        let build = fixture.children.iter().find(|c| c.name == "build").unwrap();
+        let build = fixture
+            .children
+            .iter()
+            .find(|c| c.id.name == "Fixture.build")
+            .unwrap();
         assert_eq!(build.id.name, "Fixture.build");
         assert_eq!(build.tier.as_deref(), Some("test"));
         assert_eq!(named("uses_fixture").tier.as_deref(), Some("test"));
@@ -866,8 +882,12 @@ impl Show for Point {
 
         let file_only = symbols(&p, SymbolScope::File);
         assert_eq!(file_only.scope, SymbolScope::File);
-        let entry_names: Vec<&str> = file_only.symbols.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(entry_names, vec!["entry"]);
+        let entry_names: Vec<&str> = file_only
+            .symbols
+            .iter()
+            .map(|s| s.id.name.as_str())
+            .collect();
+        assert_eq!(entry_names, vec!["joined.main.entry"]);
 
         let whole = symbols(&p, SymbolScope::Workspace);
         assert_eq!(whole.scope, SymbolScope::Workspace);
@@ -902,9 +922,9 @@ fn helper(): int { return 1 }
 ";
         let p = prepare(&Some(src.to_string()), &None).unwrap();
         let out = symbols(&p, SymbolScope::File);
-        let handle = out.symbols.iter().find(|s| s.name == "handle").unwrap();
+        let handle = out.symbols.iter().find(|s| s.id.name == "handle").unwrap();
         assert_eq!(handle.roles, vec!["Semantic.EntryPoint"]);
-        let helper = out.symbols.iter().find(|s| s.name == "helper").unwrap();
+        let helper = out.symbols.iter().find(|s| s.id.name == "helper").unwrap();
         assert!(helper.roles.is_empty(), "unannotated fn carries no role");
     }
 }

@@ -5,7 +5,7 @@
 //! `reflect::build` and `Module::disassemble` the runtime and `noeta dump` use, so an agent sees
 //! ground truth, not a re-derivation.
 
-use crate::analyze::{self, LinkStatus, NodeId, NodeKind, Prepared, SpanLoc};
+use crate::analyze::{self, LinkStatus, NodeId, NodeKind, Prepared};
 use crate::graph::DeclIndex;
 use noeta_ast::{Pretty, Program, Stmt};
 use rmcp::schemars;
@@ -348,46 +348,29 @@ pub struct ReflectOutput {
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct RoleEntry {
     /// The annotated declaration's identity — the same `id` `symbols`, `trace`, `impact` and
-    /// `callers` report for it.
+    /// `callers` report for it, and the only spelling of its name, file and span.
     pub id: NodeId,
-    /// The annotated declaration's name.
-    pub target: String,
     /// The role as `Enum.Variant`, e.g. `Semantic.EntryPoint`.
     pub role: String,
-    /// The file the annotated declaration lives in.
-    pub file: Option<String>,
-    /// The declaration name's source location — joinable with `symbols`/`definition` output.
-    pub location: Option<SpanLoc>,
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct AttributeEntry {
     /// The annotated declaration's identity.
     pub id: NodeId,
-    /// The annotated declaration's name.
-    pub target: String,
-    /// The attribute's name (e.g. `Route`).
+    /// The attribute's name (e.g. `Route`) — the one field here that is not the target's.
     pub name: String,
     /// The number of literal arguments the attribute carries.
     pub arg_count: usize,
-    /// The file the annotated declaration lives in.
-    pub file: Option<String>,
-    /// The declaration name's source location.
-    pub location: Option<SpanLoc>,
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct TypeEntry {
     /// The type's identity — what makes a type found here openable, and joinable with `symbols`.
+    /// Its name, kind, file and span are the id's.
     pub id: NodeId,
-    pub name: String,
-    pub kind: NodeKind,
     /// Field names (records/classes) or variant names (enums), in declaration order.
     pub members: Vec<String>,
-    /// The file the type is declared in.
-    pub file: Option<String>,
-    /// The type name's source location.
-    pub location: Option<SpanLoc>,
 }
 
 /// Answer `reflect`, optionally filtered to declarations bearing a given `role` (matched against
@@ -426,31 +409,19 @@ pub fn reflect(p: &Prepared, role: Option<&str>) -> ReflectOutput {
                     || format!("{}.{}", r.enum_name, r.variant).to_ascii_lowercase() == *w
             }
         })
-        .map(|r| {
-            let at = analyze::locate_span(p, r.target_span);
-            RoleEntry {
-                id: id_at(&r.target, r.target_span, NodeKind::Function),
-                target: r.target.clone(),
-                role: format!("{}.{}", r.enum_name, r.variant),
-                file: at.as_ref().map(|(file, _)| file.clone()),
-                location: at.map(|(_, loc)| loc),
-            }
+        .map(|r| RoleEntry {
+            id: id_at(&r.target, r.target_span, NodeKind::Function),
+            role: format!("{}.{}", r.enum_name, r.variant),
         })
         .collect();
 
     let attributes = info
         .manifest
         .iter()
-        .map(|a| {
-            let at = analyze::locate_span(p, a.target_span);
-            AttributeEntry {
-                id: id_at(&a.target, a.target_span, NodeKind::Function),
-                target: a.target.clone(),
-                name: a.name.clone(),
-                arg_count: a.args.len(),
-                file: at.as_ref().map(|(file, _)| file.clone()),
-                location: at.map(|(_, loc)| loc),
-            }
+        .map(|a| AttributeEntry {
+            id: id_at(&a.target, a.target_span, NodeKind::Function),
+            name: a.name.clone(),
+            arg_count: a.args.len(),
         })
         .collect();
 
@@ -475,17 +446,12 @@ pub fn reflect(p: &Prepared, role: Option<&str>) -> ReflectOutput {
                 .decls()
                 .iter()
                 .find(|d| d.name == t.name && d.kind == kind);
-            let at = declared.and_then(|d| analyze::locate_span(p, d.name_span));
             TypeEntry {
                 id: match declared {
                     Some(d) => d.id(p),
                     None => p.unlocated_id(&t.name, kind),
                 },
-                name: t.name.clone(),
-                kind,
                 members,
-                file: at.as_ref().map(|(file, _)| file.clone()),
-                location: at.map(|(_, loc)| loc),
             }
         })
         .collect();
@@ -610,23 +576,23 @@ enum Color { Red; Green }
         let out = reflect(&prep(), None);
         // The `@role(Semantic.EntryPoint)` attribute confers the role on the declaration it annotates.
         assert_eq!(out.roles.len(), 1);
-        assert_eq!(out.roles[0].target, "handle");
+        assert_eq!(out.roles[0].id.name, "handle");
         assert_eq!(out.roles[0].role, "Semantic.EntryPoint");
         // The role is locatable: the target's name span resolves to a file + line, so an agent can
         // join the role index with `symbols`/`definition` output.
-        assert_eq!(out.roles[0].file.as_deref(), Some("<inline>"));
-        assert!(out.roles[0].location.expect("role located").start.line >= 1);
+        assert_eq!(out.roles[0].id.file.as_deref(), Some("<inline>"));
+        assert!(out.roles[0].id.span.expect("role located").line >= 1);
         // The `#[Route(...)]` data attribute is in the manifest.
         assert!(
             out.attributes
                 .iter()
-                .any(|a| a.name == "Route" && a.target == "handle")
+                .any(|a| a.name == "Route" && a.id.name == "handle")
         );
         // Declared types with their members.
-        let route = out.types.iter().find(|t| t.name == "Route").unwrap();
-        assert_eq!(route.kind, NodeKind::Struct);
+        let route = out.types.iter().find(|t| t.id.name == "Route").unwrap();
+        assert_eq!(route.id.kind, NodeKind::Struct);
         assert_eq!(route.members, vec!["path"]);
-        let color = out.types.iter().find(|t| t.name == "Color").unwrap();
+        let color = out.types.iter().find(|t| t.id.name == "Color").unwrap();
         assert_eq!(color.members, vec!["Red", "Green"]);
     }
 
@@ -636,20 +602,17 @@ enum Color { Red; Green }
     #[test]
     fn reflect_types_carry_a_location_and_an_id() {
         let out = reflect(&prep(), None);
-        let route = out.types.iter().find(|t| t.name == "Route").unwrap();
-        assert_eq!(route.file.as_deref(), Some("<inline>"));
-        let at = route.location.expect("the type is located");
-        assert_eq!(at.start.line, 3, "`struct Route` is on line 3");
+        let route = out.types.iter().find(|t| t.id.name == "Route").unwrap();
+        assert_eq!(route.id.file.as_deref(), Some("<inline>"));
+        let at = route.id.span.expect("the type is located");
+        assert_eq!(at.line, 3, "`struct Route` is on line 3");
         // The id is the same object `symbols` reports for this declaration.
         assert_eq!(route.id.kind, NodeKind::Struct);
         assert_eq!(route.id.name, "Route");
-        let span = route.id.span.expect("the id carries a span");
-        assert_eq!(span.line, at.start.line);
-        assert_eq!(span.column, at.start.column);
         let outlined = crate::understand::symbols(&prep(), crate::understand::SymbolScope::File)
             .symbols
             .into_iter()
-            .find(|s| s.name == "Route")
+            .find(|s| s.id.name == "Route")
             .expect("Route is in the outline");
         assert_eq!(outlined.id, route.id, "the two tools report one identity");
     }
@@ -876,7 +839,7 @@ enum Color { Red; Green }
         let roles: Vec<(&str, &str)> = out
             .roles
             .iter()
-            .map(|r| (r.target.as_str(), r.role.as_str()))
+            .map(|r| (r.id.name.as_str(), r.role.as_str()))
             .collect();
         // Targets are **qualified** now: the entry sits inside a package, so it derives a module
         // path (`app.main`) and its declarations carry qualified identities. What this test is
@@ -895,7 +858,7 @@ enum Color { Red; Green }
         assert!(
             out.attributes
                 .iter()
-                .any(|a| a.target == "app.main.from_dep" && a.name == "toolkit.api.Tool"),
+                .any(|a| a.id.name == "app.main.from_dep" && a.name == "toolkit.api.Tool"),
             "attributes: {:?}",
             out.attributes
         );

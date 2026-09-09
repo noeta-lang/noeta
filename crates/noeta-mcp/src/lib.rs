@@ -2188,9 +2188,12 @@ echo handle(1)
         let result = client.call_tool(params).await.expect("tools/call trace");
         let structured = result.structured_content.expect("structured content");
         assert_eq!(structured["found"], serde_json::json!(true));
-        assert_eq!(structured["traces"][0]["name"], serde_json::json!("handle"));
         assert_eq!(
-            structured["traces"][0]["children"][0]["name"],
+            structured["traces"][0]["id"]["name"],
+            serde_json::json!("handle")
+        );
+        assert_eq!(
+            structured["traces"][0]["children"][0]["id"]["name"],
             serde_json::json!("helper")
         );
 
@@ -2325,6 +2328,128 @@ echo handle(1)
             files.iter().any(|f| f.ends_with("alpha.noe"))
                 && files.iter().any(|f| f.ends_with("beta.noe")),
             "files: {files:?}"
+        );
+
+        client.cancel().await.expect("client shuts down");
+        server.abort();
+    }
+
+    /// A two-module project whose **non-entry** module carries a `@test` block. The entry reaches
+    /// `render`, so `render` is in the merged program; nothing references the block, so the block
+    /// is not.
+    fn tier_in_a_sibling(name: &str) -> noeta_test_temp::TempPath {
+        let root = noeta_test_temp::TempDir::new(&format!("mcp-{name}"));
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            root.join("noeta.toml"),
+            "[package]\nname = \"local/universe\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            src.join("report.noe"),
+            "pub fn render(): string { return \"ok\" }\n\
+             @test {\n  fn renders(): void { assert(render() == \"ok\") }\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            src.join("main.noe"),
+            "use universe.report\nfn entry(): string { return report.render() }\necho entry()\n",
+        )
+        .unwrap();
+        root.into_child("src/main.noe")
+    }
+
+    /// **The universe gate.** `symbols(scope: "workspace")` outlines every module's own source and
+    /// the graph tools read the program the entry links, which is smaller. The two used to
+    /// disagree in silence: the outline listed a sibling module's `@test` fn and `callers` on it
+    /// answered `found: false` with an empty candidate list, so an agent could not tell a typo
+    /// from a declaration outside the graph. Now the outline says `in_graph`, and `callers` names
+    /// the reason.
+    #[tokio::test]
+    async fn symbols_and_callers_agree_on_what_the_graph_holds() {
+        use rmcp::model::CallToolRequestParams;
+
+        noeta_stdlib::registry::default_seeded();
+        let entry = tier_in_a_sibling("mcp_universe");
+        let file = entry.display().to_string();
+
+        let (client_io, server_io) = tokio::io::duplex(1 << 16);
+        let server = tokio::spawn(async move {
+            if let Ok(svc) = NoetaMcp::new().serve(server_io).await {
+                let _ = svc.waiting().await;
+            }
+        });
+        let client = ().serve(client_io).await.expect("client initializes");
+        let call = async |name: &str, args: serde_json::Map<String, serde_json::Value>| {
+            let mut params = CallToolRequestParams::default();
+            params.name = name.to_string().into();
+            params.arguments = Some(args);
+            client
+                .call_tool(params)
+                .await
+                .expect("tools/call")
+                .structured_content
+                .expect("structured content")
+        };
+
+        let mut args = serde_json::Map::new();
+        args.insert("file".to_string(), serde_json::json!(file.clone()));
+        args.insert("scope".to_string(), serde_json::json!("workspace"));
+        let outline = call("symbols", args).await;
+
+        let node = |name: &str| -> serde_json::Value {
+            outline["symbols"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|s| s["id"]["name"] == serde_json::json!(name))
+                .unwrap_or_else(|| panic!("{name} is not in the outline: {outline}"))
+                .clone()
+        };
+        let in_graph = node("universe.report.render");
+        let outside = node("universe.report.renders");
+        assert_eq!(in_graph["in_graph"], serde_json::json!(true));
+        assert_eq!(
+            outside["in_graph"],
+            serde_json::json!(false),
+            "a sibling module's `@test` fn is outlined but outside the graph"
+        );
+        assert_eq!(outside["tier"], serde_json::json!("test"));
+
+        // The join: `callers` finds exactly the node the outline calls `in_graph`, under the same
+        // id, and refuses the other one *by naming why* rather than as an unknown name.
+        let callers_of = async |name: &str| {
+            let mut args = serde_json::Map::new();
+            args.insert("file".to_string(), serde_json::json!(file.clone()));
+            args.insert("symbol".to_string(), serde_json::json!(name));
+            call("callers", args).await
+        };
+        let found = callers_of("universe.report.render").await;
+        assert_eq!(found["found"], serde_json::json!(true), "{found}");
+        assert_eq!(found["target"], in_graph["id"], "the two tools join on id");
+
+        let missing = callers_of("universe.report.renders").await;
+        assert_eq!(missing["found"], serde_json::json!(false));
+        let note = missing["note"].as_str().unwrap_or_default();
+        assert!(
+            note.contains("`@test` block") && note.contains("in_graph"),
+            "the note must name the reason, not just the miss: {note}"
+        );
+        assert!(
+            note.contains("report.noe"),
+            "and where the declaration is: {note}"
+        );
+
+        // A name nothing declares still reads as a plain miss.
+        let ghost = callers_of("universe.report.ghost").await;
+        assert_eq!(ghost["found"], serde_json::json!(false));
+        assert!(
+            ghost["note"]
+                .as_str()
+                .is_some_and(|n| n.contains("no declaration named")),
+            "note: {}",
+            ghost["note"]
         );
 
         client.cancel().await.expect("client shuts down");

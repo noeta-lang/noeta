@@ -49,20 +49,14 @@ pub struct TraceOutput {
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct TraceNode {
     /// The node's stable identity — the same `id` `symbols`, `reflect`, `impact` and `callers`
-    /// report for this declaration. An external or dynamic callee has a name and a kind and no
-    /// file or span, because it has no declaration here.
+    /// report for this declaration, and the only spelling of its name, file and span. An external
+    /// or dynamic callee has a name and a kind and no file or span, having no declaration here.
     pub id: NodeId,
-    /// The function's name (`handle`, `Counter.bump`), or the external/dynamic callee's label
-    /// (`http.response`, `f.call`).
-    pub name: String,
-    /// How this node was reached: `root` | `call` | `reference` (passed as a value — a callback
-    /// or handler registration).
+    /// How this node was **reached**: `root` | `call` | `reference` (passed as a value — a
+    /// callback or handler registration). What the node *is* is `id.kind`.
     pub kind: String,
     /// The architectural roles this function bears (`Enum.Variant`).
     pub roles: Vec<String>,
-    /// Where the function is declared.
-    pub file: Option<String>,
-    pub line: Option<u32>,
     /// Where the call/reference happened (in the caller), absent on roots.
     pub site: Option<Loc>,
     /// A native/module target outside the program — a leaf. False for a target that names one of
@@ -132,10 +126,18 @@ pub fn trace(p: &Prepared, from: Option<&str>, max_depth: Option<usize>) -> Trac
                 } else {
                     format!("did you mean {}?", near.join(", "))
                 };
-                return not_found(
-                    format!("`{spec}` matches no role binding and no function — {hint}"),
-                    &status,
-                );
+                // A name the graph does not hold may still be declared: the graph is the program
+                // the entry links, and a module's `@test` block is referenced by nothing, so it is
+                // outlined by `symbols` and absent here. Say which it is.
+                let note =
+                    match crate::graph::outside_graph_note(p, &crate::graph::source_index(p), spec)
+                    {
+                        Some(outside) => outside,
+                        None => {
+                            format!("`{spec}` matches no role binding and no function — {hint}")
+                        }
+                    };
+                return not_found(note, &status);
             }
             engine::Roots::AllRoleBearers(all) => {
                 if all.is_empty() {
@@ -210,7 +212,6 @@ fn not_found(note: String, status: &LinkStatus) -> TraceOutput {
 
 /// Resolve an engine node's spans to the tool's file/line wire shape, recursing into children.
 fn to_wire(p: &Prepared, n: &engine::TraceNode, decls: &DeclIndex, linked: bool) -> TraceNode {
-    let at = n.decl_span.and_then(|span| analyze::locate_span(p, span));
     // An `external` target that names one of this project's own modules is not external: it is a
     // real intra-project call the unlinked program could not resolve. Reporting it as external is
     // a wrong architecture an agent cannot detect, so it degrades to `unresolved` instead.
@@ -235,7 +236,6 @@ fn to_wire(p: &Prepared, n: &engine::TraceNode, decls: &DeclIndex, linked: bool)
     };
     TraceNode {
         id,
-        name: n.name.clone(),
         kind: match n.kind {
             engine::TraceKind::Root => "root",
             engine::TraceKind::Call => "call",
@@ -243,8 +243,6 @@ fn to_wire(p: &Prepared, n: &engine::TraceNode, decls: &DeclIndex, linked: bool)
         }
         .to_string(),
         roles: n.roles.clone(),
-        file: at.as_ref().map(|(file, _)| file.clone()),
-        line: at.map(|(_, loc)| loc.start.line),
         site: n
             .site_span
             .and_then(|span| analyze::locate_span(p, span))
@@ -308,28 +306,32 @@ fn save(n: int): int {
         assert!(out.found, "note: {:?}", out.note);
         assert_eq!(out.traces.len(), 1);
         let root = &out.traces[0];
-        assert_eq!(root.name, "handle");
+        assert_eq!(root.id.name, "handle");
         assert_eq!(root.kind, "root");
         assert_eq!(root.roles, vec!["Semantic.EntryPoint"]);
         // handle → validate and handle → save, both syntactic calls.
-        let child_names: Vec<&str> = root.children.iter().map(|c| c.name.as_str()).collect();
+        let child_names: Vec<&str> = root.children.iter().map(|c| c.id.name.as_str()).collect();
         assert!(
             child_names.contains(&"validate"),
             "children: {child_names:?}"
         );
         assert!(child_names.contains(&"save"));
         // The persistence boundary shows on the node the trace reached…
-        let save = root.children.iter().find(|c| c.name == "save").unwrap();
+        let save = root.children.iter().find(|c| c.id.name == "save").unwrap();
         assert_eq!(save.roles, vec!["Semantic.Persistence"]);
         assert_eq!(save.kind, "call");
         assert!(save.site.is_some(), "call site located");
         // …and validate's external math call is a labeled leaf.
-        let validate = root.children.iter().find(|c| c.name == "validate").unwrap();
+        let validate = root
+            .children
+            .iter()
+            .find(|c| c.id.name == "validate")
+            .unwrap();
         assert!(
             validate
                 .children
                 .iter()
-                .any(|c| c.name == "math.sqrt" && c.external),
+                .any(|c| c.id.name == "math.sqrt" && c.external),
             "validate children: {:?}",
             validate.children
         );
@@ -347,11 +349,11 @@ fn save(n: int): int {
     fn qualified_role_and_function_name_both_resolve() {
         let by_role = trace(&prep(), Some("Semantic.EntryPoint"), None);
         assert!(by_role.found);
-        assert_eq!(by_role.traces[0].name, "handle");
+        assert_eq!(by_role.traces[0].id.name, "handle");
 
         let by_name = trace(&prep(), Some("validate"), None);
         assert!(by_name.found);
-        assert_eq!(by_name.traces[0].name, "validate");
+        assert_eq!(by_name.traces[0].id.name, "validate");
         assert!(by_name.traces[0].roles.is_empty());
     }
 
@@ -359,7 +361,7 @@ fn save(n: int): int {
     fn omitted_from_traces_every_role_bearing_function() {
         let out = trace(&prep(), None, None);
         assert!(out.found);
-        let roots: Vec<&str> = out.traces.iter().map(|t| t.name.as_str()).collect();
+        let roots: Vec<&str> = out.traces.iter().map(|t| t.id.name.as_str()).collect();
         assert!(roots.contains(&"handle") && roots.contains(&"save"));
         assert!(out.note.unwrap().contains("every role-bearing function"));
     }
@@ -406,7 +408,7 @@ fn save(n: int): int {
         assert!(clean.linked, "note: {:?}", clean.note);
         assert!(clean.link_diagnostics.is_empty());
         let child = &clean.traces[0].children[0];
-        assert_eq!(child.name, "broken.alpha.alpha_only");
+        assert_eq!(child.id.name, "broken.alpha.alpha_only");
         assert!(!child.external && !child.unverified, "{child:?}");
 
         // Now break the link with one import of a module that does not exist.
@@ -469,10 +471,10 @@ fn save(n: int): int {
         assert!(out.found);
         let root = &out.traces[0];
         let under_a = &root.children[0].children[0];
-        assert_eq!(under_a.name, "deep");
+        assert_eq!(under_a.id.name, "deep");
         assert_eq!(under_a.children.len(), 1, "expanded on first arrival");
         let under_b = &root.children[1].children[0];
-        assert_eq!(under_b.name, "deep");
+        assert_eq!(under_b.id.name, "deep");
         assert!(under_b.shared && under_b.children.is_empty());
     }
 
@@ -483,9 +485,9 @@ fn save(n: int): int {
         let out = trace(&p, Some("ping"), None);
         assert!(out.found);
         let pong = &out.traces[0].children[0];
-        assert_eq!(pong.name, "pong");
+        assert_eq!(pong.id.name, "pong");
         let back = &pong.children[0];
-        assert_eq!(back.name, "ping");
+        assert_eq!(back.id.name, "ping");
         assert!(back.cycle, "the back-edge is marked, not expanded");
         assert!(back.children.is_empty());
     }

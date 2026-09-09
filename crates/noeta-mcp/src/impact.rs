@@ -34,7 +34,9 @@ pub struct ImpactOutput {
     pub decls: Vec<NodeId>,
     /// The subset of `decls` a tier runner executes, each with the tier it was declared in.
     pub tier_functions: Vec<TierFunction>,
-    /// Why the answer degrades to "rerun everything", when it does.
+    /// Why a runner must still rerun everything, when it must: a module's top-level statements
+    /// use one of the impacted declarations, and every run executes those. `decls` is the walk
+    /// regardless, so the reachability question is answered even when the runner's is not.
     pub reason: Option<String>,
     /// Every declaration an ambiguous `symbol` leaf matched.
     pub candidates: Vec<NodeId>,
@@ -71,7 +73,7 @@ pub fn impact(
 
     let answer = match (symbol, edit_file, edit_source) {
         (Some(name), None, None) => match decls.lookup(name) {
-            Lookup::Found(decl) => session.impact_of_decls(std::slice::from_ref(&decl.name)),
+            Lookup::Found(decl) => session.reach_of_decls(std::slice::from_ref(&decl.name)),
             Lookup::Ambiguous(all) => {
                 return ImpactOutput {
                     attributed: false,
@@ -87,7 +89,12 @@ pub fn impact(
                 };
             }
             Lookup::Missing => {
-                return note(format!("no declaration named `{name}` in this workspace"));
+                let sources = crate::graph::source_index(p);
+                return note(
+                    crate::graph::outside_graph_note(p, &sources, name).unwrap_or_else(|| {
+                        format!("no declaration named `{name}` in this workspace")
+                    }),
+                );
             }
         },
         (None, Some(file), Some(source)) => {
@@ -96,7 +103,7 @@ pub fn impact(
                 Ok(canonical) => canonical,
                 Err(e) => return note(format!("cannot open {file}: {e}")),
             };
-            session.impact_of_sources(&[(canonical, source.to_string())])
+            session.reach_of_sources(&[(canonical, source.to_string())])
         }
         (None, Some(_), None) | (None, None, Some(_)) => {
             return note("`edit` needs both `file` and `new_source`".to_string());
@@ -109,43 +116,63 @@ pub fn impact(
         }
     };
 
-    match answer {
-        noeta_ide::impact::Impact::Decls(names) => {
-            let mut ids = Vec::with_capacity(names.len());
-            let mut tier_functions = Vec::new();
-            for name in &names {
-                match decls.lookup(name) {
-                    Lookup::Found(decl) => {
-                        if let Some(tier) = &decl.tier {
-                            tier_functions.push(TierFunction {
-                                id: decl.id(p),
-                                tier: tier.clone(),
-                            });
-                        }
-                        ids.push(decl.id(p));
-                    }
-                    // A closure name the graph carries that no declaration owns still belongs in
-                    // the answer: dropping it would make the list read as complete while it is not.
-                    _ => ids.push(p.unlocated_id(name, NodeKind::Function)),
-                }
-            }
-            ImpactOutput {
-                attributed: true,
-                decls: ids,
-                tier_functions,
-                reason: None,
+    let reach = match answer {
+        Ok(reach) => reach,
+        // A project-shaped valve — unreadable members, a project that does not link or check.
+        // There is no walk to report, only the reason.
+        Err(reason) => {
+            return ImpactOutput {
+                attributed: false,
+                decls: Vec::new(),
+                tier_functions: Vec::new(),
+                reason: Some(reason),
                 candidates: Vec::new(),
                 note: None,
-            }
+            };
         }
-        noeta_ide::impact::Impact::All { reason } => ImpactOutput {
-            attributed: false,
-            decls: Vec::new(),
-            tier_functions: Vec::new(),
-            reason: Some(reason),
-            candidates: Vec::new(),
-            note: None,
-        },
+    };
+
+    let mut ids = Vec::with_capacity(reach.decls.len());
+    let mut tier_functions = Vec::new();
+    for name in &reach.decls {
+        match decls.lookup(name) {
+            Lookup::Found(decl) => {
+                if let Some(tier) = &decl.tier {
+                    tier_functions.push(TierFunction {
+                        id: decl.id(p),
+                        tier: tier.clone(),
+                    });
+                }
+                ids.push(decl.id(p));
+            }
+            // A closure name the graph carries that no declaration owns still belongs in the
+            // answer: dropping it would make the list read as complete while it is not.
+            _ => ids.push(p.unlocated_id(name, NodeKind::Function)),
+        }
+    }
+    // A module whose top-level statements use an impacted declaration is itself impacted — every
+    // run executes them. It joins the answer as that module's node, the way `callers` reports the
+    // same edge, rather than aborting the walk that found it.
+    for (source, _) in &reach.top_level_uses {
+        let id = top_level_id(p, *source);
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    let reason = reach.top_level_uses.first().map(|(source, used)| {
+        format!(
+            "the top level of `{}` uses `{used}`, and every run executes it — a runner cannot \
+             narrow past that, though the declarations below are still what changing it reaches",
+            top_level_id(p, *source).name
+        )
+    });
+    ImpactOutput {
+        attributed: reason.is_none(),
+        decls: ids,
+        tier_functions,
+        reason,
+        candidates: Vec::new(),
+        note: None,
     }
 }
 
@@ -252,6 +279,16 @@ pub fn callers(p: &Prepared, symbol: &str, depth: Option<usize>) -> CallersOutpu
             };
         }
         Lookup::Missing => {
+            // A name the graph does not hold may still be declared: the graph is the program the
+            // entry links, so a module's `@test` block — referenced by nothing — is outlined by
+            // `symbols` and absent here. Say which of the two it is.
+            let sources = crate::graph::source_index(p);
+            let note = crate::graph::outside_graph_note(p, &sources, symbol).unwrap_or_else(|| {
+                format!(
+                    "no declaration named `{symbol}` in this workspace — try `symbols` for the \
+                     declarations"
+                )
+            });
             return CallersOutput {
                 found: false,
                 target: None,
@@ -260,10 +297,7 @@ pub fn callers(p: &Prepared, symbol: &str, depth: Option<usize>) -> CallersOutpu
                 truncated: false,
                 linked: status.linked,
                 link_diagnostics: status.link_diagnostics,
-                note: Some(format!(
-                    "no declaration named `{symbol}` in this workspace — try `symbols` for the \
-                     declarations"
-                )),
+                note: Some(note),
             };
         }
     };
@@ -503,6 +537,69 @@ mod tests {
             .find(|s| &s.id == handles)
             .expect("the impact id joins the outline's `@test` node");
         assert_eq!(outlined_test.tier.as_deref(), Some("test"));
+    }
+
+    /// **The top-level use keeps its closure.** A module's top-level statements run on every
+    /// pass, so a *runner* cannot narrow past one that uses an impacted declaration — and the walk
+    /// used to be abandoned at that edge, so `impact` answered `decls: []` for every symbol in
+    /// every real project. The verdict stays; the answer arrives with it.
+    #[test]
+    fn a_top_level_use_reports_the_closure_it_widens_over() {
+        let root = noeta_test_temp::TempDir::new("mcp-impact-toplevel");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("noeta.toml"),
+            "[package]\nname = \"local/top\"\nversion = \"0.1.0\"\n\n[directives]\ntest = \"std\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src").join("store.noe"),
+            "pub fn load(): int { return 7 }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src").join("main.noe"),
+            "use top.store\n\
+             fn handle(): int { return store.load() }\n\
+             echo handle()\n\
+             @test {\n  fn handles(): void { assert(handle() == 7) }\n}\n",
+        )
+        .unwrap();
+        let entry = root.into_child("src/main.noe");
+        let file = entry.display().to_string();
+        let p = prep(&file);
+
+        let out = impact(&p, Some(&file), Some("top.store.load"), None, None);
+        assert!(
+            !out.attributed,
+            "a top-level use is still a full rerun for a runner"
+        );
+        let reason = out.reason.as_deref().unwrap_or_default();
+        assert!(
+            reason.contains("top.main") && reason.contains("top.main.handle"),
+            "the reason names the module and what it used: {reason}"
+        );
+
+        let names: std::collections::BTreeSet<&str> =
+            out.decls.iter().map(|d| d.name.as_str()).collect();
+        assert!(names.contains("top.store.load"), "{names:?}");
+        assert!(names.contains("top.main.handle"), "the caller: {names:?}");
+        assert!(names.contains("top.main.handles"), "the `@test`: {names:?}");
+        // The top-level use is a node of its own — the module, the way `callers` reports it —
+        // rather than the point the walk gave up at.
+        let module = out
+            .decls
+            .iter()
+            .find(|d| d.kind == NodeKind::Module)
+            .unwrap_or_else(|| panic!("the module node is missing: {names:?}"));
+        assert_eq!(module.name, "top.main");
+        assert_eq!(
+            out.tier_functions
+                .iter()
+                .map(|t| (t.id.name.as_str(), t.tier.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("top.main.handles", "test")]
+        );
     }
 
     /// The negative: an edit that touches nothing the chain reaches impacts nothing.

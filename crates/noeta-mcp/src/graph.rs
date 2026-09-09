@@ -227,6 +227,59 @@ impl<'a> At<'a> {
     }
 }
 
+/// The declarations the workspace's **sources** hold, whether or not the entry reaches them.
+///
+/// The linked program is the reachable closure from the entry: a declaration nothing imports is
+/// left out of it, and a module's `@test` block is referenced by nothing, so it is never merged.
+/// That is the right program to build a call graph over — it is the one the compiler builds — but
+/// it makes `symbols(scope: "workspace")`, which outlines each file's own parse, strictly larger
+/// than the graph. This index is that larger set, named the way the linker would have named it,
+/// so a tool that cannot find a declaration can say whether it exists at all.
+pub fn source_index(p: &Prepared) -> DeclIndex {
+    let mut index = DeclIndex::default();
+    let members = p.ws.members(&p.db);
+    for (i, member) in members.iter().enumerate() {
+        let parsed = noeta_db::ast(&p.db, *member);
+        let namespace = p
+            .modules
+            .get(i)
+            .map(|m| m.namespace.as_str())
+            .filter(|n| !n.is_empty());
+        let mut one = DeclIndex::default();
+        one.collect(&parsed.0.program.stmts, None, &Default::default());
+        for mut decl in one.decls {
+            if let Some(prefix) = namespace {
+                decl.name = format!("{prefix}.{}", decl.name);
+            }
+            index.decls.push(decl);
+        }
+    }
+    index
+}
+
+/// Why a declaration the sources hold is not in the graph, for a tool that could not find it.
+/// `None` when the name is not declared anywhere either.
+pub fn outside_graph_note(p: &Prepared, sources: &DeclIndex, query: &str) -> Option<String> {
+    let decl = match sources.lookup(query) {
+        Lookup::Found(decl) => decl,
+        Lookup::Ambiguous(all) => all.first().copied()?,
+        Lookup::Missing => return None,
+    };
+    let at = decl.id(p);
+    let file = at.file.unwrap_or_else(|| "this workspace".to_string());
+    let line = at.span.map(|s| s.line).unwrap_or(0);
+    let what = match &decl.tier {
+        Some(tier) => format!("inside a `@{tier}` block in {file}:{line}"),
+        None => format!("in {file}:{line}"),
+    };
+    Some(format!(
+        "`{}` is declared {what}, which the entry does not reach — the graph is the program the \
+         entry links, so a declaration nothing imports is outside it. `symbols` reports such a \
+         node with `in_graph: false`",
+        decl.name
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
