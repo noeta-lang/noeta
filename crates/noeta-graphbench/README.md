@@ -25,14 +25,27 @@ Each **arm** is a fixed strategy: for one question category, a composition of to
 |---|---|---|
 | A0 | `symbols`, `definition`, `references`, `trace`, `module_graph`, `reflect`, file reads | the floor a real agent works from |
 | A1 | A0 plus `code_search` | seed selection |
-| A2 | A1 plus `context_map` | budgeted ranking |
+| A2 | A1 plus `context_map`, answering with the budgeted map | budgeted ranking |
 | A3 | A2 plus `path`, `impact`, `architecture`, `callers` | multi-hop and role structure |
 | A4 | a fixed 4k-token repo map, no navigation | whether precomputation alone suffices |
 | A5 | a lexical scan of the files, no Noeta tools | whether any of this beats grep |
 
-**A requirement is per category, not per arm.** An arm's strategy for `callers` and its strategy for `path` need different tools, so each (arm, category) row is measured as soon as *its* tools are advertised and reports **SKIP** naming the missing tool otherwise. A1 measures every category, and A3 measures `callers` and `impact`; A3's `path` and `role_reach` rows name `path` and `architecture` and wait. A SKIP prints in its own column, holds no baseline row, and is never a pass.
+**A requirement is per category, not per arm.** An arm's strategy for `callers` and its strategy for `path` need different tools, so each (arm, category) row is measured as soon as *its* tools are advertised and reports **SKIP** naming the missing tool otherwise. A SKIP prints in its own column, holds no baseline row, and is never a pass.
 
 A1 changes two of A0's strategies and inherits the other six. `seed_mapping` becomes one `code_search` call on the question itself, and `definition` becomes one on the name, falling back to A0's outline sweep when the search reaches nothing. A1 drops a hit whose kind the declaration universe does not hold, because a field and an enum variant are not nodes the call graph carries an edge for.
+
+A2 and A4 answer with the budgeted map itself for the five categories the map addresses, so those rows read on **recall**: with this budget spent from these seeds, is the answer inside the map? Precision there is bounded by how many declarations a map of that size holds, which is why their F1 sits low beside A0's. A2's other three categories are A1's strategies unchanged.
+
+## Ablating the ranking
+
+```console
+$ cargo run -p noeta-graphbench -- --ranker degree --map-budget 120
+$ cargo run -p noeta-graphbench -- --path-ranker shortest
+```
+
+`--ranker` swaps `context_map`'s personalized PageRank for degree centrality or a seeded draw, `--path-ranker` swaps `path`'s flow ranking for hop count, and `--map-budget` sets what the map arms spend. A run that changes any of the three is neither compared against the baseline nor recorded into it, because it measured a different configuration; read its rows against a plain run's.
+
+A budget large enough to hold a project's whole connected component measures nothing about ranking: every ranking then emits the same set and only the order differs, so the P/R/F1 columns come back identical and only `Acc@k` and MRR move. Lower `--map-budget` until the budget binds before reading a ranking comparison on recall.
 
 An arm is given what a developer types: a leaf name and the file it sits in, a module path, or a sentence. It never sees the question's gold, and it never sees the qualified name the graph knows a declaration by, because obtaining that name is part of what is measured.
 

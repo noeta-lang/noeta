@@ -48,6 +48,7 @@
 //! crate and never notice it had. Depend on `noeta-project` and say `noeta_project::…`.
 
 pub mod api;
+pub mod architecture;
 pub mod callgraph;
 pub mod completion;
 pub mod docs;
@@ -56,6 +57,8 @@ pub mod highlight;
 pub mod impact;
 pub mod inlay;
 pub mod offsets;
+pub mod paths;
+pub mod rank;
 pub mod resolve;
 pub mod sample;
 pub mod search;

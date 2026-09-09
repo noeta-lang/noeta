@@ -10,7 +10,7 @@
 //! |---|---|---|
 //! | A0 | today's MCP surface: `symbols`, `definition`, `references`, `trace`, `module_graph`, `reflect`, file reads | the floor a real agent works from |
 //! | A1 | A0 plus `code_search` | seed selection |
-//! | A2 | A1 plus `context_map` | budgeted ranking |
+//! | A2 | A1 plus `context_map`, answering with the budgeted map | budgeted ranking |
 //! | A3 | A2 plus `path`, `impact`, `architecture`, `callers` | multi-hop and role structure |
 //! | A4 | a fixed repo map at a token budget, no navigation | whether precomputation alone suffices |
 //! | A5 | a lexical scan of the files, no Noeta tools | whether any of this beats grep |
@@ -24,7 +24,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::adapter::{self, LineIndexes, NodeRef, Symbol};
 use crate::metrics::Prediction;
@@ -85,19 +85,31 @@ impl Arm {
         match self {
             Arm::A0Today | Arm::A5Lexical => &[],
             Arm::A1CodeSearch => &[Tool::CodeSearch],
-            Arm::A2ContextMap => &[Tool::CodeSearch, Tool::ContextMap],
             Arm::A4RepoMap => &[Tool::ContextMap],
+            Arm::A2ContextMap => match category {
+                // The five categories the map itself answers: it is the whole strategy, so the
+                // row measures the map and needs nothing else.
+                Category::Callers
+                | Category::Callees
+                | Category::Path
+                | Category::RoleReach
+                | Category::Impact => &[Tool::ContextMap],
+                // The three A2 inherits from A1 unchanged, which wait on the tool A1 waits on.
+                Category::Definition | Category::Importers | Category::SeedMapping => {
+                    &[Tool::CodeSearch, Tool::ContextMap]
+                }
+            },
             Arm::A3GraphTools => match category {
                 Category::Callers => &[Tool::Callers],
                 Category::Impact => &[Tool::Impact],
                 Category::Path => &[Tool::Path],
                 Category::RoleReach => &[Tool::Architecture],
+                Category::Callees => &[Tool::ContextMap],
                 // The categories A3 inherits from A2 unchanged: it adds no tool for them, so it
                 // waits on the ranking tools A2 waits on.
-                Category::Definition
-                | Category::Callees
-                | Category::Importers
-                | Category::SeedMapping => &[Tool::CodeSearch, Tool::ContextMap],
+                Category::Definition | Category::Importers | Category::SeedMapping => {
+                    &[Tool::CodeSearch, Tool::ContextMap]
+                }
             },
         }
     }
@@ -268,10 +280,11 @@ pub async fn answer(
     let _ = service.take_spend();
     let predictions_and_evidence = match arm {
         Arm::A0Today => today(service, context, question).await,
-        Arm::A3GraphTools => reverse_walk(service, context, question).await,
         Arm::A1CodeSearch => search_seeded(service, context, question).await,
+        Arm::A2ContextMap => ranked_map(service, context, question).await,
+        Arm::A3GraphTools => reverse_walk(service, context, question).await,
+        Arm::A4RepoMap => fixed_map(service, context).await,
         Arm::A5Lexical => lexical(service, context, question),
-        Arm::A2ContextMap | Arm::A4RepoMap => (Vec::new(), None),
     };
     Answer {
         predictions: predictions_and_evidence.0,
@@ -876,7 +889,15 @@ async fn reverse_walk(
     match question.category {
         Category::Callers => a3_callers(service, context, question).await,
         Category::Impact => a3_impact(service, context, question).await,
-        _ => (Vec::new(), None),
+        Category::Path => a3_path(service, context, question).await,
+        Category::RoleReach => a3_role_reach(service, context, question).await,
+        // A3 adds no reverse-direction tool for the forward-reach question, so it answers it the
+        // way A2 does: with the budgeted map.
+        Category::Callees => budgeted_map(service, context, question).await,
+        // A3 adds no tool for the rest, so it answers them the way A2 does.
+        Category::Definition | Category::Importers | Category::SeedMapping => {
+            ranked_map(service, context, question).await
+        }
     }
 }
 
@@ -960,6 +981,226 @@ async fn a3_impact(
         .map(|(node, _)| Prediction::node(node))
         .collect();
     (out, Some(Tool::Impact))
+}
+
+// ----------------------------------------------------------------------------------------- A2
+
+/// The handles a question hands `context_map`: the declaration a developer typed, or both ends of
+/// a point-to-point question. A question with no symbol seeds nothing and the map is empty, which
+/// is the honest score for a strategy that cannot start.
+fn map_handles(question: &Question) -> Vec<Handle> {
+    match &question.subject {
+        Subject::Symbol { .. } => Handle::of(&question.subject).into_iter().collect(),
+        Subject::Pair { from, to } => [from, to]
+            .into_iter()
+            .filter_map(|end| Handle::of(end))
+            .collect(),
+        Subject::Module { path } => vec![Handle {
+            leaf: path.clone(),
+            file: None,
+        }],
+        Subject::Free => Vec::new(),
+    }
+}
+
+/// A2: the map where the map is the answer, and A1's strategy where A2 adds no tool.
+async fn ranked_map(
+    service: &mut Service,
+    context: &ProjectContext,
+    question: &Question,
+) -> (Vec<Prediction>, Option<Tool>) {
+    match question.category {
+        Category::Callers
+        | Category::Callees
+        | Category::Path
+        | Category::RoleReach
+        | Category::Impact => budgeted_map(service, context, question).await,
+        // A2 is A1 plus one tool, and the tool answers five categories. The other three are A1's
+        // unchanged, so running them any other way would measure something A2 did not add.
+        Category::Definition | Category::Importers | Category::SeedMapping => {
+            search_seeded(service, context, question).await
+        }
+    }
+}
+
+/// One `context_map` call, and everything in the map as the answer.
+///
+/// The map is the whole strategy here on purpose. A2 isolates budgeted ranking, so its row asks
+/// one question: with a 4k budget spent from these seeds, is the answer inside the map? Recall is
+/// what that reads on; precision is bounded by how many declarations a 4k map holds.
+async fn budgeted_map(
+    service: &mut Service,
+    context: &ProjectContext,
+    question: &Question,
+) -> (Vec<Prediction>, Option<Tool>) {
+    let handles = map_handles(question);
+    if handles.is_empty() {
+        return (Vec::new(), None);
+    }
+    let seeds: Vec<String> = handles.iter().map(|h| h.leaf.clone()).collect();
+    let mut value = service
+        .call(Tool::ContextMap, map_args(service, context, &seeds))
+        .await;
+    // A leaf several declarations carry seeds nothing and comes back as a candidate list. The
+    // disambiguation an agent has in hand is the file it read the name in, which is what the
+    // reverse-walk arms do with the same list.
+    if !adapter::candidates(&value).is_empty() {
+        let resolved: Vec<String> = handles
+            .iter()
+            .map(|handle| {
+                candidate_in_file(&value, context, handle).unwrap_or_else(|| handle.leaf.clone())
+            })
+            .collect();
+        if resolved != seeds {
+            value = service
+                .call(Tool::ContextMap, map_args(service, context, &resolved))
+                .await;
+        }
+    }
+    let out = adapter::context_map_nodes(&value)
+        .into_iter()
+        .map(Prediction::node)
+        .collect();
+    (out, Some(Tool::ContextMap))
+}
+
+/// The arguments a map call carries, including whichever ranking the run asked for.
+fn map_args(service: &Service, context: &ProjectContext, seeds: &[String]) -> Map<String, Value> {
+    let mut arguments = args([
+        ("file", json!(context.entry_arg())),
+        ("seeds", json!(seeds)),
+        ("budget_tokens", json!(service.map_budget(REPO_MAP_BUDGET))),
+    ]);
+    if let Some(ranker) = service.ranker() {
+        arguments.insert("ranker".to_string(), json!(ranker));
+        // A seeded draw has to be reproducible, or the ablation measures the afternoon.
+        arguments.insert("seed".to_string(), json!(RANDOM_SEED));
+    }
+    arguments
+}
+
+/// The seed `ranker: "random"` draws from, fixed so the control repeats.
+const RANDOM_SEED: u64 = 20_260_909;
+
+// ----------------------------------------------------------------------------------------- A4
+
+/// One fixed map of the project, seeded on the entry file, answering every question the same way.
+///
+/// No navigation, no reading of the question beyond the project it belongs to. This is the arm that
+/// asks whether precomputation on its own is enough.
+async fn fixed_map(
+    service: &mut Service,
+    context: &ProjectContext,
+) -> (Vec<Prediction>, Option<Tool>) {
+    let seed = context.entry_arg();
+    let value = service
+        .call(Tool::ContextMap, map_args(service, context, &[seed]))
+        .await;
+    let out = adapter::context_map_nodes(&value)
+        .into_iter()
+        .map(Prediction::node)
+        .collect();
+    (out, Some(Tool::ContextMap))
+}
+
+/// How one declaration reaches another: `path`, reading the route the tool says is strongest.
+///
+/// The tool emits a ranked answer weakest first, so the strongest route is the last one; an answer
+/// it did not rank runs shortest first, so the strongest is the first. Reading it the way the tool
+/// documents it is what an agent does, and it is what makes the ranking measurable.
+async fn a3_path(
+    service: &mut Service,
+    context: &ProjectContext,
+    question: &Question,
+) -> (Vec<Prediction>, Option<Tool>) {
+    let Subject::Pair { from, to } = &question.subject else {
+        return (Vec::new(), None);
+    };
+    let (Some(start), Some(goal)) = (Handle::of(from), Handle::of(to)) else {
+        return (Vec::new(), None);
+    };
+    let mut arguments = args([
+        ("file", json!(context.entry_arg())),
+        ("from", json!(start.leaf)),
+        ("to", json!(goal.leaf)),
+    ]);
+    if let Some(ranker) = service.path_ranker() {
+        arguments.insert("ranker".to_string(), json!(ranker));
+    }
+    let value = service.call(Tool::Path, arguments).await;
+    let (ranked, routes) = adapter::routes(&value);
+    let chosen = if ranked {
+        routes.last()
+    } else {
+        routes.first()
+    };
+    let out = chosen
+        .map(|route| {
+            route
+                .nodes
+                .iter()
+                .cloned()
+                .map(Prediction::node)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    (out, Some(Tool::Path))
+}
+
+/// Which role-bearing declarations an entry point reaches: `architecture`, walked from the subject
+/// over the bearer connections the role graph was aggregated from.
+async fn a3_role_reach(
+    service: &mut Service,
+    context: &ProjectContext,
+    question: &Question,
+) -> (Vec<Prediction>, Option<Tool>) {
+    let Some(handle) = Handle::of(&question.subject) else {
+        return (Vec::new(), None);
+    };
+    let value = service
+        .call(
+            Tool::Architecture,
+            args([("file", json!(context.entry_arg()))]),
+        )
+        .await;
+    let connections = adapter::connections(&value);
+    // The bearer the developer typed: the one whose leaf matches, preferring the file they read it
+    // in when the leaf collides.
+    let start = adapter::role_bearers(&value)
+        .into_iter()
+        .filter(|node| node.leaf == handle.leaf)
+        .min_by_key(|node| {
+            let same_file = handle.file.as_ref().is_some_and(|want| {
+                node.file.as_ref().is_some_and(|f| {
+                    Path::new(&adapter::anchored(&context.root, f)) == Path::new(want)
+                })
+            });
+            usize::from(!same_file)
+        });
+    let Some(start) = start else {
+        // A subject that bears no role reaches nothing through the role graph, and saying so is
+        // the answer rather than a guess.
+        return (Vec::new(), Some(Tool::Architecture));
+    };
+    let key = |node: &NodeRef| node.qualified.clone().unwrap_or_else(|| node.leaf.clone());
+    let mut reached: Vec<NodeRef> = vec![start.clone()];
+    let mut seen: BTreeSet<String> = BTreeSet::from([key(&start)]);
+    let mut queue: VecDeque<String> = VecDeque::from([key(&start)]);
+    while let Some(at) = queue.pop_front() {
+        for (from, to) in &connections {
+            if key(from) != at {
+                continue;
+            }
+            if seen.insert(key(to)) {
+                reached.push(to.clone());
+                queue.push_back(key(to));
+            }
+        }
+    }
+    (
+        reached.into_iter().map(Prediction::node).collect(),
+        Some(Tool::Architecture),
+    )
 }
 
 // ----------------------------------------------------------------------------------------- A5

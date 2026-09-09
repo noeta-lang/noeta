@@ -74,6 +74,9 @@ impl Tool {
             Tool::CodeSearch,
             Tool::Impact,
             Tool::Callers,
+            Tool::ContextMap,
+            Tool::Path,
+            Tool::Architecture,
             Tool::FileRead,
         ]
     }
@@ -94,15 +97,22 @@ impl Tool {
             Tool::ModuleGraph => serde_json::json!({ "modules": [] }),
             Tool::Reflect => serde_json::json!({ "roles": [], "attributes": [], "types": [] }),
             Tool::FileRead => serde_json::json!({ "text": "" }),
-            Tool::CodeSearch | Tool::ContextMap => serde_json::json!({ "results": [] }),
-            Tool::Path => serde_json::json!({ "paths": [] }),
+            Tool::CodeSearch => serde_json::json!({ "results": [] }),
+            Tool::ContextMap => serde_json::json!({
+                "found": false, "files": [], "seeds": [], "candidates": [], "missing_seeds": []
+            }),
+            Tool::Path => {
+                serde_json::json!({ "found": false, "paths": [], "candidates": [], "ranked": false })
+            }
             Tool::Callers => {
                 serde_json::json!({ "found": false, "levels": [], "candidates": [] })
             }
             Tool::Impact => serde_json::json!({
                 "attributed": false, "decls": [], "tier_functions": [], "candidates": []
             }),
-            Tool::Architecture => serde_json::json!({ "roles": [], "edges": [] }),
+            Tool::Architecture => {
+                serde_json::json!({ "roles": [], "edges": [], "connections": [], "boundaries": [] })
+            }
         }
     }
 }
@@ -172,6 +182,23 @@ pub struct Service {
     cache: HashMap<String, Value>,
     ablated: Option<Tool>,
     spend: Spend,
+    /// Which ranking `context_map` is asked for, so a run can swap personalized PageRank for
+    /// degree centrality or a seeded draw and the arms stay untouched.
+    ranker: Option<String>,
+    /// Which ranking `path` is asked for: the flow ranker, or hop count alone.
+    path_ranker: Option<String>,
+    /// The token budget the map arms spend, when a run names one instead of the arm's own.
+    map_budget: Option<usize>,
+}
+
+/// The ranking knobs a run turns. Both default to the tool's own default, so a plain run measures
+/// what ships.
+#[derive(Debug, Clone, Default)]
+pub struct Rankers {
+    pub context_map: Option<String>,
+    pub path: Option<String>,
+    /// The budget the map arms spend. `None` leaves each arm at its own.
+    pub map_budget: Option<usize>,
 }
 
 impl Service {
@@ -202,7 +229,34 @@ impl Service {
             cache: HashMap::new(),
             ablated: None,
             spend: Spend::default(),
+            ranker: None,
+            path_ranker: None,
+            map_budget: None,
         })
+    }
+
+    /// Set the ranking each ranked tool is asked for. Clears the response cache, because a cached
+    /// answer was ranked by whatever was set when it was made.
+    pub fn set_rankers(&mut self, rankers: &Rankers) {
+        self.ranker = rankers.context_map.clone();
+        self.path_ranker = rankers.path.clone();
+        self.map_budget = rankers.map_budget;
+        self.cache.clear();
+    }
+
+    /// The token budget a map call carries: what the run asked for, else the arm's own.
+    pub fn map_budget(&self, arm_budget: usize) -> usize {
+        self.map_budget.unwrap_or(arm_budget)
+    }
+
+    /// The ranking `context_map` is asked for, when a run named one.
+    pub fn ranker(&self) -> Option<&str> {
+        self.ranker.as_deref()
+    }
+
+    /// The ranking `path` is asked for, when a run named one.
+    pub fn path_ranker(&self) -> Option<&str> {
+        self.path_ranker.as_deref()
     }
 
     /// Whether the service advertises a tool. An arm that needs one it does not have reports SKIP.

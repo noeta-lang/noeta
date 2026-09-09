@@ -74,6 +74,21 @@ struct Cli {
     /// fact the id already states. Reports; changes nothing.
     #[arg(long)]
     token_cost: bool,
+
+    /// Ask `context_map` for this ranking instead of its default: `ppr`, `degree` or `random`.
+    /// The ranking ablation: run it three ways and read the recall column.
+    #[arg(long, value_name = "RANKER")]
+    ranker: Option<String>,
+
+    /// Ask `path` for this ranking instead of its default: `flow` or `shortest`.
+    #[arg(long, value_name = "RANKER")]
+    path_ranker: Option<String>,
+
+    /// Spend this token budget on the map arms instead of the 4k they are defined at. A budget
+    /// large enough to hold a project's whole connected component measures nothing about ranking,
+    /// so this is how a ranking is measured under a budget that binds.
+    #[arg(long, value_name = "TOKENS")]
+    map_budget: Option<usize>,
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -126,6 +141,11 @@ async fn run(cli: Cli) -> Result<ExitCode, String> {
     }
 
     let mut service = Service::start().await?;
+    service.set_rankers(&noeta_graphbench::service::Rankers {
+        context_map: cli.ranker.clone(),
+        path: cli.path_ranker.clone(),
+        map_budget: cli.map_budget,
+    });
 
     if cli.token_cost {
         let code = token_cost(&mut service, &prepared).await;
@@ -162,6 +182,26 @@ async fn run(cli: Cli) -> Result<ExitCode, String> {
     }
 
     let baseline_path = data.join("baseline.txt");
+    // A run that asked for a different ranking measured a different configuration, so it neither
+    // holds the baseline nor may overwrite it. Saying so is the point of the ablation: the numbers
+    // are read against the default run's, by a reader, not by a floor.
+    if cli.ranker.is_some() || cli.path_ranker.is_some() || cli.map_budget.is_some() {
+        println!(
+            "\ngraphbench: this run changed the ranking configuration ({}), so it is neither \
+             compared against the baseline nor recorded into it. Read its rows against a plain \
+             run's.",
+            [
+                cli.ranker.as_ref().map(|r| format!("context_map={r}")),
+                cli.path_ranker.as_ref().map(|r| format!("path={r}")),
+                cli.map_budget.map(|b| format!("map_budget={b}")),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(", ")
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
     if cli.record {
         std::fs::write(&baseline_path, baseline::record(&report))
             .map_err(|e| format!("cannot write {}: {e}", baseline_path.display()))?;

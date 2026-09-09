@@ -565,6 +565,125 @@ pub fn ranked_hits(value: &Value) -> Vec<NodeRef> {
     Vec::new()
 }
 
+/// Every declaration a `context_map` answer emitted, strongest first.
+///
+/// The map groups its nodes by file, so the reading is a flatten and then a sort by the `rank` the
+/// tool assigned, which is the order the whole map is in rather than the order within one file.
+pub fn context_map_nodes(value: &Value) -> Vec<NodeRef> {
+    let mut ranked: Vec<(u64, NodeRef)> = Vec::new();
+    for group in value
+        .get("files")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        for entry in group
+            .get("nodes")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let node = match read_id(entry) {
+                Some(node) => node,
+                None => match entry.get("name").and_then(Value::as_str) {
+                    Some(name) => NodeRef::named(name),
+                    None => continue,
+                },
+            };
+            let rank = entry
+                .get("rank")
+                .and_then(Value::as_u64)
+                .unwrap_or(u64::MAX);
+            ranked.push((rank, node));
+        }
+    }
+    ranked.sort_by_key(|(rank, _)| *rank);
+    ranked.into_iter().map(|(_, node)| node).collect()
+}
+
+/// One route a `path` answer reported: its nodes in order, and whether the tool ranked among more
+/// candidates than it returned.
+#[derive(Debug, Clone)]
+pub struct RouteHit {
+    pub nodes: Vec<NodeRef>,
+}
+
+/// The routes a `path` answer reported, with the ranked flag the tool set. Ranked answers run
+/// weakest first, so the caller reads the last one; unranked answers run shortest first.
+pub fn routes(value: &Value) -> (bool, Vec<RouteHit>) {
+    let ranked = value
+        .get("ranked")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let routes = value
+        .get("paths")
+        .and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .map(|route| RouteHit {
+                    nodes: route
+                        .get("nodes")
+                        .and_then(Value::as_array)
+                        .map(|nodes| {
+                            nodes
+                                .iter()
+                                .filter_map(|entry| {
+                                    read_id(entry).or_else(|| {
+                                        entry
+                                            .get("name")
+                                            .and_then(Value::as_str)
+                                            .map(NodeRef::named)
+                                    })
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    (ranked, routes)
+}
+
+/// The bearer connections an `architecture` answer reported: one pair per role-bearing declaration
+/// that reaches another, with everything bearing no role collapsed away.
+pub fn connections(value: &Value) -> Vec<(NodeRef, NodeRef)> {
+    value
+        .get("connections")
+        .and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter_map(|edge| {
+                    // `from` and `to` *are* node ids, written inline rather than under an `id`
+                    // key, the way a `candidates` entry is.
+                    Some((
+                        read_bare_id(edge.get("from")?)?,
+                        read_bare_id(edge.get("to")?)?,
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Every role-bearing declaration an `architecture` answer named, from its role nodes.
+pub fn role_bearers(value: &Value) -> Vec<NodeRef> {
+    value
+        .get("roles")
+        .and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .flat_map(|role| {
+                    role.get("bearers")
+                        .and_then(Value::as_array)
+                        .map(|b| b.iter().filter_map(read_bare_id).collect::<Vec<_>>())
+                        .unwrap_or_default()
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn string_list(value: Option<&Value>) -> Vec<String> {
     value
         .and_then(Value::as_array)

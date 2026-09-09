@@ -13,6 +13,8 @@
 //! span → file/line/col, message, labels) as structured content the agent can act on.
 
 mod analyze;
+mod architecture;
+mod context;
 mod corpus;
 mod debug;
 mod execute;
@@ -21,6 +23,7 @@ mod graph;
 mod impact;
 mod introspect;
 mod navigate;
+mod paths;
 mod search;
 mod stdlib;
 mod trace;
@@ -406,6 +409,60 @@ pub struct CallersArgs {
     /// How many levels to walk back (default 3, max 16).
     #[serde(default)]
     pub depth: Option<usize>,
+}
+
+/// Arguments to `context_map`: the seeds to rank from, the budget, and the ranking knobs.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct ContextMapArgs {
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub file: Option<String>,
+    /// What to rank from: declaration names (`app.main.handle`, `Counter.bump`, or a unique leaf),
+    /// files or module paths (`src/store.noe`, `app.store`), and `@role` names (`EntryPoint`,
+    /// which seeds every declaration bearing it).
+    pub seeds: Vec<String>,
+    /// How large the map may be, in tokens (characters over four). Default 4096.
+    #[serde(default)]
+    pub budget_tokens: Option<usize>,
+    /// Which edges to rank over: `call`, `reference`, `import`. Default all three.
+    #[serde(default)]
+    pub edge_kinds: Option<Vec<String>>,
+    /// Which ranking chooses the map: `ppr` (default, personalized PageRank from the seeds),
+    /// `degree` (importance blind to the seeds) or `random`. The two alternatives exist to measure
+    /// the default against.
+    #[serde(default)]
+    pub ranker: Option<String>,
+    /// The PRNG seed `ranker: "random"` draws from.
+    #[serde(default)]
+    pub seed: Option<u64>,
+}
+
+/// Arguments to `path`: the two endpoints and how many routes to return.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct PathArgs {
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub file: Option<String>,
+    /// Where the route starts: a post-link name (`app.main.handle`) or a unique leaf.
+    pub from: String,
+    /// Where it ends: a declaration, or an external or dynamic callee by its label
+    /// (`math.sqrt`).
+    pub to: String,
+    /// How many routes to return (default 3, max 10).
+    #[serde(default)]
+    pub k: Option<usize>,
+    /// Which edges a route may use: `call`, `reference`. Default both.
+    #[serde(default)]
+    pub edge_kinds: Option<Vec<String>>,
+    /// The longest route to search, in hops (default 12, max 24).
+    #[serde(default)]
+    pub max_depth: Option<usize>,
+    /// Which ranking chooses among more routes than `k`: `flow` (default, resource flow decayed
+    /// along each route) or `shortest` (hop count alone).
+    #[serde(default)]
+    pub ranker: Option<String>,
 }
 
 /// Arguments to `reflect`: a source, plus an optional architectural-role filter.
@@ -935,6 +992,76 @@ value). A use written in a module's top-level statements is reported as that mod
     ) -> Result<Json<impact::CallersOutput>, ErrorData> {
         let prepared = analyze::prepare(&args.source, &args.file)?;
         Ok(Json(impact::callers(&prepared, &args.symbol, args.depth)))
+    }
+
+    /// The declarations worth reading about a set of seeds, under a token budget.
+    #[tool(
+        description = "Build a budgeted map of the code around `seeds`: rank the call graph and \
+the `use` import graph from those declarations with personalized PageRank, then emit the strongest \
+connected declarations as signatures grouped by file until `budget_tokens` is full. Seed with \
+declaration names, files, module paths, or a `@role` (which seeds every declaration bearing it). \
+Every node carries its `id`, its rank and score, and the `via` edge that pulled it in, so the map \
+reads as a structure rather than a list. Use it after finding one declaration, to get the handful \
+around it instead of a whole file. `ranker` swaps the ranking for `degree` or `random` to measure \
+the default against."
+    )]
+    async fn context_map(
+        &self,
+        Parameters(args): Parameters<ContextMapArgs>,
+    ) -> Result<Json<context::ContextMapOutput>, ErrorData> {
+        let prepared = analyze::prepare(&args.source, &args.file)?;
+        Ok(Json(context::context_map(
+            &prepared,
+            &args.seeds,
+            args.budget_tokens,
+            args.edge_kinds.as_deref(),
+            args.ranker.as_deref(),
+            args.seed,
+        )))
+    }
+
+    /// How one declaration reaches another.
+    #[tool(
+        description = "Answer \"how does A reach B?\" — the k shortest chains of calls and passed \
+references from one declaration to another over the project's call graph. Each route lists its \
+nodes with their ids, the edge kind of every hop, and the call site the hop is written at. A route \
+may end on an external or dynamic callee (`math.sqrt`, a closure-valued field), which answers \
+\"how does this reach the filesystem\"; no route runs through one. Ranked answers run weakest \
+first, so the strongest route is last. `trace` walks the same graph forward from a role and \
+`callers` walks it backward from a declaration."
+    )]
+    async fn path(
+        &self,
+        Parameters(args): Parameters<PathArgs>,
+    ) -> Result<Json<paths::PathOutput>, ErrorData> {
+        let prepared = analyze::prepare(&args.source, &args.file)?;
+        Ok(Json(paths::path(
+            &prepared,
+            &args.from,
+            &args.to,
+            args.k,
+            args.edge_kinds.as_deref(),
+            args.max_depth,
+            args.ranker.as_deref(),
+        )))
+    }
+
+    /// The project as its role graph.
+    #[tool(
+        description = "Summarize a Noeta project's architecture: one node per `@role` bound \
+anywhere in it, and one edge per pair of roles, aggregated from the call graph with every \
+declaration bearing no role collapsed out. Each edge carries how many declaration-to-declaration \
+connections it stands for and a few of them by name, so it reads back to real code; an edge \
+reached only through passed references is marked. Also reports every (declaration, role) binding \
+and, for declarations bearing no role at all, how many there are and the most-connected of them. \
+Call this before `trace` to see the shape, then `trace` to unfold one entry point."
+    )]
+    async fn architecture(
+        &self,
+        Parameters(args): Parameters<AnalyzeArgs>,
+    ) -> Result<Json<architecture::ArchitectureOutput>, ErrorData> {
+        let prepared = analyze::prepare(&args.source, &args.file)?;
+        Ok(Json(architecture::architecture(&prepared)))
     }
 
     /// The `@role`/`@semantic` architectural graph plus the attribute manifest and declared types.
@@ -2221,6 +2348,121 @@ echo handle(1)
             structured["traces"][0]["children"][0]["id"]["name"],
             serde_json::json!("helper")
         );
+
+        client.cancel().await.expect("client shuts down");
+        server.abort();
+    }
+
+    /// The graph-ranking gate: `context_map`, `path` and `architecture` are advertised, and each
+    /// round-trips over a duplex against one program.
+    #[tokio::test]
+    async fn round_trip_the_ranking_tools_over_a_duplex() {
+        use rmcp::model::CallToolRequestParams;
+
+        let (client_io, server_io) = tokio::io::duplex(1 << 16);
+        let server = tokio::spawn(async move {
+            if let Ok(svc) = NoetaMcp::new().serve(server_io).await {
+                let _ = svc.waiting().await;
+            }
+        });
+
+        let client = ().serve(client_io).await.expect("client initializes");
+        let tools = client
+            .list_tools(Default::default())
+            .await
+            .expect("tools/list");
+        for expected in ["context_map", "path", "architecture"] {
+            assert!(
+                tools.tools.iter().any(|t| t.name == expected),
+                "{expected} tool advertised"
+            );
+        }
+
+        let source = "\
+@attribute
+@role(Semantic.EntryPoint)
+struct Route { path: string }
+
+@attribute
+@role(Semantic.Persistence)
+struct Store { table: string }
+
+#[Store(\"orders\")]
+fn save(n: int): int { return n }
+
+fn service(n: int): int { return save(n) }
+
+#[Route(\"/orders\")]
+fn handle(n: int): int { return service(n) }
+
+echo handle(1)
+";
+        let call = |name: &'static str, extra: Vec<(&'static str, serde_json::Value)>| {
+            let mut arguments = serde_json::Map::new();
+            arguments.insert(
+                "source".to_string(),
+                serde_json::Value::String(source.to_string()),
+            );
+            for (key, value) in extra {
+                arguments.insert(key.to_string(), value);
+            }
+            let mut params = CallToolRequestParams::default();
+            params.name = name.into();
+            params.arguments = Some(arguments);
+            params
+        };
+
+        let mapped = client
+            .call_tool(call(
+                "context_map",
+                vec![("seeds", serde_json::json!(["handle"]))],
+            ))
+            .await
+            .expect("tools/call context_map");
+        let mapped = mapped.structured_content.expect("structured content");
+        assert_eq!(mapped["found"], serde_json::json!(true));
+        assert_eq!(mapped["ranker"], serde_json::json!("ppr"));
+        assert_eq!(
+            mapped["files"][0]["nodes"][0]["name"],
+            serde_json::json!("handle")
+        );
+        assert!(mapped["files"][0]["nodes"][0]["id"]["span"].is_object());
+
+        let routed = client
+            .call_tool(call(
+                "path",
+                vec![
+                    ("from", serde_json::json!("handle")),
+                    ("to", serde_json::json!("save")),
+                ],
+            ))
+            .await
+            .expect("tools/call path");
+        let routed = routed.structured_content.expect("structured content");
+        assert_eq!(routed["found"], serde_json::json!(true));
+        let names: Vec<&str> = routed["paths"][0]["nodes"]
+            .as_array()
+            .expect("nodes")
+            .iter()
+            .map(|n| n["name"].as_str().unwrap_or_default())
+            .collect();
+        assert_eq!(names, vec!["handle", "service", "save"]);
+
+        let shape = client
+            .call_tool(call("architecture", Vec::new()))
+            .await
+            .expect("tools/call architecture");
+        let shape = shape.structured_content.expect("structured content");
+        assert_eq!(
+            shape["edges"][0]["from"],
+            serde_json::json!("Semantic.EntryPoint")
+        );
+        assert_eq!(
+            shape["edges"][0]["to"],
+            serde_json::json!("Semantic.Persistence")
+        );
+        assert_eq!(shape["edges"][0]["count"], serde_json::json!(1));
+        assert_eq!(shape["unassigned"]["count"], serde_json::json!(1));
 
         client.cancel().await.expect("client shuts down");
         server.abort();
