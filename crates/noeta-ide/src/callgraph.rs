@@ -272,6 +272,7 @@ pub fn build(
         .collect();
     // The type names the program declares, and the expression tiers' handlers.
     let types = TypeNames::collect(program, &prefixes);
+    let trait_impls = TraitImpls::collect(program, &prefixes);
     let handlers = expr_tier_handlers(program, &by_name_span);
     let modules = imported_modules(program);
 
@@ -325,16 +326,35 @@ pub fn build(
                 .lookup(ty, name)
                 .and_then(|decl| by_name_span.get(&decl).copied())
         };
+        // A member the receiver's type does not declare may be a **default method** of a trait
+        // the type implements, whose body the graph holds under `Trait.method`. Only the traits
+        // *this* type implements are consulted, so a same-named default on a trait it does not
+        // implement is never the answer.
+        let trait_default = |ty: &str| {
+            trait_impls.of(ty).iter().find_map(|trait_name| {
+                // An `impl` names its trait as the source wrote it; the declaration carries the
+                // linker's qualified identity, which is what the member table is keyed by.
+                let canonical = types.resolve(trait_name).unwrap_or(trait_name);
+                resolve(canonical)
+            })
+        };
         match receiver_kind(expr_types.get(&receiver_span), &types) {
-            // A type the program declares: the member resolves through the member table. A field
-            // access lands on a field span the inventory does not hold and is no edge at all; a
-            // *call* the type does not declare (a trait default method, a closure-valued field)
-            // is an indirection, labeled rather than dropped.
-            ReceiverKind::Nominal(ty) => match resolve(&ty) {
-                Some(target) => push(Callee::Function(target)),
-                None if is_call => push(Callee::Dynamic(format!("{ty}.{name}"))),
-                None => {}
-            },
+            // A type the program declares: the member resolves through the member table, or
+            // through a trait it implements. A field access lands on a field span the inventory
+            // does not hold and is no edge at all; a *call* nothing declares (a closure-valued
+            // field, a dispatch the checker resolved another way) is an indirection, labeled
+            // rather than dropped.
+            ReceiverKind::Nominal(ty) => {
+                let target = match members.lookup(&ty, name) {
+                    Some(decl) => by_name_span.get(&decl).copied(),
+                    None => trait_default(&ty),
+                };
+                match target {
+                    Some(target) => push(Callee::Function(target)),
+                    None if is_call => push(Callee::Dynamic(format!("{ty}.{name}"))),
+                    None => {}
+                }
+            }
             // A built-in or extern type: its methods live outside the program, named by the
             // method's own identity (`List.len`) rather than by the receiver's source text.
             ReceiverKind::Builtin(ty) if is_call => push(Callee::External(format!("{ty}.{name}"))),
@@ -666,6 +686,67 @@ impl TypeNames {
             return self.exact.get(text).map(String::as_str);
         }
         self.by_leaf.get(text)?.as_deref()
+    }
+}
+
+/// Which traits each declared type implements, from both forms that declare the relation: a
+/// standalone `impl Trait for T { … }` and an in-body `impl Trait { … }`. A member call the type
+/// itself does not declare resolves through these to the trait's default method.
+#[derive(Default)]
+struct TraitImpls {
+    by_type: HashMap<String, Vec<String>>,
+}
+
+impl TraitImpls {
+    fn collect(program: &Program, prefixes: &HashMap<SourceId, String>) -> TraitImpls {
+        let mut impls = TraitImpls::default();
+        impls.walk(&program.stmts, None, prefixes);
+        impls
+    }
+
+    fn walk(&mut self, stmts: &[Stmt], prefix: Option<&str>, prefixes: &HashMap<SourceId, String>) {
+        for stmt in stmts {
+            match stmt {
+                Stmt::Impl(d) => self.add(
+                    qualified(prefix, d.target.as_str()),
+                    qualified(prefix, d.trait_name.as_str()),
+                ),
+                Stmt::Struct(d) => self.add_blocks(prefix, d.name.as_str(), &d.impls),
+                Stmt::Class(d) => self.add_blocks(prefix, d.name.as_str(), &d.impls),
+                Stmt::Enum(d) => self.add_blocks(prefix, d.name.as_str(), &d.impls),
+                Stmt::TierBlock { items, span, .. } => {
+                    let inherited = prefix.map(str::to_string).or_else(|| {
+                        prefixes
+                            .get(&span.source)
+                            .filter(|p| !p.is_empty())
+                            .cloned()
+                    });
+                    self.walk(items, inherited.as_deref(), prefixes);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn add_blocks(&mut self, prefix: Option<&str>, ty: &str, blocks: &[noeta_ast::ImplBlock]) {
+        for block in blocks {
+            self.add(
+                qualified(prefix, ty),
+                qualified(prefix, block.trait_name.as_str()),
+            );
+        }
+    }
+
+    fn add(&mut self, ty: String, trait_name: String) {
+        let traits = self.by_type.entry(ty).or_default();
+        if !traits.contains(&trait_name) {
+            traits.push(trait_name);
+        }
+    }
+
+    /// The traits `ty` implements, in declaration order.
+    fn of(&self, ty: &str) -> &[String] {
+        self.by_type.get(ty).map_or(&[], Vec::as_slice)
     }
 }
 
