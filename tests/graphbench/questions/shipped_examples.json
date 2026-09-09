@@ -1,0 +1,20 @@
+{
+  "comment": "Hand-labeled seed questions over the pinned copy of the repository's own `examples/`. Its entry links two files, so the universe is small and several queries share an answer — the point here is the phrasing, not the breadth. Label a declaration `<file>#<name>`, or `<file>#<Type>.<method>`.",
+  "seeds": [
+    { "query": "where is a new order put together?", "answers": ["orders.noe#place"] },
+    { "query": "what checks the things being bought before anything else happens?", "answers": ["orders.noe#validate"] },
+    { "query": "where is the sentence an order shows to a person built?", "answers": ["orders.noe#Order.label"] },
+    { "query": "which function adds up what the whole order costs?", "answers": ["orders.noe#Order.total"] },
+    { "query": "where is the person who buys something declared?", "answers": ["Models.noe#User"] },
+    { "query": "which type describes one line of what was bought?", "answers": ["orders.noe#Item"] },
+    { "query": "where are the states an order can be in listed?", "answers": ["orders.noe#Status"] },
+    { "query": "what enumerates the ways this can go wrong?", "answers": ["orders.noe#OrderError"] },
+    { "query": "which function reports the outcome as text?", "answers": ["orders.noe#describe"] },
+    { "query": "where is an order value first constructed?", "answers": ["orders.noe#Order.new"] },
+    { "query": "which type carries the whole purchase?", "answers": ["orders.noe#Order"] },
+    { "query": "where is a purchase with nothing in it rejected?", "answers": ["orders.noe#validate"] },
+    { "query": "what catches a price below zero?", "answers": ["orders.noe#validate"] },
+    { "query": "where does the buyer's name live?", "answers": ["Models.noe#User"] },
+    { "query": "what wording is used once the money has arrived?", "answers": ["orders.noe#Order.label"] }
+  ]
+}

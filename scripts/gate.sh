@@ -438,6 +438,17 @@ step 2 test "shape: noeta-host-real (no default)" -- \
 step 2 test "shape: noeta-stdlib (no default)" -- \
     "${CARGO[@]}" check -p noeta-stdlib --no-default-features --locked
 
+# --- test: the graph-retrieval benchmark ------------------------------------------------------
+#
+# Fixed compositions of `noeta mcp` tool calls over a hand-written corpus, scored against gold the
+# compiler's own indices produce. Nothing in it varies — no model, no sampling, no clock in an
+# answer — so its rows are pinned exactly in tests/graphbench/baseline.txt and a drop in any F1, or
+# a rise in any row's token size, exits non-zero. It also gates the corpus itself: a project that
+# stopped linking fails the step rather than silently scoring against the entry file's own AST.
+# Re-record with `cargo run -p noeta-graphbench -- --record` and read the diff's sign.
+step 2 test "graph-retrieval benchmark (baseline compare)" -- \
+    "${CARGO[@]}" run -q -p noeta-graphbench --locked --
+
 # --- docs: every ```noeta block in docs/ runs through the real binary --------------------------
 step 2 docs "doc samples (docs/*.md)" -- \
     "${CARGO[@]}" test -p noeta-cli --test doc_samples --no-default-features --locked

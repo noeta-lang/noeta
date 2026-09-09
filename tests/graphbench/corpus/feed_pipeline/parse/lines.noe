@@ -1,0 +1,42 @@
+// The key-value parser: one record per line, `a=1;b=2`. `decode` here is the second function under
+// that leaf name.
+
+use Feed.model.Field;
+use Feed.model.Record;
+use Feed.model.FeedError;
+use Feed.model.field_of;
+use Feed.roles.Trusted;
+
+pub fn split_pairs(line: string): List<string> {
+    return line.split(";").filter(fn(part: string) => part.contains("="))
+}
+
+pub fn decode(line: string, index: int): Result<Record, FeedError> {
+    pairs = split_pairs(line)
+    if pairs.len() == 0 {
+        return Err(FeedError.BadRow(line: index))
+    }
+    mut fields: List<Field> = []
+    for pair in pairs {
+        halves = pair.split("=", 2)
+        fields = fields ~ [field_of(halves[0].trim(), halves[1].trim())]
+    }
+    return Ok(Record.new("lines", fields))
+}
+
+#[Trusted("lines")]
+pub fn decode_all(text: string): Result<List<Record>, FeedError> {
+    rows = text.lines().filter(fn(line: string) => line.len() > 0)
+    if rows.len() == 0 {
+        return Err(FeedError.EmptyFeed)
+    }
+    mut out: List<Record> = []
+    for (i, line) in rows.enumerate() {
+        out = out ~ [decode(line, i)?]
+    }
+    return Ok(out)
+}
+
+pub fn preview(text: string): string {
+    return text.lines().first() ?? ""
+}

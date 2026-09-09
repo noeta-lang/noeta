@@ -1,0 +1,41 @@
+// Argument parsing. `parse` here and `parse` in `Tasks.config` are two functions under one leaf
+// name, reached from different callers.
+
+use Tasks.model.TaskError;
+
+pub struct Invocation {
+    verb: string
+    rest: List<string>
+}
+
+pub fn parse(argv: List<string>): Invocation {
+    if argv.len() == 0 {
+        return Invocation { verb: "help", rest: [] }
+    }
+    return Invocation { verb: argv[0], rest: argv.slice(1) }
+}
+
+pub fn joined(invocation: Invocation): string {
+    return invocation.rest.join(" ")
+}
+
+pub fn first_arg(invocation: Invocation): ?string {
+    return invocation.rest.first()
+}
+
+pub fn int_arg(invocation: Invocation): Result<int, TaskError> {
+    raw = first_arg(invocation) ?? ""
+    parsed = raw.to_int()
+    return match parsed {
+        some(n) => Ok(n),
+        none => Err(TaskError.NotFound(id: 0)),
+    }
+}
+
+fn strip_flag(word: string): string {
+    return word.replace("-", "")
+}
+
+pub fn flags(invocation: Invocation): List<string> {
+    return invocation.rest.filter(fn(w: string) => w.starts_with("-")).map(strip_flag)
+}

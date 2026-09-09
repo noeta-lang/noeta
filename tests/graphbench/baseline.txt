@@ -1,0 +1,40 @@
+# Baseline for `cargo run -p noeta-graphbench` — one row per (arm, category).
+#
+# `f1` is the floor and `tokens` is the ceiling. A default run compares against them and
+# exits non-zero when an F1 falls below its floor or a row's tokens-per-question rises
+# above its ceiling.
+#
+# TOLERANCE. F1 may fall by 0.0005, which is half of the last printed digit and therefore
+# rounding; tokens may not rise at all. The bands are that tight because nothing in this
+# measurement varies: the retrieval layer has no model in it, no sampling, no clock in any
+# answer, and no dependency on machine speed, so two runs of one tree produce byte-equal
+# numbers. That is the difference from the instructions-retired perf ratchet, whose bands
+# exist because a hardware counter has spread. Here a row that moved, moved because the
+# code moved.
+#
+# Wall time is recorded in `--json` and gated nowhere: this box carries several concurrent
+# agent builds, so a millisecond column measures the afternoon.
+#
+# An arm that reports SKIP has no row. A SKIP is never a pass, and a baseline that recorded
+# one as a zero would turn "the tool does not exist yet" into a measurement.
+#
+# Re-record with:  cargo run -p noeta-graphbench -- --record
+# Read the diff's sign: F1 up is an improvement worth pinning, F1 down needs a reason, and
+# tokens up needs the sentence saying what the extra context bought.
+
+row A0  definition     f1=1.0000 tokens=5619 n=25
+row A0  callers        f1=0.6907 tokens=354 n=25
+row A0  callees        f1=1.0000 tokens=1378 n=26
+row A0  importers      f1=0.8462 tokens=1401 n=26
+row A0  role_reach     f1=1.0000 tokens=4591 n=9
+row A0  path           f1=0.9429 tokens=3939 n=21
+row A0  impact         f1=0.3077 tokens=4936 n=26
+row A0  seed_mapping   f1=0.0776 tokens=6654 n=69
+row A5  definition     f1=1.0000 tokens=4373 n=25
+row A5  callers        f1=0.6027 tokens=8746 n=25
+row A5  callees        f1=0.3331 tokens=8724 n=26
+row A5  importers      f1=0.9821 tokens=8724 n=26
+row A5  role_reach     f1=0.4638 tokens=8874 n=9
+row A5  path           f1=0.7468 tokens=8722 n=21
+row A5  impact         f1=0.7396 tokens=8724 n=26
+row A5  seed_mapping   f1=0.0409 tokens=4318 n=69

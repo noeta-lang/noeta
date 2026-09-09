@@ -109,6 +109,9 @@ noeta-pm = { path = "crates/noeta-pm" }
 # Agent-native tooling: the `noeta mcp` Model Context Protocol server (agent adapter over the
 # salsa graph + VM — the third editor-tooling leg after lsp/dap).
 noeta-mcp = { path = "crates/noeta-mcp" }
+# The graph-retrieval benchmark: deterministic tool compositions over the real `noeta mcp` service,
+# scored against gold computed from the compiler's own indices.
+noeta-graphbench = { path = "crates/noeta-graphbench" }
 
 # External crates (pinned once; see docs/resources/03-implementation-plan.md §2)
 logos = "0.16"

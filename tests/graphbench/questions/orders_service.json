@@ -1,0 +1,23 @@
+{
+  "comment": "Hand-labeled seed questions: a developer's sentence, and the declarations that answer it. No query names an identifier the code uses, because the point is mapping words onto nodes. Label a declaration `<file>#<name>`, or `<file>#<Type>.<method>` when a method name is shared.",
+  "seeds": [
+    { "query": "where does an order get persisted?", "answers": ["store.noe#save_order", "store.noe#OrderStore.append"] },
+    { "query": "what checks the caller's permissions before a handler does anything?", "answers": ["auth.noe#authorize"] },
+    { "query": "which function turns an order into the text a client sees?", "answers": ["report.noe#render_order"] },
+    { "query": "where is the route that creates a new order?", "answers": ["orders.noe#place_order"] },
+    { "query": "what sends the notification once an order is accepted?", "answers": ["notify.noe#notify_placed"] },
+    { "query": "where are amounts turned into a readable string with a decimal point?", "answers": ["money.noe#format_cents"] },
+    { "query": "what validates the request body before the handler accepts it?", "answers": ["validate.noe#validate_items"] },
+    { "query": "which type holds a person's name and email address?", "answers": ["models.noe#Customer"] },
+    { "query": "where are the orders kept in memory?", "answers": ["store.noe#OrderStore"] },
+    { "query": "what extracts the domain out of an email address?", "answers": ["models.noe#Customer.domain"] },
+    { "query": "which function records that payment has been taken?", "answers": ["store.noe#mark_paid"] },
+    { "query": "where does the project declare what makes something an entry point?", "answers": ["roles.noe#Route"] },
+    { "query": "what decides whether an address looks like a real one?", "answers": ["validate.noe#validate_email"] },
+    { "query": "which contract lets a caller ask how many orders are held?", "answers": ["repository.noe#Repository"] },
+    { "query": "where is the outbound delivery channel chosen?", "answers": ["notify.noe#email_channel", "notify.noe#log_channel"] },
+    { "query": "what adds up the price of several priced parts?", "answers": ["money.noe#total_of"] },
+    { "query": "where does the liveness endpoint live?", "answers": ["health.noe#health_check"] },
+    { "query": "which function reports how many lines an order has?", "answers": ["models.noe#Order.line_count"] }
+  ]
+}

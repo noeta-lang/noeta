@@ -1,0 +1,69 @@
+// The config store. `Config.get` reads through a map, and `parse` here shares its leaf name with
+// `Tasks.args.parse`.
+
+use Tasks.roles.Writes;
+use Tasks.roles.Layer;
+
+#[Layer("config")]
+pub class Config {
+    mut values: Map<string, string>
+
+    pub fn new(): Config {
+        return Config { values: {} }
+    }
+
+    pub fn get(key: string): ?string {
+        return self.values.get(key)
+    }
+
+    pub fn put(key: string, value: string): void {
+        self.values = self.values.set(key, value)
+    }
+
+    pub fn keys(): List<string> {
+        return self.values.keys()
+    }
+
+    pub fn describe(): string {
+        return "config(${self.values.len()})"
+    }
+}
+
+pub fn parse(line: string): ?(string, string) {
+    parts = line.split("=", 2)
+    if parts.len() < 2 {
+        return none
+    }
+    return some((parts[0].trim(), parts[1].trim()))
+}
+
+#[Writes("tasks.conf")]
+pub fn load_lines(config: Config, lines: List<string>): int {
+    mut taken = 0
+    for line in lines {
+        pair = parse(line)
+        match pair {
+            some(entry) => {
+                config.put(entry.0, entry.1)
+                taken = taken + 1
+            },
+            none => {},
+        }
+    }
+    return taken
+}
+
+pub fn default_config(): Config {
+    config = Config.new()
+    load_lines(config, ["format=plain", "color=off"])
+    return config
+}
+
+pub fn format_of(config: Config): string {
+    return config.get("format") ?? "plain"
+}
+
+// Nothing calls this.
+pub fn reset(config: Config): void {
+    config.put("format", "plain")
+}

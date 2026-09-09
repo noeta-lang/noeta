@@ -1,0 +1,25 @@
+{
+  "comment": "The corpus roster. One entry per project directory beside this file; `entry` is the file every MCP tool call addresses and the file the gold indices are built from. Adding a project means adding a directory and a row here.",
+  "projects": [
+    {
+      "name": "orders_service",
+      "entry": "main.noe",
+      "domain": "an HTTP order service with a repository layer and a notifier"
+    },
+    {
+      "name": "task_cli",
+      "entry": "main.noe",
+      "domain": "a task CLI with subcommands, a config store and a dispatch registry"
+    },
+    {
+      "name": "feed_pipeline",
+      "entry": "main.noe",
+      "domain": "an ingest pipeline of parsers, checkers and publishers"
+    },
+    {
+      "name": "shipped_examples",
+      "entry": "orders.noe",
+      "domain": "a pinned copy of the repository's own `examples/` tree"
+    }
+  ]
+}

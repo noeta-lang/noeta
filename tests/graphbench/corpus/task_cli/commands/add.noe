@@ -1,0 +1,47 @@
+// `tasks add <title>`: parse a priority, build a task, persist it, print the line.
+
+use Tasks.args.Invocation;
+use Tasks.args.joined;
+use Tasks.model.Task;
+use Tasks.model.TaskError;
+use Tasks.model.priority_of;
+use Tasks.model.Priority;
+use Tasks.store.TaskStore;
+use Tasks.store.persist;
+use Tasks.text.emit;
+use Tasks.text.renderer_for;
+use Tasks.text.Renderer;
+use Tasks.roles.Sub;
+use Tasks.roles.Confirms;
+
+#[Confirms("overwrite")]
+pub fn confirm_title(title: string): Result<string, TaskError> {
+    if title.len() == 0 {
+        return Err(TaskError.EmptyTitle)
+    }
+    return Ok(title)
+}
+
+#[Sub("add")]
+pub fn run(store: TaskStore, invocation: Invocation): string {
+    title = confirm_title(joined(invocation))
+    return match title {
+        Ok(text) => add_task(store, text, Priority.Normal),
+        Err(_) => emit("a task needs a title"),
+    }
+}
+
+fn add_task(store: TaskStore, title: string, priority: Priority): string {
+    task = Task.new(store.take_id(), title, priority)
+    persist(store, task)
+    renderer = renderer_for("plain")
+    return emit(renderer.line(task))
+}
+
+pub fn add_with_priority(store: TaskStore, title: string, word: string): string {
+    chosen = priority_of(word)
+    return match chosen {
+        Ok(priority) => add_task(store, title, priority),
+        Err(_) => emit("unknown priority ${word}"),
+    }
+}

@@ -1,0 +1,85 @@
+// The domain types. `Customer` and `Order` both answer `describe()`, which is the same method name
+// on two types — a name a lexical search cannot disambiguate and the member table can.
+
+pub struct Money {
+    cents: int
+}
+
+pub struct Item {
+    sku: string
+    price: Money
+    qty: int
+}
+
+pub enum OrderStatus: string {
+    Pending = "pending";
+    Paid = "paid";
+    Shipped = "shipped";
+    Canceled = "canceled";
+}
+
+pub enum OrderError {
+    Empty;
+    NegativePrice(index: int);
+    UnknownCustomer(email: string);
+}
+
+pub class Customer {
+    pub name: string
+    pub email: string
+
+    pub fn new(name: string, email: string): Customer {
+        return Customer { name: name, email: email }
+    }
+
+    pub fn describe(): string {
+        return "${self.name} <${self.email}>"
+    }
+
+    pub fn domain(): string {
+        parts = self.email.split("@")
+        if parts.len() < 2 {
+            return "unknown"
+        }
+        return parts.last() ?? "unknown"
+    }
+}
+
+pub class Order {
+    pub id: int
+    pub customer: Customer
+    pub items: List<Item>
+    pub mut status: OrderStatus
+
+    pub fn new(id: int, customer: Customer, items: List<Item>): Order {
+        return Order { id: id, customer: customer, items: items, status: OrderStatus.Pending }
+    }
+
+    pub fn describe(): string {
+        return "order ${self.id} for ${self.customer.describe()} (${self.line_count()} lines)"
+    }
+
+    pub fn line_count(): int {
+        return self.items.len()
+    }
+
+    pub fn subtotal(): Money {
+        mut cents = 0
+        for item in self.items {
+            cents = cents + item.price.cents * item.qty
+        }
+        return Money { cents: cents }
+    }
+
+    pub fn mark(next: OrderStatus): void {
+        self.status = next
+    }
+}
+
+pub fn money_of(cents: int): Money {
+    return Money { cents: cents }
+}
+
+pub fn item_of(sku: string, cents: int, qty: int): Item {
+    return Item { sku: sku, price: money_of(cents), qty: qty }
+}

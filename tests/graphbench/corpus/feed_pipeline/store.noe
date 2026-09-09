@@ -1,0 +1,55 @@
+// Where accepted records land.
+
+use Feed.model.Record;
+use Feed.model.Batch;
+use Feed.model.batch_of;
+use Feed.roles.Stores;
+use Feed.roles.Stage;
+
+#[Stage("storage")]
+pub class RecordStore {
+    mut kept: List<Record>
+    mut rejected: int
+
+    pub fn new(): RecordStore {
+        return RecordStore { kept: [], rejected: 0 }
+    }
+
+    pub fn accept(record: Record): void {
+        self.kept = self.kept ~ [record]
+    }
+
+    pub fn reject(): void {
+        self.rejected = self.rejected + 1
+    }
+
+    pub fn batch(label: string): Batch {
+        return batch_of(label, self.kept)
+    }
+
+    pub fn describe(): string {
+        return "${self.kept.len()} kept, ${self.rejected} rejected"
+    }
+}
+
+#[Stores("records")]
+pub fn commit(store: RecordStore, records: List<Record>): int {
+    for record in records {
+        store.accept(record)
+    }
+    return records.len()
+}
+
+#[Stores("records")]
+pub fn commit_one(store: RecordStore, record: Record): string {
+    store.accept(record)
+    return record.describe()
+}
+
+pub fn drop_all(store: RecordStore, count: int): void {
+    mut left = count
+    while left > 0 {
+        store.reject()
+        left = left - 1
+    }
+}

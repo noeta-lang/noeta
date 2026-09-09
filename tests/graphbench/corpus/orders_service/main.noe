@@ -1,0 +1,141 @@
+// The entry: wire the service, place one order, and print the read side. Everything the project
+// ships is reachable from here, because a declaration nothing imports is a declaration the linker
+// leaves out of the merged program.
+
+use Shop.models.Customer;
+use Shop.models.Item;
+use Shop.models.Order;
+use Shop.models.item_of;
+use Shop.auth.principal_of;
+use Shop.auth.scope_label;
+use Shop.auth.revoke;
+use Shop.money.Surcharge;
+use Shop.money.total_of;
+use Shop.money.label_of;
+use Shop.money.add;
+use Shop.money.rounded_label;
+use Shop.money.money_label;
+use Shop.store.OrderStore;
+use Shop.store.mark_paid;
+use Shop.notify.email_channel;
+use Shop.notify.log_channel;
+use Shop.notify.channel_names;
+use Shop.notify.notify_all;
+use Shop.notify.notify_purge;
+use Shop.report.render_all;
+use Shop.report.unused_summary;
+use Shop.report.order_total_label;
+use Shop.repository.describe_repo;
+use Shop.repository.first_or_none;
+use Shop.validate.count_positive;
+use Shop.validate.count_matching;
+use Shop.handlers.orders.Request;
+use Shop.handlers.orders.place_order;
+use Shop.handlers.orders.list_orders;
+use Shop.handlers.orders.pay_order;
+use Shop.handlers.health.health_check;
+use Shop.handlers.health.version;
+
+fn demo_customer(): Customer {
+    return Customer.new("Ada Lovelace", "ada@example.com")
+}
+
+fn demo_items(): List<Item> {
+    return [item_of("sku-1", 999, 2), item_of("sku-2", 450, 1)]
+}
+
+fn demo_request(): Request {
+    return Request {
+        customer: demo_customer(),
+        items: demo_items(),
+        scopes: ["orders:write", "orders:read"],
+    }
+}
+
+fn surcharges(): List<Surcharge> {
+    return [Surcharge { reason: "handling", cents: 150 }]
+}
+
+fn extras_label(): string {
+    fees = total_of(surcharges())
+    return "${label_of(surcharges()[0])} ${money_label(add(fees, fees))} ${rounded_label(fees)}"
+}
+
+fn run_demo(): string {
+    store = OrderStore.new()
+    channel = email_channel()
+    request = demo_request()
+    placed = place_order(store, channel, request)
+    listed = list_orders(store, request)
+    return "${placed}\n${listed}\n${describe_repo(store)}"
+}
+
+fn audit(): string {
+    store = OrderStore.new()
+    who = revoke(principal_of(demo_customer(), ["admin"]))
+    kept = first_or_none(store)
+    none_yet: List<Order> = []
+    return "${scope_label(who)}|${unused_summary(none_yet)}|${health_check(store)}|${version()}|${kept == none}"
+}
+
+echo run_demo()
+echo channel_names([email_channel(), log_channel()])
+echo render_all([])
+echo extras_label()
+echo audit()
+echo count_positive(demo_items())
+echo count_matching(demo_items(), fn(it: Item) => it.qty > 1)
+
+@test {
+    use Shop.models.OrderStatus;
+    use Shop.store.save_order;
+    use Shop.validate.validate_items;
+    use Shop.validate.error_label;
+    use Shop.models.OrderError;
+
+    struct Case {
+        label: string
+
+        fn store(): OrderStore {
+            echo self.label
+            return OrderStore.new()
+        }
+    }
+
+    fn a_case(): Case {
+        return Case { label: "demo" }
+    }
+
+    fn the_demo_places_an_order(): void {
+        assert(run_demo().contains("order 1"))
+    }
+
+    fn paying_marks_the_order(): void {
+        store = a_case().store()
+        order = Order.new(1, demo_customer(), demo_items())
+        save_order(store, order)
+        assert(mark_paid(store, order).contains("order 1"))
+        assert(order.status == OrderStatus.Paid)
+    }
+
+    fn an_empty_order_is_rejected(): void {
+        empty: List<Item> = []
+        problem = validate_items(empty)
+        assert(match problem {
+            Ok(_) => false,
+            Err(e) => error_label(e) == error_label(OrderError.Empty),
+        })
+    }
+
+    fn notifying_every_channel_returns_one_line_each(): void {
+        order = Order.new(2, demo_customer(), demo_items())
+        assert(notify_all([email_channel(), log_channel()], order).len() == 2)
+        assert(notify_purge(log_channel()).contains("purge"))
+    }
+
+    fn the_read_side_totals_an_order(): void {
+        order = Order.new(3, demo_customer(), demo_items())
+        assert(order_total_label(order).len() > 0)
+        assert(pay_order(a_case().store(), demo_request(), order).len() > 0)
+    }
+}

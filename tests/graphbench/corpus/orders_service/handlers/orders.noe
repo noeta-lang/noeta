@@ -1,0 +1,72 @@
+// The HTTP surface. Each handler is an `EntryPoint`, and the path from one to the store runs
+// through the trust boundary in `Shop.auth` and the persistence boundary in `Shop.store`.
+
+use Shop.models.Customer;
+use Shop.models.Item;
+use Shop.models.Order;
+use Shop.models.OrderError;
+use Shop.auth.Principal;
+use Shop.auth.authorize;
+use Shop.auth.principal_of;
+use Shop.store.OrderStore;
+use Shop.store.save_order;
+use Shop.store.mark_paid;
+use Shop.store.next_order_id;
+use Shop.validate.validate_items;
+use Shop.validate.validate_email;
+use Shop.validate.error_label;
+use Shop.report.render_order;
+use Shop.notify.Channel;
+use Shop.notify.notify_placed;
+use Shop.roles.Route;
+
+pub struct Request {
+    customer: Customer
+    items: List<Item>
+    scopes: List<string>
+}
+
+pub fn request_principal(request: Request): Principal {
+    return principal_of(request.customer, request.scopes)
+}
+
+#[Route("/orders")]
+pub fn place_order(store: OrderStore, channel: Channel, request: Request): string {
+    who = request_principal(request)
+    if !authorize(who, "orders:write") {
+        return "403"
+    }
+    if !validate_email(request.customer.email) {
+        return error_label(OrderError.UnknownCustomer(email: request.customer.email))
+    }
+    checked = validate_items(request.items)
+    return match checked {
+        Ok(_) => accept_order(store, channel, request),
+        Err(problem) => error_label(problem),
+    }
+}
+
+fn accept_order(store: OrderStore, channel: Channel, request: Request): string {
+    order = Order.new(next_order_id(store), request.customer, request.items)
+    save_order(store, order)
+    notify_placed(channel, order)
+    return render_order(order)
+}
+
+#[Route("/orders/pay")]
+pub fn pay_order(store: OrderStore, request: Request, order: Order): string {
+    who = request_principal(request)
+    if !authorize(who, "orders:pay") {
+        return "403"
+    }
+    return mark_paid(store, order)
+}
+
+#[Route("/orders/list")]
+pub fn list_orders(store: OrderStore, request: Request): string {
+    who = request_principal(request)
+    if !authorize(who, "orders:read") {
+        return "403"
+    }
+    return "${store.snapshot().len()} orders"
+}

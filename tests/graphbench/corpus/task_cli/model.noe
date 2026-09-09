@@ -1,0 +1,87 @@
+// The task record and its vocabulary. `Task.render` and `Filter.render` are the same method name on
+// two types, so a question about `render` needs the receiver's type to answer.
+
+pub enum Priority: int {
+    Low = 1;
+    Normal = 2;
+    High = 3;
+}
+
+pub enum TaskState: string {
+    Open = "open";
+    Doing = "doing";
+    Done = "done";
+}
+
+pub enum TaskError {
+    NotFound(id: int);
+    BadPriority(word: string);
+    EmptyTitle;
+}
+
+pub class Task {
+    pub id: int
+    pub title: string
+    pub priority: Priority
+    pub mut state: TaskState
+
+    pub fn new(id: int, title: string, priority: Priority): Task {
+        return Task { id: id, title: title, priority: priority, state: TaskState.Open }
+    }
+
+    pub fn render(): string {
+        return "[${self.id}] ${self.title} (${self.state})"
+    }
+
+    pub fn is_open(): bool {
+        return self.state == TaskState.Open
+    }
+
+    pub fn finish(): void {
+        self.state = TaskState.Done
+    }
+
+    pub fn weight(): int {
+        return match self.priority {
+            Priority.Low => 1,
+            Priority.Normal => 2,
+            Priority.High => 3,
+        }
+    }
+}
+
+pub struct Filter {
+    state: ?TaskState
+    word: string
+
+    pub fn render(): string {
+        return "filter(${self.word})"
+    }
+
+    pub fn keeps(task: Task): bool {
+        if !task.title.contains(self.word) {
+            return false
+        }
+        return match self.state {
+            some(wanted) => task.state == wanted,
+            none => true,
+        }
+    }
+}
+
+pub fn open_filter(word: string): Filter {
+    return Filter { state: some(TaskState.Open), word: word }
+}
+
+pub fn any_filter(): Filter {
+    return Filter { state: none, word: "" }
+}
+
+pub fn priority_of(word: string): Result<Priority, TaskError> {
+    return match word {
+        "low" => Ok(Priority.Low),
+        "normal" => Ok(Priority.Normal),
+        "high" => Ok(Priority.High),
+        _ => Err(TaskError.BadPriority(word: word)),
+    }
+}

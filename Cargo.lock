@@ -2801,6 +2801,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "noeta-graphbench"
+version = "0.8.1"
+dependencies = [
+ "clap",
+ "noeta-ast",
+ "noeta-db",
+ "noeta-diagnostics",
+ "noeta-ide",
+ "noeta-lexer",
+ "noeta-loader",
+ "noeta-mcp",
+ "noeta-pm",
+ "noeta-project",
+ "noeta-span",
+ "noeta-stdlib",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "noeta-host-real"
 version = "0.8.1"
 dependencies = [

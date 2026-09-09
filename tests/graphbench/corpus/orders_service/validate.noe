@@ -1,0 +1,52 @@
+// Request validation, and the one place a nested `fn` and a passed callback both appear.
+
+use Shop.models.Item;
+use Shop.models.OrderError;
+
+pub fn validate_items(items: List<Item>): Result<void, OrderError> {
+    if items.len() == 0 {
+        return Err(OrderError.Empty)
+    }
+    for (i, item) in items.enumerate() {
+        if item.price.cents < 0 {
+            return Err(OrderError.NegativePrice(index: i))
+        }
+    }
+    return Ok()
+}
+
+pub fn validate_email(email: string): bool {
+    fn has_at(text: string): bool {
+        return text.contains("@")
+    }
+    fn has_dot(text: string): bool {
+        return text.contains(".")
+    }
+    return has_at(email) && has_dot(email)
+}
+
+pub fn count_matching(items: List<Item>, keep: (Item) -> bool): int {
+    mut hits = 0
+    for item in items {
+        if keep(item) {
+            hits = hits + 1
+        }
+    }
+    return hits
+}
+
+pub fn positive_qty(item: Item): bool {
+    return item.qty > 0
+}
+
+pub fn count_positive(items: List<Item>): int {
+    return count_matching(items, positive_qty)
+}
+
+pub fn error_label(error: OrderError): string {
+    return match error {
+        OrderError.Empty => "empty order",
+        OrderError.NegativePrice(i) => "line ${i} is negative",
+        OrderError.UnknownCustomer(email) => "no customer ${email}",
+    }
+}

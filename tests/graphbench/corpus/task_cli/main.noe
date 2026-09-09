@@ -1,0 +1,130 @@
+// The entry: read a fixed argv, dispatch it, print the config summary. Everything the CLI ships is
+// wired from here, because a declaration nothing imports is one the linker leaves out.
+
+use Tasks.args.Invocation;
+use Tasks.args.parse;
+use Tasks.args.joined;
+use Tasks.args.flags;
+use Tasks.args.int_arg;
+use Tasks.config.Config;
+use Tasks.config.default_config;
+use Tasks.config.format_of;
+use Tasks.config.reset;
+use Tasks.model.Task;
+use Tasks.model.Priority;
+use Tasks.model.priority_of;
+use Tasks.model.TaskError;
+use Tasks.model.any_filter;
+use Tasks.registry.dispatch;
+use Tasks.registry.find_entry;
+use Tasks.registry.verbs;
+use Tasks.store.TaskStore;
+use Tasks.store.persist;
+use Tasks.store.store_summary;
+use Tasks.text.Wide;
+use Tasks.text.Renderer;
+use Tasks.text.render_with;
+use Tasks.text.pad;
+use Tasks.text.emit_banner;
+use Tasks.commands.add;
+use Tasks.commands.list;
+use Tasks.commands.done;
+use Tasks.roles.Command;
+
+#[Command("tasks")]
+pub fn main_entry(argv: List<string>): string {
+    store = TaskStore.new()
+    config = default_config()
+    invocation = parse(argv)
+    out = dispatch(store, invocation)
+    return "${out}\nformat=${format_of(config)}"
+}
+
+fn wide_view(store: TaskStore): string {
+    return render_with(Wide { width: 30 }, store.all())
+}
+
+fn seeded(): TaskStore {
+    store = TaskStore.new()
+    persist(store, Task.new(store.take_id(), "write the report", Priority.High))
+    return store
+}
+
+fn diagnostics(): string {
+    store = seeded()
+    invocation = Invocation { verb: "done", rest: ["-v", "1"] }
+    known = find_entry("list")
+    padded = pad("x", 4)
+    config = Config.new()
+    reset(config)
+    chosen = match priority_of("high") {
+        Ok(_) => "high",
+        Err(_) => "?",
+    }
+    numbered = match int_arg(invocation) {
+        Ok(n) => n,
+        Err(_) => 0,
+    }
+    return "${joined(invocation)}|${flags(invocation).len()}|${store_summary(store)}|${any_filter().render()}|${padded}|${known != none}|${chosen}|${numbered}|${config.describe()}"
+}
+
+fn sweep(): string {
+    store = seeded()
+    added = add.add_with_priority(store, "ship it", "low")
+    listed = list.count_open(store)
+    closed = done.problem_label(TaskError.EmptyTitle)
+    return "${added}|${listed}|${closed}|${wide_view(store)}"
+}
+
+echo main_entry(["add", "write", "the", "report"])
+echo verbs()
+echo diagnostics()
+echo sweep()
+echo emit_banner()
+
+@test {
+    use Tasks.model.TaskState;
+    use Tasks.store.persist_done;
+    use Tasks.commands.add.confirm_title;
+
+    struct Fixture {
+        verb: string
+
+        fn invocation(): Invocation {
+            return Invocation { verb: self.verb, rest: [] }
+        }
+    }
+
+    fn fixture(): Fixture {
+        return Fixture { verb: "list" }
+    }
+
+    fn dispatch_lists_a_seeded_store(): void {
+        assert(dispatch(seeded(), fixture().invocation()).contains("write the report"))
+    }
+
+    fn the_entry_adds_a_task(): void {
+        assert(main_entry(["add", "ship", "it"]).contains("ship it"))
+    }
+
+    fn closing_a_task_marks_it_done(): void {
+        store = seeded()
+        closed = persist_done(store, 1)
+        assert(match closed {
+            Ok(task) => task.state == TaskState.Done,
+            Err(_) => false,
+        })
+    }
+
+    fn an_empty_title_is_refused(): void {
+        assert(match confirm_title("") {
+            Ok(_) => false,
+            Err(_) => true,
+        })
+    }
+
+    fn the_sweep_touches_every_command(): void {
+        assert(sweep().len() > 0)
+        assert(diagnostics().len() > 0)
+    }
+}

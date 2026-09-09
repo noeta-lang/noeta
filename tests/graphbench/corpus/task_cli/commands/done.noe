@@ -1,0 +1,44 @@
+// `tasks done <id>`: look the task up, close it, print it.
+
+use Tasks.args.Invocation;
+use Tasks.args.int_arg;
+use Tasks.model.TaskError;
+use Tasks.store.TaskStore;
+use Tasks.store.persist_done;
+use Tasks.text.emit;
+use Tasks.text.emit_error;
+use Tasks.roles.Sub;
+use Tasks.roles.Confirms;
+
+#[Confirms("close")]
+pub fn confirm_close(id: int): bool {
+    return id > 0
+}
+
+#[Sub("done")]
+pub fn run(store: TaskStore, invocation: Invocation): string {
+    parsed = int_arg(invocation)
+    return match parsed {
+        Ok(id) => close_task(store, id),
+        Err(problem) => emit_error(problem_label(problem)),
+    }
+}
+
+fn close_task(store: TaskStore, id: int): string {
+    if !confirm_close(id) {
+        return emit_error("id must be positive")
+    }
+    closed = persist_done(store, id)
+    return match closed {
+        Ok(task) => emit(task.render()),
+        Err(problem) => emit_error(problem_label(problem)),
+    }
+}
+
+pub fn problem_label(problem: TaskError): string {
+    return match problem {
+        TaskError.NotFound(id) => "no task ${id}",
+        TaskError.BadPriority(word) => "bad priority ${word}",
+        TaskError.EmptyTitle => "empty title",
+    }
+}

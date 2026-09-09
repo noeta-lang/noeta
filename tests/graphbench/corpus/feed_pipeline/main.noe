@@ -1,0 +1,131 @@
+// The entry: feed one CSV document and one key-value document through the pipeline, and touch every
+// stage the project ships, because a declaration nothing imports is one the linker leaves out.
+
+use Feed.model.Record;
+use Feed.model.FeedError;
+use Feed.model.Severity;
+use Feed.model.batch_of;
+use Feed.model.field_of;
+use Feed.parse.csv;
+use Feed.parse.lines;
+use Feed.run.ingest_csv;
+use Feed.run.ingest_lines;
+use Feed.run.ingest_replay;
+use Feed.run.describe_error;
+use Feed.stages.MinWidth;
+use Feed.stages.Checker;
+use Feed.stages.Transform;
+use Feed.stages.identity;
+use Feed.stages.apply_all;
+use Feed.stages.run_check;
+use Feed.store.RecordStore;
+use Feed.store.commit_one;
+use Feed.store.drop_all;
+use Feed.publish.topics;
+use Feed.publish.verbose_topic;
+use Feed.publish.announce;
+use Feed.publish.announce_failure;
+use Feed.metrics.tally;
+use Feed.metrics.worst;
+use Feed.metrics.ratio;
+use Feed.metrics.render_counts;
+
+fn csv_text(): string {
+    return "id,name\n1,ada\n2,grace\n"
+}
+
+fn lines_text(): string {
+    return "id=3;name=alan\nid=4;name=edsger\n"
+}
+
+fn run_all(): string {
+    store = RecordStore.new()
+    first = ingest_csv(store, csv_text())
+    second = ingest_lines(store, lines_text())
+    return "${first}\n${second}\n${store.describe()}"
+}
+
+fn replayed(): string {
+    store = RecordStore.new()
+    record = Record.new("replay", [field_of("id", "9"), field_of("name", "barbara")])
+    return ingest_replay(store, [record])
+}
+
+fn diagnostics(): string {
+    store = RecordStore.new()
+    record = Record.new("probe", [field_of("id", "1"), field_of("name", "ada")])
+    record.raise(Severity.Warn)
+    commit_one(store, record)
+    drop_all(store, 2)
+    batch = batch_of("probe", apply_all(identity(), [record]))
+    counts = tally(batch)
+    announce(verbose_topic(), batch)
+    announce_failure(verbose_topic(), "unreadable row")
+    header = csv.header_of("id,name")
+    return "${render_counts(counts)}|${worst(batch)}|${ratio(counts)}|${run_check(MinWidth { least: 1 }, batch)}|${csv.width(header)}|${lines.preview(lines_text())}|${topics().len()}"
+}
+
+echo run_all()
+echo replayed()
+echo diagnostics()
+echo describe_error(csv_failure())
+
+fn csv_failure(): FeedError {
+    return match csv.decode_all("") {
+        Ok(_) => FeedError.EmptyFeed,
+        Err(problem) => problem,
+    }
+}
+
+@test {
+    use Feed.stages.RequiredField;
+    use Feed.store.commit;
+
+    struct Feeds {
+        label: string
+
+        fn store(): RecordStore {
+            echo self.label
+            return RecordStore.new()
+        }
+    }
+
+    fn feeds(): Feeds {
+        return Feeds { label: "fixture" }
+    }
+
+    fn csv_ingest_keeps_two_records(): void {
+        store = feeds().store()
+        ingest_csv(store, csv_text())
+        assert(store.describe().contains("2 kept"))
+    }
+
+    fn line_ingest_keeps_two_records(): void {
+        store = feeds().store()
+        ingest_lines(store, lines_text())
+        assert(store.describe().contains("2 kept"))
+    }
+
+    fn an_empty_feed_is_an_error(): void {
+        assert(match csv.decode_all("") {
+            Ok(_) => false,
+            Err(problem) => describe_error(problem) == describe_error(FeedError.EmptyFeed),
+        })
+    }
+
+    fn the_required_field_checker_passes_a_full_record(): void {
+        record = Record.new("probe", [field_of("id", "1"), field_of("name", "ada")])
+        batch = batch_of("probe", [record])
+        checker = RequiredField { field: "id" }
+        assert(checker.report(batch).contains("1/1"))
+        store = feeds().store()
+        commit(store, [record])
+        assert(store.describe().contains("1 kept"))
+    }
+
+    fn the_whole_run_reports_every_stage(): void {
+        assert(run_all().len() > 0)
+        assert(diagnostics().len() > 0)
+        assert(replayed().len() > 0)
+    }
+}

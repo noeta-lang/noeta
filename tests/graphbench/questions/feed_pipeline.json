@@ -1,0 +1,23 @@
+{
+  "comment": "Hand-labeled seed questions: a developer's sentence, and the declarations that answer it. No query names an identifier the code uses, because the point is mapping words onto nodes. Label a declaration `<file>#<name>`, or `<file>#<Type>.<method>` when a method name is shared.",
+  "seeds": [
+    { "query": "where does a comma-separated document become records?", "answers": ["csv.noe#decode_all"] },
+    { "query": "what reads one line of key-value pairs?", "answers": ["lines.noe#decode"] },
+    { "query": "where do accepted records end up?", "answers": ["store.noe#commit"] },
+    { "query": "which function announces the finished batch?", "answers": ["publish.noe#announce"] },
+    { "query": "what makes sure a record carries the field it must?", "answers": ["stages.noe#RequiredField.check"] },
+    { "query": "where is the worst level in a batch worked out?", "answers": ["metrics.noe#worst"] },
+    { "query": "which entry point takes the comma-separated feed?", "answers": ["run.noe#ingest_csv"] },
+    { "query": "what part of the flow do both feeds share?", "answers": ["run.noe#shared_middle"] },
+    { "query": "where is a named value read off a record?", "answers": ["model.noe#Record.field"] },
+    { "query": "which type holds a group of records together?", "answers": ["model.noe#Batch"] },
+    { "query": "what counts how many records sit at each level?", "answers": ["metrics.noe#tally"] },
+    { "query": "where is the first row read as column names?", "answers": ["csv.noe#header_of"] },
+    { "query": "which function throws away the records that did not pass?", "answers": ["stages.noe#keep_passing"] },
+    { "query": "what turns a failure into a sentence a person reads?", "answers": ["model.noe#error_label"] },
+    { "query": "where do the rows that could not be read get announced?", "answers": ["publish.noe#announce_failure"] },
+    { "query": "which function marks a record with where it came from?", "answers": ["stages.noe#tag_source"] },
+    { "query": "what keeps count of the records that were thrown away?", "answers": ["store.noe#RecordStore.reject"] },
+    { "query": "where does the flow decide a record has enough columns?", "answers": ["run.noe#wide_enough"] }
+  ]
+}

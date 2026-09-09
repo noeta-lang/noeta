@@ -1,0 +1,7 @@
+# Makes this corpus project a package, so its modules derive `Feed.…` from where their files sit.
+[package]
+name = "local/Feed"
+version = "0.1.0"
+
+[directives]
+test = "std"

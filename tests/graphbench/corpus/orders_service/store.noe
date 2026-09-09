@@ -1,0 +1,63 @@
+// The persistence layer. `OrderStore` implements both project traits, one standalone and one
+// in-body, and the two role-bearing entries into it are the boundary a trace from a handler should
+// reach.
+
+use Shop.models.Order;
+use Shop.models.OrderStatus;
+use Shop.repository.Repository;
+use Shop.repository.Auditable;
+use Shop.roles.Persists;
+use Shop.roles.Layered;
+
+#[Layered("persistence")]
+pub class OrderStore {
+    mut orders: List<Order>
+    mut next_id: int
+
+    pub fn new(): OrderStore {
+        return OrderStore { orders: [], next_id: 1 }
+    }
+
+    pub fn take_id(): int {
+        id = self.next_id
+        self.next_id = self.next_id + 1
+        return id
+    }
+
+    pub fn append(order: Order): void {
+        self.orders = self.orders ~ [order]
+    }
+
+    pub fn snapshot(): List<Order> {
+        return self.orders
+    }
+
+    impl Auditable {
+        pub fn audit_name(): string {
+            return "order-store"
+        }
+    }
+}
+
+impl Repository for OrderStore {
+    pub fn all(): List<Order> {
+        return self.snapshot()
+    }
+}
+
+#[Persists("orders")]
+pub fn save_order(store: OrderStore, order: Order): int {
+    store.append(order)
+    return order.id
+}
+
+#[Persists("orders")]
+pub fn mark_paid(store: OrderStore, order: Order): string {
+    order.mark(OrderStatus.Paid)
+    save_order(store, order)
+    return order.describe()
+}
+
+pub fn next_order_id(store: OrderStore): int {
+    return store.take_id()
+}

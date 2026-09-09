@@ -1,0 +1,43 @@
+// The outbound sinks. Notifications go through a closure stored in a field, so the edge from
+// `Channel.deliver` to the function that ends up running is an indirection a static walk labels
+// rather than resolves.
+
+use Shop.models.Order;
+use Shop.roles.Emits;
+
+pub struct Channel {
+    name: string
+    send: (string) -> string
+}
+
+pub fn email_channel(): Channel {
+    return Channel { name: "email", send: fn(body: string) => "email:" ~ body }
+}
+
+pub fn log_channel(): Channel {
+    return Channel { name: "log", send: format_line }
+}
+
+pub fn format_line(body: string): string {
+    return "log:" ~ body
+}
+
+#[Emits("orders")]
+pub fn notify_placed(channel: Channel, order: Order): string {
+    return channel.send(order.describe())
+}
+
+#[Emits("orders")]
+pub fn notify_all(channels: List<Channel>, order: Order): List<string> {
+    return channels.map(fn(c: Channel) => notify_placed(c, order))
+}
+
+// A role nothing reaches: no caller anywhere in the project.
+#[Emits("audit")]
+pub fn notify_purge(channel: Channel): string {
+    return channel.send("purge")
+}
+
+pub fn channel_names(channels: List<Channel>): string {
+    return channels.map(fn(c: Channel) => c.name).join("+")
+}
