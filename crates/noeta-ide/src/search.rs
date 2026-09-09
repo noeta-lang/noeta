@@ -1147,6 +1147,16 @@ mod tests {
         CodeIndex::build_over(&programs, &indexed)
     }
 
+    /// One declaration's score for `query`, or zero when the query does not reach it.
+    fn score_of(index: &CodeIndex, query: &str, name: &str) -> f32 {
+        index
+            .search(query, &SearchFilter::default(), 50)
+            .into_iter()
+            .find(|h| index.decls()[h.decl].name == name)
+            .map(|h| h.score)
+            .unwrap_or(0.0)
+    }
+
     /// The names of the ranked hits, best first.
     fn ranked(index: &CodeIndex, query: &str, filter: &SearchFilter, limit: usize) -> Vec<String> {
         index
@@ -1256,8 +1266,9 @@ pub struct Receipt { total: int }
     /// the query names decides which one leads.
     ///
     /// The two halves reach different fields. A module name is in the qualified name *and* in the
-    /// file path, so either can carry it; a type name is in the qualified name alone, which is
-    /// what the `total` half pins.
+    /// file path, so either can carry it; a type name is in the qualified name alone. The type
+    /// half compares scores rather than positions, because equal scores order by name and would
+    /// hand `billing.Receipt.total` the lead without ranking it at all.
     #[test]
     fn a_colliding_leaf_ranks_by_the_owner_the_query_names() {
         let index = fixture();
@@ -1275,10 +1286,12 @@ pub struct Receipt { total: int }
             leading("orders place_order", "place_order").as_deref(),
             Some("orders.place_order")
         );
-        // `Receipt` names no file, so only the qualified name can put its member first.
-        assert_eq!(
-            leading("receipt total", "total").as_deref(),
-            Some("billing.Receipt.total")
+        // `Receipt` and `Order` name no file, so only the qualified name separates their members.
+        let receipt = score_of(&index, "receipt total", "billing.Receipt.total");
+        let rival = score_of(&index, "receipt total", "orders.Order.total");
+        assert!(
+            receipt > rival,
+            "the named type's member must score higher: {receipt} vs {rival}"
         );
         assert_eq!(
             leading("order total", "total").as_deref(),
