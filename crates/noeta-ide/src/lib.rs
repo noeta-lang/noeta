@@ -61,6 +61,7 @@ pub mod paths;
 pub mod rank;
 pub mod resolve;
 pub mod sample;
+pub mod search;
 pub mod semtokens;
 pub mod signature;
 pub mod symbols;

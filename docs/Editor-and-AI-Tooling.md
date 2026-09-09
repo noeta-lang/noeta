@@ -122,6 +122,7 @@ Orient before writing a line.
 | Tool | Answers |
 |---|---|
 | `docs_search` / `docs_get` | Search and read this documentation. Also exposed as MCP *resources*. |
+| `code_search` | The **project's own declarations**, ranked against a name (`place_order`), a qualified path (`orders.place_order`), or a plain sentence (`where does an order get written to the database`). It indexes every declaration of the linked workspace — functions, methods, types, variants, fields, traits, and whatever a `@test`/`@bench` block declares — over its name, its qualified path, its `@doc` prose, its signature, its `@role` bindings and attributes, its file path, and the identifiers its body mentions. `matched_fields` names the fields that earned each hit, `kind` and `roles` narrow the set, and every result carries an `id` the graph tools accept. |
 | `examples_find` | CI-tested example programs by feature, concept, or diagnostic code. |
 | `stdlib_api` | The real standard-library signatures, from the compiler's own registry. |
 | `explain_diagnostic` | What an `E0xxx` means and how to fix it, from the compiler's explanation catalog (the text [`noeta explain`](The-CLI#noeta-explain) prints), with real programs that trigger it. |
@@ -130,6 +131,8 @@ Orient before writing a line.
 | `doc_page` | One node's signature and prose. |
 
 The three project-documentation tools work from a parse alone, so they read work-in-progress code. They are distinct from `docs_search`, which reads this language guide.
+
+`code_search` is the first call when the question names no symbol. It reports `linked` and `link_diagnostics` the way the graph tools do, and under a failed link it ranks the entry file's own parse, where names are unqualified.
 
 ### Understand
 

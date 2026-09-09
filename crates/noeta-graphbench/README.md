@@ -30,9 +30,11 @@ Each **arm** is a fixed strategy: for one question category, a composition of to
 | A4 | a fixed 4k-token repo map, no navigation | whether precomputation alone suffices |
 | A5 | a lexical scan of the files, no Noeta tools | whether any of this beats grep |
 
-**A requirement is per category, not per arm.** An arm's strategy for `callers` and its strategy for `path` need different tools, so each (arm, category) row is measured as soon as *its* tools are advertised and reports **SKIP** naming the missing tool otherwise. A2's three inherited categories name `code_search` and wait; its other five answer with the map and are measured. A SKIP prints in its own column, holds no baseline row, and is never a pass.
+**A requirement is per category, not per arm.** An arm's strategy for `callers` and its strategy for `path` need different tools, so each (arm, category) row is measured as soon as *its* tools are advertised and reports **SKIP** naming the missing tool otherwise. A SKIP prints in its own column, holds no baseline row, and is never a pass.
 
-A2 and A4 answer with the budgeted map itself, so their rows read on **recall**: with this budget spent from these seeds, is the answer inside the map? Precision there is bounded by how many declarations a map of that size holds, which is why their F1 sits low beside A0's.
+A1 changes two of A0's strategies and inherits the other six. `seed_mapping` becomes one `code_search` call on the question itself, and `definition` becomes one on the name, falling back to A0's outline sweep when the search reaches nothing. A1 drops a hit whose kind the declaration universe does not hold, because a field and an enum variant are not nodes the call graph carries an edge for.
+
+A2 and A4 answer with the budgeted map itself for the five categories the map addresses, so those rows read on **recall**: with this budget spent from these seeds, is the answer inside the map? Precision there is bounded by how many declarations a map of that size holds, which is why their F1 sits low beside A0's. A2's other three categories are A1's strategies unchanged.
 
 ## Ablating the ranking
 

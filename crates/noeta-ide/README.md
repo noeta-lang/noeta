@@ -7,6 +7,23 @@ The shared Noeta IDE engine (MCP arc, slice M5 — extracted from `noeta-lsp`).
 
 The [`DocumentStore`] owns the database, the open buffers, and one `Workspace` per directory with an open document — the directory's `.noe` members plus resolved dependency packages, shared by every open document in it. Each document reads its merged program through the entry-parametric `linked_from` query family (memoized per workspace/document), so per-file lex/parse work memoizes once no matter how many documents are open; editing a document calls salsa's `set_text` setter and salsa recomputes only what the edit invalidated — an incremental spine inherited wholesale, not rebuilt here. It's deliberately wire-protocol-free — no `tower-lsp`, no `tokio` — so `noeta lsp` (JSON-RPC) and `noeta mcp` (MCP tools) are both thin adapters over this one implementation and can never drift; the engine speaks its own positional types (`Position`/`Range`/`TextEdit`) that are field-compatible with LSP's but owned here.
 
+## Lexical search
+
+`search` holds one BM25F implementation and two indexes over it. `search::Bm25f` takes a field weight and a length normalization per field, saturates the combined per-field term frequency before applying `k1`, and scores with Lucene's smoothed IDF; matching is over terms, so `int` cannot match `print`. `guide` ranks the embedded wiki's sections over three fields (title, heading, body); `search::CodeIndex` ranks a linked program's declarations over eight.
+
+| Field | Weight | Length normalized | What it holds |
+|---|---|---|---|
+| `name` | 8.0 | no | The leaf name, the one an author types |
+| `qualified` | 4.0 | no | The whole post-link name, so a module or type name finds its members |
+| `kind` | 1.0 | no | The kind word plus the dev tier it was declared in |
+| `roles` | 3.0 | no | `@role` bindings and `#[...]` attribute names |
+| `doc` | 3.0 | yes | The `@doc { … }` prose |
+| `signature` | 2.0 | yes | The rendered signature |
+| `body` | 1.0 | yes | The declaration's own source, with nested declarations cut out |
+| `path` | 1.5 | no | The declaring file's path segments |
+
+A leaf name that **is** one of the query's terms multiplies the score by 4, a leaf the query prefixes by 1.6, and a verbatim phrase match by 1.6. `SearchFilter` narrows by kind and by `@role` before scoring, and results are ordered by score, then name, then declaration order, so the same query over the same program returns the same list. `noeta mcp`'s `code_search` is the adapter.
+
 ## The call graph
 
 `callgraph::build` joins the existing indices — `resolve::DefUse` for value uses and member accesses, `resolve::MemberTable` for what each type declares, and the checker's `expr_types` for receiver types — into the graph the `trace` tool walks and the editor's call hierarchy serves.

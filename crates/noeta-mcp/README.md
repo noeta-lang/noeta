@@ -19,6 +19,12 @@ Funnelling matters because the failure mode is silent: while the workspace was s
 
 `graph::DeclIndex` is the one walk behind it. It inventories the linked program's declarations under their post-link names, descends into `@tier { … }` blocks, and answers by exact name, by unique leaf (with the candidate list on a tie), and by span. A tool that needs "which declaration is this?" asks it rather than re-deriving an answer.
 
+## Finding the node to start from
+
+`code_search` ranks the project's own declarations against a query that may be a name, a qualified path, or a sentence with no identifier in it. It is the entry to the graph: every other tool here needs an address already, and this is what produces one.
+
+The ranking is `noeta_ide::search`'s BM25F over eight fields — leaf name, qualified path, kind and tier, `@role` bindings and attributes, `@doc` prose, signature, body identifiers, and file path — with an exact-name and a prefix-name boost on top, so typing `place_order` returns the declaration rather than the prose about it. `matched_fields` reports which fields earned a hit, `kind` and `roles` narrow the set before scoring, and the result carries the shared `NodeId`. The index is built per call from the prepared workspace and the whole thing is deterministic: no model, no randomness, ties broken by name.
+
 ## Walking the graph backwards
 
 `impact` and `callers` are the reverse direction of the walk `trace` runs forward. `callers` is one hop at a time over `noeta_ide::callgraph`, reporting each use with its site and whether it is a call or a passed reference. `impact` is the transitive closure `noeta test --watch` narrows on, driven through `noeta_ide::impact::ImpactSession`.

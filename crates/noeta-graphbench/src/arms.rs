@@ -280,11 +280,11 @@ pub async fn answer(
     let _ = service.take_spend();
     let predictions_and_evidence = match arm {
         Arm::A0Today => today(service, context, question).await,
-        Arm::A2ContextMap => budgeted_map(service, context, question).await,
+        Arm::A1CodeSearch => search_seeded(service, context, question).await,
+        Arm::A2ContextMap => ranked_map(service, context, question).await,
         Arm::A3GraphTools => reverse_walk(service, context, question).await,
         Arm::A4RepoMap => fixed_map(service, context).await,
         Arm::A5Lexical => lexical(service, context, question),
-        Arm::A1CodeSearch => (Vec::new(), None),
     };
     Answer {
         predictions: predictions_and_evidence.0,
@@ -777,6 +777,104 @@ fn overlap(wanted: &BTreeMap<String, usize>, have: &BTreeMap<String, usize>) -> 
     score
 }
 
+// ----------------------------------------------------------------------------------------- A1
+
+/// How many hits A1 asks the search for. The same ten A0's outline sweep keeps, so the two rows
+/// differ by how the ten were chosen rather than by how many there are.
+const SEED_LIMIT: usize = 10;
+
+/// The kinds the benchmark's declaration universe holds.
+///
+/// A search ranks every declaration, fields and enum variants included; the universe gold is
+/// labeled against holds functions, methods and types, because those are the nodes the call graph
+/// can carry an edge for. A hit outside this set is unmeasurable rather than wrong, and leaving it
+/// in the answer costs precision against a universe that could never have held it. Dropping them
+/// is worth Acc@1 0.087 → 0.130 and MRR 0.194 → 0.235 on the seed-mapping set.
+const GOLD_KINDS: [&str; 6] = ["function", "method", "struct", "class", "enum", "trait"];
+
+/// Whether the benchmark's universe can hold this node. A node whose tool reported no kind is
+/// kept: the filter drops what it knows to be out of scope, never what it cannot classify.
+fn measurable(node: &NodeRef) -> bool {
+    match node.kind.as_deref() {
+        None => true,
+        Some(kind) => GOLD_KINDS.contains(&kind),
+    }
+}
+
+/// A1 is A0 with `code_search` as the step that finds the node to start from.
+///
+/// Two categories change, and they are the two where A0 has no address to start from and sweeps
+/// instead. `seed_mapping` is a search by construction: the question is a sentence naming no
+/// identifier. `definition` is one in practice: a declaration in a sibling module is not
+/// addressable from the entry file, so A0 outlines every file in the project to find it. Every
+/// other category's A0 strategy is handed a leaf and a file already, so A1 runs it unchanged.
+async fn search_seeded(
+    service: &mut Service,
+    context: &ProjectContext,
+    question: &Question,
+) -> (Vec<Prediction>, Option<Tool>) {
+    match question.category {
+        Category::SeedMapping => a1_seed_mapping(service, context, question).await,
+        Category::Definition => a1_definition(service, context, question).await,
+        _ => today(service, context, question).await,
+    }
+}
+
+/// Rank the workspace against the question itself.
+async fn a1_seed_mapping(
+    service: &mut Service,
+    context: &ProjectContext,
+    question: &Question,
+) -> (Vec<Prediction>, Option<Tool>) {
+    let value = service
+        .call(
+            Tool::CodeSearch,
+            args([
+                ("file", json!(context.entry_arg())),
+                ("query", json!(question.prompt)),
+                ("limit", json!(SEED_LIMIT)),
+            ]),
+        )
+        .await;
+    let out = adapter::ranked_hits(&value)
+        .into_iter()
+        .filter(measurable)
+        .map(Prediction::node)
+        .collect();
+    (out, Some(Tool::CodeSearch))
+}
+
+/// Ask for the name, and fall back to A0's sweep when the search reaches nothing.
+async fn a1_definition(
+    service: &mut Service,
+    context: &ProjectContext,
+    question: &Question,
+) -> (Vec<Prediction>, Option<Tool>) {
+    let Some(handle) = Handle::of(&question.subject) else {
+        return (Vec::new(), None);
+    };
+    let value = service
+        .call(
+            Tool::CodeSearch,
+            args([
+                ("file", json!(context.entry_arg())),
+                ("query", json!(handle.leaf)),
+                ("limit", json!(SEED_LIMIT)),
+            ]),
+        )
+        .await;
+    let hits: Vec<Prediction> = adapter::ranked_hits(&value)
+        .into_iter()
+        .filter(measurable)
+        .filter(|node| node.leaf == handle.leaf)
+        .map(Prediction::node)
+        .collect();
+    if hits.is_empty() {
+        return a0_definition(service, context, question).await;
+    }
+    (hits, Some(Tool::CodeSearch))
+}
+
 // ----------------------------------------------------------------------------------------- A3
 
 /// A3 answers the two reverse-direction categories with the two reverse-direction tools.
@@ -796,7 +894,10 @@ async fn reverse_walk(
         // A3 adds no reverse-direction tool for the forward-reach question, so it answers it the
         // way A2 does: with the budgeted map.
         Category::Callees => budgeted_map(service, context, question).await,
-        _ => (Vec::new(), None),
+        // A3 adds no tool for the rest, so it answers them the way A2 does.
+        Category::Definition | Category::Importers | Category::SeedMapping => {
+            ranked_map(service, context, question).await
+        }
     }
 }
 
@@ -899,6 +1000,26 @@ fn map_handles(question: &Question) -> Vec<Handle> {
             file: None,
         }],
         Subject::Free => Vec::new(),
+    }
+}
+
+/// A2: the map where the map is the answer, and A1's strategy where A2 adds no tool.
+async fn ranked_map(
+    service: &mut Service,
+    context: &ProjectContext,
+    question: &Question,
+) -> (Vec<Prediction>, Option<Tool>) {
+    match question.category {
+        Category::Callers
+        | Category::Callees
+        | Category::Path
+        | Category::RoleReach
+        | Category::Impact => budgeted_map(service, context, question).await,
+        // A2 is A1 plus one tool, and the tool answers five categories. The other three are A1's
+        // unchanged, so running them any other way would measure something A2 did not add.
+        Category::Definition | Category::Importers | Category::SeedMapping => {
+            search_seeded(service, context, question).await
+        }
     }
 }
 
