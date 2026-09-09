@@ -188,9 +188,18 @@ pub struct NavRange {
 /// range there.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct NavLocation {
-    /// The target's file path; `None` when the target is in the inline `source` entry.
+    /// The target's file, relative to the project root — the same spelling `id.file` uses.
+    /// `None` when the target is in the inline `source` entry.
     pub file: Option<String>,
     pub range: NavRange,
+}
+
+impl NavLocation {
+    /// The same location with its file spelled relative to the project root.
+    fn relative_to(mut self, p: &Prepared) -> NavLocation {
+        self.file = self.file.map(|file| p.relative(&file));
+        self
+    }
 }
 
 /// The `definition` result: where the symbol at the site is declared.
@@ -278,11 +287,13 @@ pub fn definition(
                 .definition(&opened.uri, position, Encoding::Utf8)
         })
     {
-        let location = opened.location(&target_uri, range);
+        let mut location = opened.location(&target_uri, range);
+        let absolute = location.file.clone();
+        location.file = location.file.map(|file| p.relative(&file));
         return DefinitionOutput {
             found: true,
             id: ws.id_at(
-                location.file.as_deref(),
+                absolute.as_deref(),
                 location.range.start.line,
                 location.range.start.column,
             ),
@@ -328,7 +339,7 @@ pub fn definition(
                 found: true,
                 id: Some(id),
                 location: Some(NavLocation {
-                    file: Some(file),
+                    file: Some(p.relative(&file)),
                     range: NavRange {
                         start: Pos {
                             line: at.start.line,
@@ -412,7 +423,7 @@ pub fn references(
     {
         let references: Vec<NavLocation> = locations
             .into_iter()
-            .map(|(target_uri, range)| opened.location(&target_uri, range))
+            .map(|(target_uri, range)| opened.location(&target_uri, range).relative_to(p))
             .collect();
         return ReferencesOutput {
             found: true,
@@ -474,7 +485,7 @@ pub fn references(
         Some(locations) => {
             let references: Vec<NavLocation> = locations
                 .into_iter()
-                .map(|(target_uri, range)| opened.location(&target_uri, range))
+                .map(|(target_uri, range)| opened.location(&target_uri, range).relative_to(p))
                 .collect();
             ReferencesOutput {
                 found: true,

@@ -2565,4 +2565,78 @@ echo handle(1)
         client.cancel().await.expect("client shuts down");
         server.abort();
     }
+
+    /// **Every path a graph tool reports is project-relative.** An absolute path is longer than
+    /// the relative one and *unstable*: it moves with the checkout, so the same question over the
+    /// same code answers differently on two machines, and a benchmark's token column drifts with
+    /// where the repository happens to sit. The reader already named the root in the request.
+    #[tokio::test]
+    async fn no_graph_tool_reports_an_absolute_path() {
+        use rmcp::model::CallToolRequestParams;
+
+        noeta_stdlib::registry::default_seeded();
+        let entry = three_module_project("mcp_relative_paths");
+        let file = entry.display().to_string();
+        let root = std::path::Path::new(&file)
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("the project root")
+            .display()
+            .to_string();
+
+        let (client_io, server_io) = tokio::io::duplex(1 << 16);
+        let server = tokio::spawn(async move {
+            if let Ok(svc) = NoetaMcp::new().serve(server_io).await {
+                let _ = svc.waiting().await;
+            }
+        });
+        let client = ().serve(client_io).await.expect("client initializes");
+
+        for (tool, extra) in [
+            ("symbols", vec![("scope", serde_json::json!("workspace"))]),
+            ("trace", vec![("from", serde_json::json!("EntryPoint"))]),
+            ("reflect", vec![]),
+            ("module_graph", vec![]),
+            (
+                "callers",
+                vec![("symbol", serde_json::json!("joined.alpha.shared"))],
+            ),
+            (
+                "definition",
+                vec![("symbol", serde_json::json!("joined.alpha.shared"))],
+            ),
+            (
+                "references",
+                vec![("symbol", serde_json::json!("joined.alpha.shared"))],
+            ),
+            (
+                "impact",
+                vec![("symbol", serde_json::json!("joined.alpha.shared"))],
+            ),
+        ] {
+            let mut args = serde_json::Map::new();
+            args.insert("file".to_string(), serde_json::json!(file.clone()));
+            for (key, value) in extra {
+                args.insert(key.to_string(), value);
+            }
+            let mut params = CallToolRequestParams::default();
+            params.name = tool.to_string().into();
+            params.arguments = Some(args);
+            let answer = client
+                .call_tool(params)
+                .await
+                .unwrap_or_else(|e| panic!("tools/call {tool}: {e}"))
+                .structured_content
+                .unwrap_or_else(|| panic!("{tool} returned no structured content"));
+            let rendered = answer.to_string();
+            assert!(
+                !rendered.contains(&root),
+                "`{tool}` reports an absolute path; every file it names must be relative to the \
+                 project root: {rendered}"
+            );
+        }
+
+        client.cancel().await.expect("client shuts down");
+        server.abort();
+    }
 }

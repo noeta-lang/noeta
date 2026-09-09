@@ -66,7 +66,11 @@ impl Prepared {
     }
 
     /// `name` relative to the root package directory, or `name` unchanged when it sits outside it.
-    fn relative(&self, name: &str) -> String {
+    ///
+    /// Every path a tool reports goes through here. An absolute path is both longer and *unstable*
+    /// — it moves with the checkout, so two runs of the same question over the same code differ on
+    /// the wire — and a reader already knows the root, having named it in the request.
+    pub fn relative(&self, name: &str) -> String {
         let Some(root) = &self.root else {
             return name.to_string();
         };

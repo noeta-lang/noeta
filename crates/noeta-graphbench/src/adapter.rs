@@ -293,11 +293,12 @@ pub fn trace(value: &Value) -> (bool, Vec<TraceHit>) {
 }
 
 fn flatten_trace(value: &Value, depth: usize, path: &mut Vec<String>, out: &mut Vec<TraceHit>) {
+    // The id is the node's identity. A trace node's own `kind` is how it was *reached*
+    // (`root`/`call`/`reference`), never a node kind, so it is not a fallback for one.
     let name = value
         .get("name")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    path.push(name.to_string());
     let node = read_id(value).unwrap_or(NodeRef {
         qualified: if name.contains('.') {
             Some(name.to_string())
@@ -310,11 +311,9 @@ fn flatten_trace(value: &Value, depth: usize, path: &mut Vec<String>, out: &mut 
             .and_then(Value::as_str)
             .map(str::to_string),
         span: None,
-        kind: value
-            .get("kind")
-            .and_then(Value::as_str)
-            .map(str::to_string),
+        kind: None,
     });
+    path.push(node.qualified.clone().unwrap_or_else(|| node.leaf.clone()));
     out.push(TraceHit {
         node,
         depth,
@@ -338,9 +337,11 @@ pub fn boundaries(value: &Value) -> Vec<(NodeRef, String)> {
     };
     list.iter()
         .filter_map(|hit| {
-            let target = hit.get("target").and_then(Value::as_str)?;
             let role = hit.get("role").and_then(Value::as_str).unwrap_or_default();
-            let mut node = read_id(hit).unwrap_or(NodeRef::named(target));
+            let mut node = match read_id(hit) {
+                Some(node) => node,
+                None => NodeRef::named(hit.get("target").and_then(Value::as_str)?),
+            };
             if node.file.is_none() {
                 node.file = hit.get("file").and_then(Value::as_str).map(str::to_string);
             }
@@ -475,12 +476,14 @@ pub fn reflect_roles(value: &Value) -> Vec<(NodeRef, String)> {
     };
     list.iter()
         .filter_map(|entry| {
-            let target = entry.get("target").and_then(Value::as_str)?;
             let role = entry
                 .get("role")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            let mut node = read_id(entry).unwrap_or(NodeRef::named(target));
+            let mut node = match read_id(entry) {
+                Some(node) => node,
+                None => NodeRef::named(entry.get("target").and_then(Value::as_str)?),
+            };
             if node.file.is_none() {
                 node.file = entry
                     .get("file")
@@ -514,8 +517,10 @@ pub fn reflect_types(value: &Value) -> Vec<NodeRef> {
     };
     list.iter()
         .filter_map(|entry| {
-            let name = entry.get("name").and_then(Value::as_str)?;
-            let mut node = read_id(entry).unwrap_or(NodeRef::named(name));
+            let mut node = match read_id(entry) {
+                Some(node) => node,
+                None => NodeRef::named(entry.get("name").and_then(Value::as_str)?),
+            };
             if node.kind.is_none() {
                 node.kind = entry
                     .get("kind")

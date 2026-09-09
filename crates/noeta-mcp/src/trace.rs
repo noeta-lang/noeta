@@ -79,10 +79,11 @@ pub struct TraceNode {
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct BoundaryHit {
-    pub target: String,
+    /// The bearing declaration's identity — the same `id` every other tool reports for it, and
+    /// the only spelling of its name, file and span.
+    pub id: NodeId,
+    /// The role as `Enum.Variant`.
     pub role: String,
-    pub file: Option<String>,
-    pub line: Option<u32>,
 }
 
 /// Answer `trace`: walk the call graph forward from `from` — a role (`EntryPoint` or
@@ -172,14 +173,15 @@ pub fn trace(p: &Prepared, from: Option<&str>, max_depth: Option<usize>) -> Trac
         boundaries: walked
             .boundaries
             .iter()
-            .map(|b| {
-                let at = b.decl_span.and_then(|span| analyze::locate_span(p, span));
-                BoundaryHit {
-                    target: b.target.clone(),
-                    role: b.role.clone(),
-                    file: at.as_ref().map(|(file, _)| file.clone()),
-                    line: at.map(|(_, loc)| loc.start.line),
-                }
+            .map(|b| BoundaryHit {
+                id: match b.decl_span.and_then(|span| decls.at_name_span(span)) {
+                    Some(decl) => decl.id(p),
+                    None => match b.decl_span {
+                        Some(span) => p.node_id(&b.target, NodeKind::Function, span),
+                        None => p.unlocated_id(&b.target, NodeKind::Function),
+                    },
+                },
+                role: b.role.clone(),
             })
             .collect(),
         truncated: walked.truncated,
@@ -339,7 +341,7 @@ fn save(n: int): int {
         let hits: Vec<(&str, &str)> = out
             .boundaries
             .iter()
-            .map(|b| (b.target.as_str(), b.role.as_str()))
+            .map(|b| (b.id.name.as_str(), b.role.as_str()))
             .collect();
         assert!(hits.contains(&("handle", "Semantic.EntryPoint")));
         assert!(hits.contains(&("save", "Semantic.Persistence")));
