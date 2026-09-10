@@ -378,10 +378,31 @@ jobs:
           name: vscode-extension
           path: dist
 
+      # Each registry gets the artifact regardless of what the other one did: they fail
+      # independently (a gallery timeout is the case seen), and one refusing is no reason to leave
+      # the other unpublished. A version already present counts as published — that is the state a
+      # re-run finds. `.github/workflows/publish-extension.yml` offers the same two steps on demand,
+      # for finishing a publish that a timeout left half done.
       - name: Publish to Open VSX
         if: ${{ env.OVSX_PAT != '' }}
-        run: npx --yes ovsx publish dist/*.vsix --pat "$OVSX_PAT"
+        run: |
+          set +e
+          npx --yes ovsx publish dist/*.vsix --pat "$OVSX_PAT" > ovsx.log 2>&1
+          rc=$?
+          set -e
+          cat ovsx.log
+          if [ "$rc" -ne 0 ] && ! grep -qi 'already published' ovsx.log; then
+            exit "$rc"
+          fi
 
       - name: Publish to the Visual Studio Marketplace
-        if: ${{ env.VSCE_PAT != '' }}
-        run: npx --yes @vscode/vsce publish --packagePath dist/*.vsix -p "$VSCE_PAT"
+        if: ${{ !cancelled() && env.VSCE_PAT != '' }}
+        run: |
+          set +e
+          npx --yes @vscode/vsce publish --packagePath dist/*.vsix -p "$VSCE_PAT" > vsce.log 2>&1
+          rc=$?
+          set -e
+          cat vsce.log
+          if [ "$rc" -ne 0 ] && ! grep -qiE 'already exists|already published' vsce.log; then
+            exit "$rc"
+          fi

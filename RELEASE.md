@@ -74,6 +74,8 @@ Secrets it needs: `SITE_DISPATCH_PAT` (dispatch to the sites), `ORG_VARS_PAT` (a
 with organization **Variables: write** — `GITHUB_TOKEN` cannot write org variables), `OVSX_PAT` and
 `VSCE_PAT`.
 
+If one registry times out, run the **Publish extension** workflow with the tag as its input rather than re-running the release job. A re-run cannot repair a half-finished publish: the registry that already took the version answers "already published", and the step that still has work never runs.
+
 ### What you must NOT do by hand
 
 - **Do not bump the org `NOETA_VERSION` variable.** The release does it. Setting it early points

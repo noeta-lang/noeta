@@ -1,0 +1,63 @@
+# Publish a release's packaged extension to the two marketplaces, on demand.
+#
+# WHY THIS EXISTS. `release.yml` publishes the extension as part of the tag's run, and either
+# registry can time out on its own (`Request timeout: /_apis/gallery` from the Visual Studio gallery
+# is the one that has happened). Re-running that job cannot repair it: the registry that already
+# accepted the version answers "already published", the step fails, and the step that still has work
+# to do never runs. This workflow takes the `.vsix` off the release the tag already built and offers
+# each registry the same artifact, so a half-finished publish can be completed without cutting
+# another tag.
+#
+# Both steps treat "this version is already there" as success, which is the state a recovery run
+# finds by definition, and the second step runs whatever the first one did.
+name: Publish extension
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "The release tag whose .vsix to publish (for example v0.8.2)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish the packaged extension
+    runs-on: ubuntu-latest
+    env:
+      OVSX_PAT: ${{ secrets.OVSX_PAT }}
+      VSCE_PAT: ${{ secrets.VSCE_PAT }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Download the .vsix from the release
+        run: |
+          mkdir -p dist
+          gh release download "${{ inputs.tag }}" --repo "$GITHUB_REPOSITORY" --pattern '*.vsix' --dir dist
+          ls -l dist
+
+      - name: Publish to Open VSX
+        if: ${{ env.OVSX_PAT != '' }}
+        run: |
+          set +e
+          npx --yes ovsx publish dist/*.vsix --pat "$OVSX_PAT" > ovsx.log 2>&1
+          rc=$?
+          set -e
+          cat ovsx.log
+          if [ "$rc" -ne 0 ] && ! grep -qi 'already published' ovsx.log; then
+            exit "$rc"
+          fi
+
+      - name: Publish to the Visual Studio Marketplace
+        if: ${{ !cancelled() && env.VSCE_PAT != '' }}
+        run: |
+          set +e
+          npx --yes @vscode/vsce publish --packagePath dist/*.vsix -p "$VSCE_PAT" > vsce.log 2>&1
+          rc=$?
+          set -e
+          cat vsce.log
+          if [ "$rc" -ne 0 ] && ! grep -qiE 'already exists|already published' vsce.log; then
+            exit "$rc"
+          fi
