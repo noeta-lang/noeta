@@ -68,11 +68,23 @@ use crate::workspace::{self, WorkspaceCache, disk_noe_uris, path_to_uri, uri_to_
 /// Deliberately opaque with builder methods rather than public fields: a new option must not be
 /// something a caller can forget to set, and the three surfaces must not be able to disagree about
 /// the default.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct ProjectCheckOptions {
     selection: Vec<String>,
     overlay: BTreeMap<PathBuf, String>,
     target: Option<String>,
+    cancel: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+}
+
+impl std::fmt::Debug for ProjectCheckOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProjectCheckOptions")
+            .field("selection", &self.selection)
+            .field("overlay", &self.overlay)
+            .field("target", &self.target)
+            .field("cancel", &self.cancel.is_some())
+            .finish()
+    }
 }
 
 impl ProjectCheckOptions {
@@ -115,6 +127,26 @@ impl ProjectCheckOptions {
         self.overlay = overlay.into_iter().collect();
         self
     }
+
+    /// **Stop early when `cancel` returns true**, consulted once per entry and once per pool.
+    ///
+    /// A project check is a sweep of independent entries, and a caller whose request has gone away
+    /// — an agent that cancelled a `check` over a directory — wants the sweep abandoned rather than
+    /// carried to the end with its answer discarded. Granularity is one entry: the entry in flight
+    /// finishes, and the next never starts. [`ProjectCheck::cancelled`] says whether it stopped
+    /// this way, so a partial result is never mistaken for a clean tree.
+    pub fn with_cancel(
+        mut self,
+        cancel: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> ProjectCheckOptions {
+        self.cancel = Some(cancel);
+        self
+    }
+
+    /// Whether the caller has withdrawn the check.
+    fn cancelled(&self) -> bool {
+        self.cancel.as_ref().is_some_and(|c| c())
+    }
 }
 
 /// One diagnostic together with the [`SourceMap`] that resolves its spans.
@@ -152,6 +184,10 @@ pub struct ProjectCheck {
     /// every file would report an unresolved-import cascade for code a composed toolchain compiles
     /// cleanly. A caller reports the cause instead of the cascade.
     pub uncomposed: Vec<String>,
+    /// True when the caller's [`ProjectCheckOptions::with_cancel`] poll stopped the sweep. The
+    /// diagnostics are then whatever the entries that *did* run reported, which is a partial answer
+    /// rather than a clean tree.
+    pub cancelled: bool,
 }
 
 impl ProjectCheck {
@@ -185,6 +221,7 @@ struct Fold {
     problems: Vec<String>,
     uncomposed: BTreeSet<String>,
     files_checked: usize,
+    cancelled: bool,
 }
 
 impl Fold {
@@ -210,6 +247,7 @@ impl Fold {
             tiers_checked: self.tiers.into_iter().collect(),
             problems: self.problems,
             uncomposed: self.uncomposed.into_iter().collect(),
+            cancelled: self.cancelled,
         }
     }
 }
@@ -239,6 +277,10 @@ pub fn project_check(root: &Path, options: &ProjectCheckOptions) -> ProjectCheck
         by_pool.entry(entry_pool(&entry).0).or_default().push(entry);
     }
     for (pool, pool_entries) in by_pool {
+        if options.cancelled() {
+            fold.cancelled = true;
+            break;
+        }
         let sources = pool_sources(&pool, options);
         let entry_uris: Vec<String> = pool_entries.iter().map(|p| path_to_uri(p)).collect();
         sweep_pool(sources, &entry_uris, options, &mut fold);
@@ -360,6 +402,10 @@ fn sweep_pool(
     };
     let mut missed: Vec<&str> = Vec::new();
     for uri in entry_uris {
+        if options.cancelled() {
+            fold.cancelled = true;
+            break;
+        }
         match cache.find_member(uri).and_then(|(_, m)| m.input()) {
             Some(program) => sweep_entry(&db, &cache, &map, program, options, fold),
             // A requested entry the pool scan did not yield: it links against the pool from
@@ -418,6 +464,10 @@ fn outside_the_pool(
     let mut db = LangDatabase::default();
     let mut cache: Option<WorkspaceCache> = None;
     for uri in entry_uris {
+        if options.cancelled() {
+            fold.cancelled = true;
+            break;
+        }
         // A URI with no path is an inline buffer, which is a member of its own pool by
         // construction and never lands here; there is nothing to read for it.
         let Some(path) = uri_to_path(uri) else {

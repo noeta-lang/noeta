@@ -47,6 +47,30 @@ pub struct LangDatabase {
 #[salsa::db]
 impl salsa::Database for LangDatabase {}
 
+impl LangDatabase {
+    /// Abandon whatever is running on **other handles** of this database: every query in flight on
+    /// a clone unwinds with `salsa::Cancelled` at its next poll, and this call returns once they
+    /// have.
+    ///
+    /// Salsa flags cancellation for a pending *write*, so an input write is the ordinary trigger
+    /// (an editor keystroke superseding an in-flight check). A caller that wants the abandonment
+    /// without changing an input — a request the client cancelled, whose work should stop — bumps
+    /// the revision instead, which is what this does.
+    ///
+    /// The poll density is what makes it prompt: every tracked-query fetch checks the flag, and the
+    /// checker additionally polls once per top-level declaration (see
+    /// [`noeta_check::check_all_cancellable`]), so a long check of one large module unwinds
+    /// mid-module.
+    ///
+    /// Read the result through `noeta_ide::catch_cancelled`, which absorbs that unwind and leaves a
+    /// genuine panic a panic. Calling this from inside a query on this same handle deadlocks, so it
+    /// belongs on the thread that is *waiting* for the work, never inside it.
+    pub fn cancel_in_flight(&mut self) {
+        use salsa::Database as _;
+        self.synthetic_write(salsa::Durability::LOW);
+    }
+}
+
 impl std::fmt::Debug for LangDatabase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LangDatabase").finish_non_exhaustive()
@@ -1773,6 +1797,61 @@ mod tests {
         );
         // The session is not corrupted by the unwind: the next query recomputes cleanly over the
         // new (now-tiny) text.
+        assert!(checked(&db, src).diagnostics.is_empty());
+    }
+
+    #[test]
+    fn cancel_in_flight_abandons_a_long_check_without_changing_an_input() {
+        // The same abandonment [`a_long_check_is_cancelled_mid_module_by_a_concurrent_write`] gets
+        // from an edit, for a caller that has no edit to make: the request that asked for the check
+        // was cancelled, so the answer is worthless and the CPU spent producing it is waste. The
+        // input must come back *unchanged* — the caller withdrew a question, it did not change the
+        // program.
+        seed_std();
+        let mut db = LangDatabase::default();
+        let mut text = String::new();
+        for i in 0..20_000 {
+            text.push_str(&format!(
+                "fn f{i}(x: int): int {{\n  y = x + {i}\n  return y * 2\n}}\n"
+            ));
+        }
+        let source = Source::new(SourceId::FIRST, "big.noe", &text);
+        let src = source_program(&db, &source, noeta_lexer::Edition::DEFAULT);
+        // Warm lex+parse so the only long, cancellable work left is the checker's per-declaration
+        // loop.
+        let _ = ast(&db, src);
+
+        let reader_db = db.clone();
+        let handle = std::thread::spawn(move || {
+            let outcome = salsa::Cancelled::catch(std::panic::AssertUnwindSafe(|| {
+                checked(&reader_db, src).diagnostics.len()
+            }));
+            // Drop the handle before reporting: `cancel_in_flight` waits for exactly this.
+            drop(reader_db);
+            outcome
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let start = std::time::Instant::now();
+        db.cancel_in_flight();
+        let cancel_elapsed = start.elapsed();
+
+        let outcome = handle.join().expect("reader thread panicked");
+        assert!(
+            outcome.is_err(),
+            "the in-flight check must unwind with salsa::Cancelled, got {outcome:?}"
+        );
+        assert!(
+            cancel_elapsed < std::time::Duration::from_secs(5),
+            "cancellation must be prompt, the call blocked for {cancel_elapsed:?}"
+        );
+        // The program is exactly what it was: a withdrawn question changed nothing.
+        assert_eq!(src.text(&db), &text);
+        // And the session still works. Shrink the program first so the recompute is cheap.
+        {
+            use salsa::Setter as _;
+            src.set_text(&mut db).to("echo 1;\n".to_string());
+        }
         assert!(checked(&db, src).diagnostics.is_empty());
     }
 

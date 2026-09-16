@@ -36,6 +36,7 @@ use noeta_vm::{
 use rmcp::ErrorData;
 use rmcp::schemars;
 use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
 
 use crate::execute::make_host;
 
@@ -71,6 +72,10 @@ struct Handle {
     cmd: Sender<Cmd>,
     terminate: Arc<AtomicBool>,
     shared: Arc<Shared>,
+    /// Set by a tool whose request was cancelled, cleared by the debugger when it takes the pause.
+    /// A session is a durable resource the agent may still want, so a cancelled resume parks the
+    /// program instead of killing it — see [`PAUSE_CANCELLED`].
+    pause_now: Arc<AtomicBool>,
 }
 
 impl std::fmt::Debug for Handle {
@@ -261,6 +266,9 @@ pub struct BreakpointArg {
     pub file: Option<String>,
 }
 
+/// The pause reason reported when a cancelled request parked a running session.
+const PAUSE_CANCELLED: &str = "cancelled";
+
 /// The [`Debugger`] on the session's run thread: pauses at entry/breakpoints/landed steps/budget
 /// trips, publishes the captured stack, and blocks on the command channel until a tool resumes it.
 /// The MCP twin of `noeta-dap`'s `DapDebugger`, over the same shared mechanics.
@@ -289,6 +297,9 @@ struct McpDebugger {
     /// statement boundary so the captured frame's locals are materialized (never a mid-statement
     /// transient `unit`). Cleared on every resume.
     limit_pending: bool,
+    /// Raised when the request that resumed this session is cancelled. Read per instruction, so a
+    /// `continue` over a long-running program stops burning CPU as soon as the client withdraws.
+    pause_now: Arc<AtomicBool>,
 }
 
 impl McpDebugger {
@@ -421,6 +432,11 @@ impl Debugger for McpDebugger {
         if self.terminate.load(Ordering::Relaxed) {
             return DebugAction::Terminate;
         }
+        // The request that resumed this session was cancelled. Park the program where it stands:
+        // the CPU stops, the session stays inspectable, and the next `debug_step` resumes it.
+        if self.pause_now.swap(false, Ordering::Relaxed) {
+            return self.pause(PAUSE_CANCELLED, view);
+        }
         // The resume budget: a run that neither pauses nor exits lands in an inspectable `limit`
         // pause rather than running away (decision #5, session form).
         self.steps += 1;
@@ -550,6 +566,7 @@ pub async fn start(
     breakpoints: Vec<BreakpointArg>,
     stop_on_entry: Option<bool>,
     real: bool,
+    cancel: &CancellationToken,
 ) -> Result<DebugStateOutput, ErrorData> {
     let entry = match (source, file) {
         (Some(text), None) => Entry::Inline(text),
@@ -594,10 +611,12 @@ pub async fn start(
 
     let shared = Shared::new();
     let terminate = Arc::new(AtomicBool::new(false));
+    let pause_now = Arc::new(AtomicBool::new(false));
     let (cmd_tx, cmd_rx) = channel::<Cmd>();
 
     let thread_shared = Arc::clone(&shared);
     let thread_terminate = Arc::clone(&terminate);
+    let thread_pause_now = Arc::clone(&pause_now);
     std::thread::spawn(move || {
         let compiled = match compile_debug(&entry, real) {
             Ok(compiled) => compiled,
@@ -639,6 +658,7 @@ pub async fn start(
             steps: 0,
             deadline: Instant::now() + Duration::from_millis(RESUME_TIMEOUT_MS),
             limit_pending: false,
+            pause_now: thread_pause_now,
         };
         let (result, trace) = VmBackend::new().run_module_debug_session(
             &compiled.module,
@@ -665,10 +685,11 @@ pub async fn start(
             cmd: cmd_tx,
             terminate,
             shared: Arc::clone(&shared),
+            pause_now: Arc::clone(&pause_now),
         },
     );
 
-    let phase = wait_settled_blocking(&shared, 0).await;
+    let phase = settle(&shared, &pause_now, 0, cancel).await;
     Ok(DebugStateOutput::from_phase(Some(id), phase, None))
 }
 
@@ -685,6 +706,7 @@ pub async fn step(
     registry: &Registry,
     session: u64,
     mode: &str,
+    cancel: &CancellationToken,
 ) -> Result<DebugStateOutput, ErrorData> {
     let cmd = match mode {
         "continue" => Cmd::Continue,
@@ -698,7 +720,7 @@ pub async fn step(
             ));
         }
     };
-    let (cmd_tx, shared) = lookup_cmd(registry, session)?;
+    let (cmd_tx, shared, pause_now) = lookup_cmd(registry, session)?;
     let (generation, phase) = shared.snapshot();
     if !matches!(phase, Phase::Paused { .. }) {
         return Ok(DebugStateOutput::from_phase(
@@ -708,7 +730,7 @@ pub async fn step(
         ));
     }
     let _ = cmd_tx.send(cmd);
-    let phase = wait_settled_blocking(&shared, generation).await;
+    let phase = settle(&shared, &pause_now, generation, cancel).await;
     Ok(DebugStateOutput::from_phase(Some(session), phase, None))
 }
 
@@ -721,7 +743,7 @@ pub async fn eval(
     expr: &str,
     frame: usize,
 ) -> Result<DebugEvalOutput, ErrorData> {
-    let (cmd_tx, shared) = lookup_cmd(registry, session)?;
+    let (cmd_tx, shared, _) = lookup_cmd(registry, session)?;
     if !matches!(shared.snapshot().1, Phase::Paused { .. }) {
         return Ok(DebugEvalOutput {
             ok: false,
@@ -803,6 +825,31 @@ pub async fn stop(registry: &Registry, session: u64) -> Result<DebugStateOutput,
     Ok(DebugStateOutput::from_phase(Some(session), phase, note))
 }
 
+/// Wait for the session to settle past `after`, asking it to park where it stands if the request
+/// is cancelled first.
+///
+/// A resume that is cancelled mid-flight must stop the *program*, not only the answer: without this
+/// the run thread keeps executing to the end of its resume budget with nobody waiting for it. It
+/// parks rather than terminates because the session outlives the request — the agent can still
+/// inspect it, and `debug_stop` is the tool that ends it.
+async fn settle(
+    shared: &Arc<Shared>,
+    pause_now: &Arc<AtomicBool>,
+    after: u64,
+    cancel: &CancellationToken,
+) -> Phase {
+    tokio::select! {
+        phase = wait_settled_blocking(shared, after) => phase,
+        () = cancel.cancelled() => {
+            pause_now.store(true, Ordering::Relaxed);
+            // The debugger reads the flag on its next instruction, so this settles promptly — and
+            // it still honors `WAIT_MS`, so a program parked inside one long native call bounds the
+            // wait exactly as it always did.
+            wait_settled_blocking(shared, after).await
+        }
+    }
+}
+
 /// Wait (off the async runtime) for the session to settle past `after`.
 async fn wait_settled_blocking(shared: &Arc<Shared>, after: u64) -> Phase {
     let shared = Arc::clone(shared);
@@ -811,21 +858,36 @@ async fn wait_settled_blocking(shared: &Arc<Shared>, after: u64) -> Phase {
         .expect("debug wait task panicked")
 }
 
+/// What a tool needs to drive one live session: its command channel, its published state, and the
+/// flag that asks it to park where it stands.
+type SessionHandles = (Sender<Cmd>, Arc<Shared>, Arc<AtomicBool>);
+
 fn lookup(registry: &Registry, session: u64) -> Result<Arc<Shared>, ErrorData> {
-    lookup_cmd(registry, session).map(|(_, shared)| shared)
+    lookup_cmd(registry, session).map(|(_, shared, _)| shared)
 }
 
-fn lookup_cmd(registry: &Registry, session: u64) -> Result<(Sender<Cmd>, Arc<Shared>), ErrorData> {
+fn lookup_cmd(registry: &Registry, session: u64) -> Result<SessionHandles, ErrorData> {
     let sessions = registry.sessions.lock().expect("registry poisoned");
     sessions
         .get(&session)
-        .map(|handle| (handle.cmd.clone(), Arc::clone(&handle.shared)))
+        .map(|handle| {
+            (
+                handle.cmd.clone(),
+                Arc::clone(&handle.shared),
+                Arc::clone(&handle.pause_now),
+            )
+        })
         .ok_or_else(|| ErrorData::invalid_params(format!("no debug session {session}"), None))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A token nothing ever cancels: these tests are about pausing and stepping.
+    fn never() -> CancellationToken {
+        CancellationToken::new()
+    }
 
     fn registry() -> Registry {
         noeta_stdlib::registry::default_seeded();
@@ -845,6 +907,7 @@ mod tests {
             breakpoints,
             stop_on_entry,
             false,
+            &never(),
         )
         .await
         .expect("start succeeds")
@@ -895,10 +958,54 @@ mod tests {
         assert!(has("n", "3") && has("m", "6"), "locals: {:?}", frame.locals);
         let session = out.session.unwrap();
 
-        let done = step(&reg, session, "continue").await.expect("continue");
+        let done = step(&reg, session, "continue", &never())
+            .await
+            .expect("continue");
         assert_eq!(done.state, "exited");
         assert_eq!(done.stdout.as_deref(), Some("7\n"));
         assert_eq!(done.exit_code, Some(0));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cancelled_resume_parks_the_program_where_it_stands() {
+        // A `continue` over a non-terminating program is the resume that costs the most to leave
+        // running. Withdrawing the request parks it: the CPU stops, and the session is still there
+        // to inspect and resume — a cancelled request withdraws a question, it does not end a
+        // debugging session.
+        let reg = registry();
+        let out = start_inline(
+            &reg,
+            "mut n = 0\nwhile true {\n  n = n + 1\n}\n",
+            Vec::new(),
+            None,
+        )
+        .await;
+        assert_eq!(out.state, "paused");
+        let session = out.session.unwrap();
+
+        let ct = CancellationToken::new();
+        let fire = ct.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            fire.cancel();
+        });
+        let parked = step(&reg, session, "continue", &ct)
+            .await
+            .expect("continue answers");
+        assert_eq!(
+            parked.state, "paused",
+            "a cancelled resume must leave the session paused, not running: {parked:?}"
+        );
+        assert_eq!(
+            parked.reason.as_deref(),
+            Some("cancelled"),
+            "the pause must say why it happened"
+        );
+        // The session survives its cancelled resume and takes the next command.
+        let seen = inspect(&reg, session).expect("inspect");
+        assert_eq!(seen.state, "paused");
+        let done = stop(&reg, session).await.expect("stop");
+        assert_eq!(done.state, "exited");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -908,7 +1015,7 @@ mod tests {
         assert_eq!(out.state, "paused");
         let session = out.session.unwrap();
 
-        let after = step(&reg, session, "over").await.expect("step");
+        let after = step(&reg, session, "over", &never()).await.expect("step");
         assert_eq!(after.state, "paused", "note: {:?}", after.note);
         assert_eq!(after.reason.as_deref(), Some("step"));
         assert!(after.frames[0].line > out.frames[0].line);
@@ -958,7 +1065,9 @@ mod tests {
         // Continue into the infinite loop: the resume budget pauses it, inspectable and live.
         // Under parallel test load the bounded wait can answer `running` before the budget
         // trips — poll like a real agent would until the session settles.
-        let mut limited = step(&reg, session, "continue").await.expect("continue");
+        let mut limited = step(&reg, session, "continue", &never())
+            .await
+            .expect("continue");
         // Generous polling: under whole-workspace parallel test load the spinning run thread can
         // be starved well past the nominal 5 s budget before it samples the clock.
         for _ in 0..60 {
