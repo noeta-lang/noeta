@@ -210,19 +210,60 @@ impl Session {
         self.cpu_ticks() - before
     }
 
-    /// Sample until the server stops working, giving up after `deadline`. Returns how long it took.
+    /// CPU ticks the server has burned since `mark`.
+    fn burned_since(&self, mark: u64) -> u64 {
+        self.cpu_ticks().saturating_sub(mark)
+    }
+
+    /// Block until the server has burned `ticks` of CPU since `mark`, reporting what it reached and
+    /// how hard it was working when it got there.
     ///
-    /// Waiting for the observable beats sleeping a guessed interval: the spans with no cancellation
-    /// poll in them (lexing, parsing, the checker's whole-program pre-passes) run to their end
-    /// before the abandonment lands, and how long that is scales with the program.
-    fn settle(&self, deadline: Duration) -> Option<Duration> {
+    /// How the cancellation tests say "this far into the work". A sleep says it in seconds, which
+    /// is a different amount of work on a loaded box than on a quiet one, and the point of
+    /// cancelling part way in is lost if the tool has already finished or has barely started.
+    ///
+    /// The rate comes out of the walk itself. A separate sample after it would push the cancel
+    /// point a whole `SAMPLE` deeper into the tool, and every budget below is a share of what is
+    /// still ahead of that point.
+    fn burn_until(&self, mark: u64, ticks: u64) -> Approach {
         let start = std::time::Instant::now();
-        while start.elapsed() < deadline {
-            if self.burn_rate(IDLE_SLICE) <= IDLE_TICKS {
-                return Some(start.elapsed());
+        // (when, ticks burned by then), trimmed to the trailing `SAMPLE` so the rate at the end of
+        // the walk describes the work in flight rather than an average over the whole approach.
+        let mut trail: std::collections::VecDeque<(std::time::Instant, u64)> =
+            std::collections::VecDeque::new();
+        loop {
+            let now = std::time::Instant::now();
+            let burned = self.burned_since(mark);
+            trail.push_back((now, burned));
+            while trail.len() > 2 && now.duration_since(trail[1].0) >= SAMPLE {
+                trail.pop_front();
             }
+            if burned >= ticks {
+                let (then, was) = trail[0];
+                let window = now.duration_since(then);
+                // Too short a window to read a rate off — the walk ended almost as soon as it
+                // began. Pay for one explicit sample instead, and count what it burns as progress.
+                if window < SAMPLE {
+                    let rate = self.burn_rate(SAMPLE);
+                    return Approach {
+                        burned: self.burned_since(mark),
+                        rate,
+                    };
+                }
+                let scaled = (burned - was) as u128 * SAMPLE.as_micros() / window.as_micros();
+                return Approach {
+                    burned,
+                    rate: scaled as u64,
+                };
+            }
+            assert!(
+                start.elapsed() < STUCK,
+                "the server burned {burned} of the {ticks} CPU ticks this test waits for, over \
+                 {:?} — it is not doing the work that was asked of it",
+                start.elapsed()
+            );
+            std::thread::sleep(PROGRESS_SLICE);
         }
-        None
     }
 
     /// Call one tool over the wire and return its `result`, asserting it is not an error.
@@ -239,6 +280,17 @@ impl Session {
             .get("result")
             .cloned()
             .unwrap_or_else(|| panic!("`{tool}` returned neither result nor error: {response}"))
+    }
+
+    /// Run one tool to completion and report what it cost the server, in CPU ticks.
+    ///
+    /// The reference the cancelled run below is measured against. CPU is the load-invariant
+    /// measure of a piece of work: a loaded box earns ticks more slowly and needs exactly as many
+    /// of them, so a ratio between two tick counts means the same thing at load 2 and at load 30.
+    fn cost_of_tool(&mut self, tool: &str, file: &PathBuf) -> u64 {
+        let mark = self.cpu_ticks();
+        self.call_tool(tool, file);
+        self.burned_since(mark)
     }
 }
 
@@ -276,6 +328,8 @@ fn mcp_handshake_names_this_toolchain_and_its_version() {
 const SAMPLE: Duration = Duration::from_millis(800);
 /// One slice of the wait-for-idle poll.
 const IDLE_SLICE: Duration = Duration::from_millis(250);
+/// One slice of the wait-for-progress poll, which only has to notice that a threshold was crossed.
+const PROGRESS_SLICE: Duration = Duration::from_millis(50);
 /// CPU ticks in a slice that still count as idle — a quarter second at 100 Hz is 25 ticks of a busy
 /// core, so this is a few percent of one.
 const IDLE_TICKS: u64 = 2;
@@ -283,18 +337,114 @@ const IDLE_TICKS: u64 = 2;
 /// that never started also burns nothing after the cancel. At 100 Hz a spinning process earns ~80
 /// ticks over `SAMPLE`; this floor clears scheduling noise on a loaded box by a wide margin.
 const BURNING: u64 = 25;
+/// How far into a tool the cancel lands, as a percent of its measured CPU cost. Far enough in that
+/// the work is under way and the front-end spans that carry no poll are behind it, and early enough
+/// that most of the tool is still ahead for the cancellation to abandon.
+const CANCEL_AT: u64 = 25;
+/// The share of the CPU an uncancelled run still had ahead of it that a cancelled one is allowed to
+/// spend before it goes quiet, as a divisor. A quarter, which is several times the one poll-free
+/// span the abandonment has to land in and far short of the remainder a server that ignored the
+/// cancellation would work through.
+const SPILL: u64 = 4;
+/// A wall-clock backstop on the polls, carrying no part of any verdict: it bounds how long a server
+/// that neither works nor stops can hold a test open. Every threshold that decides something is
+/// counted in CPU ticks instead.
+const STUCK: Duration = Duration::from_secs(240);
 
-/// Wait for a cancelled request's work to stop, failing with what it was still costing if it does
-/// not. `deadline` is per tool: the spans that carry no cancellation poll scale with the program.
-fn wait_for_stop(session: &Session, what: &str, deadline: Duration) {
-    assert!(
-        session.settle(deadline).is_some(),
-        "cancelling {what} left the work running: still burning CPU {deadline:?} after the cancel"
-    );
+/// Where a request had got to when the test stopped walking it forward, and how fast it was going.
+struct Approach {
+    /// CPU ticks the server burned between the request going out and this point.
+    burned: u64,
+    /// CPU ticks per [`SAMPLE`] over the last stretch of the walk — the working rate the
+    /// post-cancel rate is compared against.
+    rate: u64,
 }
 
-/// Assert that a cancelled request stopped the work, given the before/after CPU samples.
-fn assert_work_stopped(what: &str, before: u64, after: u64) {
+/// `percent` of the way into a tool that costs `full` CPU ticks.
+fn part_way(full: u64, percent: u64) -> u64 {
+    full * percent / 100
+}
+
+/// What a cancelled request spent before it went quiet, against the ceiling it had to stay under.
+struct Stop {
+    /// CPU ticks the server burned between the cancel and the first quiet slice.
+    spent: u64,
+    /// The ceiling `spent` stayed under, in CPU ticks.
+    budget: u64,
+    /// How long the wait took, which the report quotes and no assertion reads.
+    waited: Duration,
+}
+
+impl Stop {
+    /// The share of the budget that went unused, in percent — the headroom this run had.
+    fn headroom(&self) -> f64 {
+        if self.budget == 0 {
+            return 0.0;
+        }
+        100.0 - (self.spent as f64 * 100.0 / self.budget as f64)
+    }
+}
+
+/// Wait for a cancelled request's work to stop, budgeting in CPU rather than in seconds.
+///
+/// `budget` is the CPU the server may still spend after the cancel, and each caller derives it from
+/// what the same work costs when it runs to the end. A server that ignored the cancellation works
+/// through the whole remainder and blows past it; one that honored it pays only for the span
+/// between the cancel and the next poll. Neither statement mentions the clock, which is what makes
+/// the verdict the same on a quiet box and on one at load 30: load changes how long a tick takes to
+/// earn and never how many ticks the work costs.
+fn wait_for_stop(session: &Session, what: &str, budget: u64) -> Stop {
+    let start = std::time::Instant::now();
+    let mark = session.cpu_ticks();
+    loop {
+        let slice = session.burn_rate(IDLE_SLICE);
+        let spent = session.burned_since(mark);
+        assert!(
+            spent <= budget,
+            "cancelling {what} left the work running: {spent} CPU ticks spent after the cancel, \
+             over a budget of {budget} — the reply was dropped, the work was not"
+        );
+        if slice <= IDLE_TICKS {
+            return Stop {
+                spent,
+                budget,
+                waited: start.elapsed(),
+            };
+        }
+        assert!(
+            start.elapsed() < STUCK,
+            "cancelling {what} neither stopped the work nor spent its budget: {spent} of {budget} \
+             CPU ticks over {:?} — the server is too starved for this test to say anything",
+            start.elapsed()
+        );
+    }
+}
+
+/// The CPU a cancelled run still had ahead of it: what the tool costs, less what this run had
+/// already spent when the cancel went out.
+///
+/// It also checks the calibration it is built on. `full` comes from an earlier run of the same tool
+/// and the two are the same work, so the cancel must land with most of it still to go; a run that
+/// reaches the cancel point having already spent the whole reference is one whose reference does
+/// not describe it, and the budget derived from it would mean nothing.
+fn remaining_work(what: &str, full: u64, spent: u64) -> u64 {
+    let remaining = full.saturating_sub(spent);
+    assert!(
+        remaining * 4 >= full,
+        "the {what} request was already {spent} CPU ticks into a {full}-tick tool when it was \
+         cancelled, so there was too little left for the cancellation to stop"
+    );
+    remaining
+}
+
+/// Assert that a cancelled request stopped the work, and report the margin it did it by.
+///
+/// Two independent statements, because each covers the other's blind spot. The budget in `stop`
+/// says the process did not *spend* what the remaining work costs, which a starved process could
+/// satisfy while still running. The before/after rates say the process is not *working* now, which
+/// a process that already burned most of the remainder could satisfy on its way out. Both are
+/// ratios between two tick counts, so neither moves when the box does.
+fn assert_work_stopped(what: &str, before: u64, after: u64, stop: &Stop) {
     assert!(
         before >= BURNING,
         "the {what} request never got busy ({before} ticks over {SAMPLE:?}), so this test cannot \
@@ -302,8 +452,16 @@ fn assert_work_stopped(what: &str, before: u64, after: u64) {
     );
     assert!(
         after * 4 < before,
-        "cancelling {what} left the work running: {before} CPU ticks before the cancel, {after} \
-         after it — the reply was dropped, the work was not"
+        "cancelling {what} left the work running: {before} CPU ticks per {SAMPLE:?} before the \
+         cancel, {after} after it — the reply was dropped, the work was not"
+    );
+    eprintln!(
+        "{what}: spent {} of {} CPU ticks after the cancel ({:.0}% headroom), quiet after {:?}; \
+         rate fell from {before} to {after} ticks per {SAMPLE:?}",
+        stop.spent,
+        stop.budget,
+        stop.headroom(),
+        stop.waited,
     );
 }
 
@@ -323,14 +481,21 @@ fn mcp_cancelling_a_run_stops_the_program() {
         }),
     );
 
-    // Let it compile and get into the loop, then measure what it is costing.
-    std::thread::sleep(Duration::from_millis(700));
-    let before = session.burn_rate(SAMPLE);
+    // Let it compile and get into the loop, then measure what it is costing. The loop is endless,
+    // so there is no "whole tool" to measure against here the way the two analysis tests have one:
+    // the rate itself is the reference, and a program still running burns another `before` every
+    // `SAMPLE` for the rest of the 30-second budget.
+    let mark = session.cpu_ticks();
+    let before = session.burn_until(mark, BURNING).rate;
 
     session.cancel(id);
-    wait_for_stop(&session, "run", Duration::from_secs(5));
+    // One `SAMPLE` of spinning is the ceiling. Noticing the token costs the VM one interval of its
+    // per-instruction hook and the teardown that follows costs a loop counter's worth of nothing,
+    // so a cancel that lands spends a small fraction of this; a run that keeps going spends all of
+    // it within the first second and the rest of the budget after that.
+    let stop = wait_for_stop(&session, "run", before);
     let after = session.burn_rate(SAMPLE);
-    assert_work_stopped("run", before, after);
+    assert_work_stopped("run", before, after, &stop);
 
     // And the session is still a session: the next request is answered, and it is answered FIRST —
     // nothing was left on the wire for the request the client withdrew.
@@ -344,18 +509,36 @@ fn mcp_cancelling_a_run_stops_the_program() {
 
 /// A single module big enough that its front end takes seconds — the size that makes "abandoned
 /// part way through" measurable.
+/// The work is spread over `parts` sibling modules rather than piled into the entry, because the
+/// spans that carry no cancellation poll are whole salsa queries and a module is one of them.
+/// Lexing and parsing a module happen as a unit, so an entry holding the lot gives the abandonment
+/// nowhere to land until the front end has chewed through all of it: measured at a fifth of the
+/// whole tool, whatever fraction of the way in the cancel arrived. Split across modules, the same
+/// total of declarations leaves the longest unpolled stretch at one module's front end.
 fn oversized_module(name: &str) -> PathBuf {
     let dir = temp_root().join(format!("noeta_cli_test_{name}"));
+    let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create temp dir");
-    let mut text = String::new();
-    for i in 0..2_000 {
-        text.push_str(&format!(
-            "fn f{i}(a: int, b: int): int {{\n  c = a + b + {i}\n  d = c * 2\n  return d - a\n}}\n"
-        ));
+    let parts = 80;
+    let per_part = 120;
+    let mut entry = String::new();
+    for part in 0..parts {
+        let mut text = String::new();
+        for i in 0..per_part {
+            text.push_str(&format!(
+                "pub fn p{part}_f{i}(a: int, b: int): int {{\n  c = a + b + {i}\n  d = c * 2\n  \
+                 return d - a\n}}\n"
+            ));
+        }
+        std::fs::write(dir.join(format!("part{part}.noe")), &text).expect("write a part module");
+        entry.push_str(&format!("use app.part{part}.{{p{part}_f0}}\n"));
     }
-    text.push_str("echo f0(1, 2)\n");
+    // Every part is named from the entry, so every part is linked and checked rather than merely
+    // sitting in the directory.
+    let calls: Vec<String> = (0..parts).map(|p| format!("p{p}_f0(1, 2)")).collect();
+    entry.push_str(&format!("echo {}\n", calls.join(" + ")));
     let path = dir.join("main.noe");
-    std::fs::write(&path, &text).expect("write the oversized module");
+    std::fs::write(&path, &entry).expect("write the entry module");
     path
 }
 
@@ -367,29 +550,31 @@ fn mcp_cancelling_an_analysis_tool_stops_the_compiler() {
     let file = oversized_module("mcp_cancel_pipeline");
     let mut session = Session::start();
 
-    // What the whole tool costs, measured rather than assumed. Everything below is a fraction of
-    // it, so the test says the same thing on a fast machine and a loaded one — and, more to the
-    // point, so the deadline stays well under the work. A wait generous enough for the compile to
-    // simply *finish* inside it would pass against a server that ignores cancellation entirely.
-    let full = std::time::Instant::now();
+    // What the whole tool costs in CPU, measured rather than assumed, and measured warm so that the
+    // reference and the run it calibrates have the same caches behind them. Everything below is a
+    // fraction of this number, and a fraction of a CPU cost is a claim about work rather than about
+    // seconds: the budget a cancelled run gets is what the *uncancelled* one still had left to do.
     session.call_tool("pipeline", &file);
-    let full = full.elapsed();
+    let full = session.cost_of_tool("pipeline", &file);
 
+    let mark = session.cpu_ticks();
     let id = session.send_request(
         "tools/call",
         serde_json::json!({ "name": "pipeline", "arguments": { "file": file } }),
     );
-    // A quarter of the way in: past the lex and parse, which carry no cancellation poll, and well
-    // inside the checker, which polls at every declaration.
-    std::thread::sleep(full / 4);
-    let before = session.burn_rate(SAMPLE);
+    // Counted in the work's own currency rather than in seconds, so the cancel lands at the same
+    // point in the compile whatever the box is doing: past the lex and parse, which carry no
+    // cancellation poll, and inside the checker, which polls at every declaration.
+    let approach = session.burn_until(mark, part_way(full, CANCEL_AT));
+    let before = approach.rate;
+    let remaining = remaining_work("pipeline", full, approach.burned);
 
     session.cancel(id);
-    // A third of the tool's cost. The abandonment needs one more poll-free span to land in; the
-    // check and the compile still ahead of the cancel point are several times that.
-    wait_for_stop(&session, "pipeline", full / 3);
+    // A quarter of what the run still had ahead of it. The abandonment lands at the next
+    // declaration, and one declaration out of two thousand is a rounding error beside this.
+    let stop = wait_for_stop(&session, "pipeline", remaining / SPILL);
     let after = session.burn_rate(SAMPLE);
-    assert_work_stopped("pipeline", before, after);
+    assert_work_stopped("pipeline", before, after, &stop);
 
     let next = session.request("tools/list", serde_json::json!({}));
     assert_eq!(
@@ -399,19 +584,33 @@ fn mcp_cancelling_an_analysis_tool_stops_the_compiler() {
     );
 }
 
-/// A directory of modules, each its own check entry — the sweep `check` performs over a project.
-fn many_modules(name: &str, count: usize) -> PathBuf {
+/// A tree of `pools` directories holding `per_pool` modules each — the sweep `check` performs over
+/// a project, at the granularity the sweep actually polls on.
+///
+/// The subdirectories are what make this a *sweep* rather than one long job. A file in no package
+/// pools with its own parent directory, so each of these is an independent pool with its own
+/// sources, its own database and its own entries, and the sweep visits them one after another. That
+/// is the shape the cancellation guard needs: it polls between pools and again between the entries
+/// of a pool, so the longest stretch that carries no poll is one small pool rather than the whole
+/// project. A flat directory of the same modules is a single pool whose sources are read, parsed
+/// and linked as one unpolled prologue, and a cancel landing in that prologue waits it out —
+/// measured at a third of the whole sweep, which is not a granularity a test can hold a budget
+/// against.
+fn many_modules(name: &str, pools: usize, per_pool: usize) -> PathBuf {
     let dir = temp_root().join(format!("noeta_cli_test_{name}"));
     let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("create temp dir");
-    for file in 0..count {
-        let mut text = String::new();
-        for i in 0..400 {
-            text.push_str(&format!(
-                "fn m{file}_f{i}(a: int): int {{\n  b = a + {i}\n  return b * 2\n}}\n"
-            ));
+    for pool in 0..pools {
+        let pool_dir = dir.join(format!("pool{pool}"));
+        std::fs::create_dir_all(&pool_dir).expect("create temp dir");
+        for file in 0..per_pool {
+            let mut text = String::new();
+            for i in 0..400 {
+                text.push_str(&format!(
+                    "fn m{file}_f{i}(a: int): int {{\n  b = a + {i}\n  return b * 2\n}}\n"
+                ));
+            }
+            std::fs::write(pool_dir.join(format!("mod{file}.noe")), &text).expect("write a module");
         }
-        std::fs::write(dir.join(format!("mod{file}.noe")), &text).expect("write a module");
     }
     dir
 }
@@ -420,29 +619,31 @@ fn many_modules(name: &str, count: usize) -> PathBuf {
 fn mcp_cancelling_a_project_check_stops_the_sweep() {
     // `check` over a directory is a sweep of independent entries. Cancelling it abandons the sweep:
     // the entry in flight finishes and the next never starts.
-    let dir = many_modules("mcp_cancel_check", 24);
+    let dir = many_modules("mcp_cancel_check", 12, 2);
     let mut session = Session::start();
 
-    // The whole sweep, measured, so the cancel lands inside it and the deadline stays under it. A
-    // deadline long enough for the sweep to simply finish would pass against a server that never
-    // looks at the cancellation at all.
-    let full = std::time::Instant::now();
+    // What the whole sweep costs in CPU, measured warm, so the cancel lands inside it and the
+    // budget below stays under it. A budget large enough for the sweep to simply finish inside
+    // would pass against a server that never looks at the cancellation at all.
     session.call_tool("check", &dir);
-    let full = full.elapsed();
+    let full = session.cost_of_tool("check", &dir);
 
+    let mark = session.cpu_ticks();
     let id = session.send_request(
         "tools/call",
         serde_json::json!({ "name": "check", "arguments": { "file": dir } }),
     );
-    std::thread::sleep(full / 4);
-    let before = session.burn_rate(SAMPLE);
+    let approach = session.burn_until(mark, part_way(full, CANCEL_AT));
+    let before = approach.rate;
+    let remaining = remaining_work("check", full, approach.burned);
 
     session.cancel(id);
-    // One entry is the granularity, and there are two dozen of them, so a third of the sweep is
-    // ample for the entry in flight to finish and far short of the entries that would follow.
-    wait_for_stop(&session, "check", full / 3);
+    // A pool is the coarsest thing the sweep does without looking at the token, and there are a
+    // dozen of them, so what is still in flight when the cancel lands is a small share of what the
+    // sweep had left.
+    let stop = wait_for_stop(&session, "check", remaining / SPILL);
     let after = session.burn_rate(SAMPLE);
-    assert_work_stopped("check", before, after);
+    assert_work_stopped("check", before, after, &stop);
 
     let next = session.request("tools/list", serde_json::json!({}));
     assert_eq!(
