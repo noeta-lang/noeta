@@ -243,11 +243,12 @@ impl StallRegistry {
     }
 
     /// Register one more parallel scheduler slot. Used directly (not via the RAII guard) for an
-    /// **isolate worker**, whose slot is added by the *parent* thread at spawn — synchronously with
-    /// `inflight_isolates += 1` — so `active` never lags a spawned-but-not-yet-started worker. That
-    /// lag was the false-positive: the parent, alone-registered while its workers' threads were still
-    /// starting, saw `parked == active` and latched a deadlock on a channel-free join. See
-    /// [`deregister`](Self::deregister) for the matching drop.
+    /// **isolate worker**, whose slot the *parent* thread takes **before** starting the worker's
+    /// thread, so `active` counts that worker from before its first instruction. A slot taken any
+    /// later leaves a live worker uncounted for as long as the machine keeps the parent off-CPU, and a
+    /// park in there reads `parked == active` with the parent still running — the false positive, an
+    /// E0010 deadlock on a channel-free join. See [`deregister`](Self::deregister) for the matching
+    /// drop, which runs after the worker's thread is joined, for the same reason in reverse.
     pub fn register(&self) {
         self.active
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);

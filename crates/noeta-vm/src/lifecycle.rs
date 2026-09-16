@@ -1176,8 +1176,8 @@ pub(crate) fn run_isolate_worker(
     let callee = Value::closure(proto, Vec::new());
     // Participate in the global all-parties-blocked deadlock check (isolates I.4c) iff the parent
     // does, so a cross-isolate deadlock among workers resolves to E0010 rather than spinning. The
-    // worker's `active` **slot is registered by the parent at spawn** (not here), so `active` never
-    // lags this thread's startup — the fix for the startup-window false positive.
+    // worker's `active` **slot is taken by the parent before this thread starts** (not here), so
+    // `active` never lags this thread's startup — the fix for the startup-window false positive.
     wvm.stall_active = stall_tracked;
     // This depth-0 call/drive holds `callee` (and then `future`) only in Rust locals — root them
     // through `transient_roots` so a safepoint collection inside the body stays exact.

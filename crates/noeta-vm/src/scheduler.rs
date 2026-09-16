@@ -13,6 +13,37 @@ use noeta_value::{ScopeId, TaskId, Value};
 
 use crate::*;
 
+/// A stall-registry slot taken for an isolate worker whose thread has not started yet
+/// ([`Vm::take_worker_stall_slot`]).
+///
+/// Dropping it releases the slot, so a `spawn` that cannot create the thread — which panics, and
+/// unwinds past every parent-side counter — leaves the registry balanced. A leaked slot would be
+/// permanent: `active` never returns to zero, so the latched-deadlock flag is never cleared and the
+/// all-parties-blocked check can never pass again, which suppresses detection for every later program
+/// in the same process rather than producing a false positive.
+pub(crate) struct WorkerStallSlot {
+    held: bool,
+}
+
+impl WorkerStallSlot {
+    /// The worker's thread is running: hand it the slot, so its harvest releases it instead of this
+    /// guard. Returns whether a slot is held at all, which is what the parent counts in
+    /// `registered_workers`.
+    fn started(mut self) -> bool {
+        let held = self.held;
+        self.held = false;
+        held
+    }
+}
+
+impl Drop for WorkerStallSlot {
+    fn drop(&mut self) {
+        if self.held {
+            isolate::STALL.deregister();
+        }
+    }
+}
+
 /// The cooperative async-scheduler state (audit-1 finding 3): the structured-concurrency
 /// scope stack, the strand-local telemetry context, and the traced-future hook. One
 /// sub-struct so a scheduler borrow (`&mut self.sched`) is disjoint from the module tables.
@@ -131,27 +162,43 @@ impl<'m> Vm<'m> {
         }
         self.isolates.inflight_isolates = self.isolates.inflight_isolates.saturating_sub(1);
         // Drop the worker's stall-registry slot now it is harvested (isolates I.4c) — on the parent
-        // thread, balanced against the spawn-time `register_worker_stall`.
+        // thread and after the join, so the slot outlives the thread it stands for, balanced against
+        // the spawn-time `take_worker_stall_slot`.
         self.deregister_worker_stall();
         if self.isolates.inflight_isolates == 0 {
             self.free_shared_region();
         }
     }
 
-    /// Add a stall-registry slot for a spawned isolate worker (isolates I.4c), on the **parent
-    /// thread** at spawn — so `active` counts the worker before its own thread has started and
-    /// registered itself, which is the window that produced the false deadlock (the parent, briefly
-    /// the only registered scheduler, saw `parked == active` and latched a join as a deadlock).
-    /// No-op unless this parent participates in the registry (`stall_active`).
-    pub(crate) fn register_worker_stall(&mut self) {
+    /// Take a stall-registry slot for an isolate worker (isolates I.4c), on the **parent thread** and
+    /// **before** that worker's own thread starts, so `active` counts the worker from before its first
+    /// instruction.
+    ///
+    /// The ordering is the whole point. A worker's thread is live the moment `spawn` creates it, and
+    /// it can reach a park — its first blocking `recv` is enough — before the parent runs another
+    /// instruction, because a loaded machine will take the parent off-CPU for milliseconds right
+    /// there. A slot taken after the thread starts leaves that worker parked and uncounted: `parked`
+    /// reaches `active` with the parent still running, the park confirms an all-parties-blocked state
+    /// that is not one, and a correct program aborts with E0010. Taking the slot first means the
+    /// registry can only ever *over*-count a worker, between the slot and the thread that fills it,
+    /// and an over-count is safe — it makes the all-parties-blocked check stricter, never looser.
+    ///
+    /// The returned [`WorkerStallSlot`] releases the slot again if the thread never starts. Hand it to
+    /// a started worker with [`WorkerStallSlot::started`], after which the worker's harvest
+    /// ([`finish_isolate`](Self::finish_isolate)) releases it. No slot is taken unless this parent
+    /// participates in the registry (`stall_active`).
+    #[must_use]
+    pub(crate) fn take_worker_stall_slot(&self) -> WorkerStallSlot {
         if self.stall_active {
             isolate::STALL.register();
-            self.registered_workers += 1;
+        }
+        WorkerStallSlot {
+            held: self.stall_active,
         }
     }
 
     /// Drop one isolate-worker stall slot — at harvest ([`finish_isolate`](Self::finish_isolate)), or
-    /// at teardown for any worker joined without a harvest. Balanced against `register_worker_stall`
+    /// at teardown for any worker joined without a harvest. Balanced against `take_worker_stall_slot`
     /// by the `registered_workers` count, so the registry returns to a clean state.
     pub(crate) fn deregister_worker_stall(&mut self) {
         if self.registered_workers > 0 {
@@ -1037,8 +1084,8 @@ impl<'m> Vm<'m> {
         // process-global default, exactly as the parent.
         let registry = self.persist.registry;
         let profile_seam = self.isolates.profile_seam.clone();
-        // The worker participates in the stall registry iff this parent does; its
-        // `active` slot is already registered above, on the parent thread.
+        // The worker participates in the stall registry iff this parent does; its `active` slot is
+        // taken on this thread just below, before the worker's thread starts.
         let stall_tracked = self.stall_active;
         // This worker's cancellation token (isolate-cancel): the parent requests through it from
         // `h.cancel()`, the worker reads its flag at every safepoint and arms its own executor and
@@ -1048,6 +1095,10 @@ impl<'m> Vm<'m> {
         let signal = Arc::new(noeta_stdlib::CancelSignal::new());
         let worker_signal = Arc::clone(&signal);
         let (tx, rx) = std::sync::mpsc::channel();
+        // Take the worker's stall-registry slot before its thread can exist: from the spawn onward the
+        // worker is a live scheduler that may park, and the registry has to already know that (see
+        // `take_worker_stall_slot`). The guard releases the slot again if the thread never starts.
+        let stall_slot = self.take_worker_stall_slot();
         let thread_handle = std::thread::spawn(move || {
             let msg = run_isolate_worker(
                 &module,
@@ -1068,6 +1119,10 @@ impl<'m> Vm<'m> {
             // so it harvests immediately instead of sleeping out its stall quantum.
             isolate::WAKE.notify();
         });
+        // The thread exists, so the slot above is now the worker's and its harvest will release it.
+        if stall_slot.started() {
+            self.registered_workers += 1;
+        }
         // The worker's thread is live from here, and everything below is bookkeeping the parent still
         // owes it. Dev-only knob, no-op unless `NOETA_ISOLATE_SPAWN_DELAY_MS` is set: hold the parent
         // here so a test can observe the window a loaded machine reaches on its own.
@@ -1085,10 +1140,6 @@ impl<'m> Vm<'m> {
         if self.cancel_requested() {
             self.request_isolate_cancel(id);
         }
-        // Register the worker's stall slot up front, on this (parent) thread — before the worker's
-        // own thread starts — so `active` never lags a starting worker (isolates I.4c false-positive
-        // fix).
-        self.register_worker_stall();
         Ok(Some(
             self.register_task(Value::make_isolate_future(id), holds),
         ))
