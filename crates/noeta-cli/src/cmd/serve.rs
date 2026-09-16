@@ -444,8 +444,23 @@ pub(crate) fn serve_parallel_impl(
         return 1;
     }
 
-    // Bind the listening socket once; each worker inherits a cloned fd.
     let addr = format!("{host}:{port}");
+
+    // **Arm the watcher before the socket exists.** A bound listener accepts on the kernel's
+    // backlog immediately, so from the outside the server is up the moment `bind` returns — and
+    // anything that treats "the port answers" as readiness (a dev script, a test, a person saving
+    // a file) can land an edit before the watcher is registered. That edit raises an event nobody
+    // is subscribed to, and the watcher never looks back. Binding first left that whole window
+    // open, plus the fleet setup between the two.
+    let hot_rig = std::env::var_os("NOETA_HOT").is_some().then(|| {
+        // One consumer per worker isolate: the queue reclaims a deposited plan (its fragment AST
+        // and its whole-program `Sites` bundle) only once ALL of them have installed it, so a
+        // worker still compiling its session — or parked mid-request — cannot lose a swap.
+        let baseline = watch::EntryUnit::of(&loaded.program, &entry_source);
+        HotRig::arm(file, tail, baseline, front, workers)
+    });
+
+    // Bind the listening socket once; each worker inherits a cloned fd.
     let base = match std::net::TcpListener::bind(&addr) {
         Ok(l) => l,
         Err(e) => {
@@ -458,16 +473,11 @@ pub(crate) fn serve_parallel_impl(
 
     // Hot multi-core: each worker runs the debug-session hot path; ONE watcher deposits into
     // the shared broadcast queue and every worker drains it, so a swap spans the whole fleet.
-    if std::env::var_os("NOETA_HOT").is_some() {
-        let baseline = watch::EntryUnit::of(&loaded.program, &entry_source);
+    if let Some(rig) = hot_rig {
         eprintln!(
             "noeta serve: listening on http://{addr} across {workers} workers, hot-reloading \
              (Ctrl-C to stop)"
         );
-        // One consumer per worker isolate: the queue reclaims a deposited plan (its fragment AST
-        // and its whole-program `Sites` bundle) only once ALL of them have installed it, so a
-        // worker still compiling its session — or parked mid-request — cannot lose a swap.
-        let rig = HotRig::arm(file, tail, baseline, front, workers);
         let program = std::sync::Arc::new(loaded.program);
         let sites = std::sync::Arc::new(checked.sites);
         let sources = std::sync::Arc::new(loaded.sources);

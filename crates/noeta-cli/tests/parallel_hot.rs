@@ -336,6 +336,21 @@ fn an_edit_made_as_soon_as_the_server_answers_is_still_swapped() {
 
     let outcome = (|| -> Result<(), String> {
         noeta_test_temp::wait_until_listening_or_child_exits(&mut child, &addr, &log)?;
+
+        // **The claim, stated as an ordering rather than inferred from an outcome.** The server is
+        // answering; the watcher must already have said it is watching. Asserting this directly
+        // matters because the alternative — edit, then wait, then blame a missing swap on the
+        // watcher — cannot tell an unarmed watch apart from a compile that has not finished, and a
+        // message naming a cause it cannot observe is how the assertion this test sits beside spent
+        // a year blaming a race that had already been fixed.
+        if !log.tail().contains("[hot] watching") {
+            return Err(
+                "the server answered a request before its watcher said it was watching: an edit \
+                 saved now raises an event nobody is subscribed to, and there is no retry"
+                    .to_string(),
+            );
+        }
+
         // No settle, no warm-up request: the edit goes in the moment the port answers.
         std::fs::write(&app_path, app("v2")).map_err(|e| e.to_string())?;
 
@@ -353,11 +368,15 @@ fn an_edit_made_as_soon_as_the_server_answers_is_still_swapped() {
             std::thread::sleep(Duration::from_millis(50));
         }
         if !swapped {
-            return Err(
-                "the edit raised no swap — the server was listening before its watcher was \
-                 armed, so the event reached nobody and there is no retry"
-                    .to_string(),
-            );
+            // Says what was observed, and nothing about why. The watcher was confirmed armed
+            // above, so the edit was seen; what is left is the watcher's own re-link, check, diff
+            // and compile, which on a box under heavy contention can outrun any budget. Naming a
+            // cause here would be guessing, and a guess in an assertion message is read as a
+            // diagnosis.
+            return Err(format!(
+                "the watcher was armed before the edit, but deposited no swap within 30s:\n{}",
+                log.tail()
+            ));
         }
         // And it really is serving the new code, from every worker.
         for _ in 0..12 {

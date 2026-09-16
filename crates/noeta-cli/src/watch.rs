@@ -481,6 +481,19 @@ fn hot_watcher(
     // Watching now. The boot has been blocked on this since before it compiled, so nothing has
     // announced a listening server yet and no edit can have fallen into an unwatched window.
     // Everything below is setup that `notify` will queue events behind.
+    //
+    // Say so. `--watch` reported only its failures, so there was no way to tell a watcher that had
+    // not started from one that had nothing to report, and no way to tell a missing reload apart
+    // from a slow one. This line is the boundary: an edit saved after it is one the watcher will
+    // see, and an edit that raises no swap after it is a swap still being built.
+    eprintln!(
+        "[hot] watching {}",
+        roots
+            .iter()
+            .map(|r| r.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     let _ = armed.send(());
     // Files an expansion hook read (an `@openapi` spec). A change to one is never entry-swappable —
     // it regenerates members — so it must reach the `all_entry` check below and force a restart,
