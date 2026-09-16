@@ -24,7 +24,7 @@
 //! `cargo test -p noeta-cli` suite, which is where a regression in this path should be caught.
 
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Command};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::time::{Duration, Instant};
 
@@ -78,6 +78,10 @@ struct Driver {
     child: Option<Child>,
     stdin: Option<ChildStdin>,
     lines: Receiver<String>,
+    /// The child's stderr, on disk. A `Stdio::piped()` stderr nothing reads holds 64 KiB and then
+    /// blocks the writer, so a chatty program would stop mid-sentence, never answer the reply this
+    /// driver is blocked on, and hang the suite with the explanation unread in the pipe.
+    log: noeta_test_temp::ServerLog,
     /// The fixture's directory guard. Held for the life of the driver because the child reads the
     /// file for the life of the run; dropping it in `spawn` deletes the program mid-read.
     _fixture: noeta_test_temp::TempPath,
@@ -92,18 +96,20 @@ impl Driver {
         // the run, and a guard dropped at the end of `spawn` would delete it mid-read.
         let dir = dir.into_child("stdin_case.noe");
 
-        let mut child = Command::new(env!("CARGO_BIN_EXE_noeta"))
-            .arg("run")
-            .arg(dir.path())
-            // Hermetic startup cache: never touch the developer's real `~/.cache/noeta`.
-            .env(
-                "NOETA_CACHE_DIR",
-                concat!(env!("CARGO_TARGET_TMPDIR"), "/stdin-pipe-cache"),
+        // stdin and stdout stay pipes because the conversation runs on them; stderr goes to the
+        // log, where it cannot fill and is still readable for the assertions below.
+        let log = noeta_test_temp::ServerLog::new(name);
+        let mut child = log
+            .spawn_stdio_protocol(
+                Command::new(env!("CARGO_BIN_EXE_noeta"))
+                    .arg("run")
+                    .arg(dir.path())
+                    // Hermetic startup cache: never touch the developer's real `~/.cache/noeta`.
+                    .env(
+                        "NOETA_CACHE_DIR",
+                        concat!(env!("CARGO_TARGET_TMPDIR"), "/stdin-pipe-cache"),
+                    ),
             )
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
             .expect("spawn `noeta run`");
 
         let stdin = child.stdin.take().expect("piped stdin");
@@ -123,6 +129,7 @@ impl Driver {
             child: Some(child),
             stdin: Some(stdin),
             lines,
+            log,
             _fixture: dir,
         }
     }
@@ -187,26 +194,20 @@ impl Driver {
     /// Kill the child and panic, quoting whatever it managed to say. Nothing is left running
     /// behind a red test.
     fn die(&mut self, message: &str) -> ! {
-        let mut stderr = String::new();
-        if let Some(mut child) = self.child.take() {
+        if let Some(child) = self.child.as_mut() {
             let _ = child.kill();
             let _ = child.wait();
-            if let Some(mut pipe) = child.stderr.take() {
-                let _ = std::io::Read::read_to_string(&mut pipe, &mut stderr);
-            }
         }
-        panic!("{message}\n--- child stderr ---\n{stderr}");
+        panic!("{}", self.log.explain(message));
     }
 
     /// Close stdin, wait for the child, and return its exit code plus stderr.
+    /// Read after the wait, so everything the child wrote has landed in the log.
     fn finish(mut self) -> (Option<i32>, String) {
         self.close_stdin();
-        let child = self.child.take().expect("the child is still running");
-        let output = child.wait_with_output().expect("wait for the child");
-        (
-            output.status.code(),
-            String::from_utf8_lossy(&output.stderr).into_owned(),
-        )
+        let mut child = self.child.take().expect("the child is still running");
+        let status = child.wait().expect("wait for the child");
+        (status.code(), self.log.tail())
     }
 
     /// Every stdout line the child produced after its stdin closed, in order.
