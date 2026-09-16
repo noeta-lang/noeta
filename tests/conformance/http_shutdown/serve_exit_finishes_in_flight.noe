@@ -1,0 +1,35 @@
+// The shutdown an `os.exit` in a handler starts is graceful: a request already in flight when it
+// fires still runs to completion and still gets its real reply.
+//
+// `/` is slow and async, so it is suspended in the in-flight set when the next request's handler
+// calls `os.exit(4)`. The drain stops accepting and then keeps polling, so the slow request finishes
+// and prints; only once the set is empty does the run unwind with the requested code. The scripted
+// requests after the exiting one are never accepted.
+// expect: stdout "start GET /"
+// expect: stdout "exiting on GET /health"
+// expect: stdout "finished GET /"
+// expect: stderr "noeta serve: os.exit(4) in a handler — finishing in-flight requests, then exiting"
+// expect: exit 4
+use std.http.server
+use std.http.{Request, Response}
+use std.task.{sleep}
+use std.{os}
+
+async fn handle(req: Request): Response {
+    path = req.path()
+    if path == "/" {
+        echo "start ${req.method()} ${path}"
+        sleep(50).await
+        echo "finished ${req.method()} ${path}"
+        return server.response(200, "slow")
+    }
+    if path == "/health" {
+        echo "exiting on ${req.method()} ${path}"
+        os.exit(4)
+    }
+    echo "never handled ${path}"
+    return server.response(200, "ok")
+}
+
+server.serve(8080, handle)
+echo "unreachable"

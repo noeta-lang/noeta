@@ -217,6 +217,12 @@ impl NativeCtx for VmCtx<'_, '_> {
             .collect()
     }
 
+    fn exit_requested(&mut self) -> Option<i32> {
+        // A peek: `lifecycle`'s teardown reads the same field for the run's exit code, so taking it
+        // here would hand the caller a code the process then fails to use.
+        self.vm.out.requested_exit
+    }
+
     fn render(&mut self, slot: Slot) -> CtxResult<String> {
         let v = self.get(slot)?;
         // A user object/enum that defines `to_string` renders through it — re-entering the VM to

@@ -412,6 +412,8 @@ noeta serve [OPTIONS] <FILE>
 
 **Ctrl-C** drains gracefully. The server stops accepting, finishes the requests already in flight, closes the listener, and exits. A second Ctrl-C forces an immediate stop.
 
+A handler can shut the server down itself by calling `os.exit(code)`, which is how a program ends on a condition only it can see. The drain is the one Ctrl-C starts: the server stops accepting, the requests already in flight run to completion and get their real replies, and the process ends with `code`. The request whose handler called `os.exit` produced no response of its own and is answered `503`, and the drain announces itself on stderr.
+
 `noeta serve` accepts plain HTTP and presents no certificate, so terminate TLS upstream in a reverse proxy such as nginx, Caddy or a cloud load balancer. Bind to loopback with `--host 127.0.0.1` when a proxy on the same host is the only thing that should reach it. That applies to inbound connections only: your program's outbound calls speak TLS through `std.http`'s rustls-backed client, so `http.get("https://…")` works with no proxy involved.
 
 The same unchanged `fetch` program also deploys to the edge as a `wasi:http` component. See [WebAssembly & the Edge](WebAssembly-and-the-Edge).
