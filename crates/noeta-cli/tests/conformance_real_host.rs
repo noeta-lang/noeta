@@ -54,12 +54,6 @@ const HOST_DEPENDENT: &[(&str, &str)] = &[
         "two isolates are cooperative tasks under the sandbox and genuine OS threads on a real \
          host, so which one prints first is a coin flip (measured 15/10 over 25 loaded runs)",
     ),
-    (
-        "map_bounded.noe",
-        "the two in-flight futures register their deadlines a real millisecond apart, so they need \
-         not come due at the same poll; every observed interleave still honors the window this case \
-         asserts, but the line order moves (measured 6 of 200 loaded runs)",
-    ),
 ];
 
 fn corpus_dir() -> PathBuf {

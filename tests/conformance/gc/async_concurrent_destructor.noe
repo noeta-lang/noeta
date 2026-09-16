@@ -15,7 +15,9 @@ class Res {
 }
 async fn work(n: int): int {
     r = Res.new("task${n}")
-    sleep(1).await
+    // Distinct deadlines, 20 ms apart: which task resumes first is a property of the program. Equal
+    // sleeps come due at the same poll on a real host and resume in scheduler order.
+    sleep(n * 20).await
     echo "using ${r.tag}"
     return n
 }

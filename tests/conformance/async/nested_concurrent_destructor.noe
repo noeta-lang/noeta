@@ -21,7 +21,9 @@ class Res {
 }
 async fn inner(n: int): int {
     r = Res.new("inner${n}")
-    sleep(1).await
+    // Distinct deadlines, 20 ms apart: the order the two inner tasks resume in is then a property of
+    // the program. Equal sleeps come due at the same poll on a real host and resume in scheduler order.
+    sleep(n * 20).await
     echo "use ${r.tag}"
     return n
 }
