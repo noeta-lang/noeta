@@ -157,10 +157,20 @@ impl ChannelCore {
         WAKE.notify();
     }
 
-    /// Whether the channel is still open — a stalled scheduler keeps polling while any open shared
-    /// channel could yet be fed/drained by another isolate thread (rather than declaring a deadlock).
-    pub fn is_open(&self) -> bool {
-        !self.inner.lock().expect("channel mutex poisoned").closed
+    /// Whether this channel still represents outstanding work for a stalled scheduler, so it keeps
+    /// polling rather than declaring a deadlock. Two ways that holds: the channel is **open**, so
+    /// another isolate thread could yet feed or drain it, or it is closed and still **holds
+    /// messages**, which a receiver will take on its next poll.
+    ///
+    /// The second case is why this asks about the queue and not just the flag. A receiver polls, finds
+    /// the queue empty and the channel open, and only then decides whether it is stalled; a sender on
+    /// another thread that pushes and closes in between leaves that receiver looking at a closed
+    /// channel with its own message sitting in it. Reading only the flag there reports "no
+    /// counterparty" and aborts the program with E0010, one poll away from the value it was waiting
+    /// for, and the wider the machine's load the wider that gap gets.
+    pub fn is_pending(&self) -> bool {
+        let inner = self.inner.lock().expect("channel mutex poisoned");
+        !inner.closed || !inner.queue.is_empty()
     }
 }
 

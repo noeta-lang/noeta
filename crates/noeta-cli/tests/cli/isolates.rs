@@ -507,6 +507,52 @@ fn run_real_isolate_spawn_window_still_detects_a_real_deadlock() {
         .stderr(predicate::str::contains("deadlock"));
 }
 
+#[test]
+fn run_real_isolate_closed_channel_still_delivers_its_queued_message() {
+    // A receiver decides it is stalled from what it saw one poll ago: queue empty, channel open. A
+    // sender on another thread that pushes and closes in between leaves it looking at a closed
+    // channel holding its own message, and reading the closed flag alone reports "no counterparty"
+    // and aborts with E0010 one poll away from the value.
+    //
+    // Sending and closing back to back is what puts the push and the close inside that gap, and the
+    // spawn delay parks each worker on an empty channel first so the gap is the only thing left to
+    // land in. Ten workers per run rather than one, because the window is a scheduling accident and
+    // one sample of it is not worth running.
+    let file = temp_program(
+        "isolate_closed_channel_drain",
+        "async fn waiter(rx: Receiver<int>): int {\n\
+         r = rx.recv().await\n\
+         return match r { some(x) => x, none => 0 }\n\
+         }\n\
+         async fn run(): int {\n\
+         mut total = 0\n\
+         mut i = 0\n\
+         while i < 10 {\n\
+         (tx, rx) = channel::<int>(1)\n\
+         mut got = 0\n\
+         concurrent {\n\
+         h = isolate waiter(rx)\n\
+         tx.send(7).await\n\
+         tx.close()\n\
+         got = h.await\n\
+         }\n\
+         total = total + got\n\
+         i = i + 1\n\
+         }\n\
+         return total\n\
+         }\n\
+         echo run().await",
+    );
+    lang()
+        .arg("run")
+        .arg(&file)
+        .env("NOETA_ISOLATE_SPAWN_DELAY_MS", "25")
+        .timeout(std::time::Duration::from_secs(60))
+        .assert()
+        .success()
+        .stdout("70\n");
+}
+
 // --- real-path cancellation (isolate-cancel) ----------------------------------------
 //
 // The deterministic sandbox cancels a *cooperative* task, which is already parked between polls, so

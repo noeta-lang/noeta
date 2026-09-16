@@ -240,7 +240,7 @@ impl<'m> Vm<'m> {
                 .persist
                 .channels
                 .iter()
-                .any(|c| matches!(c, Channel::Shared(core) if core.is_open()));
+                .any(|c| matches!(c, Channel::Shared(core) if core.is_pending()));
         if !cross_thread_pending {
             return false; // no cross-thread work outstanding — the cooperative deadlock (sandbox path).
         }
