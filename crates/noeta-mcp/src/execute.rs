@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+use tokio_util::sync::CancellationToken;
 
 /// Default wall-clock budget for a `run`, in milliseconds.
 const DEFAULT_TIMEOUT_MS: u64 = 5_000;
@@ -39,6 +40,12 @@ const CLOCK_CHECK_INTERVAL: u64 = 4_096;
 const TRIP_NONE: u8 = 0;
 const TRIP_STEPS: u8 = 1;
 const TRIP_TIMEOUT: u8 = 2;
+// The client withdrew the request. Not a liveness limit — the program was inside its budget — but
+// it stops the run through the same seam, and the caller reads it the same way.
+const TRIP_CANCELLED: u8 = 3;
+/// The caller-facing signal for a run the client cancelled, in the same `limit_hit` vocabulary the
+/// liveness limits report through.
+const CANCELLED_SIGNAL: &str = "cancelled";
 
 /// The always-on liveness limits for a `run` (decision #5). Every field defaults; an agent tunes one
 /// (e.g. a longer `timeout_ms` for a heavier program) without restating the rest.
@@ -77,7 +84,8 @@ pub struct RunOutput {
     pub diagnostics: Vec<JsonDiagnostic>,
     /// The rendered abort traceback (innermost frame first), when the run aborted with a call chain.
     pub traceback: Option<String>,
-    /// Set when a liveness limit stopped the run: `"timeout"` or `"step_limit"`.
+    /// Set when the run stopped early: `"timeout"` or `"step_limit"` for a liveness limit, or
+    /// `"cancelled"` when the client withdrew the request and the program was stopped in-VM.
     pub limit_hit: Option<String>,
     /// Approximately how many VM instructions executed (sampled).
     pub steps: u64,
@@ -94,6 +102,9 @@ struct LimitDebugger {
     deadline: Instant,
     tripped: Arc<AtomicU8>,
     step_count: Arc<AtomicU64>,
+    /// The request's cancellation token, read on the same sampled schedule as the clock. A client
+    /// that cancels a `run` gets the program stopped, not just the answer withheld.
+    cancel: CancellationToken,
 }
 
 impl Debugger for LimitDebugger {
@@ -110,6 +121,13 @@ impl Debugger for LimitDebugger {
                 self.tripped.store(TRIP_TIMEOUT, Ordering::Relaxed);
                 return DebugAction::Terminate;
             }
+            // Sampled alongside the clock, for the same reason: an atomic load per instruction
+            // would show up in tier-0 dispatch cost, and a few thousand instructions of overrun is
+            // microseconds.
+            if self.cancel.is_cancelled() {
+                self.tripped.store(TRIP_CANCELLED, Ordering::Relaxed);
+                return DebugAction::Terminate;
+            }
         }
         DebugAction::Continue
     }
@@ -119,7 +137,10 @@ impl Debugger for LimitDebugger {
 /// shared through (the concrete debugger is consumed by the run). One seam for every pillar: `run`
 /// installs it on the module run; `eval`/`test` install it on their [`VmSession`] entries — so a
 /// runaway loop is bounded identically wherever code executes (decision #5).
-fn make_limiter(limits: &RunLimits) -> (LimitDebugger, Arc<AtomicU8>, Arc<AtomicU64>) {
+fn make_limiter(
+    limits: &RunLimits,
+    cancel: &CancellationToken,
+) -> (LimitDebugger, Arc<AtomicU8>, Arc<AtomicU64>) {
     let tripped = Arc::new(AtomicU8::new(TRIP_NONE));
     let step_count = Arc::new(AtomicU64::new(0));
     let debugger = LimitDebugger {
@@ -129,16 +150,19 @@ fn make_limiter(limits: &RunLimits) -> (LimitDebugger, Arc<AtomicU8>, Arc<Atomic
             + Duration::from_millis(limits.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS)),
         tripped: tripped.clone(),
         step_count: step_count.clone(),
+        cancel: cancel.clone(),
     };
     (debugger, tripped, step_count)
 }
 
-/// Which liveness limit tripped, as the caller-facing signal (`"timeout"` / `"step_limit"`), or
-/// `None` when the run finished within budget. The same vocabulary [`RunOutput::limit_hit`] uses.
+/// Why the run stopped early, as the caller-facing signal (`"timeout"` / `"step_limit"` /
+/// `"cancelled"`), or `None` when it finished within budget. The same vocabulary
+/// [`RunOutput::limit_hit`] uses.
 fn limit_signal(tripped: &AtomicU8) -> Option<String> {
     match tripped.load(Ordering::Relaxed) {
         TRIP_STEPS => Some("step_limit".to_string()),
         TRIP_TIMEOUT => Some("timeout".to_string()),
+        TRIP_CANCELLED => Some(CANCELLED_SIGNAL.to_string()),
         _ => None,
     }
 }
@@ -151,6 +175,7 @@ pub fn run(
     args: Vec<String>,
     real: bool,
     limits: &RunLimits,
+    cancel: &CancellationToken,
 ) -> Result<RunOutput, ErrorData> {
     let source_map = SourceMap::new(p.sources.clone());
 
@@ -191,7 +216,7 @@ pub fn run(
     };
 
     let (host, executor) = make_host(real, args).map_err(|e| ErrorData::internal_error(e, None))?;
-    let (debugger, tripped, step_count) = make_limiter(limits);
+    let (debugger, tripped, step_count) = make_limiter(limits, cancel);
 
     let (result, trace) =
         VmBackend::new().run_module_debug(module, host, executor, Some(Box::new(debugger)));
@@ -234,9 +259,9 @@ pub struct EvalOutput {
     pub stdout: String,
     /// Diagnostics from parsing or running the fragment (a parse error, an unknown name, a panic).
     pub diagnostics: Vec<JsonDiagnostic>,
-    /// Set when a liveness limit stopped the evaluation: `"timeout"` or `"step_limit"` (the same
-    /// signal `run` reports). A runaway loop in `expr` (or its `context`) trips this instead of
-    /// hanging.
+    /// Set when the evaluation stopped early: `"timeout"`, `"step_limit"`, or `"cancelled"` (the
+    /// same signal `run` reports). A runaway loop in `expr` (or its `context`) trips this instead
+    /// of hanging.
     pub limit_hit: Option<String>,
 }
 
@@ -248,9 +273,15 @@ pub struct EvalOutput {
 /// The evaluation is bounded by the always-on liveness limits (decision #5): a step-count + wall-clock
 /// [`LimitDebugger`] is armed on the session, so a runaway loop in `context` or `expr` terminates
 /// in-VM and returns with `limit_hit` set, exactly as a `run` does.
-pub fn eval(expr: &str, context: Option<&str>, real: bool, limits: &RunLimits) -> EvalOutput {
+pub fn eval(
+    expr: &str,
+    context: Option<&str>,
+    real: bool,
+    limits: &RunLimits,
+    cancel: &CancellationToken,
+) -> EvalOutput {
     let mut session = VmSession::new(session_factory(real));
-    let (debugger, tripped, _steps) = make_limiter(limits);
+    let (debugger, tripped, _steps) = make_limiter(limits, cancel);
     session.set_debugger(Some(Box::new(debugger)));
     let ctx_map = SourceMap::new(vec![Source::new(
         SourceId::FIRST,
@@ -360,7 +391,7 @@ pub struct TestCaseResult {
     pub message: Option<String>,
     /// Anything the case printed (useful on a failure).
     pub stdout: String,
-    /// Set when a liveness limit stopped this case: `"timeout"` or `"step_limit"`. A case that trips
+    /// Set when this case stopped early: `"timeout"`, `"step_limit"`, or `"cancelled"`. A case that trips
     /// it counts as a failure (a runaway loop is a failing test, not a hang).
     pub limit_hit: Option<String>,
 }
@@ -370,7 +401,13 @@ pub struct TestCaseResult {
 /// [`VmSession`] entry — sandbox by default, `real: true` for the real host. `filter` keeps only
 /// cases whose test name or `#[Group(...)]` contains it. Each case runs under the always-on liveness
 /// limits (decision #5), so a runaway loop in one case fails that case instead of hanging the suite.
-pub fn test(p: &Prepared, filter: Option<&str>, real: bool, limits: &RunLimits) -> TestOutput {
+pub fn test(
+    p: &Prepared,
+    filter: Option<&str>,
+    real: bool,
+    limits: &RunLimits,
+    cancel: &CancellationToken,
+) -> TestOutput {
     let source_map = SourceMap::new(p.sources.clone());
     let empty = |diagnostics| TestOutput {
         ok: false,
@@ -422,6 +459,11 @@ pub fn test(p: &Prepared, filter: Option<&str>, real: bool, limits: &RunLimits) 
     let mut skipped = 0;
     let mut cases = Vec::new();
     for test_fn in &activated.tests {
+        // A cancelled suite stops between cases as well as inside one: the per-instruction hook
+        // ends the case that is running, and this ends the sweep rather than starting the next.
+        if cancel.is_cancelled() {
+            break;
+        }
         if !matches_filter(test_fn, filter) {
             continue;
         }
@@ -437,7 +479,7 @@ pub fn test(p: &Prepared, filter: Option<&str>, real: bool, limits: &RunLimits) 
             continue;
         }
         for case in expand_cases(test_fn) {
-            let result = run_case(&setup, &case, activated.program.span, real, limits);
+            let result = run_case(&setup, &case, activated.program.span, real, limits, cancel);
             match result.status.as_str() {
                 "pass" => passed += 1,
                 _ => failed += 1,
@@ -480,6 +522,7 @@ fn run_case(
     span: noeta_span::Span,
     real: bool,
     limits: &RunLimits,
+    cancel: &CancellationToken,
 ) -> TestCaseResult {
     let args = match &case.arg {
         CaseArg::None => Vec::new(),
@@ -499,7 +542,7 @@ fn run_case(
     let program = Program { stmts, span };
 
     let mut session = VmSession::new(session_factory(real));
-    let (debugger, tripped, _steps) = make_limiter(limits);
+    let (debugger, tripped, _steps) = make_limiter(limits, cancel);
     session.set_debugger(Some(Box::new(debugger)));
     let out: SessionOutput = session.eval(&program);
     // A liveness trip terminates the case in-VM (an abort that may leave no diagnostic), so it is
@@ -737,6 +780,12 @@ fn truncate_utf8(text: String, cap: usize) -> (String, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A token nothing ever cancels: these tests are about the liveness limits, not cancellation.
+    fn never() -> CancellationToken {
+        CancellationToken::new()
+    }
+
     use crate::analyze::prepare;
 
     fn prep(src: &str) -> Prepared {
@@ -748,7 +797,7 @@ mod tests {
     fn run_prints_stdout_and_exits_clean() {
         // A Noeta program is its top-level statements (there is no auto-invoked `main`).
         let p = prep("echo \"hello\";\n");
-        let out = run(&p, Vec::new(), false, &RunLimits::default()).unwrap();
+        let out = run(&p, Vec::new(), false, &RunLimits::default(), &never()).unwrap();
         assert!(out.ran);
         assert!(out.ok, "diagnostics: {:?}", out.diagnostics);
         assert_eq!(out.host, "sandbox");
@@ -759,7 +808,7 @@ mod tests {
     #[test]
     fn run_does_not_execute_a_type_error() {
         let p = prep("fn f(): int {\n  return \"x\";\n}\n");
-        let out = run(&p, Vec::new(), false, &RunLimits::default()).unwrap();
+        let out = run(&p, Vec::new(), false, &RunLimits::default(), &never()).unwrap();
         assert!(!out.ran, "a type error must not run");
         assert!(!out.ok);
         assert!(out.diagnostics.iter().any(|d| d.code.starts_with('E')));
@@ -773,7 +822,7 @@ mod tests {
             max_steps: Some(100_000),
             ..Default::default()
         };
-        let out = run(&p, Vec::new(), false, &limits).unwrap();
+        let out = run(&p, Vec::new(), false, &limits, &never()).unwrap();
         assert_eq!(out.limit_hit.as_deref(), Some("step_limit"));
         assert!(!out.ok);
         assert!(out.steps >= 100_000);
@@ -786,7 +835,7 @@ mod tests {
             output_bytes: Some(20),
             ..Default::default()
         };
-        let out = run(&p, Vec::new(), false, &limits).unwrap();
+        let out = run(&p, Vec::new(), false, &limits, &never()).unwrap();
         assert!(out.stdout_truncated);
         assert!(out.stdout.len() <= 20);
     }
@@ -794,7 +843,7 @@ mod tests {
     #[test]
     fn eval_reports_value_and_type() {
         noeta_stdlib::registry::default_seeded();
-        let out = eval("1 + 2", None, false, &RunLimits::default());
+        let out = eval("1 + 2", None, false, &RunLimits::default(), &never());
         assert!(out.ok, "diagnostics: {:?}", out.diagnostics);
         assert_eq!(out.value.as_deref(), Some("3"));
         assert_eq!(out.r#type.as_deref(), Some("int"));
@@ -809,6 +858,7 @@ mod tests {
             Some("xs = [10, 20, 30];"),
             false,
             &RunLimits::default(),
+            &never(),
         );
         assert!(out.ok, "diagnostics: {:?}", out.diagnostics);
         assert_eq!(out.value.as_deref(), Some("3"));
@@ -817,7 +867,7 @@ mod tests {
     #[test]
     fn eval_surfaces_a_parse_error() {
         noeta_stdlib::registry::default_seeded();
-        let out = eval("1 +", None, false, &RunLimits::default());
+        let out = eval("1 +", None, false, &RunLimits::default(), &never());
         assert!(!out.ok);
         assert!(!out.diagnostics.is_empty());
     }
@@ -832,7 +882,7 @@ fn add(a: int, b: int): int { return a + b; }
 @test fn fails(): void { assert(add(2, 2) == 5); }
 ";
         let p = prep(src);
-        let out = test(&p, None, false, &RunLimits::default());
+        let out = test(&p, None, false, &RunLimits::default(), &never());
         assert!(out.diagnostics.is_empty(), "compile: {:?}", out.diagnostics);
         assert_eq!(out.passed, 1);
         assert_eq!(out.failed, 1);
@@ -855,6 +905,7 @@ fn add(a: int, b: int): int { return a + b; }
             None,
             false,
             &limits,
+            &never(),
         );
         assert_eq!(out.limit_hit.as_deref(), Some("step_limit"));
         assert!(!out.ok);
@@ -873,6 +924,7 @@ fn add(a: int, b: int): int { return a + b; }
             Some("mut n = 0;\nwhile true {\n  n = n + 1;\n}\n"),
             false,
             &limits,
+            &never(),
         );
         assert_eq!(out.limit_hit.as_deref(), Some("step_limit"));
         assert!(!out.ok);
@@ -894,7 +946,7 @@ fn add(a: int, b: int): int { return a + b; }
             max_steps: Some(50_000),
             ..Default::default()
         };
-        let out = test(&p, None, false, &limits);
+        let out = test(&p, None, false, &limits, &never());
         assert!(out.diagnostics.is_empty(), "compile: {:?}", out.diagnostics);
         assert_eq!(out.failed, 1);
         assert!(!out.ok);

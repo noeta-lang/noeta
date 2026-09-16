@@ -14,6 +14,7 @@
 
 mod analyze;
 mod architecture;
+mod cancel;
 mod context;
 mod corpus;
 mod debug;
@@ -41,6 +42,7 @@ use rmcp::service::{RequestContext, RoleServer};
 use rmcp::{ErrorData, ServerHandler, ServiceExt, schemars, tool, tool_handler, tool_router};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use tokio_util::sync::CancellationToken;
 
 /// The always-on orientation shipped in the MCP `instructions` field — cheap, and it
 /// disproportionately raises an agent's first-shot correctness on a language it has never seen.
@@ -609,8 +611,11 @@ code compiles."
     async fn check(
         &self,
         Parameters(args): Parameters<CheckArgs>,
+        ct: CancellationToken,
     ) -> Result<Json<CheckOutput>, ErrorData> {
-        Ok(Json(run_check(&args)?))
+        Ok(Json(
+            cancel::offload(move || run_check_cancellable(&args, &ct)).await??,
+        ))
     }
 
     /// Search the Noeta documentation — the first stop before writing unfamiliar Noeta.
@@ -702,14 +707,13 @@ the tightest typed expression's type in surface syntax. Ground truth from the ty
     async fn type_at(
         &self,
         Parameters(args): Parameters<TypeAtArgs>,
+        ct: CancellationToken,
     ) -> Result<Json<understand::TypeAtOutput>, ErrorData> {
         let prepared = analyze::prepare(&args.source, &args.file)?;
-        Ok(Json(understand::type_at(
-            &prepared,
-            args.symbol.as_deref(),
-            args.line,
-            args.column,
-        )))
+        cancel::analyzing(ct, "type_at", prepared, move |p| {
+            understand::type_at(p, args.symbol.as_deref(), args.line, args.column)
+        })
+        .await
     }
 
     /// Where the symbol at a site is declared — possibly in another file.
@@ -724,16 +728,20 @@ comes back as a candidate list. Returns the declaration's `id`, its location and
     async fn definition(
         &self,
         Parameters(args): Parameters<NavigateArgs>,
+        ct: CancellationToken,
     ) -> Result<Json<navigate::DefinitionOutput>, ErrorData> {
         let mut opened = navigate::open(&args.source, &args.file)?;
         let prepared = analyze::prepare(&args.source, &args.file)?;
-        Ok(Json(navigate::definition(
-            &mut opened,
-            &prepared,
-            args.symbol.as_deref(),
-            args.line,
-            args.column,
-        )))
+        cancel::analyzing(ct, "definition", prepared, move |p| {
+            navigate::definition(
+                &mut opened,
+                p,
+                args.symbol.as_deref(),
+                args.line,
+                args.column,
+            )
+        })
+        .await
     }
 
     /// Every use of the symbol at a site.
@@ -748,17 +756,21 @@ declaration."
     async fn references(
         &self,
         Parameters(args): Parameters<NavigateArgs>,
+        ct: CancellationToken,
     ) -> Result<Json<navigate::ReferencesOutput>, ErrorData> {
         let mut opened = navigate::open(&args.source, &args.file)?;
         let prepared = analyze::prepare(&args.source, &args.file)?;
-        Ok(Json(navigate::references(
-            &mut opened,
-            &prepared,
-            args.symbol.as_deref(),
-            args.line,
-            args.column,
-            args.include_declaration.unwrap_or(true),
-        )))
+        cancel::analyzing(ct, "references", prepared, move |p| {
+            navigate::references(
+                &mut opened,
+                p,
+                args.symbol.as_deref(),
+                args.line,
+                args.column,
+                args.include_declaration.unwrap_or(true),
+            )
+        })
+        .await
     }
 
     /// What completes at a position.
@@ -802,12 +814,13 @@ agent reads before navigating."
     async fn symbols(
         &self,
         Parameters(args): Parameters<SymbolsArgs>,
+        ct: CancellationToken,
     ) -> Result<Json<understand::SymbolsOutput>, ErrorData> {
         let prepared = analyze::prepare(&args.source, &args.file)?;
-        Ok(Json(understand::symbols(
-            &prepared,
-            understand::SymbolScope::parse(args.scope.as_deref()),
-        )))
+        cancel::analyzing(ct, "symbols", prepared, move |p| {
+            understand::symbols(p, understand::SymbolScope::parse(args.scope.as_deref()))
+        })
+        .await
     }
 
     /// Rank the project's declarations against a name or a description.
@@ -826,9 +839,13 @@ documentation, use `docs_search`.)"
     async fn code_search(
         &self,
         Parameters(args): Parameters<search::CodeSearchArgs>,
+        ct: CancellationToken,
     ) -> Result<Json<search::CodeSearchOutput>, ErrorData> {
         let prepared = analyze::prepare(&args.source, &args.file)?;
-        Ok(Json(search::code_search(&prepared, &args)))
+        cancel::analyzing(ct, "code_search", prepared, move |p| {
+            search::code_search(p, &args)
+        })
+        .await
     }
 
     /// The project's own `@doc` documentation, adjacency-resolved.
@@ -842,9 +859,13 @@ docs, or to answer \"where is X documented?\"."
     async fn project_docs(
         &self,
         Parameters(args): Parameters<AnalyzeArgs>,
+        ct: CancellationToken,
     ) -> Result<Json<understand::ProjectDocsOutput>, ErrorData> {
         let prepared = analyze::prepare(&args.source, &args.file)?;
-        Ok(Json(understand::project_docs(&prepared)))
+        cancel::analyzing(ct, "project_docs", prepared, move |p| {
+            understand::project_docs(p)
+        })
+        .await
     }
 
     /// Browse the project's documentation tree — the same model the editor's docs browser shows.
@@ -886,9 +907,10 @@ construct parsed."
     async fn ast(
         &self,
         Parameters(args): Parameters<AnalyzeArgs>,
+        ct: CancellationToken,
     ) -> Result<Json<introspect::AstOutput>, ErrorData> {
         let prepared = analyze::prepare(&args.source, &args.file)?;
-        Ok(Json(introspect::ast(&prepared)))
+        cancel::analyzing(ct, "ast", prepared, introspect::ast).await
     }
 
     /// The VM bytecode disassembly — what actually runs.
@@ -900,9 +922,10 @@ construct the VM does not support, with the reason."
     async fn bytecode(
         &self,
         Parameters(args): Parameters<AnalyzeArgs>,
+        ct: CancellationToken,
     ) -> Result<Json<introspect::BytecodeOutput>, ErrorData> {
         let prepared = analyze::prepare(&args.source, &args.file)?;
-        Ok(Json(introspect::bytecode(&prepared)))
+        cancel::analyzing(ct, "bytecode", prepared, introspect::bytecode).await
     }
 
     /// A per-stage health summary: lex → parse → check → compile.
@@ -914,9 +937,10 @@ the first blocking reason). A quick 'what's the shape / where does it fall over'
     async fn pipeline(
         &self,
         Parameters(args): Parameters<AnalyzeArgs>,
+        ct: CancellationToken,
     ) -> Result<Json<introspect::PipelineOutput>, ErrorData> {
         let prepared = analyze::prepare(&args.source, &args.file)?;
-        Ok(Json(introspect::pipeline(&prepared)))
+        cancel::analyzing(ct, "pipeline", prepared, introspect::pipeline).await
     }
 
     /// The module dependency graph — `namespace`/`use` import edges.
@@ -928,9 +952,13 @@ Noeta program."
     async fn module_graph(
         &self,
         Parameters(args): Parameters<AnalyzeArgs>,
+        ct: CancellationToken,
     ) -> Result<Json<introspect::ModuleGraphOutput>, ErrorData> {
         let prepared = analyze::prepare(&args.source, &args.file)?;
-        Ok(Json(introspect::module_graph(&prepared)))
+        cancel::analyzing(ct, "module_graph", prepared, move |p| {
+            introspect::module_graph(p)
+        })
+        .await
     }
 
     /// Unfold the static call path from a role or function.
@@ -946,13 +974,13 @@ callbacks) as `reference` edges."
     async fn trace(
         &self,
         Parameters(args): Parameters<TraceArgs>,
+        ct: CancellationToken,
     ) -> Result<Json<trace::TraceOutput>, ErrorData> {
         let prepared = analyze::prepare(&args.source, &args.file)?;
-        Ok(Json(trace::trace(
-            &prepared,
-            args.from.as_deref(),
-            args.max_depth,
-        )))
+        cancel::analyzing(ct, "trace", prepared, move |p| {
+            trace::trace(p, args.from.as_deref(), args.max_depth)
+        })
+        .await
     }
 
     /// What an edit or a changed declaration reaches.
@@ -967,15 +995,19 @@ attributed and everything must rerun."
     async fn impact(
         &self,
         Parameters(args): Parameters<ImpactArgs>,
+        ct: CancellationToken,
     ) -> Result<Json<impact::ImpactOutput>, ErrorData> {
         let prepared = analyze::prepare(&None, &Some(args.file.clone()))?;
-        Ok(Json(impact::impact(
-            &prepared,
-            Some(args.file.as_str()),
-            args.symbol.as_deref(),
-            args.edit_file.as_deref(),
-            args.new_source.as_deref(),
-        )))
+        cancel::analyzing(ct, "impact", prepared, move |p| {
+            impact::impact(
+                p,
+                Some(args.file.as_str()),
+                args.symbol.as_deref(),
+                args.edit_file.as_deref(),
+                args.new_source.as_deref(),
+            )
+        })
+        .await
     }
 
     /// Who uses a declaration, level by level.
@@ -989,9 +1021,13 @@ value). A use written in a module's top-level statements is reported as that mod
     async fn callers(
         &self,
         Parameters(args): Parameters<CallersArgs>,
+        ct: CancellationToken,
     ) -> Result<Json<impact::CallersOutput>, ErrorData> {
         let prepared = analyze::prepare(&args.source, &args.file)?;
-        Ok(Json(impact::callers(&prepared, &args.symbol, args.depth)))
+        cancel::analyzing(ct, "callers", prepared, move |p| {
+            impact::callers(p, &args.symbol, args.depth)
+        })
+        .await
     }
 
     /// The declarations worth reading about a set of seeds, under a token budget.
@@ -1008,16 +1044,20 @@ the default against."
     async fn context_map(
         &self,
         Parameters(args): Parameters<ContextMapArgs>,
+        ct: CancellationToken,
     ) -> Result<Json<context::ContextMapOutput>, ErrorData> {
         let prepared = analyze::prepare(&args.source, &args.file)?;
-        Ok(Json(context::context_map(
-            &prepared,
-            &args.seeds,
-            args.budget_tokens,
-            args.edge_kinds.as_deref(),
-            args.ranker.as_deref(),
-            args.seed,
-        )))
+        cancel::analyzing(ct, "context_map", prepared, move |p| {
+            context::context_map(
+                p,
+                &args.seeds,
+                args.budget_tokens,
+                args.edge_kinds.as_deref(),
+                args.ranker.as_deref(),
+                args.seed,
+            )
+        })
+        .await
     }
 
     /// How one declaration reaches another.
@@ -1033,17 +1073,21 @@ first, so the strongest route is last. `trace` walks the same graph forward from
     async fn path(
         &self,
         Parameters(args): Parameters<PathArgs>,
+        ct: CancellationToken,
     ) -> Result<Json<paths::PathOutput>, ErrorData> {
         let prepared = analyze::prepare(&args.source, &args.file)?;
-        Ok(Json(paths::path(
-            &prepared,
-            &args.from,
-            &args.to,
-            args.k,
-            args.edge_kinds.as_deref(),
-            args.max_depth,
-            args.ranker.as_deref(),
-        )))
+        cancel::analyzing(ct, "path", prepared, move |p| {
+            paths::path(
+                p,
+                &args.from,
+                &args.to,
+                args.k,
+                args.edge_kinds.as_deref(),
+                args.max_depth,
+                args.ranker.as_deref(),
+            )
+        })
+        .await
     }
 
     /// The project as its role graph.
@@ -1059,9 +1103,13 @@ Call this before `trace` to see the shape, then `trace` to unfold one entry poin
     async fn architecture(
         &self,
         Parameters(args): Parameters<AnalyzeArgs>,
+        ct: CancellationToken,
     ) -> Result<Json<architecture::ArchitectureOutput>, ErrorData> {
         let prepared = analyze::prepare(&args.source, &args.file)?;
-        Ok(Json(architecture::architecture(&prepared)))
+        cancel::analyzing(ct, "architecture", prepared, move |p| {
+            architecture::architecture(p)
+        })
+        .await
     }
 
     /// The `@role`/`@semantic` architectural graph plus the attribute manifest and declared types.
@@ -1074,9 +1122,13 @@ the declared types — exactly what the program's own `roles_of()`/`attributes_o
     async fn reflect(
         &self,
         Parameters(args): Parameters<ReflectArgs>,
+        ct: CancellationToken,
     ) -> Result<Json<introspect::ReflectOutput>, ErrorData> {
         let prepared = analyze::prepare(&args.source, &args.file)?;
-        Ok(Json(introspect::reflect(&prepared, args.role.as_deref())))
+        cancel::analyzing(ct, "reflect", prepared, move |p| {
+            introspect::reflect(p, args.role.as_deref())
+        })
+        .await
     }
 
     /// Run a program and report what it did — stdout, exit, traceback — under liveness limits.
@@ -1090,15 +1142,20 @@ budget, and an output cap (tune via `limits`). A program that does not type-chec
     async fn run(
         &self,
         Parameters(args): Parameters<RunArgs>,
+        ct: CancellationToken,
     ) -> Result<Json<execute::RunOutput>, ErrorData> {
         let prepared = analyze::prepare(&args.source, &args.file)?;
-        let out = execute::run(
-            &prepared,
-            args.args.unwrap_or_default(),
-            args.real.unwrap_or(false),
-            &args.limits.unwrap_or_default(),
-        )?;
-        Ok(Json(out))
+        let cancel = ct.clone();
+        cancel::analyzing_fallible(ct, "run", prepared, move |p| {
+            execute::run(
+                p,
+                args.args.unwrap_or_default(),
+                args.real.unwrap_or(false),
+                &args.limits.unwrap_or_default(),
+                &cancel,
+            )
+        })
+        .await
     }
 
     /// Evaluate an expression against an optional context — a one-shot REPL.
@@ -1109,12 +1166,22 @@ Sandbox by default; `real: true` uses the real host. Bounded by liveness limits 
 instruction budget, tune via `limits`): a runaway loop trips the bound and returns with `limit_hit` \
 set instead of hanging. Use this to check what an expression produces without writing a whole program."
     )]
-    async fn eval(&self, Parameters(args): Parameters<EvalArgs>) -> Json<execute::EvalOutput> {
-        Json(execute::eval(
-            &args.expr,
-            args.context.as_deref(),
-            args.real.unwrap_or(false),
-            &args.limits.unwrap_or_default(),
+    async fn eval(
+        &self,
+        Parameters(args): Parameters<EvalArgs>,
+        ct: CancellationToken,
+    ) -> Result<Json<execute::EvalOutput>, ErrorData> {
+        Ok(Json(
+            cancel::offload(move || {
+                execute::eval(
+                    &args.expr,
+                    args.context.as_deref(),
+                    args.real.unwrap_or(false),
+                    &args.limits.unwrap_or_default(),
+                    &ct,
+                )
+            })
+            .await?,
         ))
     }
 
@@ -1129,14 +1196,20 @@ tune via `limits`): a runaway loop fails that case (with `limit_hit`) instead of
     async fn test(
         &self,
         Parameters(args): Parameters<TestArgs>,
+        ct: CancellationToken,
     ) -> Result<Json<execute::TestOutput>, ErrorData> {
         let prepared = analyze::prepare(&args.source, &args.file)?;
-        Ok(Json(execute::test(
-            &prepared,
-            args.filter.as_deref(),
-            args.real.unwrap_or(false),
-            &args.limits.unwrap_or_default(),
-        )))
+        let cancel = ct.clone();
+        cancel::analyzing(ct, "test", prepared, move |p| {
+            execute::test(
+                p,
+                args.filter.as_deref(),
+                args.real.unwrap_or(false),
+                &args.limits.unwrap_or_default(),
+                &cancel,
+            )
+        })
+        .await
     }
 
     /// Start an interactive debug session.
@@ -1150,6 +1223,7 @@ every resume is budget-bounded, so a runaway program pauses (reason `limit`) ins
     async fn debug_start(
         &self,
         Parameters(args): Parameters<DebugStartArgs>,
+        ct: CancellationToken,
     ) -> Result<Json<debug::DebugStateOutput>, ErrorData> {
         Ok(Json(
             debug::start(
@@ -1159,6 +1233,7 @@ every resume is budget-bounded, so a runaway program pauses (reason `limit`) ins
                 args.breakpoints.unwrap_or_default(),
                 args.stop_on_entry,
                 args.real.unwrap_or(false),
+                &ct,
             )
             .await?,
         ))
@@ -1186,12 +1261,14 @@ the stack and live locals), running, or exited (with stdout and exit code)."
     async fn debug_step(
         &self,
         Parameters(args): Parameters<DebugStepArgs>,
+        ct: CancellationToken,
     ) -> Result<Json<debug::DebugStateOutput>, ErrorData> {
         Ok(Json(
             debug::step(
                 &self.debug,
                 args.session,
                 args.mode.as_deref().unwrap_or("over"),
+                &ct,
             )
             .await?,
         ))
@@ -1240,9 +1317,10 @@ the source untouched) if it does not parse — format never guesses at broken so
     async fn format(
         &self,
         Parameters(args): Parameters<AnalyzeArgs>,
+        ct: CancellationToken,
     ) -> Result<Json<format::FormatOutput>, ErrorData> {
         let prepared = analyze::prepare(&args.source, &args.file)?;
-        Ok(Json(format::format(&prepared)))
+        cancel::analyzing(ct, "format", prepared, format::format).await
     }
 
     /// Explain a diagnostic code with real programs that trigger it.
@@ -1300,6 +1378,25 @@ real CI-tested example programs that raise it and the docs that cover it. Call t
     }
 }
 
+/// The programmatic server name in the `initialize` handshake: the command a user writes in a
+/// client's server config (`noeta mcp`), so the entry in a client's server list reads as the
+/// toolchain they installed.
+const SERVER_NAME: &str = "noeta";
+
+/// Who this server says it is in the `initialize` handshake.
+///
+/// Built here rather than from `Implementation::from_build_env()` (which is also
+/// `Implementation::default()`, and what `ServerInfo::default()` fills in): those expand
+/// `CARGO_CRATE_NAME`/`CARGO_PKG_VERSION` where they are *written*, which is inside the SDK — so
+/// the handshake advertised the SDK's crate name and the SDK's version, and the toolchain's own
+/// version never reached a client or anything keyed on it. The `env!`s below expand in this crate,
+/// whose version is the workspace version the `noeta` binary ships under.
+fn server_identity() -> Implementation {
+    Implementation::new(SERVER_NAME, env!("CARGO_PKG_VERSION"))
+        .with_title("Noeta")
+        .with_website_url("https://noeta.dev")
+}
+
 #[tool_handler]
 impl ServerHandler for NoetaMcp {
     /// Dispatch one `tools/call`, **containing a panic in the tool** rather than letting it end the
@@ -1332,7 +1429,7 @@ impl ServerHandler for NoetaMcp {
             .enable_tools()
             .enable_resources()
             .build();
-        info.server_info = Implementation::from_build_env();
+        info.server_info = server_identity();
         info.instructions = Some(INSTRUCTIONS.to_string());
         info
     }
@@ -1547,7 +1644,26 @@ pub(crate) fn resolve_workspace(
 /// checker sees it, so a `@test` body's type error is reported here exactly as the CLI reports it,
 /// with `tiers_checked` naming what was looked inside.
 pub fn run_check(args: &CheckArgs) -> Result<CheckOutput, ErrorData> {
-    let options = noeta_project::ProjectCheckOptions::new();
+    run_check_cancellable(args, &CancellationToken::new())
+}
+
+/// [`run_check`], abandoning the sweep when `cancel` fires.
+///
+/// The `check` tool passes its request's token, so a client that withdraws a check over a directory
+/// stops the sweep instead of paying for the rest of it. Granularity is one entry: the entry in
+/// flight finishes, and the next never starts. A sweep stopped this way returns an error rather
+/// than a partial [`CheckOutput`], because half a project's diagnostics reported as a whole
+/// project's answer is the one shape an agent would act on wrongly.
+pub fn run_check_cancellable(
+    args: &CheckArgs,
+    cancel: &CancellationToken,
+) -> Result<CheckOutput, ErrorData> {
+    // A project check is a sweep of independent entries, so a cancelled request abandons the sweep
+    // rather than carrying it to the end with the answer discarded. The entry in flight finishes:
+    // one entry is the granularity this poll can offer, and it is the unit the sweep is built from.
+    let poll = cancel.clone();
+    let options = noeta_project::ProjectCheckOptions::new()
+        .with_cancel(std::sync::Arc::new(move || poll.is_cancelled()));
     let checked = match (&args.source, &args.file) {
         // Inline source is one in-memory member of a one-member pool — a different **entry set**,
         // through the same engine, so it gets the same shapes and the same dedup a file gets.
@@ -1583,6 +1699,12 @@ pub fn run_check(args: &CheckArgs) -> Result<CheckOutput, ErrorData> {
     // is the worst available answer: it is confident, detailed and wrong, and the generated
     // `AGENTS.md` tells the agent to trust it. So the check is refused, in one sentence that names
     // the missing packages and the command that fixes them.
+    // A swept-short result describes some of the project and says nothing about the rest, so it
+    // must never be returned as an answer: `ok: true` over half a sweep is the one shape an agent
+    // would act on wrongly.
+    if checked.cancelled {
+        return Err(cancel::cancelled("check"));
+    }
     if !checked.uncomposed.is_empty() {
         let project = args
             .file
@@ -1917,6 +2039,54 @@ mod tests {
                 .contains("check")
         );
         assert!(info.capabilities.tools.is_some());
+    }
+
+    #[test]
+    fn every_tool_says_whether_it_can_be_cancelled() {
+        // The page tells an agent's user what withdrawing a request does. A tool missing from it is
+        // not a gap a reader notices: they read the nearest row and take it, so an uncancellable
+        // tool sitting above a row about the checker reads as cancellable. Both halves come from
+        // the real thing here, the router and the shipped page, so adding a tool without placing it
+        // fails rather than misinforms.
+        let page = corpus::get_doc("Editor-and-AI-Tooling").expect("the page ships in the corpus");
+        let start = page
+            .find("### Cancelling a request")
+            .expect("the page carries the cancellation section");
+        let section = &page[start..];
+        let end = section
+            .find("\n## ")
+            .or_else(|| section.find("\n`noeta dump"))
+            .unwrap_or(section.len());
+        let section = &section[..end];
+
+        let unplaced: Vec<String> = NoetaMcp::tool_router()
+            .list_all()
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .filter(|name| !section.contains(&format!("`{name}`")))
+            .collect();
+        assert!(
+            unplaced.is_empty(),
+            "these tools are in the router but not in the page's cancellation section: {unplaced:?}"
+        );
+    }
+
+    #[test]
+    fn the_handshake_advertises_this_toolchain_and_its_version() {
+        // `Implementation::from_build_env()` — and `Implementation::default()`, which calls it —
+        // expand `CARGO_CRATE_NAME`/`CARGO_PKG_VERSION` inside the SDK, so the handshake named the
+        // SDK and carried the SDK's version. A client's server list, and anything keyed on the
+        // version, then described a dependency instead of this toolchain.
+        let info = NoetaMcp::new().get_info();
+        assert_eq!(info.server_info.name, "noeta");
+        assert_eq!(info.server_info.version, env!("CARGO_PKG_VERSION"));
+        // The version is the workspace version the `noeta` binary ships under, not a version the
+        // SDK happens to be at: pin it to the crate that builds *this* server.
+        assert_ne!(
+            info.server_info.version,
+            rmcp::model::Implementation::from_build_env().version,
+            "the advertised version must not be the SDK's"
+        );
     }
 
     #[tokio::test]

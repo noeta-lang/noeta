@@ -53,4 +53,12 @@ The graph stays the program `noeta test` and `noeta run` compile, and the bounda
 
 A graph tool falls back to the entry file's own parse when the workspace does not link, so `analyze::LinkStatus` rides on `trace`, `reflect` and `module_graph` as `linked` plus `link_diagnostics` in `check`'s JSON shape. The fallback changes what the answer means: names lose their qualification and a call into a sibling module resolves to nothing, so `trace` marks every node `unverified` and degrades a callee naming one of the project's own modules to `unresolved` rather than calling it external.
 
+## A cancelled request stops the work
+
+rmcp fires the request's `CancellationToken` and drops the response; the handler task keeps running unless something in it reads the token. `cancel.rs` carries it into the two places long work lives. Compiler work runs on a blocking thread while a second `LangDatabase` handle stays on the async side, and `LangDatabase::cancel_in_flight` bumps the salsa revision so the in-flight query unwinds at its next poll (`noeta_ide::catch_cancelled` absorbs that unwind and nothing else). Program execution reads the token through the VM's per-instruction `Debugger` hook, the seam the liveness limits already ride, so a cancelled `run` reports `limit_hit: "cancelled"` and a cancelled `debug_step` parks the session with pause reason `cancelled`.
+
+`check` is the exception, because `noeta_project` owns its own databases: it takes a poll through `ProjectCheckOptions::with_cancel`, consulted once per entry and once per pool, and a sweep stopped that way returns an error rather than a partial `CheckOutput`.
+
+Every path joins its worker before returning, so a tool's return means the work has stopped rather than that it was asked to. A worker panic is re-raised on the async side, which keeps `catching_panics` the thing that turns it into a JSON-RPC error a client can read.
+
 Part of the `noeta` compilation pipeline (see the repository `ARCHITECTURE.md` and `AGENTS.md`).

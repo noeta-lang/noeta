@@ -58,6 +58,9 @@ tokio = { workspace = true, features = ["io-std", "rt-multi-thread", "macros"] }
 # waits on forever (see `NoetaMcp::call_tool`).
 futures-util = { workspace = true }
 rmcp = { workspace = true }
+# The request's `CancellationToken`: a cancelled request must stop the compile or the program run it
+# started, not merely lose its reply (see `crate::cancel`).
+tokio-util = { workspace = true }
 serde = { workspace = true }
 # (`include_dir` is gone: the example corpus is baked by `build.rs` into one blob + an integer
 # index, because one `&'static str` per embedded file is one `ld.so` relocation per embedded file
