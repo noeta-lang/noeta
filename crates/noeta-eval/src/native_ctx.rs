@@ -130,6 +130,12 @@ impl NativeCtx for EvalCtx<'_> {
             .collect()
     }
 
+    fn exit_requested(&mut self) -> Option<i32> {
+        // A peek: `ir`'s teardown reads the same field for the run's exit code, so taking it here
+        // would hand the caller a code the process then fails to use.
+        self.interp.requested_exit
+    }
+
     fn render(&mut self, slot: Slot) -> CtxResult<String> {
         // Delegate to the interpreter's `display_value` — the one place `to_string` is consulted for
         // `echo` / interpolation — so `io.outln(x)` renders byte-identically to `echo x`, with no

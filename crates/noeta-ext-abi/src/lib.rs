@@ -305,7 +305,21 @@
 /// host instead of waiting for the newline that ends it. Both are trait methods with defaults, so
 /// an extension built against 27 still loads; the version moves because the surface a host may
 /// implement grew.
-pub const ABI_VERSION: u32 = 28;
+/// **29** — [`ctx::NativeCtx::exit_requested`] answers with the exit code a completed `os.exit(code)`
+/// latched on the backend, and `None` where no termination was requested. A trait method with a
+/// default, so an extension built against 28 still loads; the version moves because the surface a
+/// backend may implement grew.
+///
+/// The rule it implements: **a native that recovers from an abort has to know which abort it has.**
+/// [`CtxError::Abort`] carries a runtime diagnostic and a deliberate termination as one token, and
+/// the two want opposite answers — a single call's failure is something a long-lived loop is right
+/// to drop, while a termination is the program ending the process. Without the distinction a loop
+/// goes on working for a run whose exit code is already decided, and the program that asked to stop
+/// is still serving. This door is half the answer; the drained diagnostics are the other half, since
+/// an `os.exit` records none and so anything recorded belongs to a failure — including one that
+/// arrives while an earlier termination is already draining, where the latch is set and no longer
+/// identifies the abort in hand.
+pub const ABI_VERSION: u32 = 29;
 
 pub mod args;
 pub mod channel;

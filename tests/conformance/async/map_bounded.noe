@@ -1,23 +1,28 @@
 // Track A.9 — `map_bounded(items, n, f)` applies the async `f` to each item with at most `n` futures
-// in flight, returning results in item order. With n=2 over five items, items 1&2 run first, then 3&4,
-// then 5 — never more than two "start"s before an "end". Results keep input order regardless of
-// completion order. Deterministic under the sandbox clock; both backends agree.
+// in flight, returning results in item order. The window SLIDES: with n=2 over five items, the next
+// item starts the moment one finishes, so a slow item never holds a free slot idle waiting for its
+// batch-mate. Results keep input order regardless of completion order.
+//
+// Each item sleeps `n * 100` ms, so consecutive events are 100 ms apart and the interleave above is a
+// property of the program. Five equal sleeps come due at the same poll on a real host and resume in
+// scheduler order, which also hides the difference between a sliding window and lock-step batches:
+// under equal sleeps both produce start,start,end,end,start,start.
 // expect: stdout "start 1"
 // expect: stdout "start 2"
 // expect: stdout "end 1"
-// expect: stdout "end 2"
 // expect: stdout "start 3"
+// expect: stdout "end 2"
 // expect: stdout "start 4"
 // expect: stdout "end 3"
-// expect: stdout "end 4"
 // expect: stdout "start 5"
+// expect: stdout "end 4"
 // expect: stdout "end 5"
 // expect: stdout "result=2,4,6,8,10"
 // expect: exit 0
 use std.task.{sleep, map_bounded}
 async fn dbl(n: int): int {
     echo "start " ~ n
-    sleep(1).await
+    sleep(n * 100).await
     echo "end " ~ n
     return n * 2
 }

@@ -4,10 +4,11 @@
 // rather than the inner block completing atomically first. At t=0 all three start; the short sleepers
 // finish first and the inner join returns; awaiting `s` then reaches `slow`'s deadline.
 //
-// The 200 ms gap is what makes that ordering hold on a REAL host too (the linked `--native`
-// differential): there the executor sleeps real time to the earliest deadline and wakes late, so
-// sleeps a couple of milliseconds apart all come due at the same poll and `slow end` lands before the
-// short sleepers' ends instead. See `all.noe` for the long form.
+// Every deadline here is 100 ms from the next, which is what makes the ordering hold on a REAL host
+// too (the linked `--native` differential): there the executor sleeps real time to the earliest
+// deadline and wakes late, so sleeps a couple of milliseconds apart all come due at the same poll and
+// resume in scheduler order. That applies to `a` against `b` as much as to either against `slow`. See
+// `all.noe` for the long form.
 // expect: stdout "slow start"
 // expect: stdout "a start"
 // expect: stdout "b start"
@@ -25,17 +26,17 @@ async fn slow(): int {
     echo "slow end"
     return 300
 }
-async fn quick(name: string): int {
+async fn quick(name: string, ms: int): int {
     echo name ~ " start"
-    sleep(100).await
+    sleep(ms).await
     echo name ~ " end"
-    return 100
+    return ms
 }
 concurrent {
     s = spawn slow()
     concurrent {
-        a = spawn quick("a")
-        b = spawn quick("b")
+        a = spawn quick("a", 100)
+        b = spawn quick("b", 200)
     }
     echo "inner done"
     echo "s=" ~ s.await

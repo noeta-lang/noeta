@@ -184,6 +184,24 @@ pub trait NativeCtx {
         Vec::new()
     }
 
+    /// The exit code a completed `os.exit(code)` latched on the backend, if one ran.
+    ///
+    /// A native that **drops** a [`CtxError::Abort`] to keep running must ask this first. The two
+    /// aborts look identical at the seam and mean opposite things: a runtime diagnostic is one
+    /// call's failure, which a long-lived loop is right to recover from, while `os.exit` is the
+    /// program ending the process. Recovering from the second leaves the run latched to an exit
+    /// code it will never reach, and the program keeps working on behalf of a process it believes
+    /// is gone.
+    ///
+    /// A peek, not a take: the backend surfaces the same code as the run's exit code once the
+    /// unwind reaches teardown, so a caller that sees `Some` should finish what it owes (a serve
+    /// loop drains its in-flight requests) and then propagate [`CtxError::Abort`].
+    ///
+    /// Defaults to `None` for the harness/test contexts that run no program teardown.
+    fn exit_requested(&mut self) -> Option<i32> {
+        None
+    }
+
     /// Render a slot's value to its display string through the backend's **own** `Value::display`
     /// path — the exact one `echo` / `Op::Stringify` use, including a re-entry into a user
     /// `to_string` for a `Display` object or enum. The single canonical rendering: `std.io`'s

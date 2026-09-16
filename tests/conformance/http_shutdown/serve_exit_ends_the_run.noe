@@ -1,0 +1,29 @@
+// `os.exit(code)` inside a request handler ends the process, exactly as it does anywhere else.
+//
+// The handler diverges without producing a response, so its own request is answered 503 (the
+// server is going away; nothing about the request failed). The loop then stops accepting, finishes
+// whatever is in flight, and unwinds with the requested code — so the scripted requests after this
+// one are never handled and the statement after `server.serve` is never reached.
+//
+// This is also the only way a program can stop its own server: `serve` is `never` and the accept
+// loop otherwise ends only on a signal the program cannot send itself.
+// expect: stdout "GET /"
+// expect: stdout "GET /health"
+// expect: stdout "POST /echo"
+// expect: stderr "noeta serve: os.exit(7) in a handler — finishing in-flight requests, then exiting"
+// expect: exit 7
+use std.http.server
+use std.http.{Request, Response}
+use std.{os}
+
+fn handle(req: Request): Response {
+    path = req.path()
+    echo "${req.method()} ${path}"
+    if path == "/echo" {
+        os.exit(7)
+    }
+    return server.response(200, "ok")
+}
+
+server.serve(8080, handle)
+echo "unreachable"

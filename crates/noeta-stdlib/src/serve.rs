@@ -11,7 +11,10 @@
 //! Under the sandbox the accept leaf drives the finite request script and reports the listener
 //! closed, so the loop terminates in-oracle; on the real host it serves until the socket closes.
 //! A handler abort becomes a 500 — the canonical "drop [`CtxError::Abort`] to recover" pattern
-//! the ctx error design was shaped around.
+//! the ctx error design was shaped around. An `os.exit(code)` inside a handler reaches the loop as
+//! the same abort and means the opposite ([`NativeCtx::exit_requested`] is what tells them apart):
+//! the loop stops accepting, lets in-flight requests finish, and then unwinds so the run ends with
+//! that code. It is also how a program shuts its own server down.
 
 use noeta_ext_abi::registry::{ExtFn, NativeOut, RetTy, SigType};
 use noeta_ext_abi::{
@@ -89,12 +92,13 @@ pub const HTTP_CTX_FNS: &[ExtFn] = &[
             SigType::Fn(&[REQUEST_SIG], &SigType::Dyn),
             SigType::Optional(&SigType::String),
         ],
-        // `never`, not `void`. The accept loop ends only on a SIGINT graceful drain — an external
-        // signal the *program* cannot cause — so no code a caller writes after this can ever be
-        // reached by the program's own control flow. `never` states exactly that: you do not get
-        // control back here. The nuance is worth naming, because it is the one declaration in the
-        // stdlib where the Rust dispatch does have a `return` path; what makes it honest is that
-        // the path is the process shutting down, which is the same reason `os.exit` is `never`.
+        // `never`, not `void`. Every way the accept loop ends is the process ending: a SIGINT
+        // graceful drain, or an `os.exit(code)` a handler ran, which drains the same way and then
+        // unwinds with that code. No code a caller writes after this is reached by the program's
+        // own control flow, and `never` states exactly that. The nuance is worth naming, because
+        // it is the one declaration in the stdlib where the Rust dispatch does have a `return`
+        // path; what makes it honest is that the path is the process shutting down, which is the
+        // same reason `os.exit` is `never`.
         //
         // Nothing downstream treats `never` as license to eliminate code — the type drives checking
         // and the tier runners' setup filter, not lowering — so this changes what a signature *says*
@@ -446,16 +450,85 @@ fn server_error() -> NetResponse {
     }
 }
 
+/// The reply for a request whose handler called `os.exit`: the handler diverged without producing
+/// a response and the server is going away, which is what 503 plus `Connection: close` says. A 500
+/// would report that the request failed, and the request did not fail.
+fn shutting_down() -> NetResponse {
+    NetResponse {
+        status: 503,
+        headers: vec![("Connection".to_string(), "close".to_string())],
+        body: b"Service Unavailable".to_vec(),
+        url: String::new(), // built, not received
+    }
+}
+
+/// What a [`CtxError::Abort`] arriving from user code actually was. The two look identical at the
+/// ctx seam and mean opposite things, so every site that recovers from one asks first.
+enum Stop {
+    /// A runtime diagnostic. One request's failure, which the server survives.
+    Failed,
+    /// `os.exit(code)` ran inside the handler. The program is ending the process.
+    Exit(i32),
+}
+
+/// Classify an abort the serve loop is about to recover from, reporting a plain failure on the way.
+///
+/// The **diagnostics decide**, and the exit latch only breaks the tie. An `os.exit` records no
+/// diagnostic, so anything drained here belongs to a genuine failure. Reading the latch first would
+/// be wrong from the moment a drain begins: the latch stays set for the rest of the run, so a
+/// handler that aborts *during* the drain would be read as a second exit and its diagnostic thrown
+/// away with nothing printed, which is the silence this whole path exists to end.
+fn classify_stop(ctx: &mut dyn NativeCtx, what: &str) -> Stop {
+    let requested = ctx.exit_requested();
+    let diagnostics = ctx.drain_runtime_diagnostics();
+    if diagnostics.is_empty()
+        && let Some(code) = requested
+    {
+        return Stop::Exit(code);
+    }
+    report_abort(ctx, what, diagnostics);
+    Stop::Failed
+}
+
+/// Begin the program-initiated drain: stop accepting, cancel the pending accept so the loop is not
+/// parked on a connection that will never come, and record the code the run ends with. In-flight
+/// handlers keep running and replying; the loop propagates once they are done.
+///
+/// The announcement is the SIGINT drain notice's twin, and exists for the same reason: a drain
+/// takes as long as the slowest in-flight request, and a process that is on its way out should say
+/// so rather than look hung. The last `os.exit` wins, matching the backend's own latch.
+fn begin_exit(
+    ctx: &mut dyn NativeCtx,
+    code: i32,
+    closing: &mut bool,
+    exiting: &mut Option<i32>,
+    accept_future: &mut Option<Slot>,
+) -> CtxResult<()> {
+    *exiting = Some(code);
+    ctx.write_stderr(&format!(
+        "noeta serve: os.exit({code}) in a handler — finishing in-flight requests, then exiting\n"
+    ));
+    ctx.flush_output();
+    if !*closing {
+        *closing = true;
+        if let Some(af) = accept_future.take() {
+            ctx.cancel(af)?;
+        }
+    }
+    Ok(())
+}
+
 /// Report the runtime diagnostics behind a handler/session abort the serve loop is **swallowing**
 /// to keep the server alive, so the failure is not silent.
 ///
 /// `serve` deliberately recovers from `CtxError::Abort` (a handler's abort becomes a 500, a
 /// websocket session's closes its stream). The diagnostic is recorded backend-side, but a serve
 /// loop runs until Ctrl-C and so never reaches the program end that would print it — without this,
-/// a developer sees a bare 500 or a silently reconnecting socket and nothing else. Draining also
-/// keeps the backend's diagnostic buffer from growing for the life of the process.
-fn report_abort(ctx: &mut dyn NativeCtx, what: &str) {
-    for diagnostic in ctx.drain_runtime_diagnostics() {
+/// a developer sees a bare 500 or a silently reconnecting socket and nothing else. The draining
+/// itself happens in [`classify_stop`], which needs the diagnostics to decide what the abort was;
+/// it also keeps the backend's diagnostic buffer from growing for the life of the process.
+fn report_abort(ctx: &mut dyn NativeCtx, what: &str, diagnostics: Vec<String>) {
+    for diagnostic in diagnostics {
         ctx.write_stderr(&format!("noeta serve: {what} failed: {diagnostic}\n"));
     }
 }
@@ -544,6 +617,10 @@ pub fn http_ctx_dispatch(
             let mut in_flight: Vec<InFlight> = Vec::new();
             let mut accept_future: Option<Slot> = None;
             let mut closing = false;
+            // Set when a handler called `os.exit`. The code is already latched on the backend (it
+            // becomes the run's exit code at teardown); this is what tells the drain below to
+            // *propagate* rather than hand control back to the program.
+            let mut exiting: Option<i32> = None;
             // The swap generation as of the last iteration; a change means a hot
             // swap landed inside `advance_tasks` and live ws clients must be told to reload.
             let mut hot_gen = ctx.hot_reload().swap_count();
@@ -619,10 +696,24 @@ pub fn http_ctx_dispatch(
                                             session: None,
                                         }),
                                         Err(CtxError::Abort) => {
-                                            report_abort(ctx, "request handler");
-                                            end_server_span(ctx, span, 500);
-                                            end_server_metrics(ctx, &instruments, metrics, 500);
-                                            reply(ctx, conn, server_error())?;
+                                            let stop = classify_stop(ctx, "request handler");
+                                            let response = match stop {
+                                                Stop::Failed => server_error(),
+                                                Stop::Exit(code) => {
+                                                    begin_exit(
+                                                        ctx,
+                                                        code,
+                                                        &mut closing,
+                                                        &mut exiting,
+                                                        &mut accept_future,
+                                                    )?;
+                                                    shutting_down()
+                                                }
+                                            };
+                                            let status = response.status;
+                                            end_server_span(ctx, span, status);
+                                            end_server_metrics(ctx, &instruments, metrics, status);
+                                            reply(ctx, conn, response)?;
                                         }
                                         Err(e) => {
                                             end_server_span(ctx, span, 500);
@@ -719,7 +810,17 @@ pub fn http_ctx_dispatch(
                                         false
                                     }
                                     Err(CtxError::Abort) => {
-                                        report_abort(ctx, "event-stream session");
+                                        if let Stop::Exit(code) =
+                                            classify_stop(ctx, "event-stream session")
+                                        {
+                                            begin_exit(
+                                                ctx,
+                                                code,
+                                                &mut closing,
+                                                &mut exiting,
+                                                &mut accept_future,
+                                            )?;
+                                        }
                                         crate::http_stream::sse_close(ctx, conn)?;
                                         true
                                     }
@@ -761,7 +862,17 @@ pub fn http_ctx_dispatch(
                                                 false
                                             }
                                             Err(CtxError::Abort) => {
-                                                report_abort(ctx, "websocket session");
+                                                if let Stop::Exit(code) =
+                                                    classify_stop(ctx, "websocket session")
+                                                {
+                                                    begin_exit(
+                                                        ctx,
+                                                        code,
+                                                        &mut closing,
+                                                        &mut exiting,
+                                                        &mut accept_future,
+                                                    )?;
+                                                }
                                                 ws_close(ctx, conn)?;
                                                 true
                                             }
@@ -815,7 +926,15 @@ pub fn http_ctx_dispatch(
                             // dies with no reply to carry a status, so an unreported abort is
                             // invisible — the client just sees the stream close and reconnect.
                             let session = in_flight[k].session;
-                            report_abort(ctx, session_label(session));
+                            if let Stop::Exit(code) = classify_stop(ctx, session_label(session)) {
+                                begin_exit(
+                                    ctx,
+                                    code,
+                                    &mut closing,
+                                    &mut exiting,
+                                    &mut accept_future,
+                                )?;
+                            }
                             ctx.free(fut);
                             close_session(ctx, session, conn)?;
                             true
@@ -823,12 +942,31 @@ pub fn http_ctx_dispatch(
                         Err(CtxError::Abort) => {
                             // The 500 tells the *client* something failed; this tells the developer
                             // what (the backend recorded the diagnostic, and a serve loop never
-                            // reaches the program end that would otherwise print it).
-                            report_abort(ctx, "request handler");
+                            // reaches the program end that would otherwise print it). An `os.exit`
+                            // instead answers 503 and starts the drain — it is not a failure.
+                            let response = match classify_stop(ctx, "request handler") {
+                                Stop::Failed => server_error(),
+                                Stop::Exit(code) => {
+                                    begin_exit(
+                                        ctx,
+                                        code,
+                                        &mut closing,
+                                        &mut exiting,
+                                        &mut accept_future,
+                                    )?;
+                                    shutting_down()
+                                }
+                            };
+                            let status = response.status;
                             ctx.free(fut);
-                            end_server_span(ctx, span, 500);
-                            end_server_metrics(ctx, &instruments, in_flight[k].metrics.take(), 500);
-                            reply(ctx, conn, server_error())?;
+                            end_server_span(ctx, span, status);
+                            end_server_metrics(
+                                ctx,
+                                &instruments,
+                                in_flight[k].metrics.take(),
+                                status,
+                            );
+                            reply(ctx, conn, response)?;
                             true
                         }
                         Err(e) => return Err(e),
@@ -846,6 +984,14 @@ pub fn http_ctx_dispatch(
                 ctx.flush_output();
                 // Done when the listener closed and every handler has replied.
                 if closing && in_flight.is_empty() && accept_future.is_none() {
+                    // A handler called `os.exit`. The code is latched on the backend already, so
+                    // propagating the abort is what carries the run to the teardown that reads it —
+                    // and what stops the program resuming after a call it believes ended the
+                    // process. The abort carries no diagnostic, exactly as a top-level `os.exit`
+                    // does not.
+                    if exiting.is_some() {
+                        return Err(CtxError::Abort);
+                    }
                     return Ok(CtxOut::Out(NativeOut::Unit));
                 }
                 // Let a handler's own `concurrent` tasks advance, then the clock if stalled.

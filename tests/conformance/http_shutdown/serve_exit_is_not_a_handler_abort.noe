@@ -1,0 +1,35 @@
+// A handler abort and a handler `os.exit` arrive at the serve loop as the same token and mean
+// opposite things, so the loop asks which it has before recovering.
+//
+// `/health` aborts at runtime: one request's failure, answered 500, named on stderr, and the server
+// serves the next request. `/users/42` calls `os.exit(0)`: the program ending the process, answered
+// 503, and the requests after it are never accepted. The exit code is the requested one even though
+// an earlier request aborted, because `os.exit` states the run's outcome and the recovered abort no
+// longer bears on it.
+// expect: stdout "GET /"
+// expect: stdout "GET /health"
+// expect: stdout "POST /echo"
+// expect: stdout "GET /users/42"
+// expect: stderr "noeta serve: request handler failed: [E0016] index 99 out of bounds for list of length 3"
+// expect: stderr "noeta serve: os.exit(0) in a handler — finishing in-flight requests, then exiting"
+// expect: exit 0
+use std.http.server
+use std.http.{Request, Response}
+use std.{os}
+
+fn handle(req: Request): Response {
+    path = req.path()
+    echo "${req.method()} ${path}"
+    if path == "/health" {
+        xs: List<int> = [1, 2, 3]
+        boom = xs[99]
+        return server.response(200, "unreachable ${boom}")
+    }
+    if path == "/users/42" {
+        os.exit(0)
+    }
+    return server.response(200, "ok")
+}
+
+server.serve(8080, handle)
+echo "unreachable"

@@ -1,8 +1,12 @@
-// server.serve concurrent dispatch (http-server S3b): an async handler suspends at its `await`, so all
-// five scripted connections are accepted and in flight — each prints "handling" — *before* any
+// server.serve concurrent dispatch (http-server S3b): an async handler suspends at its `await`, so
+// every scripted connection is accepted and in flight — each prints "handling" — *before* any
 // completes and prints "done". A serial server would print handling/done paired per request; here
-// every handler starts before the first sleep elapses, then they all resume together. Both backends
-// run the identical cooperative schedule, so the interleaving is deterministic and differential-pinned.
+// every handler starts before the first deadline elapses, then they resume in deadline order.
+//
+// Each handler takes the NEXT deadline, 100 ms after the one before it, so the order the eight
+// resume in is a property of the program. Eight equal sleeps come due at the same poll on a real
+// host, where the executor sleeps real time to the earliest deadline and wakes late, and the eight
+// then resume in whatever order the scheduler holds them — which this header pins and cannot.
 // expect: stdout "handling GET /"
 // expect: stdout "handling GET /health"
 // expect: stdout "handling POST /echo"
@@ -25,10 +29,16 @@ use std.http.server
 use std.http.{Request, Response}
 use std.task.{sleep}
 
-async fn handle(req: Request): Response {
+// Handed out before each handler's first `await`, so the deadlines are assigned in the order the
+// loop reaps the handlers rather than in the order they happen to finish.
+mut next_ms = 0
+
+async fn handle(req: Request) use (next_ms): Response {
     line = "${req.method()} ${req.path()}"
+    next_ms = next_ms + 100
+    ms = next_ms
     echo "handling ${line}"
-    sleep(5).await
+    sleep(ms).await
     echo "done ${line}"
     return server.response(200, "ok")
 }

@@ -126,7 +126,7 @@ The `fs.*_async` family is the proving client, with its descriptors declared in 
 
 A function that takes a **closure argument**, calls it back, polls futures, or drives the scheduler registers in a module's **ctx table** rather than its ordinary function table. Its arguments arrive as opaque **slots**, indices into a per-call table of backend values it never sees, and it re-enters the backend through one capability trait, `NativeCtx`.
 
-`NativeCtx` can `call` a callable slot, `call_method` a *named* method on a receiver, `spawn_io`/`timer`/`poll`/`drive` futures, `advance_tasks`/`advance_clock` the scheduler, `render` a value to its canonical display string, and `bytes_of` a `bytes` slot, alongside list access and argument probes.
+`NativeCtx` can `call` a callable slot, `call_method` a *named* method on a receiver, `spawn_io`/`timer`/`poll`/`drive` futures, `advance_tasks`/`advance_clock` the scheduler, `render` a value to its canonical display string, `bytes_of` a `bytes` slot, and `exit_requested` a pending exit code, alongside list access and argument probes.
 
 Each backend implements the trait once, and the slot table owns the refcount discipline centrally (retain on insert, release on free or drop, arguments borrowed from the caller's registers), so a dispatch structurally cannot leak. The dispatch body stays a single shared `fn`, so the differential holds by construction over orchestration code as well.
 
@@ -134,7 +134,7 @@ Each backend implements the trait once, and the slot table owns the refcount dis
 
 **`call_method`** takes a receiver plus a method name, where `call` takes a callable *value*, and answers `Ok(None)` when the receiver declares no such method. It is how a native reaches a method a **user type** declared: the extension holds the values and the name from its own contract, never a closure. The motivating case is a trait an extension declares and a user type implements.
 
-Ordinary registered ctx dispatches cover `task.sleep`/`all`/`race`/`map_bounded` (drive loops over `call` and `poll`), `server.serve` (the accept, dispatch and reply loop, including the recover-from-abort pattern where a handler abort becomes a 500 and the loop continues), and all of `std.reactive`.
+Ordinary registered ctx dispatches cover `task.sleep`/`all`/`race`/`map_bounded` (drive loops over `call` and `poll`), `server.serve` (the accept, dispatch and reply loop, including the recover-from-abort pattern where a handler abort becomes a 500 and the loop continues, while `os.exit` drains and propagates), and all of `std.reactive`.
 
 ## Persistent state: the retained arena and `ExtState`
 

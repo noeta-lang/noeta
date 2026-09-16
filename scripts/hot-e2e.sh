@@ -48,6 +48,9 @@ SUITES=(
                         # first request after it, with zero stale responses in every shape
     "live_serve:1"      # LiveView over a real RFC 6455 socket: snapshot, patches, second session
     "graceful_drain:1"  # SIGINT mid-request drains it, then the listener closes
+    "serve_exit:1"      # the program's own shutdown door: `os.exit` in a handler answers that
+                        # request 503, drains the in-flight one, closes the listener, and exits
+                        # with the requested code rather than serving on
     # The four siblings this list was first scoped to leave out. It was scoped to the hot-swap arc;
     # the class is "everything `#[ignore]`d because it needs a real port or a real child process",
     # and a sibling left out of the list is a sibling nothing runs. Added on the measurement the
