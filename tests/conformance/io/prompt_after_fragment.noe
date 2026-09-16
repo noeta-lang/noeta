@@ -1,0 +1,34 @@
+// `io.prompt` after an unterminated fragment. `prompt` writes its message to the terminal ahead of
+// the batch buffer, so it drains that buffer first and the `io.out("Name: ")` it follows reaches the
+// reader before it does. That ordering lives on a live host, where output streams; here it pins the
+// half the deterministic sandbox can see, which is that draining costs the program nothing.
+//
+// The fragment is still a fragment afterward: it joins the line that eventually terminates it, in
+// the order it was written, and the prompt's own message reaches no compared buffer on either host.
+// So a prompt in the middle of a half-written line leaves batch-captured output byte-identical to
+// the same program without one, and the scripted stdin line still comes back.
+//
+// The terminal ordering itself is not observable here, because neither host writes a prompt's
+// message anywhere the oracle compares. It is pinned over a real process by
+// `live_output::a_prompt_lands_after_the_fragment_it_follows`, which reads both of a child's streams
+// back from one file.
+// expect: stdout "Name: line one"
+// expect: stdout "left: line two"
+// expect: stdout "done"
+// expect: exit 0
+use std.io
+
+// A fragment with nothing to terminate it yet.
+io.out("Name: ")
+
+// The prompt drains the buffer, writes to the terminal, and reads the first scripted line.
+answer = io.prompt("your name? ") ?? "<eof>"
+
+// The fragment and the answer are one line, in the order they were written.
+io.outln(answer)
+
+// Reading on: `prompt` consumed exactly one line, like `stdin_line` does.
+next = io.stdin_line() ?? "<eof>"
+io.outln("left: ${next}")
+
+echo "done"

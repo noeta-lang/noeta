@@ -189,4 +189,19 @@ Every tool that takes a `file` analyzes **the whole program**: the entry, its si
 
 A failing tool fails **one request, not the session**. An internal error comes back as a JSON-RPC error naming the tool, and the server keeps serving, so you retry it or ask something else without reconnecting.
 
+The handshake identifies the server as `noeta` at the version of the binary serving it, so a client's server list and its logs name the toolchain they are talking to.
+
+### Cancelling a request
+
+A `notifications/cancelled` stops the work as well as the reply. A cancelled `run` stops the program inside the VM, a cancelled analysis abandons the compile, and the session stays open and answers the next request. Where the stop lands depends on what the tool was doing:
+
+| Tool | Stops at |
+|---|---|
+| `run`, `eval`, `test` | The next VM instruction, with `limit_hit` reading `cancelled`. |
+| `type_at`, `definition`, `references`, `symbols`, `code_search`, `project_docs`, `ast`, `bytecode`, `pipeline`, `module_graph`, `trace`, `impact`, `callers`, `context_map`, `path`, `architecture`, `reflect`, `format` | The checker's next declaration, or the next compiler stage. Lexing and parsing one module run to their end. |
+| `check` | The end of the entry in flight; the next entry never starts. |
+| `debug_start`, `debug_step` | The next VM instruction, where the program parks with pause reason `cancelled`. The session stays live and `debug_step` resumes it. |
+
+Every other tool runs to completion, because each finishes inside the time it takes to withdraw it. `docs_search`, `docs_get`, `examples_find`, `stdlib_api`, `doc_browse`, `doc_page` and `explain_diagnostic` read the bundled documentation, example and signature corpora from memory. `completions` and `signature` parse the one file the position sits in. `debug_inspect`, `debug_stop` and `debug_eval` are each bounded by the session's own budget.
+
 `noeta dump <file>` is useful to an agent or a human alongside these: it prints the exact VM bytecode a program compiles to, which fast paths fired, and how names and constants are laid out. See [The CLI](The-CLI#noeta-dump).

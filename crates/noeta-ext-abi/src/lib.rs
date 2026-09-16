@@ -298,7 +298,14 @@
 /// declaration's `traits` entry is resolved against that list at assembly and the checker resolves
 /// the same string through `BuiltinTrait::from_name`, so the list is part of the contract: a name
 /// added to it widens what an extension may advertise. Additive, and still a change.
-pub const ABI_VERSION: u32 = 27;
+/// **28** — two doors onto state a host already held and a program could not read.
+/// [`host::Network::net_sse_is_closed`] answers whether an event stream's client has gone away
+/// (`SseSink.closed()`, the push-side twin of `Socket.closed()`), and [`ctx::NativeCtx::flush_output`]
+/// became reachable from the language as `io.flush()`, which pushes a partial line to a streaming
+/// host instead of waiting for the newline that ends it. Both are trait methods with defaults, so
+/// an extension built against 27 still loads; the version moves because the surface a host may
+/// implement grew.
+pub const ABI_VERSION: u32 = 28;
 
 pub mod args;
 pub mod channel;

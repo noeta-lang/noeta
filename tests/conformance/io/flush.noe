@@ -1,0 +1,42 @@
+// `io.flush()` — push what has been written so far, whole line or not. A live host streams
+// completed lines, so a fragment with no newline waits for whatever terminates it; `flush` is the
+// door for output that must arrive before that, like a prompt or a progress indicator.
+//
+// What this case pins is the half the deterministic sandbox can see, and it is the half most
+// easily broken: a host that batch-captures output (the oracle, `noeta test`, an embedder) must
+// come out of a flushing program byte-identical to a non-flushing one. `flush` offers the buffers
+// to the host and takes them back untouched when the host declines, so fragments still join into
+// the lines below and stdout and stderr stay separate. A flush that dropped what the host did not
+// take would show up here as missing output.
+// expect: stdout "start"
+// expect: stdout "partial then flushed then more"
+// expect: stdout "42"
+// expect: stdout "end"
+// expect: stderr "warn: half flushed, half not"
+// expect: exit 0
+use std.io
+
+echo "start"
+
+// A fragment, flushed mid-line: the line is still one line when it lands.
+io.out("partial")
+io.flush()
+io.out(" then flushed")
+io.flush()
+io.outln(" then more")
+
+// Flushing an empty buffer is fine, and flushing twice in a row is the same as flushing once.
+io.flush()
+io.flush()
+
+// Values render the way `echo` renders them, flush or no flush.
+io.out(42)
+io.flush()
+io.outln("")
+
+// stderr flushes with stdout and keeps its own buffer.
+io.err("warn: half flushed")
+io.flush()
+io.errln(", half not")
+
+echo "end"

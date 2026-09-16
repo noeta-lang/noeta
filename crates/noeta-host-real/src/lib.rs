@@ -1014,6 +1014,13 @@ impl Network for RealHost {
         })
     }
 
+    fn net_sse_is_closed(&self, conn: u64) -> bool {
+        // Table presence, exactly like `net_ws_is_closed`: a send that finds the peer gone drops
+        // the entry, so its absence *is* "the client left" and there is no second piece of state to
+        // keep in sync.
+        !self.sse_conns.lock().unwrap().contains_key(&conn)
+    }
+
     fn net_sse_start_now(&mut self, _conn: u64) -> Result<(), StdError> {
         unreachable!("RealHost starts event streams via the async descriptor")
     }

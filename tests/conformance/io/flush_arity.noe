@@ -1,0 +1,17 @@
+// `io.flush()` is nullary, and the checker arity-gates it like every other native.
+//
+// The bad call sits in a function nothing calls, and the program prints if it runs. That is what
+// makes this case a check of the **checker**: a runtime arity check inside the dispatch raises the
+// same code at the same span, so a case that simply called `io.flush(1)` at top level would stay
+// green with the static rule gone. Here the only way to produce E0007 is to reject the program
+// before it runs, and the only way to get the program's output is to have failed to.
+// expect: error E0007 at 14:5
+// expect: exit 1
+use std.io
+
+fn never_called(): void {
+    // One argument to a 0-parameter function.
+    io.flush(1)
+}
+
+echo "this program runs only if the call above was accepted"
