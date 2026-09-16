@@ -9,16 +9,24 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::process::Command;
 
+mod common;
+
 /// A handler that reports which OS thread served it, so the test can observe more than one worker
 /// doing work (true multi-core, not one thread taking everything).
-fn app() -> &'static str {
-    "use std.http.server\n\
-     use std.http.{Request, Response}\n\
-     use std.task.{sleep}\n\
-     async fn fetch(req: Request): Response {\n\
-     \x20   sleep(200).await\n\
-     \x20   return server.response(200, \"ok ${req.path()}\")\n\
-     }\n"
+///
+/// `tests/fixtures/parallel_serve/app.noe` holds it. `#[ignore]` keeps this suite out of `cargo
+/// test`, which would leave a program written here compiled by nothing; from disk, `tests/fixtures.rs`
+/// compiles it on every run.
+fn app() -> String {
+    common::fixture("parallel_serve/app")
+}
+
+/// The program each worker aborts on, for the test that reads the fleet's death.
+///
+/// It is an ordinary positive fixture: `panic` is a runtime abort, so this checks clean and the
+/// detonation happens only when it runs.
+fn worker_abort() -> String {
+    common::fixture("parallel_serve/worker_abort")
 }
 
 fn get(addr: &str, path: &str) -> Result<String, String> {
@@ -111,21 +119,7 @@ fn a_worker_that_aborts_reports_its_diagnostics_and_its_stack() {
     // `scripts/hot-e2e.sh`.
     let dir = noeta_test_temp::TempDir::new("parallel-serve-abort");
     let app_path = dir.join("app.noe");
-    std::fs::write(
-        &app_path,
-        "use std.io\n\
-         use std.http.{Request, Response}\n\
-         use std.http.server\n\
-         fn detonate(): int {\n\
-         \x20   panic(\"worker kaboom\")\n\
-         }\n\
-         fn fetch(req: Request): Response {\n\
-         \x20   return server.response(200, \"ok\")\n\
-         }\n\
-         io.errln(\"worker speaking\")\n\
-         echo detonate()\n",
-    )
-    .unwrap();
+    std::fs::write(&app_path, worker_abort()).unwrap();
 
     let port = noeta_test_temp::free_port();
     let out = Command::new(env!("CARGO_BIN_EXE_noeta"))

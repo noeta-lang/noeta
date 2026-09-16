@@ -1,0 +1,11 @@
+use std.http.server
+use std.http.{Request, Response}
+use std.task.{sleep}
+use std.{os}
+async fn fetch(req: Request): Response {
+    if req.path() == "/quit" {
+        os.exit(17)
+    }
+    sleep(400).await
+    return server.response(200, "drained ${req.path()}")
+}

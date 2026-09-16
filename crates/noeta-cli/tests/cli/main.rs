@@ -9,6 +9,11 @@
 
 mod support;
 
+/// The fixture loader shared with the real-socket suites, so an `#[ignore]`d test in this target
+/// loads its Noeta from `tests/fixtures/` too.
+#[path = "../common/mod.rs"]
+mod common;
+
 mod automation;
 mod bench;
 mod build;

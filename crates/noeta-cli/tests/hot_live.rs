@@ -15,42 +15,24 @@ use std::process::Command;
 use common::{ws_connect, ws_recv, ws_send};
 
 /// The app: reactive state exposed through a view; any client frame increments.
+///
+/// The program is `tests/fixtures/hot_live/app.noe`. An inline literal would be compiled by no
+/// `cargo test` at all, since `#[ignore]` switches off the only run that would reach it; on disk it
+/// goes through `tests/fixtures.rs` every time. `double_factor` is substituted into the fixture's own
+/// `* 2`, so the file on disk stays a program rather than a template.
+///
+/// One of this test's four versions is `"boom"`, a type error the server is *meant* to reject, so it
+/// is the substitution that carries it and never the fixture.
 fn app(double_factor: &str) -> String {
-    format!(
-        "use std.http.server\n\
-         use std.http.{{Request, Response, Socket}}\n\
-         use std.reactive.{{signal, computed, view}}\n\n\
-         count = signal(0)\n\
-         double = computed(fn() {{\n\
-         \x20   return count.get() * {double_factor}\n\
-         }})\n\n\
-         async fn session(sock: Socket) use (count, double): bool {{\n\
-         \x20   v = view()\n\
-         \x20   v.expose(\"count\", count)\n\
-         \x20   v.expose(\"double\", double)\n\
-         \x20   sock.send(v.snapshot())\n\
-         \x20   mut going = true\n\
-         \x20   while going {{\n\
-         \x20       msg = sock.recv().await\n\
-         \x20       if msg == none {{\n\
-         \x20           going = false\n\
-         \x20       }} else {{\n\
-         \x20           count.set(count.get() + 1)\n\
-         \x20           patch = v.diff() ?? \"\"\n\
-         \x20           if patch != \"\" {{\n\
-         \x20               sock.send(patch)\n\
-         \x20           }}\n\
-         \x20       }}\n\
-         \x20   }}\n\
-         \x20   return true\n\
-         }}\n\n\
-         fn fetch(req: Request): Response {{\n\
-         \x20   if req.path() == \"/ws\" {{\n\
-         \x20       return server.websocket(session)\n\
-         \x20   }}\n\
-         \x20   return server.response(200, \"ok\")\n\
-         }}\n"
+    common::fixture_with(
+        "hot_live/app",
+        &[("count.get() * 2", &format!("count.get() * {double_factor}"))],
     )
+}
+
+/// The file written outside the entry to make the server child's watcher exit at teardown.
+fn teardown() -> String {
+    common::fixture("hot_live/teardown")
 }
 
 #[test]
@@ -149,7 +131,7 @@ fn a_live_client_gets_reload_on_swap_and_error_on_red_check() {
     // file makes the server child's hot watcher exit with the restart sentinel.
     let _ = child.kill();
     let _ = child.wait();
-    let _ = std::fs::write(dir.join("teardown.noe"), "// trigger child exit\n");
+    let _ = std::fs::write(dir.join("teardown.noe"), teardown());
     noeta_test_temp::settle_closed(&addr);
     let _ = std::fs::remove_dir_all(&dir);
     outcome.unwrap_or_else(|e| {

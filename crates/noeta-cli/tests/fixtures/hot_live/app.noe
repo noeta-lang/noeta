@@ -1,0 +1,36 @@
+use std.http.server
+use std.http.{Request, Response, Socket}
+use std.reactive.{signal, computed, view}
+
+count = signal(0)
+double = computed(fn() {
+    return count.get() * 2
+})
+
+async fn session(sock: Socket) use (count, double): bool {
+    v = view()
+    v.expose("count", count)
+    v.expose("double", double)
+    sock.send(v.snapshot())
+    mut going = true
+    while going {
+        msg = sock.recv().await
+        if msg == none {
+            going = false
+        } else {
+            count.set(count.get() + 1)
+            patch = v.diff() ?? ""
+            if patch != "" {
+                sock.send(patch)
+            }
+        }
+    }
+    return true
+}
+
+fn fetch(req: Request): Response {
+    if req.path() == "/ws" {
+        return server.websocket(session)
+    }
+    return server.response(200, "ok")
+}

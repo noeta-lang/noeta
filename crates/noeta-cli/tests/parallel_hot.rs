@@ -11,14 +11,17 @@ use std::net::TcpStream;
 use std::process::Command;
 use std::time::Duration;
 
+mod common;
+
+/// The served handler, tagged so a response says which version answered it.
+///
+/// The program is `tests/fixtures/parallel_hot/app.noe`, not a literal here: this test is
+/// `#[ignore]`d, so an inline program would be compiled by no `cargo test` and a language change
+/// would rot it in silence. On disk, `tests/fixtures.rs` compiles it on every run. The tag is
+/// substituted into the fixture's own `"v1"`, which keeps the file on disk a valid program rather
+/// than a template with a hole in it.
 fn app(tag: &str) -> String {
-    format!(
-        "use std.http.server\n\
-         use std.http.{{Request, Response}}\n\
-         fn fetch(req: Request): Response {{\n\
-         \x20   return server.response(200, \"{tag}\")\n\
-         }}\n"
-    )
+    common::fixture_with("parallel_hot/app", &[("\"v1\"", &format!("\"{tag}\""))])
 }
 
 fn get(addr: &str) -> Result<String, String> {
@@ -288,4 +291,86 @@ fn an_idle_swap_reaches_every_worker_before_the_next_request() {
             swap.stale_after_idle
         );
     }
+}
+
+/// **An edit made the instant the server answers is hot-swapped, not lost.**
+///
+/// Arming the watcher used to mean *spawning the thread that arms it*, and `std::thread::spawn`
+/// returns before that thread has necessarily run. The boot's next steps are to compile and bind,
+/// which for a small program on a loaded box finish first, so the server announced
+/// `listening … hot-reloading` while nothing was subscribed. `notify` has no backlog for a watch
+/// that did not exist, and the watcher has no second chance to look: an edit in that window raised
+/// no event, printed no diagnostic, and was never retried.
+///
+/// This edits with **no settle at all**, which is the worst case and the one the two tests above
+/// brush against, since they serve only a short round of requests first. The assertion is the
+/// watcher's own deposit line rather than the served body, because the `--watch` wrapper restarts
+/// the process on a change it sees first, and a restart also ends up serving the new code. A restart
+/// is not a swap: it drops the signal state a swap preserves, which is the thing hot reload exists
+/// for. Only `[hot] swapped generation` tells the two apart.
+#[test]
+#[ignore = "spawns the CLI across threads and edits real files; run explicitly"]
+fn an_edit_made_as_soon_as_the_server_answers_is_still_swapped() {
+    let dir = noeta_test_temp::TempDir::new("parallel-hot-arm");
+    let app_path = dir.join("app.noe");
+    std::fs::write(&app_path, app("v1")).unwrap();
+
+    let port = noeta_test_temp::free_port();
+    let log = noeta_test_temp::ServerLog::new("parallel-hot-arm");
+    let mut child = log
+        .spawn(
+            Command::new(env!("CARGO_BIN_EXE_noeta"))
+                .args([
+                    "serve",
+                    "--watch",
+                    app_path.to_str().unwrap(),
+                    "--port",
+                    &port.to_string(),
+                    "--parallel",
+                    "3",
+                ])
+                .current_dir(&dir),
+        )
+        .expect("spawn `noeta serve --parallel 3 --watch`");
+    let addr = format!("127.0.0.1:{port}");
+
+    let outcome = (|| -> Result<(), String> {
+        noeta_test_temp::wait_until_listening_or_child_exits(&mut child, &addr, &log)?;
+        // No settle, no warm-up request: the edit goes in the moment the port answers.
+        std::fs::write(&app_path, app("v2")).map_err(|e| e.to_string())?;
+
+        // Generous, because what is being asserted is that the edit is honored AT ALL, never how
+        // fast. The watcher has to debounce, re-link, check, diff and compile first, and none of
+        // that is this test's subject.
+        let mut swapped = false;
+        for _ in 0..600 {
+            // The watcher's own deposit line, not a worker's install line: this asserts that the
+            // edit was SEEN, which is the thing an unarmed watch loses.
+            if log.tail().contains("[hot] swapped generation") {
+                swapped = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        if !swapped {
+            return Err(
+                "the edit raised no swap — the server was listening before its watcher was \
+                 armed, so the event reached nobody and there is no retry"
+                    .to_string(),
+            );
+        }
+        // And it really is serving the new code, from every worker.
+        for _ in 0..12 {
+            let r = get(&addr)?;
+            if r != "v2" {
+                return Err(format!("swapped, but a worker still serves {r:?}"));
+            }
+        }
+        Ok(())
+    })();
+
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+    outcome.unwrap_or_else(|e| panic!("{}", log.explain(format!("arming race: {e}"))));
 }

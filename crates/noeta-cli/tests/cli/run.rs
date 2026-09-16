@@ -633,17 +633,12 @@ fn run_http_get_over_the_real_network() {
     // The verbs answer `Result<Response, HttpError>`, so `?` is what separates "the request never
     // got off the ground" from a status the server actually sent; `status()` and `ok()` then read
     // the response itself.
-    let src = r#"use std.http.client
-use std.http.HttpError
-
-async fn run(): Result<void, HttpError> {
-    echo client.get("https://example.com/")?.status()
-    echo client.get_async("https://example.com/").await?.ok()
-    return Ok()
-}
-run().await?
-"#;
-    let file = temp_program("run_http_real", src);
+    //
+    // The program is `tests/fixtures/cli/run/http_get.noe`. This is the test that went stale on an
+    // `http.get` namespace no longer in the language while the tree stayed green, because `#[ignore]`
+    // means no `cargo test` compiles a program written here. From disk, `tests/fixtures.rs` does.
+    let src = crate::common::fixture("cli/run/http_get");
+    let file = temp_program("run_http_real", &src);
     lang()
         .arg("run")
         .arg(&file)

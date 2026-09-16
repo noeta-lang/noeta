@@ -11,13 +11,34 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+mod common;
+
+/// The single-file app: a leaf, a caller, and one test on each.
+///
+/// Every program this suite writes is under `tests/fixtures/impact_watch/`, where `tests/fixtures.rs`
+/// compiles it on each `cargo test`. Written here as a literal it would be compiled nowhere, since
+/// `#[ignore]` means nothing runs it unless someone types `--ignored`. `leaf_ret` replaces the
+/// fixture's own `1`, in both the body and the assertion that pins it.
 fn app(leaf_ret: &str) -> String {
-    format!(
-        "fn leaf(): int {{ return {leaf_ret}; }}\n\
-         fn mid(): int {{ return leaf(); }}\n\
-         fn other(): int {{ return 2; }}\n\
-         @test fn t_mid(): void {{ assert(mid() == {leaf_ret}); }}\n\
-         @test fn t_other(): void {{ assert(other() == 2); }}\n"
+    app_from("impact_watch/app", leaf_ret)
+}
+
+/// The same app with a top-level statement after the declarations, which is the edit the impact
+/// valve cannot attribute and answers with a full rerun.
+///
+/// A second file rather than an appended line, because a top-level statement is structure and the
+/// version the test actually writes has to be compiled somewhere.
+fn app_with_top_level(leaf_ret: &str) -> String {
+    app_from("impact_watch/app_with_top_level", leaf_ret)
+}
+
+fn app_from(name: &str, leaf_ret: &str) -> String {
+    common::fixture_with(
+        name,
+        &[
+            ("return 1;", &format!("return {leaf_ret};")),
+            ("mid() == 1", &format!("mid() == {leaf_ret}")),
+        ],
     )
 }
 
@@ -96,8 +117,7 @@ fn an_edit_reruns_exactly_the_impacted_tests() {
 
         // A top-level change: the valve degrades to a full rerun, with the reason (prefixed
         // by the file it came from — the multi-file engine attributes per member).
-        std::fs::write(&app_path, format!("{}echo mid()\n", app("0 + 1")))
-            .map_err(|e| e.to_string())?;
+        std::fs::write(&app_path, app_with_top_level("0 + 1")).map_err(|e| e.to_string())?;
         wait_for(
             &stderr,
             err_at,
@@ -113,18 +133,35 @@ fn an_edit_reruns_exactly_the_impacted_tests() {
     outcome.expect("impact-filtered watch round trip");
 }
 
+/// The imported module, with both bodies substituted into `tests/fixtures/impact_watch/multi/lib.noe`.
 fn lib(add_body: &str, stray_body: &str) -> String {
-    format!(
-        "namespace App.Lib;\n\
-         pub fn add(a: int, b: int): int {{ return {add_body}; }}\n\
-         pub fn stray(): int {{ return {stray_body}; }}\n"
+    lib_from("impact_watch/multi/lib", add_body, stray_body)
+}
+
+/// The same module with `stray` carrying a parameter, which is the signature change the last step of
+/// the multi-file test makes.
+///
+/// It is a second file rather than a `str::replace` on the first, because a signature is structure:
+/// the padded version has to be compiled somewhere, and only a fixture on disk is. It sits in its own
+/// directory so that two modules claiming `App.Lib` never share one.
+fn lib_with_padded_stray(add_body: &str, stray_body: &str) -> String {
+    lib_from("impact_watch/multi_padded/lib", add_body, stray_body)
+}
+
+fn lib_from(name: &str, add_body: &str, stray_body: &str) -> String {
+    common::fixture_with(
+        name,
+        &[
+            ("return a + b;", &format!("return {add_body};")),
+            ("return 9;", &format!("return {stray_body};")),
+        ],
     )
 }
 
-const APP_USING_LIB: &str = "use App.Lib.add;\n\
-                             fn compose(n: int): int { return add(n, 1); }\n\
-                             @test fn t_add(): void { assert(compose(1) == 2); }\n\
-                             @test fn t_other(): void { assert(true); }\n";
+/// The entry that imports `App.Lib.add`, and the two tests whose impact this suite narrows.
+fn app_using_lib() -> String {
+    common::fixture("impact_watch/multi/app")
+}
 
 #[test]
 #[ignore = "spawns the CLI and writes real files; run explicitly"]
@@ -135,7 +172,7 @@ fn a_sibling_module_edit_narrows_to_its_caller_tests() {
     let dir = noeta_test_temp::TempDir::new("impact-watch-mf");
     let lib_path = dir.join("lib.noe");
     std::fs::write(&lib_path, lib("a + b", "9")).unwrap();
-    std::fs::write(dir.join("app.noe"), APP_USING_LIB).unwrap();
+    std::fs::write(dir.join("app.noe"), app_using_lib()).unwrap();
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_noeta"))
         .args(["test", "--watch", "app.noe"])
@@ -172,11 +209,8 @@ fn a_sibling_module_edit_narrows_to_its_caller_tests() {
         let err_at = wait_for(&stderr, err_at, "nothing impacted")?;
 
         // A lib signature change: unattributable — full rerun, reason names the file.
-        std::fs::write(
-            &lib_path,
-            lib("b + a", "10 - 1").replace("fn stray()", "fn stray(pad: int)"),
-        )
-        .map_err(|e| e.to_string())?;
+        std::fs::write(&lib_path, lib_with_padded_stray("b + a", "10 - 1"))
+            .map_err(|e| e.to_string())?;
         wait_for(&stderr, err_at, "rerunning everything: lib.noe:")?;
         wait_for(&stdout, out_at, "running 2 tests")?;
         Ok(())

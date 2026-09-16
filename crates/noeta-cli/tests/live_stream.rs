@@ -21,6 +21,13 @@ use std::net::{TcpListener, TcpStream};
 use std::process::Command;
 use std::time::Duration;
 
+mod common;
+
+/// The port every client fixture here is pinned to on disk, and the needle each test replaces with
+/// the port its stub server actually got. Keeping a real one in the file is what makes the fixture a
+/// program `tests/fixtures.rs` can compile rather than a template.
+const FIXTURE_PORT: &str = "127.0.0.1:8080";
+
 /// A scratch directory for one fixture program, private to this process and this call.
 ///
 /// Not the shared system temp dir: a Noeta entry point pulls in its *siblings* (the loader links
@@ -78,28 +85,11 @@ fn dechunk(body: &str) -> Result<String, String> {
 fn a_served_sse_handler_streams_real_events() {
     let dir = scratch("serve");
     let program = dir.join("events.noe");
-    std::fs::write(
-        &program,
-        r#"use std.http.server
-use std.http.{Request, Response, SseSink, Frame}
-
-async fn events(sink: SseSink): bool {
-    sink.send(Frame { event: "start", data: "go", id: "1", retry: none })
-    sink.comment("keepalive")
-    sink.send(Frame { event: "", data: "one\ntwo", id: "", retry: none })
-    sink.send(Frame { event: "end", data: "[DONE]", id: "2", retry: some(1500) })
-    return true
-}
-
-fn fetch(req: Request): Response {
-    if req.path() == "/events" {
-        return server.sse(events)
-    }
-    return server.response(200, "ok")
-}
-"#,
-    )
-    .expect("write the fixture program");
+    // `tests/fixtures/live_stream/events.noe`. All four programs in this suite are on disk: this
+    // test is `#[ignore]`d, so a literal here would never be compiled by `cargo test`, while a file
+    // is compiled by `tests/fixtures.rs` on every run.
+    std::fs::write(&program, common::fixture("live_stream/events"))
+        .expect("write the fixture program");
 
     // A kernel-assigned port, not a fixed one: a fixed port is shared with every other
     // checkout and every concurrent run of this test on the machine, and the server that loses the
@@ -203,40 +193,9 @@ fn client_stream_reads_a_real_body_arriving_in_pieces() {
     let program = dir.join("read.noe");
     std::fs::write(
         &program,
-        format!(
-            r#"use std.http.client
-use std.http.Framing
-use std.http.Frame
-use std.http.HttpError
-
-fn blank(): Frame {{
-    return Frame {{ event: "", data: "", id: "", retry: none }}
-}}
-
-// `Result<void, HttpError>`, not `void`: the `?` below early-returns a failed open, so the signature
-// has to be able to carry one (E0012). It also makes this fixture fail LOUDLY — a failed connection to
-// the stub server aborts with the transport message and a non-zero exit instead of producing an empty
-// stdout that only the `assert_eq!` below would notice.
-async fn run(): Result<void, HttpError> {{
-    api = client.new("http://127.0.0.1:{port}")
-    stream = client.stream(api.prepare("get", "/events"), Framing.Sse)?
-    // The head, straight off the real handshake and before any frame is consumed.
-    echo "head ${{stream.status()}} ${{stream.ok()}} ${{stream.header("content-type") ?? "none"}}"
-    mut going = true
-    while going {{
-        next = stream.recv().await
-        if next == none {{
-            going = false
-        }} else {{
-            f: Frame = next ?? blank()
-            echo "[${{f.event}}] ${{f.data}}"
-        }}
-    }}
-    echo "done"
-    return Ok()
-}}
-run().await?
-"#
+        common::fixture_with(
+            "live_stream/read",
+            &[(FIXTURE_PORT, &format!("127.0.0.1:{port}"))],
         ),
     )
     .expect("write the fixture program");
@@ -293,38 +252,9 @@ fn client_stream_reads_the_head_of_a_real_rate_limited_response() {
     let program = dir.join("status.noe");
     std::fs::write(
         &program,
-        format!(
-            r#"use std.http.client
-use std.http.Framing
-use std.http.HttpError
-
-// `Result<void, HttpError>`, not `void`: the `?` below early-returns a failed open, so the signature
-// has to be able to carry one (E0012) — and a fixture that could not connect at all now aborts with
-// the transport message instead of quietly printing nothing.
-async fn run(): Result<void, HttpError> {{
-    api = client.new("http://127.0.0.1:{port}")
-    // Opening SUCCEEDS: a status is an answer, not a transport failure, so `?` does not fire.
-    stream = client.stream(api.prepare("post", "/v1/chat", "hi"), Framing.Sse)?
-    echo "status ${{stream.status()}} ok=${{stream.ok()}} retry=${{stream.header("retry-after") ?? "none"}}"
-    mut frames = 0
-    mut going = true
-    while going {{
-        next = stream.recv().await
-        if next == none {{
-            going = false
-        }} else {{
-            frames = frames + 1
-        }}
-    }}
-    echo "frames ${{frames}}"
-    echo match stream.error_for_status() {{
-        Ok(_) => "error_for_status: unexpectedly ok",
-        Err(e) => "error_for_status ${{e.kind()}}",
-    }}
-    return Ok()
-}}
-run().await?
-"#
+        common::fixture_with(
+            "live_stream/status",
+            &[(FIXTURE_PORT, &format!("127.0.0.1:{port}"))],
         ),
     )
     .expect("write the fixture program");
@@ -367,33 +297,9 @@ fn a_session_stops_when_its_client_goes_away() {
     let program = dir.join("abandoned.noe");
     std::fs::write(
         &program,
-        format!(
-            r#"use std.http.server
-use std.http.{{Request, Response, SseSink, Frame}}
-use std.task.{{sleep}}
-
-async fn events(sink: SseSink): bool {{
-    mut i = 0
-    while i < {BUDGET} {{
-        if sink.closed() {{
-            echo "session ended at tick ${{i}}"
-            return true
-        }}
-        sink.send(Frame {{ event: "tick", data: "${{i}}", id: "", retry: none }})
-        sleep(200).await
-        i = i + 1
-    }}
-    echo "session ran its whole budget"
-    return true
-}}
-
-fn fetch(req: Request): Response {{
-    if req.path() == "/events" {{
-        return server.sse(events)
-    }}
-    return server.response(200, "ok")
-}}
-"#
+        common::fixture_with(
+            "live_stream/abandoned",
+            &[("i < 40", &format!("i < {BUDGET}"))],
         ),
     )
     .expect("write the fixture program");

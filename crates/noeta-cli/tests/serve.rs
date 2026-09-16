@@ -11,6 +11,16 @@ use std::io::{Read, Write};
 use std::process::Command;
 use std::time::Duration;
 
+mod common;
+
+/// The three handlers this suite serves live under `tests/fixtures/serve/`, because `#[ignore]` puts
+/// the suite outside `cargo test` and a program held only here would be compiled nowhere.
+/// `tests/fixtures.rs` compiles each one, including the deliberately-broken one, which carries the
+/// diagnostic code it must be rejected with on its first line.
+fn fixture(name: &str) -> String {
+    common::fixture(&format!("serve/{name}"))
+}
+
 #[test]
 #[ignore = "spawns the CLI and binds a real socket; run explicitly"]
 fn serve_routes_a_real_request() {
@@ -24,16 +34,7 @@ fn serve_routes_a_real_request() {
     // had not finished reading.
     let dir = noeta_test_temp::TempDir::new("serve-app");
     let app = dir.join("app.noe");
-    std::fs::write(
-        &app,
-        "use std.http.server\n\
-         use std.http.{Request, Response}\n\n\
-         fn fetch(req: Request): Response {\n\
-         \x20   if req.path() == \"/hi\" { return server.response(200, \"pong\") }\n\
-         \x20   return server.response(404, \"nope\")\n\
-         }\n",
-    )
-    .unwrap();
+    std::fs::write(&app, fixture("app")).unwrap();
 
     // The *other* machine-global resource, and the one a per-process fixture directory cannot fix: a
     // fixed port. Two concurrent runs of this test had the second server fail to bind 8231 and die,
@@ -108,15 +109,9 @@ fn a_server_that_dies_on_startup_is_quoted_in_the_readiness_failure() {
     let dir = noeta_test_temp::TempDir::new("serve-red");
     let app = dir.join("app.noe");
     // `nope()` does not exist: `noeta serve` checks before it binds, so this never reaches a socket.
-    std::fs::write(
-        &app,
-        "use std.http.server\n\
-         use std.http.{Request, Response}\n\n\
-         fn fetch(req: Request): Response {\n\
-         \x20   return server.response(200, nope())\n\
-         }\n",
-    )
-    .unwrap();
+    // The fixture names E0005 on its first line, so `tests/fixtures.rs` holds it to being rejected
+    // with the code this test reads out of the server's log.
+    std::fs::write(&app, fixture("undefined_handler_call")).unwrap();
 
     let port = noeta_test_temp::free_port();
     let log = noeta_test_temp::ServerLog::new("serve-red");
@@ -173,15 +168,7 @@ fn a_server_that_dies_on_startup_is_quoted_in_the_readiness_failure() {
 fn a_server_that_loses_the_bind_is_quoted_even_though_readiness_succeeds() {
     let dir = noeta_test_temp::TempDir::new("serve-clash");
     let app = dir.join("app.noe");
-    std::fs::write(
-        &app,
-        "use std.http.server\n\
-         use std.http.{Request, Response}\n\n\
-         fn fetch(req: Request): Response {\n\
-         \x20   return server.response(200, \"never reached\")\n\
-         }\n",
-    )
-    .unwrap();
+    std::fs::write(&app, fixture("never_reached")).unwrap();
 
     // The squatter: this test in the role of the *winner* of the port race. It accepts and drops,
     // which is enough to satisfy any readiness probe.

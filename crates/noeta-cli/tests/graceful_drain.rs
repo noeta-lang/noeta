@@ -9,14 +9,15 @@ use std::net::TcpStream;
 use std::process::Command;
 use std::time::Duration;
 
-fn app() -> &'static str {
-    "use std.http.server\n\
-     use std.http.{Request, Response}\n\
-     use std.task.{sleep}\n\
-     async fn fetch(req: Request): Response {\n\
-     \x20   sleep(400).await\n\
-     \x20   return server.response(200, \"drained ${req.path()}\")\n\
-     }\n"
+mod common;
+
+/// The slow handler the drain has to finish answering.
+///
+/// It lives in `tests/fixtures/graceful_drain/app.noe` rather than in a string literal here, because
+/// `#[ignore]` keeps this test out of `cargo test` and a program only this test holds is compiled by
+/// nothing. On disk, `tests/fixtures.rs` compiles it every run.
+fn app() -> String {
+    common::fixture("graceful_drain/app")
 }
 
 /// A slow request on its own thread: connect, send, block reading the reply into `out`.

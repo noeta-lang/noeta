@@ -1,0 +1,10 @@
+use std.http.server
+use std.http.{Request, Response}
+use std.reactive.{signal}
+
+count = signal(0)
+
+fn fetch(req: Request) use (count): Response {
+    count.set(count.get() + 1)
+    return server.response(200, "v1 hits=${count.get()}")
+}

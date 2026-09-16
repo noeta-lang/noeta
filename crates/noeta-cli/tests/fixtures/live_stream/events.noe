@@ -1,0 +1,17 @@
+use std.http.server
+use std.http.{Request, Response, SseSink, Frame}
+
+async fn events(sink: SseSink): bool {
+    sink.send(Frame { event: "start", data: "go", id: "1", retry: none })
+    sink.comment("keepalive")
+    sink.send(Frame { event: "", data: "one\ntwo", id: "", retry: none })
+    sink.send(Frame { event: "end", data: "[DONE]", id: "2", retry: some(1500) })
+    return true
+}
+
+fn fetch(req: Request): Response {
+    if req.path() == "/events" {
+        return server.sse(events)
+    }
+    return server.response(200, "ok")
+}

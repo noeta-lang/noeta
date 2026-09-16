@@ -1,0 +1,5 @@
+fn leaf(): int { return 1; }
+fn mid(): int { return leaf(); }
+fn other(): int { return 2; }
+@test fn t_mid(): void { assert(mid() == 1); }
+@test fn t_other(): void { assert(other() == 2); }

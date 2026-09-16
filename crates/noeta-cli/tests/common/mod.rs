@@ -1,11 +1,46 @@
-//! Shared helpers for the real-socket integration tests (`live_serve`, `hot_live`): a plain
-//! HTTP GET and a minimal RFC 6455 **client** (handshake with the RFC §1.3 example key, masked
-//! client frames, unmasked server frames) — just enough to speak to `server.websocket`.
+//! Shared helpers for the real-socket integration tests: the fixture loader, a plain HTTP GET, and
+//! a minimal RFC 6455 **client** (handshake with the RFC §1.3 example key, masked client frames,
+//! unmasked server frames) — just enough to speak to `server.websocket`.
 #![allow(dead_code)] // each test target compiles this module; not every target uses every helper
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::path::PathBuf;
 use std::time::Duration;
+
+/// Where the Noeta fixtures live. Every `.noe` file under it is compiled by the `fixtures` suite on
+/// every `cargo test`, which is the whole point of their being on disk: a fixture embedded in a
+/// `#[ignore]`d test is compiled by nothing, so a language change rots it in silence.
+pub fn fixtures_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
+}
+
+/// The Noeta source of `tests/fixtures/<name>.noe`.
+pub fn fixture(name: &str) -> String {
+    let path = fixtures_dir().join(format!("{name}.noe"));
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("read the fixture {}: {e}", path.display()))
+}
+
+/// [`fixture`], with each `(needle, replacement)` applied in order.
+///
+/// **A needle that is absent panics.** A test substituting a port or a tag into a fixture is relying
+/// on the needle still being there, and `str::replace` reports a miss as a successful no-op — which
+/// is a fixture that silently runs with its placeholder value. That failure looks like a product bug
+/// (the server answered on the wrong port, the handler served the old tag) and costs the
+/// investigation to match, so a miss is raised where it happens.
+pub fn fixture_with(name: &str, subs: &[(&str, &str)]) -> String {
+    let mut src = fixture(name);
+    for (needle, replacement) in subs {
+        assert!(
+            src.contains(needle),
+            "the fixture {name} has no `{needle}` to substitute — it was renamed or removed, and \
+             replacing nothing would have run the fixture with its placeholder still in place"
+        );
+        src = src.replace(needle, replacement);
+    }
+    src
+}
 
 /// One plain HTTP GET; the server closes the connection after replying, so read-to-EOF is the
 /// whole response. Returns the body.

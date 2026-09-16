@@ -12,6 +12,30 @@ use std::io::{Read, Write};
 use std::process::Command;
 use std::time::Duration;
 
+mod common;
+
+/// One version of a fixture handler, tagged so a response says which version answered.
+///
+/// Both programs here sit under `tests/fixtures/hot_serve/`. Written inline they would be compiled
+/// by nothing, because `#[ignore]` takes this suite out of `cargo test` and no expected-output file
+/// covers it; `tests/fixtures.rs` compiles the on-disk copies on every run. The fixture carries `v1`
+/// and the tag is substituted in, which keeps the file a valid program.
+fn tagged(name: &str, tag: &str) -> String {
+    common::fixture_with(name, &[("v1 hits=", &format!("{tag} hits="))])
+}
+
+/// A fixture that is not Noeta, read straight off disk beside the programs it belongs with.
+fn fixture_file(relative: &str) -> String {
+    let path = common::fixtures_dir().join(relative);
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("read the fixture {}: {e}", path.display()))
+}
+
+/// The file written outside the entry to make the server child's watcher exit at teardown.
+fn teardown() -> String {
+    common::fixture("hot_serve/teardown")
+}
+
 fn get(addr: &str) -> Result<String, String> {
     let mut stream = std::net::TcpStream::connect(addr).map_err(|e| e.to_string())?;
     stream
@@ -32,18 +56,7 @@ fn get(addr: &str) -> Result<String, String> {
 fn a_hot_swap_preserves_signal_state_across_a_handler_edit() {
     let dir = noeta_test_temp::TempDir::new("hot-serve");
     let app = dir.join("app.noe");
-    let v = |tag: &str| {
-        format!(
-            "use std.http.server\n\
-             use std.http.{{Request, Response}}\n\
-             use std.reactive.{{signal}}\n\n\
-             count = signal(0)\n\n\
-             fn fetch(req: Request) use (count): Response {{\n\
-             \x20   count.set(count.get() + 1)\n\
-             \x20   return server.response(200, \"{tag} hits=${{count.get()}}\")\n\
-             }}\n"
-        )
-    };
+    let v = |tag: &str| tagged("hot_serve/app", tag);
     std::fs::write(&app, v("v1")).unwrap();
 
     // A kernel-assigned port, not a fixed one: a fixed port is shared with every other
@@ -110,7 +123,7 @@ fn a_hot_swap_preserves_signal_state_across_a_handler_edit() {
     // sentinel, and no wrapper remains to restart it.
     let _ = child.kill();
     let _ = child.wait();
-    let _ = std::fs::write(dir.join("teardown.noe"), "// trigger child exit\n");
+    let _ = std::fs::write(dir.join("teardown.noe"), teardown());
     noeta_test_temp::settle_closed(&addr);
     let _ = std::fs::remove_dir_all(&dir);
     // `the edit never hot-swapped in` is a symptom; whatever the watcher said about the edit — a
@@ -129,30 +142,21 @@ fn a_hot_swap_preserves_signal_state_across_a_handler_edit() {
 fn a_hot_swap_lands_inside_a_package_where_the_entry_is_qualified() {
     let dir = noeta_test_temp::TempDir::new("hot-pkg");
     std::fs::create_dir_all(dir.join("src")).unwrap();
+    // The package is `tests/fixtures/hot_serve/hotpkg/`, copied member by member into the temp dir.
+    // `tests/fixtures.rs` checks that directory as one package, which is the only way a module that
+    // expects its siblings can be compiled at all.
     std::fs::write(
         dir.join("noeta.toml"),
-        "[package]\nname = \"local/hotpkg\"\nversion = \"0.1.0\"\n",
+        fixture_file("hot_serve/hotpkg/noeta.toml"),
     )
     .unwrap();
     std::fs::write(
         dir.join("src/greet.noe"),
-        "pub fn greet(): string {\n    return \"hello\"\n}\n",
+        common::fixture("hot_serve/hotpkg/src/greet"),
     )
     .unwrap();
     let app = dir.join("src/main.noe");
-    let v = |tag: &str| {
-        format!(
-            "use std.http.server\n\
-             use std.http.{{Request, Response}}\n\
-             use std.reactive.{{signal}}\n\
-             use hotpkg.greet.greet\n\n\
-             count = signal(0)\n\n\
-             fn fetch(req: Request) use (count): Response {{\n\
-             \x20   count.set(count.get() + 1)\n\
-             \x20   return server.response(200, \"${{greet()}} {tag} hits=${{count.get()}}\")\n\
-             }}\n"
-        )
-    };
+    let v = |tag: &str| tagged("hot_serve/hotpkg/src/main", tag);
     std::fs::write(&app, v("v1")).unwrap();
 
     let port = noeta_test_temp::free_port();
@@ -207,7 +211,7 @@ fn a_hot_swap_lands_inside_a_package_where_the_entry_is_qualified() {
 
     let _ = child.kill();
     let _ = child.wait();
-    let _ = std::fs::write(dir.join("src/teardown.noe"), "// trigger child exit\n");
+    let _ = std::fs::write(dir.join("src/teardown.noe"), teardown());
     noeta_test_temp::settle_closed(&addr);
     let _ = std::fs::remove_dir_all(&dir);
     outcome.unwrap_or_else(|e| {

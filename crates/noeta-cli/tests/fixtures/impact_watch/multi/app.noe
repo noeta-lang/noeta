@@ -1,0 +1,4 @@
+use App.Lib.add;
+fn compose(n: int): int { return add(n, 1); }
+@test fn t_add(): void { assert(compose(1) == 2); }
+@test fn t_other(): void { assert(true); }
