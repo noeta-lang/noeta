@@ -1,0 +1,32 @@
+use std.http.client
+use std.http.Framing
+use std.http.Frame
+use std.http.HttpError
+
+fn blank(): Frame {
+    return Frame { event: "", data: "", id: "", retry: none }
+}
+
+// `Result<void, HttpError>`, not `void`: the `?` below early-returns a failed open, so the signature
+// has to be able to carry one (E0012). It also makes this fixture fail LOUDLY — a failed connection to
+// the stub server aborts with the transport message and a non-zero exit instead of producing an empty
+// stdout that only the `assert_eq!` below would notice.
+async fn run(): Result<void, HttpError> {
+    api = client.new("http://127.0.0.1:8080")
+    stream = client.stream(api.prepare("get", "/events"), Framing.Sse)?
+    // The head, straight off the real handshake and before any frame is consumed.
+    echo "head ${stream.status()} ${stream.ok()} ${stream.header("content-type") ?? "none"}"
+    mut going = true
+    while going {
+        next = stream.recv().await
+        if next == none {
+            going = false
+        } else {
+            f: Frame = next ?? blank()
+            echo "[${f.event}] ${f.data}"
+        }
+    }
+    echo "done"
+    return Ok()
+}
+run().await?

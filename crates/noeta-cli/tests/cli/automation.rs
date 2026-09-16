@@ -433,3 +433,316 @@ fn every_declared_hot_e2e_suite_still_exists() {
         missing.join("\n  ")
     );
 }
+
+// --- where an ignored test's Noeta comes from -------------------------------------------------
+//
+// The second census over the same list, closing the second gap in `#[ignore]`.
+//
+// A `.noe` program written as a Rust string literal inside a `#[ignore]`d test is compiled by
+// nothing: no `// expect:` file protects it the way the conformance corpus is protected, and the one
+// thing that would compile it — running the test — is the thing `#[ignore]` switches off. It rots in
+// silence under a language change. `run_http_get_over_the_real_network` sat broken on an `http.get`
+// namespace that no longer existed, and the tree was green throughout.
+//
+// That class has now been fixed three times, once per instance, and come back twice: `examples/`
+// had the same hole, then `hot_serve`/`hot_live` did. Moving today's fixtures to disk fixes today's
+// instance and leaves the next one exactly as available, because a new `#[ignore]`d test with an
+// inline literal trips nothing. So the mechanism is not a detector of inline programs — a detector
+// can miss. It is a **mandatory declaration**: every ignored test says where its Noeta comes from,
+// and a test with no entry fails on every `cargo test` until someone writes one. The guard fires on
+// the absence of a declaration, which cannot be evaded by writing the fixture more cleverly.
+//
+// Declared fixtures live under `tests/fixtures/` and are compiled by `tests/fixtures.rs` on every
+// `cargo test`, which is the half that `#[ignore]` was dragging out of CI with the sockets.
+
+/// Where one `#[ignore]`d test's Noeta programs come from.
+#[derive(Debug)]
+enum Fixtures {
+    /// Paths under `tests/fixtures/`, without the `.noe` extension. Each must exist on disk, where
+    /// `tests/fixtures.rs` compiles it.
+    Files(&'static [&'static str]),
+    /// This test runs no Noeta program of its own, with the reason it does not.
+    None(&'static str),
+    /// This test's program **cannot** be compiled on its own, with the reason, so it stays inline.
+    ///
+    /// The escape hatch, and the same trade [`EXEMPT`] makes: a hole that is written down and
+    /// reviewable beats one that is invisible. It is for a program whose imports do not exist until
+    /// the test has built them — a native extension compiled and trusted mid-test, say — where
+    /// there is nothing a standalone check could succeed against. Reach for it only then; a program
+    /// that merely needs a package manifest is a package fixture, which [`Fixtures::Files`] already
+    /// handles.
+    Inline(&'static str),
+}
+
+/// Every `#[ignore]`d test's Noeta, declared. Matched as a prefix of the test's name.
+///
+/// Adding an ignored test means adding a row. That is the point: there is no third state, and a
+/// missing row is a red `cargo test` rather than a fixture nothing compiles.
+const FIXTURES: &[(&str, Fixtures)] = &[
+    (
+        "an_edit_broadcasts_to_every_worker",
+        Fixtures::Files(&["parallel_hot/app"]),
+    ),
+    (
+        "an_idle_swap_reaches_every_worker_before_the_next_request",
+        Fixtures::Files(&["parallel_hot/app"]),
+    ),
+    (
+        "an_edit_made_as_soon_as_the_server_answers_is_still_swapped",
+        Fixtures::Files(&["parallel_hot/app"]),
+    ),
+    (
+        "the_liveview_example_pushes_snapshot_and_patches_to_a_real_client",
+        Fixtures::None(
+            "serves the shipped examples/liveview_counter.noe, which crates/noeta-cli/tests/\
+             examples.rs already drives through the real binary on every run",
+        ),
+    ),
+    (
+        "sigint_drains_in_flight_requests_and_host_binds_local_only",
+        Fixtures::Files(&["graceful_drain/app"]),
+    ),
+    (
+        "a_live_client_gets_reload_on_swap_and_error_on_red_check",
+        Fixtures::Files(&["hot_live/app", "hot_live/teardown"]),
+    ),
+    (
+        "a_hot_swap_preserves_signal_state_across_a_handler_edit",
+        Fixtures::Files(&["hot_serve/app", "hot_serve/teardown"]),
+    ),
+    (
+        "a_hot_swap_lands_inside_a_package_where_the_entry_is_qualified",
+        Fixtures::Files(&[
+            "hot_serve/hotpkg/src/main",
+            "hot_serve/hotpkg/src/greet",
+            "hot_serve/teardown",
+        ]),
+    ),
+    (
+        "an_edit_reruns_exactly_the_impacted_tests",
+        Fixtures::Files(&["impact_watch/app", "impact_watch/app_with_top_level"]),
+    ),
+    (
+        "a_sibling_module_edit_narrows_to_its_caller_tests",
+        Fixtures::Files(&[
+            "impact_watch/multi/app",
+            "impact_watch/multi/lib",
+            "impact_watch/multi_padded/lib",
+        ]),
+    ),
+    (
+        "a_served_sse_handler_streams_real_events",
+        Fixtures::Files(&["live_stream/events"]),
+    ),
+    (
+        "client_stream_reads_a_real_body_arriving_in_pieces",
+        Fixtures::Files(&["live_stream/read"]),
+    ),
+    (
+        "client_stream_reads_the_head_of_a_real_rate_limited_response",
+        Fixtures::Files(&["live_stream/status"]),
+    ),
+    (
+        "a_session_stops_when_its_client_goes_away",
+        Fixtures::Files(&["live_stream/abandoned"]),
+    ),
+    (
+        "parallel_workers_share_the_listener_and_drain_together",
+        Fixtures::Files(&["parallel_serve/app"]),
+    ),
+    (
+        "a_worker_that_aborts_reports_its_diagnostics_and_its_stack",
+        Fixtures::Files(&["parallel_serve/worker_abort"]),
+    ),
+    (
+        "serve_routes_a_real_request",
+        Fixtures::Files(&["serve/app"]),
+    ),
+    (
+        "a_server_that_dies_on_startup_is_quoted_in_the_readiness_failure",
+        Fixtures::Files(&["serve/undefined_handler_call"]),
+    ),
+    (
+        "a_server_that_loses_the_bind_is_quoted_even_though_readiness_succeeds",
+        Fixtures::Files(&["serve/never_reached"]),
+    ),
+    (
+        "os_exit_in_a_handler_drains_the_server_and_ends_the_process_with_its_code",
+        Fixtures::Files(&["serve_exit/app"]),
+    ),
+    (
+        "run_http_get_over_the_real_network",
+        Fixtures::Files(&["cli/run/http_get"]),
+    ),
+    (
+        "composed_toolchain",
+        Fixtures::Inline(
+            "the two-line program imports a namespace that does not exist until the test has \
+             cargo-built a native Rust extension and granted it trust, so there is nothing a \
+             standalone check could resolve it against. Covering it would mean a fixture package \
+             carrying that native dependency, and a checker able to resolve it offline, which is a \
+             different mechanism from this one",
+        ),
+    ),
+];
+
+/// Noeta syntax that Rust cannot express, so finding it in a `.rs` file means a program is embedded
+/// there.
+///
+/// Each marker is chosen because Rust spells the same idea differently and cannot produce the
+/// token: Rust imports with `::` and returns with `->`. A marker that merely *tends* to appear in
+/// Noeta would make this a coincidence detector, which is the failure this file already warns about
+/// — a gate a comment can satisfy reads as coverage while asserting nothing.
+const NOETA_MARKERS: &[&str] = &[
+    // A string literal that opens with an import. Noeta separates namespace segments with `.` and
+    // Rust with `::`, and a Rust `use` is never inside a string in the first place, so a quote
+    // immediately followed by `use ` is a program being written out. This catches an import of any
+    // namespace, not only `std` — which matters, because the fixtures hardest to compile are the
+    // ones importing something the test itself builds.
+    "\"use ",
+    "use std.",
+    "): Response",
+    "): int",
+    "): void",
+    "): string",
+    "io.outln",
+    "server.response",
+];
+
+/// `text` with whole-line `//` comments removed.
+///
+/// Prose is stripped for the same reason `shell_commands` strips it: these files explain Noeta at
+/// length in their headers, and a doc comment quoting `server.response` is documentation, not an
+/// embedded fixture. Only full-line comments go, so a `"http://…"` inside a string literal is never
+/// cut in half.
+fn without_line_comments(text: &str) -> String {
+    text.lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Every ignored test declares where its Noeta comes from, and every declaration still names a test.
+#[test]
+fn every_ignored_test_declares_where_its_noeta_comes_from() {
+    let tests = ignored_tests(&tests_dir());
+    assert!(
+        !tests.is_empty(),
+        "no `#[ignore]`d tests found under {} — this census would assert nothing",
+        tests_dir().display()
+    );
+
+    let undeclared: Vec<String> = tests
+        .iter()
+        .filter(|(_, test)| !FIXTURES.iter().any(|(prefix, _)| test.starts_with(prefix)))
+        .map(|(target, test)| format!("  --test {target} :: {test}"))
+        .collect();
+    assert!(
+        undeclared.is_empty(),
+        "these `#[ignore]`d tests do not say where their Noeta comes from. Add a row to FIXTURES in \
+         this file: `Fixtures::Files(&[…])` naming programs under tests/fixtures/, or \
+         `Fixtures::None(reason)` if the test runs no Noeta of its own. A `#[ignore]`d test's inline \
+         program is compiled by nothing — that is the whole reason this list exists:\n{}",
+        undeclared.join("\n")
+    );
+
+    let stale: Vec<&str> = FIXTURES
+        .iter()
+        .map(|(prefix, _)| *prefix)
+        .filter(|prefix| !tests.iter().any(|(_, test)| test.starts_with(prefix)))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "these FIXTURES entries match no `#[ignore]`d test any more — delete them:\n  {}",
+        stale.join("\n  ")
+    );
+}
+
+/// A declared fixture exists on disk, where `tests/fixtures.rs` will compile it.
+#[test]
+fn every_declared_fixture_exists_on_disk() {
+    let dir = tests_dir().join("fixtures");
+    let mut missing: Vec<String> = Vec::new();
+    for (prefix, source) in FIXTURES {
+        match source {
+            Fixtures::Files(paths) => {
+                assert!(
+                    !paths.is_empty(),
+                    "`{prefix}` declares Fixtures::Files with no files — use Fixtures::None and say \
+                     why instead"
+                );
+                for path in *paths {
+                    let noe = dir.join(format!("{path}.noe"));
+                    let package = dir.join(path).join("noeta.toml");
+                    if !noe.is_file() && !package.is_file() {
+                        missing.push(format!("  {prefix} :: {path} (no {} )", noe.display()));
+                    }
+                }
+            }
+            Fixtures::None(why) => assert!(
+                !why.is_empty(),
+                "`{prefix}` must say why it needs no Noeta fixture"
+            ),
+            Fixtures::Inline(why) => assert!(
+                why.len() > 40,
+                "`{prefix}` keeps its program inline, where nothing compiles it. That needs a \
+                 concrete reason naming what makes a standalone check impossible, not a label"
+            ),
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "these declared fixtures are not on disk, so nothing compiles them:\n{}",
+        missing.join("\n")
+    );
+}
+
+/// A test declaring `Fixtures::None` is not quietly carrying a program anyway.
+///
+/// The declaration above is mandatory, so the only way back into the old state is a false one. This
+/// is what makes that false statement catchable rather than merely discouraged.
+#[test]
+fn a_test_declaring_no_noeta_embeds_none() {
+    let dir = tests_dir();
+    let mut files = Vec::new();
+    rs_files(&dir, &mut files);
+    let tests = ignored_tests(&dir);
+
+    let mut lying: Vec<String> = Vec::new();
+    for (prefix, source) in FIXTURES {
+        let Fixtures::None(_) = source else {
+            continue;
+        };
+        // The file this test lives in, found through the same scan the census uses.
+        let Some((target, _)) = tests.iter().find(|(_, test)| test.starts_with(prefix)) else {
+            continue;
+        };
+        for file in &files {
+            if target_of(&dir, file).as_deref() != Some(target.as_str()) {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(file) else {
+                continue;
+            };
+            let code = without_line_comments(&text);
+            let found: Vec<&str> = NOETA_MARKERS
+                .iter()
+                .copied()
+                .filter(|marker| code.contains(marker))
+                .collect();
+            if !found.is_empty() {
+                lying.push(format!(
+                    "  {} declares Fixtures::None for `{prefix}`, but holds Noeta: {}",
+                    file.display(),
+                    found.join(", ")
+                ));
+            }
+        }
+    }
+    assert!(
+        lying.is_empty(),
+        "a Fixtures::None declaration is contradicted by the file it names. Move the program to \
+         tests/fixtures/ and declare it, so `cargo test` compiles it:\n{}",
+        lying.join("\n")
+    );
+}

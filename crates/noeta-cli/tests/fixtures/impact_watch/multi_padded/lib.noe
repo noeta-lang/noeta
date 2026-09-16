@@ -1,0 +1,3 @@
+namespace App.Lib;
+pub fn add(a: int, b: int): int { return a + b; }
+pub fn stray(pad: int): int { return 9; }

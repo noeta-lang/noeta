@@ -162,32 +162,48 @@ fn run_real_isolate_borrowed_arg_round_trips_as_result() {
 
 #[test]
 fn run_real_isolates_actually_run_in_parallel() {
-    // Two isolates each sleep 300ms of real wall-clock time on their own thread. Run in parallel the
-    // program finishes in well under the ~600ms a sequential run would take; a generous 550ms ceiling
-    // keeps the test robust on a loaded machine while still failing if the isolates serialized.
+    // **Parallelism as a property of the program, not of the clock.** Each worker announces itself
+    // on its own channel and then waits for the other's announcement, so neither can finish until
+    // both have started. Run in parallel they exchange tags and the program prints 3. Serialized,
+    // the first worker sends into its capacity-1 buffer and then waits forever for a partner that
+    // has not been started yet, and the run ends on the deadlock rather than on a number.
+    //
+    // This used to time the whole `noeta run` against a 550 ms ceiling, reasoning that two parallel
+    // 300 ms sleeps come in under it and two sequential ones do not. The ceiling had to cover
+    // process spawn, parse, check and compile as well as the sleeps it was reasoning about, and none
+    // of that is the thing being claimed. On a box where several builds run at once it is also the
+    // part that stretches, so the test's verdict moved with the machine's load. A rendezvous cannot:
+    // it is the same claim at load 2 and at load 30.
     let file = temp_program(
         "isolate_parallel",
-        "use std.task.{sleep}\n\
-         async fn work(ms: int): int { sleep(ms).await; return ms }\n\
+        "async fn worker(tag: int, tx: Sender<int>, rx: Receiver<int>): int {\n\
+         tx.send(tag).await\n\
+         r = rx.recv().await\n\
+         return match r { some(x) => x, none => 0 }\n\
+         }\n\
          async fn run(): int {\n\
+         (tx_a, rx_a) = channel::<int>(1)\n\
+         (tx_b, rx_b) = channel::<int>(1)\n\
          mut total = 0\n\
-         concurrent { a = isolate work(300); b = isolate work(300); total = a.await + b.await }\n\
+         concurrent {\n\
+         a = isolate worker(1, tx_a, rx_b)\n\
+         b = isolate worker(2, tx_b, rx_a)\n\
+         total = a.await + b.await\n\
+         }\n\
          return total\n\
          }\n\
          echo run().await",
     );
-    let start = std::time::Instant::now();
+    // The timeout is the backstop for a genuine hang, not the assertion: two isolates that never
+    // meet block forever, and something has to end the process.
     lang()
         .arg("run")
         .arg(&file)
+        .timeout(std::time::Duration::from_secs(60))
         .assert()
         .success()
-        .stdout("600\n");
-    let elapsed = start.elapsed();
-    assert!(
-        elapsed < std::time::Duration::from_millis(550),
-        "two 300ms isolates should run in parallel (<550ms), took {elapsed:?} — did they serialize?"
-    );
+        // Each worker returns the *other's* tag, so the sum is 1 + 2 whichever order they arrive in.
+        .stdout("3\n");
 }
 
 #[test]
@@ -905,6 +921,17 @@ fn run_real_isolate_cancel_reaches_a_worker_parked_on_timers() {
     // which no poll could interrupt — measured at 2.8 s for a 3 s sleep cancelled at 200 ms); the
     // cancellation **wake** closed that, and this case keeps covering the *poll* half — a worker
     // that suspends constantly and is stopped between two rounds rather than mid-block.
+    //
+    // **The house rule, structurally rather than numerically**, the same one its long-sleep sibling
+    // below already follows. The watcher slices its way through ten minutes, so a worker that sits
+    // out its remaining wait cannot reach the end inside the timeout: the process is killed and the
+    // test fails loudly. That is the claim. The elapsed ceiling underneath is a smoke bound two
+    // orders of magnitude under the wait it would have had to sit out, not the thing being asserted.
+    //
+    // It was a 2 s ceiling over a 5 s watcher, which made the claim numeric and put it inside the
+    // range a loaded box moves: the bound covered process spawn, parse, check and compile as well as
+    // the cancellation it was about, and 2.264 s was measured inside the parallel suite at load 13.
+    // A test that fails on a busy afternoon and passes on a quiet one reports the machine.
     let file = temp_program(
         "isolate_cancel_timers",
         "use std.io\n\
@@ -916,7 +943,7 @@ fn run_real_isolate_cancel_reaches_a_worker_parked_on_timers() {
          }\n\
          async fn run(): int {\n\
          concurrent {\n\
-         h = isolate watcher(5000)\n\
+         h = isolate watcher(600000)\n\
          sleep(200).await\n\
          h.cancel()\n\
          io.outln(match h.join() { Ok(v) => \"ok=\" ~ v, Err(_) => \"cancelled\" })\n\
@@ -935,9 +962,9 @@ fn run_real_isolate_cancel_reaches_a_worker_parked_on_timers() {
         .stdout("cancelled\n0\n");
     let elapsed = start.elapsed();
     assert!(
-        elapsed < std::time::Duration::from_millis(2_000),
+        elapsed < std::time::Duration::from_secs(20),
         "a cancelled worker parked on timers must stop at the next scheduler round, not sit out its \
-         remaining 4.8s; took {elapsed:?}"
+         remaining 599.8s; took {elapsed:?}"
     );
 }
 

@@ -1,0 +1,3 @@
+[package]
+name = "local/hotpkg"
+version = "0.1.0"

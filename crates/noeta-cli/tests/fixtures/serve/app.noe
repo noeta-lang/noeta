@@ -1,0 +1,7 @@
+use std.http.server
+use std.http.{Request, Response}
+
+fn fetch(req: Request): Response {
+    if req.path() == "/hi" { return server.response(200, "pong") }
+    return server.response(404, "nope")
+}

@@ -20,20 +20,15 @@ use std::net::TcpStream;
 use std::process::Command;
 use std::time::Duration;
 
+mod common;
+
 /// `/slow` takes 400 ms and replies normally. `/quit` ends the process with 17 and never replies on
 /// its own, so the drain owes the client an answer and the in-flight `/slow` its real body.
-fn app() -> &'static str {
-    "use std.http.server\n\
-     use std.http.{Request, Response}\n\
-     use std.task.{sleep}\n\
-     use std.{os}\n\
-     async fn fetch(req: Request): Response {\n\
-     \x20   if req.path() == \"/quit\" {\n\
-     \x20       os.exit(17)\n\
-     \x20   }\n\
-     \x20   sleep(400).await\n\
-     \x20   return server.response(200, \"drained ${req.path()}\")\n\
-     }\n"
+///
+/// The handler is `tests/fixtures/serve_exit/app.noe`. Kept here as a literal, nothing in `cargo
+/// test` would compile it, since `#[ignore]` is what stops this test from running at all.
+fn app() -> String {
+    common::fixture("serve_exit/app")
 }
 
 /// One request on its own thread: connect, send, block reading the whole reply.

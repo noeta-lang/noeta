@@ -42,10 +42,12 @@ SUITES=(
     "hot_serve:2"       # a body edit swaps in and the signal counter survives it — bare file, and
                         # inside a package, where the handler is qualified (that one shipped broken)
     "hot_live:1"        # the L3 showcase: reload frame, preserved state, error overlay on red check
-    "parallel_hot:2"    # `--parallel 3`: one edit must reach EVERY worker isolate; plus the
+    "parallel_hot:3"    # `--parallel 3`: one edit must reach EVERY worker isolate; plus the
                         # audit-10 equality — the fleet and the single worker are ONE hot install,
                         # so an idle swap must reach every worker of a fleet of 1, 2, 3 and 5 on the
-                        # first request after it, with zero stale responses in every shape
+                        # first request after it, with zero stale responses in every shape; plus the
+                        # arming race — an edit made the instant the port answers must still swap,
+                        # rather than landing in a window where nothing is watching yet
     "live_serve:1"      # LiveView over a real RFC 6455 socket: snapshot, patches, second session
     "graceful_drain:1"  # SIGINT mid-request drains it, then the listener closes
     "serve_exit:1"      # the program's own shutdown door: `os.exit` in a handler answers that

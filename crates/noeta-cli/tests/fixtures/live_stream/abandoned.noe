@@ -1,0 +1,25 @@
+use std.http.server
+use std.http.{Request, Response, SseSink, Frame}
+use std.task.{sleep}
+
+async fn events(sink: SseSink): bool {
+    mut i = 0
+    while i < 40 {
+        if sink.closed() {
+            echo "session ended at tick ${i}"
+            return true
+        }
+        sink.send(Frame { event: "tick", data: "${i}", id: "", retry: none })
+        sleep(200).await
+        i = i + 1
+    }
+    echo "session ran its whole budget"
+    return true
+}
+
+fn fetch(req: Request): Response {
+    if req.path() == "/events" {
+        return server.sse(events)
+    }
+    return server.response(200, "ok")
+}

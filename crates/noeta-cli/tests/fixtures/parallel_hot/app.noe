@@ -1,0 +1,5 @@
+use std.http.server
+use std.http.{Request, Response}
+fn fetch(req: Request): Response {
+    return server.response(200, "v1")
+}

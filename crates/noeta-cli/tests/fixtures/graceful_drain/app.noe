@@ -1,0 +1,7 @@
+use std.http.server
+use std.http.{Request, Response}
+use std.task.{sleep}
+async fn fetch(req: Request): Response {
+    sleep(400).await
+    return server.response(200, "drained ${req.path()}")
+}

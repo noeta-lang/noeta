@@ -1,0 +1,30 @@
+use std.http.client
+use std.http.Framing
+use std.http.HttpError
+
+// `Result<void, HttpError>`, not `void`: the `?` below early-returns a failed open, so the signature
+// has to be able to carry one (E0012) — and a fixture that could not connect at all now aborts with
+// the transport message instead of quietly printing nothing.
+async fn run(): Result<void, HttpError> {
+    api = client.new("http://127.0.0.1:8080")
+    // Opening SUCCEEDS: a status is an answer, not a transport failure, so `?` does not fire.
+    stream = client.stream(api.prepare("post", "/v1/chat", "hi"), Framing.Sse)?
+    echo "status ${stream.status()} ok=${stream.ok()} retry=${stream.header("retry-after") ?? "none"}"
+    mut frames = 0
+    mut going = true
+    while going {
+        next = stream.recv().await
+        if next == none {
+            going = false
+        } else {
+            frames = frames + 1
+        }
+    }
+    echo "frames ${frames}"
+    echo match stream.error_for_status() {
+        Ok(_) => "error_for_status: unexpectedly ok",
+        Err(e) => "error_for_status ${e.kind()}",
+    }
+    return Ok()
+}
+run().await?

@@ -1,0 +1,11 @@
+use std.io
+use std.http.{Request, Response}
+use std.http.server
+fn detonate(): int {
+    panic("worker kaboom")
+}
+fn fetch(req: Request): Response {
+    return server.response(200, "ok")
+}
+io.errln("worker speaking")
+echo detonate()

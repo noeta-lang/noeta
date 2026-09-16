@@ -1,0 +1,9 @@
+use std.http.client
+use std.http.HttpError
+
+async fn run(): Result<void, HttpError> {
+    echo client.get("https://example.com/")?.status()
+    echo client.get_async("https://example.com/").await?.ok()
+    return Ok()
+}
+run().await?
